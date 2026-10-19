@@ -10,7 +10,6 @@ import secrets
 import shutil
 import signal
 import sqlite3
-import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -19,6 +18,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 
 from companion.executive_protocol import ExecutionEnvelope, ToolReceipt
+from companion.executor_files import open_scoped
 
 
 def receipt(request, status, text="", error=None, billed=0, calls=0):
@@ -35,7 +35,7 @@ def receipt(request, status, text="", error=None, billed=0, calls=0):
 
 
 def scoped_path(root, relative):
-    root = Path(root).resolve(strict=True)
+    root = Path(os.path.abspath(root))
     parts = relative.replace("\\", "/").split("/")
     if not parts or any(
         part in {"", ".", ".."}
@@ -46,19 +46,10 @@ def scoped_path(root, relative):
         for part in parts
     ):
         raise ValueError("PATH_OUTSIDE_WORKSPACE")
-    current = root
-    for part in parts:
-        current = current / part
-        if current.is_symlink() or (
-            current.exists() and getattr(current.lstat(), "st_file_attributes", 0) & 0x400
-        ):
-            raise ValueError("LINK_NOT_ALLOWED")
-    resolved = current.resolve()
-    if not resolved.is_relative_to(root) or resolved == root:
-        raise ValueError("PATH_OUTSIDE_WORKSPACE")
-    if resolved.suffix.lower() not in {".txt", ".md", ".json", ".csv", ".log", ".py"}:
+    path = root.joinpath(*parts)
+    if path.suffix.lower() not in {".txt", ".md", ".json", ".csv", ".log", ".py"}:
         raise ValueError("FILE_TYPE_NOT_ALLOWED")
-    return resolved
+    return path
 
 
 def purge_job_files(run_dir):
@@ -88,10 +79,7 @@ class FileExecutor:
         try:
             path = scoped_path(self.workspaces[request.workspace], request.arguments.path)
             if request.capability == "windows.read_text":
-                info = path.stat()
-                if info.st_nlink != 1 or not stat.S_ISREG(info.st_mode):
-                    raise ValueError("LINK_NOT_ALLOWED")
-                with path.open("rb") as stream:
+                with open_scoped(path) as stream:
                     raw = stream.read(48001)
                 if len(raw) > 48000:
                     raise ValueError("FILE_TOO_LARGE")
@@ -102,12 +90,13 @@ class FileExecutor:
             if request.capability != "windows.write_text" or not self.allow_changes:
                 raise ValueError("CAPABILITY_DISABLED")
             # Create-only avoids replacing user data. Scope approval binds exact bytes and path.
-            with path.open("x", encoding="utf-8", newline="") as stream:
+            with open_scoped(path, create=True) as stream:
                 started = True
-                stream.write(request.arguments.text)
+                stream.write(request.arguments.text.encode())
                 stream.flush()
                 os.fsync(stream.fileno())
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                stream.seek(0)
+                digest = hashlib.sha256(stream.read(48001)).hexdigest()
             if digest != hashlib.sha256(request.arguments.text.encode()).hexdigest():
                 raise ValueError("WRITTEN_CONTENT_CHANGED")
             return receipt(
