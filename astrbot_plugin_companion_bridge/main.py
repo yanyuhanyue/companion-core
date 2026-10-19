@@ -6,7 +6,8 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.star import Context, Star, StarTools, register
 
-from .bridge import Spool, deliver_one, normalize
+from .bridge import Spool, normalize
+from .expression_adapter import DEFAULT_CATEGORIES, MemeLibrary, deliver_expression
 from .reader import reader_tick, validate_source_api
 
 
@@ -21,6 +22,7 @@ class CompanionBridge(Star):
         self.protocol_epoch = ""
         self.reader_tasks = []
         self.reader_clients = []
+        self.meme_library = None
 
     async def initialize(self):
         token = self.config.get("bridge_token", "")
@@ -30,6 +32,11 @@ class CompanionBridge(Star):
             raise ValueError("请配置 owner_qq_id、bot_qq_id 和至少 24 位 bridge_token")
         self.protocol_epoch = self.config.get("protocol_epoch", "")
         self.spool = Spool(str(StarTools.get_data_dir() / "inbox.sqlite3"))
+        self.meme_library = MemeLibrary(
+            StarTools.get_data_dir().parent / "meme_manager" / "memes",
+            enabled=self.config.get("expression_enabled", False),
+            categories=self.config.get("expression_meme_categories", DEFAULT_CATEGORIES),
+        )
         try:
             self.spool.bind_backend(
                 self.config.get("protocol_backend", "napcat"), self.protocol_epoch
@@ -127,7 +134,13 @@ class CompanionBridge(Star):
                 )
                 response.raise_for_status()
                 for item in response.json()["items"]:
-                    await deliver_one(self.client, item, self.send_text)
+                    await deliver_expression(
+                        self.client,
+                        item,
+                        self.meme_library,
+                        self.build_chain,
+                        self.context.send_message,
+                    )
                 failures = 0
             except Exception:
                 failures += 1
@@ -139,6 +152,14 @@ class CompanionBridge(Star):
 
     async def send_text(self, origin, text):
         return await self.context.send_message(origin, MessageChain().message(text))
+
+    @staticmethod
+    def build_chain(text, image):
+        if image is None:
+            return MessageChain().message(text)
+        from astrbot.api.message_components import Image, Plain
+
+        return MessageChain([Plain(text), Image.fromBytes(image)])
 
     async def terminate(self):
         for task in self.reader_tasks:

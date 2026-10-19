@@ -76,5 +76,21 @@
     "type": "string",
     "secret": true,
     "description": "小黑盒来源服务独立访问令牌"
+  },
+  "expression_enabled": {
+    "type": "bool",
+    "description": "在文字回复中按意图选择本地表情",
+    "default": false
+  },
+  "expression_meme_categories": {
+    "type": "list",
+    "description": "表情分类允许列表",
+    "default": [
+      "happy",
+      "like",
+      "surprised",
+      "morning",
+      "sleep"
+    ]
   }
 }

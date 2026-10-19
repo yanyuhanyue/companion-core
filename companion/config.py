@@ -1,7 +1,7 @@
 import os
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -95,6 +95,14 @@ class Settings(BaseModel):
     exploration_daily_bytes: int = Field(default=0, ge=0, le=104857600)
     social_enabled: bool = False
     social_semantic_threshold: float = Field(default=0.9, ge=0.8, le=1)
+    expression_enabled: bool = False
+    expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+    expression_meme_categories: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]] = (
+        Field(
+            default_factory=lambda: ["happy", "like", "surprised", "morning", "sleep"],
+            max_length=12,
+        )
+    )
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
@@ -180,6 +188,8 @@ class Settings(BaseModel):
                     data[field] = TypeAdapter(dict[str, ObservationAdapterConfig]).validate_json(
                         value
                     )
+                elif field == "expression_meme_categories":
+                    data[field] = TypeAdapter(list[str]).validate_json(value)
                 else:
                     data[field] = value
         return cls.model_validate(data)

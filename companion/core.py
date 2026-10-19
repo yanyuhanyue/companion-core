@@ -10,6 +10,7 @@ from companion.consolidation import NightlyConsolidator
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
 from companion.diary import DiaryService, day_bounds, is_diary_command
 from companion.exploration import ExplorationService
+from companion.expression import ExpressionEngine
 from companion.goals import GoalEngine
 from companion.life import LifeService, is_life_command
 from companion.memory import Memory
@@ -65,6 +66,7 @@ class Core:
         self.life = LifeService(self)
         self.social = SocialPlanner(self)
         self.exploration = ExplorationService(self)
+        self.expression = ExpressionEngine(self.store, settings, clock)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -236,7 +238,7 @@ class Core:
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
         text = json.loads(job["body_json"]).get("text", "")
-        messages = [{"role": "system", "content": PRINCIPLES}]
+        messages = [{"role": "system", "content": PRINCIPLES + self.expression.instruction()}]
         affect = self.affect.snapshot()
         goals = self.life.context()
         if goals:
@@ -636,8 +638,7 @@ class Core:
                     paused and paused["value"] == "1"
                 )
                 if job["kind"] != "activity" or should_send:
-                    enqueue(
-                        self.store,
+                    self.expression.enqueue(
                         job["event_id"],
                         job["conversation_id"],
                         reply,
