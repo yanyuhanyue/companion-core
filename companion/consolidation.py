@@ -112,15 +112,19 @@ class NightlyConsolidator:
             )
             if not row:
                 return None
-            if row["state"] != "SCHEDULED" and row["captured_privacy_epoch"] != epoch(s):
+            sources = self.core.diary.repo.sources(date.fromisoformat(row["local_date"]))
+            # Erasure cancels leased/partial coordinators in the same DB transaction.
+            # Benign Memory writes may advance the epoch before a crashed coordinator
+            # checkpoints. Resume against fresh state only when its sources are unchanged;
+            # each generative subtask separately rejects its own old model result.
+            if row["state"] != "SCHEDULED" and row["source_set_sha256"] != source_hash(sources):
                 s.execute(
                     "UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
-                    "last_error_code='PRIVACY_CHANGED' WHERE run_id=?",
+                    "last_error_code='CONSOLIDATION_SOURCES_CHANGED' WHERE run_id=?",
                     (row["run_id"],),
                 )
                 return None
             token = uid("nightly_lease")
-            sources = self.core.diary.repo.sources(date.fromisoformat(row["local_date"]))
             s.execute(
                 "UPDATE consolidation_runs SET state='LEASED',lease_token=?,lease_until=?,"
                 "source_set_sha256=?,captured_privacy_epoch=?,updated_at=? WHERE run_id=?",
@@ -144,7 +148,39 @@ class NightlyConsolidator:
                 "captured_privacy_epoch": epoch(s),
                 "sources": sources,
                 "steps": json.loads(row["steps_json"]),
+                "erasure_version": s.one(
+                    "SELECT COALESCE(MAX(restore_min_replay_version),0) AS n "
+                    "FROM privacy_erasure_ledger"
+                )["n"],
             }
+
+    def after_memory_commit(self, run):
+        # Memory.add advances the context epoch. Accept our own successful write only
+        # if no erasure intervened and the exact collected source set is still intact.
+        with self.store.transaction():
+            current = self.store.one(
+                "SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],)
+            )
+            erasure_version = self.store.one(
+                "SELECT COALESCE(MAX(restore_min_replay_version),0) AS n "
+                "FROM privacy_erasure_ledger"
+            )["n"]
+            if (
+                not current
+                or current["state"] != "LEASED"
+                or current["lease_token"] != run["lease_token"]
+                or current["lease_until"] <= self.clock()
+            ):
+                raise CoreError("CONSOLIDATION_STALE_LEASE", 409)
+            if erasure_version != run["erasure_version"] or source_hash(
+                run["sources"]
+            ) != source_hash(self.core.diary.repo.sources(date.fromisoformat(run["local_date"]))):
+                raise CoreError("PRIVACY_CHANGED", 409)
+            run["captured_privacy_epoch"] = epoch(self.store)
+            self.store.execute(
+                "UPDATE consolidation_runs SET captured_privacy_epoch=? WHERE run_id=?",
+                (run["captured_privacy_epoch"], run["run_id"]),
+            )
 
     def checkpoint(self, run, state="LEASED", code=None, waiting=False):
         s, now = self.store, self.clock()
@@ -189,6 +225,8 @@ class NightlyConsolidator:
                 worked = (
                     await self.core.extract_once(day) if self.settings.memory_enabled else False
                 )
+                if worked:
+                    self.after_memory_commit(run)
                 start, end = day_bounds(day, self.settings.timezone)
                 remaining = self.store.one(
                     "SELECT COUNT(*) AS n FROM events e JOIN jobs j USING(event_id) WHERE "

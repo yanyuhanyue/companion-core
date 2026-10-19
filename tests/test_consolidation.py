@@ -85,6 +85,45 @@ def test_nightly_one_day_one_diary_one_reflection_and_hypothesis_only(core):
     assert core.store.rows("SELECT * FROM outbox") == []
 
 
+@pytest.mark.parametrize("forget_after", [False, True])
+def test_nightly_own_memory_commit_can_advance_to_diary_and_reflection(
+    core, monkeypatch, forget_after
+):
+    model = enable_nightly(core)
+    core.settings.memory_enabled = True
+    core.settings.extraction_min_events = 3
+    core.settings.extraction_idle_seconds = 0
+    model.extraction = encode(
+        {
+            "memories": [
+                {
+                    "subject": "user",
+                    "kind": "preference",
+                    "fact_key": "reading-plan",
+                    "content": "我喜欢先列出章节再开始阅读。",
+                    "evidence_event_id": "evt_test_3",
+                    "evidence_quote": "我喜欢先列出章节再开始阅读。",
+                }
+            ]
+        }
+    )
+    original = core.extract_once
+
+    async def extract_then_forget(day):
+        result = await original(day)
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, ["evt_test_2"], core.clock())
+        return result
+
+    if forget_after:
+        monkeypatch.setattr(core, "extract_once", extract_then_forget)
+    core.consolidation.schedule_day(DAY)
+    assert run(core.consolidation.run_once())
+    assert core.consolidation.status(DAY)["state"] == ("CANCELLED" if forget_after else "COMPLETE")
+    assert len(core.store.rows("SELECT * FROM memories")) == 1
+    assert len(core.reflections.recent()) == (0 if forget_after else 1)
+
+
 def test_nightly_crash_resume_reuses_completed_diary(core, monkeypatch):
     model = enable_nightly(core)
     core.consolidation.schedule_day(DAY)
@@ -102,6 +141,44 @@ def test_nightly_crash_resume_reuses_completed_diary(core, monkeypatch):
         assert restarted.consolidation.status(DAY)["state"] == "COMPLETE"
         assert [scenario for _, scenario in model.calls].count("diary") == 1
         assert [scenario for _, scenario in model.calls].count("reflection") == 1
+    finally:
+        restarted.store.close()
+
+
+def test_nightly_resume_after_memory_commit_before_checkpoint(core, monkeypatch):
+    model = enable_nightly(core)
+    core.settings.memory_enabled = True
+    core.settings.extraction_min_events = 3
+    core.settings.extraction_idle_seconds = 0
+    model.extraction = encode(
+        {
+            "memories": [
+                {
+                    "subject": "user",
+                    "kind": "preference",
+                    "fact_key": "reading-plan",
+                    "content": "我喜欢先列出章节再开始阅读。",
+                    "evidence_event_id": "evt_test_3",
+                    "evidence_quote": "我喜欢先列出章节再开始阅读。",
+                }
+            ]
+        }
+    )
+
+    def crash(run):
+        raise SystemExit("crash after committed Memory write")
+
+    monkeypatch.setattr(core.consolidation, "after_memory_commit", crash)
+    core.consolidation.schedule_day(DAY)
+    with pytest.raises(SystemExit):
+        run(core.consolidation.run_once())
+    core.clock.advance(core.settings.lease_seconds + 1)
+    restarted = Core(core.settings, model, core.clock)
+    try:
+        assert run(restarted.consolidation.run_once())
+        assert restarted.consolidation.status(DAY)["state"] == "COMPLETE"
+        assert [scenario for _, scenario in model.calls].count("memory_extract") == 1
+        assert len(core.store.rows("SELECT * FROM memories")) == 1
     finally:
         restarted.store.close()
 
