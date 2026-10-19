@@ -41,6 +41,13 @@ jobs:
           docker run --rm --network none --entrypoint python companion-executor:test
           -c "import companion.executor_gateway, companion.executor_budget_proxy, companion.dsh_job"
       - run: >-
+          docker run --rm --network none --user 10002:10002 --read-only
+          --cap-drop ALL --security-opt no-new-privileges --memory 1g --pids-limit 64
+          --tmpfs /tmp:rw,nosuid,nodev,size=64m
+          --tmpfs /scratch:rw,nosuid,nodev,exec,size=768m,uid=10002,gid=10002,mode=0700
+          -v "${{ github.workspace }}/scripts/smoke_executor.py:/verify.py:ro"
+          --entrypoint python companion-executor:test /verify.py
+      - run: >-
           docker run --rm
           -e COMPANION_OWNER_QQ_ID=10001 -e COMPANION_BOT_QQ_ID=10002
           -e COMPANION_BRIDGE_TOKEN=container-test-token-32-characters

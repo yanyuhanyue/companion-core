@@ -49,7 +49,7 @@ companion.executor_gateway:app_from_env --factory --host <Tailscale-IP> --port 8
 它只挂自身执行标记卷，未挂 Core 主数据库、QQ 凭据、宿主目录或 Docker socket。
 SDK 使用官方 `sdk-minimal`，每次创建独立 home/work，完成或失败后清理全部会话文件。
 DSH 进程以 UID 10002 运行；只读根文件系统、私有 PID namespace、无新增特权、CPU/内存/
-进程上限生效。监督进程仅保留容器内切换身份和清理任务所需能力；DSH 无法读取它的认证环境。
+进程上限生效。`/scratch` 是有大小上限的可执行 tmpfs，SDK 在每个任务的 `TMPDIR` 解压原生模块；`nosuid`、`nodev` 和只读根目录仍生效。监督进程仅保留容器内切换身份和清理任务所需能力；DSH 无法读取它的认证环境。
 超时后清理整个专用 UID，包含脱离父进程组的后台进程。
 
 执行容器只有 `internal:true` 网络，没有公网出口；只可访问独立预算代理。真正的模型
@@ -61,7 +61,7 @@ API key 只存在代理容器。每个任务获得独立、短期、可撤销的
 模型上游必须为 HTTPS。专用模型凭据应在供应商侧另设硬消费上限。Compose 的模型代理有
 出口，执行容器没有；不可给执行容器添加第二张联网网络。Core 若在 Docker，加入已创建的
 `companion-tool-private` 网络后，以 `http://172.30.91.10:8090` 访问网关；只共享网络，
-不共享数据卷。主机上 Core 可以使用 `http://127.0.0.1:8090`。
+不共享数据卷。同一 Linux 宿主机上的 Core 可通过 `http://172.30.91.10:8090` 访问；该 Compose 不发布宿主机端口，内部网络没有公网出口。
 
 ## 隐私与恢复
 
@@ -76,8 +76,7 @@ Observation。备份恢复必须调用 `restore_executive`：审批全部撤销�
 本地测试覆盖真实文件读写、MCP/HTTP 认证与回执、越界路径拒绝、独立精确审批、过期和撤销、
 预算/次数预留、UNKNOWN 不重试、lease CAS、隐私与恢复钩子、模型代理硬限额及 SDK 结果分级。
 另含真实 Windows 目录联接替换、持有目录期间的重命名/写入拒绝，以及工具 Worker 独立实例锁回归。
-DSH 测试使用 SDK 替身；没有启动真实 DSH 会话、付费模型或 Windows 高权限工具。真实 SDK
-镜像启动、目标 Tailscale 联调及供应商价格/凭据仍需启用前在专用环境验收。
+DSH 任务测试使用 SDK 替身。目标 VPS 已实际构建镜像，并以 UID 10002、无网络、只读根文件系统初始化和关闭真实 SDK；没有发起模型任务或付费请求。CI 同样运行 `scripts/smoke_executor.py`。目标 Tailscale 联调及供应商价格/凭据仍需启用前在专用环境验收。
 
 协议依据：官方 [Python SDK](https://github.com/deepseek-ai/deepseek-harness/tree/master/python/sdk)
 与 [sdk-minimal 组成](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/sdk-minimal)。
