@@ -56,7 +56,8 @@ services:
     pids_limit: 32
     cpus: 0.5
     mem_limit: 256m
-    tmpfs: [/tmp:rw,nosuid,nodev,size=16m]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
     networks:
       tool-private:
         ipv4_address: 172.30.91.11
