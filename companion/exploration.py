@@ -12,7 +12,7 @@ from pydantic import Field
 
 from companion.contracts import CoreError, StrictModel
 from companion.goals import GoalProposal, GoalScope
-from companion.observation import ObservationEvent, ObservationPayload
+from companion.observation import ObservationEvent, ObservationPayload, ReadingEvidence
 from companion.privacy import epoch
 from companion.store import after, encode, uid
 from companion.transport import digest
@@ -47,6 +47,7 @@ class ReadItem(StrictModel):
     text: str = Field(default="", max_length=12000)
     url: str = Field(min_length=1, max_length=2048)
     topic: str = Field(default="", max_length=80)
+    reading: ReadingEvidence | None = None
     image_urls: list[Annotated[str, Field(max_length=2048)]] = Field(
         default_factory=list, max_length=2
     )
@@ -57,6 +58,7 @@ class ReadResult(StrictModel):
     status: Literal["SUCCESS", "FAILED", "UNKNOWN"]
     items: list[ReadItem] = Field(default_factory=list, max_length=40)
     used_bytes: int | None = Field(default=None, ge=0, le=1048576)
+    used_requests: int | None = Field(default=None, ge=0, le=8)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
 
 
@@ -227,8 +229,9 @@ class ExplorationService:
         cfg, s = self.settings, self.store
         day, month = self.periods()
         row = s.one(
-            "SELECT COUNT(*) AS monthly,"
-            "SUM(CASE WHEN started_at>=? THEN 1 ELSE 0 END) AS daily,"
+            "SELECT SUM(COALESCE(used_requests,reserved_requests)) AS monthly,"
+            "SUM(CASE WHEN started_at>=? THEN COALESCE(used_requests,reserved_requests) "
+            "ELSE 0 END) AS daily,"
             "SUM(CASE WHEN started_at>=? THEN COALESCE(used_bytes,reserved_bytes) "
             "ELSE 0 END) bytes,"
             "SUM(CASE WHEN started_at>=? AND operation='read' THEN 1 ELSE 0 END) reads "
@@ -237,14 +240,14 @@ class ExplorationService:
         )
         return (
             (row["daily"] or 0) < cfg.exploration_daily_requests
-            and row["monthly"] < cfg.exploration_monthly_requests
+            and (row["monthly"] or 0) < cfg.exploration_monthly_requests
             and (row["bytes"] or 0) + cfg.exploration_max_response_bytes
             <= cfg.exploration_daily_bytes
             and (not for_read or (row["reads"] or 0) < cfg.exploration_daily_deep_reads)
         )
 
     def lease(self, adapter_id):
-        self.adapter(adapter_id)
+        policy = self.adapter(adapter_id)
         cfg, s, now = self.settings, self.store, self.clock()
         day, month = self.periods()
         with s.transaction():
@@ -259,8 +262,8 @@ class ExplorationService:
                 (epoch(s),),
             )
             counts = s.one(
-                "SELECT SUM(CASE WHEN started_at>=? THEN 1 ELSE 0 END) AS daily,"
-                "COUNT(*) AS monthly,"
+                "SELECT SUM(CASE WHEN started_at>=? THEN COALESCE(used_requests,reserved_requests) "
+                "ELSE 0 END) AS daily,SUM(COALESCE(used_requests,reserved_requests)) AS monthly,"
                 "SUM(CASE WHEN started_at>=? THEN COALESCE(used_bytes,reserved_bytes) ELSE 0 END) "
                 "AS bytes,SUM(CASE WHEN started_at>=? AND operation='read' "
                 "THEN 1 ELSE 0 END) AS reads "
@@ -268,8 +271,9 @@ class ExplorationService:
                 (day, day, day, month),
             )
             if (
-                (counts["daily"] or 0) >= cfg.exploration_daily_requests
-                or counts["monthly"] >= cfg.exploration_monthly_requests
+                (counts["daily"] or 0) + policy.reader_max_requests > cfg.exploration_daily_requests
+                or (counts["monthly"] or 0) + policy.reader_max_requests
+                > cfg.exploration_monthly_requests
                 or (counts["bytes"] or 0) + cfg.exploration_max_response_bytes
                 > cfg.exploration_daily_bytes
             ):
@@ -308,8 +312,17 @@ class ExplorationService:
                     until = min(until, goal_until)
                 s.execute(
                     "UPDATE exploration_requests SET state='RUNNING',lease_token=?,lease_until=?,"
-                    "reserved_bytes=?,started_at=?,updated_at=? WHERE request_id=?",
-                    (token, until, cfg.exploration_max_response_bytes, now, now, row["request_id"]),
+                    "reserved_bytes=?,reserved_requests=?,started_at=?,updated_at=? "
+                    "WHERE request_id=?",
+                    (
+                        token,
+                        until,
+                        cfg.exploration_max_response_bytes,
+                        policy.reader_max_requests,
+                        now,
+                        now,
+                        row["request_id"],
+                    ),
                 )
                 return {
                     "request_id": row["request_id"],
@@ -318,13 +331,20 @@ class ExplorationService:
                     "url": row["url"],
                     "max_bytes": cfg.exploration_max_response_bytes,
                     "max_items": min(40, cfg.exploration_daily_candidate_limit),
+                    "max_requests": policy.reader_max_requests,
                 }
         return None
 
     def complete(self, adapter_id, request_id, result):
         policy = self.adapter(adapter_id)
         s, now = self.store, self.clock()
-        fingerprint = digest(result.model_dump())
+        receipt = result.model_dump(mode="json")
+        if receipt["used_requests"] is None:
+            receipt.pop("used_requests")
+        for item in receipt["items"]:
+            if item["reading"] is None:
+                item.pop("reading")
+        fingerprint = digest(receipt)
         result_ids, failed_step = [], None
         with s.transaction():
             row = s.one(
@@ -349,7 +369,14 @@ class ExplorationService:
                 self.core.goals.validate_lease(step)
             if result.used_bytes is not None and result.used_bytes > row["reserved_bytes"]:
                 raise CoreError("READER_BYTE_LIMIT", 400)
+            used_requests = result.used_requests
+            if used_requests is None and row["reserved_requests"] == 1:
+                used_requests = 1
+            if used_requests is not None and used_requests > row["reserved_requests"]:
+                raise CoreError("READER_REQUEST_LIMIT", 400)
             if result.status == "SUCCESS":
+                if not used_requests:
+                    raise CoreError("READER_USAGE_REQUIRED", 400)
                 sources = [
                     source["event_id"]
                     for source in s.rows(
@@ -397,6 +424,7 @@ class ExplorationService:
                             text=text,
                             url=canonical,
                             requested_url=json.loads(step["scope_json"])["url"] if step else "",
+                            reading=item.reading,
                         ),
                     )
                     event_id = self.core.observations.append(adapter_id, observation)["event_id"]
@@ -444,12 +472,14 @@ class ExplorationService:
                 state = result.status
                 failed_step = step or None
             s.execute(
-                "UPDATE exploration_requests SET state=?,used_bytes=?,result_sha256=?,"
+                "UPDATE exploration_requests SET state=?,used_bytes=?,used_requests=?,"
+                "result_sha256=?,"
                 "last_error_code=?,"
                 "updated_at=? WHERE request_id=?",
                 (
                     state,
                     None if state == "UNKNOWN" else result.used_bytes,
+                    None if state == "UNKNOWN" else used_requests,
                     fingerprint,
                     result.error_code,
                     now,

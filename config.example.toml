@@ -87,6 +87,8 @@ android_enabled = false
 # Set COMPANION_CONTROL_TOKEN for owner-only v2 management.
 # Set COMPANION_OBSERVATION_ADAPTERS to a JSON object of adapter IDs and
 # {"token":"distinct-secret-at-least-24-characters","source":"bilibili"}.
+# Independent source_reader: set reader_max_requests=4 on its bilibili adapter;
+# default 1 preserves existing Bridge readers. See docs/design-v0.6/source-reader.md.
 
 # See deploy/executive.example.toml for independently authenticated executor endpoints.
 [executive]

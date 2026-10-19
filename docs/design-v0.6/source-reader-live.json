@@ -1,0 +1,349 @@
+{
+  "checked_at": "2026-10-19T14:20:20.020869+00:00",
+  "credentials_used": false,
+  "model_calls": 0,
+  "qq_messages": 0,
+  "samples": [
+    {
+      "url": "https://www.bilibili.com/video/BV1GJ411x7h7",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "【官方 MV】Never Gonna Give You Up - Rick Astley",
+          "url": "https://www.bilibili.com/video/BV1GJ411x7h7",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:22.649255+00:00",
+            "part": 1,
+            "subtitle_status": "restricted",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "36804348df73c4757dced5cb3741b1bb56fca7fe1b25211a55e4485a2082dcb8",
+                "bytes": 7507
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "2fb886aaba896d287b4a6902026337db353db3cf29ebd319493287f9472b717f",
+                "bytes": 2725
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 96
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 10232
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1Z1cfzSErG",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "太好了，说明这部分需要加强科普！ | 专访李旭",
+          "url": "https://www.bilibili.com/video/BV1Z1cfzSErG",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:26.263445+00:00",
+            "part": 1,
+            "subtitle_status": "restricted",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "3608a645b385b88c8251b1b854bbeee7b900534d4830182caf04b6184ad6ba72",
+                "bytes": 113815
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "ddd5977902f2cce9956bc3e2462c497e060bccc62758d3b1469a5a6c12da5702",
+                "bytes": 2314
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 86
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 116129
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1u5411K7Uj",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "中英文字幕《超越元素 Beyond.the.Elements》全三集 讲述元素的科学",
+          "url": "https://www.bilibili.com/video/BV1u5411K7Uj",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:29.821106+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "5a654ab9f413e435acdfbf0ebe915d85518de382886736fa719dff01e7d50715",
+                "bytes": 2818
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "f3d65b6215208f8fcd36eaed3b0cf82b4b880f31bb4ea62f3b13ceb533335a40",
+                "bytes": 2282
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 193
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 5100
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1yx411e7xv",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "【中文字幕】科普动画 人类1000年后的进化猜想",
+          "url": "https://www.bilibili.com/video/BV1yx411e7xv",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:33.689460+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "b141dbd22b0c96e2f70365854eb10ae83f3fedf92d9459b01fbdd9dfe73c803a",
+                "bytes": 1892
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "264eb981f053485f2014c75ba5116a73cbdb9c8f3eb4752bfd6f17a2efb9e131",
+                "bytes": 2282
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 120
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 4174
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1ne4y17748",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "全156集 油管最火科普视频 中英字幕 听力绝佳素材",
+          "url": "https://www.bilibili.com/video/BV1ne4y17748",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:37.174756+00:00",
+            "part": 1,
+            "subtitle_status": "restricted",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "0a8c3e4eb179cc8f4607cb22ab1629427ab8689feb2d0672ef64c6c8326ed953",
+                "bytes": 50414
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "46b9c9ae1d1500a300a9fc81da09668ed8b99bb42b46ee4e4de415def4c419e4",
+                "bytes": 2282
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 102
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 52696
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1mj411w7Km",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "UPSTREAM_HTTP_ERROR",
+      "used_requests": 2,
+      "used_bytes": 1836
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1o4411F7VP",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "Deep Look 双语字幕 | 变色龙是如何变色的？原理没我们想得那么简单",
+          "url": "https://www.bilibili.com/video/BV1o4411F7VP",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:44.023371+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "6959b2025005d5e17292b3a9bb7f08a78bbfa0ffea477faa4bb0a3b3c7f82624",
+                "bytes": 3422
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "4a0f341c4c6732303be4254160ae5e49ecddc7d77772ee9775fbc0c6d27536d3",
+                "bytes": 2283
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 338
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 5705
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1L8411n7Pg",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "【100集】全网最火-物理学-天文学科普视频-中英cc字幕-英语听力口语单词语法",
+          "url": "https://www.bilibili.com/video/BV1L8411n7Pg",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:47.495867+00:00",
+            "part": 1,
+            "subtitle_status": "restricted",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "66383604a6c718286cdf07dc8801931c65f4b9906df18b69d520b78ecd3fca82",
+                "bytes": 34201
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "49612d64130a0801d1ad9d1ebdd566b6557bffa82cc87b1622b19d30bee1d30d",
+                "bytes": 2283
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 147
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 36484
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1Y84y1473j",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "【100集】可爱的生物学动画-中英cc字幕-生物学-医学-科普-英语听力口语单词听力语法",
+          "url": "https://www.bilibili.com/video/BV1Y84y1473j",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:51.158490+00:00",
+            "part": 1,
+            "subtitle_status": "restricted",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "7ea571475c275688dd5f0ee4fd788457a9e515a095d0772a45e1cc1b6b78466a",
+                "bytes": 34129
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "599cd81c5416c7ae1e7375eaec7b84590680f44c554b579e54b9af499578602a",
+                "bytes": 2282
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 155
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 36411
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV15c411h76Y",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "世界上最大的齿轮减速器，直接转最后一个轮子，会发生什么?",
+          "url": "https://www.bilibili.com/video/BV15c411h76Y",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T14:20:54.633574+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "83e705ab47a64f2b568eb42d2c0c77572da2c22770b6b70c8f49a8047fbc316b",
+                "bytes": 3054
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "19d2f8e6491963b50b05a9446eca8da96a3127bdd687862c8f609dbc9a20febb",
+                "bytes": 2560
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 323
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 5614
+    }
+  ]
+}

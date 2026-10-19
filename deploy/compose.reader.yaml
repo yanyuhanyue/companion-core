@@ -1,0 +1,26 @@
+# Explicit opt-in. Tokens are scoped observation credentials, never owner/Bridge credentials.
+services:
+  bilibili-reader:
+    profiles: [reader]
+    build:
+      context: ..
+      dockerfile: deploy/source-reader.Dockerfile
+    command: [--core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
+              --adapter-id, "${COMPANION_READER_ID:-bilibili_source}"]
+    env_file: ../privacy/reader.env
+    user: "10003:10003"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 1
+    mem_limit: 768m
+    pids_limit: 96
+    tmpfs:
+      - /scratch:rw,nosuid,nodev,size=128m,uid=10003,gid=10003,mode=0700
+      - /tmp:rw,nosuid,nodev,size=32m
+    networks: [reader]
+    restart: "no"
+networks:
+  reader:
+    external: true
+    name: ${COMPANION_READER_NETWORK:?Set the isolated development network name}

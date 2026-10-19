@@ -341,7 +341,8 @@ class ContentService:
                 if status is None:
                     continue
                 observations = self.store.rows(
-                    "SELECT o.event_id,o.source_kind,o.result_status,o.canonical_url,e.body_json "
+                    "SELECT o.event_id,o.source_kind,o.result_status,o.canonical_url,"
+                    "o.evidence_json,e.body_json "
                     "FROM observations o JOIN events e USING(event_id) WHERE o.redacted=0 "
                     "AND e.redacted=0 AND (o.event_id=? OR o.event_id IN (SELECT ee.event_id "
                     "FROM exploration_evidence ee WHERE ee.request_id=?)) ORDER BY e.rowid LIMIT 1",
@@ -363,6 +364,7 @@ class ContentService:
                             "result_status": obs["result_status"],
                             "title": body.get("title", ""),
                             "text": body.get("text", "")[:6000],
+                            "reading": json.loads(obs["evidence_json"]).get("reading"),
                         }
                     )
                 result.append(item)
@@ -396,6 +398,11 @@ class ContentService:
                 "trust": row["trust"],
                 "kind": row.get("source_kind", row["kind"]),
             }
+            if row.get("reading"):
+                reading = row["reading"]
+                item["reading"] = {
+                    key: reading[key] for key in ("level", "part", "subtitle_status", "truncated")
+                }
             if len(render([*selected, item]).encode()) > max_bytes:
                 return False
             selected.append(item)

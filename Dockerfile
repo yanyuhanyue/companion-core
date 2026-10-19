@@ -4,6 +4,7 @@ WORKDIR /app
 RUN pip install --no-cache-dir uv==0.12.10
 COPY pyproject.toml uv.lock ./
 COPY companion ./companion
+COPY source_reader ./source_reader
 COPY migrations ./migrations
 COPY db ./db
 RUN uv sync --frozen --no-dev && useradd -m -u 10001 companion && \

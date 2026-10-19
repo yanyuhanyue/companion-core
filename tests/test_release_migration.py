@@ -32,6 +32,7 @@ REVISION_CHAIN = (
     "0011_executive",
     "0012_media",
     "0013_content",
+    "0014_reader_budget",
 )
 LEGACY_TABLES = (
     "principals",
@@ -301,9 +302,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0013_content"]
+    assert scripts.get_heads() == ["0014_reader_budget"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0013_content")
+    revisions, current = [], scripts.get_revision("0014_reader_budget")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -314,17 +315,17 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
 @pytest.mark.parametrize("revision", ["0003_memory_index", "0004_diary"])
 def test_populated_historical_upgrade_preserves_every_old_column_and_repeats(tmp_path, revision):
     database, _, before = seed_legacy(tmp_path, revision)
-    migrate(str(database), "0013_content")
+    migrate(str(database), "0014_reader_budget")
     with closing(Store(str(database))) as store:
         assert store.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0013_content"}
+            {"version_num": "0014_reader_budget"}
         ]
         assert_old_columns_unchanged(store, before)
         assert_indexes_and_integrity(store)
         assert store.schema_capabilities()
         first_upgrade = table_snapshot(store, before)
     migrate(str(database), "head")
-    migrate(str(database), "0013_content")
+    migrate(str(database), "0014_reader_budget")
     with closing(Store(str(database))) as store:
         assert table_snapshot(store, before) == first_upgrade
         assert_indexes_and_integrity(store)
@@ -351,7 +352,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
     restore(archive, destination, key, ledger)
     with closing(Store(str(destination))) as restored:
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0013_content"}
+            {"version_num": "0014_reader_budget"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))

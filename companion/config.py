@@ -28,6 +28,7 @@ class ObservationAdapterConfig(BaseModel):
         "qq_image",
     ]
     media_analysis: bool = False
+    reader_max_requests: int = Field(default=1, ge=1, le=8)
 
 
 class Settings(BaseModel):
