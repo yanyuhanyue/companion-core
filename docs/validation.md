@@ -10,6 +10,8 @@
 - 真实回环 HTTP API 与独立 Worker 进程，使用演示模型，完成入站、任务执行、领取、发送前状态更新和回执。
 - 100 条合成的真实接口格式消息回放：30 条目标事实入库，Recall@6 为 30/30，公开动作 0。
 - 加密热备份恢复；忘记后恢复旧备份，使用最新独立日志回放，内容不会重新进入检索。
+- GitHub CI：Windows、Ubuntu 的静态检查、48 项测试、回放、独立进程冒烟及打包通过；Linux 容器构建和初始化通过。[验证运行](https://github.com/yanyuhanyue/companion-core/actions/runs/39197554362)，对应代码提交 `df2d1bc`。
+- Python wheel 在独立安装目录导入，所包含的 Alembic 迁移可执行。
 
 详细回放数值见 [replay-report.json](replay-report.json)。输入 Token 数是保守估计；样例模型使用确定性规则，因此不代表 DeepSeek 的实际提取准确率或幻觉率。
 
@@ -31,6 +33,6 @@ uv sync --frozen
 - 真实 AstrBot/NapCat/QQ 账号的发送、优先级冲突与重连测试。插件方法已对照 4.29.1 源码，自动化使用模拟宿主。
 - 真实模型输出质量、真实缓存用量和供应商账单核对。
 - VPS Docker 运行、资源压力、异地备份和独立遗忘日志复制。
-- Linux 容器运行由 GitHub CI 单独检查；本机 Docker daemon 当前未运行。
+- Linux 容器已由 GitHub CI 检查；目标 VPS 的容器运行与在线 QQ 链路仍待验证。
 
 这些项目完成前，M0/M1 为**代码与本地合同验收通过，生产验收待完成**。DSH、Android 和公开发布仍关闭。
