@@ -536,6 +536,7 @@ def test_executor_compose_separates_model_secret_network_and_core_storage():
     assert "EXECUTOR_MODEL_KEY" in proxy["environment"]
     assert "pid" not in executor and "privileged" not in executor
     assert executor["environment"]["EXECUTOR_DSH_ENABLED"].endswith(":-false}")
+    assert proxy["tmpfs"] == ["/tmp:rw,nosuid,nodev,size=16m"]
 
 
 def test_sdk_adapter_requires_terminal_and_real_text_not_failed_tool_claim(tmp_path):
@@ -635,3 +636,71 @@ def test_settings_reject_reusing_executor_and_bridge_tokens(core):
     core.settings.executive.endpoints["windows"].token = core.settings.bridge_token
     with pytest.raises(ValidationError, match="executor tokens must be separate"):
         Settings.model_validate(core.settings.model_dump())
+
+
+@pytest.mark.parametrize("create", [False, True])
+def test_directory_replacement_cannot_redirect_scoped_file_access(tmp_path, monkeypatch, create):
+    import companion.executor_gateway as gateway
+
+    root, other = tmp_path / "work", tmp_path / "other"
+    nested, prepared = root / "nested", tmp_path / "replacement"
+    nested.mkdir(parents=True)
+    other.mkdir()
+    if not create:
+        (nested / "result.txt").write_text("inside", encoding="utf-8")
+        (other / "result.txt").write_text("independent file", encoding="utf-8")
+    if os.name == "nt":
+        import _winapi
+
+        _winapi.CreateJunction(str(other), str(prepared))
+    else:
+        prepared.symlink_to(other, target_is_directory=True)
+    original = gateway.scoped_path
+
+    def replace_directory(base, relative):
+        path = original(base, relative)
+        nested.rename(root / "original")
+        prepared.rename(nested)
+        return path
+
+    monkeypatch.setattr(gateway, "scoped_path", replace_directory)
+    request = envelope(
+        capability="windows.write_text" if create else "windows.read_text",
+        arguments={"path": "nested/result.txt", "text": "approved" if create else ""},
+    )
+    result = run(FileExecutor({"work": root}, allow_changes=True).execute(request))
+    assert result.status == "FAILED"
+    if create:
+        assert not (other / "result.txt").exists()
+    else:
+        assert (other / "result.txt").read_text("utf-8") == "independent file"
+
+
+def test_open_file_retains_original_object_and_windows_holds_parent(tmp_path):
+    from companion.executor_files import open_scoped
+
+    root = tmp_path / "held-directory"
+    root.mkdir()
+    path = root / "result.txt"
+    path.write_text("original", encoding="utf-8")
+    with open_scoped(path) as stream:
+        if os.name == "nt":
+            with pytest.raises(OSError):
+                root.rename(tmp_path / "renamed")
+            with pytest.raises(OSError):
+                path.write_text("changed", encoding="utf-8")
+        else:
+            path.rename(root / "original.txt")
+            path.write_text("different object", encoding="utf-8")
+        assert stream.read() == b"original"
+    root.rename(tmp_path / "released-directory")
+
+
+def test_executive_worker_has_dedicated_single_instance_lock(tmp_path):
+    from companion.worker_lock import single_worker
+
+    database = tmp_path / "worker.db"
+    with single_worker(database, "executive-worker"), single_worker(database, "worker"):
+        with pytest.raises(CoreError, match="WORKER_ALREADY_RUNNING"):
+            with single_worker(database, "executive-worker"):
+                pass
