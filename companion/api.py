@@ -145,6 +145,7 @@ def create_app(settings=None):
 
     diary_auth = [Depends(diary_admin)]
 
+    from companion.exploration import ReadResult
     from companion.goals import CommitmentRequest, GoalDecision, GoalProposal
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
@@ -153,6 +154,24 @@ def create_app(settings=None):
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
+
+    @app.post("/internal/v2/readers/{adapter_id}/lease", dependencies=adapter_auth)
+    async def reader_lease(adapter_id: str):
+        return {"item": app.state.core.exploration.lease(adapter_id)}
+
+    @app.post("/internal/v2/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
+    async def reader_result(adapter_id: str, request_id: str, body: ReadResult):
+        return app.state.core.exploration.complete(adapter_id, request_id, body)
+
+    @app.get("/internal/v2/exploration", dependencies=control_auth)
+    async def exploration_status():
+        return {
+            "items": app.state.core.store.rows(
+                "SELECT request_id,adapter_id,operation,state,used_bytes,reserved_bytes,"
+                "last_error_code,"
+                "created_at FROM exploration_requests ORDER BY rowid DESC LIMIT 30"
+            )
+        }
 
     @app.get("/internal/v2/affect", dependencies=control_auth)
     async def affect_snapshot():
@@ -277,7 +296,7 @@ def create_app(settings=None):
     @app.post(prefix + "/deliveries/{message_id}/begin-send", dependencies=auth)
     async def begin(message_id: str, body: LeaseToken):
         core = app.state.core
-        return begin_send(core.store, message_id, body.lease_token, core.clock())
+        return begin_send(core.store, message_id, body.lease_token, core.clock(), settings)
 
     @app.post(prefix + "/deliveries/{message_id}/result", dependencies=auth)
     async def result(message_id: str, body: DeliveryResult):

@@ -16,9 +16,17 @@ from companion import __version__  # noqa: E402
 def main():
     wheel = ROOT / f"dist/companion_core-{__version__}-py3-none-any.whl"
     source = ROOT / f"dist/companion_core-{__version__}.tar.gz"
-    forbidden = {".local", ".env", "config.toml", ".codex-remote-attachments", "__pycache__"}
+    forbidden = {
+        ".local",
+        ".env",
+        "config.toml",
+        ".codex-remote-attachments",
+        "__pycache__",
+        ".playwright-cli",
+    }
     with tarfile.open(source) as archive:
         assert not any(forbidden.intersection(Path(n).parts) for n in archive.getnames())
+        assert not any("output/playwright/" in n for n in archive.getnames())
     with zipfile.ZipFile(wheel) as archive:
         assert not any(forbidden.intersection(Path(n).parts) for n in archive.namelist())
         temporary = ROOT / ".local"

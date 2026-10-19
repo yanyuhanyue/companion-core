@@ -298,6 +298,11 @@ class GoalEngine:
             )
             if paused:
                 self.store.execute(
+                    "UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
+                    "last_error_code='AUTONOMY_PAUSED' WHERE action_type='qq.private.proactive' "
+                    "AND state IN ('PENDING','LEASED','RETRY_WAIT')"
+                )
+                self.store.execute(
                     "UPDATE goal_steps SET state='WAITING_RESOURCE',lease_token=NULL,"
                     "last_error_code='AUTONOMY_PAUSED' WHERE goal_id IN (SELECT goal_id FROM "
                     "goals WHERE kind='self') AND state IN ('QUEUED','RUNNING','RETRY_WAIT')"
@@ -466,7 +471,7 @@ class GoalEngine:
 
     def finish(self, step, result_event_id):
         s, now = self.store, self.clock()
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
             self.validate_lease(step)
             commitment = s.one(
                 "SELECT deadline FROM commitments WHERE goal_id=?", (step["goal_id"],)

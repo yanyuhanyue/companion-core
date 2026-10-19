@@ -9,6 +9,7 @@ from companion.affect import AffectEngine
 from companion.consolidation import NightlyConsolidator
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
 from companion.diary import DiaryService, day_bounds, is_diary_command
+from companion.exploration import ExplorationService
 from companion.goals import GoalEngine
 from companion.life import LifeService, is_life_command
 from companion.memory import Memory
@@ -16,6 +17,7 @@ from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULE
 from companion.observation import ObservationService
 from companion.privacy import ErasureLedger, epoch, redact
 from companion.reflection import ReflectionService
+from companion.social import SocialPlanner, proactive_counts
 from companion.store import Store, after, encode, uid, utcnow
 from companion.transport import digest, enqueue, reconcile_delivery, recover_deliveries
 from companion.wake import WakePlanner
@@ -61,6 +63,8 @@ class Core:
         self.goals = GoalEngine(self.store, settings, self.ledger, clock)
         self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
         self.life = LifeService(self)
+        self.social = SocialPlanner(self)
+        self.exploration = ExplorationService(self)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -728,16 +732,7 @@ class Core:
                 "('PENDING','LEASED','SENDING','RETRY_WAIT','DELIVERY_UNCERTAIN')"
             ):
                 return False
-            day = (
-                local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
-            )
-            count = s.one(
-                "SELECT COUNT(*) AS n FROM jobs WHERE kind='activity' AND created_at>=?", (day,)
-            )["n"]
-            recent = s.one(
-                "SELECT 1 FROM jobs WHERE kind='activity' AND created_at>?",
-                (after(now, -cfg.proactive_interval_seconds),),
-            )
+            count, recent = proactive_counts(s, cfg, now)
             if count >= cfg.proactive_daily_limit or recent:
                 return False
             event_id = uid("activity")

@@ -59,6 +59,11 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                store.execute(
+                    "UPDATE exploration_requests SET state='UNKNOWN',lease_token=NULL,"
+                    "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "
+                    "WHERE state IN ('QUEUED','RUNNING')"
+                )
                 if store.execute(
                     "UPDATE consents SET revoked_at=? WHERE revoked_at IS NULL", (utcnow(),)
                 ).rowcount:

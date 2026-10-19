@@ -25,7 +25,7 @@ dev = ["pytest>=8,<10", "ruff>=0.11,<1", "jsonschema>=4.23,<5", "pyyaml>=6,<7"]
 packages = ["companion"]
 
 [tool.hatch.build]
-exclude = [".codex-remote-attachments/**"]
+exclude = [".codex-remote-attachments/**", ".playwright-cli/**", "output/playwright/**"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "migrations" = "companion/migrations"

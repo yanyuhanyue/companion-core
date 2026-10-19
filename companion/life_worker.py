@@ -19,9 +19,11 @@ async def life_worker(settings):
                 if ticks % 60 == 0:
                     core.expire_raw_events()
                     core.consolidation.schedule_due()
-                    core.wake.evaluate()
+                    core.exploration.schedule_wake(core.wake.evaluate())
                     with core.store.transaction():
                         core.goals.expire_commitments()
+                    core.exploration.schedule_goal()
+                    core.social.flush()
                 worked = await core.consolidation.run_once(worker_id)
                 ticks += 1
                 if not worked:

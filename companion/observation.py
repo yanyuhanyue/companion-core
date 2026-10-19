@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import UTC
 from typing import Literal
 from urllib.parse import urlsplit
@@ -25,6 +26,7 @@ class ObservationPayload(StrictModel):
     title: str = Field(default="", max_length=300)
     text: str = Field(default="", max_length=12000)
     url: str = Field(default="", max_length=2048)
+    requested_url: str = Field(default="", max_length=2048)
     duration_seconds: float | None = Field(default=None, gt=0, le=36000, allow_inf_nan=False)
     analyzed_spans: list[MediaSpan] = Field(default_factory=list, max_length=120)
     media_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -37,7 +39,16 @@ class ObservationEvent(StrictModel):
     event_id: str = Field(min_length=8, max_length=128)
     event_type: Literal["content.observed"]
     source: Literal[
-        "bilibili", "heybox", "web", "voice", "camera", "android", "dsh", "windows", "simulation"
+        "bilibili",
+        "heybox",
+        "web",
+        "voice",
+        "camera",
+        "android",
+        "dsh",
+        "windows",
+        "simulation",
+        "qq_image",
     ]
     source_kind: Literal[
         "title", "text", "video_analysis", "image_analysis", "audio_transcript", "tool_result"
@@ -47,7 +58,7 @@ class ObservationEvent(StrictModel):
     trace_id: str = Field(min_length=8, max_length=128)
     privacy_scope: Literal["private"] = "private"
     result_status: Literal["DISCOVERED", "FETCHED", "WATCHED", "FAILED", "UNKNOWN"]
-    source_event_ids: list[str] = Field(default_factory=list, max_length=20)
+    source_event_ids: list[str] = Field(default_factory=list, max_length=256)
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     privacy_epoch: int = Field(ge=0)
     device_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -108,12 +119,14 @@ class ObservationService:
             raise CoreError("OBSERVATION_DIGEST_MISMATCH", 400)
         if any(
             redact(value, self.settings) != value
-            for value in (payload.title, payload.text, payload.url)
+            for value in (payload.title, payload.text, payload.url, payload.requested_url)
         ):
             raise CoreError("OBSERVATION_CONTAINS_CREDENTIALS", 400)
-        if payload.url:
+        for value in (payload.url, payload.requested_url):
+            if not value:
+                continue
             try:
-                url = urlsplit(payload.url)
+                url = urlsplit(value)
             except ValueError as error:
                 raise CoreError("INVALID_OBSERVATION_URL", 400) from error
             if url.scheme != "https" or not url.hostname or url.username or url.fragment:
@@ -127,6 +140,7 @@ class ObservationService:
             raise CoreError("OBSERVATION_TIME_OUT_OF_RANGE", 400)
         status, kind = observation.result_status, observation.source_kind
         kinds = {
+            "qq_image": {"image_analysis"},
             "voice": {"audio_transcript"},
             "camera": {"image_analysis", "video_analysis"},
             "android": {"text", "image_analysis"},
@@ -179,6 +193,19 @@ class ObservationService:
                 observation.session_id,
                 occurred,
             )
+        if observation.source == "qq_image":
+            if len(observation.source_event_ids) != 1:
+                raise CoreError("OWNER_SHARED_IMAGE_REQUIRED", 403)
+            event = self.store.one(
+                "SELECT body_json FROM events WHERE event_id=? AND source='qq.onebot' "
+                "AND actor_id='owner' AND redacted=0",
+                (observation.source_event_ids[0],),
+            )
+            if not event or not any(
+                item.get("kind") == "image"
+                for item in json.loads(event["body_json"]).get("shared_content", [])
+            ):
+                raise CoreError("OWNER_SHARED_IMAGE_REQUIRED", 403)
         # Tool receipts enter through the executor, added in the tool capability phase.
         if observation.source in {"dsh", "windows"}:
             raise CoreError("TOOL_RECEIPT_REQUIRED", 403)
@@ -194,7 +221,7 @@ class ObservationService:
             "observation." + adapter.source,
             adapter_id + ":" + observation.provider_event_id,
         )
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
             if observation.privacy_epoch != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
             occurred = self.validate(observation, adapter)

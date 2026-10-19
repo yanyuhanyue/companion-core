@@ -12,7 +12,16 @@ class ObservationAdapterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: SecretStr
     source: Literal[
-        "bilibili", "heybox", "web", "voice", "camera", "android", "dsh", "windows", "simulation"
+        "bilibili",
+        "heybox",
+        "web",
+        "voice",
+        "camera",
+        "android",
+        "dsh",
+        "windows",
+        "simulation",
+        "qq_image",
     ]
     media_analysis: bool = False
 
@@ -78,6 +87,14 @@ class Settings(BaseModel):
     wake_min_interval_minutes: int = Field(default=180, ge=1, le=1440)
     wake_max_daily_runs: int = Field(default=3, ge=0, le=20)
     exploration_enabled: bool = False
+    exploration_daily_candidate_limit: int = Field(default=40, ge=1, le=40)
+    exploration_daily_deep_reads: int = Field(default=5, ge=0, le=20)
+    exploration_daily_requests: int = Field(default=0, ge=0, le=100)
+    exploration_monthly_requests: int = Field(default=0, ge=0, le=3000)
+    exploration_max_response_bytes: int = Field(default=524288, ge=4096, le=1048576)
+    exploration_daily_bytes: int = Field(default=0, ge=0, le=104857600)
+    social_enabled: bool = False
+    social_semantic_threshold: float = Field(default=0.9, ge=0.8, le=1)
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)

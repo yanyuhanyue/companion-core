@@ -65,6 +65,15 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
+            if row["action_type"] == "qq.private.proactive":
+                from companion.social import quiet_hours
+
+                paused = store.one(
+                    "SELECT 1 FROM runtime_meta WHERE key IN "
+                    "('proactive_paused','life_paused') AND value='1'"
+                )
+                if not settings.proactive_enabled or paused or quiet_hours(settings, now):
+                    continue
             token = uid("lease")
             store.execute(
                 "UPDATE outbox SET state='LEASED',lease_owner=?,lease_token=?,"
@@ -90,8 +99,25 @@ def lease_deliveries(store, settings, request, now):
         return {"items": items}
 
 
-def begin_send(store, message_id, token, now):
+def begin_send(store, message_id, token, now, settings=None):
     with store.transaction():
+        pending = store.one(
+            "SELECT action_type FROM outbox WHERE message_id=? AND state='LEASED' "
+            "AND lease_token=? AND lease_until>?",
+            (message_id, token, now),
+        )
+        if pending and pending["action_type"] == "qq.private.proactive":
+            from companion.social import quiet_hours
+
+            paused = store.one(
+                "SELECT 1 FROM runtime_meta WHERE key IN "
+                "('proactive_paused','life_paused') AND value='1'"
+            )
+            if paused or (
+                settings is not None
+                and (not settings.proactive_enabled or quiet_hours(settings, now))
+            ):
+                raise CoreError("PROACTIVE_SEND_PAUSED", 409)
         changed = store.execute(
             "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
             "WHERE message_id=? AND state='LEASED' AND lease_token=? AND lease_until>?",

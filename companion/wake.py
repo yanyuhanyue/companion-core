@@ -74,7 +74,9 @@ class WakePlanner:
                     if accepted["state"] == "QUEUED":
                         reason = "GOAL_DUE"
             goal_id = candidate["goal_id"] if reason == "GOAL_DUE" else None
-            decision = "EXPLORE" if goal_id else "SKIP"
+            if reason == "NO_CANDIDATE" and cfg.exploration_daily_requests > 0:
+                reason = "DISCOVERY_DUE"
+            decision = "EXPLORE" if goal_id else "OBSERVE" if reason == "DISCOVERY_DUE" else "SKIP"
             decision_id = uid("wake")
             s.insert(
                 "wake_decisions",
@@ -89,6 +91,6 @@ class WakePlanner:
             )
             return (
                 [{"decision_id": decision_id, "decision": decision, "goal_id": goal_id}]
-                if goal_id
+                if decision != "SKIP"
                 else []
             )

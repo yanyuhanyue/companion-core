@@ -48,6 +48,12 @@
           "title": "Url",
           "type": "string"
         },
+        "requested_url": {
+          "default": "",
+          "maxLength": 2048,
+          "title": "Requested Url",
+          "type": "string"
+        },
         "duration_seconds": {
           "anyOf": [
             {
@@ -143,7 +149,8 @@
         "android",
         "dsh",
         "windows",
-        "simulation"
+        "simulation",
+        "qq_image"
       ],
       "title": "Source",
       "type": "string"
@@ -198,7 +205,7 @@
       "items": {
         "type": "string"
       },
-      "maxItems": 20,
+      "maxItems": 256,
       "title": "Source Event Ids",
       "type": "array"
     },

@@ -99,6 +99,8 @@ class Store:
             "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts"},
             "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},
             "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
+            "exploration_requests": {"lease_token", "reserved_bytes", "captured_privacy_epoch"},
+            "social_candidates": {"event_id", "message_id", "comparison_text"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

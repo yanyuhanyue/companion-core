@@ -10,5 +10,7 @@ privacy/
 backups/
 dist/
 .local/
+.playwright-cli/
+output/playwright/
 *.sqlite*
 *.log
