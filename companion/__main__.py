@@ -41,7 +41,7 @@ async def worker(settings):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Companion Core M0/M1/M1.5")
+    parser = argparse.ArgumentParser(description="Companion Core v0.5")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("worker")

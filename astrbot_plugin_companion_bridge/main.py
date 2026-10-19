@@ -12,7 +12,7 @@ from .expression_adapter import DEFAULT_CATEGORIES, MemeLibrary, deliver_express
 from .reader import reader_tick, validate_source_api
 
 
-@register("astrbot_plugin_companion_bridge", "yanyuhanyue", "Companion Core 私聊传输桥", "0.4.0")
+@register("astrbot_plugin_companion_bridge", "yanyuhanyue", "Companion Core 私聊传输桥", "0.5.0")
 class CompanionBridge(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)

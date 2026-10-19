@@ -36,7 +36,7 @@ docker network connect companion-internal <你的AstrBot容器名>
 uv run python scripts/package_bridge.py
 ```
 
-生成 `dist/astrbot_plugin_companion_bridge-v0.4.0.zip`。在 AstrBot 安装本地插件 ZIP，或把 `astrbot_plugin_companion_bridge/` 目录放入其插件目录，然后重载插件。私有仓库可用本地 ZIP，避免在 QQ 或插件配置里保存 GitHub token。
+生成 `dist/astrbot_plugin_companion_bridge-v0.5.0.zip`。在 AstrBot 安装本地插件 ZIP，或把 `astrbot_plugin_companion_bridge/` 目录放入其插件目录，然后重载插件。私有仓库可用本地 ZIP，避免在 QQ 或插件配置里保存 GitHub token。
 
 配置插件：
 
