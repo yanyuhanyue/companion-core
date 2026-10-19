@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "taskbook": "CC-NEXT-2026-10-19-01",
+  "scope": "G0",
+  "baseline": {
+    "main_sha": "676f6143a40d08ffe44862a8897b4953dfa6c02e",
+    "release_sha": "aee7b16fd4808bb78597f68e79836d146cc00e5b",
+    "pull_request": "https://github.com/yanyuhanyue/companion-core/pull/11",
+    "state": "OPEN",
+    "code_gate": "BLOCKED",
+    "reason": "Seven confirmed findings; fixes are on an independent candidate branch.",
+    "commits": 25,
+    "changed_files": 120,
+    "additions": 17793,
+    "deletions": 125,
+    "windows": {"passed": 393, "skipped": 1, "seconds": 449.61},
+    "build": "FAILED",
+    "export_private_canaries_included": 6
+  },
+  "candidate": {
+    "branch": "fix/v05-release-gates",
+    "source_sha": "fbbbf9aab76c507c06db958cfd155cb44ec1f13d",
+    "source_archive_sha256": "389f12bcb5a767eb6842e9e177dd71e029a9871ebc8db9ce93caad8de711f0a7",
+    "pull_request": "https://github.com/yanyuhanyue/companion-core/pull/12",
+    "code_gate": "CODE_READY",
+    "windows": {"passed": 441, "skipped": 1, "seconds": 509.06, "skip_reason": "Local Windows symbolic-link privilege unavailable"},
+    "ci": {
+      "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39258395915",
+      "head_sha": "fbbbf9aab76c507c06db958cfd155cb44ec1f13d",
+      "conclusion": "success",
+      "ubuntu": {"passed": 442, "skipped": 0, "seconds": 58.09},
+      "windows": {"passed": 442, "skipped": 0, "seconds": 87.89},
+      "container": "PASS",
+      "replay_smoke_build_package": "PASS"
+    },
+    "vps": {
+      "source_sha": "fbbbf9aab76c507c06db958cfd155cb44ec1f13d",
+      "directory": "/opt/companion-core-dev/r0-fbbbf9a",
+      "docker": "29.5.3",
+      "compose": "5.1.4",
+      "compose_configurations": "PASS",
+      "core_image": "sha256:bc625da05b1259f396bbc94ccdfdda86175f9b88727e1e705d356a175a48119a",
+      "executor_image": "sha256:0435e1132c5415efb6ffc3953c3a190774344ae2343be9567009e14220cce1cf",
+      "six_process_smoke": "PASS",
+      "offline_embedding_dimensions": 512,
+      "encrypted_restore_latest_erasure_replay": "PASS",
+      "integrity": "ok",
+      "foreign_keys": "ok",
+      "native_sdk_uid": 10002,
+      "native_sdk_start_stop": "PASS",
+      "model_tasks": 0,
+      "existing_containers_compared": 13,
+      "existing_container_ids_images_states_unchanged": true,
+      "runtime_network": "none",
+      "real_qq_connected": false
+    }
+  },
+  "findings": [
+    {"id": "G0-F1", "priority": "P1", "summary": "Diary date aliases and completed historical tombstones retain copies", "status": "FIXED_VERIFIED"},
+    {"id": "G0-F2", "priority": "P1", "summary": "Paused autonomous work can be generated and block ordinary replies", "status": "FIXED_VERIFIED"},
+    {"id": "G0-F3", "priority": "P1", "summary": "Content parsing rejects management commands and their chat fallback", "status": "FIXED_VERIFIED"},
+    {"id": "G0-F4", "priority": "P2", "summary": "Owner shares bypass daily deep-read allowance", "status": "FIXED_VERIFIED"},
+    {"id": "G0-F5", "priority": "P2", "summary": "Compressed responses allocate before bounded readers check size", "status": "FIXED_VERIFIED"},
+    {"id": "G0-F6", "priority": "P2", "summary": "Diary ignores expired upstream observation evidence", "status": "FIXED_VERIFIED"},
+    {"id": "G0-F7", "priority": "P1", "summary": "Source exports can package private runtime inputs without Git ignores", "status": "FIXED_VERIFIED"}
+  ],
+  "migration": {
+    "changed": false,
+    "head": "0013_content",
+    "historical_schemas": ["0003_memory_index", "0004_diary"],
+    "new_tests": 6,
+    "first_run_passed": 6,
+    "first_run_seconds": 5.54,
+    "report": "v0.5-migration-test.md"
+  },
+  "replay": {"events": 100, "expected_facts": 30, "accepted": 30, "recall_at_6": 1.0, "max_chat_input_token_upper_bound": 2824, "public_actions": 0},
+  "production_ready": false,
+  "production_gate": "NOT_VERIFIED",
+  "unverified": ["20 real QQ messages and reconnect/delivery recovery", "20 real anonymized diary dates reviewed by owner", "Production offsite encrypted backups and newest independent erasure ledger", "Long-term load and power-loss recovery", "Live content sources and paid providers"],
+  "requires_user_decision": ["Merge fix PR into release/v0.5", "Merge PR #11 into main", "Authorize a separate real QQ acceptance session"],
+  "signed_at": "2026-10-19T13:22:54Z",
+  "signoff_kind": "Automated technical verification; human merge approval pending"
+}
