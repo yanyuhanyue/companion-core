@@ -21,6 +21,8 @@ def redact(text, settings):
         settings.bridge_token.get_secret_value(),
         settings.model_key.get_secret_value(),
         settings.diary_admin_token.get_secret_value(),
+        settings.control_token.get_secret_value(),
+        *(adapter.token.get_secret_value() for adapter in settings.observation_adapters.values()),
     ):
         if secret:
             text = text.replace(secret, "[REDACTED]")
@@ -285,6 +287,18 @@ class ErasureLedger:
                     self.apply(store, record)
 
     def apply(self, store, record):
+        from companion.observation import dependent_events, erase_observations
+
+        event_ids = dependent_events(store, record["event_ids"])
+        memory_ids = set(record["memory_ids"])
+        for event_id in event_ids:
+            memory_ids.update(
+                row["memory_id"]
+                for row in store.rows(
+                    "SELECT memory_id FROM memory_evidence WHERE event_id=?", (event_id,)
+                )
+            )
+        record = {**record, "event_ids": sorted(event_ids), "memory_ids": sorted(memory_ids)}
         copies = self.erase_diary_projections(store, record)
         for memory_id in record["memory_ids"]:
             store.execute(
@@ -295,6 +309,7 @@ class ErasureLedger:
             store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
             store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (memory_id,))
         event_ids = set(record["event_ids"]) | copies
+        erase_observations(store, event_ids)
         for event_id in event_ids:
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",

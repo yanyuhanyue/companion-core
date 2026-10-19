@@ -9,6 +9,7 @@ from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, 
 from companion.diary import DiaryService, is_diary_command
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
+from companion.observation import ObservationService
 from companion.privacy import ErasureLedger, epoch, redact
 from companion.store import Store, after, encode, uid, utcnow
 from companion.transport import digest, enqueue, reconcile_delivery, recover_deliveries
@@ -45,6 +46,7 @@ class Core:
                 (settings.owner_qq_id,),
             )
         self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
+        self.observations = ObservationService(self.store, settings, clock)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -654,7 +656,7 @@ class Core:
             return False
         with s.transaction():
             conversation = s.one(
-                "SELECT * FROM conversations WHERE scope='private' "
+                "SELECT * FROM conversations WHERE scope='private' AND platform='qq.onebot' "
                 "ORDER BY last_event_at DESC LIMIT 1"
             )
             if not conversation or conversation["last_event_at"] > after(

@@ -1,0 +1,283 @@
+{
+  "$defs": {
+    "MediaSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "start_seconds": {
+          "minimum": 0,
+          "title": "Start Seconds",
+          "type": "number"
+        },
+        "end_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "End Seconds",
+          "type": "number"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_seconds",
+        "end_seconds",
+        "sha256"
+      ],
+      "title": "MediaSpan",
+      "type": "object"
+    },
+    "ObservationPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Title",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "maxLength": 12000,
+          "title": "Text",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "maxLength": 2048,
+          "title": "Url",
+          "type": "string"
+        },
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 36000,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "analyzed_spans": {
+          "items": {
+            "$ref": "#/$defs/MediaSpan"
+          },
+          "maxItems": 120,
+          "title": "Analyzed Spans",
+          "type": "array"
+        },
+        "media_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Media Sha256"
+        },
+        "processor_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Processor Id"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z0-9_]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        }
+      },
+      "title": "ObservationPayload",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 2,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "event_id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "event_type": {
+      "const": "content.observed",
+      "title": "Event Type",
+      "type": "string"
+    },
+    "source": {
+      "enum": [
+        "bilibili",
+        "heybox",
+        "web",
+        "voice",
+        "camera",
+        "android",
+        "dsh",
+        "windows",
+        "simulation"
+      ],
+      "title": "Source",
+      "type": "string"
+    },
+    "source_kind": {
+      "enum": [
+        "title",
+        "text",
+        "video_analysis",
+        "image_analysis",
+        "audio_transcript",
+        "tool_result"
+      ],
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "provider_event_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Provider Event Id",
+      "type": "string"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "trace_id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "privacy_scope": {
+      "const": "private",
+      "default": "private",
+      "title": "Privacy Scope",
+      "type": "string"
+    },
+    "result_status": {
+      "enum": [
+        "DISCOVERED",
+        "FETCHED",
+        "WATCHED",
+        "FAILED",
+        "UNKNOWN"
+      ],
+      "title": "Result Status",
+      "type": "string"
+    },
+    "source_event_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Source Event Ids",
+      "type": "array"
+    },
+    "source_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Sha256",
+      "type": "string"
+    },
+    "privacy_epoch": {
+      "minimum": 0,
+      "title": "Privacy Epoch",
+      "type": "integer"
+    },
+    "device_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Device Id"
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Session Id"
+    },
+    "consent_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Consent Id"
+    },
+    "raw_media_retention": {
+      "const": "discard",
+      "default": "discard",
+      "title": "Raw Media Retention",
+      "type": "string"
+    },
+    "payload": {
+      "$ref": "#/$defs/ObservationPayload"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "source",
+    "source_kind",
+    "provider_event_id",
+    "occurred_at",
+    "trace_id",
+    "result_status",
+    "source_sha256",
+    "privacy_epoch",
+    "payload"
+  ],
+  "title": "ObservationEvent",
+  "type": "object"
+}

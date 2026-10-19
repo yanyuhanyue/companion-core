@@ -84,6 +84,9 @@ class Store:
             "diary_entries": {"body_md", "status", "version"},
             "diary_evidence": {"event_id", "outbox_message_id"},
             "diary_revisions": {"prior_title", "prior_body_md"},
+            "observations": {"event_id", "result_status", "captured_privacy_epoch"},
+            "event_dependencies": {"event_id", "source_event_id"},
+            "consents": {"capabilities_json", "expires_at", "revoked_at"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

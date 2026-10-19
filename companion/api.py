@@ -82,6 +82,20 @@ def create_app(settings=None):
         ):
             raise HTTPException(401, "UNAUTHORIZED")
 
+    async def control_admin(authorization: str = Header(default="")):
+        token = settings.control_token.get_secret_value()
+        if not token or not hmac.compare_digest(
+            authorization.encode(), ("Bearer " + token).encode()
+        ):
+            raise HTTPException(401, "UNAUTHORIZED")
+
+    async def observation_adapter(adapter_id: str, authorization: str = Header(default="")):
+        adapter = settings.observation_adapters.get(adapter_id)
+        if not adapter or not hmac.compare_digest(
+            authorization.encode(), ("Bearer " + adapter.token.get_secret_value()).encode()
+        ):
+            raise HTTPException(401, "UNAUTHORIZED")
+
     @app.exception_handler(CoreError)
     async def core_error(request, exc):
         return JSONResponse({"error": exc.code}, status_code=exc.status)
@@ -117,10 +131,47 @@ def create_app(settings=None):
         return {
             "status": "ready",
             "schema": version["version_num"],
-            "capabilities": ["m0", "m1", "memory_index", "diary"],
+            "capabilities": ["m0", "m1", "memory_index", "diary", "observations"],
         }
 
     diary_auth = [Depends(diary_admin)]
+
+    from companion.observation import ObservationEvent
+    from companion.policy import ConsentRequest
+    from companion.privacy import epoch
+
+    control_auth = [Depends(control_admin)]
+    adapter_auth = [Depends(observation_adapter)]
+
+    @app.get("/internal/v2/observations/{adapter_id}/context", dependencies=adapter_auth)
+    async def observation_context(adapter_id: str):
+        app.state.core.observations.policy(adapter_id)
+        return {"privacy_epoch": epoch(app.state.core.store)}
+
+    @app.post("/internal/v2/observations/{adapter_id}", dependencies=adapter_auth, status_code=202)
+    async def observe(adapter_id: str, body: ObservationEvent):
+        return app.state.core.observations.append(adapter_id, body)
+
+    @app.get("/internal/v2/observations", dependencies=control_auth)
+    async def observations():
+        return {"items": app.state.core.observations.recent()}
+
+    @app.post("/internal/v2/observations/{event_id}/forget", dependencies=control_auth)
+    async def forget_observation(event_id: str):
+        core = app.state.core
+        if not core.store.one("SELECT 1 FROM observations WHERE event_id=?", (event_id,)):
+            raise CoreError("OBSERVATION_NOT_FOUND", 404)
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, [event_id], core.clock())
+        return {"event_id": event_id, "status": "REDACTED"}
+
+    @app.post("/internal/v2/consents", dependencies=control_auth)
+    async def grant_consent(body: ConsentRequest):
+        return app.state.core.observations.consents.grant(body)
+
+    @app.post("/internal/v2/consents/{consent_id}/revoke", dependencies=control_auth)
+    async def revoke_consent(consent_id: str):
+        return app.state.core.observations.consents.revoke(consent_id)
 
     @app.get(prefix + "/diary", dependencies=diary_auth)
     async def diary_list(limit: int = 7):

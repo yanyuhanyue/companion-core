@@ -6,8 +6,8 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from companion.contracts import CoreError
-from companion.privacy import ErasureLedger
-from companion.store import Store, migrate
+from companion.privacy import ErasureLedger, advance_epoch
+from companion.store import Store, migrate, utcnow
 
 
 def backup(database, destination, key):
@@ -51,6 +51,12 @@ def restore(source, destination, key, ledger_path):
             if not identity or identity["value"] != ledger.read()[0]["ledger_id"]:
                 raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
             ledger.replay(store)
+            # A snapshot cannot authorize a device session that existed before restoration.
+            with store.transaction():
+                if store.execute(
+                    "UPDATE consents SET revoked_at=? WHERE revoked_at IS NULL", (utcnow(),)
+                ).rowcount:
+                    advance_epoch(store)
             if store.one("PRAGMA integrity_check")["integrity_check"] != "ok":
                 raise CoreError("BACKUP_INTEGRITY_FAILED")
             if store.rows("PRAGMA foreign_key_check"):

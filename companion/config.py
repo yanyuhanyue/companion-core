@@ -1,10 +1,20 @@
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
+
+
+class ObservationAdapterConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: SecretStr
+    source: Literal[
+        "bilibili", "heybox", "web", "voice", "camera", "android", "dsh", "windows", "simulation"
+    ]
+    media_analysis: bool = False
 
 
 class Settings(BaseModel):
@@ -42,6 +52,12 @@ class Settings(BaseModel):
     diary_daily_micro_usd: int = Field(default=50000, ge=0)
     diary_auto_share: bool = False
     diary_admin_token: SecretStr = SecretStr("")
+    control_token: SecretStr = SecretStr("")
+    observation_enabled: bool = False
+    observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
+    voice_enabled: bool = False
+    camera_enabled: bool = False
+    android_enabled: bool = False
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
@@ -77,6 +93,22 @@ class Settings(BaseModel):
         admin = self.diary_admin_token.get_secret_value()
         if admin and (len(admin) < 24 or admin == self.bridge_token.get_secret_value()):
             raise ValueError("diary_admin_token must be distinct and at least 24 characters")
+        tokens = [self.bridge_token.get_secret_value()]
+        for secret in (self.diary_admin_token, self.control_token):
+            token = secret.get_secret_value()
+            if token:
+                if len(token) < 24 or token in tokens:
+                    raise ValueError(
+                        "management tokens must be distinct and at least 24 characters"
+                    )
+                tokens.append(token)
+        for name, adapter in self.observation_adapters.items():
+            token = adapter.token.get_secret_value()
+            if not name.isascii() or not name.replace("_", "").replace("-", "").isalnum():
+                raise ValueError("invalid observation adapter name")
+            if len(token) < 24 or token in tokens:
+                raise ValueError("adapter tokens must be distinct and at least 24 characters")
+            tokens.append(token)
         if self.mode == "live" and not self.model_key.get_secret_value():
             raise ValueError("COMPANION_MODEL_KEY is required in live mode")
         request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
@@ -105,5 +137,10 @@ class Settings(BaseModel):
         for field in cls.model_fields:
             value = os.getenv(f"COMPANION_{field.upper()}")
             if value is not None:
-                data[field] = value
+                if field == "observation_adapters":
+                    data[field] = TypeAdapter(dict[str, ObservationAdapterConfig]).validate_json(
+                        value
+                    )
+                else:
+                    data[field] = value
         return cls.model_validate(data)

@@ -46,3 +46,12 @@ diary_daily_micro_usd = 50000
 diary_auto_share = false
 # Optional HTTP diary administration: set a distinct COMPANION_DIARY_ADMIN_TOKEN.
 # The Bridge token cannot list, export, edit, or delete diaries over this API.
+
+# v0.5: independent observation adapters; never use Bridge or owner control tokens here.
+observation_enabled = false
+voice_enabled = false
+camera_enabled = false
+android_enabled = false
+# Set COMPANION_CONTROL_TOKEN for owner-only v2 management.
+# Set COMPANION_OBSERVATION_ADAPTERS to a JSON object of adapter IDs and
+# {"token":"distinct-secret-at-least-24-characters","source":"bilibili"}.
