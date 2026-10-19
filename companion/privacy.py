@@ -288,7 +288,9 @@ class ErasureLedger:
 
     def apply(self, store, record):
         from companion.affect import erase_affect
+        from companion.consolidation import erase_consolidation
         from companion.observation import dependent_events, erase_observations
+        from companion.reflection import erase_reflections
 
         event_ids = dependent_events(store, record["event_ids"])
         memory_ids = set(record["memory_ids"])
@@ -312,6 +314,8 @@ class ErasureLedger:
         event_ids = set(record["event_ids"]) | copies
         erase_observations(store, event_ids)
         erase_affect(store, event_ids)
+        erase_reflections(store, event_ids, record.get("target_type") != "diary")
+        erase_consolidation(store, event_ids)
         for event_id in event_ids:
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",

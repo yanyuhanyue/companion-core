@@ -6,12 +6,14 @@ from zoneinfo import ZoneInfo
 
 from companion import __version__, budget
 from companion.affect import AffectEngine
+from companion.consolidation import NightlyConsolidator
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
-from companion.diary import DiaryService, is_diary_command
+from companion.diary import DiaryService, day_bounds, is_diary_command
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.observation import ObservationService
 from companion.privacy import ErasureLedger, epoch, redact
+from companion.reflection import ReflectionService
 from companion.store import Store, after, encode, uid, utcnow
 from companion.transport import digest, enqueue, reconcile_delivery, recover_deliveries
 
@@ -49,6 +51,10 @@ class Core:
         self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
         self.observations = ObservationService(self.store, settings, clock)
         self.affect = AffectEngine(self.store, settings, clock)
+        self.reflections = ReflectionService(
+            self.store, settings, model, self.diary.repo, self.ledger, clock
+        )
+        self.consolidation = NightlyConsolidator(self)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -718,17 +724,52 @@ class Core:
             self.new_job(event_id, "activity", event_id, now)
             return True
 
-    async def extract_once(self):
+    async def extract_once(self, local_day=None):
+        if not self.settings.memory_enabled or not self.settings.pricing_known:
+            return False
+        s, now = self.store, self.clock()
+        lease = encode(
+            {"token": uid("memory_lease"), "until": after(now, self.settings.lease_seconds)}
+        )
+        with s.transaction():
+            old = s.one("SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'")
+            if old and json.loads(old["value"])["until"] > now:
+                return False
+            if old:
+                s.execute(
+                    "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id "
+                    "IS NULL AND scenario IN ('memory_extract','memory_review')"
+                )
+            s.execute(
+                "INSERT OR REPLACE INTO runtime_meta VALUES ('memory_extraction_lease',?)", (lease,)
+            )
+        try:
+            return await self._extract_claimed_once(local_day, lease)
+        finally:
+            s.execute(
+                "DELETE FROM runtime_meta WHERE key='memory_extraction_lease' AND value=?", (lease,)
+            )
+
+    def _owns_memory_lease(self, lease):
+        current = self.store.one(
+            "SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'"
+        )
+        return bool(
+            current and current["value"] == lease and json.loads(lease)["until"] > self.clock()
+        )
+
+    async def _extract_claimed_once(self, local_day, lease):
         if not self.settings.memory_enabled or not self.settings.pricing_known:
             return False
         s, cfg, now = self.store, self.settings, self.clock()
-        # The documented deployment has exactly one memory worker.
+        day_filter = " AND e.occurred_at>=? AND e.occurred_at<? " if local_day else ""
+        bounds = day_bounds(local_day, cfg.timezone) if local_day else ()
         events = s.rows(
             "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
             "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
             "AND e.source='qq.onebot' AND j.state='SUCCEEDED' "
-            "AND e.ingested_at<=? ORDER BY e.rowid LIMIT 20",
-            (after(now, -cfg.extraction_idle_seconds),),
+            "AND e.ingested_at<=? " + day_filter + " ORDER BY e.rowid LIMIT 20",
+            (after(now, -cfg.extraction_idle_seconds), *bounds),
         )
         if len(events) < cfg.extraction_min_events:
             return False
@@ -755,7 +796,7 @@ class Core:
             budget.settle(s, cfg, request_id, response)
             request_id = None
             extraction = Extraction.model_validate_json(response.text)
-            if captured_epoch != epoch(s):
+            if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                 return False
             valid_ids = {e["event_id"] for e in events}
             candidates = []
@@ -770,7 +811,7 @@ class Core:
                         )
             candidates, resolutions = await self.prepare_memories(candidates)
             with s.transaction():
-                if captured_epoch != epoch(s):
+                if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                     return False
                 self.add_memories(candidates, resolutions, now)
                 # Keep episodes scoped to a single conversation.
@@ -813,6 +854,8 @@ class Core:
                 "diary": self.diary.repo.enabled(),
                 "diary_auto_share": False,
                 "affect": self.settings.affect_enabled,
+                "consolidation": self.consolidation.enabled(),
+                "reflection": self.settings.reflection_enabled,
                 "dsh": False,
                 "android": False,
                 "public_publish": False,

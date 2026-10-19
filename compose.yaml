@@ -42,7 +42,15 @@ services:
     restart: unless-stopped
   companion-diary-worker:
     <<: *core
+    profiles: [diary]
     command: [diary-worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
+  companion-life-worker:
+    <<: *core
+    profiles: [life]
+    command: [life-worker]
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped

@@ -61,6 +61,16 @@ class Settings(BaseModel):
     affect_enabled: bool = False
     affect_decay_minutes: int = Field(default=180, ge=1, le=1440)
     affect_max_evidence: int = Field(default=12, ge=4, le=100)
+    consolidation_enabled: bool = False
+    consolidation_local_hour: int = Field(default=3, ge=0, le=23)
+    consolidation_catchup_days: int = Field(default=3, ge=1, le=7)
+    reflection_enabled: bool = False
+    reflection_daily_max_suggestions: int = Field(default=3, ge=1, le=3)
+    reflection_min_sources: int = Field(default=3, ge=1, le=20)
+    reflection_max_output_tokens: int = Field(default=600, ge=128, le=2048)
+    reflection_max_daily_calls: int = Field(default=1, ge=1, le=5)
+    reflection_daily_micro_usd: int = Field(default=0, ge=0)
+    reflection_monthly_micro_usd: int = Field(default=0, ge=0)
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
@@ -131,6 +141,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "reflection":
+            return self.reflection_max_output_tokens
         return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
 
     @classmethod

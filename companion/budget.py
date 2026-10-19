@@ -48,6 +48,25 @@ def reserve(store, settings, job_id, scenario, messages, now):
             elif scenario == "activity":
                 scenarios = ("activity",)
                 limit = settings.autonomous_daily_micro_usd
+            elif scenario == "reflection":
+                scenarios = ("reflection",)
+                limit = settings.reflection_daily_micro_usd
+                monthly = store.one(
+                    "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+                    "WHERE occurred_at>=? AND scenario='reflection'",
+                    (month.isoformat(timespec="microseconds"),),
+                )["n"]
+                calls = store.one(
+                    "SELECT COUNT(*) AS n FROM model_usage WHERE scenario='reflection' AND "
+                    "occurred_at>=?",
+                    (day.isoformat(timespec="microseconds"),),
+                )["n"]
+                if limit == 0 or settings.reflection_monthly_micro_usd == 0:
+                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
+                if monthly + estimate > settings.reflection_monthly_micro_usd:
+                    raise CoreError("SCENARIO_MONTHLY_BUDGET_EXHAUSTED", 429)
+                if calls >= settings.reflection_max_daily_calls:
+                    raise CoreError("SCENARIO_CALL_LIMIT", 429)
             else:
                 raise CoreError("UNKNOWN_BUDGET_SCENARIO", 400)
             spent = store.one(

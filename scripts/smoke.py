@@ -31,6 +31,8 @@ def main():
             "COMPANION_PROACTIVE_ENABLED": "false",
             "COMPANION_DIARY_ENABLED": "true",
             "COMPANION_DIARY_ADMIN_TOKEN": secrets.token_urlsafe(32),
+            "COMPANION_CONTROL_TOKEN": secrets.token_urlsafe(32),
+            "COMPANION_CONSOLIDATION_ENABLED": "true",
             "PYTHONDONTWRITEBYTECODE": "1",
             "TEMP": directory,
             "TMP": directory,
@@ -49,7 +51,12 @@ def main():
             port = probe.getsockname()[1]
         processes = []
         try:
-            for args in (["serve", "--port", str(port)], ["worker"], ["diary-worker"]):
+            for args in (
+                ["serve", "--port", str(port)],
+                ["worker"],
+                ["diary-worker"],
+                ["life-worker"],
+            ):
                 processes.append(
                     subprocess.Popen(
                         [sys.executable, "-m", "companion", *args],
@@ -138,9 +145,17 @@ def main():
                 else:
                     raise RuntimeError("Independent diary worker did not process empty days")
                 assert client.get("/internal/v1/diary").status_code == 401
-                print(
-                    "PASS: HTTP API + separate chat/diary workers + private delivery + diary auth"
-                )
+                for _ in range(100):
+                    nightly = client.get(
+                        "/internal/v2/consolidation",
+                        headers={"Authorization": "Bearer " + env["COMPANION_CONTROL_TOKEN"]},
+                    ).json()["items"]
+                    if nightly and any(item["state"] == "SKIPPED" for item in nightly):
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Independent life worker did not process empty days")
+                print("PASS: HTTP API + separate chat/diary/life workers + private delivery + auth")
         finally:
             for process in processes:
                 if os.name == "nt":

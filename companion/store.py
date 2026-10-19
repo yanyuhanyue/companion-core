@@ -89,6 +89,11 @@ class Store:
             "consents": {"capabilities_json", "expires_at", "revoked_at"},
             "affect_states": {"state_json", "expires_at", "version"},
             "affect_evidence": {"event_id", "reason_code", "expires_at"},
+            "reflection_runs": {"captured_privacy_epoch", "lease_token", "model_request_id"},
+            "reflection_evidence": {"event_id", "outbox_message_id"},
+            "reflection_suggestions": {"kind", "content", "state"},
+            "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
+            "consolidation_evidence": {"event_id", "run_id"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

@@ -131,7 +131,16 @@ def create_app(settings=None):
         return {
             "status": "ready",
             "schema": version["version_num"],
-            "capabilities": ["m0", "m1", "memory_index", "diary", "observations", "affect"],
+            "capabilities": [
+                "m0",
+                "m1",
+                "memory_index",
+                "diary",
+                "observations",
+                "affect",
+                "consolidation",
+                "reflection",
+            ],
         }
 
     diary_auth = [Depends(diary_admin)]
@@ -139,6 +148,7 @@ def create_app(settings=None):
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
+    from companion.reflection import ReflectionDecision
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
@@ -146,6 +156,25 @@ def create_app(settings=None):
     @app.get("/internal/v2/affect", dependencies=control_auth)
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
+
+    @app.get("/internal/v2/consolidation", dependencies=control_auth)
+    async def consolidation_status():
+        return {"items": app.state.core.consolidation.recent()}
+
+    @app.post("/internal/v2/consolidation/{day}", dependencies=control_auth, status_code=202)
+    async def consolidate(day: date):
+        run_id = app.state.core.consolidation.schedule_day(day)
+        if not run_id:
+            raise CoreError("CONSOLIDATION_DISABLED", 403)
+        return {"run_id": run_id}
+
+    @app.get("/internal/v2/reflections", dependencies=control_auth)
+    async def reflections():
+        return {"items": app.state.core.reflections.recent()}
+
+    @app.post("/internal/v2/reflections/{suggestion_id}/decision", dependencies=control_auth)
+    async def reflection_decision(suggestion_id: str, body: ReflectionDecision):
+        return app.state.core.reflections.decide(suggestion_id, body.decision)
 
     @app.get("/internal/v2/observations/{adapter_id}/context", dependencies=adapter_auth)
     async def observation_context(adapter_id: str):

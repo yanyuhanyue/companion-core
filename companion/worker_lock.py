@@ -8,7 +8,7 @@ from companion.contracts import CoreError
 @contextmanager
 def single_worker(database, kind="worker"):
     """OS-held lock releases on process death; no stale PID-file recovery needed."""
-    if kind not in {"worker", "diary-worker"}:
+    if kind not in {"worker", "diary-worker", "life-worker"}:
         raise ValueError("unknown worker lock")
     path = Path(database).with_suffix(f".{kind}.lock")
     with path.open("a+b") as stream:
