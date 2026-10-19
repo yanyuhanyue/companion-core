@@ -32,3 +32,17 @@ quiet_start = 23
 quiet_end = 8
 lease_seconds = 120
 raw_event_retention_days = 365
+
+# M1.5: enable only after diary and deployment acceptance. Uses `timezone` above.
+diary_enabled = false
+diary_generate_hour = 2
+diary_min_source_events = 3
+diary_max_source_events = 40
+diary_max_output_tokens = 700
+diary_max_body_chars = 2400
+diary_catchup_days = 3
+diary_max_attempts = 2
+diary_daily_micro_usd = 50000
+diary_auto_share = false
+# Optional HTTP diary administration: set a distinct COMPANION_DIARY_ADMIN_TOKEN.
+# The Bridge token cannot list, export, edit, or delete diaries over this API.

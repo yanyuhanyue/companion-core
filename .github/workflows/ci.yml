@@ -41,6 +41,7 @@ jobs:
           -e COMPANION_BRIDGE_TOKEN=container-test-token-32-characters
           -e COMPANION_MODE=demo
           -e COMPANION_MEMORY_ENABLED=true
+          -e COMPANION_DIARY_ENABLED=true
           -e COMPANION_DATABASE=/data/test.sqlite3
           -e COMPANION_ERASURE_LEDGER=/privacy/test.jsonl
           -e COMPANION_EMBEDDING_CACHE_DIR=/data/embedding-cache

@@ -41,10 +41,11 @@ async def worker(settings):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Companion Core M0/M1")
+    parser = argparse.ArgumentParser(description="Companion Core M0/M1/M1.5")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("worker")
+    sub.add_parser("diary-worker")
     sub.add_parser("status")
     server = sub.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
@@ -76,6 +77,12 @@ def main():
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database):
                 asyncio.run(worker(settings))
+        elif args.command == "diary-worker":
+            from companion.diary_worker import diary_worker
+
+            logging.getLogger("httpx").setLevel(logging.WARNING)
+            with single_worker(settings.database, "diary-worker"):
+                asyncio.run(diary_worker(settings))
         elif args.command == "status":
             core = Core(settings)
             print(encode(core.status()))

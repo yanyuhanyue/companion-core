@@ -2,7 +2,7 @@
 
 面向单一主人 QQ 私聊的虚拟朋友核心。Python 模块化单体，AstrBot 只负责消息传输；记忆和表达风格来自有证据的互动，初始人格为空。
 
-当前交付 **v0.3 M0/M1 实现**。已完成自动化测试、100 条格式化消息回放、独立 API/Worker 进程的 HTTP 冒烟，以及 DeepSeek 的合成对话记忆场景实测。Core 的真实 QQ 接入、长期模型质量/账单和目标 VPS 仍须联调；本仓库不将本地验收等同于生产验收。
+当前交付 **v0.4 M0/M1 + M1.5 私人日记**，并加入 NapCat/SnowLuma 切换保护。已完成自动化测试、100 条消息回放、独立 API/聊天/日记 Worker 冒烟，以及真实 DeepSeek 的合成记忆与日记场景实测。Core 的真实 QQ 接入、日记真实样本人工抽检、长期账单和目标 VPS 仍须联调；日记默认关闭。
 
 ## 能力与边界
 
@@ -12,6 +12,8 @@
 - 主动私聊有冷却、每日次数、免打扰、暂停指令；不伪造现实生活或浏览记录。
 - M1：批量记忆候选、逐字证据核验、语义冲突核对、确认/纠正/忘记、中文 FTS5 与本地语义混合检索、相关性筛选、空白起步的自我观察。
 - 加密热备份；恢复前强制回放独立遗忘日志；隐私变更期间的旧模型结果被丢弃。
+- M1.5：独立日记 Worker、自然日调度、真实来源核验、私人保存、主人查看/修订/删除、专用预算和完整遗忘回放。
+- QQ 协议端继续通过 AstrBot OneBot v11；切换批次隔离消息 ID，保留 Core 数据和会话身份，回滚禁止复用旧批次。
 
 M0/M1 的 **DSH、Android、Windows MCP、公开空间和评论执行均关闭**。原设计将它们安排在 M2–M4，参见 [实施边界](docs/architecture.md)。多媒体输入目前只作文字能力提示，不下载或理解附件。
 
@@ -32,6 +34,8 @@ uv run python -m companion init
 uv run python -m companion serve
 # 第二个终端：设置同样的环境变量后
 uv run python -m companion worker
+# 第三个终端：同样的配置；日记默认关闭，完成门禁后再开启
+uv run python -m companion diary-worker
 ```
 
 演示可设 `COMPANION_MODE=demo`，无需模型密钥；回复明确标记为演示。`.env` 仅由 Docker Compose 读取，本地命令需通过环境变量注入。不要提交真实配置、密钥或数据库。
@@ -52,6 +56,11 @@ uv run python -m companion worker
 | `暂停主动分享` / `恢复主动分享` | 控制自主私聊 |
 | `发送状态` | 列出待人工核对的发送 ID |
 | `核对发送 msg_… 已发送` / `核对发送 msg_… 取消` | 核对后解除不确定状态，不重发 |
+| `今天写日记了吗` / `日记列表` | 查看日记状态和最近日期 |
+| `读日记` / `读日记 YYYY-MM-DD` | 主动请求查看私人日记 |
+| `修改日记 YYYY-MM-DD 新正文` | 有界修订，保留版本 |
+| `删除日记 YYYY-MM-DD` | 清除正文、修订及恢复时的旧副本 |
+| `暂停写日记` / `恢复写日记` | 控制运行时开关，不能绕过配置硬禁用 |
 
 “忘记”会清空关联原始事件，同时失效所有可能复述该信息的近期回复、摘要和自我特征投影。其他独立事实仍保留。这是首版的保守策略；已发到 QQ 的消息无法由本地遗忘操作撤回。
 
@@ -61,6 +70,7 @@ uv run python -m companion worker
 - [模块边界与设计取舍](docs/architecture.md)
 - [验收结果与限制](docs/validation.md)、[回放数据](docs/replay-report.json)
 - [原始设计合同](docs/design-v0.3/implementation-m0-m1.md)、[接口合同](contracts/openapi.v1.yaml)
+- [日记实施合同](docs/design-v0.4/diary-m1.5.md)、[协议切换与回滚](docs/design-v0.4/qq-protocols.md)、[语音视觉接口规划](docs/design-v0.4/multimodal.md)
 
 ```powershell
 ./scripts/check.ps1                     # 检查并清理测试临时文件
@@ -69,6 +79,7 @@ uv run python -m companion worker
 .venv/Scripts/python.exe scripts/package_bridge.py
 # 真实 DeepSeek 合成场景验证；读取本地 .env 的模型 Key，单轮预算上限 0.05 USD
 .venv/Scripts/python.exe scripts/verify_memory_live.py
+.venv/Scripts/python.exe scripts/verify_diary_live.py
 ```
 
 Linux 检查：`uv run ruff check companion migrations astrbot_plugin_companion_bridge tests scripts` 与 `uv run pytest -q --basetemp=.local/test-temp`。CI 同时运行 Windows/Linux 测试和 Linux 容器构建。

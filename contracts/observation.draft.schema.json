@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:companion:observation:draft:1",
+  "title": "Future observation event; not accepted by the current inbox API",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "event_type", "occurred_at", "source_event_ids", "session_id", "device_id", "consent_id", "privacy_scope", "raw_media_retention", "observation", "confidence", "source_sha256"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string", "minLength": 8, "maxLength": 128},
+    "event_type": {"enum": ["voice.transcribed", "vision.observed"]},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "source_event_ids": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"type": "string", "minLength": 8, "maxLength": 128}},
+    "session_id": {"type": "string", "minLength": 8, "maxLength": 128},
+    "device_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "consent_id": {"type": "string", "minLength": 8, "maxLength": 128},
+    "privacy_scope": {"const": "private"},
+    "raw_media_retention": {"const": "discard"},
+    "observation": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

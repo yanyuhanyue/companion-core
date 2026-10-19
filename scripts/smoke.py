@@ -29,6 +29,8 @@ def main():
             "COMPANION_DATABASE": directory + "/core.db",
             "COMPANION_ERASURE_LEDGER": directory + "/privacy.jsonl",
             "COMPANION_PROACTIVE_ENABLED": "false",
+            "COMPANION_DIARY_ENABLED": "true",
+            "COMPANION_DIARY_ADMIN_TOKEN": secrets.token_urlsafe(32),
             "PYTHONDONTWRITEBYTECODE": "1",
             "TEMP": directory,
             "TMP": directory,
@@ -47,7 +49,7 @@ def main():
             port = probe.getsockname()[1]
         processes = []
         try:
-            for args in (["serve", "--port", str(port)], ["worker"]):
+            for args in (["serve", "--port", str(port)], ["worker"], ["diary-worker"]):
                 processes.append(
                     subprocess.Popen(
                         [sys.executable, "-m", "companion", *args],
@@ -125,8 +127,19 @@ def main():
                     ).json()["items"]
                     == []
                 )
+                for _ in range(100):
+                    diary = client.get(
+                        "/internal/v1/diary/status",
+                        headers={"Authorization": "Bearer " + env["COMPANION_DIARY_ADMIN_TOKEN"]},
+                    ).json()
+                    if diary.get("latest") and diary["latest"]["state"] == "SKIPPED":
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Independent diary worker did not process empty days")
+                assert client.get("/internal/v1/diary").status_code == 401
                 print(
-                    "PASS: real HTTP API + separate worker + demo model + delivery acknowledgment"
+                    "PASS: HTTP API + separate chat/diary workers + private delivery + diary auth"
                 )
         finally:
             for process in processes:

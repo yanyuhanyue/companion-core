@@ -31,6 +31,17 @@ class Settings(BaseModel):
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
     memory_enabled: bool = False
+    diary_enabled: bool = False
+    diary_generate_hour: int = Field(default=2, ge=0, le=23)
+    diary_min_source_events: int = Field(default=3, ge=1, le=40)
+    diary_max_source_events: int = Field(default=40, ge=1, le=100)
+    diary_max_output_tokens: int = Field(default=700, ge=128, le=4096)
+    diary_max_body_chars: int = Field(default=2400, ge=200, le=8000)
+    diary_catchup_days: int = Field(default=3, ge=1, le=7)
+    diary_max_attempts: int = Field(default=2, ge=1, le=3)
+    diary_daily_micro_usd: int = Field(default=50000, ge=0)
+    diary_auto_share: bool = False
+    diary_admin_token: SecretStr = SecretStr("")
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
@@ -59,6 +70,13 @@ class Settings(BaseModel):
                 raise ValueError("owner_qq_id and bot_qq_id must be nonzero QQ numbers")
         if self.owner_qq_id == self.bot_qq_id:
             raise ValueError("owner and bot must be different QQ accounts")
+        if self.diary_auto_share:
+            raise ValueError("diary_auto_share is not supported")
+        if self.diary_min_source_events > self.diary_max_source_events:
+            raise ValueError("diary_min_source_events exceeds diary_max_source_events")
+        admin = self.diary_admin_token.get_secret_value()
+        if admin and (len(admin) < 24 or admin == self.bridge_token.get_secret_value()):
+            raise ValueError("diary_admin_token must be distinct and at least 24 characters")
         if self.mode == "live" and not self.model_key.get_secret_value():
             raise ValueError("COMPANION_MODEL_KEY is required in live mode")
         request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
@@ -76,6 +94,9 @@ class Settings(BaseModel):
         return all(
             x is not None for x in (self.input_rate, self.cached_input_rate, self.output_rate)
         )
+
+    def output_tokens(self, scenario):
+        return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
 
     @classmethod
     def load(cls):

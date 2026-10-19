@@ -3,7 +3,7 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 source = root / "astrbot_plugin_companion_bridge"
-output = root / "dist/astrbot_plugin_companion_bridge-v0.3.0.zip"
+output = root / "dist/astrbot_plugin_companion_bridge-v0.4.0.zip"
 output.parent.mkdir(exist_ok=True)
 with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
     for path in sorted(source.iterdir()):

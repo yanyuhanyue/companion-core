@@ -1,10 +1,12 @@
 import hmac
 from contextlib import asynccontextmanager
+from datetime import date
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from companion import __version__
 from companion.config import Settings
 from companion.contracts import (
     CoreError,
@@ -16,6 +18,7 @@ from companion.contracts import (
     SearchRequest,
 )
 from companion.core import Core
+from companion.diary import DiaryCorrection, DiaryMode
 from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
@@ -59,7 +62,7 @@ def create_app(settings=None):
 
     app = FastAPI(
         title="Companion Core",
-        version="0.3.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -70,6 +73,13 @@ def create_app(settings=None):
     async def authenticate(authorization: str = Header(default="")):
         expected = "Bearer " + settings.bridge_token.get_secret_value()
         if not hmac.compare_digest(authorization.encode(), expected.encode()):
+            raise HTTPException(401, "UNAUTHORIZED")
+
+    async def diary_admin(authorization: str = Header(default="")):
+        token = settings.diary_admin_token.get_secret_value()
+        if not token or not hmac.compare_digest(
+            authorization.encode(), ("Bearer " + token).encode()
+        ):
             raise HTTPException(401, "UNAUTHORIZED")
 
     @app.exception_handler(CoreError)
@@ -102,9 +112,42 @@ def create_app(settings=None):
     async def ready():
         core = app.state.core
         version = core.store.one("SELECT version_num FROM alembic_version")
-        if version["version_num"] != "0003_memory_index":
+        if not core.store.schema_capabilities():
             raise CoreError("MIGRATION_REQUIRED", 503)
-        return {"status": "ready", "schema": version["version_num"]}
+        return {
+            "status": "ready",
+            "schema": version["version_num"],
+            "capabilities": ["m0", "m1", "memory_index", "diary"],
+        }
+
+    diary_auth = [Depends(diary_admin)]
+
+    @app.get(prefix + "/diary", dependencies=diary_auth)
+    async def diary_list(limit: int = 7):
+        return {"items": app.state.core.diary.list_recent(settings.owner_qq_id, limit)}
+
+    @app.get(prefix + "/diary/status", dependencies=diary_auth)
+    async def diary_status():
+        return app.state.core.diary.status(settings.owner_qq_id)
+
+    @app.post(prefix + "/diary/runtime-mode", dependencies=diary_auth)
+    async def diary_mode(body: DiaryMode):
+        return app.state.core.diary.set_mode(body.enabled, settings.owner_qq_id)
+
+    @app.get(prefix + "/diary/{day}", dependencies=diary_auth)
+    async def diary_day(day: date):
+        result = app.state.core.diary.get_day(day, settings.owner_qq_id)
+        if not result:
+            raise CoreError("DIARY_NOT_FOUND", 404)
+        return result
+
+    @app.post(prefix + "/diary/{day}/forget", dependencies=diary_auth)
+    async def diary_forget(day: date):
+        return app.state.core.diary.forget(day, settings.owner_qq_id)
+
+    @app.post(prefix + "/diary/{day}/correction", dependencies=diary_auth)
+    async def diary_correct(day: date, body: DiaryCorrection):
+        return app.state.core.diary.correct(day, body.text, settings.owner_qq_id)
 
     @app.post(prefix + "/inbox/events", dependencies=auth, status_code=202)
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):

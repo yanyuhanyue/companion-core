@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: Companion Core Internal API
-  version: 0.3.0
+  version: 0.4.0
   description: >-
-    Private Docker-network API; versioned contract for M0-M1.
+    Private Docker-network API; versioned contract for M0-M1.5.
     Protected by bearer token; NOT exposed to public Internet.
 servers:
   - url: http://companion-api:8765
@@ -188,12 +188,119 @@ paths:
       description: Counters only; do not return raw secrets or private memory.
       responses:
         '200': {description: Queue depth, model budget, degraded modules}
+  /internal/v1/diary:
+    get:
+      operationId: listDiary
+      security: [{diaryAdmin: []}]
+      parameters:
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 31, default: 7}
+      responses:
+        '200': {description: Recent committed private diary metadata, never drafts}
+        '400': {description: Invalid limit}
+        '401': {description: Independent diary administrator credential required}
+  /internal/v1/diary/status:
+    get:
+      operationId: diaryStatus
+      security: [{diaryAdmin: []}]
+      responses:
+        '200': {description: Configured and runtime flags plus latest run state}
+        '401': {description: Independent diary administrator credential required}
+  /internal/v1/diary/runtime-mode:
+    post:
+      operationId: diaryRuntimeMode
+      security: [{diaryAdmin: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled: {type: boolean}
+      responses:
+        '200': {description: Runtime mode applied; disabling cancels uncommitted runs}
+        '400': {description: Invalid contract}
+        '401': {description: Independent diary administrator credential required}
+        '409': {description: Configuration hard-disable cannot be overridden}
+  /internal/v1/diary/{day}:
+    get:
+      operationId: readDiary
+      security: [{diaryAdmin: []}]
+      parameters: [{$ref: '#/components/parameters/DiaryDay'}]
+      responses:
+        '200':
+          description: Committed diary after evidence expiry checks
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DiaryEntry'}
+        '400': {description: Invalid date}
+        '401': {description: Independent diary administrator credential required}
+        '404': {description: No committed diary for this day}
+  /internal/v1/diary/{day}/forget:
+    post:
+      operationId: forgetDiary
+      security: [{diaryAdmin: []}]
+      parameters: [{$ref: '#/components/parameters/DiaryDay'}]
+      responses:
+        '200': {description: Idempotent deletion persisted to the independent erasure ledger}
+        '400': {description: Invalid date}
+        '401': {description: Independent diary administrator credential required}
+        '503': {description: Erasure ledger invalid or unavailable; fail closed}
+  /internal/v1/diary/{day}/correction:
+    post:
+      operationId: correctDiary
+      security: [{diaryAdmin: []}]
+      parameters: [{$ref: '#/components/parameters/DiaryDay'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text: {type: string, minLength: 1, maxLength: 8000}
+      responses:
+        '200':
+          description: Owner correction recorded, subject to configured body limit
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/DiaryEntry'}
+        '400': {description: Invalid date, length, or sensitive content}
+        '401': {description: Independent diary administrator credential required}
+        '404': {description: No committed diary for this day}
 components:
   securitySchemes:
     bridgeToken:
       type: http
       scheme: bearer
+    diaryAdmin:
+      type: http
+      scheme: bearer
+      description: Distinct administrator secret; the Bridge credential is rejected.
+  parameters:
+    DiaryDay:
+      in: path
+      name: day
+      required: true
+      schema: {type: string, format: date}
   schemas:
+    DiaryEntry:
+      type: object
+      required: [entry_id, local_date, title, body_md, version, created_at, updated_at]
+      properties:
+        entry_id: {type: string}
+        local_date: {type: string, format: date}
+        title: {type: string}
+        body_md: {type: string}
+        version: {type: integer, minimum: 1}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
     IngestReply:
       type: object
       required: [event_id, job_id, duplicate, state]

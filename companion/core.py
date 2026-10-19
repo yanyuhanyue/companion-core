@@ -4,8 +4,9 @@ import sqlite3
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from companion import budget
+from companion import __version__, budget
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
+from companion.diary import DiaryService, is_diary_command
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.privacy import ErasureLedger, epoch, redact
@@ -43,6 +44,7 @@ class Core:
                 "INSERT OR IGNORE INTO runtime_meta VALUES ('owner_qq_id',?)",
                 (settings.owner_qq_id,),
             )
+        self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -98,6 +100,13 @@ class Core:
                 )
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
+                diary_command = is_diary_command(body["text"])
+                if diary_command:
+                    body["diary_command"] = True
+                    body["diary_correction"] = body["text"].strip().startswith("修改日记")
+                if body["text"].strip() == "暂停写日记":
+                    s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
+                    self.diary.repo.cancel_pending("DIARY_PAUSED")
                 if body["text"].strip() == "暂停主动分享":
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
                     s.execute(
@@ -129,6 +138,7 @@ class Core:
                     trace_id=event.trace_id,
                     idempotency_key=key,
                     fingerprint=fingerprint,
+                    memory_processed=int(diary_command),
                 )
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
@@ -232,7 +242,8 @@ class Core:
             "SELECT e.body_json,o.content_json FROM events e LEFT JOIN outbox o ON "
             "o.origin_event_id=e.event_id AND o.state='SENT' WHERE e.conversation_id=? "
             "AND e.actor_id='owner' AND e.redacted=0 AND e.rowid<(SELECT rowid FROM events "
-            "WHERE event_id=?) AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
+            "WHERE event_id=?) AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
+            "AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
             "JOIN memories m ON m.memory_id=me.memory_id WHERE me.event_id=e.event_id "
             "AND m.status IN ('SUPERSEDED','FORGOTTEN')) ORDER BY e.rowid DESC LIMIT ?",
             (job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2),
@@ -420,6 +431,9 @@ class Core:
     async def command_reply(self, job):
         text = json.loads(job["body_json"]).get("text", "").strip()
         now, s = self.clock(), self.store
+        diary_reply = self.diary.command(text, self.settings.owner_qq_id)
+        if diary_reply is not None:
+            return diary_reply
         if text == "发送状态":
             uncertain = s.rows(
                 "SELECT message_id,created_at FROM outbox "
@@ -507,8 +521,16 @@ class Core:
             return False
         request_id = None
         try:
+            before_command = epoch(self.store)
             reply = await self.command_reply(job) if job["kind"] == "chat" else None
             captured_epoch = epoch(self.store)
+            text = json.loads(job["body_json"]).get("text", "").strip()
+            if (
+                reply is not None
+                and (text.startswith(("读日记", "日记列表")) or text == "你记得什么")
+                and before_command != captured_epoch
+            ):
+                raise CoreError("PRIVACY_CHANGED", 503)
             if reply is None:
                 body = json.loads(job["body_json"])
                 if job["kind"] == "chat" and not body.get("text"):
@@ -769,10 +791,12 @@ class Core:
     def status(self):
         s = self.store
         return {
-            "version": "0.3.0",
+            "version": __version__,
             "mode": self.settings.mode,
             "features": {
                 "memory": self.settings.memory_enabled,
+                "diary": self.diary.repo.enabled(),
+                "diary_auto_share": False,
                 "dsh": False,
                 "android": False,
                 "public_publish": False,

@@ -29,7 +29,8 @@ def reserve(store, settings, job_id, scenario, messages, now):
     month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     estimated_input = token_upper_bound(messages)
-    estimate = cost(settings, estimated_input, settings.max_output_tokens)
+    output_tokens = settings.output_tokens(scenario)
+    estimate = cost(settings, estimated_input, output_tokens)
     with store.transaction():
         total = store.one(
             "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=?",
@@ -38,18 +39,22 @@ def reserve(store, settings, job_id, scenario, messages, now):
         if settings.pricing_known and total + estimate > settings.monthly_limit_micro_usd:
             raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
         if autonomous:
-            memory_work = scenario in {"memory_extract", "memory_review"}
-            scenarios = ("memory_extract", "memory_review") if memory_work else ("activity",)
+            if scenario in {"memory_extract", "memory_review"}:
+                scenarios = ("memory_extract", "memory_review")
+                limit = settings.memory_daily_micro_usd
+            elif scenario == "diary":
+                scenarios = ("diary",)
+                limit = settings.diary_daily_micro_usd
+            elif scenario == "activity":
+                scenarios = ("activity",)
+                limit = settings.autonomous_daily_micro_usd
+            else:
+                raise CoreError("UNKNOWN_BUDGET_SCENARIO", 400)
             spent = store.one(
                 "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
                 "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in scenarios) + ")",
                 (day.isoformat(timespec="microseconds"), *scenarios),
             )["n"]
-            limit = (
-                settings.memory_daily_micro_usd
-                if memory_work
-                else settings.autonomous_daily_micro_usd
-            )
             if spent + estimate > limit:
                 raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
         request_id = uid("model")
@@ -62,7 +67,7 @@ def reserve(store, settings, job_id, scenario, messages, now):
             provider=settings.provider,
             model=settings.model_name,
             input_tokens=estimated_input,
-            output_tokens=settings.max_output_tokens,
+            output_tokens=output_tokens,
             billed_micro_usd=estimate,
             is_estimate=1,
             pricing_known=int(settings.pricing_known),

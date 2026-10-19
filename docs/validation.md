@@ -5,9 +5,9 @@
 ## 已执行
 
 - Ruff 静态检查与格式整理。
-- 68 项自动化检查：M0/M1 合同用例与真实命令流程回归，覆盖跨会话同义问法、新事实干扰、冲突双方保留、候选确认、核对结果校验、预算降级和在途遗忘。
-- SQLite Alembic `base → M0 → M1 → memory_index` 及降级/升级往返；已有 M1 事实在索引迁移和回退后保持不变，向量可重建。
-- 真实回环 HTTP API 与独立 Worker 进程，使用演示模型，完成入站、任务执行、领取、发送前状态更新和回执。
+- 共 130 项自动化检查：保留原 68 项 M0/M1，新增 49 项日记和 13 项协议后端/多模态草案检查。覆盖跨会话召回、冲突、隐私竞态、跨天回顾、备份恢复、并发、费用和切换回滚。
+- SQLite Alembic `base → M0 → M1 → memory_index → diary`；已有 M1 数据保留，重复迁移可执行，存在日记时拒绝破坏性降级。
+- 真实回环 HTTP API 与独立聊天/日记 Worker 进程，使用演示模型，完成入站、任务执行、发送回执、空日期跳过和日记管理鉴权；另用挂起的日记模型调用验证新 QQ 消息仍可完成。
 - 100 条合成的真实接口格式消息回放：30 条目标事实入库，Recall@6 为 30/30，公开动作 0。
 - 加密热备份恢复；忘记后恢复旧备份，使用最新独立日志回放，内容不会重新进入检索。
 - GitHub CI 在 Windows、Ubuntu 执行同组测试、回放、独立进程冒烟和打包；Linux 容器初始化启用 M1，检查原生 ONNX 依赖与模型加载。[对应提交的运行结果](https://github.com/yanyuhanyue/companion-core/actions/workflows/ci.yml)。
@@ -26,6 +26,14 @@
 
 这些结果验证指定的真实模型使用场景，不等同于长期真实聊天的完整质量评估。测试将出站结果留在本地 Outbox；没有向 QQ 发送合成测试内容。
 
+## M1.5 真实模型验证
+
+`live-diary-report.json` 记录 21 个合成日期，通过真实 DeepSeek 和 SQLite 生成流程验证，21/21 成功保存，最终一轮 21 次请求，配置费率估算 9,677 微美元（$0.009677）。涵盖计划与完成、主人的外出与 AI 经历分离、未打开的视频、未启用摄像头、临时猜测、纠正、私人保存、提示注入数据和跨天回顾。最后一例实际引用了前一天 episode 中的原始事件。生成过程没有 QQ Outbox、Memory 或 traits 写入。
+
+实际模型曾出现缺少必填字段的输出，现有严格验证会拒绝，并在最多两次尝试内处理格式重试；语义来源错误不会自动放宽。样本中的反思仍是模型推测，例如可能从构建失败联想到挫败感；程序验证不代表人工叙事质量门禁已完成。
+
+协议检查使用合成 AstrBot/OneBot 事件，验证保持会话、隔离跨后端消息 ID、重放幂等、批次回滚保护和媒体能力边界。没有在生产 QQ 上安装或切换 SnowLuma，尚不声称实机全功能兼容。
+
 ## 复现
 
 ```powershell
@@ -36,6 +44,7 @@ uv sync --frozen
 .venv/Scripts/python.exe scripts/smoke.py
 .venv/Scripts/python.exe scripts/package_bridge.py
 .venv/Scripts/python.exe scripts/verify_memory_live.py
+.venv/Scripts/python.exe scripts/verify_diary_live.py
 ```
 
 检查脚本把测试临时目录限定在工作区并在结束时清理。回放和冒烟脚本自行清理数据。插件 ZIP 是保留的交付物。
@@ -46,5 +55,6 @@ uv sync --frozen
 - 长期真实模型输出质量和供应商账单核对；本次场景报告已保存实际 Token 与缓存用量。
 - VPS Docker 运行、资源压力、异地备份和独立遗忘日志复制。
 - Linux 容器已由 GitHub CI 检查；目标 VPS 的容器运行与在线 QQ 链路仍待验证。
+- 日记需要至少 20 个真实匿名化日期的主人审核；合成日期不能替代该门禁。配置继续 `diary_enabled=false`，自动分享关闭。
 
 这些项目完成前，M0/M1 为**代码与本地合同验收通过，生产验收待完成**。DSH、Android 和公开发布仍关闭。

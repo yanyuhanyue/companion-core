@@ -9,7 +9,7 @@ from astrbot.api.star import Context, Star, StarTools, register
 from .bridge import Spool, deliver_one, normalize
 
 
-@register("astrbot_plugin_companion_bridge", "yanyuhanyue", "Companion Core 私聊传输桥", "0.3.0")
+@register("astrbot_plugin_companion_bridge", "yanyuhanyue", "Companion Core 私聊传输桥", "0.4.0")
 class CompanionBridge(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -17,6 +17,7 @@ class CompanionBridge(Star):
         self.client = None
         self.task = None
         self.spool = None
+        self.protocol_epoch = ""
 
     async def initialize(self):
         token = self.config.get("bridge_token", "")
@@ -24,13 +25,22 @@ class CompanionBridge(Star):
         bot = self.config.get("bot_qq_id", "")
         if len(token) < 24 or not owner.isdigit() or not bot.isdigit() or owner == bot:
             raise ValueError("请配置 owner_qq_id、bot_qq_id 和至少 24 位 bridge_token")
+        self.protocol_epoch = self.config.get("protocol_epoch", "")
+        self.spool = Spool(str(StarTools.get_data_dir() / "inbox.sqlite3"))
+        try:
+            self.spool.bind_backend(
+                self.config.get("protocol_backend", "napcat"), self.protocol_epoch
+            )
+        except Exception:
+            self.spool.db.close()
+            self.spool = None
+            raise
         self.client = httpx.AsyncClient(
             base_url=self.config.get("core_url", "http://companion-api:8765"),
             headers={"Authorization": "Bearer " + token},
             timeout=10,
             trust_env=False,
         )
-        self.spool = Spool(str(StarTools.get_data_dir() / "inbox.sqlite3"))
         self.task = asyncio.create_task(self.pump())
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=10000)
@@ -40,6 +50,7 @@ class CompanionBridge(Star):
             self.config.get("owner_qq_id", ""),
             self.config.get("bot_qq_id", ""),
             self.config.get("bridge_token", ""),
+            self.protocol_epoch,
         )
         if normalized is None:
             return

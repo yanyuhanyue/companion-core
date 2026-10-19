@@ -72,6 +72,24 @@ class Store:
         row = self.db.execute(sql, params).fetchone()
         return dict(row) if row else None
 
+    def schema_capabilities(self):
+        required = {
+            "events": {"event_id", "redacted", "memory_processed", "fingerprint"},
+            "jobs": {"lease_token", "state"},
+            "outbox": {"lease_token", "state", "content_json"},
+            "memories": {"needs_review", "fact_key"},
+            "memory_vectors": {"model_version", "content_hash", "vector"},
+            "runtime_meta": {"key", "value"},
+            "diary_runs": {"captured_privacy_epoch", "lease_token", "source_set_sha256"},
+            "diary_entries": {"body_md", "status", "version"},
+            "diary_evidence": {"event_id", "outbox_message_id"},
+            "diary_revisions": {"prior_title", "prior_body_md"},
+        }
+        return all(
+            columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}
+            for table, columns in required.items()
+        )
+
     def insert(self, table, **values):
         # Identifiers are application constants, never API input.
         names = ",".join(values)
