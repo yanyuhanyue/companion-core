@@ -26,11 +26,10 @@ services:
     mem_limit: 2g
     tmpfs:
       - /tmp:rw,nosuid,nodev,size=64m
-      - /scratch:rw,nosuid,nodev,size=768m,mode=0711
+      # The packaged SDK extracts native bindings under the per-task TMPDIR here.
+      - /scratch:rw,nosuid,nodev,exec,size=768m,mode=0711
     volumes:
       - executor-state:/state
-    ports:
-      - "127.0.0.1:8090:8090"
     networks:
       tool-private:
         ipv4_address: 172.30.91.10
