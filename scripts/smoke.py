@@ -17,7 +17,8 @@ def main():
     root = Path(__file__).resolve().parents[1]
     scratch = root / ".local"
     scratch.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=scratch, prefix="smoke-") as directory:
+    temporary = tempfile.TemporaryDirectory(dir=scratch, prefix="smoke-")
+    with temporary as directory:
         env = {
             **os.environ,
             "COMPANION_CONFIG": directory + "/absent.toml",
@@ -146,6 +147,16 @@ def main():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+            # Windows may retain a terminated child's file handles briefly.
+            # Retry only sharing violations; a persistent lock must still fail CI.
+            for attempt in range(50):
+                try:
+                    temporary.cleanup()
+                    break
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) != 32 or attempt == 49:
+                        raise
+                    time.sleep(0.1)
 
 
 if __name__ == "__main__":
