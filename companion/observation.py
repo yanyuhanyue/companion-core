@@ -83,6 +83,27 @@ def dependent_events(store, event_ids):
     return result
 
 
+def expired_sources(store, event_ids, cutoff):
+    """Check upstream evidence even when the derived observation itself is recent."""
+    if not event_ids:
+        return []
+    lineage = "SELECT value FROM json_each(?)"
+    if store.one("SELECT 1 FROM sqlite_master WHERE name='event_dependencies' AND type='table'"):
+        lineage += (
+            " UNION SELECT d.source_event_id FROM event_dependencies d "
+            "JOIN sources s ON d.event_id=s.event_id"
+        )
+    return [
+        row["event_id"]
+        for row in store.rows(
+            "WITH RECURSIVE sources(event_id) AS (" + lineage + ") "
+            "SELECT e.event_id FROM events e JOIN sources s USING(event_id) "
+            "WHERE e.redacted=1 OR e.ingested_at<?",
+            (encode(event_ids), cutoff),
+        )
+    ]
+
+
 def erase_observations(store, event_ids):
     if not store.one("SELECT 1 FROM sqlite_master WHERE name='observations' AND type='table'"):
         return

@@ -92,9 +92,11 @@ async def fetch_public_image(url, source, limit, transport=None):
             transport=transport, timeout=10, trust_env=False, follow_redirects=False
         ) as client,
     ):
-        async with client.stream("GET", url) as response:
+        async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
             if response.status_code != 200:
                 raise CoreError("CONTENT_IMAGE_FETCH_FAILED", 502)
+            if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                raise CoreError("CONTENT_IMAGE_ENCODING_UNSUPPORTED", 502)
             mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
             if mime not in {"image/png", "image/jpeg"}:
                 raise CoreError("CONTENT_IMAGE_TYPE_UNSUPPORTED", 415)

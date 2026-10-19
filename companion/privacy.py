@@ -60,12 +60,14 @@ def advance_epoch(store):
     )
 
 
-def diary_copies(store, dates):
+def diary_copies(store, dates, before=None):
     """Resolve explicit diary commands, including records from before date metadata existed."""
     result = set()
     for row in store.rows(
         "SELECT event_id,body_json FROM events WHERE redacted=0 "
-        "AND json_extract(body_json,'$.diary_command')=1"
+        "AND json_extract(body_json,'$.diary_command')=1 "
+        "AND (? IS NULL OR ingested_at<=?)",
+        (before, before),
     ):
         body = json.loads(row["body_json"])
         parts = body.get("text", "").split(maxsplit=2)
@@ -74,8 +76,12 @@ def diary_copies(store, dates):
         if parts[0] == "日记列表" or (parts[0] == "读日记" and len(parts) == 1):
             result.add(row["event_id"])
         elif parts[0] in {"读日记", "修改日记"} and len(parts) >= 2:
+            try:
+                command_day = date.fromisoformat(parts[1]).isoformat()
+            except ValueError:
+                continue
             if any(
-                parts[1] == day and body.get("diary_timezone", timezone) == timezone
+                command_day == day and body.get("diary_timezone", timezone) == timezone
                 for day, timezone in dates
             ):
                 result.add(row["event_id"])
@@ -180,10 +186,17 @@ class ErasureLedger:
 
     def forget_diary(self, store, day, timezone, now):
         target = "companion:" + timezone + ":" + day
-        if store.one(
-            "SELECT 1 FROM privacy_erasure_ledger WHERE target_type='diary' AND target_id=?",
+        existing = store.one(
+            "SELECT erasure_id FROM privacy_erasure_ledger "
+            "WHERE target_type='diary' AND target_id=?",
             (target,),
-        ):
+        )
+        if existing:
+            record = next(
+                row for row in self.read()[1:] if row["erasure_id"] == existing["erasure_id"]
+            )
+            if diary_copies(store, {(day, timezone)}, before=record["at"]):
+                self.apply(store, record)
             return
         copies = diary_copies(store, {(day, timezone)})
         record = {
@@ -258,7 +271,13 @@ class ErasureLedger:
             for row in store.rows("SELECT entry_id,local_date,timezone FROM diary_entries")
             if row["entry_id"] in affected
         }
-        copies = diary_copies(store, dates) if dates else set()
+        copies = (
+            diary_copies(
+                store, dates, before=record["at"] if record.get("target_type") == "diary" else None
+            )
+            if dates
+            else set()
+        )
         for entry_id in affected:
             store.execute(
                 "UPDATE diary_entries SET title='',body_md='',source_set_sha256='',"
@@ -286,10 +305,16 @@ class ErasureLedger:
             raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
         with store.transaction():
             for record in lines[1:]:
-                if not store.one(
+                applied = store.one(
                     "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=?",
                     (record["erasure_id"],),
-                ):
+                )
+                # Older releases marked deletion complete before resolving date aliases.
+                # Recompute remaining copies even in snapshots taken after that deletion.
+                remaining_diary_copies = record.get("target_type") == "diary" and diary_copies(
+                    store, {(record["diary_day"], record["diary_timezone"])}, before=record["at"]
+                )
+                if not applied or remaining_diary_copies:
                     self.apply(store, record)
 
     def apply(self, store, record):

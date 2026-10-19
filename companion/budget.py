@@ -46,6 +46,11 @@ def reserve(store, settings, job_id, scenario, messages, now):
     output_tokens = settings.output_tokens(scenario)
     estimate = cost(settings, estimated_input, output_tokens)
     with store.transaction():
+        if scenario == "activity":
+            from companion.social import proactive_allowed
+
+            if not proactive_allowed(store, settings, now):
+                raise CoreError("AUTONOMY_PAUSED", 409)
         total = total_monthly(store, month.isoformat(timespec="microseconds"))
         if settings.pricing_known and total + estimate > settings.monthly_limit_micro_usd:
             raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)

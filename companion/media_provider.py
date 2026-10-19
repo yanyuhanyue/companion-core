@@ -50,7 +50,10 @@ class HTTPMediaProvider:
         self.options, self.transport = options, transport
 
     async def process(self, operation, data, mime_type, endpoint):
-        headers = {"Authorization": "Bearer " + endpoint.key.get_secret_value()}
+        headers = {
+            "Authorization": "Bearer " + endpoint.key.get_secret_value(),
+            "Accept-Encoding": "identity",
+        }
         if endpoint.protocol == "minimax" and operation != "speech":
             raise CoreError("MEDIA_PROVIDER_PROTOCOL_MISMATCH", 503)
         if operation == "audio":
@@ -116,6 +119,11 @@ class HTTPMediaProvider:
                 async with client.stream("POST", endpoint.url, headers=headers, **request) as resp:
                     if resp.status_code != 200:
                         raise CoreError("MEDIA_PROVIDER_REJECTED", 502)
+                    if (
+                        resp.headers.get("content-encoding", "identity").strip().lower()
+                        != "identity"
+                    ):
+                        raise CoreError("MEDIA_PROVIDER_ENCODING_UNSUPPORTED", 502)
                     body = bytearray()
                     limit = self.options.max_output_bytes if operation == "speech" else 32768
                     if endpoint.protocol == "minimax":

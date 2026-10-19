@@ -297,11 +297,9 @@ class GoalEngine:
                 ("1" if paused else "0",),
             )
             if paused:
-                self.store.execute(
-                    "UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
-                    "last_error_code='AUTONOMY_PAUSED' WHERE action_type='qq.private.proactive' "
-                    "AND state IN ('PENDING','LEASED','RETRY_WAIT')"
-                )
+                from companion.transport import cancel_proactive_work
+
+                cancel_proactive_work(self.store, self.clock())
                 self.store.execute(
                     "UPDATE goal_steps SET state='WAITING_RESOURCE',lease_token=NULL,"
                     "last_error_code='AUTONOMY_PAUSED' WHERE goal_id IN (SELECT goal_id FROM "

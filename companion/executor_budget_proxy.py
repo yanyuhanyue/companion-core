@@ -132,9 +132,14 @@ def create_budget_proxy(
             async with client.stream(
                 "POST",
                 upstream_url.rstrip("/") + "/chat/completions",
-                headers={"Authorization": "Bearer " + api_key},
+                headers={"Authorization": "Bearer " + api_key, "Accept-Encoding": "identity"},
                 json=body,
             ) as upstream:
+                if (
+                    upstream.headers.get("content-encoding", "identity").strip().lower()
+                    != "identity"
+                ):
+                    raise HTTPException(502, "MODEL_ENCODING_UNSUPPORTED")
                 output = bytearray()
                 async for chunk in upstream.aiter_bytes():
                     output.extend(chunk)

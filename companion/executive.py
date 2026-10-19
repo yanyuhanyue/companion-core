@@ -72,10 +72,18 @@ class HTTPExecutor:
             async with client.stream(
                 "POST",
                 endpoint.url.rstrip("/") + "/internal/v1/execute",
-                headers={"Authorization": "Bearer " + endpoint.token.get_secret_value()},
+                headers={
+                    "Authorization": "Bearer " + endpoint.token.get_secret_value(),
+                    "Accept-Encoding": "identity",
+                },
                 json=request.model_dump(),
             ) as response:
                 response.raise_for_status()
+                if (
+                    response.headers.get("content-encoding", "identity").strip().lower()
+                    != "identity"
+                ):
+                    raise ValueError("EXECUTOR_ENCODING_UNSUPPORTED")
                 data = bytearray()
                 async for chunk in response.aiter_bytes():
                     data.extend(chunk)

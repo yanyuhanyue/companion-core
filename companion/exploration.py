@@ -286,9 +286,12 @@ class ExplorationService:
                 step = json.loads(row["goal_step_json"])
                 if paused and paused["value"] == "1" and self.autonomous(row, step):
                     continue
+                if (
+                    row["operation"] == "read"
+                    and (counts["reads"] or 0) >= cfg.exploration_daily_deep_reads
+                ):
+                    continue
                 if step:
-                    if (counts["reads"] or 0) >= cfg.exploration_daily_deep_reads:
-                        continue
                     try:
                         self.core.goals.validate_lease(step)
                     except CoreError:

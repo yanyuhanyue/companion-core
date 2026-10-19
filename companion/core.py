@@ -1,8 +1,7 @@
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
+from datetime import UTC
 
 from companion import __version__, budget
 from companion.affect import AffectEngine
@@ -21,9 +20,15 @@ from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULE
 from companion.observation import ObservationService
 from companion.privacy import ErasureLedger, epoch, redact
 from companion.reflection import ReflectionService
-from companion.social import SocialPlanner, proactive_counts
+from companion.social import SocialPlanner, proactive_allowed, proactive_counts
 from companion.store import Store, after, encode, uid, utcnow
-from companion.transport import digest, enqueue, reconcile_delivery, recover_deliveries
+from companion.transport import (
+    cancel_proactive_work,
+    digest,
+    enqueue,
+    reconcile_delivery,
+    recover_deliveries,
+)
 from companion.wake import WakePlanner
 
 
@@ -227,6 +232,8 @@ class Core:
         s, now = self.store, self.clock()
         with s.transaction():
             self.recover(now)
+            if not proactive_allowed(s, self.settings, now):
+                cancel_proactive_work(s, now)
             row = s.one(
                 "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
@@ -238,7 +245,13 @@ class Core:
             )
             if not row:
                 return None
-            if self.settings.content_enabled and row["kind"] == "chat":
+            body = json.loads(row["body_json"])
+            if (
+                self.settings.content_enabled
+                and row["kind"] == "chat"
+                and not body.get("diary_command")
+                and not body.get("control_command")
+            ):
                 if self.content.status(row["event_id"])["pending"]:
                     return None
             token = uid("lease")
@@ -251,14 +264,20 @@ class Core:
 
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
-        text = json.loads(job["body_json"]).get("text", "")
+        body = json.loads(job["body_json"])
+        text = body.get("text", "")
         rules = PRINCIPLES + self.expression.instruction()
         if cfg.content_enabled:
             rules += CONTEXT_RULES
         messages = [{"role": "system", "content": rules}]
         current = {"role": "user", "content": text or "请看看我分享的内容。"}
         content_reference = ""
-        if cfg.content_enabled and job["kind"] == "chat":
+        if (
+            cfg.content_enabled
+            and job["kind"] == "chat"
+            and not body.get("diary_command")
+            and not body.get("control_command")
+        ):
             available = cfg.context_soft_tokens - budget.token_upper_bound([messages[0], current])
             content_reference = self.content.context_message(job["event_id"], available - 24)
         affect = self.affect.snapshot()
@@ -525,10 +544,13 @@ class Core:
             reconcile_delivery(s, reconciliation[1], outcome, now)
             return "已记录核对结果，不会重发该条消息。"
         if text in {"暂停主动分享", "恢复主动分享"}:
-            s.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
-                ("1" if text.startswith("暂停") else "0",),
-            )
+            with s.transaction():
+                s.execute(
+                    "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
+                    ("1" if text.startswith("暂停") else "0",),
+                )
+                if text.startswith("暂停"):
+                    cancel_proactive_work(s, now)
             return "已" + text + "。"
         if not self.settings.memory_enabled:
             return None
@@ -662,11 +684,8 @@ class Core:
                 if epoch(self.store) != captured_epoch:
                     raise CoreError("PRIVACY_CHANGED", 503)
                 now = self.clock()
-                paused = self.store.one(
-                    "SELECT value FROM runtime_meta WHERE key='proactive_paused'"
-                )
-                should_send = reply.strip() not in {"[SKIP]", ""} and not (
-                    paused and paused["value"] == "1"
+                should_send = reply.strip() not in {"[SKIP]", ""} and proactive_allowed(
+                    self.store, self.settings, now
                 )
                 if job["kind"] != "activity" or should_send:
                     self.expression.enqueue(
@@ -735,20 +754,11 @@ class Core:
 
     def schedule_proactive(self):
         cfg, s, now = self.settings, self.store, self.clock()
-        local = datetime.fromisoformat(now).astimezone(ZoneInfo(cfg.timezone))
-        quiet = (
-            cfg.quiet_start <= local.hour < cfg.quiet_end
-            if cfg.quiet_start < cfg.quiet_end
-            else local.hour >= cfg.quiet_start or local.hour < cfg.quiet_end
-        )
-        if cfg.quiet_start == cfg.quiet_end:
-            quiet = False
-        if not cfg.proactive_enabled or quiet or not cfg.pricing_known:
-            return False
-        paused = s.one("SELECT value FROM runtime_meta WHERE key='proactive_paused'")
-        if paused and paused["value"] == "1":
+        if not cfg.pricing_known:
             return False
         with s.transaction():
+            if not proactive_allowed(s, cfg, now):
+                return False
             conversation = s.one(
                 "SELECT * FROM conversations WHERE scope='private' AND platform='qq.onebot' "
                 "ORDER BY last_event_at DESC LIMIT 1"
