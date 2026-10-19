@@ -1,0 +1,13 @@
+{
+  "mode": "deterministic_fixture_model",
+  "events": 100,
+  "expected_facts": 30,
+  "accepted_extractions": 30,
+  "recall_at_6": 1.0,
+  "average_chat_input_token_upper_bound": 1533.72,
+  "max_chat_input_token_upper_bound": 2448,
+  "context_soft_bound": 3200,
+  "public_actions": 0,
+  "real_model_extraction_accuracy": "not measured",
+  "real_model_hallucination_rate": "not measured"
+}

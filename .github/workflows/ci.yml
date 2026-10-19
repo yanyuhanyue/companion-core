@@ -1,0 +1,39 @@
+name: checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.10
+      - run: uv sync --frozen
+      - run: uv run ruff check companion migrations astrbot_plugin_companion_bridge tests scripts
+      - run: uv run pytest -q --basetemp=.local/test-temp
+      - run: uv run python scripts/replay.py
+      - run: uv run python scripts/smoke.py
+      - run: uv build
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t companion-core:test .
+      - run: >-
+          docker run --rm
+          -e COMPANION_OWNER_QQ_ID=10001 -e COMPANION_BOT_QQ_ID=10002
+          -e COMPANION_BRIDGE_TOKEN=container-test-token-32-characters
+          -e COMPANION_MODE=demo
+          -e COMPANION_DATABASE=/data/test.sqlite3
+          -e COMPANION_ERASURE_LEDGER=/privacy/test.jsonl
+          companion-core:test init

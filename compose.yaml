@@ -1,0 +1,47 @@
+name: companion
+x-core: &core
+  build: .
+  image: companion-core:0.3.0
+  env_file: .env
+  environment:
+    COMPANION_CONFIG: /app/config.toml
+    COMPANION_DATABASE: /data/companion.sqlite3
+    COMPANION_ERASURE_LEDGER: /privacy/erasures.jsonl
+  volumes:
+    - ./config.toml:/app/config.toml:ro
+    - core-data:/data
+    - erasure-ledger:/privacy
+  networks: [companion]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 60s
+services:
+  migrate:
+    <<: *core
+    command: [init]
+    restart: "no"
+  companion-api:
+    <<: *core
+    command: [serve, --host, 0.0.0.0]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, /app/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/internal/v1/health/live', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  companion-worker:
+    <<: *core
+    command: [worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
+networks:
+  companion:
+    name: companion-internal
+volumes:
+  core-data:
+  erasure-ledger:

@@ -1,0 +1,152 @@
+"""Launch real API and worker processes against a demo model, entirely in the workspace."""
+
+import os
+import secrets
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+
+import httpx
+
+
+def main():
+    root = Path(__file__).resolve().parents[1]
+    scratch = root / ".local"
+    scratch.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=scratch, prefix="smoke-") as directory:
+        env = {
+            **os.environ,
+            "COMPANION_CONFIG": directory + "/absent.toml",
+            "COMPANION_OWNER_QQ_ID": "10001",
+            "COMPANION_BOT_QQ_ID": "10002",
+            "COMPANION_BRIDGE_TOKEN": secrets.token_urlsafe(32),
+            "COMPANION_MODE": "demo",
+            "COMPANION_DATABASE": directory + "/core.db",
+            "COMPANION_ERASURE_LEDGER": directory + "/privacy.jsonl",
+            "COMPANION_PROACTIVE_ENABLED": "false",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TEMP": directory,
+            "TMP": directory,
+        }
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        subprocess.run(
+            [sys.executable, "-m", "companion", "init"],
+            cwd=root,
+            env=env,
+            check=True,
+            capture_output=True,
+            creationflags=flags,
+        )
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        processes = []
+        try:
+            for args in (["serve", "--port", str(port)], ["worker"]):
+                processes.append(
+                    subprocess.Popen(
+                        [sys.executable, "-m", "companion", *args],
+                        cwd=root,
+                        env=env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=flags,
+                    )
+                )
+            with httpx.Client(
+                base_url=f"http://127.0.0.1:{port}",
+                trust_env=False,
+                timeout=3,
+                headers={"Authorization": "Bearer " + env["COMPANION_BRIDGE_TOKEN"]},
+            ) as client:
+                for _ in range(100):
+                    try:
+                        if client.get("/internal/v1/health/ready").status_code == 200:
+                            break
+                    except httpx.TransportError:
+                        pass
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("API failed to become ready")
+                body = {
+                    "schema_version": 1,
+                    "event_id": "evt_smoke_001",
+                    "source": "qq.onebot",
+                    "source_event_id": "10002:qq:FriendMessage:10001:smoke",
+                    "event_type": "message.received",
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "conversation": {
+                        "platform_session_key": "qq:FriendMessage:10001",
+                        "scope": "private",
+                    },
+                    "actor": {"platform_user_id": "10001", "role": "owner"},
+                    "payload": {"text": "你好", "media": []},
+                    "trace_id": "trace_smoke_001",
+                }
+                result = client.post(
+                    "/internal/v1/inbox/events",
+                    json=body,
+                    headers={"X-Idempotency-Key": "smoke-001"},
+                )
+                assert result.status_code == 202
+                for _ in range(100):
+                    items = client.post(
+                        "/internal/v1/deliveries/lease", json={"worker_id": "smoke", "limit": 1}
+                    ).json()["items"]
+                    if items:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("Worker did not produce delivery")
+                item = items[0]
+                assert "演示模式" in item["content"]["text"]
+                path = "/internal/v1/deliveries/" + item["message_id"]
+                assert (
+                    client.post(
+                        path + "/begin-send", json={"lease_token": item["lease_token"]}
+                    ).status_code
+                    == 200
+                )
+                assert (
+                    client.post(
+                        path + "/result",
+                        json={"lease_token": item["lease_token"], "result": "SENT"},
+                    ).status_code
+                    == 200
+                )
+                assert (
+                    client.post(
+                        "/internal/v1/deliveries/lease", json={"worker_id": "smoke", "limit": 1}
+                    ).json()["items"]
+                    == []
+                )
+                print(
+                    "PASS: real HTTP API + separate worker + demo model + delivery acknowledgment"
+                )
+        finally:
+            for process in processes:
+                if os.name == "nt":
+                    # Windows venv launchers can have a child interpreter holding the DB.
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=flags,
+                        check=False,
+                    )
+                else:
+                    process.terminate()
+            for process in processes:
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    main()

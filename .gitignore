@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+config.toml
+data/
+privacy/
+backups/
+dist/
+.local/
+*.sqlite*
+*.log

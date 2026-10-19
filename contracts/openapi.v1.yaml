@@ -1,0 +1,226 @@
+openapi: 3.1.0
+info:
+  title: Companion Core Internal API
+  version: 0.3.0
+  description: >-
+    Private Docker-network API; versioned contract for M0-M1.
+    Protected by bearer token; NOT exposed to public Internet.
+servers:
+  - url: http://companion-api:8765
+security:
+  - bridgeToken: []
+paths:
+  /internal/v1/health/live:
+    get:
+      operationId: liveness
+      security: []
+      responses:
+        '200': {description: Service process alive}
+  /internal/v1/health/ready:
+    get:
+      operationId: readiness
+      responses:
+        '200': {description: DB ready and migrations compatible}
+        '503': {description: Not ready}
+  /internal/v1/inbox/events:
+    post:
+      operationId: ingestEvent
+      description: >-
+        Auth+owner allowlist check precedes writes. Atomic transaction creates
+        event and reply job. Repeated (source,source_event_id) returns same job.
+      parameters:
+        - in: header
+          name: X-Idempotency-Key
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: './event.v1.schema.json'
+      responses:
+        '202':
+          description: Accepted or replay of previously accepted event
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IngestReply'}
+        '400': {description: Invalid contract}
+        '401': {description: Missing/invalid authentication}
+        '403': {description: Actor or scope not allowed}
+        '409': {description: Same idempotency key with different payload}
+  /internal/v1/deliveries/lease:
+    post:
+      operationId: leaseDeliveries
+      description: Reserve pending private QQ deliveries for a known AstrBot sender.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [worker_id, limit]
+              properties:
+                worker_id: {type: string}
+                limit: {type: integer, minimum: 1, maximum: 20}
+      responses:
+        '200':
+          description: Leased messages (never public/unapproved actions)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Delivery'}
+  /internal/v1/deliveries/{message_id}/begin-send:
+    post:
+      operationId: beginDeliverySend
+      description: >-
+        Atomically transition LEASED to SENDING before the first network send.
+        Expired LEASED can be safely requeued; expired SENDING is uncertain.
+      parameters:
+        - in: path
+          name: message_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [lease_token]
+              properties:
+                lease_token: {type: string}
+      responses:
+        '200': {description: Ready for one send attempt}
+        '409': {description: Stale lease / already started}
+  /internal/v1/deliveries/{message_id}/result:
+    post:
+      operationId: commitDeliveryResult
+      description: >-
+        Sender reports SENT with provider message id, RETRYABLE_FAILURE, or
+        DELIVERY_UNCERTAIN. A lease token prevents stale workers from ACKing.
+      parameters:
+        - in: path
+          name: message_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [lease_token, result]
+              properties:
+                lease_token: {type: string}
+                result: {enum: [SENT, RETRYABLE_FAILURE, DELIVERY_UNCERTAIN, PERMANENT_FAILURE]}
+                provider_message_id: {type: [string, 'null']}
+                error_code: {type: [string, 'null']}
+      responses:
+        '200': {description: Result stored}
+        '409': {description: Stale lease / invalid transition}
+  /internal/v1/memories/search:
+    post:
+      operationId: searchMemories
+      description: Subject and visibility access checks are mandatory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [query, requester_actor_id]
+              properties:
+                query: {type: string, minLength: 1, maxLength: 1000}
+                requester_actor_id: {type: string}
+                subject_filter:
+                  type: array
+                  items: {enum: [user, self, relationship, project]}
+                limit: {type: integer, minimum: 1, maximum: 10, default: 6}
+      responses:
+        '200':
+          description: Results with evidence status and provenance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/MemoryResult'}
+  /internal/v1/memories/{memory_id}/decisions:
+    post:
+      operationId: decideMemory
+      description: >-
+        Owner-only confirm/correct/forget. Correct produces a superseding memory;
+        forget purges active retrieval and derived summaries/trait evidence.
+      parameters:
+        - in: path
+          name: memory_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [actor_id, decision]
+              properties:
+                actor_id: {const: owner}
+                decision: {enum: [confirm, correct, forget]}
+                corrected_content: {type: [string, 'null']}
+      responses:
+        '200': {description: Decision accepted; dependent projections queued for reconciliation}
+        '403': {description: Requester is not owner}
+  /internal/v1/ops/status:
+    get:
+      operationId: opsStatus
+      description: Counters only; do not return raw secrets or private memory.
+      responses:
+        '200': {description: Queue depth, model budget, degraded modules}
+components:
+  securitySchemes:
+    bridgeToken:
+      type: http
+      scheme: bearer
+  schemas:
+    IngestReply:
+      type: object
+      required: [event_id, job_id, duplicate, state]
+      properties:
+        event_id: {type: string}
+        job_id: {type: string}
+        duplicate: {type: boolean}
+        state: {enum: [QUEUED, RUNNING, SUCCEEDED, FAILED]}
+    Delivery:
+      type: object
+      required: [message_id, conversation_platform_session_key, content, lease_token, delivery_key]
+      properties:
+        message_id: {type: string}
+        conversation_platform_session_key: {type: string}
+        content: {type: object}
+        lease_token: {type: string}
+        delivery_key: {type: string}
+        action_type: {enum: [qq.private.reply, qq.private.proactive]}
+    MemoryResult:
+      type: object
+      required: [memory_id, subject, content, status, confidence, evidence_ids]
+      properties:
+        memory_id: {type: string}
+        subject: {enum: [user, self, relationship, project]}
+        content: {type: string}
+        status: {enum: [HYPOTHESIS, CONFIRMED]}
+        confidence: {type: number, minimum: 0, maximum: 1}
+        evidence_ids:
+          type: array
+          items: {type: string}

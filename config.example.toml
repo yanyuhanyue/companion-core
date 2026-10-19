@@ -1,0 +1,32 @@
+# Copy to config.toml; secrets and QQ IDs are environment variables.
+mode = "live"
+database = "data/companion.sqlite3"
+erasure_ledger = "privacy/erasures.jsonl"
+timezone = "Asia/Shanghai"
+provider = "deepseek"
+model_url = "https://api.deepseek.com"
+model_name = "deepseek-flash"
+max_output_tokens = 768
+context_soft_tokens = 3200
+max_recent_messages = 12
+# Integer micro-USD per million tokens, upper-bound peak rates verified 2026-10-19.
+# https://api-docs.deepseek.com/quick_start/pricing/
+# Estimates, not provider invoices. Omit all rates for unknown pricing.
+input_rate = 300000
+cached_input_rate = 6000
+output_rate = 1200000
+monthly_limit_micro_usd = 20000000
+autonomous_daily_micro_usd = 200000
+memory_daily_micro_usd = 50000
+# Enable after completing M0 checks in your environment.
+memory_enabled = false
+extraction_min_events = 5
+extraction_idle_seconds = 900
+proactive_enabled = true
+proactive_interval_seconds = 10800
+proactive_idle_seconds = 3600
+proactive_daily_limit = 2
+quiet_start = 23
+quiet_end = 8
+lease_seconds = 120
+raw_event_retention_days = 365

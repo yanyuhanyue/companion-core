@@ -1,0 +1,11 @@
+.git
+.venv
+.local
+.env
+config.toml
+data
+privacy
+backups
+__pycache__
+.pytest_cache
+.ruff_cache

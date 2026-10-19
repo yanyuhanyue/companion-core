@@ -1,0 +1,6 @@
+{
+  "core_url": {"description": "Companion 内部地址", "type": "string", "default": "http://companion-api:8765"},
+  "owner_qq_id": {"description": "主人 QQ", "type": "string", "default": ""},
+  "bot_qq_id": {"description": "机器人 QQ", "type": "string", "default": ""},
+  "bridge_token": {"description": "内部 API 令牌", "type": "string", "secret": true, "default": ""}
+}

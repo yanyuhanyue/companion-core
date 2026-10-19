@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "event_id": "evt_01K0000000000",
+  "source": "qq.onebot",
+  "source_event_id": "bot-account:private-owner:message-98765",
+  "event_type": "message.received",
+  "occurred_at": "2026-10-19T02:17:00Z",
+  "conversation": {
+    "platform_session_key": "private:owner-placeholder",
+    "scope": "private"
+  },
+  "actor": {
+    "platform_user_id": "replace_with_owner_qq_id",
+    "role": "owner"
+  },
+  "payload": {
+    "text": "今天有什么新发现？",
+    "media": []
+  },
+  "trace_id": "trace_01K0000000000"
+}
