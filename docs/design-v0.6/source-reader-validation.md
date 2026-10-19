@@ -8,14 +8,16 @@
 | 检查 | 结果 |
 |---|---|
 | Windows `./scripts/check.ps1`，启用真实浏览器测试 | 487 passed、1 skipped；403.97 秒。跳过项是系统符号链接权限；1 条既有 Starlette 弃用警告 |
-| 后续字幕登录标记修正及真实 Core HTTP 路由回归 | `./scripts/check.ps1 -TestFiles tests/test_source_reader.py`：45 passed；8.34 秒 |
+| 后续字幕登录标记、Core HTTP 路由及 DNS 失败回归 | `./scripts/check.ps1 -TestFiles tests/test_source_reader.py`：46 passed；7.81 秒 |
 | 真实 Chromium | Windows Chromium 156 / Playwright 1.64.0；内联数据、外部连接阻断、无限脚本超时和取消清理三项通过，后续任务可继续执行 |
 | 预算／兼容 | 多请求原子预留与结算、UNKNOWN 保留、旧 result／observation 指纹重放通过 |
 | 迁移／隐私 | 有数据 0003/0004 → 0014、0013 → 0014、重复升级、加密恢复及最新遗忘日志重放通过 |
 | 包隔离 | `uv build --out-dir .local/v06-reader/dist`；`verify_package.py --dist-dir ...` 通过；脱离 Git 重建不包含私密 canary，提取 wheel 独立迁移和 Reader CLI 成功 |
-| GitHub CI | 提交后记录最终 HEAD 检查结果 |
+| 模拟回放 | `scripts/replay.py`：100 事件、30 事实、Recall@6=1.0、最大聊天上下文上界 2824 token；不是实际模型准确率 |
+| 进程联调 | `scripts/smoke.py`：API + chat/diary/life/executive/content workers、私聊投递和鉴权通过 |
+| GitHub CI | Linux/Windows 全量、容器与独立 Windows 浏览器检查由 [PR #13 当前提交状态](https://github.com/yanyuhanyue/companion-core/pull/13/checks) 提供 |
 
-全量检查在最后两个 Reader 回归添加前开始，故不能把其数量当成最后 HEAD 的全量测试计数。
+全量检查在最后三个 Reader 回归添加前开始，故不能把其数量当成最后 HEAD 的全量测试计数。
 最后 HEAD 由远端 Linux/Windows 全量检查与独立浏览器检查复核。
 本机 Docker daemon 未运行；Linux 镜像构建及非 root 启动交给隔离 CI，未触碰现有生产容器。
 

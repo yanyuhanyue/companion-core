@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import socket
 import ssl
 
 import httpcore
@@ -234,6 +235,12 @@ def test_request_budget_prevents_subtitle_io_and_timeout_retains_unknown_reserva
     assert result["items"][0]["reading"]["subtitle_status"] == "budget_limited"
     assert len(backend.requests) == 1
     result, _ = run(read(response(META), httpcore.ReadTimeout()))
+    assert result["status"] == "UNKNOWN" and result["used_requests"] is None
+    assert result["used_bytes"] is None and not result["items"]
+
+
+def test_dns_failure_is_unknown_without_crashing_the_reader():
+    result, _ = run(read(socket.gaierror("temporary resolution failure")))
     assert result["status"] == "UNKNOWN" and result["used_requests"] is None
     assert result["used_bytes"] is None and not result["items"]
 

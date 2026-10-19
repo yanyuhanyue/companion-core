@@ -23,6 +23,7 @@ async def read_result(reader, item):
         result.update(status="FAILED", items=[], error_code=str(error))
     except (
         TimeoutError,
+        OSError,
         httpcore.NetworkError,
         httpcore.TimeoutException,
         httpcore.ProtocolError,
