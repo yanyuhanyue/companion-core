@@ -186,6 +186,7 @@ class DiaryRepository:
             if (
                 not text
                 or body.get("diary_command")
+                or body.get("control_command")
                 or is_diary_command(text)
                 or sensitive(text)
                 or redact(text, self.settings) != text
@@ -255,6 +256,7 @@ class DiaryRepository:
                 if (
                     not text
                     or body.get("diary_command")
+                    or body.get("control_command")
                     or is_diary_command(text)
                     or sensitive(text)
                     or redact(text, self.settings) != text

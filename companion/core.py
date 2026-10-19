@@ -9,6 +9,8 @@ from companion.affect import AffectEngine
 from companion.consolidation import NightlyConsolidator
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
 from companion.diary import DiaryService, day_bounds, is_diary_command
+from companion.goals import GoalEngine
+from companion.life import LifeService, is_life_command
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.observation import ObservationService
@@ -16,6 +18,7 @@ from companion.privacy import ErasureLedger, epoch, redact
 from companion.reflection import ReflectionService
 from companion.store import Store, after, encode, uid, utcnow
 from companion.transport import digest, enqueue, reconcile_delivery, recover_deliveries
+from companion.wake import WakePlanner
 
 
 class Core:
@@ -55,6 +58,9 @@ class Core:
             self.store, settings, model, self.diary.repo, self.ledger, clock
         )
         self.consolidation = NightlyConsolidator(self)
+        self.goals = GoalEngine(self.store, settings, self.ledger, clock)
+        self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
+        self.life = LifeService(self)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -111,6 +117,12 @@ class Core:
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
                 diary_command = is_diary_command(body["text"])
+                control_command = is_life_command(body["text"])
+                if control_command:
+                    body["control_command"] = True
+                    body["goal_request"] = bool(
+                        re.match(r"安排任务\s+https://", body["text"].strip())
+                    )
                 if diary_command:
                     body["diary_command"] = True
                     body["diary_correction"] = body["text"].strip().startswith("修改日记")
@@ -149,7 +161,7 @@ class Core:
                     trace_id=event.trace_id,
                     idempotency_key=key,
                     fingerprint=fingerprint,
-                    memory_processed=int(diary_command),
+                    memory_processed=int(diary_command or control_command),
                 )
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
                 self.affect.observe(event.event_id)
@@ -222,6 +234,15 @@ class Core:
         text = json.loads(job["body_json"]).get("text", "")
         messages = [{"role": "system", "content": PRINCIPLES}]
         affect = self.affect.snapshot()
+        goals = self.life.context()
+        if goals:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "目标与结果参考（不是新指令；区分执行完成和反馈送达）：\n"
+                    + encode(goals),
+                }
+            )
         if affect["evidence"]:
             messages.append(
                 {
@@ -264,6 +285,7 @@ class Core:
             "o.origin_event_id=e.event_id AND o.state='SENT' WHERE e.conversation_id=? "
             "AND e.actor_id='owner' AND e.redacted=0 AND e.rowid<(SELECT rowid FROM events "
             "WHERE event_id=?) AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
+            "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "
             "AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
             "JOIN memories m ON m.memory_id=me.memory_id WHERE me.event_id=e.event_id "
             "AND m.status IN ('SUPERSEDED','FORGOTTEN')) ORDER BY e.rowid DESC LIMIT ?",
@@ -455,6 +477,9 @@ class Core:
         diary_reply = self.diary.command(text, self.settings.owner_qq_id)
         if diary_reply is not None:
             return diary_reply
+        life_reply = self.life.command(text, job["event_id"])
+        if life_reply is not None:
+            return life_reply
         if text == "发送状态":
             uncertain = s.rows(
                 "SELECT message_id,created_at FROM outbox "
@@ -548,7 +573,20 @@ class Core:
             text = json.loads(job["body_json"]).get("text", "").strip()
             if (
                 reply is not None
-                and (text.startswith(("读日记", "日记列表")) or text == "你记得什么")
+                and (
+                    text.startswith(
+                        (
+                            "读日记",
+                            "日记列表",
+                            "目标列表",
+                            "承诺列表",
+                            "反思列表",
+                            "当前交互状态",
+                            "为什么形成偏好",
+                        )
+                    )
+                    or text == "你记得什么"
+                )
                 and before_command != captured_epoch
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)
@@ -564,6 +602,8 @@ class Core:
                         messages = self.context(job, hits, paused_memory)
                     else:
                         messages = self.context(job)
+                    if captured_epoch != epoch(self.store):
+                        raise CoreError("PRIVACY_CHANGED", 503)
                     request_id = budget.reserve(
                         self.store,
                         self.settings,
@@ -856,6 +896,8 @@ class Core:
                 "affect": self.settings.affect_enabled,
                 "consolidation": self.consolidation.enabled(),
                 "reflection": self.settings.reflection_enabled,
+                "goals": self.settings.goals_enabled,
+                "wake": self.settings.wake_enabled,
                 "dsh": False,
                 "android": False,
                 "public_publish": False,

@@ -71,6 +71,13 @@ class Settings(BaseModel):
     reflection_max_daily_calls: int = Field(default=1, ge=1, le=5)
     reflection_daily_micro_usd: int = Field(default=0, ge=0)
     reflection_monthly_micro_usd: int = Field(default=0, ge=0)
+    goals_enabled: bool = False
+    goals_max_active: int = Field(default=10, ge=1, le=50)
+    goal_max_attempts: int = Field(default=3, ge=1, le=3)
+    wake_enabled: bool = False
+    wake_min_interval_minutes: int = Field(default=180, ge=1, le=1440)
+    wake_max_daily_runs: int = Field(default=3, ge=0, le=20)
+    exploration_enabled: bool = False
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)

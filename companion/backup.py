@@ -53,6 +53,12 @@ def restore(source, destination, key, ledger_path):
             ledger.replay(store)
             # A snapshot cannot authorize a device session that existed before restoration.
             with store.transaction():
+                store.execute(
+                    "UPDATE outbox SET state='DELIVERY_UNCERTAIN',lease_token=NULL,"
+                    "last_error_code='RESTORED_DELIVERY_REQUIRES_RECONCILIATION' "
+                    "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
+                )
+                store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
                 if store.execute(
                     "UPDATE consents SET revoked_at=? WHERE revoked_at IS NULL", (utcnow(),)
                 ).rowcount:

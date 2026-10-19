@@ -144,6 +144,9 @@ def delivery_result(store, settings, message_id, result, now):
             ),
         )
         store.audit("delivery.result", message_id, "delivery", now, state=state)
+        from companion.goals import acknowledge_commitment_delivery
+
+        acknowledge_commitment_delivery(store, message_id, state, now)
         return {"state": state}
 
 
@@ -160,4 +163,7 @@ def reconcile_delivery(store, message_id, outcome, now):
         if changed != 1:
             raise CoreError("NOT_UNCERTAIN")
         store.audit("delivery.owner_reconciled", message_id, "owner", now, outcome=outcome)
+        from companion.goals import acknowledge_commitment_delivery
+
+        acknowledge_commitment_delivery(store, message_id, outcome, now)
         return {"state": outcome}

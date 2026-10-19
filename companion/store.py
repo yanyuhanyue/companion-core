@@ -94,6 +94,11 @@ class Store:
             "reflection_suggestions": {"kind", "content", "state"},
             "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
             "consolidation_evidence": {"event_id", "run_id"},
+            "goals": {"scope_json", "state", "redacted"},
+            "goal_evidence": {"event_id", "goal_id"},
+            "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts"},
+            "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},
+            "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

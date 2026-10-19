@@ -277,6 +277,37 @@ class NightlyConsolidator:
                     self.checkpoint(run, "PARTIAL", "REFLECTION_PENDING", waiting=True)
                     return True
             failed = any(value in {"FAILED", "CANCELLED"} for value in steps.values())
+            if self.settings.goals_enabled and steps.get("goals") != "COMPLETE":
+                from companion.goals import GoalProposal
+
+                proposals = self.store.rows(
+                    "SELECT s.content,r.run_id FROM reflection_suggestions s JOIN "
+                    "reflection_runs r USING(run_id) WHERE r.local_date=? AND r.timezone=? AND "
+                    "r.state='COMMITTED' AND s.kind='next_question' AND s.state IN ('PENDING',"
+                    "'ACCEPT_AS_HYPOTHESIS')",
+                    (day.isoformat(), self.settings.timezone),
+                )
+                for proposal in proposals:
+                    source_ids = [
+                        row["event_id"]
+                        for row in self.store.rows(
+                            "SELECT DISTINCT event_id FROM reflection_evidence WHERE run_id=?",
+                            (proposal["run_id"],),
+                        )
+                    ]
+                    try:
+                        self.core.goals.propose(
+                            GoalProposal(
+                                topic=proposal["content"][:300], source_event_ids=source_ids
+                            )
+                        )
+                    except CoreError as error:
+                        if error.code != "GOAL_CAPACITY_REACHED":
+                            raise
+                        steps["goals"] = "WAITING"
+                        self.checkpoint(run, "PARTIAL", "GOAL_CAPACITY_REACHED", waiting=True)
+                        return True
+                steps["goals"] = "COMPLETE"
             state = (
                 "PARTIAL"
                 if failed

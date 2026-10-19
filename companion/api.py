@@ -145,6 +145,7 @@ def create_app(settings=None):
 
     diary_auth = [Depends(diary_admin)]
 
+    from companion.goals import CommitmentRequest, GoalDecision, GoalProposal
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
@@ -156,6 +157,37 @@ def create_app(settings=None):
     @app.get("/internal/v2/affect", dependencies=control_auth)
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
+
+    @app.get("/internal/v2/goals", dependencies=control_auth)
+    async def goals():
+        return {"items": app.state.core.goals.recent()}
+
+    @app.post("/internal/v2/goals", dependencies=control_auth, status_code=202)
+    async def propose_goal(body: GoalProposal):
+        return {"goal_id": app.state.core.goals.propose(body)}
+
+    @app.post("/internal/v2/goals/{goal_id}/decision", dependencies=control_auth)
+    async def decide_goal(goal_id: str, body: GoalDecision):
+        engine = app.state.core.goals
+        return engine.accept(goal_id) if body.decision == "ACCEPT" else engine.cancel(goal_id)
+
+    @app.post("/internal/v2/commitments", dependencies=control_auth, status_code=202)
+    async def accept_commitment(body: CommitmentRequest):
+        return app.state.core.goals.accept_commitment(body)
+
+    @app.post("/internal/v2/life/runtime-mode", dependencies=control_auth)
+    async def life_mode(body: DiaryMode):
+        return app.state.core.goals.pause_autonomy(not body.enabled)
+
+    @app.get("/internal/v2/interests", dependencies=control_auth)
+    async def interests():
+        return {
+            "items": app.state.core.store.rows(
+                "SELECT t.trait_id,t.topic,t.status,t.confidence,e.event_id FROM traits t JOIN "
+                "trait_evidence e USING(trait_id) WHERE t.category='interest' ORDER BY "
+                "t.updated_at DESC LIMIT 30"
+            )
+        }
 
     @app.get("/internal/v2/consolidation", dependencies=control_auth)
     async def consolidation_status():
