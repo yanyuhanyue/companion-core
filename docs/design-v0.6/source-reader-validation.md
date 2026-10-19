@@ -2,6 +2,7 @@
 
 基线：`89c60f08ab4707f169d7fc268fc7d72a55faec78`（PR #12，未合并）。
 本轮只实现 B站公开 L1/L2 Reader；未将 v0.6 全部能力或生产门禁标为完成。
+运行代码提交：`582106ab159d94de38a106c689492a7a05310d86`；后续补充浏览器回归与记录。
 
 ## 代码和隔离验证
 
@@ -9,7 +10,7 @@
 |---|---|
 | Windows `./scripts/check.ps1`，启用真实浏览器测试 | 487 passed、1 skipped；403.97 秒。跳过项是系统符号链接权限；1 条既有 Starlette 弃用警告 |
 | 后续字幕登录标记、Core HTTP 路由及 DNS 失败回归 | `./scripts/check.ps1 -TestFiles tests/test_source_reader.py`：46 passed；7.81 秒 |
-| 真实 Chromium | Windows Chromium 156 / Playwright 1.64.0；内联数据、外部连接阻断、无限脚本超时和取消清理三项通过，后续任务可继续执行 |
+| 真实 Chromium | Windows Chromium 156 / Playwright 1.64.0；内联数据／外部连接阻断、无限脚本超时、取消清理、私网 WebRTC UDP 隔离四项通过（20.76 秒），后续任务可继续执行 |
 | 预算／兼容 | 多请求原子预留与结算、UNKNOWN 保留、旧 result／observation 指纹重放通过 |
 | 迁移／隐私 | 有数据 0003/0004 → 0014、0013 → 0014、重复升级、加密恢复及最新遗忘日志重放通过 |
 | 包隔离 | `uv build --out-dir .local/v06-reader/dist`；`verify_package.py --dist-dir ...` 通过；脱离 Git 重建不包含私密 canary，提取 wheel 独立迁移和 Reader CLI 成功 |
@@ -17,9 +18,14 @@
 | 进程联调 | `scripts/smoke.py`：API + chat/diary/life/executive/content workers、私聊投递和鉴权通过 |
 | GitHub CI | Linux/Windows 全量、容器与独立 Windows 浏览器检查由 [PR #13 当前提交状态](https://github.com/yanyuhanyue/companion-core/pull/13/checks) 提供 |
 
+运行代码提交 `582106a` 的 push／PR 两轮共 8 项检查均成功；
+[PR workflow 39269077052](https://github.com/yanyuhanyue/companion-core/actions/runs/39269077052)
+完成 Linux/Windows 全量、打包及容器检查。之后仅增加上述 UDP 隔离回归和文档。
+
 全量检查在最后三个 Reader 回归添加前开始，故不能把其数量当成最后 HEAD 的全量测试计数。
 最后 HEAD 由远端 Linux/Windows 全量检查与独立浏览器检查复核。
-本机 Docker daemon 未运行；Linux 镜像构建及非 root 启动交给隔离 CI，未触碰现有生产容器。
+本机 Docker daemon 未运行；Linux 三镜像构建及 Reader 非 root、无网络、只读启动已由隔离 CI
+通过，未触碰现有生产容器。该检查不包含 Linux Chromium sandbox 的实际渲染。
 
 ## 真实公开访问
 

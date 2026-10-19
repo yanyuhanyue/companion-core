@@ -59,3 +59,37 @@ def test_browser_cancel_closes_session():
         assert renderer.active_contexts == 0
 
     run(scenario())
+
+
+def test_browser_cannot_send_webrtc_packets_to_a_private_address():
+    async def scenario():
+        packets = []
+
+        class Receiver(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                packets.append(data)
+
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            Receiver, local_addr=("127.0.0.1", 0)
+        )
+        port = transport.get_extra_info("sockname")[1]
+        document = f"""<script>
+          window.__INITIAL_STATE__ = {{videoData:{{title:'test',desc:'UDP isolation'}}}};
+          const pc = new RTCPeerConnection({{iceServers:[{{urls:'stun:127.0.0.1:{port}'}}]}});
+          pc.createDataChannel('probe');
+          pc.createOffer().then(o => pc.setLocalDescription(o));
+          Object.defineProperty(window.__INITIAL_STATE__.videoData, 'title', {{get() {{
+            const end = Date.now() + 1500;
+            while(Date.now() < end) {{}}
+            return 'test';
+          }}}});
+        </script>""".encode()
+        try:
+            result = await BrowserRenderer(timeout=8).metadata(URL, document)
+            assert result["desc"] == "UDP isolation"
+            await asyncio.sleep(0.1)
+            assert not packets
+        finally:
+            transport.close()
+
+    run(scenario())
