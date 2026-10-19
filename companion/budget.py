@@ -21,6 +21,20 @@ def cost(settings, input_tokens, output_tokens, cached=0):
     return (numerator + 999999) // 1000000
 
 
+def total_monthly(store, month):
+    """Shared cost ceiling includes unknown/reserved model and isolated tool charges."""
+    total = store.one(
+        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=?",
+        (month,),
+    )["n"]
+    if store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_tasks'"):
+        total += store.one(
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM tool_tasks WHERE dispatched_at>=?",
+            (month,),
+        )["n"]
+    return total
+
+
 def reserve(store, settings, job_id, scenario, messages, now):
     autonomous = scenario != "chat"
     if autonomous and not settings.pricing_known:
@@ -32,10 +46,7 @@ def reserve(store, settings, job_id, scenario, messages, now):
     output_tokens = settings.output_tokens(scenario)
     estimate = cost(settings, estimated_input, output_tokens)
     with store.transaction():
-        total = store.one(
-            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=?",
-            (month.isoformat(timespec="microseconds"),),
-        )["n"]
+        total = total_monthly(store, month.isoformat(timespec="microseconds"))
         if settings.pricing_known and total + estimate > settings.monthly_limit_micro_usd:
             raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
         if autonomous:

@@ -101,6 +101,8 @@ class Store:
             "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
             "exploration_requests": {"lease_token", "reserved_bytes", "captured_privacy_epoch"},
             "social_candidates": {"event_id", "message_id", "comparison_text"},
+            "tool_tasks": {"scope_sha256", "captured_privacy_epoch", "billed_micro_usd"},
+            "tool_approvals": {"scope_sha256", "expires_at", "revoked_at"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

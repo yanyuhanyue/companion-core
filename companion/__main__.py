@@ -47,6 +47,7 @@ def main():
     sub.add_parser("worker")
     sub.add_parser("diary-worker")
     sub.add_parser("life-worker")
+    sub.add_parser("executive-worker")
     sub.add_parser("status")
     server = sub.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
@@ -94,6 +95,12 @@ def main():
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database, "life-worker"):
                 asyncio.run(life_worker(settings))
+        elif args.command == "executive-worker":
+            from companion.executive_worker import executive_worker
+
+            logging.getLogger("httpx").setLevel(logging.WARNING)
+            with single_worker(settings.database, "executive-worker"):
+                asyncio.run(executive_worker(settings))
         elif args.command == "backup":
             backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode())
             print("Encrypted backup saved. Keep the latest erasure ledger separately.")

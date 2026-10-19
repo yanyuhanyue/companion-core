@@ -54,6 +54,13 @@ services:
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped
+  companion-executive-worker:
+    <<: *core
+    profiles: [tools]
+    command: [executive-worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
 networks:
   companion:
     name: companion-internal

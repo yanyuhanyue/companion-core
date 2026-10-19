@@ -140,11 +140,16 @@ def create_app(settings=None):
                 "affect",
                 "consolidation",
                 "reflection",
+                "goals",
+                "exploration",
+                "expression",
+                "executive",
             ],
         }
 
     diary_auth = [Depends(diary_admin)]
 
+    from companion.executive_protocol import ToolDecision, ToolRequest
     from companion.exploration import ReadResult
     from companion.goals import CommitmentRequest, GoalDecision, GoalProposal
     from companion.observation import ObservationEvent
@@ -154,6 +159,26 @@ def create_app(settings=None):
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
+
+    @app.get("/internal/v2/tools", dependencies=control_auth)
+    async def list_tools():
+        return {
+            "items": app.state.core.store.rows(
+                "SELECT * FROM tool_tasks WHERE redacted=0 ORDER BY rowid DESC LIMIT 30"
+            )
+        }
+
+    @app.post("/internal/v2/tools", dependencies=control_auth, status_code=202)
+    async def submit_tool(body: ToolRequest):
+        return app.state.core.executive.submit(body)
+
+    @app.post("/internal/v2/tools/{task_id}/decision", dependencies=control_auth)
+    async def decide_tool(task_id: str, body: ToolDecision):
+        return app.state.core.executive.decide(task_id, body)
+
+    @app.post("/internal/v2/tools/{task_id}/revoke", dependencies=control_auth)
+    async def revoke_tool(task_id: str):
+        return app.state.core.executive.revoke(task_id)
 
     @app.post("/internal/v2/readers/{adapter_id}/lease", dependencies=adapter_auth)
     async def reader_lease(adapter_id: str):

@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
 
+from companion.executive_protocol import ExecutiveConfig
+
 
 class ObservationAdapterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -62,6 +64,7 @@ class Settings(BaseModel):
     diary_auto_share: bool = False
     diary_admin_token: SecretStr = SecretStr("")
     control_token: SecretStr = SecretStr("")
+    executive: ExecutiveConfig = Field(default_factory=ExecutiveConfig)
     observation_enabled: bool = False
     observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
     voice_enabled: bool = False
@@ -154,6 +157,11 @@ class Settings(BaseModel):
             if len(token) < 24 or token in tokens:
                 raise ValueError("adapter tokens must be distinct and at least 24 characters")
             tokens.append(token)
+        for endpoint in self.executive.endpoints.values():
+            token = endpoint.token.get_secret_value()
+            if token in tokens or token == self.model_key.get_secret_value():
+                raise ValueError("executor tokens must be separate from other credentials")
+            tokens.append(token)
         if self.mode == "live" and not self.model_key.get_secret_value():
             raise ValueError("COMPANION_MODEL_KEY is required in live mode")
         request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
@@ -190,6 +198,8 @@ class Settings(BaseModel):
                     )
                 elif field == "expression_meme_categories":
                     data[field] = TypeAdapter(list[str]).validate_json(value)
+                elif field == "executive":
+                    data[field] = ExecutiveConfig.model_validate_json(value)
                 else:
                     data[field] = value
         return cls.model_validate(data)

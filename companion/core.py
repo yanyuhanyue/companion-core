@@ -9,6 +9,7 @@ from companion.affect import AffectEngine
 from companion.consolidation import NightlyConsolidator
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
 from companion.diary import DiaryService, day_bounds, is_diary_command
+from companion.executive import Executive
 from companion.exploration import ExplorationService
 from companion.expression import ExpressionEngine
 from companion.goals import GoalEngine
@@ -67,6 +68,7 @@ class Core:
         self.social = SocialPlanner(self)
         self.exploration = ExplorationService(self)
         self.expression = ExpressionEngine(self.store, settings, clock)
+        self.executive = Executive(self.store, settings, clock)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -894,12 +896,23 @@ class Core:
                 "reflection": self.settings.reflection_enabled,
                 "goals": self.settings.goals_enabled,
                 "wake": self.settings.wake_enabled,
-                "dsh": False,
+                "executive": self.settings.executive.enabled,
+                "dsh": self.settings.executive.enabled
+                and self.settings.executive.allow_changes
+                and any(
+                    "dsh.run" in endpoint.capabilities
+                    for endpoint in self.settings.executive.endpoints.values()
+                ),
                 "android": False,
                 "public_publish": False,
             },
             "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),
             "deliveries": s.rows("SELECT state,COUNT(*) AS count FROM outbox GROUP BY state"),
+            "tool_usage": s.rows(
+                "SELECT capability,state,COUNT(*) AS calls,"
+                "SUM(billed_micro_usd) AS estimated_micro_usd FROM tool_tasks "
+                "GROUP BY capability,state"
+            ),
             "usage": s.rows(
                 "SELECT scenario,SUM(input_tokens) AS input_tokens,"
                 "SUM(output_tokens) AS output_tokens,SUM(cached_input_tokens) AS cached_tokens,"

@@ -6,6 +6,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from companion.contracts import CoreError
+from companion.executive import restore_executive
 from companion.privacy import ErasureLedger, advance_epoch
 from companion.store import Store, migrate, utcnow
 
@@ -59,6 +60,7 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                restore_executive(store, utcnow())
                 store.execute(
                     "UPDATE exploration_requests SET state='UNKNOWN',lease_token=NULL,"
                     "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "

@@ -86,3 +86,11 @@ android_enabled = false
 # Set COMPANION_CONTROL_TOKEN for owner-only v2 management.
 # Set COMPANION_OBSERVATION_ADAPTERS to a JSON object of adapter IDs and
 # {"token":"distinct-secret-at-least-24-characters","source":"bilibili"}.
+
+# See deploy/executive.example.toml for independently authenticated executor endpoints.
+[executive]
+enabled = false
+allow_changes = false
+daily_calls = 0
+daily_micro_usd = 0
+monthly_micro_usd = 0
