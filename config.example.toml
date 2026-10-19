@@ -20,6 +20,8 @@ autonomous_daily_micro_usd = 200000
 memory_daily_micro_usd = 50000
 # Enable after completing M0 checks in your environment.
 memory_enabled = false
+embedding_cache_dir = "data/embedding-cache"
+semantic_min_score = 0.5
 extraction_min_events = 5
 extraction_idle_seconds = 900
 proactive_enabled = true

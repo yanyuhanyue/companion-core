@@ -39,6 +39,13 @@ def epoch(store):
     return int(row["value"]) if row else 0
 
 
+def advance_epoch(store):
+    store.execute(
+        "INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch',?)",
+        (str(epoch(store) + 1),),
+    )
+
+
 class ErasureLedger:
     def __init__(self, path):
         self.path = Path(path)
@@ -165,10 +172,7 @@ class ErasureLedger:
             "state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
             "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END"
         )
-        store.execute(
-            "INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch',?)",
-            (str(epoch(store) + 1),),
-        )
+        advance_epoch(store)
         store.execute(
             "INSERT OR IGNORE INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
             (

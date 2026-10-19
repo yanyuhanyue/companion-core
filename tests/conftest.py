@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -27,6 +28,8 @@ class FakeModel:
         self.error = None
         self.callback = None
         self.extraction = '{"memories":[]}'
+        self.review = None
+        self.recall = None
 
     async def complete(self, messages, scenario):
         self.calls.append((messages, scenario))
@@ -34,9 +37,30 @@ class FakeModel:
             self.callback()
         if self.error:
             raise self.error
-        text = (
-            self.extraction if scenario == "memory_extract" else "回复：" + messages[-1]["content"]
-        )
+        if scenario == "memory_extract":
+            text = self.extraction
+        elif scenario == "memory_review":
+            payload = json.loads(messages[-1]["content"])
+            if payload.get("operation") == "recall":
+                text = (
+                    self.recall(payload)
+                    if self.recall
+                    else json.dumps({"relevant": [row["ref"] for row in payload["memories"]]})
+                )
+            else:
+                text = (
+                    self.review(payload)
+                    if self.review
+                    else json.dumps(
+                        {
+                            "relations": [
+                                {"same": None, "conflicts": []} for _ in payload["candidates"]
+                            ]
+                        }
+                    )
+                )
+        else:
+            text = "回复：" + messages[-1]["content"]
         return ModelResponse(text, 100, 20, 40)
 
 

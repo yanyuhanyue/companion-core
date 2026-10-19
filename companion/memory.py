@@ -4,13 +4,15 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from companion.contracts import CoreError
-from companion.privacy import redact, sensitive
+from companion.privacy import advance_epoch, redact, sensitive
+from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
 
 
 class Memory:
     def __init__(self, store, settings, ledger):
         self.store, self.settings, self.ledger = store, settings, ledger
+        self.index = SemanticIndex(store, settings)
 
     def require_owner(self, actor):
         if actor != "owner" or not self.settings.memory_enabled:
@@ -36,10 +38,12 @@ class Memory:
         if subjects:
             base += "AND m.subject IN (" + ",".join("?" for _ in subjects) + ") "
             params.extend(subjects)
-        if query != "*":
+        base += "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,m.updated_at DESC"
+        rows = s.rows(base, params)
+        if query != "*" and rows:
+            allowed = {row["memory_id"] for row in rows}
             if len(query) < 3:
-                base += "AND instr(m.content,?)>0 "
-                params.append(query)
+                lexical = [row["memory_id"] for row in rows if query in row["content"]]
             else:
                 terms = re.findall(r"[A-Za-z0-9_\u4e00-\u9fff]+", query)
                 grams = []
@@ -49,21 +53,48 @@ class Memory:
                     else:
                         grams.append(term)
                 grams = [term for term in dict.fromkeys(grams) if len(term) >= 3][:40]
-                if not grams:
-                    return []
                 match = " OR ".join('"' + term.replace('"', '""') + '"' for term in grams)
-                base += (
-                    "AND m.memory_id IN (SELECT memory_id FROM memories_fts "
-                    "WHERE memories_fts MATCH ?) "
+                lexical = (
+                    [
+                        row["memory_id"]
+                        for row in s.rows(
+                            "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? "
+                            "ORDER BY bm25(memories_fts)",
+                            (match,),
+                        )
+                        if row["memory_id"] in allowed
+                    ]
+                    if match
+                    else []
                 )
-                params.append(match)
-        base += (
-            "ORDER BY instr(m.content,?)>0 DESC,m.needs_review,"
-            "m.status='CONFIRMED' DESC,m.updated_at DESC LIMIT ?"
-        )
-        params.append(query)
-        params.append(limit)
-        rows = s.rows(base, params)
+            similarities = self.index.scores(query, rows)
+            exact = {row["memory_id"] for row in rows if query in row["content"]}
+            # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
+            lexical = [
+                key
+                for key in lexical
+                if key in exact or similarities[key] >= self.settings.semantic_min_score
+            ]
+            semantic = sorted(
+                (
+                    key
+                    for key, score in similarities.items()
+                    if score >= self.settings.semantic_min_score
+                ),
+                key=lambda key: similarities[key],
+                reverse=True,
+            )
+            scores = fuse(lexical, semantic)
+            rows = sorted(
+                (row for row in rows if row["memory_id"] in scores),
+                key=lambda row: (
+                    query in row["content"],
+                    scores[row["memory_id"]],
+                    similarities[row["memory_id"]],
+                ),
+                reverse=True,
+            )
+        rows = rows[:limit]
         for row in rows:
             row["evidence_ids"] = [
                 e["event_id"]
@@ -76,7 +107,7 @@ class Memory:
             ]
         return rows
 
-    def add(self, candidate, now, confirmed=False):
+    def validate_candidate(self, candidate, confirmed=False):
         s = self.store
         event = s.one(
             "SELECT * FROM events WHERE event_id=? AND redacted=0 AND actor_id='owner'",
@@ -95,19 +126,54 @@ class Memory:
         content = redact(candidate.content, self.settings)
         if "[REDACTED]" in content:
             return None
+        return event, content
+
+    def confirm(self, memory_id, now):
+        self.store.execute(
+            "UPDATE memories SET status='CONFIRMED',confidence=1,"
+            "origin='user_confirmed',updated_at=? WHERE memory_id=?",
+            (now, memory_id),
+        )
+        advance_epoch(self.store)
+
+    def add(self, candidate, now, confirmed=False, resolution=None):
+        validated = self.validate_candidate(candidate, confirmed)
+        if validated is None:
+            return None
+        event, content = validated
+        s = self.store
         same = s.one(
             "SELECT * FROM memories WHERE content=? AND subject=? AND status IN "
             "('HYPOTHESIS','CONFIRMED')",
             (content, candidate.subject),
         )
-        if same:
-            memory_id = same["memory_id"]
-        else:
-            conflict = s.one(
-                "SELECT memory_id FROM memories WHERE subject=? AND fact_key=? "
+        conflicts = []
+        if resolution is not None:
+            for memory_id in [resolution.get("same"), *resolution.get("conflicts", [])]:
+                if memory_id is None:
+                    continue
+                row = s.one(
+                    "SELECT * FROM memories WHERE memory_id=? AND subject=? "
+                    "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0",
+                    (memory_id, candidate.subject),
+                )
+                if not row:
+                    raise CoreError("MEMORY_MATCH_STALE", 409)
+                if memory_id == resolution.get("same"):
+                    same = row
+                else:
+                    conflicts.append(row)
+        elif not same:
+            conflicts = s.rows(
+                "SELECT * FROM memories WHERE subject=? AND fact_key=? "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
             )
+        if same:
+            memory_id = same["memory_id"]
+            if confirmed:
+                self.confirm(memory_id, now)
+        else:
             memory_id = uid("mem")
             s.insert(
                 "memories",
@@ -122,20 +188,23 @@ class Memory:
                 privacy_scope="private",
                 created_at=now,
                 updated_at=now,
-                fact_key=candidate.fact_key,
-                needs_review=int(bool(conflict)),
+                fact_key=conflicts[0]["fact_key"] if conflicts else candidate.fact_key,
+                needs_review=int(bool(conflicts)),
             )
-            if conflict:
+        if conflicts:
+            for row in [*conflicts, {"memory_id": memory_id}]:
                 s.execute(
-                    "UPDATE memories SET needs_review=1 WHERE memory_id=?", (conflict["memory_id"],)
+                    "UPDATE memories SET needs_review=1 WHERE memory_id=?", (row["memory_id"],)
                 )
-                s.audit("memory.conflict", memory_id, event["trace_id"], now)
+            s.audit("memory.conflict", memory_id, event["trace_id"], now)
         s.execute(
             "INSERT OR IGNORE INTO memory_evidence VALUES (?,?,1,?)",
             (memory_id, event["event_id"], now),
         )
         if candidate.subject == "self":
-            self.observe_trait(candidate.fact_key, event, now)
+            key = s.one("SELECT fact_key FROM memories WHERE memory_id=?", (memory_id,))["fact_key"]
+            self.observe_trait(key, event, now)
+        advance_epoch(s)
         return memory_id
 
     def observe_trait(self, topic, event, now):
@@ -211,11 +280,7 @@ class Memory:
             if old["status"] not in {"HYPOTHESIS", "CONFIRMED"}:
                 raise CoreError("MEMORY_NOT_ACTIVE")
             if decision == "confirm":
-                s.execute(
-                    "UPDATE memories SET status='CONFIRMED',confidence=1,"
-                    "origin='user_confirmed',updated_at=? WHERE memory_id=?",
-                    (now, memory_id),
-                )
+                self.confirm(memory_id, now)
                 return {"memory_id": memory_id, "state": "CONFIRMED"}
             if not corrected or not corrected.strip():
                 raise CoreError("CORRECTION_REQUIRED", 400)
@@ -290,6 +355,7 @@ class Memory:
             s.execute(
                 "UPDATE traits SET status='FADING',confidence=0 WHERE topic=?", (old["fact_key"],)
             )
+            advance_epoch(s)
             return {"memory_id": new_id, "state": "CONFIRMED", "supersedes": memory_id}
 
     def episodes(self, events, now):

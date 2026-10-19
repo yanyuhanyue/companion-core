@@ -84,6 +84,19 @@ class Extraction(StrictModel):
     memories: list[Candidate] = Field(default_factory=list, max_length=20)
 
 
+class MemoryRelation(StrictModel):
+    same: str | None = Field(default=None, pattern=r"^[mc]\d+$")
+    conflicts: list[str] = Field(default_factory=list, max_length=40)
+
+
+class MemoryReview(StrictModel):
+    relations: list[MemoryRelation] = Field(max_length=20)
+
+
+class MemorySelection(StrictModel):
+    relevant: list[str] = Field(max_length=6)
+
+
 class CoreError(Exception):
     def __init__(self, code, status=409):
         self.code = code

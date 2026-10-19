@@ -1,0 +1,99 @@
+{
+  "at": "2026-10-19T05:38:14.697580+00:00",
+  "mode": "real_model_synthetic_conversations",
+  "transport": "local Core outbox; no QQ sends",
+  "embedding_index": "BAAI/bge-small-zh-v1.5@46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59",
+  "budget_limit_micro_usd": 50000,
+  "checks": [
+    {
+      "name": "automatic_extraction",
+      "passed": true
+    },
+    {
+      "name": "explicit_confirmation_preserves_memory_id",
+      "passed": true,
+      "reply": "已记住：mem_2195ae3e4222462ea5e1336cc46cf2bc"
+    },
+    {
+      "name": "paraphrased_recall_1",
+      "passed": true,
+      "question": "我平时最爱喝什么？",
+      "retrieved_count": 1,
+      "reply": "你最爱喝的是茉莉绿茶。"
+    },
+    {
+      "name": "paraphrased_recall_2",
+      "passed": true,
+      "question": "休息日一般做什么运动？",
+      "retrieved_count": 1,
+      "reply": "我记得你有周六上午骑行的习惯，休息日的话可以按这个来安排。除此之外，你还有别的常做的运动吗？我目前没有更多可靠记录，就不乱猜了。"
+    },
+    {
+      "name": "paraphrased_recall_3",
+      "passed": true,
+      "question": "我的猫叫什么？",
+      "retrieved_count": 1,
+      "reply": "你养的猫叫布丁。"
+    },
+    {
+      "name": "unrelated_question_has_no_memory_hits",
+      "passed": true
+    },
+    {
+      "name": "contradiction_is_preserved_and_flagged",
+      "passed": true,
+      "reply": "已记录：mem_077abec53515447b882aa83142fa9472。这与已有记忆存在冲突，请澄清或用“纠正这一条”修订。"
+    },
+    {
+      "name": "compatible_preferences_do_not_conflict",
+      "passed": true
+    },
+    {
+      "name": "conflicted_recall_requests_clarification",
+      "passed": true,
+      "reply": "关于“你喜不喜欢绿茶”，目前记录里有明显冲突：一条说你喜欢，一条说你不喜欢，还有一条说最喜欢的饮料是茉莉绿茶。所以我没法替你下结论。\n\n你愿意的话，可以告诉我现在更偏向哪一种——喜欢、不喜欢，还是看具体种类？我好把这条理清楚。"
+    },
+    {
+      "name": "forgotten_fact_does_not_return",
+      "passed": true,
+      "retrieved_count": 3,
+      "reply": "我目前没有可靠记录能确定你最喜欢什么颜色。你愿意告诉我的话，我会记住；如果之前说过但说法有冲突，也可以顺便帮我确认一下。"
+    }
+  ],
+  "failed_jobs": [],
+  "review_validation_retries": [],
+  "usage": [
+    {
+      "scenario": "chat",
+      "input_tokens": 1728,
+      "output_tokens": 173,
+      "cached_tokens": 512,
+      "estimated_micro_usd": 578,
+      "unknown_price_requests": 0,
+      "unknown_usage_requests": 0
+    },
+    {
+      "scenario": "memory_extract",
+      "input_tokens": 214,
+      "output_tokens": 53,
+      "cached_tokens": 0,
+      "estimated_micro_usd": 128,
+      "unknown_price_requests": 0,
+      "unknown_usage_requests": 0
+    },
+    {
+      "scenario": "memory_review",
+      "input_tokens": 5941,
+      "output_tokens": 260,
+      "cached_tokens": 2048,
+      "estimated_micro_usd": 1502,
+      "unknown_price_requests": 0,
+      "unknown_usage_requests": 0
+    }
+  ],
+  "request_count": 27,
+  "estimated_micro_usd": 2208,
+  "model": "deepseek-flash",
+  "temporary_database_cleanup": "passed",
+  "passed": true
+}

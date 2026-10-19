@@ -31,6 +31,8 @@ class Settings(BaseModel):
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
     memory_enabled: bool = False
+    embedding_cache_dir: str = "data/embedding-cache"
+    semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
     extraction_idle_seconds: int = Field(default=900, ge=0)
     emerging_min_sessions: int = Field(default=3, ge=3)
@@ -59,8 +61,9 @@ class Settings(BaseModel):
             raise ValueError("owner and bot must be different QQ accounts")
         if self.mode == "live" and not self.model_key.get_secret_value():
             raise ValueError("COMPANION_MODEL_KEY is required in live mode")
-        if self.lease_seconds <= self.timeout_seconds + 10:
-            raise ValueError("lease_seconds must exceed timeout_seconds by more than 10")
+        request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
+        if self.lease_seconds <= request_span + 10:
+            raise ValueError("lease_seconds must cover model calls plus more than 10 seconds")
         parsed = urlparse(self.model_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
             raise ValueError("model_url must be HTTP(S) without embedded credentials")

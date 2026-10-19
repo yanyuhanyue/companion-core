@@ -22,7 +22,7 @@ async def worker(settings):
         core = Core(settings, ModelClient(settings, client))
         core.store.execute(
             "UPDATE model_usage SET state='UNKNOWN' "
-            "WHERE scenario='memory_extract' AND state='RESERVED'"
+            "WHERE scenario IN ('memory_extract','memory_review') AND state='RESERVED'"
         )
         worker_id = uid("worker")
         try:

@@ -102,7 +102,7 @@ def test_m1_08_correction_supersedes_and_keeps_revision(core):
     result = core.memory.decide(a, "correct", core.clock(), "我喜欢红茶")
     assert result["memory_id"] != a
     assert core.memory.search("红茶")[0]["content"] == "我喜欢红茶"
-    assert core.memory.search("绿茶") == []
+    assert all("绿茶" not in item["content"] for item in core.memory.search("绿茶"))
     assert (
         core.store.one("SELECT prior_content FROM memory_revisions")["prior_content"]
         == "我喜欢绿茶"
@@ -186,11 +186,9 @@ def test_m1_14_replay_one_hundred_format_valid_messages(core):
         core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE action_type LIKE 'qzone.%'")["n"]
         == 0
     )
-    assert len(core.model.calls) == 70
-    assert (
-        max(budget.token_upper_bound(m) for m, _ in core.model.calls)
-        <= core.settings.context_soft_tokens
-    )
+    chat_calls = [messages for messages, scenario in core.model.calls if scenario == "chat"]
+    assert len(chat_calls) == 70
+    assert max(budget.token_upper_bound(m) for m in chat_calls) <= core.settings.context_soft_tokens
 
 
 def test_m1_15_external_quote_cannot_become_authority(core):
@@ -239,8 +237,10 @@ def test_inflight_reply_is_discarded_after_forgetting(core):
     ingest(core, 2, "茉莉绿茶")
     core.model.callback = lambda: core.memory.decide(memory_id, "forget", core.clock())
     previous = epoch(core.store)
+    chat_calls = sum(scenario == "chat" for _, scenario in core.model.calls)
     run(core.run_once())
     assert epoch(core.store) > previous
+    assert sum(scenario == "chat" for _, scenario in core.model.calls) == chat_calls
     assert (
         core.store.one("SELECT state FROM jobs WHERE event_id='evt_test_2'")["state"]
         == "RETRY_WAIT"

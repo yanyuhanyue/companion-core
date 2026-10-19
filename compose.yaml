@@ -7,6 +7,7 @@ x-core: &core
     COMPANION_CONFIG: /app/config.toml
     COMPANION_DATABASE: /data/companion.sqlite3
     COMPANION_ERASURE_LEDGER: /privacy/erasures.jsonl
+    COMPANION_EMBEDDING_CACHE_DIR: /data/embedding-cache
   volumes:
     - ./config.toml:/app/config.toml:ro
     - core-data:/data

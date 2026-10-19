@@ -102,7 +102,7 @@ def create_app(settings=None):
     async def ready():
         core = app.state.core
         version = core.store.one("SELECT version_num FROM alembic_version")
-        if version["version_num"] != "0002_m1":
+        if version["version_num"] != "0003_memory_index":
             raise CoreError("MIGRATION_REQUIRED", 503)
         return {"status": "ready", "schema": version["version_num"]}
 

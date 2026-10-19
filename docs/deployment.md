@@ -53,7 +53,18 @@ uv run python scripts/package_bridge.py
 
 ## 开启记忆
 
-先在真实 QQ 上测试正常消息、重复消息和故障恢复，确认仅一条主回复，再将 `memory_enabled=true` 并重启 API/Worker。使用“记住这个：…”验证新会话召回、纠正和忘记。
+先在真实 QQ 上测试正常消息、重复消息和故障恢复，确认仅一条主回复，再将 `memory_enabled=true`。停止 API/Worker 后运行迁移初始化，再启动服务：
+
+```bash
+docker compose stop companion-worker companion-api
+docker compose build
+docker compose run --rm migrate
+docker compose up -d companion-api companion-worker
+```
+
+初始化会执行 `0003_memory_index` 并准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
+
+使用“记住这个：…”验证新会话的不同问法、冲突提示、确认、纠正和忘记。相似检索返回的是候选，最终回复前还会检查它是否直接对应问题。语义核对调用使用同一个模型适配器，记入每日记忆预算；预算不足时聊天会继续，并明确说明记忆核对暂不可用。
 
 自动记忆默认为待确认假设，有逐字引用证据，冲突内容标为待审查。敏感内容采用规则过滤加模型约束，仍应检查候选；这并非对所有自然语言敏感信息的完美分类器。Core 不将部署凭据加入上下文，并过滤已知密钥和常见凭据格式。外部内容始终作为数据。
 
@@ -72,7 +83,7 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 生产应由你现有的备份服务定时调用该命令，把加密文件和**最新遗忘日志**分别复制到受限存储。首版没有静默创建系统 cron，也没有替你配置异地存储或自动保留策略。旧数据库备份和旧遗忘日志一起回滚会丢失后来的删除意图，禁止这样恢复。
 
-升级前先备份，停止 Worker 和 API，再执行一次迁移，随后启动服务。当前两个 Alembic revision 支持空库/同版升级和测试环境降级；生产回退优先使用旧应用镜像加已验证的备份恢复，不要直接降级删除 M1 数据表。
+升级前先备份，停止 Worker 和 API，再执行一次迁移，随后启动服务。当前三个 Alembic revision 支持空库/同版升级和测试环境降级。`0003_memory_index → 0002_m1` 只移除可重建的向量缓存；生产回退仍优先使用旧应用镜像加已验证的备份恢复，不要直接降级删除 M1 事实表。
 
 ## 常见运行状态
 

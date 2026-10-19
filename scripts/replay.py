@@ -36,6 +36,13 @@ class FixtureModel:
                         }
                     )
             text = encode({"memories": candidates})
+        elif scenario == "memory_review":
+            payload = json.loads(messages[-1]["content"])
+            text = encode(
+                {"relevant": [row["ref"] for row in payload["memories"]]}
+                if payload.get("operation") == "recall"
+                else {"relations": [{"same": None, "conflicts": []} for _ in payload["candidates"]]}
+            )
         else:
             self.chat_bounds.append(estimate)
             text = "[回放模型] 收到。"

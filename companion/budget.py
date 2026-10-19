@@ -38,15 +38,16 @@ def reserve(store, settings, job_id, scenario, messages, now):
         if settings.pricing_known and total + estimate > settings.monthly_limit_micro_usd:
             raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
         if autonomous:
-            scenario_group = "memory_extract" if scenario == "memory_extract" else "activity"
+            memory_work = scenario in {"memory_extract", "memory_review"}
+            scenarios = ("memory_extract", "memory_review") if memory_work else ("activity",)
             spent = store.one(
                 "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                "WHERE occurred_at>=? AND scenario=?",
-                (day.isoformat(timespec="microseconds"), scenario_group),
+                "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in scenarios) + ")",
+                (day.isoformat(timespec="microseconds"), *scenarios),
             )["n"]
             limit = (
                 settings.memory_daily_micro_usd
-                if scenario == "memory_extract"
+                if memory_work
                 else settings.autonomous_daily_micro_usd
             )
             if spent + estimate > limit:
