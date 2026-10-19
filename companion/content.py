@@ -365,6 +365,7 @@ class ContentService:
                             "title": body.get("title", ""),
                             "text": body.get("text", "")[:6000],
                             "reading": json.loads(obs["evidence_json"]).get("reading"),
+                            "article": json.loads(obs["evidence_json"]).get("article"),
                         }
                     )
                 result.append(item)
@@ -402,6 +403,13 @@ class ContentService:
                 reading = row["reading"]
                 item["reading"] = {
                     key: reading[key] for key in ("level", "part", "subtitle_status", "truncated")
+                }
+            if row.get("article"):
+                article = row["article"]
+                item["article"] = {
+                    "method": article["method"],
+                    "truncated": article["truncated"],
+                    "image_links": len(article["images"]),
                 }
             if len(render([*selected, item]).encode()) > max_bytes:
                 return False

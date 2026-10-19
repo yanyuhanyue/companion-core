@@ -77,6 +77,46 @@ class ReadingEvidence(StrictModel):
         return self
 
 
+class ArticleImage(StrictModel):
+    url: str = Field(max_length=2048)
+    text_offset: int = Field(ge=0, le=12000)
+
+    @model_validator(mode="after")
+    def source_image(self):
+        url = urlsplit(self.url)
+        if (
+            url.scheme != "https"
+            or url.hostname not in {"imgheybox.max-c.com", "imgheybox1.max-c.com"}
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.port not in {None, 443}
+            or not url.path.startswith("/")
+        ):
+            raise ValueError("Invalid article image reference")
+        return self
+
+
+class ArticleEvidence(StrictModel):
+    method: Literal["public_html", "source_api"]
+    fetched_at: AwareDatetime
+    response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_bytes: int = Field(gt=0, le=1048576)
+    images: list[ArticleImage] = Field(default_factory=list, max_length=2)
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def image_order(self):
+        if len({row.url for row in self.images}) != len(self.images):
+            raise ValueError("Duplicate article image")
+        if [row.text_offset for row in self.images] != sorted(
+            row.text_offset for row in self.images
+        ):
+            raise ValueError("Invalid article image order")
+        return self
+
+
 class ObservationPayload(StrictModel):
     title: str = Field(default="", max_length=300)
     text: str = Field(default="", max_length=12000)
@@ -88,6 +128,7 @@ class ObservationPayload(StrictModel):
     processor_id: str | None = Field(default=None, min_length=1, max_length=128)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
     reading: ReadingEvidence | None = None
+    article: ArticleEvidence | None = None
 
 
 class ObservationEvent(StrictModel):
@@ -216,6 +257,18 @@ class ObservationService:
         ):
             raise CoreError("OBSERVATION_TIME_OUT_OF_RANGE", 400)
         status, kind = observation.result_status, observation.source_kind
+        if payload.article is not None:
+            fetched = payload.article.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
+            if (
+                observation.source != "heybox"
+                or status != "FETCHED"
+                or kind != "text"
+                or any(image.text_offset >= len(payload.text) for image in payload.article.images)
+                or not after(self.clock(), -86400 * self.settings.raw_event_retention_days)
+                <= fetched
+                <= after(self.clock(), 300)
+            ):
+                raise CoreError("ARTICLE_EVIDENCE_MISMATCH", 400)
         if payload.reading is not None:
             fetched = payload.reading.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
             if (
@@ -305,8 +358,9 @@ class ObservationService:
         receipt = observation.model_dump(
             mode="json", exclude={"event_id", "trace_id", "privacy_epoch"}
         )
-        if receipt["payload"]["reading"] is None:
-            receipt["payload"].pop("reading")
+        for field in ("reading", "article"):
+            if receipt["payload"][field] is None:
+                receipt["payload"].pop(field)
         fingerprint = digest(receipt)
         source, external_id = (
             "observation." + adapter.source,

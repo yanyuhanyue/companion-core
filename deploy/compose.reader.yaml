@@ -1,6 +1,6 @@
 # Explicit opt-in. Tokens are scoped observation credentials, never owner/Bridge credentials.
 services:
-  bilibili-reader:
+  bilibili-reader: &reader
     profiles: [reader]
     build:
       context: ..
@@ -20,6 +20,13 @@ services:
       - /tmp:rw,nosuid,nodev,size=32m
     networks: [reader]
     restart: "no"
+  heybox-reader:
+    <<: *reader
+    profiles: [heybox-reader]
+    command: [--source, heybox,
+              --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
+              --adapter-id, "${COMPANION_HEYBOX_READER_ID:-heybox_source}"]
+    env_file: ../privacy/heybox-reader.env
 networks:
   reader:
     external: true

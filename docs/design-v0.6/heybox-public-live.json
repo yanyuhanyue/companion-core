@@ -1,0 +1,169 @@
+{
+  "checked_at": "2026-10-19T23:40:18.582010+00:00",
+  "source": "heybox",
+  "credentials_used": false,
+  "model_calls": 0,
+  "qq_messages": 0,
+  "samples": [
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/168860244",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/168860244",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/152986484",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/152986484",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/177617584",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/177617584",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/185073726",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/185073726",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/185060603",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/185060603",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184921242",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/184921242",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184904308",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/184904308",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184839596",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/184839596",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184746213",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/184746213",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184673780",
+      "status": "FAILED",
+      "items": [],
+      "error_code": "READ_BODY_UNAVAILABLE",
+      "used_requests": 1,
+      "used_bytes": 3479,
+      "sources": [
+        {
+          "role": "page",
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/184673780",
+          "sha256": "3b66c759942b036aadfffdd850bbd01b24af8384c01c40c16858de19610ab5fe",
+          "bytes": 3479
+        }
+      ]
+    }
+  ]
+}

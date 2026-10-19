@@ -12,7 +12,12 @@ from pydantic import Field
 
 from companion.contracts import CoreError, StrictModel
 from companion.goals import GoalProposal, GoalScope
-from companion.observation import ObservationEvent, ObservationPayload, ReadingEvidence
+from companion.observation import (
+    ArticleEvidence,
+    ObservationEvent,
+    ObservationPayload,
+    ReadingEvidence,
+)
 from companion.privacy import epoch
 from companion.store import after, encode, uid
 from companion.transport import digest
@@ -22,7 +27,12 @@ def content_target(url):
     """Accept content identifiers only; adapters never fetch arbitrary user URLs."""
     try:
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.username or parsed.port not in {None, 443}:
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.port not in {None, 443}
+        ):
             raise ValueError()
         if parsed.fragment:
             raise ValueError()
@@ -31,12 +41,15 @@ def content_target(url):
             if match:
                 return "bilibili", "https://www.bilibili.com/video/" + match[1]
         if parsed.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
-            match = re.fullmatch(r"/(?:app/)?bbs/link/([0-9]{1,32})/?", parsed.path)
+            match = re.fullmatch(
+                r"/(?:(?:app/)?bbs/link|a)/([0-9]{1,32}|[0-9a-fA-F]{12})/?", parsed.path
+            )
             post_id = match[1] if match else ""
             if parsed.path == "/v3/bbs/app/api/web/share":
-                post_id = parse_qs(parsed.query).get("link_id", [""])[0]
-            if re.fullmatch(r"[0-9]{1,32}", post_id):
-                return "heybox", "https://www.xiaoheihe.cn/app/bbs/link/" + post_id
+                identifiers = parse_qs(parsed.query, keep_blank_values=True).get("link_id", [])
+                post_id = identifiers[0] if len(identifiers) == 1 else ""
+            if re.fullmatch(r"[0-9]{1,32}|[0-9a-fA-F]{12}", post_id):
+                return "heybox", "https://www.xiaoheihe.cn/app/bbs/link/" + post_id.lower()
     except ValueError:
         pass
     raise CoreError("CONTENT_URL_NOT_ALLOWED", 400)
@@ -48,6 +61,7 @@ class ReadItem(StrictModel):
     url: str = Field(min_length=1, max_length=2048)
     topic: str = Field(default="", max_length=80)
     reading: ReadingEvidence | None = None
+    article: ArticleEvidence | None = None
     image_urls: list[Annotated[str, Field(max_length=2048)]] = Field(
         default_factory=list, max_length=2
     )
@@ -342,8 +356,9 @@ class ExplorationService:
         if receipt["used_requests"] is None:
             receipt.pop("used_requests")
         for item in receipt["items"]:
-            if item["reading"] is None:
-                item.pop("reading")
+            for field in ("reading", "article"):
+                if item[field] is None:
+                    item.pop(field)
         fingerprint = digest(receipt)
         result_ids, failed_step = [], None
         with s.transaction():
@@ -405,6 +420,11 @@ class ExplorationService:
                     text = item.title if discovered else item.text.strip()
                     if not text:
                         raise CoreError("READ_BODY_REQUIRED", 400)
+                    if item.article and (
+                        item.image_urls != [image.url for image in item.article.images]
+                        or item.article.response_bytes > result.used_bytes
+                    ):
+                        raise CoreError("ARTICLE_EVIDENCE_MISMATCH", 400)
                     provider_id = request_id + ":" + str(index)
                     observation = ObservationEvent(
                         schema_version=2,
@@ -425,6 +445,7 @@ class ExplorationService:
                             url=canonical,
                             requested_url=json.loads(step["scope_json"])["url"] if step else "",
                             reading=item.reading,
+                            article=item.article,
                         ),
                     )
                     event_id = self.core.observations.append(adapter_id, observation)["event_id"]

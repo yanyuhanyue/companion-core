@@ -3,10 +3,13 @@ import hashlib
 import json
 import socket
 import ssl
+from pathlib import Path
 
 import httpcore
 import httpx
 import pytest
+from alembic import command
+from alembic.config import Config
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
@@ -439,6 +442,7 @@ def test_pre_v06_observation_fingerprint_still_replays(core):
     core.observations.append("reader", item)
     old_receipt = item.model_dump(mode="json", exclude={"event_id", "trace_id", "privacy_epoch"})
     old_receipt["payload"].pop("reading")
+    old_receipt["payload"].pop("article")
     assert core.store.one("SELECT fingerprint FROM events WHERE event_id=?", (item.event_id,))[
         "fingerprint"
     ] == digest(old_receipt)
@@ -481,3 +485,48 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("reservation", [1, 4])
+def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, reservation):
+    configure(core)
+    core.settings.content_enabled = True
+    core.settings.observation_adapters["bili"].reader_max_requests = reservation
+    ingest(core, text=URL)
+    lease = core.exploration.lease("bili")
+    before = core.store.one(
+        "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+    )
+    cfg = Config()
+    cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
+    if reservation == 4:
+        with pytest.raises(RuntimeError, match="READER_BUDGET_DOWNGRADE"):
+            command.downgrade(cfg, "0013_content")
+        assert (
+            core.store.one(
+                "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+            )
+            == before
+        )
+        assert (
+            core.store.one("SELECT version_num FROM alembic_version")["version_num"]
+            == "0014_reader_budget"
+        )
+    else:
+        command.downgrade(cfg, "0013_content")
+        after = core.store.one(
+            "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+        )
+        assert after == {
+            key: value
+            for key, value in before.items()
+            if key not in {"reserved_requests", "used_requests"}
+        }
+        migrate(core.settings.database)
+        assert (
+            core.store.one(
+                "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+            )
+            == before
+        )
