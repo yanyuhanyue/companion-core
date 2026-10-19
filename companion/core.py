@@ -14,6 +14,7 @@ from companion.exploration import ExplorationService
 from companion.expression import ExpressionEngine
 from companion.goals import GoalEngine
 from companion.life import LifeService, is_life_command
+from companion.media import MediaService
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.observation import ObservationService
@@ -57,6 +58,7 @@ class Core:
             )
         self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
         self.observations = ObservationService(self.store, settings, clock)
+        self.media = MediaService(self.store, settings, clock, self.observations)
         self.affect = AffectEngine(self.store, settings, clock)
         self.reflections = ReflectionService(
             self.store, settings, model, self.diary.repo, self.ledger, clock
@@ -903,7 +905,10 @@ class Core:
                     "dsh.run" in endpoint.capabilities
                     for endpoint in self.settings.executive.endpoints.values()
                 ),
-                "android": False,
+                "media": self.settings.media.enabled,
+                "voice": self.settings.media.enabled and self.settings.voice_enabled,
+                "camera": self.settings.media.enabled and self.settings.camera_enabled,
+                "android": self.settings.media.enabled and self.settings.android_enabled,
                 "public_publish": False,
             },
             "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),

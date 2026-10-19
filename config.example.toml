@@ -94,3 +94,11 @@ allow_changes = false
 daily_calls = 0
 daily_micro_usd = 0
 monthly_micro_usd = 0
+
+# Explicit short owner sessions; configure HTTPS providers and bounded costs before enabling.
+[media]
+enabled = false
+daily_micro_usd = 0
+max_session_seconds = 180
+max_session_bytes = 2000000
+max_chunk_bytes = 64000

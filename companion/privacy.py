@@ -24,6 +24,10 @@ def redact(text, settings):
         settings.control_token.get_secret_value(),
         *(adapter.token.get_secret_value() for adapter in settings.observation_adapters.values()),
         *(endpoint.token.get_secret_value() for endpoint in settings.executive.endpoints.values()),
+        *(
+            endpoint.key.get_secret_value()
+            for endpoint in (settings.media.stt, settings.media.tts, settings.media.vision)
+        ),
     ):
         if secret:
             text = text.replace(secret, "[REDACTED]")
@@ -293,6 +297,7 @@ class ErasureLedger:
         from companion.executive import erase_executive
         from companion.exploration import erase_exploration
         from companion.goals import erase_goals
+        from companion.media import erase_media_links
         from companion.observation import dependent_events, erase_observations
         from companion.reflection import erase_reflections
 
@@ -323,6 +328,7 @@ class ErasureLedger:
         erase_goals(store, event_ids)
         erase_exploration(store, event_ids)
         erase_executive(store, event_ids)
+        erase_media_links(store, event_ids)
         for event_id in event_ids:
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",

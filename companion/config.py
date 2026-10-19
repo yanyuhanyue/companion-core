@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
 
 from companion.executive_protocol import ExecutiveConfig
+from companion.media import MediaConfig
 
 
 class ObservationAdapterConfig(BaseModel):
@@ -65,6 +66,7 @@ class Settings(BaseModel):
     diary_admin_token: SecretStr = SecretStr("")
     control_token: SecretStr = SecretStr("")
     executive: ExecutiveConfig = Field(default_factory=ExecutiveConfig)
+    media: MediaConfig = Field(default_factory=MediaConfig)
     observation_enabled: bool = False
     observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
     voice_enabled: bool = False
@@ -200,6 +202,8 @@ class Settings(BaseModel):
                     data[field] = TypeAdapter(list[str]).validate_json(value)
                 elif field == "executive":
                     data[field] = ExecutiveConfig.model_validate_json(value)
+                elif field == "media":
+                    data[field] = MediaConfig.model_validate_json(value)
                 else:
                     data[field] = value
         return cls.model_validate(data)

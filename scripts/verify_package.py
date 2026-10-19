@@ -29,6 +29,11 @@ def main():
         assert not any("output/playwright/" in n for n in archive.getnames())
     with zipfile.ZipFile(wheel) as archive:
         assert not any(forbidden.intersection(Path(n).parts) for n in archive.namelist())
+        assert {
+            "companion/media_web/index.html",
+            "companion/media_web/app.js",
+            "companion/media_web/style.css",
+        } <= set(archive.namelist())
         temporary = ROOT / ".local"
         temporary.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:

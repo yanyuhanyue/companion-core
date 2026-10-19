@@ -19,6 +19,7 @@ from companion.contracts import (
 )
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
+from companion.media_api import register_media_routes
 from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
@@ -144,6 +145,7 @@ def create_app(settings=None):
                 "exploration",
                 "expression",
                 "executive",
+                "media",
             ],
         }
 
@@ -159,6 +161,7 @@ def create_app(settings=None):
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
+    register_media_routes(app, control_auth)
 
     @app.get("/internal/v2/tools", dependencies=control_auth)
     async def list_tools():

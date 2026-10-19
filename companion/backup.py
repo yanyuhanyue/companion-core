@@ -62,6 +62,12 @@ def restore(source, destination, key, ledger_path):
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
                 restore_executive(store, utcnow())
                 store.execute(
+                    "UPDATE media_sessions SET state='CLOSED',closed_at=?,"
+                    "close_reason='RESTORED_SESSION_REVOKED' WHERE state='OPEN'",
+                    (utcnow(),),
+                )
+                store.execute("UPDATE media_requests SET state='UNKNOWN' WHERE state='RESERVED'")
+                store.execute(
                     "UPDATE exploration_requests SET state='UNKNOWN',lease_token=NULL,"
                     "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "
                     "WHERE state IN ('QUEUED','RUNNING')"
