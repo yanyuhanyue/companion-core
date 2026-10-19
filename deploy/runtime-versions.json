@@ -1,0 +1,16 @@
+{
+  "verified_date": "2026-10-19",
+  "astrbot": {
+    "version": "4.29.1",
+    "image": "soulter/astrbot:v4.29.1",
+    "release": "https://github.com/AstrBotDevs/AstrBot/releases/tag/v4.29.1"
+  },
+  "napcat": {
+    "version": "4.18.38",
+    "image": "companion-napcat:4.18.38",
+    "dockerfile": "deploy/napcat/Dockerfile",
+    "release": "https://github.com/NapNeko/NapCatQQ/releases/tag/v4.18.38",
+    "asset": "https://github.com/NapNeko/NapCatQQ/releases/download/v4.18.38/NapCat.Shell.zip",
+    "asset_sha256": "735f2e633247df3ffd6e8ee8b84d7039c315b2655f5807e5f0029f93d2c30016"
+  }
+}

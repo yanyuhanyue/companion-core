@@ -6,6 +6,8 @@
 
 本地兼容性核查对象：AstrBot 4.29.1，源码提交 `e5e21b71aec5642f110eb115eb8e9a0d8028b7e5`；使用 `stop_event()`、`Star.initialize/terminate`、`StarTools.get_data_dir()`、`Context.send_message()`。实际生产部署应固定你验收过的 AstrBot/NapCat 版本，避免自动升级。
 
+2026-10-19 的运行版本记录为 AstrBot 4.29.1 / NapCat 4.18.38；镜像固定方式和 NapCat 构建步骤见 [运行版本说明](../deploy/README.md)。
+
 ## 启动核心容器
 
 ```bash
