@@ -104,6 +104,7 @@ class Core:
                 if diary_command:
                     body["diary_command"] = True
                     body["diary_correction"] = body["text"].strip().startswith("修改日记")
+                    body["diary_timezone"] = cfg.timezone
                 if body["text"].strip() == "暂停写日记":
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
                     self.diary.repo.cancel_pending("DIARY_PAUSED")

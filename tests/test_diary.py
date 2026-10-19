@@ -378,6 +378,74 @@ def test_d16_fsync_record_survives_db_failure_before_apply(core, monkeypatch):
         reopened.store.close()
 
 
+def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path):
+    seed_day(core)
+    first = core.store.one("SELECT conversation_id FROM events WHERE event_id='evt_test_1'")
+    first_reply = enqueue(
+        core.store, "evt_test_1", first["conversation_id"], "第一天回复", core.clock()
+    )
+    core.store.execute(
+        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+        (DAY.isoformat() + "T05:00:00.000000+00:00", first_reply),
+    )
+    generate(core)
+    other_day = DAY - timedelta(days=1)
+    for i in range(11, 14):
+        ingest(core, i, "另一日讨论了天文阅读。", at=other_day.isoformat() + "T04:00:00+00:00")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    other_reply = enqueue(
+        core.store, "evt_test_11", first["conversation_id"], "独立的一天", core.clock()
+    )
+    core.store.execute(
+        "UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
+        (other_day.isoformat() + "T05:00:00.000000+00:00", other_reply),
+    )
+    core.diary.schedule_day(other_day)
+    assert run(core.diary.generate_once("g0-check"))
+    for i, day in ((20, DAY), (21, other_day)):
+        ingest(core, i, f"修改日记 {day} 这是该日期的主人修订")
+        assert run(core.run_once())
+    ingest(core, 22, "读日记")
+    assert run(core.run_once())
+    saved = core.diary.get_day(other_day, "10001")
+    assert saved
+    key = Fernet.generate_key()
+    archive = tmp_path / "two-days.enc"
+    backup(core.settings.database, archive, key)
+    core.diary.forget(DAY, "10001")
+    destination = tmp_path / "restored-days.db"
+    restore(archive, destination, key, core.settings.erasure_ledger)
+    restored = Core(
+        core.settings.model_copy(update={"database": str(destination)}), core.model, core.clock
+    )
+    try:
+        for instance in (core, restored):
+            assert instance.diary.get_day(DAY, "10001") is None
+            assert instance.diary.get_day(other_day, "10001")["body_md"] == saved["body_md"]
+            assert instance.store.one("SELECT redacted FROM events WHERE event_id='evt_test_20'")[
+                "redacted"
+            ]
+            assert not instance.store.one(
+                "SELECT redacted FROM events WHERE event_id='evt_test_21'"
+            )["redacted"]
+            assert (
+                json.loads(
+                    instance.store.one(
+                        "SELECT content_json FROM outbox WHERE message_id=?", (other_reply,)
+                    )["content_json"]
+                )["text"]
+                == "独立的一天"
+            )
+            assert (
+                instance.store.one(
+                    "SELECT content_json FROM outbox WHERE origin_event_id='evt_test_22'"
+                )["content_json"]
+                == "{}"
+            )
+    finally:
+        restored.store.close()
+
+
 def test_d18_http_diary_requires_distinct_admin_authority(core):
     seed_day(core)
     generate(core)

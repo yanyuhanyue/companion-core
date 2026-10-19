@@ -52,6 +52,28 @@ def advance_epoch(store):
     )
 
 
+def diary_copies(store, dates):
+    """Resolve explicit diary commands, including records from before date metadata existed."""
+    result = set()
+    for row in store.rows(
+        "SELECT event_id,body_json FROM events WHERE redacted=0 "
+        "AND json_extract(body_json,'$.diary_command')=1"
+    ):
+        body = json.loads(row["body_json"])
+        parts = body.get("text", "").split(maxsplit=2)
+        if not parts:
+            continue
+        if parts[0] == "日记列表" or (parts[0] == "读日记" and len(parts) == 1):
+            result.add(row["event_id"])
+        elif parts[0] in {"读日记", "修改日记"} and len(parts) >= 2:
+            if any(
+                parts[1] == day and body.get("diary_timezone", timezone) == timezone
+                for day, timezone in dates
+            ):
+                result.add(row["event_id"])
+    return result
+
+
 class ErasureLedger:
     def __init__(self, path):
         self.path = Path(path)
@@ -155,17 +177,13 @@ class ErasureLedger:
             (target,),
         ):
             return
-        # QQ corrections contain a copy of diary text; include those raw copies in erasure.
-        corrections = store.rows(
-            "SELECT event_id FROM events WHERE redacted=0 "
-            "AND json_extract(body_json,'$.diary_correction')=1"
-        )
+        copies = diary_copies(store, {(day, timezone)})
         record = {
             "seq": len(self.read()),
             "erasure_id": uid("erase"),
             "memory_id": target,
             "memory_ids": [],
-            "event_ids": [row["event_id"] for row in corrections],
+            "event_ids": sorted(copies),
             "at": now,
             "target_type": "diary",
             "diary_day": day,
@@ -179,7 +197,7 @@ class ErasureLedger:
 
     def erase_diary_projections(self, store, record):
         if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='diary_entries'"):
-            return
+            return set()
         targets = set()
         if record.get("target_type") == "diary":
             day, timezone = record["diary_day"], record["diary_timezone"]
@@ -211,21 +229,28 @@ class ErasureLedger:
                     (event_id,),
                 )
             )
-        # Existing erasure invalidates every stored reply; diaries using those replies follow it.
-        affected.update(
-            row["entry_id"]
-            for row in store.rows(
-                "SELECT entry_id FROM diary_evidence WHERE outbox_message_id IS NOT NULL"
+        if record.get("target_type") != "diary":
+            # Raw-fact erasure still clears every reply that could paraphrase that fact.
+            affected.update(
+                row["entry_id"]
+                for row in store.rows(
+                    "SELECT entry_id FROM diary_evidence WHERE outbox_message_id IS NOT NULL"
+                )
             )
-        )
-        affected.update(
-            row["entry_id"]
-            for row in store.rows(
-                "SELECT d.entry_id FROM diary_entries d WHERE status='COMMITTED' AND "
-                "(generator_version<>'diary-1' OR NOT EXISTS "
-                "(SELECT 1 FROM diary_evidence e WHERE e.entry_id=d.entry_id))"
+            affected.update(
+                row["entry_id"]
+                for row in store.rows(
+                    "SELECT d.entry_id FROM diary_entries d WHERE status='COMMITTED' AND "
+                    "(generator_version<>'diary-1' OR NOT EXISTS "
+                    "(SELECT 1 FROM diary_evidence e WHERE e.entry_id=d.entry_id))"
+                )
             )
-        )
+        dates = {
+            (row["local_date"], row["timezone"])
+            for row in store.rows("SELECT entry_id,local_date,timezone FROM diary_entries")
+            if row["entry_id"] in affected
+        }
+        copies = diary_copies(store, dates) if dates else set()
         for entry_id in affected:
             store.execute(
                 "UPDATE diary_entries SET title='',body_md='',source_set_sha256='',"
@@ -235,18 +260,6 @@ class ErasureLedger:
             )
             store.execute("DELETE FROM diary_revisions WHERE entry_id=?", (entry_id,))
             store.execute("DELETE FROM diary_evidence WHERE entry_id=?", (entry_id,))
-        if affected:
-            # These owner inputs copy corrected diary text; they are excluded from extraction.
-            store.execute(
-                "UPDATE jobs SET state='CANCELLED',lease_token=NULL WHERE event_id IN "
-                "(SELECT event_id FROM events WHERE "
-                "json_extract(body_json,'$.diary_correction')=1) "
-                "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')"
-            )
-            store.execute(
-                "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 "
-                "WHERE json_extract(body_json,'$.diary_correction')=1"
-            )
         # Never retry a model output captured before an erasure, even after a process crash.
         store.execute(
             "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,"
@@ -254,6 +267,7 @@ class ErasureLedger:
             "WHERE state IN ('RUNNING','RETRY_WAIT')",
             (record["at"],),
         )
+        return copies
 
     def replay(self, store):
         lines = self.read()
@@ -271,7 +285,7 @@ class ErasureLedger:
                     self.apply(store, record)
 
     def apply(self, store, record):
-        self.erase_diary_projections(store, record)
+        copies = self.erase_diary_projections(store, record)
         for memory_id in record["memory_ids"]:
             store.execute(
                 "UPDATE memories SET content='',status='FORGOTTEN',fact_key='',"
@@ -280,26 +294,34 @@ class ErasureLedger:
             )
             store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
             store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (memory_id,))
-        for event_id in record["event_ids"]:
+        event_ids = set(record["event_ids"]) | copies
+        for event_id in event_ids:
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",
                 (event_id,),
             )
             store.execute(
-                "UPDATE jobs SET state='CANCELLED',lease_token=NULL "
+                "UPDATE jobs SET state='CANCELLED',lease_token=NULL,"
+                "last_error_code='PRIVACY_CHANGED' "
                 "WHERE event_id=? AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
                 (event_id,),
             )
-        # Summaries/replies may paraphrase the forgotten fact; invalidate all owner projections.
-        store.execute("DELETE FROM conversation_summaries")
-        store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
-        store.execute("DELETE FROM trait_evidence")
-        store.execute("DELETE FROM traits")
-        store.execute(
+        clear_reply = (
             "UPDATE outbox SET content_json='{}',content_sha256='',"
             "state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
             "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END"
         )
+        if record.get("target_type") == "diary":
+            # Diary commands never enter chat context, memory extraction, or diary sources.
+            for event_id in event_ids:
+                store.execute(clear_reply + " WHERE origin_event_id=?", (event_id,))
+        else:
+            # Summaries/replies may paraphrase the forgotten raw fact.
+            store.execute("DELETE FROM conversation_summaries")
+            store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
+            store.execute("DELETE FROM trait_evidence")
+            store.execute("DELETE FROM traits")
+            store.execute(clear_reply)
         advance_epoch(store)
         store.execute(
             "INSERT OR IGNORE INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
