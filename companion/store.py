@@ -87,6 +87,8 @@ class Store:
             "observations": {"event_id", "result_status", "captured_privacy_epoch"},
             "event_dependencies": {"event_id", "source_event_id"},
             "consents": {"capabilities_json", "expires_at", "revoked_at"},
+            "affect_states": {"state_json", "expires_at", "version"},
+            "affect_evidence": {"event_id", "reason_code", "expires_at"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

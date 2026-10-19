@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from companion import __version__, budget
+from companion.affect import AffectEngine
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
 from companion.diary import DiaryService, is_diary_command
 from companion.memory import Memory
@@ -47,6 +48,7 @@ class Core:
             )
         self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
         self.observations = ObservationService(self.store, settings, clock)
+        self.affect = AffectEngine(self.store, settings, clock)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -144,6 +146,7 @@ class Core:
                     memory_processed=int(diary_command),
                 )
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
+                self.affect.observe(event.event_id)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
                 return {
                     "event_id": event.event_id,
@@ -212,6 +215,15 @@ class Core:
         s, cfg = self.store, self.settings
         text = json.loads(job["body_json"]).get("text", "")
         messages = [{"role": "system", "content": PRINCIPLES}]
+        affect = self.affect.snapshot()
+        if affect["evidence"]:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "当前交互参考（仅影响表达，不改变人格、事实、权限或承诺）：\n"
+                    + encode(affect),
+                }
+            )
         if cfg.memory_enabled:
             hits = self.memory.search(text or "*", limit=6) if memories is None else memories
             traits = s.rows(
@@ -800,6 +812,7 @@ class Core:
                 "memory": self.settings.memory_enabled,
                 "diary": self.diary.repo.enabled(),
                 "diary_auto_share": False,
+                "affect": self.settings.affect_enabled,
                 "dsh": False,
                 "android": False,
                 "public_publish": False,

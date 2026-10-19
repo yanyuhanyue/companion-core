@@ -58,6 +58,9 @@ class Settings(BaseModel):
     voice_enabled: bool = False
     camera_enabled: bool = False
     android_enabled: bool = False
+    affect_enabled: bool = False
+    affect_decay_minutes: int = Field(default=180, ge=1, le=1440)
+    affect_max_evidence: int = Field(default=12, ge=4, le=100)
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)

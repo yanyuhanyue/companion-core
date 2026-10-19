@@ -131,7 +131,7 @@ def create_app(settings=None):
         return {
             "status": "ready",
             "schema": version["version_num"],
-            "capabilities": ["m0", "m1", "memory_index", "diary", "observations"],
+            "capabilities": ["m0", "m1", "memory_index", "diary", "observations", "affect"],
         }
 
     diary_auth = [Depends(diary_admin)]
@@ -142,6 +142,10 @@ def create_app(settings=None):
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
+
+    @app.get("/internal/v2/affect", dependencies=control_auth)
+    async def affect_snapshot():
+        return app.state.core.affect.snapshot()
 
     @app.get("/internal/v2/observations/{adapter_id}/context", dependencies=adapter_auth)
     async def observation_context(adapter_id: str):
