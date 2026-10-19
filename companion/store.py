@@ -105,6 +105,7 @@ class Store:
             "tool_approvals": {"scope_sha256", "expires_at", "revoked_at"},
             "media_sessions": {"token_hash", "captured_privacy_epoch", "max_bytes"},
             "media_requests": {"request_key", "fingerprint", "usage_request_id", "event_id"},
+            "content_items": {"owner_event_id", "read_request_id", "usage_request_id", "deadline"},
         }
         return all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}

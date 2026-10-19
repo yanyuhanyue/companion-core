@@ -68,6 +68,11 @@ def restore(source, destination, key, ledger_path):
                 )
                 store.execute("UPDATE media_requests SET state='UNKNOWN' WHERE state='RESERVED'")
                 store.execute(
+                    "UPDATE content_items SET state='UNKNOWN',lease_token=NULL,lease_until=NULL,"
+                    "error_code='RESTORED_CONTENT_REQUIRES_RECONCILIATION' "
+                    "WHERE state IN ('WAITING','QUEUED','FETCHING','RUNNING')"
+                )
+                store.execute(
                     "UPDATE exploration_requests SET state='UNKNOWN',lease_token=NULL,"
                     "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "
                     "WHERE state IN ('QUEUED','RUNNING')"

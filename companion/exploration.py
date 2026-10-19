@@ -104,6 +104,18 @@ class ExplorationService:
             for at in (day, day.replace(day=1))
         )
 
+    def autonomous(self, request, step):
+        if step:
+            return step["kind"] == "self"
+        if request["operation"] != "read":
+            return True
+        return not self.store.one(
+            "SELECT 1 FROM exploration_evidence x JOIN events e USING(event_id) "
+            "WHERE x.request_id=? AND e.source='qq.onebot' AND e.actor_id='owner' "
+            "AND e.redacted=0",
+            (request["request_id"],),
+        )
+
     def create(self, adapter_id, operation, key, url="", step=None, source_event_ids=None):
         self.adapter(adapter_id)
         s, now = self.store, self.clock()
@@ -272,7 +284,7 @@ class ExplorationService:
                 if row["operation"] == "discover" and not cfg.exploration_enabled:
                     continue
                 step = json.loads(row["goal_step_json"])
-                if paused and paused["value"] == "1" and (not step or step["kind"] == "self"):
+                if paused and paused["value"] == "1" and self.autonomous(row, step):
                     continue
                 if step:
                     if (counts["reads"] or 0) >= cfg.exploration_daily_deep_reads:
@@ -328,7 +340,7 @@ class ExplorationService:
                 raise CoreError("PRIVACY_CHANGED", 409)
             step = json.loads(row["goal_step_json"])
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
-            if paused and paused["value"] == "1" and (not step or step["kind"] == "self"):
+            if paused and paused["value"] == "1" and self.autonomous(row, step):
                 raise CoreError("AUTONOMY_PAUSED", 409)
             if step:
                 self.core.goals.validate_lease(step)

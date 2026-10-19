@@ -37,6 +37,29 @@
       "required": ["text", "media"],
       "properties": {
         "text": {"type": "string", "maxLength": 20000},
+        "shared_content": {
+          "type": "array", "maxItems": 4,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["kind", "url"],
+                "properties": {
+                  "kind": {"const": "link"},
+                  "url": {"type": "string", "minLength": 1, "maxLength": 2048}
+                }
+              },
+              {
+                "type": "object", "additionalProperties": false,
+                "required": ["kind", "slot"],
+                "properties": {
+                  "kind": {"const": "image"},
+                  "slot": {"type": "integer", "minimum": 0, "maximum": 1}
+                }
+              }
+            ]
+          }
+        },
         "media": {
           "type": "array", "maxItems": 10,
           "items": {

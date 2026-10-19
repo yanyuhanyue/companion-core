@@ -1,4 +1,5 @@
 import hmac
+import re
 from contextlib import asynccontextmanager
 from datetime import date
 
@@ -8,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from companion import __version__
 from companion.config import Settings
+from companion.content_api import register_content_routes
 from companion.contracts import (
     CoreError,
     DeliveryResult,
@@ -24,19 +26,25 @@ from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
 class BodyLimit:
-    def __init__(self, app):
+    def __init__(self, app, image_limit=131072):
         self.app = app
+        self.image_limit = image_limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
             return await self.app(scope, receive, send)
         body = bytearray()
+        limit = (
+            self.image_limit
+            if re.fullmatch(r"/internal/v2/content/[^/]+/image", scope["path"])
+            else 131072
+        )
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
                 return
             body.extend(message.get("body", b""))
-            if len(body) > 131072:
+            if len(body) > limit:
                 return await JSONResponse({"error": "BODY_TOO_LARGE"}, 413)(scope, receive, send)
             if not message.get("more_body"):
                 break
@@ -69,7 +77,10 @@ def create_app(settings=None):
         redoc_url=None,
         openapi_url=None,
     )
-    app.add_middleware(BodyLimit)
+    app.add_middleware(
+        BodyLimit,
+        image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
+    )
 
     async def authenticate(authorization: str = Header(default="")):
         expected = "Bearer " + settings.bridge_token.get_secret_value()
@@ -118,6 +129,7 @@ def create_app(settings=None):
 
     prefix = "/internal/v1"
     auth = [Depends(authenticate)]
+    register_content_routes(app, auth)
 
     @app.get(prefix + "/health/live")
     async def live():
@@ -146,6 +158,7 @@ def create_app(settings=None):
                 "expression",
                 "executive",
                 "media",
+                "content",
             ],
         }
 
@@ -262,6 +275,8 @@ def create_app(settings=None):
 
     @app.post("/internal/v2/observations/{adapter_id}", dependencies=adapter_auth, status_code=202)
     async def observe(adapter_id: str, body: ObservationEvent):
+        if settings.observation_adapters[adapter_id].source == "qq_image":
+            raise CoreError("CONTENT_IMAGE_INTAKE_REQUIRED", 403)
         return app.state.core.observations.append(adapter_id, body)
 
     @app.get("/internal/v2/observations", dependencies=control_auth)

@@ -33,6 +33,7 @@ def main():
             "COMPANION_DIARY_ADMIN_TOKEN": secrets.token_urlsafe(32),
             "COMPANION_CONTROL_TOKEN": secrets.token_urlsafe(32),
             "COMPANION_CONSOLIDATION_ENABLED": "true",
+            "COMPANION_CONTENT_ENABLED": "true",
             "PYTHONDONTWRITEBYTECODE": "1",
             "TEMP": directory,
             "TMP": directory,
@@ -56,6 +57,8 @@ def main():
                 ["worker"],
                 ["diary-worker"],
                 ["life-worker"],
+                ["executive-worker"],
+                ["content-worker"],
             ):
                 processes.append(
                     subprocess.Popen(
@@ -94,7 +97,13 @@ def main():
                         "scope": "private",
                     },
                     "actor": {"platform_user_id": "10001", "role": "owner"},
-                    "payload": {"text": "你好", "media": []},
+                    "payload": {
+                        "text": "你好",
+                        "media": [],
+                        "shared_content": [
+                            {"kind": "link", "url": "https://www.xiaoheihe.cn/app/bbs/link/123456"}
+                        ],
+                    },
                     "trace_id": "trace_smoke_001",
                 }
                 result = client.post(
@@ -103,6 +112,9 @@ def main():
                     headers={"X-Idempotency-Key": "smoke-001"},
                 )
                 assert result.status_code == 202
+                content = client.get("/internal/v2/content/evt_smoke_001").json()
+                assert content["items"][0]["error_code"] == "CONTENT_READER_UNAVAILABLE"
+                assert not content["pending"]
                 for _ in range(100):
                     items = client.post(
                         "/internal/v1/deliveries/lease", json={"worker_id": "smoke", "limit": 1}
@@ -155,7 +167,11 @@ def main():
                     time.sleep(0.1)
                 else:
                     raise RuntimeError("Independent life worker did not process empty days")
-                print("PASS: HTTP API + separate chat/diary/life workers + private delivery + auth")
+                assert all(process.poll() is None for process in processes)
+                print(
+                    "PASS: API + chat/diary/life/executive/content workers "
+                    "+ private delivery + auth"
+                )
         finally:
             for process in processes:
                 if os.name == "nt":

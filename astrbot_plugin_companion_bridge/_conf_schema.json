@@ -82,6 +82,11 @@
     "description": "在文字回复中按意图选择本地表情",
     "default": false
   },
+  "content_enabled": {
+    "type": "bool",
+    "description": "解析主人分享链接和截图（需同时启用 Core 内容能力）",
+    "default": false
+  },
   "expression_meme_categories": {
     "type": "list",
     "description": "表情分类允许列表",

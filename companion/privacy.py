@@ -22,6 +22,7 @@ def redact(text, settings):
         settings.model_key.get_secret_value(),
         settings.diary_admin_token.get_secret_value(),
         settings.control_token.get_secret_value(),
+        settings.content.vision.key.get_secret_value(),
         *(adapter.token.get_secret_value() for adapter in settings.observation_adapters.values()),
         *(endpoint.token.get_secret_value() for endpoint in settings.executive.endpoints.values()),
         *(
@@ -294,6 +295,7 @@ class ErasureLedger:
     def apply(self, store, record):
         from companion.affect import erase_affect
         from companion.consolidation import erase_consolidation
+        from companion.content import erase_content
         from companion.executive import erase_executive
         from companion.exploration import erase_exploration
         from companion.goals import erase_goals
@@ -329,6 +331,7 @@ class ErasureLedger:
         erase_exploration(store, event_ids)
         erase_executive(store, event_ids)
         erase_media_links(store, event_ids)
+        erase_content(store, event_ids)
         for event_id in event_ids:
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",

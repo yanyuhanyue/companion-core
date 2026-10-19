@@ -78,6 +78,7 @@ exploration_daily_bytes = 0
 social_enabled = false
 social_semantic_threshold = 0.9
 expression_enabled = false
+content_enabled = false
 expression_cooldown_minutes = 30
 expression_meme_categories = ["happy", "like", "surprised", "morning", "sleep"]
 voice_enabled = false
@@ -102,3 +103,12 @@ daily_micro_usd = 0
 max_session_seconds = 180
 max_session_bytes = 2000000
 max_chunk_bytes = 64000
+
+[content]
+max_links_per_event = 2
+max_images_per_event = 2
+max_image_bytes = 1000000
+max_daily_image_bytes = 4000000
+max_daily_images = 4
+image_daily_micro_usd = 0
+wait_seconds = 30

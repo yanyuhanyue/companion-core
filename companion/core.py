@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from companion import __version__, budget
 from companion.affect import AffectEngine
 from companion.consolidation import NightlyConsolidator
+from companion.content import CONTEXT_RULES, ContentService
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
 from companion.diary import DiaryService, day_bounds, is_diary_command
 from companion.executive import Executive
@@ -69,6 +70,7 @@ class Core:
         self.life = LifeService(self)
         self.social = SocialPlanner(self)
         self.exploration = ExplorationService(self)
+        self.content = ContentService(self)
         self.expression = ExpressionEngine(self.store, settings, clock)
         self.executive = Executive(self.store, settings, clock)
 
@@ -84,6 +86,9 @@ class Core:
         if not key or len(key) > 512:
             raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)
         raw = event.model_dump(mode="json", exclude={"event_id", "trace_id"})
+        # Preserve the v1 fingerprint for messages queued before shared content existed.
+        if not raw["payload"]["shared_content"]:
+            raw["payload"].pop("shared_content")
         fingerprint = digest(raw)
         try:
             with s.transaction():
@@ -174,6 +179,8 @@ class Core:
                     memory_processed=int(diary_command or control_command),
                 )
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
+                if not diary_command and not control_command:
+                    self.content.schedule(event.event_id)
                 self.affect.observe(event.event_id)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
                 return {
@@ -231,6 +238,9 @@ class Core:
             )
             if not row:
                 return None
+            if self.settings.content_enabled and row["kind"] == "chat":
+                if self.content.status(row["event_id"])["pending"]:
+                    return None
             token = uid("lease")
             s.execute(
                 "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
@@ -242,7 +252,15 @@ class Core:
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
         text = json.loads(job["body_json"]).get("text", "")
-        messages = [{"role": "system", "content": PRINCIPLES + self.expression.instruction()}]
+        rules = PRINCIPLES + self.expression.instruction()
+        if cfg.content_enabled:
+            rules += CONTEXT_RULES
+        messages = [{"role": "system", "content": rules}]
+        current = {"role": "user", "content": text or "请看看我分享的内容。"}
+        content_reference = ""
+        if cfg.content_enabled and job["kind"] == "chat":
+            available = cfg.context_soft_tokens - budget.token_upper_bound([messages[0], current])
+            content_reference = self.content.context_message(job["event_id"], available - 24)
         affect = self.affect.snapshot()
         goals = self.life.context()
         if goals:
@@ -309,9 +327,14 @@ class Core:
                 reply = json.loads(row["content_json"]).get("text")
                 if reply:
                     messages.append({"role": "assistant", "content": reply})
-        messages.append({"role": "user", "content": text})
+        if content_reference:
+            messages.append({"role": "user", "content": content_reference})
+        messages.append(current)
         # Conservative bound. Always preserve static rules and the complete current message.
-        while len(messages) > 2 and budget.token_upper_bound(messages) > cfg.context_soft_tokens:
+        minimum = 3 if content_reference else 2
+        while (
+            len(messages) > minimum and budget.token_upper_bound(messages) > cfg.context_soft_tokens
+        ):
             messages.pop(1)
         return messages
 
@@ -602,7 +625,11 @@ class Core:
                 raise CoreError("PRIVACY_CHANGED", 503)
             if reply is None:
                 body = json.loads(job["body_json"])
-                if job["kind"] == "chat" and not body.get("text"):
+                if (
+                    job["kind"] == "chat"
+                    and not body.get("text")
+                    and not (self.settings.content_enabled and self.content._rows(job["event_id"]))
+                ):
                     reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"
                 else:
                     if self.settings.memory_enabled:
@@ -906,6 +933,7 @@ class Core:
                     for endpoint in self.settings.executive.endpoints.values()
                 ),
                 "media": self.settings.media.enabled,
+                "content": self.settings.content_enabled,
                 "voice": self.settings.media.enabled and self.settings.voice_enabled,
                 "camera": self.settings.media.enabled and self.settings.camera_enabled,
                 "android": self.settings.media.enabled and self.settings.android_enabled,
