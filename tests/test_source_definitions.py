@@ -263,6 +263,62 @@ def test_accepted_text_history_without_url_needs_no_new_fetch_or_receipt(core, s
     assert core.model.calls == []
 
 
+@pytest.mark.parametrize(
+    "source,legacy_url",
+    [
+        ("bilibili", "https://m.bilibili.com:443/video/BV1xx411c7mD/?p=1"),
+        ("heybox", "https://xiaoheihe.cn:443/a/123456?tracking=old"),
+    ],
+)
+def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legacy_url):
+    enable_sharing(core)
+    event = accepted_text(core, source)
+    event.payload.url = legacy_url
+    core.observations.append("reader", event)
+    candidate = core.social.consider(event.event_id)
+    assert candidate
+    # Before normalization, queued candidates retained the accepted URL verbatim.
+    core.store.execute(
+        "UPDATE social_candidates SET canonical_url=? WHERE candidate_id=?",
+        (legacy_url, candidate),
+    )
+    assert core.social.consider(event.event_id) == candidate
+    assert core.social.flush()
+    body = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])["text"]
+    assert event.payload.text in body
+    assert body.endswith(BILI if source == "bilibili" else HEYBOX)
+    assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    assert core.store.rows("SELECT * FROM exploration_requests") == []
+    assert core.model.calls == []
+
+
+@pytest.mark.parametrize(
+    "source,queued_url",
+    [
+        ("bilibili", HEYBOX),
+        ("heybox", BILI),
+        ("bilibili", "https://www.bilibili.com.evil.example/video/BV1xx411c7mD"),
+        ("heybox", "https://www.xiaoheihe.cn:8443/a/123456"),
+        ("bilibili", "https://www.bilibili.com/video/av999"),
+    ],
+)
+def test_legacy_queued_url_still_rejects_invalid_or_different_source(core, source, queued_url):
+    enable_sharing(core)
+    event = accepted_text(core, source)
+    core.observations.append("reader", event)
+    candidate = core.social.consider(event.event_id)
+    assert candidate
+    core.store.execute(
+        "UPDATE social_candidates SET canonical_url=? WHERE candidate_id=?",
+        (queued_url, candidate),
+    )
+    assert not core.social.flush()
+    assert core.store.rows("SELECT * FROM outbox") == []
+    assert core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?", (candidate,))[
+        "state"
+    ] == "SKIPPED"
+
+
 @pytest.mark.parametrize("mutation", ["platform", "text", "url"])
 def test_queued_share_rechecks_same_platform_url_and_accepted_text(core, mutation):
     enable_sharing(core)
