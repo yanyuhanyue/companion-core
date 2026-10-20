@@ -732,3 +732,37 @@ def test_in_process_concurrent_once_invocations_send_at_most_one(core, tmp_path)
 
     run(scenario())
     assert len(sends) == 1
+
+
+def test_async_http_preflight_expiry_blocks_dispatch_and_retains_attempt(core, tmp_path):
+    cfg, value, inventory, now = plan_fixture(tmp_path)
+    core.clock.now = now
+    plan, sends, clock = WindowPlan(value, cfg, inventory), [], [now]
+
+    async def preflight(request):
+        if request.url.path == "/send_private_msg":
+            # The shipped private client's DNS pinning is asynchronous.
+            clock[0] = plan.end
+
+    async def scenario():
+        with Spool(cfg) as spool:
+            window = TestWindow(spool, plan, clock=lambda: clock[0])
+            async with (
+                core_client(core) as http,
+                httpx.AsyncClient(
+                    base_url="http://onebot",
+                    transport=httpx.MockTransport(lambda r: provider(r, sends)),
+                    event_hooks={"request": [preflight]},
+                ) as protocol,
+            ):
+                await window.open(http)
+                approval = await stage(window, http, core)
+                clock[0] = plan.end - timedelta(microseconds=1)
+                status = await window.send_once(http, protocol, approval)
+                assert status["attempts_reserved"] == 1
+                assert status["attempt_states"] == {"UNKNOWN": 1}
+                assert status["state"] == "STOPPED"
+                assert protocol.event_hooks["request"] == [preflight]
+
+    run(scenario())
+    assert sends == []
