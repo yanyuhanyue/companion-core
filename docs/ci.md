@@ -20,6 +20,11 @@ identity, delivery uncertainty, spool idempotency and isolated Reader imports fa
 before expensive jobs start. New worker-composition tests are also included once
 their separate feature change is present.
 
+Each preflight invocation initializes its scratch parent and owns one fresh
+`ci-preflight-*` directory under `.local/test-temp`. Success and failure both
+remove only that invocation's temporary data; unrelated retained diagnostics are
+preserved. A fresh runner does not depend on directories left by an earlier job.
+
 The final `ci` job rejects failed, cancelled, missing or unexpectedly skipped
 required jobs. A fast/docs run requires every full-only job to be skipped; it
 cannot hide a failed attempted job. PR checks retain GitHub's default merge-preview
