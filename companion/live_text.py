@@ -10,6 +10,7 @@ import json
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from pydantic import Field
 
@@ -62,7 +63,7 @@ def active(store, settings):
     )
 
 
-def guard(store, settings, clock, *, opening=False, current_request=None):
+def guard(store, settings, clock, *, opening=False, current_request=None, current_delivery=None):
     # Read the clock after BEGIN IMMEDIATE, including any SQLite lock wait.
     with nullcontext() if store.db.in_transaction else store.transaction():
         approval = settings.live_text_window
@@ -107,12 +108,17 @@ def guard(store, settings, clock, *, opening=False, current_request=None):
         if store.one(
             "SELECT 1 FROM model_usage WHERE state IN ('UNKNOWN','RESERVED') "
             "AND request_id!=? LIMIT 1", (current_request or "",),
-        ) or store.one("SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN' LIMIT 1"):
+        ) or store.one(
+            "SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN' "
+            "OR (state='SENDING' AND message_id!=?) LIMIT 1", (current_delivery or "",),
+        ):
             raise CoreError("LIVE_TEXT_RECONCILIATION_REQUIRED", 503)
         binding = store.one("SELECT value FROM runtime_meta WHERE key=?", (BINDING,))
         expected = {"approval_sha256": paid_budget.sha(approval.model_dump(mode="json")),
                     "privacy_epoch": epoch(store), "plan_sha256": approval.plan_sha256,
-                    "window_id": approval.window_id}
+                    "window_id": approval.window_id,
+                    "budget_journal_id": approval.budget_journal_id,
+                    "budget_journal_path": str(Path(paid.journal_path).resolve())}
         if (binding and json.loads(binding["value"]) != expected) or (not binding and not opening):
             raise CoreError("LIVE_TEXT_BINDING_OR_PRIVACY_CHANGED", 503)
         attempts = store.one(
@@ -201,8 +207,10 @@ def check_input(store, settings, clock, event):
     return True
 
 
-def check_job(store, settings, clock, job, *, current_request=None):
-    approval, _, attempts = guard(store, settings, clock, current_request=current_request)
+def check_job(store, settings, clock, job, *, current_request=None, current_delivery=None):
+    approval, _, attempts = guard(
+        store, settings, clock, current_request=current_request, current_delivery=current_delivery
+    )
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + job["event_id"],))
     event = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
     if not event or event["redacted"] or not receipt or job["kind"] != "chat":
@@ -241,7 +249,7 @@ def check_model(store, settings, clock, request_id):
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):
-    approval, _, _ = guard(store, settings, clock)
+    approval, _, _ = guard(store, settings, clock, current_delivery=message_id)
     row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     if not row or row["action_type"] != "qq.private.reply":
         raise CoreError("LIVE_TEXT_REPLY_REQUIRED", 403)
@@ -250,7 +258,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     )
     if not job or job["state"] != "SUCCEEDED":
         raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-    check_job(store, settings, clock, job)
+    check_job(store, settings, clock, job, current_delivery=message_id)
     usage = store.rows("SELECT * FROM model_usage WHERE job_id=?", (job["job_id"],))
     text = json.loads(row["content_json"])["text"]
     if len(usage) != 1 or usage[0]["state"] != "SETTLED" or len(text) > approval.max_reply_chars:
@@ -299,6 +307,18 @@ def stop_window(store, reference):
         binding = store.one("SELECT value FROM runtime_meta WHERE key=?", (BINDING,))
         if not binding or json.loads(binding["value"])["plan_sha256"] != reference.window_sha256:
             raise CoreError("LIVE_TEXT_WINDOW_MISMATCH", 403)
+        frozen = json.loads(binding["value"])
+        identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+        if not identity or identity["value"] != frozen["budget_journal_id"]:
+            raise CoreError("LIVE_TEXT_BUDGET_JOURNAL_CHANGED", 503)
+        # Fsync the stop outside the DB's failure domain before acknowledging it.
+        # Existing in-flight settlements can still record known costs, but this
+        # record permanently fences new admission even if an old DB loses its flag.
+        paid_budget.journal(
+            store, SimpleNamespace(journal_path=frozen["budget_journal_path"]),
+            {"kind": "window_stop", "window_id": frozen["window_id"],
+             "plan_sha256": reference.window_sha256}, allow_settlement=True,
+        )
         store.execute(
             "INSERT OR REPLACE INTO runtime_meta VALUES ('live_text_stopped','OWNER_STOP')"
         )

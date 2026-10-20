@@ -91,6 +91,7 @@ class LiveTextWindowApproval(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     live_approved: bool = Field(default=False, strict=True)
+    execution: Literal["local_synthetic", "approved_live"] = "local_synthetic"
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
     starts_at: datetime

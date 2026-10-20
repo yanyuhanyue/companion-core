@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from companion import paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
@@ -405,6 +407,13 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
+    if live_text.active(store, settings):
+        if not isinstance(model, ModelClient):
+            raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
+        if settings.live_text_window.execution == "local_synthetic" and not isinstance(
+            model.client._transport_for_url(httpx.URL(settings.model_url)), httpx.MockTransport
+        ):
+            raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
     if isinstance(model, ModelClient) and model.settings is not settings:
         raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
     approval = paid_budget.contract(settings, now)
@@ -466,6 +475,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         if live_text.active(store, settings):
             async def after_preflight(request):
                 live_text.check_model(store, settings, clock, request_id)
+                if settings.live_text_window.execution == "local_synthetic" and not isinstance(
+                    model.client._transport_for_url(request.url), httpx.MockTransport
+                ):
+                    raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
                 if (
                     request.method != "POST"
                     or str(request.url) != settings.model_url.rstrip("/") + "/chat/completions"
