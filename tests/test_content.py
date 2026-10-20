@@ -79,7 +79,6 @@ def enable(core, **options):
         }
     )
     core.observations.settings = core.settings
-    core.exploration = ExplorationService(core)
     vision = Vision()
     config = ContentConfig(
         vision=MediaEndpoint(
@@ -90,7 +89,15 @@ def enable(core, **options):
         ),
         image_daily_micro_usd=100,
     ).model_copy(update=options)
-    core.content = ContentService(core, config, vision)
+    core.content = ContentService(
+        core.store, core.settings, core.observations,
+        lambda *args, **kwargs: exploration.create(*args, **kwargs), core.clock,
+        options=config, provider=vision,
+    )
+    exploration = core.exploration = ExplorationService(
+        core.store, core.settings, core.observations, core.goals, core.social,
+        core.content.register_link_images, core.clock,
+    )
     return core.content, vision
 
 
@@ -137,7 +144,9 @@ def source_observation(core, owner_event_id="evt_test_1", text="这是正文，�
 
 def test_content_off_does_not_create_jobs_or_extract_media(core):
     ingest(core, text=POST)
-    service = ContentService(core)
+    service = ContentService(
+        core.store, core.settings, core.observations, core.exploration.create, core.clock,
+    )
     assert service.schedule("evt_test_1") == []
     assert not run(service.run_once())
     assert service.context("evt_test_1") == []

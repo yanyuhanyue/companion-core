@@ -13,6 +13,7 @@ from companion.config import Settings
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import ModelClient
+from companion.runtime import Runtime
 from companion.store import encode, migrate, uid
 from companion.worker_lock import single_worker
 
@@ -63,8 +64,8 @@ def main():
         settings = Settings.load()
         if args.command == "init":
             migrate(settings.database)
-            core = Core(settings)
-            core.store.close()
+            with Runtime(settings):
+                pass
             print("Database migrated; identity and erasure ledger initialized.")
         elif args.command == "serve":
             from companion.api import create_app

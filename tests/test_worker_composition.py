@@ -1,0 +1,199 @@
+"""Workers depend on their own services, with semantic startup kept on chat/life."""
+
+import asyncio
+import importlib
+import sqlite3
+from functools import partial
+
+import pytest
+
+from companion.config import Settings
+from companion.contracts import CoreError
+from companion.memory import Memory
+from companion.retrieval import SemanticIndex
+from companion.runtime import Runtime
+from companion.store import Store, migrate
+
+
+@pytest.fixture
+def worker_settings(tmp_path):
+    settings = Settings(
+        owner_qq_id="10001",
+        bot_qq_id="10002",
+        bridge_token="test-token-" * 4,
+        database=str(tmp_path / "core.db"),
+        erasure_ledger=str(tmp_path / "privacy.jsonl"),
+        memory_enabled=True,
+    )
+    migrate(settings.database)
+    return settings
+
+
+@pytest.fixture
+def unavailable_semantics(monkeypatch):
+    calls = []
+
+    def fail(index):
+        calls.append(index)
+        raise CoreError("MEMORY_INDEX_UNAVAILABLE", 503)
+
+    monkeypatch.setattr(SemanticIndex, "warmup", fail)
+    return calls
+
+
+@pytest.fixture
+def opened_stores(monkeypatch):
+    stores = []
+    original = Store.__init__
+
+    def capture(store, *args, **kwargs):
+        original(store, *args, **kwargs)
+        stores.append(store)
+
+    monkeypatch.setattr(Store, "__init__", capture)
+    yield stores
+    # Avoid leaking handles even when an assertion exposes a regression.
+    for store in stores:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    "module_name,entry,service,operation",
+    [
+        ("companion.content_worker", "content_worker", "ContentService", "run_batch"),
+        ("companion.executive_worker", "executive_worker", "Executive", "run_one"),
+        ("companion.diary_worker", "diary_worker", "DiaryService", "generate_once"),
+    ],
+)
+def test_nonsemantic_worker_enters_own_loop_and_closes_store(
+    worker_settings, unavailable_semantics, opened_stores, monkeypatch,
+    module_name, entry, service, operation,
+):
+    module = importlib.import_module(module_name)
+    service_class = getattr(importlib.import_module({
+        "ContentService": "companion.content",
+        "Executive": "companion.executive",
+        "DiaryService": "companion.diary",
+    }[service]), service)
+    worked = []
+
+    async def tick(instance, *args):
+        assert instance.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'") == {
+            "value": worker_settings.owner_qq_id,
+        }
+        worked.append(instance)
+        return False
+
+    async def stop(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(service_class, operation, tick)
+    monkeypatch.setattr(asyncio, "sleep", stop)
+
+    def forbidden_memory(*args, **kwargs):
+        pytest.fail("A nonsemantic worker constructed Memory")
+
+    monkeypatch.setattr(Memory, "__init__", forbidden_memory)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(getattr(module, entry)(worker_settings))
+    assert len(worked) == 1
+    assert unavailable_semantics == []
+    assert len(opened_stores) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened_stores[0].one("SELECT 1")
+
+
+@pytest.mark.parametrize("failure", ["owner", "ledger"])
+def test_shared_bootstrap_rejects_identity_or_ledger_mismatch_and_closes_store(
+    worker_settings, unavailable_semantics, opened_stores, failure,
+):
+    with Runtime(worker_settings):
+        pass
+    if failure == "owner":
+        settings = worker_settings.model_copy(update={"owner_qq_id": "different-owner"})
+        error = "OWNER_IDENTITY_MISMATCH"
+    else:
+        settings = worker_settings.model_copy(
+            update={"erasure_ledger": worker_settings.erasure_ledger + ".missing"}
+        )
+        error = "ERASURE_LEDGER_MISSING"
+    with pytest.raises(CoreError, match=error):
+        Runtime(settings)
+    assert unavailable_semantics == []
+    assert len(opened_stores) == 2
+    for store in opened_stores:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            store.one("SELECT 1")
+
+
+@pytest.mark.parametrize(
+    "module_name,entry",
+    [("companion.__main__", "worker"), ("companion.life_worker", "life_worker")],
+)
+def test_semantic_worker_still_fails_closed_and_closes_store(
+    worker_settings, unavailable_semantics, opened_stores, module_name, entry,
+):
+    module = importlib.import_module(module_name)
+    with pytest.raises(CoreError, match="MEMORY_INDEX_UNAVAILABLE"):
+        asyncio.run(getattr(module, entry)(worker_settings))
+    assert len(unavailable_semantics) == 1
+    assert len(opened_stores) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened_stores[0].one("SELECT 1")
+
+
+def test_content_worker_finishes_queued_article_images_without_semantic_startup(
+    core, unavailable_semantics, opened_stores, monkeypatch,
+):
+    from companion import content, content_worker
+    from tests.test_article_vision import article
+    from tests.test_content import enable, png
+
+    service, vision = enable(core)
+    owner_id, article_id = article(core, 1)
+    settings = core.settings.model_copy(update={"memory_enabled": True, "content": service.options})
+    clock = core.clock
+    core.store.close()
+
+    async def fetch(*args, **kwargs):
+        return png(), "image/png"
+
+    async def stop(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(content, "HTTPMediaProvider", lambda options: vision)
+    monkeypatch.setattr(content, "fetch_public_image", fetch)
+    monkeypatch.setattr(content_worker, "Runtime", partial(Runtime, clock=clock))
+    monkeypatch.setattr(asyncio, "sleep", stop)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(content_worker.content_worker(settings))
+    assert unavailable_semantics == []
+    assert len(vision.calls) == 1
+    assert len(opened_stores) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened_stores[0].one("SELECT 1")
+    with Runtime(settings, clock) as runtime:
+        image = runtime.store.one("SELECT * FROM content_items WHERE kind='link_image'")
+        assert image["state"] == "SUCCEEDED"
+        assert (image["owner_event_id"], image["source_event_id"]) == (owner_id, article_id)
+        assert runtime.store.one(
+            "SELECT result_status FROM observations WHERE event_id=?", (image["output_event_id"],)
+        ) == {"result_status": "FETCHED"}
+        assert runtime.store.one(
+            "SELECT state FROM model_usage WHERE request_id=?", (image["usage_request_id"],)
+        ) == {"state": "SETTLED"}
+
+
+def test_init_bootstraps_identity_without_semantic_index(
+    worker_settings, unavailable_semantics, opened_stores, monkeypatch, capsys,
+):
+    from companion import __main__
+
+    monkeypatch.setattr(Settings, "load", lambda: worker_settings)
+    monkeypatch.setattr("sys.argv", ["companion", "init"])
+    __main__.main()
+    assert "identity and erasure ledger initialized" in capsys.readouterr().out
+    assert unavailable_semantics == []
+    assert len(opened_stores) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        opened_stores[0].one("SELECT 1")

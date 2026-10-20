@@ -1,13 +1,12 @@
 import asyncio
 
-from companion.core import Core
+from companion.executive import Executive
+from companion.runtime import Runtime
 
 
 async def executive_worker(settings):
-    core = Core(settings)
-    try:
+    with Runtime(settings) as runtime:
+        executive = Executive(runtime.store, settings, runtime.clock)
         while True:
-            if not await core.executive.run_one():
+            if not await executive.run_one():
                 await asyncio.sleep(1)
-    finally:
-        core.store.close()
