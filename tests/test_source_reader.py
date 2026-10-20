@@ -440,7 +440,9 @@ def test_pre_v06_observation_fingerprint_still_replays(core):
     enable_observations(core)
     item = observation(core)
     core.observations.append("reader", item)
-    old_receipt = item.model_dump(mode="json", exclude={"event_id", "trace_id", "privacy_epoch"})
+    old_receipt = item.model_dump(
+        mode="json", exclude={"event_id", "trace_id", "privacy_epoch", "source_grant"}
+    )
     old_receipt["payload"].pop("reading")
     old_receipt["payload"].pop("article")
     assert core.store.one("SELECT fingerprint FROM events WHERE event_id=?", (item.event_id,))[
@@ -481,6 +483,7 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
             before, store.rows("SELECT * FROM exploration_requests ORDER BY rowid"), strict=True
         ):
             assert new.pop("reserved_requests") == 1 and new.pop("used_requests") is None
+            assert new.pop("source_grant_id") is None and new.pop("source_grant_epoch") is None
             assert new == old
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
     finally:
@@ -497,6 +500,11 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, re
     before = core.store.one(
         "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
     )
+    before_0014 = {
+        key: value
+        for key, value in before.items()
+        if key not in {"source_grant_id", "source_grant_epoch"}
+    }
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
@@ -507,7 +515,7 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, re
             core.store.one(
                 "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
             )
-            == before
+            == before_0014
         )
         assert (
             core.store.one("SELECT version_num FROM alembic_version")["version_num"]
@@ -521,7 +529,8 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, re
         assert after == {
             key: value
             for key, value in before.items()
-            if key not in {"reserved_requests", "used_requests"}
+            if key
+            not in {"reserved_requests", "used_requests", "source_grant_id", "source_grant_epoch"}
         }
         migrate(core.settings.database)
         assert (

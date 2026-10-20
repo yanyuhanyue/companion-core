@@ -11,7 +11,7 @@ import re
 from datetime import UTC, datetime
 from urllib.parse import urlencode, urlsplit
 
-from source_reader.accounts import account_grant
+from source_reader.accounts import account_grant, source_grant
 from source_reader.bilibili import BilibiliReader, api_data
 from source_reader.network import PublicHTTP, ReadFailure, video_url
 
@@ -33,6 +33,9 @@ class BilibiliAccountHTTP(PublicHTTP):
             raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
         budget.authorization = fingerprint
         return grant
+
+    def grant_snapshot(self, required=False):
+        return source_grant(self.account_file, self.clock(), "bilibili", required)
 
     async def get(self, url, budget, role):
         grant = self.verify(budget)
