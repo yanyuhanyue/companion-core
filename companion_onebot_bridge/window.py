@@ -17,8 +17,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .event_normalizer import decode, normalize
-from .network import private_http_client
-from .onebot_client import OneBotClient
+from .network import private_http_client, private_request_matches
+from .onebot_client import OneBotClient, bounded_post
 from .outbound import deliver_tick
 from .spool import Spool, encode
 
@@ -28,6 +28,12 @@ ACTIVE = {"PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN"}
 
 def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def bridge_code_sha256():
+    package = Path(__file__).parent
+    return digest([[p.name, hashlib.sha256(p.read_bytes()).hexdigest()]
+                   for p in sorted(package.glob("*.py"))])
 
 
 def private_json(path):
@@ -93,7 +99,14 @@ class WindowPlan:
             "max_reply_chars",
             "execution",
         }
-        if not isinstance(value, dict) or set(value) != fields:
+        if not isinstance(value, dict):
+            raise ValueError("INVALID_WINDOW_PLAN")
+        self.mode = value.get("mode", "demo")
+        if self.mode == "live_text":
+            fields |= {"mode", "live_text"}
+        elif self.mode != "demo":
+            raise ValueError("INVALID_WINDOW_MODE")
+        if set(value) != fields:
             raise ValueError("INVALID_WINDOW_PLAN")
         self.value, self.config = value, config
         self.sha256 = digest(value)
@@ -104,6 +117,36 @@ class WindowPlan:
         self.start, self.end = instant(value["starts_at"]), instant(value["ends_at"])
         if not self.start < self.end:
             raise ValueError("INVALID_WINDOW_INTERVAL")
+        if self.mode == "live_text":
+            scope = value["live_text"]
+            expected_scope = {
+                "live_approved", "window_id", "starts_at", "ends_at", "core_config_sha256",
+                "core_code_sha256", "bridge_code_sha256", "candidate_sha", "paid_contract_sha256",
+                "budget_journal_id", "custodian_sha256", "approval_sha256", "max_inputs",
+                "max_model_attempts", "max_input_chars", "max_reply_chars",
+            }
+            if not isinstance(scope, dict) or scope.get("live_approved") is not True:
+                raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
+            if set(scope) != expected_scope or any(
+                not isinstance(scope[k], str) or not SHA.fullmatch(scope[k])
+                for k in expected_scope if k.endswith("_sha256")
+            ):
+                raise ValueError("INVALID_LIVE_TEXT_SCOPE")
+            if (
+                scope["bridge_code_sha256"] != bridge_code_sha256()
+                or scope["window_id"] != value["window_id"]
+                or instant(scope["starts_at"]) != self.start
+                or instant(scope["ends_at"]) != self.end
+                or not re.fullmatch(r"[a-f0-9]{40}", scope["candidate_sha"])
+                or not re.fullmatch(r"budget_[a-f0-9]{32}", scope["budget_journal_id"])
+                or type(scope["max_model_attempts"]) is not int
+                or not 1 <= scope["max_model_attempts"] <= 5
+                or any(type(scope[key]) is not int or scope[key] != value[other] for key, other in (
+                    ("max_inputs", "max_new_inputs"), ("max_input_chars", "max_input_chars"),
+                    ("max_reply_chars", "max_reply_chars"),
+                ))
+            ):
+                raise ValueError("LIVE_TEXT_SCOPE_MISMATCH")
         for field in ("max_new_inputs", "max_attempts", "max_visible_replies"):
             if type(value[field]) is not int or not 1 <= value[field] <= 5:
                 raise ValueError("INVALID_WINDOW_LIMIT")
@@ -198,6 +241,8 @@ class TestWindow:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.busy = False
         self.current = None
+        self.current_item = None
+        self.model_attempts = None
 
     def row(self):
         self.db.row_factory = sqlite3.Row
@@ -206,9 +251,14 @@ class TestWindow:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
         return row
 
-    def verify(self, *, active=True):
+    def verify(self, *, active=True, dispatch=False):
         if digest(self.plan.value) != self.plan.sha256:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
+        if (active or dispatch) and self.plan.mode == "live_text" and (
+            self.plan.value["live_text"]["bridge_code_sha256"] != bridge_code_sha256()
+            or digest(asdict(self.plan.config)) != self.plan.value["config_sha256"]
+        ):
+            raise ValueError("LIVE_TEXT_RUNTIME_CHANGED")
         row = self.row()
         records, head = self.read_journal()
         if not records or head != row["journal_head"]:
@@ -273,6 +323,8 @@ class TestWindow:
         return digest(record)
 
     async def core_counts(self, client, *, initial=False):
+        if self.plan.mode == "live_text":
+            self.check_core_client(client)
         content = bytearray()
         async with client.stream("GET", "/internal/v1/ops/status") as response:
             response.raise_for_status()
@@ -282,7 +334,25 @@ class TestWindow:
                     raise ValueError("INVALID_CORE_COUNTS")
         status = decode(bytes(content), 65536)
         deliveries, jobs = counts(status.get("deliveries")), counts(status.get("jobs"))
-        if (
+        closed = (
+            isinstance(status.get("features"), dict)
+            and all(value is False for value in status["features"].values())
+        )
+        if self.plan.mode == "live_text":
+            live = status.get("live_text_window", {})
+            if (
+                status.get("mode") != "live" or not closed
+                or live.get("approved") is not True
+                or live.get("plan_sha256") != self.plan.sha256
+                or live.get("scope_sha256") != digest(self.plan.value["live_text"])
+                or type(live.get("model_attempts")) is not int
+                or not 0 <= live["model_attempts"] <= self.plan.value["live_text"][
+                    "max_model_attempts"
+                ]
+            ):
+                raise ValueError("LIVE_TEXT_CORE_APPROVAL_REQUIRED")
+            self.model_attempts = live["model_attempts"]
+        elif (
             status.get("mode") != "demo"
             or not isinstance(status.get("features"), dict)
             or any(value is not False for value in status["features"].values())
@@ -312,6 +382,23 @@ class TestWindow:
                 raise ValueError("UNATTENDED_CORE_DELIVERY")
         return deliveries
 
+    def check_core_client(self, client):
+        if (
+            str(client.base_url).rstrip("/") != self.plan.config.core_url.rstrip("/")
+            or client.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
+        ):
+            raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+
+    async def stop_core(self, client):
+        if self.plan.mode != "live_text":
+            return
+        self.check_core_client(client)
+        result = await bounded_post(client, "/internal/v1/live-text/stop", {
+            "window_sha256": self.plan.sha256,
+        })
+        if result != {"stopped": True}:
+            raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED")
+
     async def open(self, client):
         if self.plan.journal.exists() or self.plan.journal.is_symlink():
             raise ValueError("WINDOW_ALREADY_REGISTERED")
@@ -327,6 +414,11 @@ class TestWindow:
             ).fetchone()
         ):
             raise ValueError("INITIAL_SPOOL_MUST_BE_CONFIRMED")
+        if self.plan.mode == "live_text":
+            self.check_core_client(client)
+            await bounded_post(client, "/internal/v1/live-text/open", {
+                "window_sha256": self.plan.sha256,
+            })
         baseline = await self.core_counts(client, initial=True)
         if not self.plan.start <= self.clock() < self.plan.end:
             raise ValueError("WINDOW_OUTSIDE_INTERVAL")
@@ -361,7 +453,7 @@ class TestWindow:
         attempts = dict(
             self.db.execute("SELECT state,COUNT(*) FROM window_attempts GROUP BY state").fetchall()
         )
-        return {
+        result = {
             "state": row["state"],
             "reason": row["reason"],
             "plan_sha256": row["plan_hash"],
@@ -374,6 +466,9 @@ class TestWindow:
             "e2e_p50_ms": None,
             "e2e_p95_ms": None,
         }
+        if self.plan.mode == "live_text":
+            result.update(mode="live_text", model_attempts=self.model_attempts)
+        return result
 
     def stop(self, reason="OWNER_STOP"):
         self.verify(active=False)
@@ -407,6 +502,10 @@ class TestWindow:
             return await self._ingest(client, raw, approval)
         except BaseException:
             try:
+                await self.stop_core(client)
+            except BaseException:
+                pass
+            try:
                 self.stop("INPUT_FAILED_CLOSED")
             except Exception:
                 pass
@@ -439,6 +538,11 @@ class TestWindow:
             or not self.plan.start <= datetime.fromisoformat(event["occurred_at"]) < self.plan.end
         ):
             raise ValueError("WINDOW_OWNER_TEXT_INPUT_REQUIRED")
+        if self.plan.mode == "live_text" and (
+            event["payload"]["text"].strip().startswith("/")
+            or self.plan.value["execution"] != "local_synthetic"
+        ):
+            raise ValueError("LIVE_TEXT_ORDINARY_AUTHENTICATED_INPUT_REQUIRED")
         event_id, text_hash = event["event_id"], digest(event["payload"]["text"])
         expected = {
             "window_sha256": self.plan.sha256,
@@ -472,6 +576,9 @@ class TestWindow:
         if self.db.execute("SELECT 1 FROM inbox WHERE key=?", (event_id,)).fetchone():
             raise ValueError("HISTORICAL_INPUT_REFUSED")
         self.verify()
+        if self.plan.mode == "live_text":
+            await bounded_post(client, "/internal/v1/live-text/inputs/approve", approval)
+            self.verify()
         head = self.append(
             "INPUT",
             {
@@ -538,9 +645,10 @@ class TestWindow:
             )
             self.db.execute("UPDATE test_window SET fence=?,journal_head=?", (fence, head))
         self.current = (item["message_id"], fence)
+        self.current_item = item
 
     def before_io(self, text):
-        self.verify(active=False)
+        self.verify(active=False, dispatch=True)
         row = self.row()
         if (
             row["state"] != "OPEN"
@@ -568,7 +676,7 @@ class TestWindow:
     def before_dispatch(self):
         # HTTP request hooks can await DNS pinning after before_io(). Check again
         # after those hooks, at the transport boundary; keep the spent reservation.
-        self.verify(active=False)
+        self.verify(active=False, dispatch=True)
         row = self.row()
         attempt = self.db.execute(
             "SELECT state FROM window_attempts WHERE message_id=? AND fence=?", self.current
@@ -610,6 +718,7 @@ class TestWindow:
         if self.busy:
             raise ValueError("WINDOW_EXECUTOR_BUSY")
         self.busy, self.approval = True, approval
+        self.core_client = client
         try:
             self.verify()
             self.check_spool()
@@ -618,8 +727,14 @@ class TestWindow:
             sender = WindowOneBot(self, protocol)
             if not await deliver_tick(client, sender, self.spool, guard=self):
                 raise ValueError("NO_APPROVED_DELIVERY_READY")
+            if self.row()["state"] == "STOPPED":
+                await self.stop_core(client)
             return self.status()
         except BaseException:
+            try:
+                await self.stop_core(client)
+            except BaseException:
+                pass
             # Cancellation/crash never refunds reservations. A hard kill leaves RESERVED/
             # IO_STARTED and the next invocation blocks before any new send.
             try:
@@ -636,6 +751,11 @@ class WindowOneBot:
         self.window, self.config = window, window.plan.config
         # Ephemeral permission only; the persistent config is required to remain false.
         self.delegate = OneBotClient(replace(self.config, delivery_enabled=True), protocol)
+        if window.plan.mode == "live_text" and (
+            str(protocol.base_url).rstrip("/") != self.config.onebot_http_url.rstrip("/")
+            or protocol.headers.get("Authorization") != "Bearer " + self.config.onebot_token
+        ):
+            raise ValueError("LIVE_TEXT_ONEBOT_ENDPOINT_CHANGED")
 
     async def probe(self):
         return await self.delegate.probe()
@@ -646,6 +766,30 @@ class WindowOneBot:
         async def after_network_preflight(request):
             if request.url.path != "/send_private_msg":
                 raise ValueError("WINDOW_ACTION_REFUSED")
+            if self.window.plan.mode == "live_text":
+                expected = {"user_id": int(self.config.owner_qq_id),
+                            "message": [{"type": "text", "data": {"text": text}}],
+                            "auto_escape": True}
+                if (
+                    not private_request_matches(
+                        request, self.config.onebot_http_url, "/send_private_msg",
+                        synthetic=self.window.plan.value["execution"] == "local_synthetic",
+                    )
+                    or request.headers.get("Authorization") != "Bearer " + self.config.onebot_token
+                    or json.loads(request.content) != expected
+                ):
+                    raise ValueError("LIVE_TEXT_ONEBOT_REQUEST_CHANGED")
+                self.window.check_core_client(self.window.core_client)
+                item = self.window.current_item
+                approval = self.window.approval
+                receipt = await bounded_post(
+                    self.window.core_client, "/internal/v1/live-text/send-check",
+                    {key: approval[key] for key in (
+                        "window_sha256", "event_id", "message_id", "reply_sha256"
+                    )} | {"lease_token": item["lease_token"]},
+                )
+                if receipt != {"approved": True}:
+                    raise ValueError("LIVE_TEXT_SEND_FENCED")
             self.window.before_dispatch()
 
         hooks = self.delegate.client.event_hooks["request"]
@@ -670,9 +814,18 @@ async def command(config, args):
             # Stop/status performs no network I/O and does not require unexpired authorization.
             plan = object.__new__(WindowPlan)
             plan.value, plan.config, plan.sha256 = value, config, digest(value)
+            plan.mode = value.get("mode", "demo")
             plan.journal = Path(value["journal_path"])
             window = TestWindow(spool, plan)
-            return window.stop() if args.command == "window-stop" else window.status()
+            if args.command == "window-status":
+                return window.status()
+            # Always persist the local stop; an unreachable Core is not a confirmed
+            # global stop. Report that failure, never claim a paid call was revoked.
+            result = window.stop()
+            if plan.mode == "live_text":
+                async with private_http_client(config.core_url, config.bridge_token) as client:
+                    await window.stop_core(client)
+            return result
     if args.window is None or args.inventory is None:
         raise ValueError("WINDOW_AND_INVENTORY_REQUIRED")
     plan = WindowPlan(

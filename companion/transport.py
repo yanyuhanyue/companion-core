@@ -114,8 +114,13 @@ def lease_deliveries(store, settings, request, now):
         return {"items": items}
 
 
-def begin_send(store, message_id, token, now, settings=None):
+def begin_send(store, message_id, token, now, settings=None, *, clock=None):
     with store.transaction():
+        from companion import live_text
+
+        if settings is not None and live_text.active(store, settings):
+            live_text.check_delivery(store, settings, clock, message_id)
+            now = clock()
         pending = store.one(
             "SELECT action_type FROM outbox WHERE message_id=? AND state='LEASED' "
             "AND lease_token=? AND lease_until>?",

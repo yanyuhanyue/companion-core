@@ -41,7 +41,8 @@ def total_monthly(store, month):
 
 
 def reserve(
-    store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None
+    store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
+    clock=None,
 ):
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     autonomous = scenario != "chat"
@@ -60,6 +61,9 @@ def reserve(
             raise CoreError("MODEL_OUTPUT_LIMIT", 429)
     estimate = cost(settings, estimated_input, output_tokens)
     with store.transaction():
+        from companion import live_text
+
+        live_text.reserve_model(store, settings, clock, job_id, scenario)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
@@ -391,6 +395,9 @@ def _persist_accounting(store, admission, amount, state, blocked, evidence_sha25
 
 async def complete(model, store, settings, request_id, messages, scenario, clock):
     """The one Core calling seam: persisted admission is fenced before adapter I/O."""
+    from companion import live_text
+
+    live_text.check_model(store, settings, clock, request_id)
     if settings.mode != "live":
         return await model.complete(messages, scenario)
     if not callable(clock):
@@ -447,6 +454,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     try:
         paid_budget.contract(settings, clock())
+        live_text.check_model(store, settings, clock, request_id)
         if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
@@ -455,6 +463,26 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         settle(store, settings, request_id)
         raise
     if isinstance(model, ModelClient):
+        if live_text.active(store, settings):
+            async def after_preflight(request):
+                live_text.check_model(store, settings, clock, request_id)
+                if (
+                    request.method != "POST"
+                    or str(request.url) != settings.model_url.rstrip("/") + "/chat/completions"
+                    or request.headers.get("Authorization")
+                    != "Bearer " + settings.model_key.get_secret_value()
+                    or paid_budget.sha(json.loads(request.content)) != row["payload_sha256"]
+                ):
+                    raise CoreError("LIVE_TEXT_MODEL_REQUEST_CHANGED", 503)
+
+            hooks = model.client.event_hooks["request"]
+            hooks.append(after_preflight)
+            try:
+                return await model.complete(
+                    messages, scenario, admission=ModelAdmission(row["payload_sha256"])
+                )
+            finally:
+                hooks.remove(after_preflight)
         return await model.complete(
             messages, scenario, admission=ModelAdmission(row["payload_sha256"])
         )
