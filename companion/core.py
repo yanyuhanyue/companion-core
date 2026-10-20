@@ -4,8 +4,9 @@ import sqlite3
 import time
 from datetime import UTC, datetime
 
-from companion import __version__, budget
+from companion import __version__, budget, live_text
 from companion.affect import AffectEngine
+from companion.commands import command_parts
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES, ContentService
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
@@ -88,6 +89,7 @@ class Core(Runtime):
         fingerprint = digest(raw)
         try:
             with s.transaction():
+                bounded_text = live_text.check_input(s, cfg, self.clock, event)
                 if s.one(
                     "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
                 ):
@@ -131,21 +133,20 @@ class Core(Runtime):
                 )
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
-                diary_command = is_diary_command(body["text"])
-                control_command = is_life_command(body["text"])
+                command, arguments = command_parts(body["text"])
+                diary_command = not bounded_text and is_diary_command(body["text"])
+                control_command = not bounded_text and is_life_command(body["text"])
                 if control_command:
                     body["control_command"] = True
-                    body["goal_request"] = bool(
-                        re.match(r"安排任务\s+https://", body["text"].strip())
-                    )
+                    body["goal_request"] = command == "安排任务" and arguments.startswith("https://")
                 if diary_command:
                     body["diary_command"] = True
-                    body["diary_correction"] = body["text"].strip().startswith("修改日记")
+                    body["diary_correction"] = command == "修改日记"
                     body["diary_timezone"] = cfg.timezone
-                if body["text"].strip() == "暂停写日记":
+                if not bounded_text and command == "暂停写日记" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
                     self.diary.repo.cancel_pending("DIARY_PAUSED")
-                if body["text"].strip() == "暂停主动分享":
+                if not bounded_text and command == "暂停主动分享" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
                     s.execute(
                         "UPDATE jobs SET state='CANCELLED' WHERE kind='activity' "
@@ -546,6 +547,9 @@ class Core(Runtime):
 
     async def command_reply(self, job):
         text = json.loads(job["body_json"]).get("text", "").strip()
+        command, arguments = command_parts(text)
+        if not command:
+            return None
         now, s = self.clock(), self.store
         diary_reply = self.diary.command(text, self.settings.owner_qq_id)
         if diary_reply is not None:
@@ -553,6 +557,7 @@ class Core(Runtime):
         life_reply = self.life.command(text, job["event_id"])
         if life_reply is not None:
             return life_reply
+        text = command + (" " + arguments if arguments else "")
         if text == "发送状态":
             uncertain = s.rows(
                 "SELECT message_id,created_at FROM outbox "
@@ -583,8 +588,8 @@ class Core(Runtime):
                 )
                 or "目前还没有长期记忆。"
             )
-        if text.startswith("记住这个"):
-            content = text[len("记住这个") :].lstrip(" :：\n")
+        if command == "记住这个":
+            content = arguments
             evidence_id = job["event_id"]
             if not content:
                 prior = s.one(
@@ -597,7 +602,7 @@ class Core(Runtime):
                     evidence_id = prior["event_id"]
                     content = json.loads(prior["body_json"]).get("text", "")
             if not content or len(content) > 500:
-                return "请用“记住这个：内容”提供 1–500 字的明确事实。"
+                return "请用“/记住这个：内容”提供 1–500 字的明确事实。"
             candidate = Candidate(
                 subject="user",
                 kind="fact",
@@ -624,7 +629,7 @@ class Core(Runtime):
                 memory_id = self.add_memories(candidates, resolutions, now, confirmed=True)[0]
                 review = s.one("SELECT needs_review FROM memories WHERE memory_id=?", (memory_id,))
             if review["needs_review"]:
-                return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“纠正这一条”修订。"
+                return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“/纠正这一条”修订。"
             return f"已记住：{memory_id}"
         match = re.fullmatch(
             r"(确认这一条|忘记这一条|纠正这一条)\s+(mem_[a-f0-9]+)(?:\s+([\s\S]+))?", text
@@ -652,26 +657,28 @@ class Core(Runtime):
         )
         request_id = None
         try:
+            bounded_text = live_text.active(self.store, self.settings)
+            if bounded_text:
+                live_text.check_job(self.store, self.settings, self.clock, job)
             before_command = epoch(self.store)
-            reply = await self.command_reply(job) if job["kind"] == "chat" else None
+            reply = (
+                await self.command_reply(job)
+                if job["kind"] == "chat" and not bounded_text else None
+            )
             captured_epoch = epoch(self.store)
-            text = json.loads(job["body_json"]).get("text", "").strip()
+            command, _ = command_parts(json.loads(job["body_json"]).get("text", ""))
             if (
                 reply is not None
-                and (
-                    text.startswith(
-                        (
-                            "读日记",
-                            "日记列表",
-                            "目标列表",
-                            "承诺列表",
-                            "反思列表",
-                            "当前交互状态",
-                            "为什么形成偏好",
-                        )
-                    )
-                    or text == "你记得什么"
-                )
+                and command in {
+                    "读日记",
+                    "日记列表",
+                    "目标列表",
+                    "承诺列表",
+                    "反思列表",
+                    "当前交互状态",
+                    "为什么形成偏好",
+                    "你记得什么",
+                }
                 and before_command != captured_epoch
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)
@@ -705,6 +712,7 @@ class Core(Runtime):
                         job["kind"],
                         messages,
                         self.clock(),
+                        clock=self.clock,
                     )
                     model_started_ns = time.perf_counter_ns()
                     emit("t_model_request", job["trace_id"])
@@ -734,6 +742,8 @@ class Core(Runtime):
                     request_id = None
                     reply = redact(response.text, self.settings)
             with self.store.transaction():
+                if bounded_text:
+                    live_text.check_job(self.store, self.settings, self.clock, job)
                 current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
                 if current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
                     return True
@@ -746,7 +756,7 @@ class Core(Runtime):
                     self.store, self.settings, now
                 )
                 if job["kind"] != "activity" or should_send:
-                    self.expression.enqueue(
+                    message_id = self.expression.enqueue(
                         job["event_id"],
                         job["conversation_id"],
                         reply,
@@ -755,6 +765,10 @@ class Core(Runtime):
                         if job["kind"] == "activity"
                         else "qq.private.reply",
                     )
+                    if bounded_text:
+                        live_text.record_reply(
+                            self.store, self.settings, self.clock, job, message_id, reply
+                        )
                 self.store.execute(
                     "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
                     "WHERE job_id=?",
@@ -786,6 +800,11 @@ class Core(Runtime):
     def fail_job(self, job, code):
         now = self.clock()
         with self.store.transaction():
+            bounded_text = live_text.active(self.store, self.settings)
+            if bounded_text:
+                self.store.execute(
+                    "INSERT OR REPLACE INTO runtime_meta VALUES ('live_text_stopped',?)", (code,)
+                )
             retryable = code in {
                 "MODEL_RETRYABLE",
                 "PRIVACY_CHANGED",
@@ -793,9 +812,8 @@ class Core(Runtime):
                 "MEMORY_INDEX_UNAVAILABLE",
                 "MEMORY_REVIEW_INVALID",
             }
-            state = (
-                "RETRY_WAIT" if retryable and job["attempts"] < job["max_attempts"] else "FAILED"
-            )
+            state = ("RETRY_WAIT" if retryable and not bounded_text
+                     and job["attempts"] < job["max_attempts"] else "FAILED")
             changed = self.store.execute(
                 "UPDATE jobs SET state=?,last_error_code=?,next_attempt_at=?,"
                 "lease_token=NULL,updated_at=? WHERE job_id=? "
@@ -813,7 +831,7 @@ class Core(Runtime):
                 self.store.audit(
                     "job.failed", job["job_id"], job["trace_id"], now, code=code, state=state
                 )
-                if state == "FAILED" and job["kind"] == "chat":
+                if state == "FAILED" and job["kind"] == "chat" and not bounded_text:
                     enqueue(
                         self.store,
                         job["event_id"],
@@ -1008,6 +1026,7 @@ class Core(Runtime):
         return {
             "version": __version__,
             "mode": self.settings.mode,
+            "live_text_window": live_text.status(s, self.settings, self.clock),
             "features": {
                 "memory": self.settings.memory_enabled,
                 "diary": self.diary.repo.enabled(),

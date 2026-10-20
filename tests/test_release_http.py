@@ -108,14 +108,14 @@ def test_owner_shares_respect_daily_deep_read_allowance(core, allowance):
     )
 
 
-@pytest.mark.parametrize("command", ["暂停自主活动", "目标列表", "今天写日记了吗"])
+@pytest.mark.parametrize("command", ["/暂停自主活动", "/目标列表", "/今天写日记了吗"])
 def test_content_enabled_commands_and_following_chat_complete(core, command):
     enable(core)
     ingest(core, 1, command)
     ingest(core, 2, "普通后续对话")
     assert run(core.run_once())
     assert not core.model.calls
-    if command == "暂停自主活动":
+    if command == "/暂停自主活动":
         assert (
             core.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")["value"] == "1"
         )
@@ -129,7 +129,7 @@ def test_content_enabled_commands_and_following_chat_complete(core, command):
 
 def test_content_enabled_incomplete_command_falls_back_to_chat(core):
     enable(core)
-    ingest(core, 1, "安排任务")
+    ingest(core, 1, "/安排任务")
     ingest(core, 2, "普通后续对话")
     assert run(core.run_once())
     assert run(core.run_once())
@@ -138,7 +138,7 @@ def test_content_enabled_incomplete_command_falls_back_to_chat(core):
         {"state": "SUCCEEDED"},
     ]
     assert [messages[-1]["content"] for messages, _ in core.model.calls] == [
-        "安排任务",
+        "/安排任务",
         "普通后续对话",
     ]
     assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 2

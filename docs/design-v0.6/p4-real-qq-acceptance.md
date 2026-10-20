@@ -34,7 +34,7 @@
 公开材料仅保留脱敏标识和统计；完整私聊/账号/凭据不入 Git、CI artifact 或模型上下文。
 
 `SENDING` 失联后转 `DELIVERY_UNCERTAIN`，只允许真人先核对 QQ，再通过主人命令
-`核对发送 <message_id> 已发送` 或 `核对发送 <message_id> 取消` 记录结果。
+`/核对发送 <message_id> 已发送` 或 `/核对发送 <message_id> 取消` 记录结果。
 取消不补发。不要手工把不确定行改回 PENDING，也不把模拟回执写成真实记录。
 
 机器门禁 `real_qq_acceptance` 的每条真实审核记录使用

@@ -86,6 +86,39 @@ class PaidModelApproval(BaseModel):
         return self
 
 
+class LiveTextWindowApproval(BaseModel):
+    """Separate private approval for one closed-by-default text-only experiment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    live_approved: bool = Field(default=False, strict=True)
+    execution: Literal["local_synthetic", "approved_live"] = "local_synthetic"
+    plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
+    starts_at: datetime
+    ends_at: datetime
+    core_config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    core_code_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bridge_code_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    candidate_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
+    paid_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    budget_journal_id: str = Field(pattern=r"^budget_[a-f0-9]{32}$")
+    custodian_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    max_inputs: int = Field(default=5, strict=True, ge=1, le=5)
+    max_model_attempts: int = Field(default=5, strict=True, ge=1, le=5)
+    max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
+    max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
+
+    @model_validator(mode="after")
+    def valid_interval(self):
+        if (
+            self.starts_at.tzinfo is None or self.ends_at.tzinfo is None
+            or self.starts_at >= self.ends_at
+        ):
+            raise ValueError("absolute live text approval interval required")
+        return self
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner_qq_id: str
@@ -107,6 +140,7 @@ class Settings(BaseModel):
     cached_input_rate: int | None = Field(default=None, ge=0)
     output_rate: int | None = Field(default=None, ge=0)
     paid_model: PaidModelApproval | None = None
+    live_text_window: LiveTextWindowApproval | None = None
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
@@ -268,6 +302,8 @@ class Settings(BaseModel):
                     data[field] = ContentConfig.model_validate_json(value)
                 elif field == "paid_model":
                     data[field] = PaidModelApproval.model_validate_json(value)
+                elif field == "live_text_window":
+                    data[field] = LiveTextWindowApproval.model_validate_json(value)
                 else:
                     data[field] = value
         return cls.model_validate(data)

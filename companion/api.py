@@ -7,7 +7,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from companion import __version__
+from companion import __version__, live_text
 from companion.config import Settings
 from companion.content_api import register_content_routes
 from companion.contracts import (
@@ -365,6 +365,25 @@ def create_app(settings=None):
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
         return app.state.core.ingest(event, x_idempotency_key)
 
+    @app.post(prefix + "/live-text/open", dependencies=auth)
+    async def live_text_open(body: live_text.WindowReference):
+        core = app.state.core
+        return live_text.open_window(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/live-text/inputs/approve", dependencies=auth)
+    async def live_text_input(body: live_text.InputApproval):
+        core = app.state.core
+        return live_text.approve_input(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/live-text/send-check", dependencies=auth)
+    async def live_text_send(body: live_text.SendCheck):
+        core = app.state.core
+        return live_text.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/live-text/stop", dependencies=auth)
+    async def live_text_stop(body: live_text.WindowReference):
+        return live_text.stop_window(app.state.core.store, body)
+
     @app.post(prefix + "/deliveries/lease", dependencies=auth)
     async def lease(body: LeaseRequest):
         core = app.state.core
@@ -373,7 +392,9 @@ def create_app(settings=None):
     @app.post(prefix + "/deliveries/{message_id}/begin-send", dependencies=auth)
     async def begin(message_id: str, body: LeaseToken):
         core = app.state.core
-        return begin_send(core.store, message_id, body.lease_token, core.clock(), settings)
+        return begin_send(
+            core.store, message_id, body.lease_token, core.clock(), settings, clock=core.clock
+        )
 
     @app.post(prefix + "/deliveries/{message_id}/result", dependencies=auth)
     async def result(message_id: str, body: DeliveryResult):

@@ -122,7 +122,7 @@ async def verify(directory, report):
                 "automatic_extraction",
                 extracted and original and original["status"] == "HYPOTHESIS",
             )
-            answer = await send("记住这个：我最喜欢的颜色是蓝色。")
+            answer = await send("/记住这个：我最喜欢的颜色是蓝色。")
             confirmed = core.store.one(
                 "SELECT * FROM memories WHERE memory_id=?", (original["memory_id"],)
             )
@@ -151,7 +151,7 @@ async def verify(directory, report):
                 "我有一个白色的帆布包。",
                 "我正在阅读一本天文学入门书。",
             ]:
-                await send("记住这个：" + fact)
+                await send("/记住这个：" + fact)
 
             for n, (question, target) in enumerate(
                 [
@@ -174,9 +174,9 @@ async def verify(directory, report):
                 not core.memory.search("今天下午下雨了吗？"),
             )
 
-            positive = await send("记住这个：我喜欢绿茶")
+            positive = await send("/记住这个：我喜欢绿茶")
             positive_id = re.search(r"mem_[a-f0-9]+", positive).group(0)
-            negative = await send("记住这个：我不喜欢绿茶")
+            negative = await send("/记住这个：我不喜欢绿茶")
             negative_id = re.search(r"mem_[a-f0-9]+", negative).group(0)
             pair = [
                 core.store.one("SELECT * FROM memories WHERE memory_id=?", (mid,))
@@ -189,7 +189,7 @@ async def verify(directory, report):
                 and "冲突" in negative,
                 reply=negative,
             )
-            compatible = await send("记住这个：我喜欢红茶")
+            compatible = await send("/记住这个：我喜欢红茶")
             compatible_id = re.search(r"mem_[a-f0-9]+", compatible).group(0)
             record(
                 "compatible_preferences_do_not_conflict",
@@ -204,7 +204,7 @@ async def verify(directory, report):
                 reply=answer,
             )
 
-            await send("忘记这一条 " + original["memory_id"])
+            await send("/忘记这一条 " + original["memory_id"])
             after_erasure = core.memory.search("我最喜欢什么颜色？")
             answer = await send("我最喜欢什么颜色？", "after-erasure")
             record(

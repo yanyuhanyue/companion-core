@@ -1,0 +1,498 @@
+{
+  "$schema": "../../contracts/p8c-readiness.schema.json",
+  "schema_version": 1,
+  "evidence_level": "OFFLINE_PROPOSAL",
+  "authority": "Preparation only; six separately signed private approvals are required. This JSON is not a runtime approval.",
+  "snapshot": {
+    "observed_at": "2026-10-20T20:40:07+08:00",
+    "main_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+    "main_ci": {
+      "run_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301",
+      "status": "completed",
+      "conclusion": "success",
+      "successful_jobs": 7,
+      "jobs": [
+        {
+          "name": "preflight",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118627568755"
+        },
+        {
+          "name": "container",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118627731832"
+        },
+        {
+          "name": "browser-reader",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118627731939"
+        },
+        {
+          "name": "plugin-native",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118627731947"
+        },
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118627732027"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118627732199"
+        },
+        {
+          "name": "ci",
+          "conclusion": "success",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39422750301/job/118629232446"
+        }
+      ]
+    },
+    "reviewed_source_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+    "candidate_sha": "39de04edce1fc392c9fa6d9c6a734b46ff78aaee",
+    "integration_pr": {
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/29",
+      "state": "MERGED",
+      "head_sha": "39de04edce1fc392c9fa6d9c6a734b46ff78aaee",
+      "ci_status": "SUCCESS_7_OF_7_BOTH_RUNS",
+      "run_urls": [
+        "https://github.com/yanyuhanyue/companion-core/actions/runs/39422068330",
+        "https://github.com/yanyuhanyue/companion-core/actions/runs/39422081781"
+      ],
+      "merged_sha": "bbd712c1a79497762275e718e9f76959bedf6583"
+    },
+    "original_prs": [
+      {
+        "number": 24,
+        "head_sha": "5cf997a801f1ab3826456b9264dcf67e71f3eba4",
+        "state": "MERGED",
+        "draft_at_source": true
+      },
+      {
+        "number": 25,
+        "head_sha": "1a452d287185e969cff7ecb52a469e218b194d57",
+        "state": "MERGED",
+        "draft_at_source": true
+      },
+      {
+        "number": 26,
+        "head_sha": "1346fa29cb1f63651377dc33525a09fc96cd526a",
+        "state": "MERGED",
+        "draft_at_source": true
+      },
+      {
+        "number": 27,
+        "head_sha": "692da26b0779e2ecd8130c199523ec897e0fde4e",
+        "state": "MERGED",
+        "draft_at_source": true
+      }
+    ],
+    "source_contracts": [
+      {
+        "path": "companion/backup.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      },
+      {
+        "path": "companion/privacy.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      },
+      {
+        "path": "companion/paid_budget.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      },
+      {
+        "path": "companion/config.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      },
+      {
+        "path": "companion_onebot_bridge/window.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      },
+      {
+        "path": "migrations/versions/0017_paid_model_gate.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      },
+      {
+        "path": "companion/source_grants.py",
+        "sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+        "evidence": "CODE_ONLY"
+      }
+    ],
+    "integrated_candidate_sha": "39de04edce1fc392c9fa6d9c6a734b46ff78aaee",
+    "integrated_tree": "6f60b1b82e2e2d439192f7b08f6aa73c9498b75e",
+    "code_migration_head": "0017_paid_model_gate",
+    "independent_review": {
+      "state": "COMPLETED",
+      "reviewed_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+      "reported_findings": [],
+      "done": true,
+      "reference": "review-status.json and independent A1/A3 report read 2026-10-20T20:40:07+08:00",
+      "conclusion": "PASS_WITH_COVERAGE_LIMITS",
+      "report_commit": "e5026d816b70c2b169f53ca1268b43c5e943dd27",
+      "report_url": null,
+      "coverage_limits": [
+        "Synthetic/offline only; production_ready=false; no live evidence",
+        "Local Docker unavailable; exact-SHA container CI inspected; no new successful in-container HTTP fixture flow",
+        "Worker regression supplement 2ac4a154f50307d72d56769b4350c6655b267e92 is not in main; local-only evidence"
+      ]
+    }
+  },
+  "environment": {
+    "historical_test_host": {
+      "host": null,
+      "evidence": "HISTORICAL_REPOSITORY_REPORT_ONLY",
+      "source": "docs/qq-beta/p8-host-recovery-review.md",
+      "source_sha": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+      "mode": "demo",
+      "config_version": "P7-DEMO-1",
+      "schema_head": "0015_article_images",
+      "qq_demo_inputs": 5,
+      "qq_demo_sent": 5,
+      "real_nonempty_restore": "NOT_VERIFIED"
+    },
+    "final_target": {
+      "private_target_ref": "private_target_final",
+      "target_inventory_sha256": null,
+      "evidence": "USER_SUPPLIED_NOT_PROBED",
+      "core_deployed": false,
+      "observed_config_sha256": null,
+      "observed_schema_head": null,
+      "observed_image_inventory_sha256": null
+    },
+    "windows_gateway": {
+      "evidence": "USER_SUPPLIED_NOT_PROBED",
+      "private_link": "TAILSCALE_CONFIGURED",
+      "connected_executor_methods": [
+        "windows.read_text",
+        "windows.write_text"
+      ],
+      "core_enabled": false,
+      "screenshot_connected": false,
+      "keyboard_mouse_connected": false,
+      "app_launch_connected": false,
+      "desktop_e2e_p50_ms": null,
+      "desktop_e2e_p95_ms": null
+    }
+  },
+  "requests": {
+    "recovery": {
+      "status": "BLOCKED",
+      "approval_reference": null,
+      "owner": null,
+      "operator": null,
+      "candidate_sha": null,
+      "starts_at": null,
+      "ends_at": null,
+      "dependencies": [],
+      "fields": {
+        "source_inventory_reference": null,
+        "source_hosts_reference": null,
+        "new_isolated_destination_reference": null,
+        "destination_fault_domain": null,
+        "source_fault_domain": null,
+        "consistency_boundary_reference": null,
+        "writer_stop_scope_reference": null,
+        "snowluma_stop_reference": null,
+        "original_services_stop_reference": null,
+        "whole_host_scope_reference": null,
+        "encrypted_storage_reference": null,
+        "key_custodian": null,
+        "independent_key_recovery_reference": null,
+        "backup_manifest_reference": null,
+        "core_schema_head": null,
+        "core_nonempty_restore_reference": null,
+        "spool_restore_reference": null,
+        "qq_volumes_restore_reference": null,
+        "original_services_restore_reference": null,
+        "whole_host_restore_reference": null,
+        "source_grant_attribution_review_reference": null,
+        "restore_signoff_reference": null,
+        "currency": null,
+        "storage_transfer_cost_reference": null,
+        "isolation_attestation_reference": null,
+        "source_inventory_sha256": null,
+        "core_archive_sha256": null,
+        "erasure_file_sha256": null,
+        "erasure_last_record_sha256": null,
+        "budget_file_sha256": null,
+        "budget_chain_head_sha256": null,
+        "spool_archive_sha256": null,
+        "protocol_epoch_sha256": null,
+        "window_file_sha256": null,
+        "window_chain_head_sha256": null,
+        "snowluma_data_archive_sha256": null,
+        "snowluma_config_archive_sha256": null,
+        "snowluma_qq_archive_sha256": null,
+        "original_services_manifest_sha256": null,
+        "erasure_ledger_id": null,
+        "budget_journal_id": null,
+        "window_id": null,
+        "core_events": null,
+        "core_outbox": null,
+        "core_model_usage": null,
+        "archive_bytes": null,
+        "erasure_last_native_seq": null,
+        "budget_last_entry_ordinal": null,
+        "budget_record_count": null,
+        "window_last_native_seq": null,
+        "initial_delivery_uncertain": null,
+        "initial_model_unknown": null,
+        "initial_model_reserved": null,
+        "initial_unconfirmed_spool": null,
+        "rpo_seconds": null,
+        "rto_seconds": null,
+        "maximum_downtime_seconds": null,
+        "maximum_cost_minor_units": null,
+        "restore_destination_is_new": null,
+        "qq_model_social_and_site_egress_denied": null,
+        "stop_operator": null,
+        "stop_command_reference": null,
+        "all_budget_journals_inventory_reference": null,
+        "all_window_journals_inventory_reference": null
+      }
+    },
+    "deployment": {
+      "status": "BLOCKED",
+      "approval_reference": null,
+      "owner": null,
+      "operator": null,
+      "candidate_sha": null,
+      "starts_at": null,
+      "ends_at": null,
+      "dependencies": [
+        "recovery: real nonempty isolated restore of approved data scope"
+      ],
+      "fields": {
+        "target_inventory_reference": null,
+        "config_version": null,
+        "compose_inventory_reference": null,
+        "migration_validation_reference": null,
+        "verified_real_nonempty_restore_reference": null,
+        "latest_three_ledgers_manifest_reference": null,
+        "legacy_attribution_review_reference": null,
+        "stop_scope_reference": null,
+        "compatible_rollback_validation_reference": null,
+        "rollback_stop_operator": null,
+        "core_image_digest": null,
+        "bridge_image_digest": null,
+        "snowluma_image_digest": null,
+        "compatible_rollback_image_digest": null,
+        "config_sha256": null,
+        "compose_inventory_sha256": null,
+        "mount_network_inventory_sha256": null,
+        "approved_migration_head": null,
+        "maximum_downtime_seconds": null,
+        "stop_operator": null,
+        "stop_command_reference": null
+      }
+    },
+    "qq_window": {
+      "status": "BLOCKED",
+      "approval_reference": null,
+      "owner": null,
+      "operator": null,
+      "candidate_sha": null,
+      "starts_at": null,
+      "ends_at": null,
+      "dependencies": [
+        "deployment: exact frozen target",
+        "Current bounded entry is Demo-only; paid/M1/Reader interoperability requires a separately implemented and reviewed bounded entry."
+      ],
+      "fields": {
+        "window_id": null,
+        "fixed_private_identity_reference": null,
+        "approved_input_manifest_reference": null,
+        "approved_output_manifest_reference": null,
+        "image_inventory_reference": null,
+        "config_version": null,
+        "latest_window_journal_reference": null,
+        "stop_command_reference": null,
+        "stop_operator": null,
+        "human_acceptance_reference": null,
+        "phone_clock_and_error_reference": null,
+        "identity_sha256": null,
+        "protocol_epoch_sha256": null,
+        "config_sha256": null,
+        "image_inventory_sha256": null,
+        "initial_pending": null,
+        "initial_uncertain": null,
+        "initial_unconfirmed_spool": null,
+        "previous_attempts_used": null
+      },
+      "max_new_inputs": 5,
+      "max_external_attempts": 5,
+      "max_replies_per_input": 1,
+      "concurrency": 1,
+      "paid_requests": 0,
+      "persistent_delivery_enabled": false,
+      "max_visible_replies_upper_bound": 5
+    },
+    "paid_model": {
+      "status": "BLOCKED",
+      "approval_reference": null,
+      "owner": null,
+      "operator": null,
+      "candidate_sha": null,
+      "starts_at": null,
+      "ends_at": null,
+      "dependencies": [
+        "deployment: exact frozen target",
+        "recovery: latest independent budget journal and provider reconciliation"
+      ],
+      "fields": {
+        "provider": null,
+        "account_scope_reference": null,
+        "model_id": null,
+        "https_endpoint": null,
+        "region": null,
+        "terms_reference": null,
+        "currency": null,
+        "timezone": null,
+        "rate_evidence_reference": null,
+        "key_custodian": null,
+        "tokenizer_artifact_reference": null,
+        "framing_contract_reference": null,
+        "structured_suffix_reference": null,
+        "sole_database_reference": null,
+        "independent_journal_reference": null,
+        "journal_fault_domain": null,
+        "provider_account_cap_reference": null,
+        "independent_database_usage_exclusion_reference": null,
+        "credential_rotation_reference": null,
+        "stop_operator": null,
+        "billing_reconciliation_reference": null,
+        "tokenizer_artifact_sha256": null,
+        "framing_contract_sha256": null,
+        "rate_valid_from": null,
+        "rate_valid_until": null,
+        "input_rate_micro_usd_per_million": null,
+        "cached_input_rate_micro_usd_per_million": null,
+        "output_rate_micro_usd_per_million": null,
+        "tax_fx_rounding_upper_micro_usd": null,
+        "input_hard_tokens": null,
+        "output_max_tokens": null,
+        "per_attempt_micro_usd": null,
+        "per_request_micro_usd": null,
+        "per_request_calls": null,
+        "daily_micro_usd": null,
+        "daily_calls": null,
+        "monthly_micro_usd": null,
+        "window_micro_usd": null,
+        "window_calls": null,
+        "global_concurrency": null,
+        "stop_command_reference": null,
+        "window_id": null
+      }
+    },
+    "m1": {
+      "status": "DISABLED",
+      "approval_reference": null,
+      "owner": null,
+      "operator": null,
+      "candidate_sha": null,
+      "starts_at": null,
+      "ends_at": null,
+      "dependencies": [
+        "deployment: exact frozen target",
+        "recovery: latest ErasureLedger",
+        "paid_model/qq_window separately when used"
+      ],
+      "fields": {
+        "approved_real_evidence_set_reference": null,
+        "subject_scope_reference": null,
+        "retention_reference": null,
+        "private_confirmation_reference": null,
+        "sensitive_and_conflict_policy_reference": null,
+        "correction_and_supersedes_reference": null,
+        "erasure_derivative_reference": null,
+        "old_backup_latest_ledger_replay_reference": null,
+        "stop_operator": null,
+        "signoff_reference": null,
+        "config_sha256": null,
+        "max_initial_writes": null,
+        "max_initial_retrievals": null,
+        "stop_command_reference": null
+      }
+    },
+    "reader_g1": {
+      "status": "DISABLED",
+      "approval_reference": null,
+      "owner": null,
+      "operator": null,
+      "candidate_sha": null,
+      "starts_at": null,
+      "ends_at": null,
+      "dependencies": [
+        "deployment: isolated Reader boundary",
+        "recovery: latest ErasureLedger and source attribution",
+        "paid_model plus a separate media contract when used"
+      ],
+      "fields": {
+        "source_platform": null,
+        "account_ownership_reference": null,
+        "readonly_scope_reference": null,
+        "grant_id": null,
+        "login_volume_scope_reference": null,
+        "historical_inventory_reference": null,
+        "revocation_plan_reference": null,
+        "erasure_closure_reference": null,
+        "old_complete_attribution_reference": null,
+        "isolation_deployment_reference": null,
+        "pre_get_and_pre_commit_recheck_reference": null,
+        "paid_media_separate_contract_reference": null,
+        "stop_operator": null,
+        "signoff_reference": null,
+        "grant_expires_at": null,
+        "max_requests": null,
+        "max_response_bytes": null,
+        "max_duration_seconds": null,
+        "max_cost_micro_usd": null,
+        "stop_command_reference": null
+      }
+    }
+  },
+  "runtime": {
+    "new_qq_strict_first5": 0,
+    "new_qq_strict_all20": 0,
+    "phone_e2e_paired_samples": 0,
+    "phone_e2e_p50_ms": null,
+    "phone_e2e_p95_ms": null,
+    "provider_usage": null,
+    "provider_cache_hits": null,
+    "provider_tokens": null,
+    "provider_cost": null,
+    "provider_p50_ms": null,
+    "provider_p95_ms": null,
+    "production_ready": false
+  },
+  "actions": {
+    "host_connections": 0,
+    "host_writes": 0,
+    "private_data_reads": 0,
+    "real_data_copies": 0,
+    "qq_sends": 0,
+    "paid_requests": 0,
+    "deployments": 0,
+    "merges": 0
+  },
+  "validation": {
+    "reference": "docs/qq-beta/p8c-readiness.md",
+    "commands": [
+      "./scripts/check.ps1 -TestFiles @('tests/test_p8c_readiness.py','tests/test_p8b_evidence.py','tests/test_p8b_context_benchmark.py'): Ruff PASS; 34 passed in 48.88s",
+      "After source-snapshot Schema hardening: ./scripts/check.ps1 -TestFiles @('tests/test_p8c_readiness.py'): Ruff PASS; 17 passed in 2.82s",
+      "Final ./scripts/check.ps1 -TestFiles @('tests/test_p8c_readiness.py','docs/experiments/p8b1-context-v2/test_benchmark.py'): Ruff PASS; 25 passed in 3.29s",
+      "ruff check --no-cache docs/experiments/p8b1-context-v2: PASS",
+      "Recompute benchmark() against results-final.json and compare legacy fixture with original #26 file: PASS",
+      "Local Markdown links: 4 files checked; 0 broken",
+      "git diff --cached --check: PASS"
+    ],
+    "result": "PASS"
+  }
+}

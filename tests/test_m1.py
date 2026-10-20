@@ -177,7 +177,7 @@ def test_m1_13_migration_and_fts_short_chinese(core):
 def test_m1_14_replay_one_hundred_format_valid_messages(core):
     core.settings.memory_enabled = True
     for i in range(100):
-        text = f"记住这个：我的编号{i:02}项目偏好是蓝色" if i < 30 else f"普通问候第{i}次"
+        text = f"/记住这个：我的编号{i:02}项目偏好是蓝色" if i < 30 else f"普通问候第{i}次"
         ingest(core, i, text)
         run(core.run_once())
         core.store.execute("UPDATE outbox SET state='SENT'")

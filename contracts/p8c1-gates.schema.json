@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "P8-C.1 offline integration evidence, without runtime approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema", "schema_version", "baseline_sha", "product_candidate_sha",
+    "evidence_level", "gates", "validation", "actual", "references", "production_ready"
+  ],
+  "properties": {
+    "$schema": {"const": "../../contracts/p8c1-gates.schema.json"},
+    "schema_version": {"const": 1},
+    "baseline_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "product_candidate_sha": {
+      "anyOf": [{"type": "string", "pattern": "^[a-f0-9]{40}$"}, {"type": "null"}]
+    },
+    "evidence_level": {"const": "OFFLINE_SYNTHETIC_WITH_RUNTIME_BLOCKERS"},
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "offline_compatibility", "slash_commands", "provider_contract", "privacy_review",
+        "live_recovery", "deployment", "qq", "paid", "M1", "Reader", "optional_C5"
+      ],
+      "properties": {
+        "offline_compatibility": {"enum": ["PENDING_INTEGRATION", "OFFLINE_COMPATIBILITY_READY"]},
+        "slash_commands": {"const": "OFFLINE_PASS"},
+        "provider_contract": {"const": "PROVIDER_CONTRACT_UNVERIFIABLE"},
+        "privacy_review": {"const": "OFFLINE_PASS_WITH_HISTORY_RESIDUAL"},
+        "live_recovery": {"const": "BLOCKED"},
+        "deployment": {"const": "BLOCKED"},
+        "qq": {"const": "BLOCKED"},
+        "paid": {"const": "BLOCKED"},
+        "M1": {"const": "DISABLED"},
+        "Reader": {"const": "DISABLED"},
+        "optional_C5": {"const": "DEFERRED"}
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["independent_review", "local", "exact_head_ci", "required_jobs"],
+      "properties": {
+        "independent_review": {"enum": ["PENDING", "PASS"]},
+        "local": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state", "passed", "skipped", "warnings", "seconds"],
+          "properties": {
+            "state": {"enum": ["PENDING", "PASS"]},
+            "passed": {"type": ["integer", "null"], "minimum": 1},
+            "skipped": {"type": ["integer", "null"], "minimum": 0},
+            "warnings": {"type": ["integer", "null"], "minimum": 0},
+            "seconds": {"type": ["number", "null"], "minimum": 0}
+          }
+        },
+        "exact_head_ci": {"const": "EXTERNAL_ATTESTATION_REQUIRED_FOR_FINAL_PR_AND_MAIN_SHA"},
+        "required_jobs": {
+          "const": [
+            "preflight", "test (ubuntu-latest)", "test (windows-latest)",
+            "container", "browser-reader", "plugin-native", "ci"
+          ]
+        }
+      }
+    },
+    "actual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_usage", "provider_cost", "billing_reconciled_cost",
+        "phone_e2e_samples", "phone_p50_ms", "phone_p95_ms", "strict_qq_first5", "strict_qq_all20"
+      ],
+      "properties": {
+        "provider_usage": {"type": "null"},
+        "provider_cost": {"type": "null"},
+        "billing_reconciled_cost": {"type": "null"},
+        "phone_e2e_samples": {"const": 0},
+        "phone_p50_ms": {"type": "null"},
+        "phone_p95_ms": {"type": "null"},
+        "strict_qq_first5": {"const": 0},
+        "strict_qq_all20": {"const": 0}
+      }
+    },
+    "references": {
+      "type": "array",
+      "minItems": 4,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^p8c1-[a-z0-9-]+\\.(md|json)$"}
+    },
+    "production_ready": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "gates": {"properties": {"offline_compatibility": {"const": "OFFLINE_COMPATIBILITY_READY"}}}
+        }
+      },
+      "then": {
+        "properties": {
+          "product_candidate_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+          "validation": {
+            "properties": {
+              "independent_review": {"const": "PASS"},
+              "local": {
+                "properties": {
+                  "state": {"const": "PASS"},
+                  "passed": {"type": "integer", "minimum": 1},
+                  "skipped": {"type": "integer", "minimum": 0},
+                  "warnings": {"type": "integer", "minimum": 0},
+                  "seconds": {"type": "number", "minimum": 0}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

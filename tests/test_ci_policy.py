@@ -60,6 +60,7 @@ def test_critical_changes_cannot_use_development_or_docs_shortcut(name):
     "companion/api.py", "companion/policy.py", "companion/backup.py",
     "companion/model.py", "companion/memory.py", "companion/core.py",
     "companion/runtime.py", "companion/observation.py", "companion/content.py",
+    "companion/live_text.py",
     "companion/executor_gateway.py", "companion/executor_budget_proxy.py",
     "companion/dsh_job.py", "source_reader/worker.py",
     "astrbot_plugin_companion_bridge/bridge.py",

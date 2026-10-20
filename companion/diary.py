@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ConfigDict, Field, ValidationError
 
 from companion import budget
+from companion.commands import command_parts
 from companion.contracts import CoreError, StrictModel
 from companion.observation import expired_sources
 from companion.privacy import advance_epoch, diary_copies, epoch, redact, sensitive
@@ -154,10 +155,13 @@ class DiaryCorrection(StrictModel):
     text: str = Field(min_length=1, max_length=8000)
 
 
+DIARY_COMMANDS = (
+    "今天写日记了吗", "读日记", "日记列表", "删除日记", "暂停写日记", "恢复写日记", "修改日记"
+)
+
+
 def is_diary_command(text):
-    return text.strip().startswith(
-        ("今天写日记了吗", "读日记", "日记列表", "删除日记", "暂停写日记", "恢复写日记", "修改日记")
-    )
+    return command_parts(text)[0] in DIARY_COMMANDS
 
 
 def day_bounds(day, timezone):
@@ -790,6 +794,8 @@ class DiaryService:
         if not is_diary_command(text):
             return None
         self.authorize(requester)
+        command, arguments = command_parts(text)
+        text = command + (" " + arguments if arguments else "")
         parts = text.split(maxsplit=2)
         try:
             if text == "今天写日记了吗":
@@ -853,5 +859,6 @@ class DiaryService:
                 return f"修订内容须为1–{limit}字，且不含敏感信息。"
             raise
         return (
-            "可用指令：读日记 [YYYY-MM-DD]、日记列表、删除日记 YYYY-MM-DD、暂停写日记、恢复写日记。"
+            "可用指令：/今天写日记了吗、/读日记 [YYYY-MM-DD]、/日记列表、"
+            "/修改日记 YYYY-MM-DD 新正文、/删除日记 YYYY-MM-DD、/暂停写日记、/恢复写日记。"
         )
