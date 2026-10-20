@@ -39,8 +39,8 @@ class PaidModelApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     window_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,96}$")
     approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    provider: str
-    model: str
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
     endpoint: str
     currency: Literal["USD"]
     timezone: str
@@ -52,7 +52,7 @@ class PaidModelApproval(BaseModel):
     input_rate: int = Field(strict=True, gt=0)
     cached_input_rate: int = Field(strict=True, gt=0)
     output_rate: int = Field(strict=True, gt=0)
-    tokenizer_path: str
+    tokenizer_path: str = Field(min_length=1)
     tokenizer_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     # This attests the exact provider-side rendering, including hidden structured-mode tokens.
     input_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -71,7 +71,7 @@ class PaidModelApproval(BaseModel):
     concurrency: int = Field(strict=True, gt=0, le=32)
     sole_account_database: Literal[True]
     provider_budget_evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    journal_path: str
+    journal_path: str = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_approval(self):
