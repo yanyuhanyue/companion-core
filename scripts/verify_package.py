@@ -30,6 +30,8 @@ FORBIDDEN = {
 def verify_source(archive):
     assert not any(FORBIDDEN.intersection(Path(n).parts) for n in archive.getnames())
     assert not any("output/playwright/" in n for n in archive.getnames())
+    assert not any(Path(n).suffix.lower() in {".node", ".dll", ".so", ".enc"}
+                   for n in archive.getnames())
 
 
 def verify_export_rebuild(source, temporary):
@@ -75,6 +77,8 @@ def main():
     verify_export_rebuild(source, temporary)
     with zipfile.ZipFile(wheel) as archive:
         assert not any(FORBIDDEN.intersection(Path(n).parts) for n in archive.namelist())
+        assert not any(Path(n).suffix.lower() in {".node", ".dll", ".so", ".enc"}
+                       for n in archive.namelist())
         assert {
             "companion/media_web/index.html",
             "companion/media_web/app.js",
@@ -85,6 +89,9 @@ def main():
             "source_reader/accounts.py",
             "source_reader/heybox_source.py",
             "source_reader/bili_tools.py",
+            "companion_onebot_bridge/__main__.py",
+            "companion_onebot_bridge/spool.py",
+            "companion/telemetry.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
             destination = Path(folder).resolve()

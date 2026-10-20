@@ -207,6 +207,10 @@ class SourceAPI:
 
 
 class HeyboxReader:
+    def grant_snapshot(self, required=False):
+        snapshot = getattr(self.source, "grant_snapshot", None)
+        return snapshot(required=required) if snapshot else None
+
     def __init__(self, public, source=None, clock=lambda: datetime.now(UTC).isoformat()):
         self.public, self.source, self.clock = public, source, clock
 

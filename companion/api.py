@@ -171,6 +171,11 @@ def create_app(settings=None):
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
     from companion.reflection import ReflectionDecision
+    from companion.source_grants import (
+        ReaderLeaseRequest,
+        ReaderReadValidation,
+        SourceGrantRegistration,
+    )
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
@@ -197,8 +202,37 @@ def create_app(settings=None):
         return app.state.core.executive.revoke(task_id)
 
     @app.post("/internal/v2/readers/{adapter_id}/lease", dependencies=adapter_auth)
-    async def reader_lease(adapter_id: str):
-        return {"item": app.state.core.exploration.lease(adapter_id)}
+    async def reader_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
+        grant = body.source_grant if body else None
+        return {"item": app.state.core.exploration.lease(adapter_id, grant)}
+
+    @app.post("/internal/v2/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
+    async def reader_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
+        return app.state.core.exploration.validate_read(adapter_id, request_id, body)
+
+    @app.post("/internal/v2/source-grants", dependencies=control_auth, status_code=201)
+    async def source_grant_register(body: SourceGrantRegistration):
+        return app.state.core.observations.grants.register(body)
+
+    @app.get("/internal/v2/source-grants", dependencies=control_auth)
+    async def source_grant_list():
+        return {"items": app.state.core.observations.grants.list(), "limit": 100}
+
+    @app.get("/internal/v2/source-grants/legacy", dependencies=control_auth)
+    async def source_grant_legacy(offset: int = 0):
+        return {
+            "items": app.state.core.observations.grants.legacy(offset),
+            "page_size": 100, "automatic_attribution": False,
+        }
+
+    @app.post("/internal/v2/source-grants/{grant_id}/revoke", dependencies=control_auth)
+    async def source_grant_revoke(grant_id: str):
+        return app.state.core.observations.grants.revoke(grant_id)
+
+    @app.post("/internal/v2/source-grants/{grant_id}/forget", dependencies=control_auth)
+    async def source_grant_forget(grant_id: str):
+        core = app.state.core
+        return core.observations.grants.forget(grant_id, core.ledger)
 
     @app.post("/internal/v2/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
     async def reader_result(adapter_id: str, request_id: str, body: ReadResult):

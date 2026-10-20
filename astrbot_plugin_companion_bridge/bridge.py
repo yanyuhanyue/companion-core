@@ -5,6 +5,13 @@ import sqlite3
 from datetime import UTC, datetime
 
 
+def _unique_fields(items):
+    fields = dict(items)
+    if len(fields) != len(items):
+        raise ValueError("duplicate receipt field")
+    return fields
+
+
 def normalize(event, owner_id, bot_id, token="", protocol_epoch=""):
     if event.get_platform_name() != "aiocqhttp":
         return None
@@ -112,6 +119,19 @@ class Spool:
             content=row[1].encode(),
             headers={"X-Idempotency-Key": row[0], "Content-Type": "application/json"},
         )
+        erased = False
+        if response.status_code == 410 and len(response.content) <= 65536:
+            try:
+                erased = response.json(object_pairs_hook=_unique_fields) == {
+                    "error": "EVENT_ERASED"
+                }
+            except (ValueError, UnicodeError, RecursionError):
+                pass
+        if erased:
+            with self.db:
+                self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return
         with self.db:
             if response.status_code == 202:
                 self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))

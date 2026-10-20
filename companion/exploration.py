@@ -19,6 +19,7 @@ from companion.observation import (
     ReadingEvidence,
 )
 from companion.privacy import epoch
+from companion.source_grants import SourceGrantSnapshot
 from companion.store import after, encode, uid
 from companion.transport import digest
 
@@ -74,6 +75,7 @@ class ReadResult(StrictModel):
     used_bytes: int | None = Field(default=None, ge=0, le=1048576)
     used_requests: int | None = Field(default=None, ge=0, le=8)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
+    source_grant: SourceGrantSnapshot | None = None
 
 
 def erase_exploration(store, event_ids):
@@ -260,11 +262,13 @@ class ExplorationService:
             and (not for_read or (row["reads"] or 0) < cfg.exploration_daily_deep_reads)
         )
 
-    def lease(self, adapter_id):
+    def lease(self, adapter_id, source_grant=None):
         policy = self.adapter(adapter_id)
         cfg, s, now = self.settings, self.store, self.clock()
         day, month = self.periods()
         with s.transaction():
+            if source_grant or policy.source_grant_required:
+                self.core.observations.grants.require(adapter_id, source_grant)
             s.execute(
                 "UPDATE exploration_requests SET state='UNKNOWN',last_error_code='READ_TIMEOUT' "
                 "WHERE state='RUNNING' AND lease_until<=?",
@@ -326,7 +330,8 @@ class ExplorationService:
                     until = min(until, goal_until)
                 s.execute(
                     "UPDATE exploration_requests SET state='RUNNING',lease_token=?,lease_until=?,"
-                    "reserved_bytes=?,reserved_requests=?,started_at=?,updated_at=? "
+                    "reserved_bytes=?,reserved_requests=?,started_at=?,updated_at=?,"
+                    "source_grant_id=?,source_grant_epoch=? "
                     "WHERE request_id=?",
                     (
                         token,
@@ -335,10 +340,12 @@ class ExplorationService:
                         policy.reader_max_requests,
                         now,
                         now,
+                        source_grant.grant_id if source_grant else None,
+                        source_grant.epoch if source_grant else None,
                         row["request_id"],
                     ),
                 )
-                return {
+                item = {
                     "request_id": row["request_id"],
                     "lease_token": token,
                     "operation": row["operation"],
@@ -347,12 +354,38 @@ class ExplorationService:
                     "max_items": min(40, cfg.exploration_daily_candidate_limit),
                     "max_requests": policy.reader_max_requests,
                 }
+                if source_grant:
+                    item["source_grant"] = source_grant.snapshot()
+                return item
         return None
+
+    def validate_read(self, adapter_id, request_id, validation):
+        self.adapter(adapter_id)
+        s = self.store
+        with s.transaction():
+            row = s.one(
+                "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",
+                (request_id, adapter_id),
+            )
+            if (
+                not row or row["lease_token"] != validation.lease_token
+                or row["state"] != "RUNNING" or row["lease_until"] <= self.clock()
+            ):
+                raise CoreError("STALE_READER_LEASE", 409)
+            if row["captured_privacy_epoch"] != epoch(s):
+                raise CoreError("PRIVACY_CHANGED", 409)
+            captured = self.core.observations.grants.captured(row)
+            if captured != validation.source_grant:
+                raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
+            self.core.observations.grants.require(adapter_id, captured)
+        return {"valid": True}
 
     def complete(self, adapter_id, request_id, result):
         policy = self.adapter(adapter_id)
         s, now = self.store, self.clock()
         receipt = result.model_dump(mode="json")
+        if receipt["source_grant"] is None:
+            receipt.pop("source_grant")
         if receipt["used_requests"] is None:
             receipt.pop("used_requests")
         for item in receipt["items"]:
@@ -376,6 +409,11 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
+            captured_grant = self.core.observations.grants.captured(row)
+            if captured_grant != result.source_grant:
+                raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
+            if captured_grant or policy.source_grant_required:
+                self.core.observations.grants.require(adapter_id, captured_grant)
             step = json.loads(row["goal_step_json"])
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
             if paused and paused["value"] == "1" and self.autonomous(row, step):
@@ -439,6 +477,7 @@ class ExplorationService:
                         source_event_ids=sources,
                         source_sha256=hashlib.sha256(text.encode()).hexdigest(),
                         privacy_epoch=epoch(s),
+                        source_grant=captured_grant,
                         payload=ObservationPayload(
                             title=item.title,
                             text=text,

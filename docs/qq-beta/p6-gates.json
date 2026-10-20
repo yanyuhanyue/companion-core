@@ -1,0 +1,143 @@
+{
+  "schema_version": 1,
+  "task": "CC-NEXT-20261020-P6-SNOWLUMA-LIVE-BETA",
+  "baseline_main": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
+  "baseline_pr18_head": "33dff1186899d3a91f4c2023ab0d594024761971",
+  "code_ready": true,
+  "code_gate": "PASS",
+  "test_source_ready": false,
+  "production_ready": false,
+  "license": "PASS_OWNER_ATTESTED",
+  "written_permission_owner_attested": true,
+  "written_permission_scope_confirmed": true,
+  "written_permission_document_inspected": false,
+  "written_permission_channel": "owner-confirmed email",
+  "written_permission_issuer_date_reference": null,
+  "host": "BLOCKED_HOST",
+  "host_target_confirmed": true,
+  "existing_host_services_unchanged": true,
+  "provider_snapshot": "ABSENT_OWNER_CONFIRMED",
+  "offsite_restore": "NOT_VERIFIED",
+  "snowluma_actual_onebot_compat_verified": false,
+  "protocol": "NOT_RUN_LIVE_ONEBOT",
+  "real_qq_first_batch_accepted": 0,
+  "real_qq_first_batch_target": 5,
+  "real_qq_private_scenarios_accepted": 0,
+  "real_qq_private_scenarios_target": 20,
+  "memory_human_acceptance": "NOT_RUN_MEMORY",
+  "grant_revocation_dependency_closure": "FAIL",
+  "source_soak_24h": "NOT_RUN",
+  "source_soak_72h": "NOT_RUN",
+  "real_natural_diary_days_accepted": 0,
+  "latency_real_p50_ms": null,
+  "latency_real_p95_ms": null,
+  "paid_model_requests": 0,
+  "dsh_runs": 0,
+  "windows_device_runs": 0,
+  "evidence": {
+    "OFFLINE_FIXTURE": [
+      "p6-review.md",
+      "p6-latency.json",
+      "https://github.com/yanyuhanyue/companion-core/actions/runs/39376354697",
+      "https://github.com/yanyuhanyue/companion-core/actions/runs/39376360900"
+    ],
+    "LIVE_ONEBOT": [],
+    "LIVE_QQ_HUMAN": [],
+    "PAID_MODEL": []
+  },
+  "next_gate": "Establish and verify a recovery point, record its scope, separate target and successful time; then explicitly approve isolated runtime installation. QQ login and a bounded first-five-message test window remain separate.",
+  "R0": "PASS",
+  "R1": "BLOCKED_HOST_BACKUP",
+  "offline_fixture_ready": true,
+  "validated_code_commit": "c1986a39178755ddec20f330523cfdeee68be685",
+  "validation": {
+    "local_windows": {
+      "passed": 715,
+      "skipped": 2,
+      "warnings": 3,
+      "seconds": 539.81,
+      "chromium_enabled": true
+    },
+    "onebot": {
+      "passed": 87,
+      "seconds": 52.13
+    },
+    "ci": [
+      {
+        "run_id": 39376354697,
+        "head_sha": "c1986a39178755ddec20f330523cfdeee68be685",
+        "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39376354697",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "container",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (windows-latest)",
+            "conclusion": "success"
+          },
+          {
+            "name": "browser-reader",
+            "conclusion": "success"
+          },
+          {
+            "name": "plugin-native",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (ubuntu-latest)",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "run_id": 39376360900,
+        "head_sha": "c1986a39178755ddec20f330523cfdeee68be685",
+        "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39376360900",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "browser-reader",
+            "conclusion": "success"
+          },
+          {
+            "name": "container",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (ubuntu-latest)",
+            "conclusion": "success"
+          },
+          {
+            "name": "plugin-native",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (windows-latest)",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "ci_full_suite_each_os": {
+      "passed": 713,
+      "skipped_browser_cases": 4,
+      "warnings": 1
+    },
+    "ci_chromium_each_run": 4,
+    "ci_native_fixture_each_run": 58,
+    "ci_four_images_and_uid_volume_smoke": "PASS",
+    "compose_isolated_synthetic_env": "PASS",
+    "package_export_migration": "PASS",
+    "replay_and_worker_smoke": "PASS",
+    "report_followup": "Report-only followup; current head checks linked from Draft PR19."
+  },
+  "independent_backup": "ABSENT_OWNER_CONFIRMED",
+  "recovery_status_evidence": {
+    "type": "OWNER_REPORT",
+    "date": "2026-10-20",
+    "provider_snapshot_exists": false,
+    "independent_backup_exists": false
+  }
+}

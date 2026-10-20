@@ -88,6 +88,35 @@ def diary_copies(store, dates, before=None):
     return result
 
 
+def source_grant_closure(store, event_ids, memory_ids=()):
+    """Follow explicit derivation, including owner corrections of attributed memories."""
+    from companion.observation import dependent_events
+
+    event_ids, memory_ids = set(event_ids), set(memory_ids)
+    relatives = store.rows("SELECT memory_id,supersedes_memory_id FROM memories")
+    evidence = store.rows(
+        "SELECT m.memory_id,m.event_id,e.source,e.event_type FROM memory_evidence m "
+        "JOIN events e USING(event_id)"
+    )
+    while True:
+        before = len(event_ids), len(memory_ids)
+        event_ids = dependent_events(store, event_ids)
+        for row in evidence:
+            if row["event_id"] in event_ids:
+                memory_ids.add(row["memory_id"])
+        for row in relatives:
+            if row["supersedes_memory_id"] in memory_ids:
+                memory_ids.add(row["memory_id"])
+        for row in evidence:
+            if (
+                row["memory_id"] in memory_ids
+                and row["source"] == "owner.decision" and row["event_type"] == "memory.corrected"
+            ):
+                event_ids.add(row["event_id"])
+        if before == (len(event_ids), len(memory_ids)):
+            return event_ids, memory_ids
+
+
 class ErasureLedger:
     def __init__(self, path):
         self.path = Path(path)
@@ -125,8 +154,15 @@ class ErasureLedger:
                     )
                 ):
                     raise ValueError("invalid sequence")
-                if record.get("target_type", "memory") not in {"memory", "event_batch", "diary"}:
+                if record.get("target_type", "memory") not in {
+                    "memory", "event_batch", "diary", "source_grant",
+                }:
                     raise ValueError("unknown erasure target")
+                if record.get("target_type") == "source_grant" and (
+                    not re.fullmatch(r"grant_[0-9a-f]{32}", record.get("source_grant_id", ""))
+                    or record["source_grant_id"] != record["memory_id"]
+                ):
+                    raise ValueError("invalid source grant")
                 if record.get("target_type") == "diary":
                     if date.fromisoformat(record["diary_day"]).isoformat() != record["diary_day"]:
                         raise ValueError("invalid diary date")
@@ -209,6 +245,20 @@ class ErasureLedger:
             "target_type": "diary",
             "diary_day": day,
             "diary_timezone": timezone,
+        }
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(encode(record) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.apply(store, record)
+
+    def forget_source_grant(self, store, grant_id, now):
+        events, memories = source_grant_closure(store, [row["event_id"] for row in store.rows(
+            "SELECT event_id FROM source_grant_events WHERE grant_id=?", (grant_id,))])
+        record = {
+            "seq": len(self.read()), "erasure_id": uid("erase"),
+            "memory_id": grant_id, "memory_ids": sorted(memories), "event_ids": sorted(events),
+            "at": now, "target_type": "source_grant", "source_grant_id": grant_id,
         }
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(encode(record) + "\n")
@@ -305,6 +355,11 @@ class ErasureLedger:
             raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
         with store.transaction():
             for record in lines[1:]:
+                # Rebuild this projection even for pre-upgrade COMPLETE records.
+                # A backup may predate the event itself, so UPDATE events is insufficient.
+                for event_id in record["event_ids"]:
+                    store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+                                  ("erased_event:" + event_id, record["erasure_id"]))
                 applied = store.one(
                     "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=?",
                     (record["erasure_id"],),
@@ -314,7 +369,32 @@ class ErasureLedger:
                 remaining_diary_copies = record.get("target_type") == "diary" and diary_copies(
                     store, {(record["diary_day"], record["diary_timezone"])}, before=record["at"]
                 )
-                if not applied or remaining_diary_copies:
+                remaining_grant = False
+                if record.get("target_type") == "source_grant":
+                    from companion.source_grants import grant_tombstone
+
+                    if applied and record["event_ids"] and not record["memory_ids"] and store.one(
+                        "SELECT 1 FROM memories p JOIN memories c "
+                        "ON c.supersedes_memory_id=p.memory_id WHERE p.status='FORGOTTEN' "
+                        "AND (c.status<>'FORGOTTEN' OR c.content<>'') LIMIT 1"
+                    ):
+                        # Old COMPLETE records deleted the root-to-memory evidence without
+                        # recording memory IDs. Preserve data for isolated owner review;
+                        # neither restored publication nor inferred grant attribution is safe.
+                        raise CoreError("SOURCE_GRANT_LEGACY_ERASURE_REVIEW_REQUIRED", 503)
+                    remaining_grant = not store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                        (grant_tombstone(record["source_grant_id"]),)) or store.one(
+                        "SELECT 1 FROM source_grant_events g JOIN events e USING(event_id) "
+                        "WHERE g.grant_id=? AND e.redacted=0", (record["source_grant_id"],))
+                    remaining_grant = remaining_grant or store.one(
+                        "SELECT 1 FROM events WHERE redacted=0 AND event_id IN "
+                        "(SELECT value FROM json_each(?))", (encode(record["event_ids"]),),
+                    ) or store.one(
+                        "SELECT 1 FROM memories WHERE memory_id IN "
+                        "(SELECT value FROM json_each(?)) AND (content<>'' OR status<>'FORGOTTEN')",
+                        (encode(record["memory_ids"]),),
+                    )
+                if not applied or remaining_diary_copies or remaining_grant:
                     self.apply(store, record)
 
     def apply(self, store, record):
@@ -327,6 +407,25 @@ class ErasureLedger:
         from companion.media import erase_media_links
         from companion.observation import dependent_events, erase_observations
         from companion.reflection import erase_reflections
+
+        if record.get("target_type") == "source_grant":
+            from companion.source_grants import cancel_grant_reads, grant_tombstone
+
+            grant_id = record["source_grant_id"]
+            store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                          (grant_tombstone(grant_id), record["erasure_id"]))
+            store.execute("UPDATE source_grants SET revoked_at=COALESCE(revoked_at,?),"
+                          "forgotten_at=? WHERE grant_id=?", (record["at"], record["at"], grant_id))
+            cancel_grant_reads(store, grant_id, record["at"])
+            # Re-resolve the explicit relationship in the snapshot; never infer it from URLs.
+            roots = set(record["event_ids"]) | {row["event_id"] for row in store.rows(
+                "SELECT event_id FROM source_grant_events WHERE grant_id=?", (grant_id,))}
+            events, memories = source_grant_closure(store, roots, record["memory_ids"])
+            record = {**record, "event_ids": sorted(events), "memory_ids": sorted(memories)}
+            if not events and not memories:
+                advance_epoch(store)
+                self.record_complete(store, record)
+                return
 
         event_ids = dependent_events(store, record["event_ids"])
         memory_ids = set(record["memory_ids"])
@@ -358,6 +457,8 @@ class ErasureLedger:
         erase_media_links(store, event_ids)
         erase_content(store, event_ids)
         for event_id in event_ids:
+            store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+                          ("erased_event:" + event_id, record["erasure_id"]))
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",
                 (event_id,),
@@ -385,6 +486,10 @@ class ErasureLedger:
             store.execute("DELETE FROM traits")
             store.execute(clear_reply)
         advance_epoch(store)
+        self.record_complete(store, record)
+
+    @staticmethod
+    def record_complete(store, record):
         store.execute(
             "INSERT OR IGNORE INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
             (

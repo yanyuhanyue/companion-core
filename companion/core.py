@@ -1,7 +1,8 @@
 import json
 import re
 import sqlite3
-from datetime import UTC
+import time
+from datetime import UTC, datetime
 
 from companion import __version__, budget
 from companion.affect import AffectEngine
@@ -22,6 +23,7 @@ from companion.privacy import ErasureLedger, epoch, redact
 from companion.reflection import ReflectionService
 from companion.social import SocialPlanner, proactive_allowed, proactive_counts
 from companion.store import Store, after, encode, uid, utcnow
+from companion.telemetry import emit
 from companion.transport import (
     cancel_proactive_work,
     digest,
@@ -97,6 +99,9 @@ class Core:
         fingerprint = digest(raw)
         try:
             with s.transaction():
+                if s.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                         ("erased_event:" + event.event_id,)):
+                    raise CoreError("EVENT_ERASED", 410)
                 existing = s.one(
                     "SELECT * FROM events WHERE (source=? AND source_event_id=?) "
                     "OR idempotency_key=? OR event_id=?",
@@ -620,6 +625,10 @@ class Core:
         job = self.claim_job(worker_id)
         if job is None:
             return False
+        started_ns = time.perf_counter_ns()
+        emit("t_job_started", job["trace_id"], elapsed_ms=(
+            datetime.fromisoformat(self.clock()) - datetime.fromisoformat(job["created_at"])
+        ).total_seconds() * 1000)
         request_id = None
         try:
             before_command = epoch(self.store)
@@ -663,6 +672,8 @@ class Core:
                         messages = self.context(job)
                     if captured_epoch != epoch(self.store):
                         raise CoreError("PRIVACY_CHANGED", 503)
+                    emit("t_context_ready", job["trace_id"],
+                         elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
                     request_id = budget.reserve(
                         self.store,
                         self.settings,
@@ -671,8 +682,20 @@ class Core:
                         messages,
                         self.clock(),
                     )
+                    model_started_ns = time.perf_counter_ns()
+                    emit("t_model_request", job["trace_id"])
                     response = await self.model.complete(messages, job["kind"])
+                    model_done_ns = time.perf_counter_ns()
                     budget.settle(self.store, self.settings, request_id, response)
+                    usage = self.store.one(
+                        "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                        (request_id,),
+                    )
+                    emit("t_model_done", job["trace_id"],
+                         elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
+                         budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                         model_usage_state=usage["state"] if usage else None,
+                         at_ns=model_done_ns)
                     request_id = None
                     reply = redact(response.text, self.settings)
             with self.store.transaction():
@@ -703,14 +726,20 @@ class Core:
                     (now, job["job_id"]),
                 )
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now)
-        except CoreError as error:
+            emit("t_job_done", job["trace_id"],
+                 elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
+        except Exception as error:
+            emit("job_failed", job["trace_id"])
             if request_id:
                 budget.settle(self.store, self.settings, request_id)
-            self.fail_job(job, error.code)
-        except Exception:
-            if request_id:
-                budget.settle(self.store, self.settings, request_id)
-            self.fail_job(job, "INTERNAL_ERROR")
+                usage = self.store.one(
+                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    (request_id,),
+                )
+                emit("t_model_failed", job["trace_id"],
+                     budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                     model_usage_state=usage["state"] if usage else None)
+            self.fail_job(job, error.code if isinstance(error, CoreError) else "INTERNAL_ERROR")
         return True
 
     def fail_job(self, job, code):

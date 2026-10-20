@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "P8-A offline evidence gates",
+  "type": "object",
+  "required": ["schema_version", "task", "date", "timezone", "p8_a", "baseline", "evidence_separation", "qq", "recovery", "g1", "m1", "paid_models", "switches", "validation", "repository_workflow", "production_ready"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "task": {"const": "CC-P8-20261020-QQ-NATURAL-BETA-READINESS"},
+    "date": {"type": "string", "format": "date"},
+    "timezone": {"const": "Asia/Shanghai"},
+    "p8_a": {"type": "object", "required": ["state", "completion_rule", "new_live_qa_performed"], "properties": {"state": {"enum": ["OFFLINE_CANDIDATE", "OFFLINE_READY"]}, "new_live_qa_performed": {"const": false}}},
+    "baseline": {"type": "object", "required": ["main", "prs", "p8_base", "p7_report", "runtime_code"], "properties": {"main": {"$ref": "#/$defs/sha"}, "p8_base": {"$ref": "#/$defs/sha"}, "p7_report": {"$ref": "#/$defs/sha"}, "runtime_code": {"$ref": "#/$defs/sha"}, "prs": {"type": "array", "minItems": 4, "items": {"type": "object", "required": ["number", "headRefOid", "baseRefName"], "properties": {"headRefOid": {"$ref": "#/$defs/sha"}}}}}},
+    "evidence_separation": {"type": "object", "required": ["repository", "prior_live", "current_host"]},
+    "qq": {"type": "object", "required": ["phone_reply_samples", "strict_first5", "strict_20", "new_p8_inputs", "new_p8_sends", "old_window_closed", "new_window_authorized", "e2e", "onebot_identity_probe"], "properties": {"new_p8_inputs": {"const": 0}, "new_p8_sends": {"const": 0}, "old_window_closed": {"const": true}, "new_window_authorized": {"const": false}, "phone_reply_samples": {"type": "object", "properties": {"confirmed": {"const": 5}, "target": {"const": 5}}, "required": ["confirmed", "target"]}, "strict_first5": {"$ref": "#/$defs/noLivePass"}, "strict_20": {"$ref": "#/$defs/noLivePass"}, "e2e": {"type": "object", "required": ["paired_samples", "p50_ms", "p95_ms"], "properties": {"paired_samples": {"const": 0}, "p50_ms": {"type": "null"}, "p95_ms": {"type": "null"}}}, "onebot_identity_probe": {"type": "object", "required": ["private_message_delivery_verified"], "properties": {"private_message_delivery_verified": {"const": false}}}}},
+    "recovery": {"type": "object", "required": ["state", "nonempty_real_core_restore", "whole_host_restore"], "properties": {"state": {"const": "BLOCKED"}}},
+    "g1": {"type": "object", "required": ["state", "original_candidate", "independent_review", "repair", "legacy_review_required"], "properties": {"state": {"const": "BLOCKED_NOT_DEPLOYED"}, "original_candidate": {"$ref": "#/$defs/sha"}}},
+    "m1": {"type": "object", "properties": {"state": {"const": "DISABLED_NOT_AUTHORIZED"}}, "required": ["state"]},
+    "paid_models": {"type": "object", "required": ["actual_requests", "authorization", "activation_state", "missing_chat_enforcement"], "properties": {"actual_requests": {"const": 0}, "authorization": {"const": "NOT_GRANTED"}, "activation_state": {"const": "BLOCKED"}}},
+    "switches": {"type": "object", "required": ["mode", "persistent_delivery_enabled", "memory_enabled", "reader_enabled", "autonomous_enabled", "dsh_runs", "windows_runs", "android_runs"], "properties": {"mode": {"const": "demo"}, "persistent_delivery_enabled": {"const": false}, "memory_enabled": {"const": false}, "reader_enabled": {"const": false}, "autonomous_enabled": {"const": false}, "dsh_runs": {"const": 0}, "windows_runs": {"const": 0}, "android_runs": {"const": 0}}},
+    "validation": {"type": "object"},
+    "repository_workflow": {"type": "object"},
+    "production_ready": {"const": false}
+  },
+  "$defs": {"sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "noLivePass": {"type": "object", "required": ["accepted", "target", "state"], "properties": {"accepted": {"const": 0}, "target": {"type": "integer", "minimum": 1}}}},
+  "additionalProperties": false
+}

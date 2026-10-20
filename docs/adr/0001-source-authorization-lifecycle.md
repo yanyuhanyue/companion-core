@@ -1,0 +1,3 @@
+# Separate read revocation from withdrawal of historical processing
+
+On 2026-10-20 the owner confirmed that natural login expiry and revoking future reads stop acquisition while retaining previously authorized history. Explicit withdrawal of historical processing erases the attributable evidence and its derived closure, and the latest independent ErasureLedger must prevent old backups from reviving it. This preserves legitimate history without treating a retained login session as continuing permission; unattributed legacy records require review rather than inferred attribution or automatic bulk deletion.

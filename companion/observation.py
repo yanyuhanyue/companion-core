@@ -12,6 +12,7 @@ from pydantic import AwareDatetime, Field, model_validator
 from companion.contracts import CoreError, StrictModel
 from companion.policy import ConsentService
 from companion.privacy import epoch, redact
+from companion.source_grants import SourceGrantService, SourceGrantSnapshot
 from companion.store import after, encode
 from companion.transport import digest
 
@@ -158,6 +159,7 @@ class ObservationEvent(StrictModel):
     source_event_ids: list[str] = Field(default_factory=list, max_length=256)
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     privacy_epoch: int = Field(ge=0)
+    source_grant: SourceGrantSnapshot | None = None
     device_id: str | None = Field(default=None, min_length=1, max_length=128)
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
     consent_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -220,6 +222,7 @@ class ObservationService:
     def __init__(self, store, settings, clock):
         self.store, self.settings, self.clock = store, settings, clock
         self.consents = ConsentService(store, settings, clock)
+        self.grants = SourceGrantService(store, settings, clock)
 
     def policy(self, adapter_id):
         adapter = self.settings.observation_adapters.get(adapter_id)
@@ -358,6 +361,8 @@ class ObservationService:
         receipt = observation.model_dump(
             mode="json", exclude={"event_id", "trace_id", "privacy_epoch"}
         )
+        if receipt["source_grant"] is None:
+            receipt.pop("source_grant")  # Preserve pre-upgrade idempotency fingerprints.
         for field in ("reading", "article"):
             if receipt["payload"][field] is None:
                 receipt["payload"].pop(field)
@@ -370,6 +375,11 @@ class ObservationService:
             if observation.privacy_epoch != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
             occurred = self.validate(observation, adapter)
+            account_read = (
+                observation.payload.reading and observation.payload.reading.method == "account_api"
+            )
+            if observation.source_grant or adapter.source_grant_required or account_read:
+                self.grants.require(adapter_id, observation.source_grant)
             previous = s.one(
                 "SELECT * FROM events WHERE (source=? AND source_event_id=?) OR event_id=?",
                 (source, external_id, observation.event_id),
@@ -453,6 +463,10 @@ class ObservationService:
                 s.insert(
                     "event_dependencies", event_id=observation.event_id, source_event_id=source_id
                 )
+            if observation.source_grant:
+                s.insert("source_grant_events", event_id=observation.event_id,
+                         grant_id=observation.source_grant.grant_id,
+                         grant_epoch=observation.source_grant.epoch)
             s.audit(
                 "observation.accepted",
                 observation.event_id,

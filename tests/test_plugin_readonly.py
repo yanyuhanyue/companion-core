@@ -12,6 +12,7 @@ from companion.api import create_app
 from companion.backup import backup, restore
 from companion.contracts import DeliveryResult, LeaseRequest
 from companion.exploration import ReadResult
+from companion.source_grants import SourceGrantRegistration
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from source_reader.accounts import BILIBILI_COMMIT, HEYBOX_COMMIT, account_grant
@@ -44,6 +45,31 @@ def grant(tmp_path, source="heybox", now=NOW_DT, **updates):
     path = tmp_path / (source + ".json")
     path.write_text(json.dumps(data), encoding="utf-8")
     path.chmod(0o600)
+    return path
+
+
+def registered_grant(core, tmp_path, source="heybox"):
+    adapter = "bili" if source == "bilibili" else "heybox"
+    grant_id = "grant_" + ("1" if adapter == "heybox" else "2") * 32
+    previous = core.store.one(
+        "SELECT MAX(epoch) n FROM source_grant_revisions WHERE grant_id=?", (grant_id,)
+    )
+    revision = (previous["n"] or 0) + 1
+    authority = {
+        "grant_id": grant_id,
+        "epoch": revision,
+        "fingerprint": hashlib.sha256(f"fixture-{adapter}-{revision}".encode()).hexdigest(),
+    }
+    path = grant(
+        tmp_path, source, now=datetime.fromisoformat(core.clock()), authorization=authority
+    )
+    core.observations.grants.register(
+        SourceGrantRegistration(
+            adapter_id=adapter,
+            expires_at=json.loads(path.read_text("utf-8"))["expires_at"],
+            **authority,
+        )
+    )
     return path
 
 
@@ -296,7 +322,13 @@ def test_native_reader_http_core_chat_and_erasure_replay(core, tmp_path):
 
     async def scenario():
         pool, backend = mock_pool(response(native_post()))
-        path = grant(tmp_path, now=datetime.fromisoformat(core.clock()))
+        authority = {"grant_id": "grant_" + "1" * 32, "epoch": 1, "fingerprint": "a" * 64}
+        path = grant(tmp_path, now=datetime.fromisoformat(core.clock()), authorization=authority)
+        expires = json.loads(path.read_text("utf-8"))["expires_at"]
+        core.observations.grants.register(
+            SourceGrantRegistration(adapter_id="heybox", expires_at=expires, **authority)
+        )
+        core.settings.observation_adapters["heybox"].source_grant_required = True
         async with NativeHeyboxSource(
             path, pool, clock=lambda: datetime.fromisoformat(core.clock())
         ) as source:

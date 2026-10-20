@@ -14,7 +14,7 @@ from source_reader.bilibili import BilibiliReader
 from source_reader.browser import BrowserRenderer
 from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.heybox_source import NativeHeyboxSource
-from source_reader.network import PublicHTTP
+from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import read_result, tick
 
 
@@ -90,7 +90,7 @@ async def main(args):
             while True:
                 try:
                     worked = await tick(core, reader, args.adapter_id)
-                except (httpx.HTTPError, ValueError, KeyError):
+                except (httpx.HTTPError, ValueError, KeyError, ReadFailure):
                     worked = False
                     print("Reader connection unavailable; lease state retained", flush=True)
                 if args.once:

@@ -1,0 +1,14 @@
+{
+  "statusCommand": {"enabled": false, "swallow": false, "cooldownSeconds": 5, "trigger": "#sl"},
+  "networks": {
+    "httpServers": [{"name": "core-private-http", "enabled": true, "host": "0.0.0.0",
+      "port": 3000, "path": "/", "enableWebSocket": false,
+      "accessToken": "SYNTHETIC_ONEBOT_TOKEN_REPLACE_32_BYTES",
+      "messageFormat": "array", "reportSelfMessage": false}],
+    "wsServers": [{"name": "core-private-events", "enabled": true, "host": "0.0.0.0",
+      "port": 3001, "path": "/", "role": "Event",
+      "accessToken": "SYNTHETIC_ONEBOT_TOKEN_REPLACE_32_BYTES",
+      "messageFormat": "array", "reportSelfMessage": false}],
+    "httpClients": [], "wsClients": []
+  }
+}

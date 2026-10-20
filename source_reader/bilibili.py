@@ -96,6 +96,10 @@ def subtitle_excerpt(raw, limit=8000, duration=None):
 
 
 class BilibiliReader:
+    def grant_snapshot(self, required=False):
+        snapshot = getattr(self.public, "grant_snapshot", None)
+        return snapshot(required=required) if snapshot else None
+
     def __init__(
         self, public, renderer=None, clock=lambda: datetime.now(UTC).isoformat(), subtitles=True
     ):
@@ -247,6 +251,8 @@ class BilibiliReader:
                     "OWNER_ACCOUNT_AUTHORIZATION_REQUIRED",
                     "SOURCE_CREDENTIAL_REVOKED",
                     "SOURCE_DISABLED",
+                    "SOURCE_GRANT_REVALIDATION_FAILED",
+                    "SOURCE_GRANT_REVISION_CHANGED",
                     "PLUGIN_UNAVAILABLE",
                     "READER_SUBTITLE_TARGET_MISMATCH",
                 }:

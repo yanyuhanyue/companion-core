@@ -1,0 +1,126 @@
+{
+  "schema_version": 2,
+  "evidence_type": "LIVE_ONEBOT",
+  "status": "PASS_LIVE_ONEBOT_PROTOCOL",
+  "code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+  "config_version": "P7-DEMO-1",
+  "license": "PASS_OWNER_ATTESTED",
+  "runtime_installation_authorized": true,
+  "qq_login_authorized": true,
+  "qq_send_authorized": true,
+  "image_pulled": true,
+  "snowluma_started": true,
+  "runtime_unlogged": false,
+  "webui_http_status": 200,
+  "novnc_http_status": 200,
+  "supervisor_components_running": true,
+  "observed_qq_package_version": "3.2.32-52194",
+  "expected_app_name": "SnowLuma",
+  "expected_app_version": "2.0.3-node",
+  "observed_onebot_app_name": "SnowLuma",
+  "observed_onebot_app_version": "2.0.3-node",
+  "probe": {
+    "evidence_type": "LIVE_ONEBOT",
+    "account_matches": true,
+    "online": true,
+    "good": true,
+    "expected_version_reported": true,
+    "connection_ready": true,
+    "private_message_delivery_verified": false
+  },
+  "real_ws_event": {
+    "status": "PASS_OWNER_FRIEND_EVENT",
+    "post_type": "message",
+    "message_type": "private",
+    "sub_type": "friend",
+    "identity_matches_private_config": true,
+    "message_id_valid": true,
+    "time_valid": true,
+    "message_format": "array",
+    "events_durably_accepted": 5,
+    "private_ids_and_text_recorded_in_public_report": false
+  },
+  "private_accounts_configured": true,
+  "bridge_started": true,
+  "bridge_image_uid10004_volume_smoke": "PASS",
+  "delivery_enabled": false,
+  "pending_outbox_at_capture": 0,
+  "allowed_probe_after_login_approval": [
+    "get_login_info",
+    "get_status",
+    "get_version_info"
+  ],
+  "blocked_by": [],
+  "images": {
+    "bridge": {
+      "id": "sha256:8367e1d85b90df577df5aaa8c3da0d771cc4545ae5bb241d7f1b45c0ed3e760f",
+      "repo_digests": [
+        "companion-p7-bridge@sha256:8367e1d85b90df577df5aaa8c3da0d771cc4545ae5bb241d7f1b45c0ed3e760f"
+      ],
+      "architecture": "amd64"
+    },
+    "core": {
+      "id": "sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891",
+      "repo_digests": [
+        "companion-p7-core@sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891"
+      ],
+      "architecture": "amd64"
+    },
+    "snowluma": {
+      "id": "sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a",
+      "repo_digests": [
+        "motricseven7/snowluma@sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a"
+      ],
+      "architecture": "amd64"
+    }
+  },
+  "observed_webui_version_display": "2.0.3",
+  "platform_private_sends_confirmed": 5,
+  "phone_receipt_evidence": {
+    "evidence_type": "LIVE_QQ_HUMAN",
+    "reply_samples_confirmed": 5,
+    "reference": "p7-qq-human-acceptance.md"
+  },
+  "send_window": {
+    "starts_at": "2026-10-20T07:13:13+00:00",
+    "ends_at": "2026-10-20T07:43:13+00:00",
+    "timezone": "Asia/Shanghai",
+    "closed_at_utc": "2026-10-20T07:21:52.065741+00:00",
+    "closed_reason": "FIVE_ATTEMPT_LIMIT_REACHED",
+    "max_attempts": 5,
+    "attempts_reserved": 5
+  },
+  "pending_at_window_start": 1,
+  "owner_explicitly_allowed_initial_pending_reply": true,
+  "operator_delivery": "One approved event per invocation; persistent daemon delivery remains disabled.",
+  "status_command_enabled": false,
+  "http_clients": 0,
+  "ws_clients": 0,
+  "durable_snapshot": {
+    "event_count": 5,
+    "jobs": {
+      "SUCCEEDED": 5
+    },
+    "outbox": {
+      "SENT": 5
+    },
+    "model_usage": {
+      "SETTLED": 5
+    },
+    "configured_rate_estimate_micro_usd": 0,
+    "delivery_attempts": 5,
+    "spool": {
+      "inbox": {
+        "accepted": 5
+      },
+      "results": {
+        "accepted": 5
+      }
+    },
+    "captured_at_utc": "2026-10-20T07:21:56.415848+00:00",
+    "evidence_type": "LIVE_ONEBOT",
+    "paid_model_requests": 0,
+    "persistent_delivery_enabled": false,
+    "mode": "demo"
+  }
+}

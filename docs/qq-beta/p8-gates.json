@@ -1,0 +1,206 @@
+{
+  "$schema": "../../contracts/p8-gates.schema.json",
+  "schema_version": 1,
+  "task": "CC-P8-20261020-QQ-NATURAL-BETA-READINESS",
+  "date": "2026-10-20",
+  "timezone": "Asia/Shanghai",
+  "p8_a": {
+    "state": "OFFLINE_READY",
+    "completion_rule": "Local and combined checks passed. Exact final report/patch head push+PR CI remains a mandatory external attestation resolved by the actual PR checks and final manifest.",
+    "new_live_qa_performed": false
+  },
+  "baseline": {
+    "checked_at": "2026-10-20T08:46:24.724237+00:00",
+    "main": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
+    "prs": [
+      {
+        "number": 18,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/18",
+        "headRefOid": "33dff1186899d3a91f4c2023ab0d594024761971",
+        "baseRefName": "main",
+        "last_commit_at": "2026-10-20T05:09:17Z"
+      },
+      {
+        "number": 19,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/19",
+        "headRefOid": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+        "baseRefName": "codex/p5-onebot-direct-bridge",
+        "last_commit_at": "2026-10-20T05:57:40Z"
+      },
+      {
+        "number": 20,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/20",
+        "headRefOid": "904eafbb698ce8bfa1cdf7aa0a89ef6aab78dfbf",
+        "baseRefName": "codex/p6-readiness-review",
+        "last_commit_at": "2026-10-20T08:26:38Z"
+      },
+      {
+        "number": 21,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/21",
+        "headRefOid": "907d62c1491e0a3613a7653f2d4eb0275ec4a357",
+        "baseRefName": "codex/p6-readiness-review",
+        "last_commit_at": "2026-10-20T08:24:39Z"
+      }
+    ],
+    "p8_base": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+    "p7_report": "904eafbb698ce8bfa1cdf7aa0a89ef6aab78dfbf",
+    "runtime_code": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+    "runtime_config_version_from_p7": "P7-DEMO-1",
+    "initial_ci_jobs_success": 40,
+    "topology": "18 -> main; 19 -> 18; 20 and 21 are siblings from 19; P8 starts from 19, G1 patch is separate."
+  },
+  "evidence_separation": {
+    "repository": {
+      "level": "READ_ONLY_REPOSITORY",
+      "reference": "baseline pinned SHAs and linked job runs"
+    },
+    "prior_live": {
+      "level": "LIVE_QQ_HUMAN",
+      "reference": "https://github.com/yanyuhanyue/companion-core/blob/904eafbb698ce8bfa1cdf7aa0a89ef6aab78dfbf/docs/qq-beta/p7-qq-human-acceptance.md",
+      "phone_reply_samples": 5,
+      "new_in_p8": false
+    },
+    "current_host": {
+      "level": "LIVE_HOST_METADATA",
+      "checked_at": "2026-10-20T08:47:09.778623+00:00",
+      "schema": "0015_article_images",
+      "observations": 0,
+      "events": 5,
+      "outbox": {
+        "SENT": 5
+      },
+      "attempts": 5,
+      "existing_services_unchanged": true,
+      "persistent_delivery_enabled": false,
+      "source_grant_tables_present": false,
+      "contents_read": false,
+      "services_modified": false
+    }
+  },
+  "qq": {
+    "phone_reply_samples": {
+      "confirmed": 5,
+      "target": 5,
+      "source": "P7 prior human evidence"
+    },
+    "strict_first5": {
+      "accepted": 0,
+      "target": 5,
+      "state": "PARTIAL_NOT_ACCEPTED"
+    },
+    "strict_20": {
+      "accepted": 0,
+      "target": 20,
+      "state": "NOT_RUN_STRICT_MATRIX"
+    },
+    "new_p8_inputs": 0,
+    "new_p8_sends": 0,
+    "old_window_closed": true,
+    "new_window_authorized": false,
+    "e2e": {
+      "paired_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null
+    },
+    "onebot_identity_probe": {
+      "private_message_delivery_verified": false,
+      "meaning": "Identity/status/version protocol probe only; separate from five human-confirmed P7 deliveries."
+    }
+  },
+  "recovery": {
+    "state": "BLOCKED",
+    "initial_empty_core_off_host_restore": "P7_VERIFIED",
+    "nonempty_real_core_restore": "NOT_VERIFIED",
+    "whole_host_restore": "NOT_VERIFIED",
+    "original_services_recovery_point": false,
+    "offline_nonempty_synthetic_recovery": "PASS_15_TESTS"
+  },
+  "g1": {
+    "state": "BLOCKED_NOT_DEPLOYED",
+    "original_candidate": "907d62c1491e0a3613a7653f2d4eb0275ec4a357",
+    "independent_review": "p8-g1-independent-review.md",
+    "findings": [
+      "P1 pre-GET Core revocation revalidation missing",
+      "P1 owner-corrected memory successor omitted from grant erasure closure"
+    ],
+    "repair": {
+      "commit": "6d200378aaeed5a13e2aa76a676cb0c7d8e594c4",
+      "pr": "https://github.com/yanyuhanyue/companion-core/pull/23",
+      "targeted_passed": 81,
+      "original_red_reproductions_now_passed": 2,
+      "second_independent_passed": 7,
+      "combined_validation_passed": true,
+      "legacy_ambiguous_complete": "FAIL_CLOSED_ISOLATED_REVIEW_REQUIRED",
+      "deployed": false,
+      "original_findings_remain_a_fixed_head_snapshot": true
+    },
+    "legacy_review_required": true
+  },
+  "m1": {
+    "state": "DISABLED_NOT_AUTHORIZED"
+  },
+  "paid_models": {
+    "actual_requests": 0,
+    "authorization": "NOT_GRANTED",
+    "configuration": "DEMO_ONLY",
+    "required_parameters": "PENDING_OWNER_CONFIRMATION",
+    "missing_chat_enforcement": [
+      "per-call monetary cap",
+      "chat daily monetary cap",
+      "approval-window/lifetime total cap",
+      "provider concurrency cap",
+      "hard complete-current-input limit"
+    ],
+    "activation_state": "BLOCKED"
+  },
+  "switches": {
+    "mode": "demo",
+    "persistent_delivery_enabled": false,
+    "memory_enabled": false,
+    "reader_enabled": false,
+    "autonomous_enabled": false,
+    "dsh_runs": 0,
+    "windows_runs": 0,
+    "android_runs": 0
+  },
+  "validation": {
+    "local_full": {
+      "command": "./scripts/check.ps1",
+      "platform": "Windows/Python3.12.10",
+      "exit_code": 0,
+      "passed": 726,
+      "skipped": 2,
+      "warnings": 1,
+      "seconds": 593.28,
+      "chromium_enabled": true
+    },
+    "new_regression_tests_passed": 11,
+    "synthetic_recovery_tests_passed": 15,
+    "replay": "PASS_100_EVENTS_30_FACTS_RECALL1_PUBLIC_ACTIONS0",
+    "worker_smoke": "PASS",
+    "compose": "PASS_SYNTHETIC_CONFIG_BUILD_PLAN_NO_DAEMON",
+    "package": "PASS_WHEEL_SDIST_EXPORTED_SOURCE_PRIVACY_MIGRATIONS",
+    "ci": "EXACT_FINAL_HEAD_EXTERNAL_ATTESTATION_REQUIRED",
+    "local_linux_container_run": "SKIPPED_BY_ENV_DOCKER_ENGINE_OFF",
+    "native_fixture": "PASS_PINNED_CHECKOUTS_LOCAL_NO_ASTRBOT_DSH",
+    "bounded_regression_tests_passed": 146,
+    "combined_full": {
+      "validation_commit": "fbb5861f336d3cd6da74b13ae67454cfd715aad9",
+      "scope": "P8 regressions + original G1 + G1 repair + pinned P7 reports",
+      "exit_code": 0,
+      "passed": 771,
+      "skipped": 2,
+      "warnings": 1,
+      "seconds": 605.83,
+      "chromium_enabled": true
+    }
+  },
+  "repository_workflow": {
+    "merge_and_integrated_branch_cleanup_authorized_by_latest_user": true,
+    "deployment_authorized": false,
+    "history_rewrite_allowed": false,
+    "protected_data_cleanup_allowed": false,
+    "final_topology": "Resolve from final PR state and final manifest after verified merges."
+  },
+  "production_ready": false
+}

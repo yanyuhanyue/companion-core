@@ -5,7 +5,7 @@ import json
 import os
 import re
 import stat
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from source_reader.network import ReadFailure
@@ -56,7 +56,7 @@ def account_grant(path, now, source="heybox"):
         fields = {"enabled", "expires_at", "cookies", "upstream_commit"}
         if source == "heybox":
             fields |= {"account_id", "device_id"}
-        if not isinstance(data, dict) or set(data) != fields:
+        if not isinstance(data, dict) or set(data) not in (fields, fields | {"authorization"}):
             raise ValueError("schema")
         expires = datetime.fromisoformat(data["expires_at"])
         if data["enabled"] is not True or expires.tzinfo is None or expires <= now:
@@ -79,6 +79,30 @@ def account_grant(path, now, source="heybox"):
                 raise ValueError("header")
         if source == "bilibili" and not cookies.get("SESSDATA"):
             raise ValueError("identity")
+        if "authorization" in data:
+            authorization = data["authorization"]
+            if (
+                not isinstance(authorization, dict)
+                or set(authorization) != {"grant_id", "epoch", "fingerprint"}
+                or not isinstance(authorization["grant_id"], str)
+                or not re.fullmatch(r"grant_[0-9a-f]{32}", authorization["grant_id"])
+                or type(authorization["epoch"]) is not int
+                or not 1 <= authorization["epoch"] <= 2147483647
+                or not isinstance(authorization["fingerprint"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", authorization["fingerprint"])
+            ):
+                raise ValueError("authorization")
         return data, hashlib.sha256(raw).digest()
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         raise ReadFailure("OWNER_ACCOUNT_AUTHORIZATION_REQUIRED") from None
+
+
+def source_grant(path, now, source, required=False):
+    data, _ = account_grant(path, now, source)
+    authorization = data.get("authorization")
+    if authorization is None:
+        if required:
+            raise ReadFailure("SOURCE_GRANT_METADATA_REQUIRED")
+        return None
+    return {**authorization, "expires_at": datetime.fromisoformat(data["expires_at"])
+            .astimezone(UTC).isoformat(timespec="microseconds")}

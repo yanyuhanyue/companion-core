@@ -1,5 +1,77 @@
 {
   "$defs": {
+    "ArticleEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "enum": [
+            "public_html",
+            "source_api"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "fetched_at": {
+          "format": "date-time",
+          "title": "Fetched At",
+          "type": "string"
+        },
+        "response_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Response Sha256",
+          "type": "string"
+        },
+        "response_bytes": {
+          "exclusiveMinimum": 0,
+          "maximum": 1048576,
+          "title": "Response Bytes",
+          "type": "integer"
+        },
+        "images": {
+          "items": {
+            "$ref": "#/$defs/ArticleImage"
+          },
+          "maxItems": 32,
+          "title": "Images",
+          "type": "array"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "method",
+        "fetched_at",
+        "response_sha256",
+        "response_bytes"
+      ],
+      "title": "ArticleEvidence",
+      "type": "object"
+    },
+    "ArticleImage": {
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "maxLength": 2048,
+          "title": "Url",
+          "type": "string"
+        },
+        "text_offset": {
+          "maximum": 12000,
+          "minimum": 0,
+          "title": "Text Offset",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "url",
+        "text_offset"
+      ],
+      "title": "ArticleImage",
+      "type": "object"
+    },
     "MediaSpan": {
       "additionalProperties": false,
       "properties": {
@@ -115,9 +187,207 @@
           ],
           "default": null,
           "title": "Error Code"
+        },
+        "reading": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReadingEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "article": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArticleEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "title": "ObservationPayload",
+      "type": "object"
+    },
+    "ReadingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "L1",
+            "L2"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "public_api",
+            "account_api",
+            "static_page",
+            "browser_render"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "fetched_at": {
+          "format": "date-time",
+          "title": "Fetched At",
+          "type": "string"
+        },
+        "part": {
+          "const": 1,
+          "default": 1,
+          "title": "Part",
+          "type": "integer"
+        },
+        "subtitle_status": {
+          "enum": [
+            "available",
+            "missing",
+            "restricted",
+            "unavailable",
+            "budget_limited"
+          ],
+          "title": "Subtitle Status",
+          "type": "string"
+        },
+        "language": {
+          "default": "",
+          "maxLength": 32,
+          "title": "Language",
+          "type": "string"
+        },
+        "spans": {
+          "items": {
+            "$ref": "#/$defs/SubtitleSpan"
+          },
+          "maxItems": 120,
+          "title": "Spans",
+          "type": "array"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/ReadingSource"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Sources",
+          "type": "array"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "level",
+        "method",
+        "fetched_at",
+        "subtitle_status",
+        "sources"
+      ],
+      "title": "ReadingEvidence",
+      "type": "object"
+    },
+    "ReadingSource": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "metadata",
+            "page",
+            "player",
+            "subtitle"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "url": {
+          "maxLength": 2048,
+          "title": "Url",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "bytes": {
+          "exclusiveMinimum": 0,
+          "maximum": 1048576,
+          "title": "Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "role",
+        "url",
+        "sha256",
+        "bytes"
+      ],
+      "title": "ReadingSource",
+      "type": "object"
+    },
+    "SourceGrantSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "grant_id": {
+          "pattern": "^grant_[0-9a-f]{32}$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "epoch": {
+          "maximum": 2147483647,
+          "minimum": 1,
+          "title": "Epoch",
+          "type": "integer"
+        },
+        "fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id",
+        "epoch",
+        "fingerprint",
+        "expires_at"
+      ],
+      "title": "SourceGrantSnapshot",
+      "type": "object"
+    },
+    "SubtitleSpan": {
+      "additionalProperties": false,
+      "properties": {
+        "start_seconds": {
+          "minimum": 0,
+          "title": "Start Seconds",
+          "type": "number"
+        },
+        "end_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "End Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "start_seconds",
+        "end_seconds"
+      ],
+      "title": "SubtitleSpan",
       "type": "object"
     }
   },
@@ -218,6 +488,17 @@
       "minimum": 0,
       "title": "Privacy Epoch",
       "type": "integer"
+    },
+    "source_grant": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceGrantSnapshot"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "device_id": {
       "anyOf": [

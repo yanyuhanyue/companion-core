@@ -34,6 +34,7 @@ REVISION_CHAIN = (
     "0013_content",
     "0014_reader_budget",
     "0015_article_images",
+    "0016_source_grants",
 )
 LEGACY_TABLES = (
     "principals",
@@ -303,9 +304,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0015_article_images"]
+    assert scripts.get_heads() == ["0016_source_grants"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0015_article_images")
+    revisions, current = [], scripts.get_revision("0016_source_grants")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -354,7 +355,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
     restore(archive, destination, key, ledger)
     with closing(Store(str(destination))) as restored:
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0015_article_images"}
+            {"version_num": "0016_source_grants"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
