@@ -1,35 +1,38 @@
 # P7 阶段发布复核
 
-当前结论：**代码就绪，专用实验环境已启动但 QQ 未登录；未达到 QQ Beta 验收或生产发布条件。**
-运行代码 `940b6f28c16f7d495c3ff86e6b5bc7fad63e917a`，配置 `P7-DEMO-1`；P7 报告提交由本 PR head 与私有最终清单单独记录。
-本轮没有源代码/迁移修改，旧 #18/#19 保持原有 stacked 关系。
+**实验环境已运行，真实 OneBot 握手与手机5条 Demo 收发成功；完整场景验收和生产发布仍未通过。**
+运行源码 `940b6f28c16f7d495c3ff86e6b5bc7fad63e917a`，配置 `P7-DEMO-1`；
+报告提交由 [Draft P7-A #20](https://github.com/yanyuhanyue/companion-core/pull/20) head
+和私有最终清单单独标识。产品源码/迁移无修改，#19→#18→main关系保留。
 
-## 已完成与实机证据
+## 已验证的结果
 
-- #19 相对 #18 的 24 文件独立复审，无新增可复现缺陷；715 passed / 2 skipped / 1 warning，Chromium 已执行。
-- 合成 Compose/build plan、100-event replay、API/worker/auth smoke、wheel/sdist、无 Git 重包排除与迁移初始化通过。
-  wheel SHA256 为 `b9c74360fc7cb7a2d50f6abe509153de58b3854c55e5486989000fa186ed0cb4`，与 P6 相同。
-  P7 报告 head 的最终 CI 另见本 PR checks/私有最终清单。
-- 主人明确说明无生产任务、专用 Companion Core 实验主机并允许使用；执行方据此按实验例外继续隔离安装。
-  原服务恢复点仍不存在，没有改为 PASS，也没有复制原服务业务正文。
-- 官方 SnowLuma 按 linux/amd64 固定 digest 拉取；Core/Bridge 在目标机从固定 Git archive 构建，
-  归档 SHA256 `fbb94835a502447c44edf289d5dd75069c9cc574c8338e094cb6c0f5b5ef7c4b` 校验通过。
-- Docker 29 的镜像存储为本机构建产物提供了真实 RepoDigest；运行 Compose 三组件均使用 image@sha256，
-  没有把 config/image ID 或 :review 标签冒作可用的 runtime digest，也无需引入额外 registry。
-- 新增 SnowLuma、Core API、聊天 Worker 正在运行，迁移退出 0；API live HTTP 200/healthy，
-  SnowLuma WebUI/noVNC HTTP 200，supervisor 的 qq/snowluma 均运行。
-  Linux QQ 包元数据为 `3.2.32-52194`；经本地 SSH 隧道看到 WebUI 登录页显示 v2.0.3，
-  SnowLuma 的 OneBot 版本尚未实测，未登录管理页或 QQ。
-- Bridge 镜像在本机隔离容器中验证 UID10004、新卷0700/文件0600、重新打开去重，通过后退出。
-  正式 Bridge 尚未启动，不调用 OneBot，不租用或发送 Outbox。
-- 初始 Core 加密备份 868452 bytes 与最新 Ledger 已到主人工作站，
-  通过 SHA256、独立解密/新路径恢复、最新 Ledger 回放、SQLite integrity/foreign key 检查。
-  events/Outbox/ModelUsage 均为0。这只证明空初始 Core 状态，不能证明原服务或生产恢复。
-  密钥另存 Windows 当前用户 DPAPI，已验证能解密；完整离线密钥托管尚未建立。
-- 原有3个容器的完整所选元数据、挂载/镜像/状态/启动/restart/网络/权限均未变，
-  原网络/卷/监听保留，原服务重启操作0次。
-  只新增4个本项目容器（3运行、1迁移退出）、2个专用网络、6个专用卷（含合成 smoke 卷），
-  管理监听仅回环，公网新增监听0。
+- #19相对#18的24文件增量复审，无新增可复现P0/P1/P2；完整Windows检查715 passed/2 skipped/1 warning，Chromium执行。
+- 合成Compose、100-event replay、API/worker/auth smoke与发布包验证通过。
+  原报告4592241的push/PR两组各5项CI成功；最新报告head以本PR检查和最终清单为准。
+- 主人明确主机无生产任务、专用于Companion Core并允许使用，本轮按此实验授权继续隔离安装。
+  原服务恢复点仍不存在，不能计为恢复PASS。许可沿用主人已确认的邮件声明，未读取/公开原件。
+- 官方SnowLuma按linux/amd64固定摘要运行；Core/Bridge从固定Git archive构建，归档SHA256
+  `fbb94835a502447c44edf289d5dd75069c9cc574c8338e094cb6c0f5b5ef7c4b`验证通过。
+  Docker29为本地构建提供真实RepoDigest，运行Compose三组件均image@sha256、无build。
+- Core迁移exit0，API healthy/HTTP200，聊天Worker运行。SnowLuma WebUI/noVNC HTTP200，
+  supervisor qq/snowluma运行，Linux QQ包3.2.32-52194；QQ登录后精确只读probe验证
+  SnowLuma/2.0.3-node、身份匹配、online/good均true，真实owner friend事件array通过。
+- 手机确认5条Demo回复，每输入1条、无重复。最终5个job成功、Outbox SENT=5、attempts=5，
+  Spool inbox/results各accepted=5，PENDING/LEASED/SENDING/DELIVERY_UNCERTAIN均0。
+  ModelUsage SETTLED=5为Demo，费率估算0，付费调用0；未以SETTLED计为真实付费。
+- 逐条操作辅助进程使用既有deliver_tick，不运行发送循环；常驻delivery=false，先持久预留配额，
+  仅白名单事件、最多5次、固定身份和截止时间。窗口已主动关闭，不能继续发第6条。
+  初始Compose run参数错误在任何发送前退出，配额/attempt/results均0后修正，未重试不确定投递。
+- 匿名LIVE_ONEBOT n=5：receive→spool P50 16.3272ms/P95 31.738ms，
+  receive→Core ingest ACK P50 76.784ms/P95 131.5216ms，HTTP send ACK P50 165.4549ms/P95 320.6717ms。
+  各自是组件内跨度，n很小；未采集Core context/真实模型区间，不是完整QQ响应SLA。
+  手机时间不完整且逐条由操作者放行，真实端到端P50/P95保持null。
+- 原有3个容器的挂载、镜像、状态、启动/restart、网络/安全所选元数据完全一致；
+  原网络/卷/监听保留，原服务重启0次。只新增5个项目容器（4运行、1迁移退出）、
+  2个网络、7个卷（含隔离smoke卷），管理口只在回环，公网新增监听0。
+- 初始空Core加密备份868452bytes已到主人工作站，另存DPAPI密钥并独立解密恢复、重放最新Ledger、
+  integrity ok/foreign keys0；它仅证明初始空库恢复，不包含后来QQ样本，不代替整机/原服务/生产恢复。
 
 | 组件 | 实际 RepoDigest |
 |---|---|
@@ -37,42 +40,32 @@
 | core | `companion-p7-core@sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891` |
 | snowluma | `motricseven7/snowluma@sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a` |
 
-## 配置与数据边界
+## 剩余门禁
 
-新项目、目录、网络、卷全部独立命名，不复用 1Panel 网络。公开报告不包含真实服务器路径、
-IP+端口拓扑、QQ ID、Token 或私有配置。实际 owner/bot 仅进服务器私密配置；两个 token 与 epoch
-在服务器新建并持久保存。Bridge UID10004 配置0600，Core UID10001 配置0600，父私密目录0700。
-Bridge 只挂其配置/Spool；Core DB 与 Ledger 分卷，SnowLuma QQ 三卷独立；无 Docker socket。
-SYS_PTRACE/seccomp=unconfined 仅在 SnowLuma，Core/Bridge 只读根、drop ALL、无新特权。
-内存/PID 上限：Bridge 256MiB/64，Core API 与 Worker 各1GiB/96，SnowLuma 3GiB/512。
-所有服务停止/回退只针对本项目，不执行全局 prune 或 down -v。
+5条手机可见是收发样本数，严格首批五场景仍PARTIAL、20场景签收0/20。
+Demo固定回复不能验收语义问答/上下文；真实同ID重复未观察到（duplicate_suppressed=0），
+不能拿不同ID同文输入或离线Fixture补数。单独的故障/恢复签收、部分客户端时间/评分仍缺失。
+继续实测应先批准新范围/窗口；付费模型需明确provider/model/endpoint/费率/单轮和周期硬上限，
+Key只进Core私密配置；M1仍需独立授权。不能自动续期、清队列或开启长期投递。
 
-`mode=demo`、`delivery_enabled=false`、`memory_enabled=false`，Reader/diary/探索/唤醒/社交/
-content/executive/media/Android 全关闭，模型 Key 未配置，真实付费调用0。
-原生组件许可沿用主人已确认的邮件声明，未独立读取或公布原件。
+Reader G1 grant归属/派生闭包保持FAIL；自然过期、撤销后续访问、撤销既有处理授权尚需澄清，
+另起独立修复PR。memory/Reader/diary/探索/唤醒/社交/content/executive/media/Android全部关闭，
+没有产品DSH或Windows执行。原服务恢复点、生产异地恢复、真实费用、账号长期稳定性和20自然日记仍缺，
+production_ready=false。
 
-## 停止点与后续批准
+## 数据边界与回退
 
-QQ 未扫码，OneBot login/status/version 与 WS 事件未实测，首批0/5、累计0/20，
-真实端到端 P50/P95 null。提供 QQ 号码只完成了私有身份配置；不能自动扫码、发消息或使用付费模型。
-下一步是主人批准并扫码专用测试账号，再仅验证 get_login_info/get_status/get_version_info 与被动 WS，
-要求精确 SnowLuma/2.0.3-node、身份和 online/good；delivery 继续关闭。
-确认唯一 Bridge 接管和积压清单后，再分别批准最多5条的具体时间窗口及手机观察人；
-首批通过后再批准扩展20场景。跨进程 monotonic 不相减，OneBot ACK 不当手机收到。
+真实owner/bot、两个独立强Token、稳定epoch、VNC凭据仅保存在私密配置；公开Git不含服务器路径、
+IP+端口拓扑、账号/正文/密钥/私人截图。Core DB/Ledger、Bridge Spool、QQ三卷分别隔离；
+Bridge UID10004，只挂配置/Spool，无模型Key/CoreDB/Docker socket。Core UID10001。
+Core/Bridge只读根/drop ALL/无新特权；SYS_PTRACE/seccomp例外仅SnowLuma。
+Bridge256MiB/PID64，Core API/Worker各1GiB/PID96，SnowLuma3GiB/PID512。
 
-G1 Reader grant 生命周期保持 FAIL，另行澄清自然过期、撤销后续访问、撤销既有处理授权；
-不在 QQ 安装里扩大重写，不启用 DSH/Windows/公开副作用。
-原服务恢复点、生产异地恢复、真实费用、长期稳定性和20自然日记仍缺失，production_ready=false。
+发生错误目标、身份/版本改变、UNKNOWN、Spool冲突/容量、HTTP/WS异常等情况，停止新输入和本项目投递，
+保全DB/Spool/最新Ledger/稳定epoch和私有证据；不重发UNKNOWN、不重置费用、不影响原服务。
+仅针对本项目服务停机/回退固定摘要，禁止down -v、全局prune或覆盖在线库；旧备份先重放最新Ledger。
+私有加密备份与DPAPI材料、登录数据和验收证据必须在任何worktree清理前保全。
 
-## 失败回退与保全
-
-身份/版本或权限不符、意外公网暴露、重复/错误目标、UNKNOWN、Spool 冲突/容量等情况停止新组件。
-只停本项目 Bridge/Worker/API/SnowLuma，保留新卷、稳定 epoch、DB、最新 Ledger 和匿名证据；
-不影响原有1Panel/OpenResty/redroid。不 down -v、不清空队列、不将 UNKNOWN 设回待发；
-真人核对后才按认证流程收口。代码回退使用本表固定已审摘要，不回退 Ledger。
-新初始 Core 恢复在工作站新路径完成，没有覆盖在线库。
-
-Windows 恢复辅助脚本首次漏关 SQLite 连接，造成临时文件清理失败；已修正并用另存 DPAPI
-密钥重新通过恢复。自动审批拒绝了一条含复核/清理的命令，仅返回 blocked by policy；
-该命令未执行，原临时恢复目录保留且未重试删除，修正后的新一轮临时副本已正常清理。
-保留目录只含初始空 Core 恢复数据，不含 QQ 对话；私有最终清单记录其位置。
+恢复脚本首次未显式关闭SQLite造成临时目录残留，已修正后独立恢复成功。
+自动审批拒绝了一条包含复核/临时目录清理的命令，原因仅blocked by policy；命令未执行，
+该原临时目录保留且未重试删除，新一轮恢复临时副本正常清理。保留的仅是初始空Core恢复副本。

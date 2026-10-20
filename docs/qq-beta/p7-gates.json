@@ -8,7 +8,7 @@
   "baseline_main": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
   "baseline_pr18_head": "33dff1186899d3a91f4c2023ab0d594024761971",
   "validated_code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
-  "report_revision": "P7-A.1",
+  "report_revision": "P7-A.2",
   "report_commit_resolution": "P7-A PR head and private final-manifest.json; independently recorded after commit",
   "config_version": "P7-DEMO-1",
   "images": {
@@ -60,7 +60,7 @@
     "allows_production_release": false
   },
   "G2_LICENSE_AND_INSTALL": {
-    "state": "PARTIAL_RUNTIME_UNLOGGED",
+    "state": "PASS_EXPERIMENTAL_RUNTIME_INSTALL",
     "license": "PASS_OWNER_ATTESTED",
     "written_permission_document_inspected": false,
     "installation_authorized_by_owner_test_host_instruction": true,
@@ -73,25 +73,47 @@
     "existing_services_unchanged": true
   },
   "G3_LIVE_ONEBOT": {
-    "state": "NOT_RUN_LIVE_ONEBOT",
-    "qq_login_authorized": false,
+    "state": "PASS",
+    "qq_login_authorized": true,
     "private_accounts_configured": true,
-    "owner_scan_completed": false,
-    "probe": null
+    "login_completed_verified": true,
+    "probe": {
+      "evidence_type": "LIVE_ONEBOT",
+      "account_matches": true,
+      "online": true,
+      "good": true,
+      "expected_version_reported": true,
+      "connection_ready": true,
+      "private_message_delivery_verified": false
+    },
+    "owner_friend_events_accepted": 5,
+    "platform_private_sends_confirmed": 5
   },
   "G4_QQ_FIRST5": {
-    "state": "NOT_RUN",
-    "accepted": 0,
-    "target": 5,
-    "send_window_authorized": false
+    "state": "PARTIAL_DELIVERY_5_OF_5_REQUIRED_SCENARIOS_INCOMPLETE",
+    "phone_reply_samples_confirmed": 5,
+    "phone_reply_sample_target": 5,
+    "strict_scenarios_accepted": 0,
+    "required_scenario_target": 5,
+    "send_window_authorized": true,
+    "send_window_closed": true,
+    "all_inputs_exactly_one_reply_human_confirmed": true,
+    "missing": [
+      "Real same-ID replay not observed.",
+      "Demo fixed response cannot validate semantic multi-turn context.",
+      "Individual phone timestamps and scores are incomplete; gentle operator restart is not full fault recovery acceptance."
+    ]
   },
   "G5_QQ_20": {
-    "state": "NOT_RUN",
+    "state": "NOT_RUN_REQUIRED_SCENARIO_MATRIX",
     "accepted": 0,
-    "target": 20
+    "target": 20,
+    "observed_demo_phone_reply_samples": 5,
+    "additional_send_window_authorized": false
   },
   "G6_REAL_LATENCY": {
-    "state": "NOT_RUN",
+    "state": "PARTIAL_LIVE_PROTOCOL_SPANS_ONLY",
+    "protocol_span_samples": 5,
     "samples": 0,
     "p50_ms": null,
     "p95_ms": null
@@ -117,5 +139,5 @@
   "paid_model_requests": 0,
   "dsh_runs": 0,
   "windows_device_runs": 0,
-  "next_action": "Obtain separate QQ login approval and owner scan; verify exact OneBot identity/status/version and passive WS shape while delivery remains disabled. Sending needs a separate bounded window."
+  "next_action": "Review incomplete phone scenario records and prepare a separately approved follow-up window; real model use requires provider/endpoint/rates/hard budget and separate fee authorization. No automatic send or paid call."
 }

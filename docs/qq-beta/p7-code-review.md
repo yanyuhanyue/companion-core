@@ -49,6 +49,8 @@
 现有服务不加入新网，不挂 Docker socket，不共享 QQ/Spool/Core DB/Ledger/模型 Key。
 后续运行和恢复结果见 [release review](p7-release-review.md) 与机器证据。
 
-目前无真实 OneBot/QQ、付费模型、真实网络 soak 或 20 自然日记证据。
+随后实机 OneBot/手机5条 Demo 收发已记录；逐条窗口控制新增操作辅助脚本，未更改产品源码。
+窗口无批准/过期/超限/事件未许可/已尝试五类停止检查通过，相关投递回归16 passed（19.47s）。
+没有付费模型、长时真实网络 soak 或20自然日记证据。
 Reader grant 自然失效、撤销访问与撤销既有处理授权的语义尚未明确，G1 维持 FAIL，
 另行澄清并独立 PR；不以 event tombstone 测试关闭 G1。

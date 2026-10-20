@@ -115,10 +115,10 @@
     "existing_mounts_images_state_start_restart_network_security_unchanged": true,
     "existing_networks_volumes_listeners_preserved": true,
     "unexpected_runtime_changes": [],
-    "new_companion_container_count": 4,
-    "new_running_companion_containers": 3,
+    "new_companion_container_count": 5,
+    "new_running_companion_containers": 4,
     "new_namespaced_network_count": 2,
-    "new_namespaced_volume_count": 6,
+    "new_namespaced_volume_count": 7,
     "new_loopback_management_listeners": 2,
     "new_public_listeners": 0,
     "original_service_restart_operations": 0

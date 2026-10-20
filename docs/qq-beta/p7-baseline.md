@@ -54,5 +54,7 @@ P7-A base 保持 #19 分支；未合并、改 base、强推或删除分支。
 `motricseven7/snowluma@sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a`。
 源码/registry 与实际已启动状态分别记录在机器门禁中；不以 tag 元数据证明 QQ 实机握手。
 
-本轮仍是 Demo、memory=false、delivery=false。真实 QQ 首批 0/5、累计 0/20，
-真实客户端延迟 null，付费模型/DSH/Windows 运行次数均为 0，production_ready=false。
+主人另行批准登录与首批发送窗口。精确 OneBot 身份/online/good/版本与真实 friend WS 通过；
+5条 Demo 回复经手机确认每次1条、无重复，最终 Outbox SENT=5/attempts=5，Spool accepted=5。
+发送窗口已关闭，常驻 delivery=false；memory=false、真实客户端延迟 null，付费模型/DSH/Windows 为0。
+严格五场景仍 PARTIAL、完整20场景签收0/20，production_ready=false。
