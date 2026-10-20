@@ -27,15 +27,19 @@ Core 等待 `status(event_id).pending` 在有界时间内结束，然后将 `con
 
 Bridge 的原始字节 POST 使用 `Content-Type: image/png|image/jpeg` 和 `X-Content-Key: image:0`。Core 的 `analyze_image` 再校验来源槽位、有效期、图片解码、尺寸、费用和幂等性，调用独立 `HTTPMediaProvider` 的视觉接口。截图使用 `qq_image` 观察来源，不复用摄像头设备授权；通用观察上传 API 必须拒绝直接提交 `qq_image`，使其只能由此次有预算的内容处理产生。
 
-帖子读取返回的 `ReadItem.image_urls` 只是最多两个候选。正文观察提交后，`register_link_images(owner_event_id, observation_id, urls)` 检查原始主人事件依赖，再持久排队。`run_once()` 一次处理一张配图。小黑盒配图只允许 `imgheybox.max-c.com`、`imgheybox1.max-c.com`；B 站只允许 `i0.hdslb.com`、`i1.hdslb.com`、`i2.hdslb.com`。请求强制 HTTPS，移除查询参数，不跟随重定向；来自另一个平台或私有地址的图片不会读取。
+帖子读取返回的 `ReadItem.image_urls` 最多保留 32 个有序候选。正文观察提交后，`register_link_images(owner_event_id, observation_id, urls)` 检查原始主人事件依赖，再持久排队。`run_once()` 一次处理一张配图，worker 使用 `run_batch()` 每批顺序处理最多两张；每张都独立预留并提交。小黑盒配图只允许 `imgheybox.max-c.com`、`imgheybox1.max-c.com`；B 站只允许 `i0.hdslb.com`、`i1.hdslb.com`、`i2.hdslb.com`。请求强制 HTTPS，移除查询参数，不跟随重定向；来自另一个平台或私有地址的图片不会读取。
 
-同一主人消息的 QQ 截图与正文配图合计最多两张。自主探索没有主人分享来源时不进入配图分析。原读者适配器需配置 `media_analysis=true` 才能产生该平台的图片观察；QQ 图片使用 `content.image_adapter` 指定的 `qq_image` 适配器。
+同一主人消息的 QQ 截图仍保留原协议的两个槽位；文章配图按篇独立计数，默认最多识别 32 张，单条消息最多两篇、64 张引用。低于引用数量的配置上限只阻止后续识别，不删除引用。自主探索没有主人分享来源时不进入配图分析。原读者适配器需配置 `media_analysis=true` 才能产生该平台的图片观察；QQ 图片使用 `content.image_adapter` 指定的 `qq_image` 适配器。
 
-默认每图最多 1 MB、单边不超过 4096 像素、累计不超过 1600 万像素，只接受静态 PNG/JPEG。下载总截止 10 秒，模型截止默认 20 秒。Core 和 Bridge 均不保存原图或媒体缓存；媒体只存在一次调用的内存缓冲中。返回观察包括真实媒体哈希、处理模型、根事件依赖与 `image_analysis` 层级。
+默认每图最多 1 MB、单边不超过 4096 像素、累计不超过 1600 万像素；文章配图接受静态 PNG/JPEG/WebP，QQ Bridge 保留现有 PNG/JPEG 入口。下载总截止 10 秒，模型截止默认 20 秒。Core 和 Bridge 均不保存原图或媒体缓存；媒体只存在一次调用的内存缓冲中。返回观察包括真实媒体哈希、处理模型、根事件依赖与 `image_analysis` 层级。
 
 ## 配额、失败和遗忘
 
-`ContentConfig` 提供单图大小、每日图片数、每日预留字节和独立图片模型日预算。视觉端点完整 URL、key、model 和每次请求费用上限来自 `MediaEndpoint`；费用上限或日预算为零时不调用模型。费用预留同时计入 Core 全局月预算，包括其他模型与工具执行的 RESERVED/UNKNOWN 成本。
+`ContentConfig` 提供单图大小、每篇图片数/累计模型预算、每日图片数/预留字节和图片模型日预算。视觉端点完整 URL、key、model 和每次请求费用上限来自 `MediaEndpoint`；也可显式设置 `use_chat_model_for_vision=true` 复用聊天服务。费用上限或日预算为零时不调用模型。费用在下载前检查、模型调用前再次原子预留，同时计入 Core 全局月预算，包括其他模型与工具执行的 RESERVED/UNKNOWN 成本。
+
+已读、排队、失败、UNKNOWN 的数量会进入文章上下文；每张分析关联文章事件、图片序号和正文偏移。正文截断会预留图片标记的位置，后续图片仍保留；总数超过32才截断候选。上下文装不下的图片详情用 `image_details_omitted` 明示；模型输出达到 token 上限时标记为部分识别。
+
+额度调整后，已认证 Bridge 可 `POST /internal/v2/content/{event_id}/images/resume` 继续读取。它只重新排队因数量/预算阻断且从未发出 I/O 的图片，开启一个新的有限等待窗口；成功、已开始 I/O、UNKNOWN 和已删除的图片不会重放。
 
 截图与配图在模型调用前原子预留费用。同一槽位同样字节成功后可返回已有结果，不再次调用；同一槽位不同字节发生幂等冲突。网络异常、取消、进程丢失、过期租约或无法确定结果的调用保留预留并进入 UNKNOWN，不自动重试。提交时重新核对源事件、隐私版本、租约与费用请求 ID，防止晚结果复活已删除内容。
 

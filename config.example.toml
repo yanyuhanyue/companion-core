@@ -110,8 +110,16 @@ max_chunk_bytes = 64000
 [content]
 max_links_per_event = 2
 max_images_per_event = 2
+max_images_per_article = 32
+article_image_micro_usd = 50000
+use_chat_model_for_vision = false
 max_image_bytes = 1000000
-max_daily_image_bytes = 4000000
-max_daily_images = 4
+max_daily_image_bytes = 32000000
+max_daily_images = 32
 image_daily_micro_usd = 0
 wait_seconds = 30
+
+# Explicit opt-in: use_chat_model_for_vision=true reuses the chat URL/model/key.
+# deepseek-flash supports image input; both cost limits must be positive before calls.
+[content.vision]
+max_request_micro_usd = 0

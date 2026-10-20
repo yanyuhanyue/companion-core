@@ -103,7 +103,7 @@ class ArticleEvidence(StrictModel):
     fetched_at: AwareDatetime
     response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_bytes: int = Field(gt=0, le=1048576)
-    images: list[ArticleImage] = Field(default_factory=list, max_length=2)
+    images: list[ArticleImage] = Field(default_factory=list, max_length=32)
     truncated: bool = False
 
     @model_validator(mode="after")
