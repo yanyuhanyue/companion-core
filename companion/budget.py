@@ -272,7 +272,7 @@ def _settle_paid(store, settings, admission, response):
     approval = settings.paid_model
     if approval is None:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
-    paid_budget.journal(store, approval)
+    paid_budget.journal(store, approval, allow_settlement=True)
     usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (admission["request_id"],))
     if usage["state"] == "SETTLED":
         return
@@ -341,6 +341,7 @@ def _settle_paid(store, settings, admission, response):
             "contract_sha256": admission["contract_sha256"],
             "io_started_at": admission["io_started_at"],
         },
+        allow_settlement=True,
     )
 
 
@@ -360,12 +361,15 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         paid_budget.contract(settings, clock())
         paid_budget.journal(store, approval)
         row = store.one(
-            "SELECT a.*,m.state FROM model_admissions a JOIN model_usage m USING(request_id) "
+            "SELECT a.*,m.state,m.scenario AS usage_scenario "
+            "FROM model_admissions a JOIN model_usage m USING(request_id) "
             "WHERE request_id=?",
             (request_id,),
         )
         if not row or row["io_started_at"] or row["state"] != "RESERVED":
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
+        if row["usage_scenario"] != scenario:
+            raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         snapshot = paid_budget.snapshot(settings)
@@ -430,7 +434,7 @@ def record_provider_discrepancy(
         approval = settings.paid_model
         if approval is None:
             raise CoreError("PAID_APPROVAL_REQUIRED", 503)
-        paid_budget.journal(store, approval)
+        paid_budget.journal(store, approval, allow_settlement=True)
         row = store.one(
             "SELECT a.*,m.billed_micro_usd FROM model_admissions a "
             "JOIN model_usage m USING(request_id) WHERE request_id=?",
@@ -459,4 +463,5 @@ def record_provider_discrepancy(
                 "io_started_at": row["io_started_at"],
                 "evidence_sha256": evidence_sha256,
             },
+            allow_settlement=True,
         )
