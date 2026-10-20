@@ -20,7 +20,7 @@ docker compose up -d --build
 docker compose exec companion-api /app/.venv/bin/python -m companion status
 ```
 
-Compose 启动一次性迁移容器、API 和 Worker。数据库和遗忘日志分别放在 `core-data`、`erasure-ledger` 卷中。API **没有宿主机端口映射**，通过 Docker 网络 `companion-internal` 访问；网络保留模型 API 所需的出网能力。不得给 8765 添加公网端口或公网反向代理。容器以非 root 用户运行、只读根文件系统、删除 Linux capabilities。
+Compose 默认启动一次性迁移容器、API 和聊天 Worker。日记、生活、工具、内容 Worker 分别通过 `--profile diary`、`--profile life`、`--profile tools`、`--profile content` 启用；对应功能还需配置开关。数据库和遗忘日志分别放在 `core-data`、`erasure-ledger` 卷中。API **没有宿主机端口映射**，通过 Docker 网络 `companion-internal` 访问；网络保留模型 API 所需的出网能力。不得给 8765 添加公网端口或公网反向代理。容器以非 root 用户运行、只读根文件系统、删除 Linux capabilities。
 
 现有 AstrBot 容器接入相同网络：
 
@@ -36,7 +36,7 @@ docker network connect companion-internal <你的AstrBot容器名>
 uv run python scripts/package_bridge.py
 ```
 
-生成 `dist/astrbot_plugin_companion_bridge-v0.3.0.zip`。在 AstrBot 安装本地插件 ZIP，或把 `astrbot_plugin_companion_bridge/` 目录放入其插件目录，然后重载插件。私有仓库可用本地 ZIP，避免在 QQ 或插件配置里保存 GitHub token。
+生成 `dist/astrbot_plugin_companion_bridge-v0.5.0.zip`。在 AstrBot 安装本地插件 ZIP，或把 `astrbot_plugin_companion_bridge/` 目录放入其插件目录，然后重载插件。私有仓库可用本地 ZIP，避免在 QQ 或插件配置里保存 GitHub token。
 
 配置插件：
 
@@ -46,6 +46,8 @@ uv run python scripts/package_bridge.py
 | `owner_qq_id` | 与 Core 一致的主人账号 |
 | `bot_qq_id` | 与 Core 一致的机器人账号 |
 | `bridge_token` | 与 `COMPANION_BRIDGE_TOKEN` 一致 |
+| `protocol_backend` | 默认 `napcat`，切换时可设为 `snowluma` |
+| `protocol_epoch` | 沿用原 NapCat 可为空；每次切换/回滚使用新的批次号 |
 
 主人会话的 AstrBot 默认 Agent 应显式关闭。桥接监听器还会以高优先级调用 `stop_event()`，在任何 HTTP 请求前取得回复所有权；Core 故障时会把消息留在插件收件箱，不回落到第二个 LLM。其他插件仍可能在更早的优先级运行，必须在实机确认没有重复回复。不要对主人启用另一个独立聊天插件。
 
@@ -56,19 +58,23 @@ uv run python scripts/package_bridge.py
 先在真实 QQ 上测试正常消息、重复消息和故障恢复，确认仅一条主回复，再将 `memory_enabled=true`。停止 API/Worker 后运行迁移初始化，再启动服务：
 
 ```bash
-docker compose stop companion-worker companion-api
+docker compose stop companion-worker companion-diary-worker companion-api
 docker compose build
 docker compose run --rm migrate
-docker compose up -d companion-api companion-worker
+docker compose up -d companion-api companion-worker companion-diary-worker
 ```
 
-初始化会执行 `0003_memory_index` 并准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
+初始化会迁移至 `0013_content`；开启 M1 时还会准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
 
 使用“记住这个：…”验证新会话的不同问法、冲突提示、确认、纠正和忘记。相似检索返回的是候选，最终回复前还会检查它是否直接对应问题。语义核对调用使用同一个模型适配器，记入每日记忆预算；预算不足时聊天会继续，并明确说明记忆核对暂不可用。
 
 自动记忆默认为待确认假设，有逐字引用证据，冲突内容标为待审查。敏感内容采用规则过滤加模型约束，仍应检查候选；这并非对所有自然语言敏感信息的完美分类器。Core 不将部署凭据加入上下文，并过滤已知密钥和常见凭据格式。外部内容始终作为数据。
 
 ## 备份和恢复
+
+日记沿用同一个数据库和遗忘日志；不另建独立且无法回放删除的备份。启用要求及 QQ 指令见 [M1.5 合同](design-v0.4/diary-m1.5.md)。只有完成目标环境与真实样本审核后，才在所有 Core 进程的同一配置中设置 `diary_enabled=true` 并重启。可通过主人私聊立即暂停。HTTP 管理另设独立 `COMPANION_DIARY_ADMIN_TOKEN`，不要将该密钥配置到 Bridge。
+
+协议后端切换请按 [切换与回滚合同](design-v0.4/qq-protocols.md) 执行。先保留 NapCat，实机验证后再切换；Core 数据库和最新遗忘日志不随协议端回滚。
 
 生成 Fernet 密钥，并在部署环境单独保管：
 
@@ -83,7 +89,7 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 生产应由你现有的备份服务定时调用该命令，把加密文件和**最新遗忘日志**分别复制到受限存储。首版没有静默创建系统 cron，也没有替你配置异地存储或自动保留策略。旧数据库备份和旧遗忘日志一起回滚会丢失后来的删除意图，禁止这样恢复。
 
-升级前先备份，停止 Worker 和 API，再执行一次迁移，随后启动服务。当前三个 Alembic revision 支持空库/同版升级和测试环境降级。`0003_memory_index → 0002_m1` 只移除可重建的向量缓存；生产回退仍优先使用旧应用镜像加已验证的备份恢复，不要直接降级删除 M1 事实表。
+升级前先备份，停止所有已启用 Worker 和 API，再执行一次迁移，随后启动服务。当前 Alembic 链支持空库和同版升级；含日记记录的 `0004_diary` 拒绝破坏性降级。`0003_memory_index → 0002_m1` 仅移除可重建的向量缓存，但不要直接降级删除事实或 v0.5 业务表。应用回退前验证 schema 兼容性与最新遗忘回放，不能仅把数据库和日志都换成旧版本。恢复时会撤销旧媒体会话，并将未完成投递、执行和内容读取置为需要核对的状态。
 
 ## 常见运行状态
 

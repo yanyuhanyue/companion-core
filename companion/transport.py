@@ -47,9 +47,33 @@ def recover_deliveries(store, now):
     )
 
 
+def cancel_proactive_work(store, now):
+    # Caller holds the write transaction. Started I/O keeps its uncertain accounting.
+    store.execute(
+        "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id IN "
+        "(SELECT job_id FROM jobs WHERE kind='activity' AND state='RUNNING')"
+    )
+    store.execute(
+        "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
+        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+        (now,),
+    )
+    store.execute(
+        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "last_error_code='AUTONOMY_PAUSED' WHERE action_type='qq.private.proactive' "
+        "AND state IN ('PENDING','LEASED','RETRY_WAIT')",
+        (now,),
+    )
+
+
 def lease_deliveries(store, settings, request, now):
+    from companion.social import proactive_allowed
+
     with store.transaction():
         recover_deliveries(store, now)
+        if not proactive_allowed(store, settings, now):
+            cancel_proactive_work(store, now)
         # One delivery at a time per conversation. Uncertain items are never replayed;
         # later ordinary replies can continue so the owner can reconcile over QQ.
         rows = store.rows(
@@ -90,8 +114,18 @@ def lease_deliveries(store, settings, request, now):
         return {"items": items}
 
 
-def begin_send(store, message_id, token, now):
+def begin_send(store, message_id, token, now, settings=None):
     with store.transaction():
+        pending = store.one(
+            "SELECT action_type FROM outbox WHERE message_id=? AND state='LEASED' "
+            "AND lease_token=? AND lease_until>?",
+            (message_id, token, now),
+        )
+        if pending and pending["action_type"] == "qq.private.proactive":
+            from companion.social import proactive_allowed
+
+            if not proactive_allowed(store, settings, now):
+                raise CoreError("PROACTIVE_SEND_PAUSED", 409)
         changed = store.execute(
             "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
             "WHERE message_id=? AND state='LEASED' AND lease_token=? AND lease_until>?",
@@ -144,6 +178,9 @@ def delivery_result(store, settings, message_id, result, now):
             ),
         )
         store.audit("delivery.result", message_id, "delivery", now, state=state)
+        from companion.goals import acknowledge_commitment_delivery
+
+        acknowledge_commitment_delivery(store, message_id, state, now)
         return {"state": state}
 
 
@@ -160,4 +197,7 @@ def reconcile_delivery(store, message_id, outcome, now):
         if changed != 1:
             raise CoreError("NOT_UNCERTAIN")
         store.audit("delivery.owner_reconciled", message_id, "owner", now, outcome=outcome)
+        from companion.goals import acknowledge_commitment_delivery
+
+        acknowledge_commitment_delivery(store, message_id, outcome, now)
         return {"state": outcome}

@@ -1,7 +1,7 @@
 name: companion
 x-core: &core
   build: .
-  image: companion-core:0.3.0
+  image: companion-core:0.5.0
   env_file: .env
   environment:
     COMPANION_CONFIG: /app/config.toml
@@ -37,6 +37,34 @@ services:
   companion-worker:
     <<: *core
     command: [worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
+  companion-diary-worker:
+    <<: *core
+    profiles: [diary]
+    command: [diary-worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
+  companion-life-worker:
+    <<: *core
+    profiles: [life]
+    command: [life-worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
+  companion-executive-worker:
+    <<: *core
+    profiles: [tools]
+    command: [executive-worker]
+    depends_on:
+      companion-api: {condition: service_healthy}
+    restart: unless-stopped
+  companion-content-worker:
+    <<: *core
+    profiles: [content]
+    command: [content-worker]
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped

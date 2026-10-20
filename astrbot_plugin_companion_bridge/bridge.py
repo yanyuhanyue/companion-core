@@ -5,7 +5,7 @@ import sqlite3
 from datetime import UTC, datetime
 
 
-def normalize(event, owner_id, bot_id, token=""):
+def normalize(event, owner_id, bot_id, token="", protocol_epoch=""):
     if event.get_platform_name() != "aiocqhttp":
         return None
     if str(event.get_sender_id()) != owner_id or str(event.get_sender_id()) == bot_id:
@@ -21,7 +21,10 @@ def normalize(event, owner_id, bot_id, token=""):
     raw = getattr(event.message_obj, "raw_message", {})
     if isinstance(raw, dict) and raw.get("post_type") not in (None, "message"):
         return None
-    source_id = f"{bot_id}:{origin}:{message_id}"
+    if protocol_epoch and not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", protocol_epoch):
+        raise ValueError("invalid protocol_epoch")
+    generation = f"epoch:{protocol_epoch}:" if protocol_epoch else ""
+    source_id = f"{bot_id}:{origin}:{generation}{message_id}"
     key = hashlib.sha256(source_id.encode()).hexdigest()
     text = event.message_str
     if token:
@@ -60,7 +63,35 @@ class Spool:
             "CREATE TABLE IF NOT EXISTS inbox "
             "(key TEXT PRIMARY KEY,body TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending')"
         )
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS protocol_generations "
+            "(epoch TEXT PRIMARY KEY,backend TEXT NOT NULL)"
+        )
         self.db.commit()
+
+    def bind_backend(self, backend, epoch):
+        if backend not in {"napcat", "snowluma"}:
+            raise ValueError("protocol_backend must be napcat or snowluma")
+        if epoch and not re.fullmatch(r"[a-zA-Z0-9_-]{8,64}", epoch):
+            raise ValueError("protocol_epoch must be 8-64 letters, digits, underscores or hyphens")
+        with self.db:
+            current = self.db.execute(
+                "SELECT epoch,backend FROM protocol_generations ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            if current == (epoch, backend):
+                return
+            if not epoch and (current or backend != "napcat"):
+                raise ValueError("switching backend requires a fresh protocol_epoch")
+            if self.db.execute(
+                "SELECT 1 FROM protocol_generations WHERE epoch=?", (epoch,)
+            ).fetchone():
+                raise ValueError("protocol_epoch cannot be reused, including during rollback")
+            if (
+                current
+                and self.db.execute("SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
+            ):
+                raise ValueError("drain the existing bridge inbox before switching backend")
+            self.db.execute("INSERT INTO protocol_generations VALUES (?,?)", (epoch, backend))
 
     def put(self, key, payload):
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True)

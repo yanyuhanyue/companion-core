@@ -1,10 +1,34 @@
 import os
 import tomllib
 from pathlib import Path
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
+
+from companion.content import ContentConfig
+from companion.executive_protocol import ExecutiveConfig
+from companion.media import MediaConfig
+
+
+class ObservationAdapterConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: SecretStr
+    source: Literal[
+        "bilibili",
+        "heybox",
+        "web",
+        "voice",
+        "camera",
+        "android",
+        "dsh",
+        "windows",
+        "simulation",
+        "qq_image",
+    ]
+    media_analysis: bool = False
+    reader_max_requests: int = Field(default=1, ge=1, le=8)
 
 
 class Settings(BaseModel):
@@ -31,6 +55,63 @@ class Settings(BaseModel):
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
     memory_enabled: bool = False
+    diary_enabled: bool = False
+    diary_generate_hour: int = Field(default=2, ge=0, le=23)
+    diary_min_source_events: int = Field(default=3, ge=1, le=40)
+    diary_max_source_events: int = Field(default=40, ge=1, le=100)
+    diary_max_output_tokens: int = Field(default=700, ge=128, le=4096)
+    diary_max_body_chars: int = Field(default=2400, ge=200, le=8000)
+    diary_catchup_days: int = Field(default=3, ge=1, le=7)
+    diary_max_attempts: int = Field(default=2, ge=1, le=3)
+    diary_daily_micro_usd: int = Field(default=50000, ge=0)
+    diary_auto_share: bool = False
+    diary_admin_token: SecretStr = SecretStr("")
+    control_token: SecretStr = SecretStr("")
+    executive: ExecutiveConfig = Field(default_factory=ExecutiveConfig)
+    media: MediaConfig = Field(default_factory=MediaConfig)
+    content_enabled: bool = False
+    content: ContentConfig = Field(default_factory=ContentConfig)
+    observation_enabled: bool = False
+    observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
+    voice_enabled: bool = False
+    camera_enabled: bool = False
+    android_enabled: bool = False
+    affect_enabled: bool = False
+    affect_decay_minutes: int = Field(default=180, ge=1, le=1440)
+    affect_max_evidence: int = Field(default=12, ge=4, le=100)
+    consolidation_enabled: bool = False
+    consolidation_local_hour: int = Field(default=3, ge=0, le=23)
+    consolidation_catchup_days: int = Field(default=3, ge=1, le=7)
+    reflection_enabled: bool = False
+    reflection_daily_max_suggestions: int = Field(default=3, ge=1, le=3)
+    reflection_min_sources: int = Field(default=3, ge=1, le=20)
+    reflection_max_output_tokens: int = Field(default=600, ge=128, le=2048)
+    reflection_max_daily_calls: int = Field(default=1, ge=1, le=5)
+    reflection_daily_micro_usd: int = Field(default=0, ge=0)
+    reflection_monthly_micro_usd: int = Field(default=0, ge=0)
+    goals_enabled: bool = False
+    goals_max_active: int = Field(default=10, ge=1, le=50)
+    goal_max_attempts: int = Field(default=3, ge=1, le=3)
+    wake_enabled: bool = False
+    wake_min_interval_minutes: int = Field(default=180, ge=1, le=1440)
+    wake_max_daily_runs: int = Field(default=3, ge=0, le=20)
+    exploration_enabled: bool = False
+    exploration_daily_candidate_limit: int = Field(default=40, ge=1, le=40)
+    exploration_daily_deep_reads: int = Field(default=5, ge=0, le=20)
+    exploration_daily_requests: int = Field(default=0, ge=0, le=100)
+    exploration_monthly_requests: int = Field(default=0, ge=0, le=3000)
+    exploration_max_response_bytes: int = Field(default=524288, ge=4096, le=1048576)
+    exploration_daily_bytes: int = Field(default=0, ge=0, le=104857600)
+    social_enabled: bool = False
+    social_semantic_threshold: float = Field(default=0.9, ge=0.8, le=1)
+    expression_enabled: bool = False
+    expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+    expression_meme_categories: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]] = (
+        Field(
+            default_factory=lambda: ["happy", "like", "surprised", "morning", "sleep"],
+            max_length=12,
+        )
+    )
     embedding_cache_dir: str = "data/embedding-cache"
     semantic_min_score: float = Field(default=0.5, ge=0, le=1)
     extraction_min_events: int = Field(default=5, ge=1, le=20)
@@ -59,6 +140,34 @@ class Settings(BaseModel):
                 raise ValueError("owner_qq_id and bot_qq_id must be nonzero QQ numbers")
         if self.owner_qq_id == self.bot_qq_id:
             raise ValueError("owner and bot must be different QQ accounts")
+        if self.diary_auto_share:
+            raise ValueError("diary_auto_share is not supported")
+        if self.diary_min_source_events > self.diary_max_source_events:
+            raise ValueError("diary_min_source_events exceeds diary_max_source_events")
+        admin = self.diary_admin_token.get_secret_value()
+        if admin and (len(admin) < 24 or admin == self.bridge_token.get_secret_value()):
+            raise ValueError("diary_admin_token must be distinct and at least 24 characters")
+        tokens = [self.bridge_token.get_secret_value()]
+        for secret in (self.diary_admin_token, self.control_token):
+            token = secret.get_secret_value()
+            if token:
+                if len(token) < 24 or token in tokens:
+                    raise ValueError(
+                        "management tokens must be distinct and at least 24 characters"
+                    )
+                tokens.append(token)
+        for name, adapter in self.observation_adapters.items():
+            token = adapter.token.get_secret_value()
+            if not name.isascii() or not name.replace("_", "").replace("-", "").isalnum():
+                raise ValueError("invalid observation adapter name")
+            if len(token) < 24 or token in tokens:
+                raise ValueError("adapter tokens must be distinct and at least 24 characters")
+            tokens.append(token)
+        for endpoint in self.executive.endpoints.values():
+            token = endpoint.token.get_secret_value()
+            if token in tokens or token == self.model_key.get_secret_value():
+                raise ValueError("executor tokens must be separate from other credentials")
+            tokens.append(token)
         if self.mode == "live" and not self.model_key.get_secret_value():
             raise ValueError("COMPANION_MODEL_KEY is required in live mode")
         request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
@@ -77,6 +186,11 @@ class Settings(BaseModel):
             x is not None for x in (self.input_rate, self.cached_input_rate, self.output_rate)
         )
 
+    def output_tokens(self, scenario):
+        if scenario == "reflection":
+            return self.reflection_max_output_tokens
+        return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
+
     @classmethod
     def load(cls):
         path = Path(os.getenv("COMPANION_CONFIG", "config.toml"))
@@ -84,5 +198,18 @@ class Settings(BaseModel):
         for field in cls.model_fields:
             value = os.getenv(f"COMPANION_{field.upper()}")
             if value is not None:
-                data[field] = value
+                if field == "observation_adapters":
+                    data[field] = TypeAdapter(dict[str, ObservationAdapterConfig]).validate_json(
+                        value
+                    )
+                elif field == "expression_meme_categories":
+                    data[field] = TypeAdapter(list[str]).validate_json(value)
+                elif field == "executive":
+                    data[field] = ExecutiveConfig.model_validate_json(value)
+                elif field == "media":
+                    data[field] = MediaConfig.model_validate_json(value)
+                elif field == "content":
+                    data[field] = ContentConfig.model_validate_json(value)
+                else:
+                    data[field] = value
         return cls.model_validate(data)

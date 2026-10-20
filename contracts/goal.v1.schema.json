@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "GoalScope": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "default": "investigate",
+          "enum": [
+            "read_content",
+            "investigate"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "maxLength": 2048,
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "title": "GoalScope",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "topic": {
+      "maxLength": 300,
+      "minLength": 2,
+      "title": "Topic",
+      "type": "string"
+    },
+    "source_event_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "title": "Source Event Ids",
+      "type": "array"
+    },
+    "scope": {
+      "$ref": "#/$defs/GoalScope"
+    },
+    "priority": {
+      "default": 1,
+      "maximum": 3,
+      "minimum": 0,
+      "title": "Priority",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "topic",
+    "source_event_ids"
+  ],
+  "title": "GoalProposal",
+  "type": "object"
+}

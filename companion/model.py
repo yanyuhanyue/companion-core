@@ -58,6 +58,10 @@ class ModelClient:
 
     async def complete(self, messages, scenario):
         if self.settings.mode == "demo":
+            if scenario == "reflection":
+                return ModelResponse('{"suggestions":[]}', 0, 0)
+            if scenario == "diary":
+                return ModelResponse('{"schema_version":1,"worth_saving":false}', 0, 0)
             if scenario == "memory_review":
                 raise CoreError("MEMORY_REVIEW_REQUIRES_LIVE_MODEL", 503)
             text = (
@@ -69,10 +73,10 @@ class ModelClient:
         payload = {
             "model": self.settings.model_name,
             "messages": messages,
-            "max_tokens": self.settings.max_output_tokens,
+            "max_tokens": self.settings.output_tokens(scenario),
             "stream": False,
         }
-        if scenario in {"memory_extract", "memory_review"}:
+        if scenario in {"memory_extract", "memory_review", "diary", "reflection"}:
             payload["response_format"] = {"type": "json_object"}
         if self.settings.provider == "deepseek":
             payload["thinking"] = {"type": "disabled"}

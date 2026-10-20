@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
@@ -23,9 +23,22 @@ class Media(StrictModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class SharedLink(StrictModel):
+    kind: Literal["link"]
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class SharedImage(StrictModel):
+    kind: Literal["image"]
+    slot: int = Field(ge=0, le=1, strict=True)
+
+
 class Payload(StrictModel):
     text: str = Field(max_length=20000)
     media: list[Media] = Field(max_length=10)
+    shared_content: list[Annotated[SharedLink | SharedImage, Field(discriminator="kind")]] = Field(
+        default_factory=list, max_length=4
+    )
 
 
 class InboundEvent(StrictModel):

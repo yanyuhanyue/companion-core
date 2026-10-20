@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "DiaryCitation": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "maxLength": 180,
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "exact_quote": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Exact Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "DiaryCitation",
+      "type": "object"
+    },
+    "DiarySection": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "observation",
+            "reflection",
+            "question"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/DiaryCitation"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "text",
+        "evidence"
+      ],
+      "title": "DiarySection",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "local_date": {
+      "default": "",
+      "title": "Local Date",
+      "type": "string"
+    },
+    "title": {
+      "default": "",
+      "maxLength": 80,
+      "title": "Title",
+      "type": "string"
+    },
+    "sections": {
+      "items": {
+        "$ref": "#/$defs/DiarySection"
+      },
+      "maxItems": 8,
+      "title": "Sections",
+      "type": "array"
+    },
+    "worth_saving": {
+      "title": "Worth Saving",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "worth_saving"
+  ],
+  "title": "DiaryDraft",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:companion:diary:1"
+}

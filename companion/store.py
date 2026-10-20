@@ -72,6 +72,58 @@ class Store:
         row = self.db.execute(sql, params).fetchone()
         return dict(row) if row else None
 
+    def schema_capabilities(self):
+        required = {
+            "events": {"event_id", "redacted", "memory_processed", "fingerprint"},
+            "jobs": {"lease_token", "state"},
+            "outbox": {"lease_token", "state", "content_json"},
+            "memories": {"needs_review", "fact_key"},
+            "memory_vectors": {"model_version", "content_hash", "vector"},
+            "runtime_meta": {"key", "value"},
+            "diary_runs": {"captured_privacy_epoch", "lease_token", "source_set_sha256"},
+            "diary_entries": {"body_md", "status", "version"},
+            "diary_evidence": {"event_id", "outbox_message_id"},
+            "diary_revisions": {"prior_title", "prior_body_md"},
+            "observations": {"event_id", "result_status", "captured_privacy_epoch"},
+            "event_dependencies": {"event_id", "source_event_id"},
+            "consents": {"capabilities_json", "expires_at", "revoked_at"},
+            "affect_states": {"state_json", "expires_at", "version"},
+            "affect_evidence": {"event_id", "reason_code", "expires_at"},
+            "reflection_runs": {"captured_privacy_epoch", "lease_token", "model_request_id"},
+            "reflection_evidence": {"event_id", "outbox_message_id"},
+            "reflection_suggestions": {"kind", "content", "state"},
+            "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
+            "consolidation_evidence": {"event_id", "run_id"},
+            "goals": {"scope_json", "state", "redacted"},
+            "goal_evidence": {"event_id", "goal_id"},
+            "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts"},
+            "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},
+            "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
+            "exploration_requests": {
+                "lease_token",
+                "reserved_bytes",
+                "captured_privacy_epoch",
+                "reserved_requests",
+                "used_requests",
+            },
+            "social_candidates": {"event_id", "message_id", "comparison_text"},
+            "tool_tasks": {"scope_sha256", "captured_privacy_epoch", "billed_micro_usd"},
+            "tool_approvals": {"scope_sha256", "expires_at", "revoked_at"},
+            "media_sessions": {"token_hash", "captured_privacy_epoch", "max_bytes"},
+            "media_requests": {"request_key", "fingerprint", "usage_request_id", "event_id"},
+            "content_items": {"owner_event_id", "read_request_id", "usage_request_id", "deadline"},
+        }
+        columns_present = all(
+            columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}
+            for table, columns in required.items()
+        )
+        content = self.one(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
+        )
+        return columns_present and bool(
+            content and "slot<64" in "".join(content["sql"].split()).lower()
+        )
+
     def insert(self, table, **values):
         # Identifiers are application constants, never API input.
         names = ",".join(values)

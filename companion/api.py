@@ -1,11 +1,15 @@
 import hmac
+import re
 from contextlib import asynccontextmanager
+from datetime import date
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from companion import __version__
 from companion.config import Settings
+from companion.content_api import register_content_routes
 from companion.contracts import (
     CoreError,
     DeliveryResult,
@@ -16,23 +20,31 @@ from companion.contracts import (
     SearchRequest,
 )
 from companion.core import Core
+from companion.diary import DiaryCorrection, DiaryMode
+from companion.media_api import register_media_routes
 from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
 class BodyLimit:
-    def __init__(self, app):
+    def __init__(self, app, image_limit=131072):
         self.app = app
+        self.image_limit = image_limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
             return await self.app(scope, receive, send)
         body = bytearray()
+        limit = (
+            self.image_limit
+            if re.fullmatch(r"/internal/v2/content/[^/]+/image", scope["path"])
+            else 131072
+        )
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
                 return
             body.extend(message.get("body", b""))
-            if len(body) > 131072:
+            if len(body) > limit:
                 return await JSONResponse({"error": "BODY_TOO_LARGE"}, 413)(scope, receive, send)
             if not message.get("more_body"):
                 break
@@ -59,17 +71,41 @@ def create_app(settings=None):
 
     app = FastAPI(
         title="Companion Core",
-        version="0.3.0",
+        version=__version__,
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
     )
-    app.add_middleware(BodyLimit)
+    app.add_middleware(
+        BodyLimit,
+        image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
+    )
 
     async def authenticate(authorization: str = Header(default="")):
         expected = "Bearer " + settings.bridge_token.get_secret_value()
         if not hmac.compare_digest(authorization.encode(), expected.encode()):
+            raise HTTPException(401, "UNAUTHORIZED")
+
+    async def diary_admin(authorization: str = Header(default="")):
+        token = settings.diary_admin_token.get_secret_value()
+        if not token or not hmac.compare_digest(
+            authorization.encode(), ("Bearer " + token).encode()
+        ):
+            raise HTTPException(401, "UNAUTHORIZED")
+
+    async def control_admin(authorization: str = Header(default="")):
+        token = settings.control_token.get_secret_value()
+        if not token or not hmac.compare_digest(
+            authorization.encode(), ("Bearer " + token).encode()
+        ):
+            raise HTTPException(401, "UNAUTHORIZED")
+
+    async def observation_adapter(adapter_id: str, authorization: str = Header(default="")):
+        adapter = settings.observation_adapters.get(adapter_id)
+        if not adapter or not hmac.compare_digest(
+            authorization.encode(), ("Bearer " + adapter.token.get_secret_value()).encode()
+        ):
             raise HTTPException(401, "UNAUTHORIZED")
 
     @app.exception_handler(CoreError)
@@ -93,6 +129,7 @@ def create_app(settings=None):
 
     prefix = "/internal/v1"
     auth = [Depends(authenticate)]
+    register_content_routes(app, auth)
 
     @app.get(prefix + "/health/live")
     async def live():
@@ -102,9 +139,193 @@ def create_app(settings=None):
     async def ready():
         core = app.state.core
         version = core.store.one("SELECT version_num FROM alembic_version")
-        if version["version_num"] != "0003_memory_index":
+        if not core.store.schema_capabilities():
             raise CoreError("MIGRATION_REQUIRED", 503)
-        return {"status": "ready", "schema": version["version_num"]}
+        return {
+            "status": "ready",
+            "schema": version["version_num"],
+            "capabilities": [
+                "m0",
+                "m1",
+                "memory_index",
+                "diary",
+                "observations",
+                "affect",
+                "consolidation",
+                "reflection",
+                "goals",
+                "exploration",
+                "expression",
+                "executive",
+                "media",
+                "content",
+            ],
+        }
+
+    diary_auth = [Depends(diary_admin)]
+
+    from companion.executive_protocol import ToolDecision, ToolRequest
+    from companion.exploration import ReadResult
+    from companion.goals import CommitmentRequest, GoalDecision, GoalProposal
+    from companion.observation import ObservationEvent
+    from companion.policy import ConsentRequest
+    from companion.privacy import epoch
+    from companion.reflection import ReflectionDecision
+
+    control_auth = [Depends(control_admin)]
+    adapter_auth = [Depends(observation_adapter)]
+    register_media_routes(app, control_auth)
+
+    @app.get("/internal/v2/tools", dependencies=control_auth)
+    async def list_tools():
+        return {
+            "items": app.state.core.store.rows(
+                "SELECT * FROM tool_tasks WHERE redacted=0 ORDER BY rowid DESC LIMIT 30"
+            )
+        }
+
+    @app.post("/internal/v2/tools", dependencies=control_auth, status_code=202)
+    async def submit_tool(body: ToolRequest):
+        return app.state.core.executive.submit(body)
+
+    @app.post("/internal/v2/tools/{task_id}/decision", dependencies=control_auth)
+    async def decide_tool(task_id: str, body: ToolDecision):
+        return app.state.core.executive.decide(task_id, body)
+
+    @app.post("/internal/v2/tools/{task_id}/revoke", dependencies=control_auth)
+    async def revoke_tool(task_id: str):
+        return app.state.core.executive.revoke(task_id)
+
+    @app.post("/internal/v2/readers/{adapter_id}/lease", dependencies=adapter_auth)
+    async def reader_lease(adapter_id: str):
+        return {"item": app.state.core.exploration.lease(adapter_id)}
+
+    @app.post("/internal/v2/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
+    async def reader_result(adapter_id: str, request_id: str, body: ReadResult):
+        return app.state.core.exploration.complete(adapter_id, request_id, body)
+
+    @app.get("/internal/v2/exploration", dependencies=control_auth)
+    async def exploration_status():
+        return {
+            "items": app.state.core.store.rows(
+                "SELECT request_id,adapter_id,operation,state,used_bytes,reserved_bytes,"
+                "last_error_code,"
+                "created_at FROM exploration_requests ORDER BY rowid DESC LIMIT 30"
+            )
+        }
+
+    @app.get("/internal/v2/affect", dependencies=control_auth)
+    async def affect_snapshot():
+        return app.state.core.affect.snapshot()
+
+    @app.get("/internal/v2/goals", dependencies=control_auth)
+    async def goals():
+        return {"items": app.state.core.goals.recent()}
+
+    @app.post("/internal/v2/goals", dependencies=control_auth, status_code=202)
+    async def propose_goal(body: GoalProposal):
+        return {"goal_id": app.state.core.goals.propose(body)}
+
+    @app.post("/internal/v2/goals/{goal_id}/decision", dependencies=control_auth)
+    async def decide_goal(goal_id: str, body: GoalDecision):
+        engine = app.state.core.goals
+        return engine.accept(goal_id) if body.decision == "ACCEPT" else engine.cancel(goal_id)
+
+    @app.post("/internal/v2/commitments", dependencies=control_auth, status_code=202)
+    async def accept_commitment(body: CommitmentRequest):
+        return app.state.core.goals.accept_commitment(body)
+
+    @app.post("/internal/v2/life/runtime-mode", dependencies=control_auth)
+    async def life_mode(body: DiaryMode):
+        return app.state.core.goals.pause_autonomy(not body.enabled)
+
+    @app.get("/internal/v2/interests", dependencies=control_auth)
+    async def interests():
+        return {
+            "items": app.state.core.store.rows(
+                "SELECT t.trait_id,t.topic,t.status,t.confidence,e.event_id FROM traits t JOIN "
+                "trait_evidence e USING(trait_id) WHERE t.category='interest' ORDER BY "
+                "t.updated_at DESC LIMIT 30"
+            )
+        }
+
+    @app.get("/internal/v2/consolidation", dependencies=control_auth)
+    async def consolidation_status():
+        return {"items": app.state.core.consolidation.recent()}
+
+    @app.post("/internal/v2/consolidation/{day}", dependencies=control_auth, status_code=202)
+    async def consolidate(day: date):
+        run_id = app.state.core.consolidation.schedule_day(day)
+        if not run_id:
+            raise CoreError("CONSOLIDATION_DISABLED", 403)
+        return {"run_id": run_id}
+
+    @app.get("/internal/v2/reflections", dependencies=control_auth)
+    async def reflections():
+        return {"items": app.state.core.reflections.recent()}
+
+    @app.post("/internal/v2/reflections/{suggestion_id}/decision", dependencies=control_auth)
+    async def reflection_decision(suggestion_id: str, body: ReflectionDecision):
+        return app.state.core.reflections.decide(suggestion_id, body.decision)
+
+    @app.get("/internal/v2/observations/{adapter_id}/context", dependencies=adapter_auth)
+    async def observation_context(adapter_id: str):
+        app.state.core.observations.policy(adapter_id)
+        return {"privacy_epoch": epoch(app.state.core.store)}
+
+    @app.post("/internal/v2/observations/{adapter_id}", dependencies=adapter_auth, status_code=202)
+    async def observe(adapter_id: str, body: ObservationEvent):
+        if settings.observation_adapters[adapter_id].source == "qq_image":
+            raise CoreError("CONTENT_IMAGE_INTAKE_REQUIRED", 403)
+        return app.state.core.observations.append(adapter_id, body)
+
+    @app.get("/internal/v2/observations", dependencies=control_auth)
+    async def observations():
+        return {"items": app.state.core.observations.recent()}
+
+    @app.post("/internal/v2/observations/{event_id}/forget", dependencies=control_auth)
+    async def forget_observation(event_id: str):
+        core = app.state.core
+        if not core.store.one("SELECT 1 FROM observations WHERE event_id=?", (event_id,)):
+            raise CoreError("OBSERVATION_NOT_FOUND", 404)
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, [event_id], core.clock())
+        return {"event_id": event_id, "status": "REDACTED"}
+
+    @app.post("/internal/v2/consents", dependencies=control_auth)
+    async def grant_consent(body: ConsentRequest):
+        return app.state.core.observations.consents.grant(body)
+
+    @app.post("/internal/v2/consents/{consent_id}/revoke", dependencies=control_auth)
+    async def revoke_consent(consent_id: str):
+        return app.state.core.observations.consents.revoke(consent_id)
+
+    @app.get(prefix + "/diary", dependencies=diary_auth)
+    async def diary_list(limit: int = 7):
+        return {"items": app.state.core.diary.list_recent(settings.owner_qq_id, limit)}
+
+    @app.get(prefix + "/diary/status", dependencies=diary_auth)
+    async def diary_status():
+        return app.state.core.diary.status(settings.owner_qq_id)
+
+    @app.post(prefix + "/diary/runtime-mode", dependencies=diary_auth)
+    async def diary_mode(body: DiaryMode):
+        return app.state.core.diary.set_mode(body.enabled, settings.owner_qq_id)
+
+    @app.get(prefix + "/diary/{day}", dependencies=diary_auth)
+    async def diary_day(day: date):
+        result = app.state.core.diary.get_day(day, settings.owner_qq_id)
+        if not result:
+            raise CoreError("DIARY_NOT_FOUND", 404)
+        return result
+
+    @app.post(prefix + "/diary/{day}/forget", dependencies=diary_auth)
+    async def diary_forget(day: date):
+        return app.state.core.diary.forget(day, settings.owner_qq_id)
+
+    @app.post(prefix + "/diary/{day}/correction", dependencies=diary_auth)
+    async def diary_correct(day: date, body: DiaryCorrection):
+        return app.state.core.diary.correct(day, body.text, settings.owner_qq_id)
 
     @app.post(prefix + "/inbox/events", dependencies=auth, status_code=202)
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
@@ -118,7 +339,7 @@ def create_app(settings=None):
     @app.post(prefix + "/deliveries/{message_id}/begin-send", dependencies=auth)
     async def begin(message_id: str, body: LeaseToken):
         core = app.state.core
-        return begin_send(core.store, message_id, body.lease_token, core.clock())
+        return begin_send(core.store, message_id, body.lease_token, core.clock(), settings)
 
     @app.post(prefix + "/deliveries/{message_id}/result", dependencies=auth)
     async def result(message_id: str, body: DeliveryResult):

@@ -1,16 +1,35 @@
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
+from datetime import UTC
 
-from companion import budget
+from companion import __version__, budget
+from companion.affect import AffectEngine
+from companion.consolidation import NightlyConsolidator
+from companion.content import CONTEXT_RULES, ContentService
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
+from companion.diary import DiaryService, day_bounds, is_diary_command
+from companion.executive import Executive
+from companion.exploration import ExplorationService
+from companion.expression import ExpressionEngine
+from companion.goals import GoalEngine
+from companion.life import LifeService, is_life_command
+from companion.media import MediaService
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
+from companion.observation import ObservationService
 from companion.privacy import ErasureLedger, epoch, redact
+from companion.reflection import ReflectionService
+from companion.social import SocialPlanner, proactive_allowed, proactive_counts
 from companion.store import Store, after, encode, uid, utcnow
-from companion.transport import digest, enqueue, reconcile_delivery, recover_deliveries
+from companion.transport import (
+    cancel_proactive_work,
+    digest,
+    enqueue,
+    reconcile_delivery,
+    recover_deliveries,
+)
+from companion.wake import WakePlanner
 
 
 class Core:
@@ -43,6 +62,22 @@ class Core:
                 "INSERT OR IGNORE INTO runtime_meta VALUES ('owner_qq_id',?)",
                 (settings.owner_qq_id,),
             )
+        self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
+        self.observations = ObservationService(self.store, settings, clock)
+        self.media = MediaService(self.store, settings, clock, self.observations)
+        self.affect = AffectEngine(self.store, settings, clock)
+        self.reflections = ReflectionService(
+            self.store, settings, model, self.diary.repo, self.ledger, clock
+        )
+        self.consolidation = NightlyConsolidator(self)
+        self.goals = GoalEngine(self.store, settings, self.ledger, clock)
+        self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
+        self.life = LifeService(self)
+        self.social = SocialPlanner(self)
+        self.exploration = ExplorationService(self)
+        self.content = ContentService(self)
+        self.expression = ExpressionEngine(self.store, settings, clock)
+        self.executive = Executive(self.store, settings, clock)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -56,6 +91,9 @@ class Core:
         if not key or len(key) > 512:
             raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)
         raw = event.model_dump(mode="json", exclude={"event_id", "trace_id"})
+        # Preserve the v1 fingerprint for messages queued before shared content existed.
+        if not raw["payload"]["shared_content"]:
+            raw["payload"].pop("shared_content")
         fingerprint = digest(raw)
         try:
             with s.transaction():
@@ -98,6 +136,20 @@ class Core:
                 )
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
+                diary_command = is_diary_command(body["text"])
+                control_command = is_life_command(body["text"])
+                if control_command:
+                    body["control_command"] = True
+                    body["goal_request"] = bool(
+                        re.match(r"安排任务\s+https://", body["text"].strip())
+                    )
+                if diary_command:
+                    body["diary_command"] = True
+                    body["diary_correction"] = body["text"].strip().startswith("修改日记")
+                    body["diary_timezone"] = cfg.timezone
+                if body["text"].strip() == "暂停写日记":
+                    s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
+                    self.diary.repo.cancel_pending("DIARY_PAUSED")
                 if body["text"].strip() == "暂停主动分享":
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
                     s.execute(
@@ -129,8 +181,12 @@ class Core:
                     trace_id=event.trace_id,
                     idempotency_key=key,
                     fingerprint=fingerprint,
+                    memory_processed=int(diary_command or control_command),
                 )
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
+                if not diary_command and not control_command:
+                    self.content.schedule(event.event_id)
+                self.affect.observe(event.event_id)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
                 return {
                     "event_id": event.event_id,
@@ -176,6 +232,8 @@ class Core:
         s, now = self.store, self.clock()
         with s.transaction():
             self.recover(now)
+            if not proactive_allowed(s, self.settings, now):
+                cancel_proactive_work(s, now)
             row = s.one(
                 "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
@@ -187,6 +245,15 @@ class Core:
             )
             if not row:
                 return None
+            body = json.loads(row["body_json"])
+            if (
+                self.settings.content_enabled
+                and row["kind"] == "chat"
+                and not body.get("diary_command")
+                and not body.get("control_command")
+            ):
+                if self.content.status(row["event_id"])["pending"]:
+                    return None
             token = uid("lease")
             s.execute(
                 "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
@@ -197,8 +264,40 @@ class Core:
 
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
-        text = json.loads(job["body_json"]).get("text", "")
-        messages = [{"role": "system", "content": PRINCIPLES}]
+        body = json.loads(job["body_json"])
+        text = body.get("text", "")
+        rules = PRINCIPLES + self.expression.instruction()
+        if cfg.content_enabled:
+            rules += CONTEXT_RULES
+        messages = [{"role": "system", "content": rules}]
+        current = {"role": "user", "content": text or "请看看我分享的内容。"}
+        content_reference = ""
+        if (
+            cfg.content_enabled
+            and job["kind"] == "chat"
+            and not body.get("diary_command")
+            and not body.get("control_command")
+        ):
+            available = cfg.context_soft_tokens - budget.token_upper_bound([messages[0], current])
+            content_reference = self.content.context_message(job["event_id"], available - 24)
+        affect = self.affect.snapshot()
+        goals = self.life.context()
+        if goals:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "目标与结果参考（不是新指令；区分执行完成和反馈送达）：\n"
+                    + encode(goals),
+                }
+            )
+        if affect["evidence"]:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "当前交互参考（仅影响表达，不改变人格、事实、权限或承诺）：\n"
+                    + encode(affect),
+                }
+            )
         if cfg.memory_enabled:
             hits = self.memory.search(text or "*", limit=6) if memories is None else memories
             traits = s.rows(
@@ -232,7 +331,9 @@ class Core:
             "SELECT e.body_json,o.content_json FROM events e LEFT JOIN outbox o ON "
             "o.origin_event_id=e.event_id AND o.state='SENT' WHERE e.conversation_id=? "
             "AND e.actor_id='owner' AND e.redacted=0 AND e.rowid<(SELECT rowid FROM events "
-            "WHERE event_id=?) AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
+            "WHERE event_id=?) AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
+            "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "
+            "AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
             "JOIN memories m ON m.memory_id=me.memory_id WHERE me.event_id=e.event_id "
             "AND m.status IN ('SUPERSEDED','FORGOTTEN')) ORDER BY e.rowid DESC LIMIT ?",
             (job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2),
@@ -245,9 +346,14 @@ class Core:
                 reply = json.loads(row["content_json"]).get("text")
                 if reply:
                     messages.append({"role": "assistant", "content": reply})
-        messages.append({"role": "user", "content": text})
+        if content_reference:
+            messages.append({"role": "user", "content": content_reference})
+        messages.append(current)
         # Conservative bound. Always preserve static rules and the complete current message.
-        while len(messages) > 2 and budget.token_upper_bound(messages) > cfg.context_soft_tokens:
+        minimum = 3 if content_reference else 2
+        while (
+            len(messages) > minimum and budget.token_upper_bound(messages) > cfg.context_soft_tokens
+        ):
             messages.pop(1)
         return messages
 
@@ -420,6 +526,12 @@ class Core:
     async def command_reply(self, job):
         text = json.loads(job["body_json"]).get("text", "").strip()
         now, s = self.clock(), self.store
+        diary_reply = self.diary.command(text, self.settings.owner_qq_id)
+        if diary_reply is not None:
+            return diary_reply
+        life_reply = self.life.command(text, job["event_id"])
+        if life_reply is not None:
+            return life_reply
         if text == "发送状态":
             uncertain = s.rows(
                 "SELECT message_id,created_at FROM outbox "
@@ -432,10 +544,13 @@ class Core:
             reconcile_delivery(s, reconciliation[1], outcome, now)
             return "已记录核对结果，不会重发该条消息。"
         if text in {"暂停主动分享", "恢复主动分享"}:
-            s.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
-                ("1" if text.startswith("暂停") else "0",),
-            )
+            with s.transaction():
+                s.execute(
+                    "INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused',?)",
+                    ("1" if text.startswith("暂停") else "0",),
+                )
+                if text.startswith("暂停"):
+                    cancel_proactive_work(s, now)
             return "已" + text + "。"
         if not self.settings.memory_enabled:
             return None
@@ -507,11 +622,36 @@ class Core:
             return False
         request_id = None
         try:
+            before_command = epoch(self.store)
             reply = await self.command_reply(job) if job["kind"] == "chat" else None
             captured_epoch = epoch(self.store)
+            text = json.loads(job["body_json"]).get("text", "").strip()
+            if (
+                reply is not None
+                and (
+                    text.startswith(
+                        (
+                            "读日记",
+                            "日记列表",
+                            "目标列表",
+                            "承诺列表",
+                            "反思列表",
+                            "当前交互状态",
+                            "为什么形成偏好",
+                        )
+                    )
+                    or text == "你记得什么"
+                )
+                and before_command != captured_epoch
+            ):
+                raise CoreError("PRIVACY_CHANGED", 503)
             if reply is None:
                 body = json.loads(job["body_json"])
-                if job["kind"] == "chat" and not body.get("text"):
+                if (
+                    job["kind"] == "chat"
+                    and not body.get("text")
+                    and not (self.settings.content_enabled and self.content._rows(job["event_id"]))
+                ):
                     reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"
                 else:
                     if self.settings.memory_enabled:
@@ -521,6 +661,8 @@ class Core:
                         messages = self.context(job, hits, paused_memory)
                     else:
                         messages = self.context(job)
+                    if captured_epoch != epoch(self.store):
+                        raise CoreError("PRIVACY_CHANGED", 503)
                     request_id = budget.reserve(
                         self.store,
                         self.settings,
@@ -542,15 +684,11 @@ class Core:
                 if epoch(self.store) != captured_epoch:
                     raise CoreError("PRIVACY_CHANGED", 503)
                 now = self.clock()
-                paused = self.store.one(
-                    "SELECT value FROM runtime_meta WHERE key='proactive_paused'"
-                )
-                should_send = reply.strip() not in {"[SKIP]", ""} and not (
-                    paused and paused["value"] == "1"
+                should_send = reply.strip() not in {"[SKIP]", ""} and proactive_allowed(
+                    self.store, self.settings, now
                 )
                 if job["kind"] != "activity" or should_send:
-                    enqueue(
-                        self.store,
+                    self.expression.enqueue(
                         job["event_id"],
                         job["conversation_id"],
                         reply,
@@ -616,22 +754,13 @@ class Core:
 
     def schedule_proactive(self):
         cfg, s, now = self.settings, self.store, self.clock()
-        local = datetime.fromisoformat(now).astimezone(ZoneInfo(cfg.timezone))
-        quiet = (
-            cfg.quiet_start <= local.hour < cfg.quiet_end
-            if cfg.quiet_start < cfg.quiet_end
-            else local.hour >= cfg.quiet_start or local.hour < cfg.quiet_end
-        )
-        if cfg.quiet_start == cfg.quiet_end:
-            quiet = False
-        if not cfg.proactive_enabled or quiet or not cfg.pricing_known:
-            return False
-        paused = s.one("SELECT value FROM runtime_meta WHERE key='proactive_paused'")
-        if paused and paused["value"] == "1":
+        if not cfg.pricing_known:
             return False
         with s.transaction():
+            if not proactive_allowed(s, cfg, now):
+                return False
             conversation = s.one(
-                "SELECT * FROM conversations WHERE scope='private' "
+                "SELECT * FROM conversations WHERE scope='private' AND platform='qq.onebot' "
                 "ORDER BY last_event_at DESC LIMIT 1"
             )
             if not conversation or conversation["last_event_at"] > after(
@@ -645,16 +774,7 @@ class Core:
                 "('PENDING','LEASED','SENDING','RETRY_WAIT','DELIVERY_UNCERTAIN')"
             ):
                 return False
-            day = (
-                local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC).isoformat()
-            )
-            count = s.one(
-                "SELECT COUNT(*) AS n FROM jobs WHERE kind='activity' AND created_at>=?", (day,)
-            )["n"]
-            recent = s.one(
-                "SELECT 1 FROM jobs WHERE kind='activity' AND created_at>?",
-                (after(now, -cfg.proactive_interval_seconds),),
-            )
+            count, recent = proactive_counts(s, cfg, now)
             if count >= cfg.proactive_daily_limit or recent:
                 return False
             event_id = uid("activity")
@@ -681,17 +801,52 @@ class Core:
             self.new_job(event_id, "activity", event_id, now)
             return True
 
-    async def extract_once(self):
+    async def extract_once(self, local_day=None):
+        if not self.settings.memory_enabled or not self.settings.pricing_known:
+            return False
+        s, now = self.store, self.clock()
+        lease = encode(
+            {"token": uid("memory_lease"), "until": after(now, self.settings.lease_seconds)}
+        )
+        with s.transaction():
+            old = s.one("SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'")
+            if old and json.loads(old["value"])["until"] > now:
+                return False
+            if old:
+                s.execute(
+                    "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id "
+                    "IS NULL AND scenario IN ('memory_extract','memory_review')"
+                )
+            s.execute(
+                "INSERT OR REPLACE INTO runtime_meta VALUES ('memory_extraction_lease',?)", (lease,)
+            )
+        try:
+            return await self._extract_claimed_once(local_day, lease)
+        finally:
+            s.execute(
+                "DELETE FROM runtime_meta WHERE key='memory_extraction_lease' AND value=?", (lease,)
+            )
+
+    def _owns_memory_lease(self, lease):
+        current = self.store.one(
+            "SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'"
+        )
+        return bool(
+            current and current["value"] == lease and json.loads(lease)["until"] > self.clock()
+        )
+
+    async def _extract_claimed_once(self, local_day, lease):
         if not self.settings.memory_enabled or not self.settings.pricing_known:
             return False
         s, cfg, now = self.store, self.settings, self.clock()
-        # The documented deployment has exactly one memory worker.
+        day_filter = " AND e.occurred_at>=? AND e.occurred_at<? " if local_day else ""
+        bounds = day_bounds(local_day, cfg.timezone) if local_day else ()
         events = s.rows(
             "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
             "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
             "AND e.source='qq.onebot' AND j.state='SUCCEEDED' "
-            "AND e.ingested_at<=? ORDER BY e.rowid LIMIT 20",
-            (after(now, -cfg.extraction_idle_seconds),),
+            "AND e.ingested_at<=? " + day_filter + " ORDER BY e.rowid LIMIT 20",
+            (after(now, -cfg.extraction_idle_seconds), *bounds),
         )
         if len(events) < cfg.extraction_min_events:
             return False
@@ -718,7 +873,7 @@ class Core:
             budget.settle(s, cfg, request_id, response)
             request_id = None
             extraction = Extraction.model_validate_json(response.text)
-            if captured_epoch != epoch(s):
+            if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                 return False
             valid_ids = {e["event_id"] for e in events}
             candidates = []
@@ -733,7 +888,7 @@ class Core:
                         )
             candidates, resolutions = await self.prepare_memories(candidates)
             with s.transaction():
-                if captured_epoch != epoch(s):
+                if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                     return False
                 self.add_memories(candidates, resolutions, now)
                 # Keep episodes scoped to a single conversation.
@@ -769,16 +924,38 @@ class Core:
     def status(self):
         s = self.store
         return {
-            "version": "0.3.0",
+            "version": __version__,
             "mode": self.settings.mode,
             "features": {
                 "memory": self.settings.memory_enabled,
-                "dsh": False,
-                "android": False,
+                "diary": self.diary.repo.enabled(),
+                "diary_auto_share": False,
+                "affect": self.settings.affect_enabled,
+                "consolidation": self.consolidation.enabled(),
+                "reflection": self.settings.reflection_enabled,
+                "goals": self.settings.goals_enabled,
+                "wake": self.settings.wake_enabled,
+                "executive": self.settings.executive.enabled,
+                "dsh": self.settings.executive.enabled
+                and self.settings.executive.allow_changes
+                and any(
+                    "dsh.run" in endpoint.capabilities
+                    for endpoint in self.settings.executive.endpoints.values()
+                ),
+                "media": self.settings.media.enabled,
+                "content": self.settings.content_enabled,
+                "voice": self.settings.media.enabled and self.settings.voice_enabled,
+                "camera": self.settings.media.enabled and self.settings.camera_enabled,
+                "android": self.settings.media.enabled and self.settings.android_enabled,
                 "public_publish": False,
             },
             "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),
             "deliveries": s.rows("SELECT state,COUNT(*) AS count FROM outbox GROUP BY state"),
+            "tool_usage": s.rows(
+                "SELECT capability,state,COUNT(*) AS calls,"
+                "SUM(billed_micro_usd) AS estimated_micro_usd FROM tool_tasks "
+                "GROUP BY capability,state"
+            ),
             "usage": s.rows(
                 "SELECT scenario,SUM(input_tokens) AS input_tokens,"
                 "SUM(output_tokens) AS output_tokens,SUM(cached_input_tokens) AS cached_tokens,"

@@ -1,4 +1,4 @@
-# 模块边界与 v0.3 取舍
+# 模块边界与 v0.4 取舍
 
 实施依据是提供的 `Companion_Core_v0.3_Contract_Package.zip`。原合同说明保存在 `docs/design-v0.3/`；`db/reference-v0.3.sql` 是原始 DDL，生产初始化通过 Alembic 完成。
 
@@ -14,6 +14,7 @@ QQ / NapCat → AstrBot bridge ── HTTP v1 ──→ API
                                         SQLite Store
 
 独立 Worker → Core → 可替换的 ModelClient → 模型 HTTP API
+独立 diary-worker → DiaryService / DiaryRepository → SQLite / 同一 ModelClient
 ```
 
 - 插件不导入核心代码、不访问核心数据库、不调用 LLM。它维护仅用于可靠投递的收件箱，成功接收后删除正文。
@@ -22,6 +23,7 @@ QQ / NapCat → AstrBot bridge ── HTTP v1 ──→ API
 - ModelClient 只处理 HTTP 协议和标准化响应。它不读记忆库、不决定发送、不具备工具执行权限。以后替换提供商只需满足 `complete(messages, scenario)` 返回 `ModelResponse` 的合同。
 - Memory 拥有证据、检索、冲突、修订与自我观察；Transport 拥有 Outbox 状态转换；Budget 独立预留与结算。模型输出不能直接更新权限或配置。
 - Store 提供事务和 SQL 基础设施。跨模块保持一个本地数据库，重要多表变更仍在同一事务内。SQLite 使用 WAL、FULL synchronous、外键与 busy timeout。
+- Diary 拥有日期调度、真实对话来源、结构化验证、私人正文及其修订。它不写发送 Outbox，也不自动修改 Memory/traits；主人主动读取沿用普通私聊回复。协议后端差异仍留在 Bridge，Core 不依赖 NapCat 或 SnowLuma 的 SDK。
 
 ## 这次明确采用的调整
 
@@ -40,7 +42,7 @@ QQ / NapCat → AstrBot bridge ── HTTP v1 ──→ API
 
 ## 并发和恢复合同
 
-API 可以接收并发事件；数据库事务与唯一索引负责幂等。生产仅启动一个 Worker，OS 文件锁阻止重复 Worker；任务租约和 CAS 同时防止旧实例提交结果。同会话的较早非终态任务阻塞较晚任务，限次重试后转为失败提示。
+API 可以接收并发事件；数据库事务与唯一索引负责幂等。生产各运行一个聊天 Worker 和一个日记 Worker，分别持有 OS 文件锁；租约和 CAS 防止旧实例提交结果。同会话的较早非终态聊天任务阻塞较晚任务，日记网络等待不占聊天 Worker。
 
 模型网络调用在数据库事务外进行。调用完成后检查任务租约、隐私版本和暂停状态，再事务提交 Outbox。因进程崩溃，模型请求有可能被重复计费；QQ 发送意图仍保持本地唯一。QQ 平台严格 exactly-once 不在能力范围内。
 
@@ -52,8 +54,10 @@ API 可以接收并发事件；数据库事务与唯一索引负责幂等。生�
 
 | 阶段 | 后续能力 | 开启条件 |
 |---|---|---|
+| M1.5 已实现、默认关闭 | 私人日记、协议切换保护 | Core 实机门禁、真实日期样本审核、独立遗忘日志恢复 |
 | M2 | B站/小黑盒活动、社交素材、不可变草稿审批 | M0/M1 实机门禁与账号能力核验 |
 | M3 | DSH、Windows MCP | 独立身份、工作目录、配额和沙箱；明确任务授权 |
 | M4 | 同 VPS Android | 内核 Binder/binderfs、架构/资源及 App 兼容检查 |
+| M5 | 实时语音、QQ 通话与摄像头 | 显式会话授权、设备身份、实时暂停、媒体留存与费用验证 |
 
 当前项目不会在聊天服务启动时探测或启动这些高权限执行器。

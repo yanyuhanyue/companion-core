@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "DiaryCitation": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "maxLength": 180,
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "exact_quote": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Exact Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id"
+      ],
+      "title": "DiaryCitation",
+      "type": "object"
+    },
+    "ReflectionSuggestion": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "observation",
+            "possible_preference",
+            "lesson",
+            "next_question"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/DiaryCitation"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "text",
+        "evidence"
+      ],
+      "title": "ReflectionSuggestion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "suggestions": {
+      "items": {
+        "$ref": "#/$defs/ReflectionSuggestion"
+      },
+      "maxItems": 3,
+      "title": "Suggestions",
+      "type": "array"
+    }
+  },
+  "required": [
+    "suggestions"
+  ],
+  "title": "ReflectionDraft",
+  "type": "object"
+}

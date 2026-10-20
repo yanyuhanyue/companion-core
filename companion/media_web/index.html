@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Companion 媒体会话</title><link rel="stylesheet" href="/media/style.css"></head>
+<body><main><p class="eyebrow">COMPANION · PRIVATE</p><h1>这一刻，一起看与听。</h1>
+<p>每次开始都会申请设备权限。原始音视频只在内存中处理；生成的转录和画面描述会作为私有观察记录保存，可通过观察记录的遗忘功能删除。</p>
+<form id="start-form"><label>本次授权口令<input id="owner-token" type="password" autocomplete="off" required></label>
+<fieldset><legend>本次允许使用</legend><label><input id="voice" type="checkbox"> 麦克风与语音播放</label>
+<label><input id="camera" type="checkbox"> 摄像头</label></fieldset>
+<label>时长（秒）<input id="duration" type="number" min="5" max="600" value="120"></label>
+<label>流量上限（KB）<input id="budget" type="number" min="32" max="50000" value="1000"></label>
+<button id="start" type="submit">授权并开始</button><button id="stop" type="button" disabled>立即关闭</button></form>
+<p id="status" role="status" aria-live="polite">尚未开始</p><video id="preview" autoplay muted playsinline hidden></video>
+<section aria-label="观察记录"><h2>本次观察</h2><ol id="observations"></ol></section>
+<form id="speech-form"><label>朗读文本<textarea id="speech" maxlength="1000" rows="3" placeholder="输入要播放的内容"></textarea></label>
+<button id="speak" type="submit" disabled>朗读</button></form>
+<p class="note">语音约每 3 秒转录，摄像头约每 5 秒分析一帧。关闭、切换到后台、断网或会话到期后停止采集。QQ 原生通话尚未接入。</p>
+</main><script src="/media/app.js"></script></body></html>

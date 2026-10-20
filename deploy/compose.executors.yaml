@@ -1,0 +1,73 @@
+# Explicit opt-in: docker compose --env-file <private env file> -f deploy/compose.executors.yaml \
+#   --profile tools up --build -d
+# This separate deployment has no access to the application's data volumes or Docker socket.
+services:
+  tool-executor:
+    profiles: [tools]
+    build:
+      context: ..
+      dockerfile: deploy/executor.Dockerfile
+    environment:
+      EXECUTOR_TOKEN: ${EXECUTOR_TOKEN:?Set a unique executor token}
+      EXECUTOR_STATE: /state/executor.sqlite3
+      EXECUTOR_DSH_ENABLED: ${EXECUTOR_DSH_ENABLED:-false}
+      EXECUTOR_SCRATCH: /scratch
+      BUDGET_PROXY_URL: http://172.30.91.11:8091
+      BUDGET_PROXY_ADMIN_TOKEN: ${BUDGET_PROXY_ADMIN_TOKEN:?Set a unique proxy admin token}
+    # Root supervisor only drops child identity / reaps all processes of the disposable UID.
+    # The SDK and every shell run as UID 10002; they cannot read supervisor environment/secrets.
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, DAC_OVERRIDE, KILL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    cpus: 1
+    mem_limit: 2g
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m
+      # The packaged SDK extracts native bindings under the per-task TMPDIR here.
+      - /scratch:rw,nosuid,nodev,exec,size=768m,mode=0711
+    volumes:
+      - executor-state:/state
+    networks:
+      tool-private:
+        ipv4_address: 172.30.91.10
+    restart: "no"
+  budget-proxy:
+    profiles: [tools]
+    build:
+      context: ..
+      dockerfile: deploy/executor.Dockerfile
+    command: [python, -m, uvicorn, "companion.executor_budget_proxy:app_from_env", --factory,
+              --host, "0.0.0.0", --port, "8091", --no-access-log]
+    environment:
+      BUDGET_PROXY_ADMIN_TOKEN: ${BUDGET_PROXY_ADMIN_TOKEN:?Set a unique proxy admin token}
+      EXECUTOR_MODEL_URL: ${EXECUTOR_MODEL_URL:?Set an HTTPS model base URL including /v1 if needed}
+      EXECUTOR_MODEL_KEY: ${EXECUTOR_MODEL_KEY:?Set an independent capped model credential}
+      EXECUTOR_MODEL_NAME: ${EXECUTOR_MODEL_NAME:?Set the model ID}
+      EXECUTOR_INPUT_RATE: ${EXECUTOR_INPUT_RATE:?Set upper micro-USD per million input tokens}
+      EXECUTOR_OUTPUT_RATE: ${EXECUTOR_OUTPUT_RATE:?Set upper micro-USD per million output tokens}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 32
+    cpus: 0.5
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=16m
+    networks:
+      tool-private:
+        ipv4_address: 172.30.91.11
+      model-egress: {}
+    restart: "no"
+networks:
+  tool-private:
+    name: companion-tool-private
+    internal: true
+    ipam:
+      config: [{subnet: 172.30.91.0/24}]
+  model-egress: {}
+volumes:
+  executor-state: {}

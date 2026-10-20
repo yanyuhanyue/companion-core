@@ -6,8 +6,9 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from companion.contracts import CoreError
-from companion.privacy import ErasureLedger
-from companion.store import Store, migrate
+from companion.executive import restore_executive
+from companion.privacy import ErasureLedger, advance_epoch
+from companion.store import Store, migrate, utcnow
 
 
 def backup(database, destination, key):
@@ -51,6 +52,35 @@ def restore(source, destination, key, ledger_path):
             if not identity or identity["value"] != ledger.read()[0]["ledger_id"]:
                 raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
             ledger.replay(store)
+            # A snapshot cannot authorize a device session that existed before restoration.
+            with store.transaction():
+                store.execute(
+                    "UPDATE outbox SET state='DELIVERY_UNCERTAIN',lease_token=NULL,"
+                    "last_error_code='RESTORED_DELIVERY_REQUIRES_RECONCILIATION' "
+                    "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
+                )
+                store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                restore_executive(store, utcnow())
+                store.execute(
+                    "UPDATE media_sessions SET state='CLOSED',closed_at=?,"
+                    "close_reason='RESTORED_SESSION_REVOKED' WHERE state='OPEN'",
+                    (utcnow(),),
+                )
+                store.execute("UPDATE media_requests SET state='UNKNOWN' WHERE state='RESERVED'")
+                store.execute(
+                    "UPDATE content_items SET state='UNKNOWN',lease_token=NULL,lease_until=NULL,"
+                    "error_code='RESTORED_CONTENT_REQUIRES_RECONCILIATION' "
+                    "WHERE state IN ('WAITING','QUEUED','FETCHING','RUNNING')"
+                )
+                store.execute(
+                    "UPDATE exploration_requests SET state='UNKNOWN',lease_token=NULL,"
+                    "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "
+                    "WHERE state IN ('QUEUED','RUNNING')"
+                )
+                if store.execute(
+                    "UPDATE consents SET revoked_at=? WHERE revoked_at IS NULL", (utcnow(),)
+                ).rowcount:
+                    advance_epoch(store)
             if store.one("PRAGMA integrity_check")["integrity_check"] != "ok":
                 raise CoreError("BACKUP_INTEGRITY_FAILED")
             if store.rows("PRAGMA foreign_key_check"):
