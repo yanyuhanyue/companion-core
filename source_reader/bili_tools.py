@@ -39,6 +39,9 @@ class BilibiliAccountHTTP(PublicHTTP):
 
     async def get(self, url, budget, role):
         grant = self.verify(budget)
+        if budget.validate_account_read:
+            await budget.validate_account_read()
+            grant = self.verify(budget)
         # CDN subtitles and page fallbacks never receive account cookies.
         headers = {}
         if urlsplit(url).hostname == "api.bilibili.com":

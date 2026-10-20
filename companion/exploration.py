@@ -359,6 +359,27 @@ class ExplorationService:
                 return item
         return None
 
+    def validate_read(self, adapter_id, request_id, validation):
+        self.adapter(adapter_id)
+        s = self.store
+        with s.transaction():
+            row = s.one(
+                "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",
+                (request_id, adapter_id),
+            )
+            if (
+                not row or row["lease_token"] != validation.lease_token
+                or row["state"] != "RUNNING" or row["lease_until"] <= self.clock()
+            ):
+                raise CoreError("STALE_READER_LEASE", 409)
+            if row["captured_privacy_epoch"] != epoch(s):
+                raise CoreError("PRIVACY_CHANGED", 409)
+            captured = self.core.observations.grants.captured(row)
+            if captured != validation.source_grant:
+                raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
+            self.core.observations.grants.require(adapter_id, captured)
+        return {"valid": True}
+
     def complete(self, adapter_id, request_id, result):
         policy = self.adapter(adapter_id)
         s, now = self.store, self.clock()

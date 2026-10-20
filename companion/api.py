@@ -171,7 +171,11 @@ def create_app(settings=None):
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
     from companion.reflection import ReflectionDecision
-    from companion.source_grants import ReaderLeaseRequest, SourceGrantRegistration
+    from companion.source_grants import (
+        ReaderLeaseRequest,
+        ReaderReadValidation,
+        SourceGrantRegistration,
+    )
 
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
@@ -201,6 +205,10 @@ def create_app(settings=None):
     async def reader_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
         grant = body.source_grant if body else None
         return {"item": app.state.core.exploration.lease(adapter_id, grant)}
+
+    @app.post("/internal/v2/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
+    async def reader_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
+        return app.state.core.exploration.validate_read(adapter_id, request_id, body)
 
     @app.post("/internal/v2/source-grants", dependencies=control_auth, status_code=201)
     async def source_grant_register(body: SourceGrantRegistration):
