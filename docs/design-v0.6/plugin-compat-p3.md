@@ -63,7 +63,7 @@ Bridge 继续仅经 HTTP v1 传输私聊；模型适配器没有增加存储、�
 ## 可重复的原生试验
 
 在工作区 `.local/p3/upstream/{heybox,bili}` 检出上表 SHA，创建独立 Python 3.12 环境。
-`uv pip sync --require-hashes -r docs/design-v0.6/upstream-native-p3.lock` 必须指向该独立环境。
+`uv pip sync --require-hashes docs/design-v0.6/upstream-native-p3.lock` 必须指向该独立环境。
 运行该环境的 Python：
 
 ```text

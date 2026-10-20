@@ -112,7 +112,7 @@ jobs:
       - run: uv venv .local/p3/native-venv
       - run: >-
           uv pip sync --python .local/p3/native-venv/bin/python --require-hashes
-          -r docs/design-v0.6/upstream-native-p3.lock
+          docs/design-v0.6/upstream-native-p3.lock
       - run: >-
           .local/p3/native-venv/bin/python scripts/verify_plugin_native.py
           --upstream-root .local/p3/upstream
