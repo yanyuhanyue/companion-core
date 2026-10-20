@@ -1,6 +1,10 @@
 # P5 人工 QQ 验收表
 
-当前 Gate 0 开发验证中；Gate 1/2 **NOT_RUN**，真实 QQ 0/20，真人自然度、实机延迟均未测。
+下表保留 P5 的早期验收快照。2026-10-20 的 P7 后续证据已确认手机 Demo 回复 **5/5**（每输入一条、无重复），
+但严格首批场景仍 **0/5**、QQ01–QQ20 严格通过仍 **0/20**；可配对真实客户端 E2E 样本为 **0**，P50/P95 为 `null`。
+第 1 条历史自然度为 3/5，其余评分不完整；不能把 Demo 收发或 OneBot ACK 当成自然语义/时延验收。
+历史来源见 [P7 固定版本真人报告](https://github.com/yanyuhanyue/companion-core/blob/904eafbb698ce8bfa1cdf7aa0a89ef6aab78dfbf/docs/qq-beta/p7-qq-human-acceptance.md)；
+当前空验收表与证据等级见 [P8 人工验收](p8-human-acceptance.md)。P7 旧窗口已关闭，本轮没有新增 QQ 真实验收。
 离线测试的 Mock 回复、100 次合成负载、本地 TCP 与 ASGI 不计入实机数量。
 
 首轮单独记录 owner/bot 的私有证据引用、Asia/Shanghai 起止时段、最多5条、回退人和费用上限。
