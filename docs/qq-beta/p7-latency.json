@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+  "OFFLINE_FIXTURE": {
+    "status": "PREVIOUS_P6_FIXTURE_REFERENCE",
+    "new_p7_latency_samples": 0,
+    "reference": "p6-latency.json",
+    "reference_source_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+    "reference_samples": 100,
+    "reference_spool_p50_ms": 7.7161,
+    "reference_spool_p95_ms": 8.8279,
+    "reference_bridge_ack_p50_ms": 53.6856,
+    "reference_bridge_ack_p95_ms": 59.4563,
+    "limitations": "ASGI/FakeModel/MockTransport, fixture clock and Windows disk; not QQ SLA."
+  },
+  "LIVE_ONEBOT": {
+    "status": "PASS_COMPONENT_SPANS_ONLY",
+    "samples": 5,
+    "observation_window_utc": {
+      "first_send": "2026-10-20T07:15:17.893002+00:00",
+      "last_send": "2026-10-20T07:21:02.838821+00:00"
+    },
+    "stage_counts": {
+      "ws_connected": 6,
+      "t_onebot_received": 5,
+      "t_spool_commit": 5,
+      "t_core_ingest_ack": 5,
+      "t_outbox_lease": 5,
+      "t_begin_send": 5,
+      "t_onebot_send_ack": 5
+    },
+    "latency": {
+      "t_spool_commit": {
+        "samples": 5,
+        "p50_ms": 16.3272,
+        "p95_ms": 31.738,
+        "max_ms": 31.738
+      },
+      "t_core_ingest_ack": {
+        "samples": 5,
+        "p50_ms": 76.784,
+        "p95_ms": 131.5216,
+        "max_ms": 131.5216
+      },
+      "t_onebot_send_ack": {
+        "samples": 5,
+        "p50_ms": 165.4549,
+        "p95_ms": 320.6717,
+        "max_ms": 320.6717
+      }
+    },
+    "durable_delivery_counts": {
+      "SENT": 5
+    },
+    "unknown_delivery_count": 0,
+    "observed_send_uncertainty_rate": 0.0,
+    "duplicate_events_observed": 0,
+    "span_definitions": {
+      "t_spool_commit": "OneBot receive through normalization and durable commit.",
+      "t_core_ingest_ack": "OneBot receive through Core acceptance; includes spool time, not a separate spool-to-Core span.",
+      "t_onebot_send_ack": "Only the OneBot HTTP send request/ACK span; excludes queue and phone delivery."
+    },
+    "missing_intervals": [
+      "Core queue/context spans were not captured; Core telemetry was disabled.",
+      "Real-model request spans do not exist in Demo mode.",
+      "Intentional daemon/one-shot process separation prevents a receive-to-send in-memory span."
+    ],
+    "small_sample_limit": "n=5; nearest-rank P95 is only an observation, not an SLA."
+  },
+  "LIVE_QQ_HUMAN": {
+    "status": "DELIVERY_5_OF_5_NO_MEASURABLE_RTT",
+    "samples": 0,
+    "reply_samples_phone_confirmed": 5,
+    "window_timezone": "Asia/Shanghai",
+    "window": {
+      "starts_at": "2026-10-20T07:13:13+00:00",
+      "ends_at": "2026-10-20T07:43:13+00:00",
+      "timezone": "Asia/Shanghai",
+      "closed_at_utc": "2026-10-20T07:21:52.065741+00:00",
+      "closed_reason": "FIVE_ATTEMPT_LIMIT_REACHED",
+      "max_attempts": 5,
+      "attempts_reserved": 5
+    },
+    "clock_method": "Owner manual phone observations; sample 1 minute precision, sample 2 +/-30s, others not supplied.",
+    "p50_ms": null,
+    "p95_ms": null,
+    "max_ms": null,
+    "failure_rate": null,
+    "timeout_rate": null,
+    "unknown_rate": null,
+    "duplicates_observed_by_owner": 0,
+    "missing_intervals": "No paired precise client-send/visible-reply timestamps; manual release delays.",
+    "rtt_exclusion": "Do not treat held initial reply, manual release delay or OneBot ACK as automatic QQ response latency."
+  },
+  "PAID_MODEL": {
+    "status": "NOT_RUN",
+    "requests": 0,
+    "p50_ms": null,
+    "p95_ms": null,
+    "actual_cost_micro_usd": 0,
+    "invoice_verified": false
+  },
+  "runtime_initial_durable_snapshot": {
+    "events": 0,
+    "outbox": {},
+    "model_usage": {},
+    "snapshot_type": "EMPTY_INITIAL_CORE_STATE",
+    "live_qq_test_performed": false
+  },
+  "latency_real_p50_ms": null,
+  "latency_real_p95_ms": null,
+  "method": "Use component elapsed_ms only; never subtract independent process monotonic clocks. Phone send/visible receipt times require separate human evidence. Reconcile logs with durable Outbox/ModelUsage; configured-rate estimates are not invoices.",
+  "runtime_final_durable_snapshot": {
+    "event_count": 5,
+    "jobs": {
+      "SUCCEEDED": 5
+    },
+    "outbox": {
+      "SENT": 5
+    },
+    "model_usage": {
+      "SETTLED": 5
+    },
+    "configured_rate_estimate_micro_usd": 0,
+    "delivery_attempts": 5,
+    "spool": {
+      "inbox": {
+        "accepted": 5
+      },
+      "results": {
+        "accepted": 5
+      }
+    },
+    "captured_at_utc": "2026-10-20T07:21:56.415848+00:00",
+    "evidence_type": "LIVE_ONEBOT",
+    "paid_model_requests": 0,
+    "persistent_delivery_enabled": false,
+    "mode": "demo"
+  }
+}

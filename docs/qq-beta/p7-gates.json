@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "task": "CC-NEXT-20261020-P7-SNOWLUMA-QQ-BETA",
+  "code_ready": true,
+  "qq_ready": false,
+  "test_source_ready": false,
+  "production_ready": false,
+  "baseline_main": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
+  "baseline_pr18_head": "33dff1186899d3a91f4c2023ab0d594024761971",
+  "validated_code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+  "report_revision": "P7-A.3",
+  "report_commit_resolution": "P7-A PR head and private final-manifest.json; independently recorded after commit",
+  "config_version": "P7-DEMO-1",
+  "images": {
+    "bridge": {
+      "id": "sha256:8367e1d85b90df577df5aaa8c3da0d771cc4545ae5bb241d7f1b45c0ed3e760f",
+      "repo_digests": [
+        "companion-p7-bridge@sha256:8367e1d85b90df577df5aaa8c3da0d771cc4545ae5bb241d7f1b45c0ed3e760f"
+      ],
+      "architecture": "amd64"
+    },
+    "core": {
+      "id": "sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891",
+      "repo_digests": [
+        "companion-p7-core@sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891"
+      ],
+      "architecture": "amd64"
+    },
+    "snowluma": {
+      "id": "sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a",
+      "repo_digests": [
+        "motricseven7/snowluma@sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a"
+      ],
+      "architecture": "amd64"
+    }
+  },
+  "G0_CODE_READY": {
+    "state": "PASS",
+    "local_full": {
+      "passed": 715,
+      "skipped": 2,
+      "warnings": 1,
+      "seconds": 543.56,
+      "chromium_enabled": true
+    },
+    "candidate_ci_runs": [
+      39377694338,
+      39377697730
+    ],
+    "candidate_ci_jobs_success": 10,
+    "p7_report_head_ci": "See P7-A checks and final manifest; distinct from candidate CI."
+  },
+  "G1_HOST_RECOVERY": {
+    "state": "NO_RECOVERY_POINT_OWNER_AUTHORIZED_TEST_HOST_EXCEPTION",
+    "provider_snapshot_exists": false,
+    "existing_services_independent_backup_exists": false,
+    "owner_context": "No production tasks; dedicated Companion Core test host; use permitted.",
+    "operator_decision": "Proceed with isolated experimental installation, preserving existing services.",
+    "counts_as_recovery_pass": false,
+    "allows_production_release": false
+  },
+  "G2_LICENSE_AND_INSTALL": {
+    "state": "PASS_EXPERIMENTAL_RUNTIME_INSTALL",
+    "license": "PASS_OWNER_ATTESTED",
+    "written_permission_document_inspected": false,
+    "installation_authorized_by_owner_test_host_instruction": true,
+    "snowluma_started": true,
+    "core_api_healthy": true,
+    "chat_worker_running": true,
+    "migrate_exit_code": 0,
+    "bridge_image_uid10004_volume_smoke": "PASS",
+    "initial_core_backup_restore": "PASS_INITIAL_EMPTY_CORE_STATE",
+    "existing_services_unchanged": true
+  },
+  "G3_LIVE_ONEBOT": {
+    "state": "PASS",
+    "qq_login_authorized": true,
+    "private_accounts_configured": true,
+    "login_completed_verified": true,
+    "probe": {
+      "evidence_type": "LIVE_ONEBOT",
+      "account_matches": true,
+      "online": true,
+      "good": true,
+      "expected_version_reported": true,
+      "connection_ready": true,
+      "private_message_delivery_verified": false
+    },
+    "owner_friend_events_accepted": 5,
+    "platform_private_sends_confirmed": 5
+  },
+  "G4_QQ_FIRST5": {
+    "state": "PARTIAL_DELIVERY_5_OF_5_REQUIRED_SCENARIOS_INCOMPLETE",
+    "phone_reply_samples_confirmed": 5,
+    "phone_reply_sample_target": 5,
+    "strict_scenarios_accepted": 0,
+    "required_scenario_target": 5,
+    "send_window_authorized": true,
+    "send_window_closed": true,
+    "all_inputs_exactly_one_reply_human_confirmed": true,
+    "missing": [
+      "Real same-ID replay not observed.",
+      "Demo fixed response cannot validate semantic multi-turn context.",
+      "Individual phone timestamps and scores are incomplete; gentle operator restart is not full fault recovery acceptance."
+    ]
+  },
+  "G5_QQ_20": {
+    "state": "NOT_RUN_REQUIRED_SCENARIO_MATRIX",
+    "accepted": 0,
+    "target": 20,
+    "observed_demo_phone_reply_samples": 5,
+    "additional_send_window_authorized": false
+  },
+  "G6_REAL_LATENCY": {
+    "state": "PARTIAL_LIVE_PROTOCOL_SPANS_ONLY",
+    "protocol_span_samples": 5,
+    "samples": 0,
+    "p50_ms": null,
+    "p95_ms": null
+  },
+  "G7_M1_AND_G1": {
+    "state": "BLOCKED",
+    "memory_enabled": false,
+    "reader_grant_closure": "FAIL",
+    "owner_retention_semantics_confirmed": true,
+    "retention_semantics": "Expiry or future-read revocation retain history; explicit processing withdrawal erases attributable derived data and prevents backup revival.",
+    "candidate": {
+      "pr": "https://github.com/yanyuhanyue/companion-core/pull/21",
+      "commit": "907d62c1491e0a3613a7653f2d4eb0275ec4a357",
+      "local_full": {
+        "passed": 731,
+        "skipped": 2,
+        "warnings": 1
+      },
+      "package_replay_worker_smoke": "PASS",
+      "deployed": false,
+      "runtime_grant_closure_verified": false,
+      "legacy_review_and_processing_freeze_required_on_upgrade": true,
+      "ci_resolution": "See independent G1 draft checks and validation manifest."
+    }
+  },
+  "G8_PRODUCTION": {
+    "state": "BLOCKED",
+    "whole_host_recovery_verified": false,
+    "production_offsite_restore_verified": false,
+    "natural_diary_days_accepted": 0
+  },
+  "runtime_switches": {
+    "mode": "demo",
+    "delivery_enabled": false,
+    "memory_enabled": false,
+    "reader_enabled": false,
+    "autonomous_capabilities_enabled": false
+  },
+  "paid_model_requests": 0,
+  "dsh_runs": 0,
+  "windows_device_runs": 0,
+  "next_action": "Review incomplete phone scenario records and prepare a separately approved follow-up window; real model use requires provider/endpoint/rates/hard budget and separate fee authorization. No automatic send or paid call."
+}
