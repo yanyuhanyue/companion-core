@@ -780,3 +780,36 @@ def test_empty_identity_or_proof_location_cannot_form_approval(core, tmp_path, f
     with pytest.raises(ValidationError):
         approved_live(core, tmp_path, **{field: ""})
     assert core.model.calls == []
+
+
+def test_model_adapter_with_different_settings_cannot_use_another_admission(core, tmp_path):
+    from companion import budget
+
+    approved_live(core, tmp_path)
+    messages = [{"role": "user", "content": "hello"}]
+    request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    other = core.settings.model_copy(update={"model_url": "https://unapproved.invalid"})
+    calls = []
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: (
+                    calls.append(req)
+                    or httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+                )
+            )
+        ) as client:
+            with pytest.raises(CoreError, match="CONFIGURATION_MISMATCH"):
+                await budget.complete(
+                    ModelClient(other, client),
+                    core.store,
+                    core.settings,
+                    request,
+                    messages,
+                    "chat",
+                    core.clock,
+                )
+
+    asyncio.run(exercise())
+    assert calls == []
