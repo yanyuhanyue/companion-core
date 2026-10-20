@@ -31,7 +31,7 @@ def test_historical_diary_date_aliases_are_erased_live_and_after_restore(
     correction = "这是该日期的主人修订内容"
     verb = "读日记" if operation == "read" else "修改日记"
     suffix = "" if operation == "read" else " " + correction
-    ingest(core, 10, f"{verb} {DAY}{suffix}")
+    ingest(core, 10, f"/{verb} {DAY}{suffix}")
     assert run(core.run_once())
     # Seed the exact pre-fix persisted form; rejecting new aliases cannot repair old backups.
     legacy_body = {
@@ -274,7 +274,7 @@ def seed_completed_legacy_diary_erasure(core):
     assert run(core.diary.generate_once("historical-fixture"))
     core.diary.correct(other_day, "独立日期的主人修订仍应保留。", "10001")
     for number, day in ((20, DAY), (21, other_day)):
-        ingest(core, number, f"读日记 {day}")
+        ingest(core, number, f"/读日记 {day}")
         assert run(core.run_once())
     core.store.execute(
         "UPDATE outbox SET state='SENT',sent_at=? WHERE origin_event_id IN "
@@ -442,7 +442,7 @@ def test_already_completed_legacy_erasure_repairs_copies_idempotently(core, tmp_
             instance.store.close()
 
 
-@pytest.mark.parametrize("command", ["读日记", "日记列表"])
+@pytest.mark.parametrize("command", ["/读日记", "/日记列表"])
 def test_legacy_diary_repair_preserves_newer_independent_readbacks(core, tmp_path, command):
     seed_completed_legacy_diary_erasure(core)
     core.ledger.replay(core.store)

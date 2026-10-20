@@ -246,7 +246,7 @@ def test_observation_tokens_are_independent_and_never_persist_in_content(core):
         core.observations.append(
             "reader", observation(core, text=core.settings.control_token.get_secret_value())
         )
-    ingest(core, 200, "修改日记 2026-10-18 私人正文")
+    ingest(core, 200, "/修改日记 2026-10-18 私人正文")
     with pytest.raises(CoreError, match="PROVENANCE"):
         core.observations.append("reader", observation(core, source_event_ids=["evt_test_200"]))
 

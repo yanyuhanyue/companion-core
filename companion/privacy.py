@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.store import encode, uid
 
@@ -70,7 +71,10 @@ def diary_copies(store, dates, before=None):
         (before, before),
     ):
         body = json.loads(row["body_json"])
-        parts = body.get("text", "").split(maxsplit=2)
+        text = body.get("text", "")
+        command, arguments = command_parts(text)
+        # This marked-only lookup must still erase readbacks from pre-slash backups.
+        parts = (command + " " + arguments if command else text).split(maxsplit=2)
         if not parts:
             continue
         if parts[0] == "日记列表" or (parts[0] == "读日记" and len(parts) == 1):

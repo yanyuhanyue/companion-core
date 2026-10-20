@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 
+from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.goals import CommitmentRequest, GoalProposal, GoalScope
 from companion.store import after
@@ -39,7 +40,7 @@ STATES = {
 
 
 def is_life_command(text):
-    return text.strip().startswith(COMMANDS)
+    return command_parts(text)[0] in COMMANDS
 
 
 class LifeService:
@@ -47,6 +48,10 @@ class LifeService:
         self.core = core
 
     def command(self, text, event_id):
+        command, arguments = command_parts(text)
+        if command not in COMMANDS:
+            return None
+        text = command + (" " + arguments if arguments else "")
         core = self.core
         if text in {"暂停自主活动", "恢复自主活动"}:
             core.goals.pause_autonomy(text.startswith("暂停"))
@@ -138,7 +143,7 @@ class LifeService:
                     "明天此时前会说明结果。"
                 )
             except ValueError:
-                return "请提供有效的 HTTPS 内容链接，格式：安排任务 链接 主题。"
+                return "请提供有效的 HTTPS 内容链接，格式：/安排任务 链接 主题。"
             except CoreError as error:
                 return "这项任务尚未接受（" + error.code + "）。"
         return None

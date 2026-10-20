@@ -310,7 +310,7 @@ def test_owner_control_api_and_qq_commands_are_independent_from_model(core):
         admin = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
         assert client.get("/internal/v2/goals", headers=bridge).status_code == 401
         assert client.get("/internal/v2/goals", headers=admin).status_code == 200
-    ingest(core, 100, "安排任务 https://example.org/article 阅读天文介绍")
+    ingest(core, 100, "/安排任务 https://example.org/article 阅读天文介绍")
     assert run(core.run_once())
     assert len(core.store.rows("SELECT * FROM commitments")) == 1
     assert core.model.calls == []

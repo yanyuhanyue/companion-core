@@ -28,7 +28,7 @@ RepoDigest 后运行配置才设置 image@sha256。不要把构建文件合并�
 
 ## UNKNOWN 与迟到回执
 
-`SENDING/DELIVERY_UNCERTAIN` 必须先真人核对客户端，再走已认证主人“发送状态/核对发送”
+`SENDING/DELIVERY_UNCERTAIN` 必须先真人核对客户端，再走已认证主人`/发送状态`、`/核对发送`
 收口为 SENT/CANCELLED；不能设回 PENDING 或盲目补发。
 旧 lease 的迟到结果保留为 rejected 隔离记录，不推翻人工决定，检查后才恢复正常新消息。
 
