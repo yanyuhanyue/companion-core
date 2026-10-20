@@ -771,3 +771,12 @@ def test_extraction_and_reconciliation_share_one_logical_request_cap(core, tmp_p
     assert not run(core.extract_once())
     assert [scenario for _, scenario in core.model.calls] == ["chat", "memory_extract"]
     assert core.store.rows("SELECT * FROM memories") == []
+
+
+@pytest.mark.parametrize("field", ["provider", "model", "tokenizer_path", "journal_path"])
+def test_empty_identity_or_proof_location_cannot_form_approval(core, tmp_path, field):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        approved_live(core, tmp_path, **{field: ""})
+    assert core.model.calls == []
