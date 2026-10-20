@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-20",
+  "evidence_type": "LIVE_HOST_METADATA",
+  "host_recovery_gate": "NO_RECOVERY_POINT_OWNER_AUTHORIZED_TEST_HOST_EXCEPTION",
+  "owner_host_description": "Dedicated Companion Core experimental host; no production workload; use authorized by owner.",
+  "owner_exception_is_backup_success": false,
+  "provider_snapshot": {
+    "status": "ABSENT_OWNER_CONFIRMED",
+    "id": null,
+    "completed_at": null,
+    "coverage": null,
+    "storage_location": null,
+    "cost": null,
+    "restore_entry": null
+  },
+  "existing_services_independent_backup": {
+    "status": "NOT_CREATED",
+    "id": null,
+    "completed_at": null,
+    "coverage": null,
+    "location": null,
+    "key_custodian": null
+  },
+  "existing_services_restore_verification": null,
+  "provider_readonly": {
+    "readonly_surfaces": [
+      "instance list",
+      "instance summary",
+      "control menu",
+      "settings"
+    ],
+    "system_disk_display_gb": 80,
+    "data_disk_display": "not requested",
+    "snapshot_entry_observed": false,
+    "instance_snapshot_support_verified": false,
+    "snapshot_fee": null,
+    "snapshot_storage_location": null,
+    "snapshot_service_impact": null
+  },
+  "before_install_sanitized": {
+    "observed_at": "2026-10-20T06:18:26.891544+00:00",
+    "read_only": true,
+    "containers_total": 3,
+    "containers_running": 2,
+    "roles": [
+      {
+        "role": "android_active",
+        "identity_sha256": "ffdd0322a3ef05617c951f83565ac2fc05dc131a37cf8a5780674a176b9fe7cc",
+        "state": "running",
+        "mount_count": 1,
+        "restart_count": 0,
+        "source_path_sha256": [
+          "9225f9340ee527e19b28108b87f2287fb4ad36a15e7fa42f2f8392adab8f57f8"
+        ]
+      },
+      {
+        "role": "android_exited",
+        "identity_sha256": "bb3ced7c3360453786789dcfa5139655b50a6f2cde5f53184d867546bb52a65d",
+        "state": "exited",
+        "mount_count": 1,
+        "restart_count": 0,
+        "source_path_sha256": [
+          "9225f9340ee527e19b28108b87f2287fb4ad36a15e7fa42f2f8392adab8f57f8"
+        ]
+      },
+      {
+        "role": "web_proxy",
+        "identity_sha256": "ea79276c6166866fdd8541d07f57ebf3b3789fdc3628de0f94bfccba1bd3cda5",
+        "state": "running",
+        "mount_count": 15,
+        "restart_count": 0,
+        "source_path_sha256": [
+          "29ff516aa60a96b7d37ede0ae3430c23e2d9b9987dac0dd7166d0f1b979cc64d",
+          "2dc7931951be6533e52fb595d7a8eb2acc1494e5bfec6178d2617483fd606501",
+          "3ae53473f2bafaaec18df01187948bd2f857e40d852c2580e53cbc01a81e28c2",
+          "4e5b8ad1fd9d41f218b98364dd85c687f47ea803f3ce8223d239c5493fd9bd2f",
+          "72784780e9b57bf9a58034b1db4332568b3ed9105ea4b3022ec034e9e3cfc63a",
+          "802b9bba1d087c2b7a42227be92910bcea1f02fd75157c09bdfd6fa1a7dd0083",
+          "808cd7aebc43604e5e0361a178b02d68494459249cb20941e2b8f2bc38681bde",
+          "aa6c45542c8c009e6e7f42d07359d55703568f0c5a3d454062f6fd8ff9c092f3",
+          "b21df4cc4e54c6ce3c254c02f439fe4fc15e0cba3e23de366b06f0d332b589fb",
+          "be8a4ec6a0788a63731523131e165bb5ea194237e42ccf9ca50e1831b47b37ed",
+          "ec95d77aa5440acb111d39ee10ced0a68cb14c5aeb4c1835c8c802a422bfbbd0",
+          "f0ba1e85d162ee364ecd008544c9b8f0610b30b8fdfc098abb75f5409b9fa6c0",
+          "f8dd7e23a5605ba374635f69659dc0d71eccb346ba0701908b77fe2bc2434e0b",
+          "fb9f809dd09d0edd4189b155bccf3c7b71e511244b7d278f4aae483d7a9c0c55",
+          "fc8354ef8d57893b4eec2bb689c9ab2837019f43e7e03b7ec1cc63319f26a5d8"
+        ]
+      }
+    ],
+    "bind_mount_entries": 17,
+    "unique_bind_sources": 16,
+    "metadata_paths_checked": 21,
+    "private_path_stat_errors": 0,
+    "visible_disk_count": 1,
+    "visible_disk_bytes": [
+      85899345920
+    ],
+    "provider_disk_coverage_verified": false,
+    "private_contents_read": false,
+    "comparison": {
+      "reference": "P6 host-after + mounts selected metadata",
+      "containers_identity_image_state_ports_unchanged": true,
+      "mounts_and_start_restart_unchanged": true,
+      "networks_unchanged": true,
+      "named_volumes_unchanged": true,
+      "listeners_unchanged": true,
+      "all_compared_fields_unchanged": true
+    }
+  },
+  "after_install_sanitized": {
+    "existing_containers_compared": 3,
+    "existing_containers_unchanged": true,
+    "existing_mounts_images_state_start_restart_network_security_unchanged": true,
+    "existing_networks_volumes_listeners_preserved": true,
+    "unexpected_runtime_changes": [],
+    "new_companion_container_count": 4,
+    "new_running_companion_containers": 3,
+    "new_namespaced_network_count": 2,
+    "new_namespaced_volume_count": 6,
+    "new_loopback_management_listeners": 2,
+    "new_public_listeners": 0,
+    "original_service_restart_operations": 0
+  },
+  "private_business_contents_read_or_copied": false,
+  "new_initial_core_recovery": {
+    "status": "PASS_INITIAL_EMPTY_CORE_STATE",
+    "created_at_utc": "2026-10-20T06:43:03.873063+00:00",
+    "encrypted_bytes": 868452,
+    "encrypted_sha256": "c892c100bbdfd463faf8d7a25cf25b39484578978413d6cf88d9cd07ab3bf065",
+    "latest_ledger_sha256": "eb579cec25bd3f6ce8a089059fad815d2bc53115f0d9a4bace9e67f83d48e8f4",
+    "independent_destination": "owner workstation; private workspace archive and separately protected key",
+    "custodian": "owner Windows account (DPAPI); no independent offline key escrow yet",
+    "latest_ledger_replayed": true,
+    "integrity_check": "ok",
+    "foreign_key_errors": 0,
+    "initial_durable_counts": {
+      "events": 0,
+      "outbox": 0,
+      "model_usage": 0
+    },
+    "existing_host_recovery_verified": false,
+    "production_recovery_verified": false,
+    "retained_initial_restore_copy_after_cleanup_approval_rejection": true,
+    "limits": "Empty initial Core state only; not existing services, whole host, real QQ data or production recovery."
+  },
+  "public_evidence_excludes": [
+    "server absolute paths",
+    "target IP/port topology",
+    "account IDs",
+    "private service configs and DBs",
+    "credentials",
+    "QQ session data"
+  ]
+}

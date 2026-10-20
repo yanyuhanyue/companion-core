@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+  "OFFLINE_FIXTURE": {
+    "status": "PREVIOUS_P6_FIXTURE_REFERENCE",
+    "new_p7_latency_samples": 0,
+    "reference": "p6-latency.json",
+    "reference_source_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+    "reference_samples": 100,
+    "reference_spool_p50_ms": 7.7161,
+    "reference_spool_p95_ms": 8.8279,
+    "reference_bridge_ack_p50_ms": 53.6856,
+    "reference_bridge_ack_p95_ms": 59.4563,
+    "limitations": "ASGI/FakeModel/MockTransport, fixture clock and Windows disk; not QQ SLA."
+  },
+  "LIVE_ONEBOT": {
+    "status": "NOT_RUN",
+    "samples": 0,
+    "p50_ms": null,
+    "p95_ms": null,
+    "max_ms": null
+  },
+  "LIVE_QQ_HUMAN": {
+    "status": "NOT_RUN",
+    "samples": 0,
+    "window": null,
+    "clock_method": null,
+    "p50_ms": null,
+    "p95_ms": null,
+    "max_ms": null,
+    "failure_rate": null,
+    "timeout_rate": null,
+    "unknown_rate": null,
+    "missing_intervals": null
+  },
+  "PAID_MODEL": {
+    "status": "NOT_RUN",
+    "requests": 0,
+    "p50_ms": null,
+    "p95_ms": null,
+    "actual_cost_micro_usd": 0,
+    "invoice_verified": false
+  },
+  "runtime_initial_durable_snapshot": {
+    "events": 0,
+    "outbox": {},
+    "model_usage": {},
+    "snapshot_type": "EMPTY_INITIAL_CORE_STATE",
+    "live_qq_test_performed": false
+  },
+  "latency_real_p50_ms": null,
+  "latency_real_p95_ms": null,
+  "method": "Use component elapsed_ms only; never subtract independent process monotonic clocks. Phone send/visible receipt times require separate human evidence. Reconcile logs with durable Outbox/ModelUsage; configured-rate estimates are not invoices."
+}

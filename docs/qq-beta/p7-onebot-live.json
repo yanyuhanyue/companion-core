@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "evidence_type": "LIVE_ONEBOT",
+  "status": "NOT_RUN_LIVE_ONEBOT",
+  "code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
+  "config_version": "P7-DEMO-1",
+  "license": "PASS_OWNER_ATTESTED",
+  "runtime_installation_authorized": true,
+  "qq_login_authorized": false,
+  "qq_send_authorized": false,
+  "image_pulled": true,
+  "snowluma_started": true,
+  "runtime_unlogged": true,
+  "webui_http_status": 200,
+  "novnc_http_status": 200,
+  "supervisor_components_running": true,
+  "observed_qq_package_version": "3.2.32-52194",
+  "expected_app_name": "SnowLuma",
+  "expected_app_version": "2.0.3-node",
+  "observed_onebot_app_name": null,
+  "observed_onebot_app_version": null,
+  "probe": null,
+  "real_ws_event": null,
+  "private_accounts_configured": true,
+  "bridge_started": false,
+  "bridge_image_uid10004_volume_smoke": "PASS",
+  "delivery_enabled": false,
+  "pending_outbox_at_capture": 0,
+  "private_message_delivery_verified": false,
+  "allowed_probe_after_login_approval": [
+    "get_login_info",
+    "get_status",
+    "get_version_info"
+  ],
+  "blocked_by": [
+    "QQ_LOGIN_APPROVAL_AND_OWNER_SCAN",
+    "LIVE_ONEBOT_IDENTITY_STATUS_VERSION_AND_WS_VERIFICATION"
+  ],
+  "images": {
+    "bridge": {
+      "id": "sha256:8367e1d85b90df577df5aaa8c3da0d771cc4545ae5bb241d7f1b45c0ed3e760f",
+      "repo_digests": [
+        "companion-p7-bridge@sha256:8367e1d85b90df577df5aaa8c3da0d771cc4545ae5bb241d7f1b45c0ed3e760f"
+      ],
+      "architecture": "amd64"
+    },
+    "core": {
+      "id": "sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891",
+      "repo_digests": [
+        "companion-p7-core@sha256:5eb8045c47f62f68202e164bb3fcb7f93be4633c31a15d55047743bc436b7891"
+      ],
+      "architecture": "amd64"
+    },
+    "snowluma": {
+      "id": "sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a",
+      "repo_digests": [
+        "motricseven7/snowluma@sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a"
+      ],
+      "architecture": "amd64"
+    }
+  },
+  "observed_webui_version_display": "2.0.3"
+}
