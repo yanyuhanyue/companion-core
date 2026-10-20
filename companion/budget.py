@@ -474,7 +474,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     if isinstance(model, ModelClient):
         if live_text.active(store, settings):
             async def after_preflight(request):
-                live_text.check_model(store, settings, clock, request_id)
+                current_job = live_text.check_model(store, settings, clock, request_id)
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport
                 ):
@@ -487,6 +487,9 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     or paid_budget.sha(json.loads(request.content)) != row["payload_sha256"]
                 ):
                     raise CoreError("LIVE_TEXT_MODEL_REQUEST_CHANGED", 503)
+                live_text.dispatch_fence(
+                    settings, clock, current_job["lease_until"], row["lease_until"]
+                )
 
             hooks = model.client.event_hooks["request"]
             hooks.append(after_preflight)

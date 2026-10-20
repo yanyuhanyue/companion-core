@@ -794,3 +794,53 @@ def test_unfinished_sending_blocks_next_model_input_approval(core, tmp_path):
                 assert len(model_calls) == 1 and sends == []
 
     run(scenario())
+
+
+@pytest.mark.parametrize("boundary", ["window", "paid", "job_lease"])
+def test_model_dispatch_rechecks_time_after_last_blocking_journal_read(
+    core, tmp_path, monkeypatch, boundary,
+):
+    from datetime import datetime, timedelta
+
+    from companion import paid_budget
+
+    cfg, plan = live_fixture(core, tmp_path)
+    real_journal = paid_budget.journal
+    preflight_started, advanced = [], []
+
+    def slow_journal(*args, **kwargs):
+        value = real_journal(*args, **kwargs)
+        record = args[2] if len(args) > 2 else kwargs.get("record")
+        if preflight_started and not advanced and record is None:
+            if boundary == "window":
+                core.clock.now = plan.end
+            elif boundary == "paid":
+                core.settings.paid_model = core.settings.paid_model.model_copy(
+                    update={"expires_at": core.clock.now}
+                )
+            else:
+                job = core.store.one("SELECT lease_until FROM jobs WHERE state='RUNNING'")
+                core.clock.now = datetime.fromisoformat(job["lease_until"]) + timedelta(seconds=1)
+            advanced.append(True)
+        return value
+
+    async def scenario():
+        async with live_clients(core, cfg) as (client, _protocol, model_calls, sends):
+            async def start_final_preflight(_request):
+                preflight_started.append(True)
+
+            core.model.client.event_hooks["request"].append(start_final_preflight)
+            with Spool(cfg) as spool:
+                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
+                await window.open(client)
+                raw = raw_event(1)
+                await window.ingest(client, raw, input_approval(plan, raw))
+                monkeypatch.setattr(paid_budget, "journal", slow_journal)
+                assert await core.run_once()
+                assert advanced == [True]
+                assert model_calls == sends == []
+                usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
+                assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
+                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
+
+    run(scenario())

@@ -246,6 +246,30 @@ def check_model(store, settings, clock, request_id):
     if not job or job["state"] != "RUNNING" or job["lease_until"] <= clock():
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
     check_job(store, settings, clock, job, current_request=request_id)
+    current = store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    if not current or current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
+        raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
+    return current
+
+
+def dispatch_fence(settings, clock, job_lease_until, admission_lease_until):
+    """Pure final check after ALL journal/file/DB work; no I/O follows this clock read."""
+    approval, paid = settings.live_text_window, settings.paid_model
+    if approval is None or paid is None or approval.live_approved is not True:
+        raise CoreError("LIVE_TEXT_APPROVAL_REQUIRED", 503)
+    if settings.mode != "live" or approval.core_config_sha256 != config_sha256(settings):
+        raise CoreError("LIVE_TEXT_RUNTIME_CHANGED", 503)
+    # Parse leases before sampling time too; there are no locks, file reads or
+    # awaits between the following sample and returning to the HTTP transport.
+    leases = [datetime.fromisoformat(job_lease_until),
+              datetime.fromisoformat(admission_lease_until)]
+    now = datetime.fromisoformat(clock())
+    if not approval.starts_at <= now < approval.ends_at:
+        raise CoreError("LIVE_TEXT_APPROVAL_EXPIRED", 503)
+    if not paid.starts_at <= now < paid.expires_at or now >= paid.rates_valid_until:
+        raise CoreError("PAID_APPROVAL_EXPIRED", 503)
+    if any(lease <= now for lease in leases):
+        raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):
