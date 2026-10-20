@@ -1,0 +1,53 @@
+{
+  "$schema": "../../contracts/p8c1-gates.schema.json",
+  "schema_version": 1,
+  "baseline_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+  "product_candidate_sha": null,
+  "evidence_level": "OFFLINE_SYNTHETIC_WITH_RUNTIME_BLOCKERS",
+  "gates": {
+    "offline_compatibility": "PENDING_INTEGRATION",
+    "slash_commands": "OFFLINE_PASS",
+    "provider_contract": "PROVIDER_CONTRACT_UNVERIFIABLE",
+    "privacy_review": "OFFLINE_PASS_WITH_HISTORY_RESIDUAL",
+    "live_recovery": "BLOCKED",
+    "deployment": "BLOCKED",
+    "qq": "BLOCKED",
+    "paid": "BLOCKED",
+    "M1": "DISABLED",
+    "Reader": "DISABLED",
+    "optional_C5": "DEFERRED"
+  },
+  "validation": {
+    "independent_review": "PENDING",
+    "local": {
+      "state": "PENDING",
+      "passed": null,
+      "skipped": null,
+      "warnings": null,
+      "seconds": null
+    },
+    "exact_head_ci": "EXTERNAL_ATTESTATION_REQUIRED_FOR_FINAL_PR_AND_MAIN_SHA",
+    "required_jobs": [
+      "preflight", "test (ubuntu-latest)", "test (windows-latest)",
+      "container", "browser-reader", "plugin-native", "ci"
+    ]
+  },
+  "actual": {
+    "provider_usage": null,
+    "provider_cost": null,
+    "billing_reconciled_cost": null,
+    "phone_e2e_samples": 0,
+    "phone_p50_ms": null,
+    "phone_p95_ms": null,
+    "strict_qq_first5": 0,
+    "strict_qq_all20": 0
+  },
+  "references": [
+    "p8c1-baseline.md",
+    "p8c1-public-evidence-review.md",
+    "p8c1-provider-contract-review.md",
+    "p8c1-recovery-approval-delta.md",
+    "p8c1-contracts-gates.json"
+  ],
+  "production_ready": false
+}
