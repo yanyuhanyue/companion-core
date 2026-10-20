@@ -2,10 +2,8 @@
 
 import hashlib
 import json
-import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
-from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic import Field
@@ -20,40 +18,9 @@ from companion.observation import (
 )
 from companion.privacy import epoch
 from companion.source_grants import SourceGrantSnapshot
+from companion.sources import content_target, observation_sources, supports
 from companion.store import after, encode, uid
 from companion.transport import digest
-
-
-def content_target(url):
-    """Accept content identifiers only; adapters never fetch arbitrary user URLs."""
-    try:
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.username
-            or parsed.password
-            or parsed.port not in {None, 443}
-        ):
-            raise ValueError()
-        if parsed.fragment:
-            raise ValueError()
-        if parsed.hostname in {"www.bilibili.com", "m.bilibili.com", "bilibili.com"}:
-            match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,20})/?", parsed.path)
-            if match:
-                return "bilibili", "https://www.bilibili.com/video/" + match[1]
-        if parsed.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
-            match = re.fullmatch(
-                r"/(?:(?:app/)?bbs/link|a)/([0-9]{1,32}|[0-9a-fA-F]{12})/?", parsed.path
-            )
-            post_id = match[1] if match else ""
-            if parsed.path == "/v3/bbs/app/api/web/share":
-                identifiers = parse_qs(parsed.query, keep_blank_values=True).get("link_id", [])
-                post_id = identifiers[0] if len(identifiers) == 1 else ""
-            if re.fullmatch(r"[0-9]{1,32}|[0-9a-fA-F]{12}", post_id):
-                return "heybox", "https://www.xiaoheihe.cn/app/bbs/link/" + post_id.lower()
-    except ValueError:
-        pass
-    raise CoreError("CONTENT_URL_NOT_ALLOWED", 400)
 
 
 class ReadItem(StrictModel):
@@ -109,7 +76,7 @@ class ExplorationService:
         policy = self.core.observations.policy(adapter_id)
         content_enabled = getattr(self.settings, "content_enabled", False)
         if (not self.settings.exploration_enabled and not content_enabled) or (
-            policy.source not in {"bilibili", "heybox"}
+            not supports(policy.source, "get")
         ):
             raise CoreError("EXPLORATION_DISABLED", 403)
         return policy
@@ -166,7 +133,7 @@ class ExplorationService:
         adapters = [
             name
             for name, adapter in self.settings.observation_adapters.items()
-            if adapter.source in {"bilibili", "heybox"}
+            if supports(adapter.source, "discover")
         ]
         if not adapters:
             return
@@ -444,9 +411,9 @@ class ExplorationService:
                 day, _ = self.periods()
                 count = s.one(
                     "SELECT COUNT(*) AS n FROM observations o JOIN events e USING(event_id) "
-                    "WHERE e.source IN ('observation.bilibili','observation.heybox') "
+                    "WHERE e.source IN (SELECT value FROM json_each(?)) "
                     "AND result_status='DISCOVERED' AND o.created_at>=?",
-                    (day,),
+                    (encode(observation_sources("discover")), day),
                 )["n"]
                 for index, item in enumerate(result.items):
                     source, canonical = content_target(item.url)
