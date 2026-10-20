@@ -27,11 +27,11 @@ def validate_item(item, config):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
 
 
-async def deliver_tick(client, onebot, spool, *, metrics=None):
+async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):
     # Finish reporting interrupted sends before taking new work; never repeat send I/O.
     if await spool.flush_result(client):
         return True
-    if not onebot.config.delivery_enabled:
+    if not onebot.config.delivery_enabled and guard is None:
         return False
     batch = await bounded_post(
         client, "/internal/v1/deliveries/lease", {"worker_id": "onebot-direct", "limit": 1}
@@ -42,6 +42,8 @@ async def deliver_tick(client, onebot, spool, *, metrics=None):
         return False
     item = batch["items"][0]
     validate_item(item, onebot.config)
+    if guard is not None:
+        guard.reserve(item)
     trace = spool.trace_for(item.get("delivery_key"))
     if metrics:
         metrics.emit("t_outbox_lease", trace)
@@ -76,4 +78,6 @@ async def deliver_tick(client, onebot, spool, *, metrics=None):
         )
         metrics.delivered(item.get("delivery_key", ""), provider_id, ack_ns)
     await spool.flush_result(client)
+    if guard is not None:
+        guard.complete(item, provider_id)
     return True
