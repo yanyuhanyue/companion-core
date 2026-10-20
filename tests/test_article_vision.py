@@ -76,8 +76,12 @@ def test_eight_images_reuse_chat_provider_in_two_image_batches_and_keep_article(
     core.settings.model_url = "https://api.deepseek.com"
     core.settings.model_name = "deepseek-flash"
     core.settings.model_key = SecretStr("fixture-deepseek-key")
-    service = ContentService(core, service.options, image_transport=image_transport())
+    service = ContentService(
+        core.store, core.settings, core.observations, core.exploration.create, core.clock,
+        options=service.options, image_transport=image_transport(),
+    )
     core.content = service
+    core.exploration.register_link_images = service.register_link_images
     calls = []
 
     def provider(request):

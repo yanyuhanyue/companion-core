@@ -1,13 +1,14 @@
 import asyncio
 
-from companion.core import Core
+from companion.content import ContentService
+from companion.observation import ObservationService
+from companion.runtime import Runtime
 
 
 async def content_worker(settings):
-    core = Core(settings)
-    try:
+    with Runtime(settings) as runtime:
+        observations = ObservationService(runtime.store, settings, runtime.clock)
+        content = ContentService(runtime.store, settings, observations, clock=runtime.clock)
         while True:
-            if not await core.content.run_batch():
+            if not await content.run_batch():
                 await asyncio.sleep(1)
-    finally:
-        core.store.close()

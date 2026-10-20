@@ -19,10 +19,11 @@ from companion.media import MediaService
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.observation import ObservationService
-from companion.privacy import ErasureLedger, epoch, redact
+from companion.privacy import epoch, redact
 from companion.reflection import ReflectionService
+from companion.runtime import Runtime
 from companion.social import SocialPlanner, proactive_allowed, proactive_counts
-from companion.store import Store, after, encode, uid, utcnow
+from companion.store import after, encode, uid, utcnow
 from companion.telemetry import emit
 from companion.transport import (
     cancel_proactive_work,
@@ -34,52 +35,40 @@ from companion.transport import (
 from companion.wake import WakePlanner
 
 
-class Core:
+class Core(Runtime):
     def __init__(self, settings, model=None, clock=utcnow):
-        self.settings, self.model, self.clock = settings, model, clock
-        self.store = Store(settings.database)
-        self.ledger = ErasureLedger(settings.erasure_ledger)
-        self.ledger.initialize(self.store)
-        self.memory = Memory(self.store, settings, self.ledger)
-        if settings.memory_enabled:
-            try:
+        super().__init__(settings, clock)
+        self.model = model
+        try:
+            self.memory = Memory(self.store, settings, self.ledger)
+            if settings.memory_enabled:
                 self.memory.index.warmup()
-            except Exception:
-                self.store.close()
-                raise
-        with self.store.transaction():
-            for actor, kind in (
-                ("owner", "owner"),
-                ("companion", "companion"),
-                ("system", "system"),
-            ):
-                self.store.execute(
-                    "INSERT OR IGNORE INTO principals VALUES (?,?,?)", (actor, kind, self.clock())
-                )
-            # A persistent identity cannot silently be reassigned to a new QQ owner.
-            previous = self.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
-            if previous and previous["value"] != settings.owner_qq_id:
-                raise CoreError("OWNER_IDENTITY_MISMATCH", 503)
-            self.store.execute(
-                "INSERT OR IGNORE INTO runtime_meta VALUES ('owner_qq_id',?)",
-                (settings.owner_qq_id,),
+            self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
+            self.observations = ObservationService(self.store, settings, clock)
+            self.media = MediaService(self.store, settings, clock, self.observations)
+            self.affect = AffectEngine(self.store, settings, clock)
+            self.reflections = ReflectionService(
+                self.store, settings, model, self.diary.repo, self.ledger, clock
             )
-        self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
-        self.observations = ObservationService(self.store, settings, clock)
-        self.media = MediaService(self.store, settings, clock, self.observations)
-        self.affect = AffectEngine(self.store, settings, clock)
-        self.reflections = ReflectionService(
-            self.store, settings, model, self.diary.repo, self.ledger, clock
-        )
-        self.consolidation = NightlyConsolidator(self)
-        self.goals = GoalEngine(self.store, settings, self.ledger, clock)
-        self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
-        self.life = LifeService(self)
-        self.social = SocialPlanner(self)
-        self.exploration = ExplorationService(self)
-        self.content = ContentService(self)
-        self.expression = ExpressionEngine(self.store, settings, clock)
-        self.executive = Executive(self.store, settings, clock)
+            self.consolidation = NightlyConsolidator(self)
+            self.goals = GoalEngine(self.store, settings, self.ledger, clock)
+            self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
+            self.life = LifeService(self)
+            self.social = SocialPlanner(self.store, settings, clock)
+            # Only this finite callback is late-bound; neither service retains the Core.
+            self.content = ContentService(
+                self.store, settings, self.observations,
+                lambda *args, **kwargs: exploration.create(*args, **kwargs), clock,
+            )
+            exploration = self.exploration = ExplorationService(
+                self.store, settings, self.observations, self.goals, self.social,
+                self.content.register_link_images, clock,
+            )
+            self.expression = ExpressionEngine(self.store, settings, clock)
+            self.executive = Executive(self.store, settings, clock)
+        except BaseException:
+            self.close()
+            raise
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -1058,15 +1047,3 @@ class Core:
                 "FROM model_usage GROUP BY scenario"
             ),
         }
-
-    def expire_raw_events(self):
-        now = self.clock()
-        with self.store.transaction():
-            rows = self.store.rows(
-                "SELECT event_id FROM events WHERE redacted=0 AND ingested_at<? "
-                "ORDER BY rowid LIMIT 1000",
-                (after(now, -86400 * self.settings.raw_event_retention_days),),
-            )
-            if rows:
-                self.ledger.expire_events(self.store, [e["event_id"] for e in rows], now)
-            return len(rows)
