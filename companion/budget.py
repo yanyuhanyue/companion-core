@@ -130,10 +130,7 @@ def reserve(
         if approval:
             from companion.model import model_payload
 
-            snapshot = approval.model_dump(mode="json")
-            # Paths are operational settings, not pricing evidence or model input.
-            snapshot.pop("tokenizer_path")
-            snapshot.pop("journal_path")
+            snapshot = paid_budget.snapshot(settings)
             contract_hash = paid_budget.sha(snapshot)
             store.insert(
                 "model_admissions",
@@ -179,7 +176,7 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
         "('model_budget_blocked','model_budget_restore_required')"
     ):
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
-    snapshot = approval.model_dump(mode="json", exclude={"tokenizer_path", "journal_path"})
+    snapshot = paid_budget.snapshot(settings)
     frozen = paid_budget.sha(snapshot)
     prior = store.one(
         "SELECT contract_sha256 FROM model_budget_windows WHERE window_id=?", (approval.window_id,)
@@ -371,7 +368,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-        snapshot = approval.model_dump(mode="json", exclude={"tokenizer_path", "journal_path"})
+        snapshot = paid_budget.snapshot(settings)
         if row["contract_sha256"] != paid_budget.sha(snapshot):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if paid_budget.input_bound(approval, messages, scenario) != row["input_bound"]:
@@ -401,6 +398,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     try:
         paid_budget.contract(settings, clock())
+        if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
+            raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
     except CoreError:
