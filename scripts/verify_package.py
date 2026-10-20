@@ -1,5 +1,6 @@
 """Check release archives and initialize a database using only the extracted wheel."""
 
+import argparse
 import os
 import subprocess
 import sys
@@ -62,8 +63,11 @@ def verify_export_rebuild(source, temporary):
 
 
 def main():
-    wheel = ROOT / f"dist/companion_core-{__version__}-py3-none-any.whl"
-    source = ROOT / f"dist/companion_core-{__version__}.tar.gz"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dist-dir", type=Path, default=ROOT / "dist")
+    distribution = parser.parse_args().dist_dir.resolve()
+    wheel = distribution / f"companion_core-{__version__}-py3-none-any.whl"
+    source = distribution / f"companion_core-{__version__}.tar.gz"
     temporary = ROOT / ".local"
     temporary.mkdir(exist_ok=True)
     with tarfile.open(source) as archive:
@@ -75,6 +79,12 @@ def main():
             "companion/media_web/index.html",
             "companion/media_web/app.js",
             "companion/media_web/style.css",
+            "source_reader/__main__.py",
+            "source_reader/network.py",
+            "source_reader/THIRD_PARTY_NOTICES.txt",
+            "source_reader/accounts.py",
+            "source_reader/heybox_source.py",
+            "source_reader/bili_tools.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
             destination = Path(folder).resolve()
@@ -92,6 +102,13 @@ def main():
             )
             subprocess.run(
                 [sys.executable, "-m", "companion", "init"],
+                cwd=destination,
+                env=env,
+                check=True,
+                timeout=30,
+            )
+            subprocess.run(
+                [sys.executable, "-m", "source_reader", "--help"],
                 cwd=destination,
                 env=env,
                 check=True,

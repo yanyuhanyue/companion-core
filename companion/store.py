@@ -99,7 +99,13 @@ class Store:
             "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts"},
             "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},
             "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
-            "exploration_requests": {"lease_token", "reserved_bytes", "captured_privacy_epoch"},
+            "exploration_requests": {
+                "lease_token",
+                "reserved_bytes",
+                "captured_privacy_epoch",
+                "reserved_requests",
+                "used_requests",
+            },
             "social_candidates": {"event_id", "message_id", "comparison_text"},
             "tool_tasks": {"scope_sha256", "captured_privacy_epoch", "billed_micro_usd"},
             "tool_approvals": {"scope_sha256", "expires_at", "revoked_at"},
@@ -107,9 +113,15 @@ class Store:
             "media_requests": {"request_key", "fingerprint", "usage_request_id", "event_id"},
             "content_items": {"owner_event_id", "read_request_id", "usage_request_id", "deadline"},
         }
-        return all(
+        columns_present = all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}
             for table, columns in required.items()
+        )
+        content = self.one(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
+        )
+        return columns_present and bool(
+            content and "slot<64" in "".join(content["sql"].split()).lower()
         )
 
     def insert(self, table, **values):

@@ -1,0 +1,471 @@
+{
+  "schema_version": 1,
+  "taskbook": "CC-NEXT-20261020-P4",
+  "taskbook_sha256": "fe3f03fbff3de86a8a7abda8caaa8611c00e281c002e669f1de087e27272cd90",
+  "queried_on": "2026-10-20",
+  "main": {
+    "sha": "676f6143a40d08ffe44862a8897b4953dfa6c02e",
+    "runs": [
+      {
+        "id": 39206368708,
+        "head_sha": "676f6143a40d08ffe44862a8897b4953dfa6c02e",
+        "status": "completed",
+        "conclusion": "success",
+        "event": "push",
+        "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39206368708"
+      }
+    ]
+  },
+  "prs": [
+    {
+      "number": 11,
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/11",
+      "head": "release/v0.5",
+      "head_sha": "aee7b16fd4808bb78597f68e79836d146cc00e5b",
+      "base": "main",
+      "base_sha": "676f6143a40d08ffe44862a8897b4953dfa6c02e",
+      "draft": false,
+      "state": "open",
+      "merged": false,
+      "reviews": [],
+      "runs": [
+        {
+          "id": 39248256712,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248256712",
+          "event": "pull_request",
+          "head_sha": "aee7b16fd4808bb78597f68e79836d146cc00e5b",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 39248251634,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248251634",
+          "event": "push",
+          "head_sha": "aee7b16fd4808bb78597f68e79836d146cc00e5b",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 12,
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/12",
+      "head": "fix/v05-release-gates",
+      "head_sha": "89c60f08ab4707f169d7fc268fc7d72a55faec78",
+      "base": "release/v0.5",
+      "base_sha": "aee7b16fd4808bb78597f68e79836d146cc00e5b",
+      "draft": false,
+      "state": "open",
+      "merged": false,
+      "reviews": [],
+      "runs": [
+        {
+          "id": 39259868931,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259868931",
+          "event": "pull_request",
+          "head_sha": "89c60f08ab4707f169d7fc268fc7d72a55faec78",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 39259860191,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259860191",
+          "event": "push",
+          "head_sha": "89c60f08ab4707f169d7fc268fc7d72a55faec78",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 13,
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/13",
+      "head": "feat/v06-source-browser",
+      "head_sha": "c74cae69022fa09543a4e59209002c5282784140",
+      "base": "fix/v05-release-gates",
+      "base_sha": "89c60f08ab4707f169d7fc268fc7d72a55faec78",
+      "draft": false,
+      "state": "open",
+      "merged": false,
+      "reviews": [],
+      "runs": [
+        {
+          "id": 39269744258,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269744258",
+          "event": "pull_request",
+          "head_sha": "c74cae69022fa09543a4e59209002c5282784140",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 39269737160,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269737160",
+          "event": "push",
+          "head_sha": "c74cae69022fa09543a4e59209002c5282784140",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 14,
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/14",
+      "head": "feat/v06-heybox-reader",
+      "head_sha": "058cb62d7323ad23195a2077b96ede36fd24a0d2",
+      "base": "feat/v06-source-browser",
+      "base_sha": "c74cae69022fa09543a4e59209002c5282784140",
+      "draft": true,
+      "state": "open",
+      "merged": false,
+      "reviews": [],
+      "runs": [
+        {
+          "id": 39344891358,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344891358",
+          "event": "pull_request",
+          "head_sha": "058cb62d7323ad23195a2077b96ede36fd24a0d2",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 39344759809,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344759809",
+          "event": "push",
+          "head_sha": "058cb62d7323ad23195a2077b96ede36fd24a0d2",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 15,
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/15",
+      "head": "codex/v06-plugin-readonly-p3",
+      "head_sha": "a199e25443e34b81c905c802e36fa8a707504b4d",
+      "base": "feat/v06-heybox-reader",
+      "base_sha": "058cb62d7323ad23195a2077b96ede36fd24a0d2",
+      "draft": true,
+      "state": "open",
+      "merged": false,
+      "reviews": [],
+      "runs": [
+        {
+          "id": 39359603443,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39359603443",
+          "event": "pull_request",
+          "head_sha": "a199e25443e34b81c905c802e36fa8a707504b4d",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "plugin-native",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 39359598359,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39359598359",
+          "event": "push",
+          "head_sha": "a199e25443e34b81c905c802e36fa8a707504b4d",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "plugin-native",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "number": 16,
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/16",
+      "head": "codex/v06-article-vision",
+      "head_sha": "df28f595f714219b78c88858af6ff4c57c055c14",
+      "base": "codex/v06-plugin-readonly-p3",
+      "base_sha": "a199e25443e34b81c905c802e36fa8a707504b4d",
+      "draft": true,
+      "state": "open",
+      "merged": false,
+      "reviews": [],
+      "runs": [
+        {
+          "id": 39363343587,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39363343587",
+          "event": "pull_request",
+          "head_sha": "df28f595f714219b78c88858af6ff4c57c055c14",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "plugin-native",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        },
+        {
+          "id": 39363274155,
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39363274155",
+          "event": "push",
+          "head_sha": "df28f595f714219b78c88858af6ff4c57c055c14",
+          "status": "completed",
+          "conclusion": "success",
+          "jobs": [
+            {
+              "name": "container",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "browser-reader",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (ubuntu-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "test (windows-latest)",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            {
+              "name": "plugin-native",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "source_input_sha": "df28f595f714219b78c88858af6ff4c57c055c14",
+  "p15_net_changed_files": 29,
+  "changes_from_taskbook": [
+    "PR16 adds bounded article vision; historical P3 evidence is unchanged."
+  ],
+  "production_ready": false
+}

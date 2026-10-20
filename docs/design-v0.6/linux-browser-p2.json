@@ -1,0 +1,28 @@
+{
+  "checked_at": "2026-10-20T07:49:28.219795+08:00",
+  "source_archive_sha256": "4da188aee2b69e141f2fa0613f31ef6afb468fee6e221a4439404d1ed309b030",
+  "image_id": "sha256:d86e96d97a4e6ddaf0d8850b6db641f0f0b7e5b33fd00606bb80345e86f2b534",
+  "status": "BLOCKED",
+  "error_code": "READER_BROWSER_UNAVAILABLE",
+  "diagnostic": "Chromium: No usable sandbox; unshare --user --map-root-user true under the same restricted container profile returned Operation not permitted.",
+  "host_unprivileged_userns_clone": 1,
+  "host_max_user_namespaces": 31581,
+  "security_options": [
+    "apparmor",
+    "seccomp builtin",
+    "cgroupns"
+  ],
+  "sandbox_disabled": false,
+  "host_security_changed": false,
+  "existing_containers_unchanged": true,
+  "existing_containers": 13,
+  "resource_limits": {
+    "cpu": 1,
+    "memory_mib": 768,
+    "pids": 96
+  },
+  "memory_peak_bytes": null,
+  "startup_attempt_seconds": 3.073,
+  "active_contexts_after_exit": 0,
+  "network": "none"
+}

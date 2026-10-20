@@ -7,7 +7,7 @@ from datetime import UTC
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from companion.contracts import CoreError, StrictModel
 from companion.policy import ConsentService
@@ -22,6 +22,101 @@ class MediaSpan(StrictModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ReadingSource(StrictModel):
+    role: Literal["metadata", "page", "player", "subtitle"]
+    url: str = Field(max_length=2048)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(gt=0, le=1048576)
+
+    @model_validator(mode="after")
+    def public_source(self):
+        url = urlsplit(self.url)
+        if (
+            url.scheme != "https"
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.port not in {None, 443}
+            or url.hostname
+            not in {"www.bilibili.com", "api.bilibili.com", "aisubtitle.hdslb.com", "i0.hdslb.com"}
+        ):
+            raise ValueError("Invalid reading evidence URL")
+        return self
+
+
+class SubtitleSpan(StrictModel):
+    start_seconds: float = Field(ge=0, allow_inf_nan=False)
+    end_seconds: float = Field(gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def ordered(self):
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("Invalid subtitle span")
+        return self
+
+
+class ReadingEvidence(StrictModel):
+    level: Literal["L1", "L2"]
+    method: Literal["public_api", "account_api", "static_page", "browser_render"]
+    fetched_at: AwareDatetime
+    part: Literal[1] = 1
+    subtitle_status: Literal["available", "missing", "restricted", "unavailable", "budget_limited"]
+    language: str = Field(default="", max_length=32)
+    spans: list[SubtitleSpan] = Field(default_factory=list, max_length=120)
+    sources: list[ReadingSource] = Field(min_length=1, max_length=4)
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def consistent(self):
+        available = self.subtitle_status == "available"
+        if (self.level == "L2") != available or bool(self.spans) != available:
+            raise ValueError("Reading level requires matching subtitle evidence")
+        if available and not any(row.role == "subtitle" for row in self.sources):
+            raise ValueError("Missing subtitle source")
+        return self
+
+
+class ArticleImage(StrictModel):
+    url: str = Field(max_length=2048)
+    text_offset: int = Field(ge=0, le=12000)
+
+    @model_validator(mode="after")
+    def source_image(self):
+        url = urlsplit(self.url)
+        if (
+            url.scheme != "https"
+            or url.hostname not in {"imgheybox.max-c.com", "imgheybox1.max-c.com"}
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.port not in {None, 443}
+            or not url.path.startswith("/")
+        ):
+            raise ValueError("Invalid article image reference")
+        return self
+
+
+class ArticleEvidence(StrictModel):
+    method: Literal["public_html", "source_api"]
+    fetched_at: AwareDatetime
+    response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    response_bytes: int = Field(gt=0, le=1048576)
+    images: list[ArticleImage] = Field(default_factory=list, max_length=32)
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def image_order(self):
+        if len({row.url for row in self.images}) != len(self.images):
+            raise ValueError("Duplicate article image")
+        if [row.text_offset for row in self.images] != sorted(
+            row.text_offset for row in self.images
+        ):
+            raise ValueError("Invalid article image order")
+        return self
+
+
 class ObservationPayload(StrictModel):
     title: str = Field(default="", max_length=300)
     text: str = Field(default="", max_length=12000)
@@ -32,6 +127,8 @@ class ObservationPayload(StrictModel):
     media_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     processor_id: str | None = Field(default=None, min_length=1, max_length=128)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
+    reading: ReadingEvidence | None = None
+    article: ArticleEvidence | None = None
 
 
 class ObservationEvent(StrictModel):
@@ -160,6 +257,29 @@ class ObservationService:
         ):
             raise CoreError("OBSERVATION_TIME_OUT_OF_RANGE", 400)
         status, kind = observation.result_status, observation.source_kind
+        if payload.article is not None:
+            fetched = payload.article.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
+            if (
+                observation.source != "heybox"
+                or status != "FETCHED"
+                or kind != "text"
+                or any(image.text_offset >= len(payload.text) for image in payload.article.images)
+                or not after(self.clock(), -86400 * self.settings.raw_event_retention_days)
+                <= fetched
+                <= after(self.clock(), 300)
+            ):
+                raise CoreError("ARTICLE_EVIDENCE_MISMATCH", 400)
+        if payload.reading is not None:
+            fetched = payload.reading.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
+            if (
+                observation.source != "bilibili"
+                or status != "FETCHED"
+                or kind != "text"
+                or not after(self.clock(), -86400 * self.settings.raw_event_retention_days)
+                <= fetched
+                <= after(self.clock(), 300)
+            ):
+                raise CoreError("READING_EVIDENCE_MISMATCH", 400)
         kinds = {
             "qq_image": {"image_analysis"},
             "voice": {"audio_transcript"},
@@ -235,9 +355,13 @@ class ObservationService:
     def append(self, adapter_id, observation):
         adapter = self.policy(adapter_id)
         now, s = self.clock(), self.store
-        fingerprint = digest(
-            observation.model_dump(mode="json", exclude={"event_id", "trace_id", "privacy_epoch"})
+        receipt = observation.model_dump(
+            mode="json", exclude={"event_id", "trace_id", "privacy_epoch"}
         )
+        for field in ("reading", "article"):
+            if receipt["payload"][field] is None:
+                receipt["payload"].pop(field)
+        fingerprint = digest(receipt)
         source, external_id = (
             "observation." + adapter.source,
             adapter_id + ":" + observation.provider_event_id,
@@ -320,7 +444,7 @@ class ObservationService:
                 session_id=observation.session_id,
                 consent_id=observation.consent_id,
                 evidence_json=encode(
-                    observation.payload.model_dump(exclude={"text", "title", "url"})
+                    observation.payload.model_dump(mode="json", exclude={"text", "title", "url"})
                 ),
                 captured_privacy_epoch=observation.privacy_epoch,
                 created_at=now,

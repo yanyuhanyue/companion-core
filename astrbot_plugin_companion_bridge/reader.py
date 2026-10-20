@@ -211,7 +211,7 @@ def safe_target(source, url):
         if match:
             return "https://www.bilibili.com/video/" + match[1]
     if source == "heybox" and parsed.hostname == "www.xiaoheihe.cn":
-        match = re.fullmatch(r"/app/bbs/link/([0-9]{1,32})/?", parsed.path)
+        match = re.fullmatch(r"/app/bbs/link/([0-9]{1,32}|[0-9a-fA-F]{12})/?", parsed.path)
         if match:
             return "https://www.xiaoheihe.cn/app/bbs/link/" + match[1]
     raise ReadFailure("CONTENT_URL_NOT_ALLOWED")

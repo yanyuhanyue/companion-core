@@ -1,0 +1,237 @@
+{
+  "checked_at": "2026-10-20T01:36:47.629735+00:00",
+  "source": "bilibili",
+  "upstream_commit": "9a3e0e67d82feedf755c763807c806c4d125a245",
+  "credentials_used": true,
+  "authorization": "owner_interactive_login_in_this_task",
+  "real_model_calls": 0,
+  "qq_messages": 0,
+  "samples": [
+    {
+      "url": "https://www.bilibili.com/video/BV1Sb41127UZ",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 3,
+      "used_bytes": 8136,
+      "receipt_idempotent": true,
+      "title": "有关b站cc字幕科普和开启方法",
+      "reading": {
+        "level": "L2",
+        "method": "account_api",
+        "fetched_at": "2026-10-20T01:36:59.456621+00:00",
+        "part": 1,
+        "subtitle_status": "available",
+        "language": "ai-zh",
+        "spans": [
+          {
+            "start_seconds": 42.2,
+            "end_seconds": 47.26
+          },
+          {
+            "start_seconds": 48.72,
+            "end_seconds": 49.72
+          },
+          {
+            "start_seconds": 68.82,
+            "end_seconds": 70.679
+          },
+          {
+            "start_seconds": 74.42,
+            "end_seconds": 75.2
+          },
+          {
+            "start_seconds": 75.2,
+            "end_seconds": 77.3
+          },
+          {
+            "start_seconds": 80.46,
+            "end_seconds": 84.14
+          },
+          {
+            "start_seconds": 84.14,
+            "end_seconds": 89.6
+          }
+        ],
+        "sources": [
+          {
+            "role": "metadata",
+            "url": "https://api.bilibili.com/x/web-interface/view",
+            "sha256": "079d2d5dbca32842087c367ed5148f97ff1f3c955cc28d5d425f97639746cbb6",
+            "bytes": 4129
+          },
+          {
+            "role": "player",
+            "url": "https://api.bilibili.com/x/player/v2",
+            "sha256": "23683ba6f1d8b94aef239a61ca7cde38675cbfdc45006c4afea568736d87e520",
+            "bytes": 2857
+          },
+          {
+            "role": "subtitle",
+            "url": "https://aisubtitle.hdslb.com/bfs/ai_subtitle/prod/436996457656658705f4de7339c560a09e516a796ef977f9",
+            "sha256": "fe2ff17db90287b2a71f0cc442a6566817ef6a35eef1ea3469d35d056b0ed38e",
+            "bytes": 1150
+          }
+        ],
+        "truncated": false
+      },
+      "text_chars": 483,
+      "text_sha256": "dc048e04ee5b4313344a0918eb643343fc9a94554ab90f5ecf7d400508dddd28",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1Lb411h7gY",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 2,
+      "used_bytes": 6345,
+      "receipt_idempotent": true,
+      "title": "【iPad终于支持CC字幕】以及B站CC字幕的一些问题以及说明",
+      "reading": {
+        "level": "L1",
+        "method": "account_api",
+        "fetched_at": "2026-10-20T01:37:09.180657+00:00",
+        "part": 1,
+        "subtitle_status": "missing",
+        "language": "",
+        "spans": [],
+        "sources": [
+          {
+            "role": "metadata",
+            "url": "https://api.bilibili.com/x/web-interface/view",
+            "sha256": "2ae30828917f4876905e5bcf91e67a59e2e0533467efeefb9ae103de35d4b6e0",
+            "bytes": 3608
+          },
+          {
+            "role": "player",
+            "url": "https://api.bilibili.com/x/player/v2",
+            "sha256": "44d65192a715300ec38afc5fba6c3a0d3d9c4f05a6b7d989bb7b9d074725665a",
+            "bytes": 2737
+          }
+        ],
+        "truncated": false
+      },
+      "text_chars": 319,
+      "text_sha256": "3b316a2b773a1dda836eacb82586e43af74008ea4a55b5a7f1947c45adcf0389",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1SE411v7qy",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 2,
+      "used_bytes": 4520,
+      "receipt_idempotent": true,
+      "title": "怎样打开CC字幕（B站外挂字幕）",
+      "reading": {
+        "level": "L1",
+        "method": "account_api",
+        "fetched_at": "2026-10-20T01:37:18.475756+00:00",
+        "part": 1,
+        "subtitle_status": "missing",
+        "language": "",
+        "spans": [],
+        "sources": [
+          {
+            "role": "metadata",
+            "url": "https://api.bilibili.com/x/web-interface/view",
+            "sha256": "9a116615c9c753795a5e62bd1896c7dd943029d4366063be8f86c58f93c3d19a",
+            "bytes": 2001
+          },
+          {
+            "role": "player",
+            "url": "https://api.bilibili.com/x/player/v2",
+            "sha256": "7ce6cb5736e933ac81105a6da0dc05c4a2fdf6cde00f669f718e88c3fa34f62f",
+            "bytes": 2519
+          }
+        ],
+        "truncated": false
+      },
+      "text_chars": 71,
+      "text_sha256": "258d1858281530e3468147a29cafaf163b4656994660075dcace043a7fec82d5",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    }
+  ],
+  "core_transport": "actual_ASGI_HTTP_and_SQLite",
+  "production_ready": false,
+  "mock_chat_calls": 1,
+  "outbox_rows_not_sent": 1,
+  "observations_fetched": 3,
+  "encrypted_restore_latest_erasure_replay": "PASS",
+  "elapsed_seconds": 32.218,
+  "fixed_sample_l2_success_count": 1,
+  "fixed_sample_l1_only_count": 2,
+  "superseded_probes": "Earlier bvid+cid probes are excluded; accepted samples use aid/cid, target-bound AI URL, and duration checks.",
+  "interest_exploration": {
+    "source": "bilibili",
+    "query": "独立游戏",
+    "actual_model_calls": 0,
+    "qq_messages": 0,
+    "wake_decision": "OBSERVE",
+    "discovery": {
+      "status": "SUCCESS",
+      "items": [
+        {
+          "url": "https://www.bilibili.com/video/BV18DxEzHEwC",
+          "title": "全体起立！十年50款史上留名的独立游戏盘点（纯享版）"
+        },
+        {
+          "url": "https://www.bilibili.com/video/BV19zpt6fEk9",
+          "title": "第一个独立游戏上线两周，零宣发能赚到多少钱？"
+        },
+        {
+          "url": "https://www.bilibili.com/video/BV1N8UcBaEjD",
+          "title": "【中配】为何96%的独立游戏难逃失败命运 - Going Indie"
+        }
+      ],
+      "used_requests": 1,
+      "used_bytes": 33503
+    },
+    "goal_read": {
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "全体起立！十年50款史上留名的独立游戏盘点（纯享版）",
+          "url": "https://www.bilibili.com/video/BV18DxEzHEwC",
+          "reading": {
+            "level": "L1",
+            "method": "account_api",
+            "fetched_at": "2026-10-20T01:58:48.925467+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "9d7e1d693c1a8d9eb70380dd07b47e4cc0bce77d9febb31777e00453ede282a9",
+                "bytes": 12653
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "a605fa74158dc0a7fd26523dc23fd57d06d016b4461e6463d5edbd7828b6c65e",
+                "bytes": 4116
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 106
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 16769
+    },
+    "goal_state": "DONE",
+    "observation_states": [
+      "DISCOVERED",
+      "DISCOVERED",
+      "DISCOVERED",
+      "FETCHED"
+    ],
+    "encrypted_restore_latest_erasure": "PASS"
+  }
+}

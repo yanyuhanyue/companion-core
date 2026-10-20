@@ -1,0 +1,33 @@
+{
+  "heybox_commit": "90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac",
+  "bilibili_commit": "9a3e0e67d82feedf755c763807c806c4d125a245",
+  "native_external_requests": 0,
+  "native_mcp_tools_list": [
+    "bili_comments",
+    "bili_search",
+    "bili_subtitle",
+    "bili_video_info"
+  ],
+  "hidden_write_call_rejected": true,
+  "account_absence_rejected": true,
+  "mock_heybox_gets": [
+    {
+      "method": "GET",
+      "path": "/bbs/app/feeds"
+    },
+    {
+      "method": "GET",
+      "path": "/bbs/app/link/tree"
+    }
+  ],
+  "mock_feed_items": 1,
+  "mock_post_text_chars": 11,
+  "server_sha256": "64d1f4748940f6a27f37a59c45abaa71ab131c5e047abb1b9d5418e0d7b39c1e",
+  "packages": {
+    "mcp": "1.30.0",
+    "bilibili-api-python": "17.4.2",
+    "httpx": "0.28.1",
+    "aiosqlite": "0.22.1"
+  },
+  "full_astrbot_or_dsh_agent_started": false
+}
