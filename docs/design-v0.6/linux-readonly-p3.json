@@ -1,0 +1,33 @@
+{
+  "source_archive_sha256": "5281a0883338c4f6bc38c83dc149b85c1380006a9a17c2df66742ab2c1029db8",
+  "runtime_image_id": "sha256:d86e96d97a4e6ddaf0d8850b6db641f0f0b7e5b33fd00606bb80345e86f2b534",
+  "source_mount": "read_only_new_source_overlay",
+  "network": "none",
+  "cpu": 1,
+  "memory_mib": 768,
+  "pids_limit": 96,
+  "read_only_root": true,
+  "cap_drop": [
+    "ALL"
+  ],
+  "no_new_privileges": true,
+  "exit_code": 0,
+  "elapsed_seconds": 2.689,
+  "smoke": {
+    "status": "PASS",
+    "tools": [
+      "bili_search",
+      "bili_subtitle",
+      "bili_comments",
+      "bili_video_info"
+    ],
+    "upstream_requests": 0,
+    "uid": 10003,
+    "memory.peak": null,
+    "pids.peak": null
+  },
+  "stderr": "",
+  "existing_containers_unchanged": true,
+  "existing_containers": 13,
+  "artifact_note": "New source read-only overlay on pinned P2 runtime; current complete image build is checked in CI."
+}

@@ -30,7 +30,7 @@ async def read_result(reader, item):
         httpx.HTTPError,
     ):
         result.update(status="UNKNOWN", items=[], error_code="READER_NETWORK_UNKNOWN")
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (ValueError, KeyError, TypeError, AttributeError, RecursionError, OverflowError):
         result.update(status="FAILED", items=[], error_code="UPSTREAM_RESPONSE_INVALID")
     unknown = result["status"] == "UNKNOWN"
     result["used_requests"] = None if unknown else budget.used_requests

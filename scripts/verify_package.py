@@ -81,6 +81,10 @@ def main():
             "companion/media_web/style.css",
             "source_reader/__main__.py",
             "source_reader/network.py",
+            "source_reader/THIRD_PARTY_NOTICES.txt",
+            "source_reader/accounts.py",
+            "source_reader/heybox_source.py",
+            "source_reader/bili_tools.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
             destination = Path(folder).resolve()

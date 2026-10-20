@@ -7,23 +7,37 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from source_reader.bilibili import BilibiliReader
+from source_reader.heybox import HeyboxReader
 from source_reader.network import PublicHTTP
 from source_reader.worker import read_result
 
 
-async def verify(urls, output):
+class ProbeHTTP(PublicHTTP):
+    def __init__(self):
+        super().__init__()
+        self.receipts = []
+
+    async def get(self, url, budget, role):
+        raw = await super().get(url, budget, role)
+        self.receipts = list(budget.sources)
+        return raw
+
+
+async def verify(urls, output, source="bilibili"):
     if not 1 <= len(urls) <= 10:
-        raise ValueError("Provide 1–10 explicit public video URLs")
+        raise ValueError("Provide 1–10 explicit public source URLs")
     report = {
         "checked_at": datetime.now(UTC).isoformat(),
+        "source": source,
         "credentials_used": False,
         "model_calls": 0,
         "qq_messages": 0,
         "samples": [],
     }
-    async with PublicHTTP() as public:
-        reader = BilibiliReader(public)
+    async with ProbeHTTP() as public:
+        reader = HeyboxReader(public) if source == "heybox" else BilibiliReader(public)
         for url in urls:
+            public.receipts = []
             result = await read_result(
                 reader,
                 {
@@ -38,6 +52,8 @@ async def verify(urls, output):
             result.pop("lease_token")
             for item in result["items"]:
                 item["text_chars"] = len(item.pop("text"))
+            if not result["items"]:
+                result["sources"] = public.receipts
             report["samples"].append({"url": url, **result})
             print(
                 json.dumps(
@@ -57,5 +73,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("urls", nargs="+")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--source", choices=["bilibili", "heybox"], default="bilibili")
     args = parser.parse_args()
-    asyncio.run(verify(args.urls, args.output))
+    asyncio.run(verify(args.urls, args.output, args.source))

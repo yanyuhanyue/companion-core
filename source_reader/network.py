@@ -15,6 +15,23 @@ class ReadFailure(Exception):
     pass
 
 
+def post_url(value):
+    url = urlsplit(value)
+    match = re.fullmatch(r"/app/bbs/link/([0-9]{1,32}|[0-9a-fA-F]{12})/?", url.path)
+    if (
+        url.scheme != "https"
+        or url.hostname != "www.xiaoheihe.cn"
+        or not match
+        or url.username
+        or url.password
+        or url.port not in {None, 443}
+        or url.fragment
+        or len(value) > 2048
+    ):
+        raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
+    return "https://www.xiaoheihe.cn/app/bbs/link/" + match[1].lower()
+
+
 def video_url(value):
     url = urlsplit(value)
     match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,20})/?", url.path)
@@ -42,13 +59,29 @@ def permitted_url(value):
         or len(value) > 2048
     ):
         raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
-    if url.hostname == "api.bilibili.com" and url.path in {"/x/web-interface/view", "/x/player/v2"}:
+    if url.hostname == "api.bilibili.com" and url.path in {
+        "/x/web-interface/view",
+        "/x/player/v2",
+        "/x/web-interface/search/type",
+        "/x/v2/reply",
+    }:
         return
     if url.hostname in {"aisubtitle.hdslb.com", "i0.hdslb.com"} and re.fullmatch(
         r"/bfs/subtitle/[A-Za-z0-9_.-]{1,240}\.json", url.path
     ):
         return
-    if url.hostname == "www.bilibili.com" and url.path == "/" and not url.query:
+    if url.hostname == "aisubtitle.hdslb.com" and re.fullmatch(
+        r"/bfs/ai_subtitle/prod/[0-9a-fA-F]{32,128}(?:\.json)?", url.path
+    ):
+        return
+    if (
+        url.hostname in {"www.bilibili.com", "www.xiaoheihe.cn"}
+        and url.path == "/"
+        and not url.query
+    ):
+        return
+    if url.hostname == "www.xiaoheihe.cn":
+        post_url(value)
         return
     video_url(value)
 
@@ -102,6 +135,7 @@ class ReadBudget:
     used_bytes: int = 0
     used_requests: int = 0
     sources: list = field(default_factory=list)
+    authorization: bytes | None = field(default=None, repr=False)
 
     def reserve(self):
         if self.used_requests >= self.max_requests:
@@ -109,6 +143,28 @@ class ReadBudget:
         if self.used_bytes >= self.max_bytes:
             raise ReadFailure("READER_BYTE_LIMIT")
         self.used_requests += 1
+
+
+async def response_body(response, budget):
+    """Read raw HTTPCore bytes; the public and configured-source clients share limits."""
+    headers = {key.decode().lower(): value.decode() for key, value in response.headers}
+    if response.status in {401, 403, 412, 429}:
+        raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
+    if response.status != 200:
+        raise ReadFailure("UPSTREAM_HTTP_ERROR")
+    if headers.get("content-encoding", "identity").strip().lower() != "identity":
+        raise ReadFailure("READER_ENCODING_UNSUPPORTED")
+    if int(headers.get("content-length", "0")) > budget.max_bytes - budget.used_bytes:
+        raise ReadFailure("READER_BYTE_LIMIT")
+    body = bytearray()
+    async for chunk in response.aiter_stream():
+        budget.used_bytes += len(chunk)
+        if budget.used_bytes > budget.max_bytes:
+            raise ReadFailure("READER_BYTE_LIMIT")
+        body.extend(chunk)
+    if not body:
+        raise ReadFailure("READ_BODY_UNAVAILABLE")
+    return bytes(body)
 
 
 class PublicHTTP:
@@ -126,32 +182,20 @@ class PublicHTTP:
     async def __aexit__(self, *args):
         await self.pool.aclose()
 
-    async def get(self, url, budget, role):
+    async def get(self, url, budget, role, *, headers=None):
         permitted_url(url)
         budget.reserve()
         async with self.pool.stream(
             "GET",
             url,
-            headers={"Accept-Encoding": "identity", "User-Agent": "CompanionSourceReader/0.6"},
+            headers={
+                **(headers or {}),
+                "Accept-Encoding": "identity",
+                "User-Agent": "CompanionSourceReader/0.6",
+            },
             extensions={"timeout": {key: 8.0 for key in ("connect", "read", "write", "pool")}},
         ) as response:
-            headers = {key.decode().lower(): value.decode() for key, value in response.headers}
-            if response.status in {401, 403, 412, 429}:
-                raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
-            if response.status != 200:
-                raise ReadFailure("UPSTREAM_HTTP_ERROR")
-            if headers.get("content-encoding", "identity").strip().lower() != "identity":
-                raise ReadFailure("READER_ENCODING_UNSUPPORTED")
-            if int(headers.get("content-length", "0")) > budget.max_bytes - budget.used_bytes:
-                raise ReadFailure("READER_BYTE_LIMIT")
-            body = bytearray()
-            async for chunk in response.aiter_stream():
-                budget.used_bytes += len(chunk)
-                if budget.used_bytes > budget.max_bytes:
-                    raise ReadFailure("READER_BYTE_LIMIT")
-                body.extend(chunk)
-        if not body:
-            raise ReadFailure("READ_BODY_UNAVAILABLE")
+            body = await response_body(response, budget)
         parsed = urlsplit(url)
         # Signed CDN query parameters are transient fetch inputs, never persisted evidence.
         budget.sources.append(
@@ -162,4 +206,4 @@ class PublicHTTP:
                 "bytes": len(body),
             }
         )
-        return bytes(body)
+        return body

@@ -4,12 +4,16 @@ import ipaddress
 import json
 import os
 import re
+from contextlib import AsyncExitStack
 from urllib.parse import urlsplit
 
 import httpx
 
+from source_reader.bili_tools import BilibiliAccountHTTP, BilibiliToolReader
 from source_reader.bilibili import BilibiliReader
 from source_reader.browser import BrowserRenderer
+from source_reader.heybox import HeyboxReader, SourceAPI
+from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import PublicHTTP
 from source_reader.worker import read_result, tick
 
@@ -35,8 +39,27 @@ def core_address(value):
 
 async def main(args):
     renderer = BrowserRenderer() if args.browser else None
-    async with PublicHTTP() as public:
-        reader = BilibiliReader(public, renderer)
+    async with AsyncExitStack() as stack:
+        public = await stack.enter_async_context(
+            BilibiliAccountHTTP(args.account_file)
+            if args.source == "bilibili" and args.account_file
+            else PublicHTTP()
+        )
+        source = None
+        if args.source == "heybox" and args.source_url:
+            source_token = os.environ.get("COMPANION_HEYBOX_SOURCE_TOKEN", "")
+            if source_token == os.environ.get("COMPANION_READER_TOKEN"):
+                raise ValueError("Use different Core adapter and source service credentials")
+            source = await stack.enter_async_context(SourceAPI(args.source_url, source_token))
+        elif args.source == "heybox" and args.heybox_native:
+            source = await stack.enter_async_context(NativeHeyboxSource(args.account_file))
+        reader = (
+            HeyboxReader(public, source)
+            if args.source == "heybox"
+            else BilibiliToolReader(public, args.search_keyword)
+            if args.bili_tools
+            else BilibiliReader(public, renderer)
+        )
         if args.probe:
             result = await read_result(
                 reader,
@@ -77,13 +100,32 @@ async def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Bilibili public metadata/subtitle source reader")
+    parser = argparse.ArgumentParser(description="Bounded Bilibili / Heybox source reader")
+    parser.add_argument("--source", choices=["bilibili", "heybox"], default="bilibili")
+    parser.add_argument("--source-url", help="Explicit two-GET Heybox service origin")
+    parser.add_argument("--heybox-native", action="store_true", help="Enable pinned two-GET source")
+    parser.add_argument("--bili-tools", action="store_true", help="Enable bounded Bilibili tools")
+    parser.add_argument("--search-keyword", help="Operator-selected Bilibili discovery keyword")
+    parser.add_argument("--account-file", help="Explicit expiring read-only account grant file")
     parser.add_argument("--core-url", default="http://127.0.0.1:8765")
     parser.add_argument("--adapter-id")
-    parser.add_argument("--probe", help="Read one public video without connecting to Core")
+    parser.add_argument("--probe", help="Read one source item without connecting to Core")
     parser.add_argument("--browser", action="store_true", help="Enable bounded offline rendering")
     parser.add_argument("--once", action="store_true")
     try:
-        asyncio.run(main(parser.parse_args()))
+        args = parser.parse_args()
+        if args.source_url and args.source != "heybox":
+            parser.error("--source-url requires --source heybox")
+        if args.browser and args.source != "bilibili":
+            parser.error("--browser is the Bilibili offline renderer")
+        if args.heybox_native and (args.source != "heybox" or args.source_url):
+            parser.error("--heybox-native requires Heybox without --source-url")
+        if args.bili_tools and (args.source != "bilibili" or args.browser):
+            parser.error("--bili-tools requires Bilibili API mode")
+        if args.account_file and not (args.heybox_native or args.bili_tools):
+            parser.error("--account-file requires an explicit native/tool reader")
+        if args.search_keyword and not args.bili_tools:
+            parser.error("--search-keyword requires --bili-tools")
+        asyncio.run(main(args))
     except KeyboardInterrupt:
         pass

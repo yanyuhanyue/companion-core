@@ -1,0 +1,80 @@
+[
+  {
+    "path": "source_reader/__pycache__",
+    "files": 5,
+    "bytes": 44550,
+    "modified_utc": "2026-10-19T23:49:19.5178907Z",
+    "extensions": [
+      ".pyc"
+    ],
+    "contents_scanned_for_secrets": false,
+    "evidence_or_secret_presence": "NOT_ASSERTED_FROM_METADATA",
+    "rebuildable": "CACHE_OR_TEMP_BY_LOCATION",
+    "action": "READ_ONLY_RETAINED_NO_DELETE_RETRY"
+  },
+  {
+    "path": "companion/__pycache__",
+    "files": 38,
+    "bytes": 565526,
+    "modified_utc": "2026-10-19T23:49:19.4442332Z",
+    "extensions": [
+      ".pyc"
+    ],
+    "contents_scanned_for_secrets": false,
+    "evidence_or_secret_presence": "NOT_ASSERTED_FROM_METADATA",
+    "rebuildable": "CACHE_OR_TEMP_BY_LOCATION",
+    "action": "READ_ONLY_RETAINED_NO_DELETE_RETRY"
+  },
+  {
+    "path": "tests/__pycache__",
+    "files": 23,
+    "bytes": 1301665,
+    "modified_utc": "2026-10-19T23:49:19.5128898Z",
+    "extensions": [
+      ".pyc"
+    ],
+    "contents_scanned_for_secrets": false,
+    "evidence_or_secret_presence": "NOT_ASSERTED_FROM_METADATA",
+    "rebuildable": "CACHE_OR_TEMP_BY_LOCATION",
+    "action": "READ_ONLY_RETAINED_NO_DELETE_RETRY"
+  },
+  {
+    "path": "astrbot_plugin_companion_bridge/__pycache__",
+    "files": 6,
+    "bytes": 75067,
+    "modified_utc": "2026-10-19T23:49:19.4662366Z",
+    "extensions": [
+      ".pyc"
+    ],
+    "contents_scanned_for_secrets": false,
+    "evidence_or_secret_presence": "NOT_ASSERTED_FROM_METADATA",
+    "rebuildable": "CACHE_OR_TEMP_BY_LOCATION",
+    "action": "READ_ONLY_RETAINED_NO_DELETE_RETRY"
+  },
+  {
+    "path": ".local/v06-heybox/ruff-cache",
+    "files": 9,
+    "bytes": 6114,
+    "modified_utc": "2026-10-19T23:42:26.5424229Z",
+    "extensions": [
+      "",
+      ".gitignore",
+      ".TAG"
+    ],
+    "contents_scanned_for_secrets": false,
+    "evidence_or_secret_presence": "NOT_ASSERTED_FROM_METADATA",
+    "rebuildable": "CACHE_OR_TEMP_BY_LOCATION",
+    "action": "READ_ONLY_RETAINED_NO_DELETE_RETRY"
+  },
+  {
+    "path": ".local/v06-heybox/tmp",
+    "files": 0,
+    "bytes": 0,
+    "modified_utc": "2026-10-19T23:55:51.1632356Z",
+    "extensions": [],
+    "contents_scanned_for_secrets": false,
+    "evidence_or_secret_presence": "NOT_ASSERTED_FROM_METADATA",
+    "rebuildable": "CACHE_OR_TEMP_BY_LOCATION",
+    "action": "READ_ONLY_RETAINED_NO_DELETE_RETRY"
+  }
+]
