@@ -732,3 +732,42 @@ def test_unknown_or_zero_template_rate_never_enables_live(core, tmp_path, rate):
             approved_live(core, tmp_path, input_rate=rate)
     assert core.model.calls == []
     assert core.store.rows("SELECT * FROM model_usage") == []
+
+
+def test_extraction_and_reconciliation_share_one_logical_request_cap(core, tmp_path):
+    import json
+
+    from tests.conftest import ingest, run
+
+    ingest(core, 1, "我喜欢绿茶，也喜欢红茶")
+    assert run(core.run_once())
+    core.settings.memory_enabled = True
+    core.settings.extraction_min_events = 1
+    core.settings.extraction_idle_seconds = 0
+    core.model.extraction = json.dumps(
+        {
+            "memories": [
+                {
+                    "subject": "user",
+                    "kind": "preference",
+                    "fact_key": "tea_green",
+                    "content": "我喜欢绿茶",
+                    "evidence_event_id": "evt_test_1",
+                    "evidence_quote": "我喜欢绿茶",
+                },
+                {
+                    "subject": "user",
+                    "kind": "preference",
+                    "fact_key": "tea_red",
+                    "content": "喜欢红茶",
+                    "evidence_event_id": "evt_test_1",
+                    "evidence_quote": "喜欢红茶",
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+    approved_live(core, tmp_path, per_request_calls=1)
+    assert not run(core.extract_once())
+    assert [scenario for _, scenario in core.model.calls] == ["chat", "memory_extract"]
+    assert core.store.rows("SELECT * FROM memories") == []

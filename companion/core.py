@@ -433,7 +433,9 @@ class Core:
             self.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"], self.clock())
             raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
 
-    async def prepare_memories(self, candidates, confirmed=False, job_id=None):
+    async def prepare_memories(
+        self, candidates, confirmed=False, job_id=None, logical_request_id=None
+    ):
         """Plan semantic matches without holding a SQLite transaction across model I/O."""
         s, cfg = self.store, self.settings
         candidates = [
@@ -468,7 +470,15 @@ class Core:
             {"role": "system", "content": REVIEW_RULES},
             {"role": "user", "content": encode(payload)},
         ]
-        request_id = budget.reserve(s, cfg, job_id, "memory_review", messages, self.clock())
+        request_id = budget.reserve(
+            s,
+            cfg,
+            job_id,
+            "memory_review",
+            messages,
+            self.clock(),
+            logical_request_id=logical_request_id,
+        )
         try:
             response = await budget.complete(
                 self.model,
@@ -967,7 +977,9 @@ class Core:
                         s.audit(
                             "memory.candidate_rejected", candidate.evidence_event_id, "memory", now
                         )
-            candidates, resolutions = await self.prepare_memories(candidates)
+            candidates, resolutions = await self.prepare_memories(
+                candidates, logical_request_id=attempt_key
+            )
             with s.transaction():
                 if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                     return False
