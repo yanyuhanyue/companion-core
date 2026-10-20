@@ -38,6 +38,8 @@ def test_independent_design_review_requires_an_evidence_reference(evidence, vali
 
 def test_offline_compatibility_requires_a_frozen_candidate_and_evidence(evidence, validator):
     evidence["source"]["offline_compatibility"] = "OFFLINE_COMPATIBILITY_READY"
+    evidence["source"]["frozen_product_candidate_sha"] = None
+    evidence["source"]["compatibility_evidence_reference"] = None
     with pytest.raises(ValidationError):
         validator.validate(evidence)
     evidence["source"]["frozen_product_candidate_sha"] = "a" * 40
