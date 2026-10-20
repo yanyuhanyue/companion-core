@@ -16,6 +16,7 @@ from scripts.ci_policy import (
     check_results,
     choose_profile,
     preflight_tests,
+    run_preflight,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,6 +183,29 @@ def test_preflight_files_exist_and_optional_new_workers_are_not_silently_missed(
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_worker_composition.py").touch()
     assert "tests/test_worker_composition.py" in preflight_tests("full", tmp_path)
+
+
+@pytest.mark.parametrize("result", [0, 1])
+def test_preflight_bootstraps_fresh_scratch_and_cleans_only_its_own_round(
+    tmp_path, monkeypatch, result,
+):
+    scratch = tmp_path / ".local/test-temp"
+    assert not scratch.exists()
+    rounds = []
+
+    def pytest_process(command, cwd):
+        assert cwd == tmp_path and scratch.is_dir()
+        directory = Path(next(arg for arg in command if arg.startswith("--basetemp="))[11:])
+        assert directory.parent.is_dir() and directory.parent.parent == scratch
+        rounds.append(directory.parent)
+        # An unrelated retained diagnostic must survive a later successful/failed run.
+        (scratch / "retained.txt").write_text("synthetic diagnostic", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr("scripts.ci_policy.subprocess.call", pytest_process)
+    assert run_preflight("fast", tmp_path) == result
+    assert not rounds[0].exists()
+    assert (scratch / "retained.txt").read_text("utf-8") == "synthetic diagnostic"
 
 
 def test_workflow_keeps_full_platform_checks_and_final_gate_after_preflight():

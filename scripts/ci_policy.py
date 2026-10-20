@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +122,21 @@ def preflight_tests(profile, root=ROOT):
     return tests
 
 
+def run_preflight(profile, root=ROOT):
+    scratch = root / ".local/test-temp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    # One owned directory per invocation; existing diagnostics are never cleared.
+    with tempfile.TemporaryDirectory(prefix="ci-preflight-", dir=scratch) as directory:
+        temporary = Path(directory)
+        if temporary.resolve().parent != scratch.resolve():
+            raise RuntimeError("CI temporary directory outside workspace scratch")
+        return subprocess.call([
+            sys.executable, "-m", "pytest", "-q", *preflight_tests(profile, root),
+            "--basetemp=" + str(temporary / "pytest"),
+            "-o", "cache_dir=" + str(temporary / "cache"),
+        ], cwd=root)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["plan", "test", "gate"])
@@ -144,10 +160,7 @@ def main():
     else:
         if not args.profile:
             parser.error("test requires --profile")
-        raise SystemExit(subprocess.call([
-            sys.executable, "-m", "pytest", "-q", *preflight_tests(args.profile),
-            "--basetemp=.local/test-temp/preflight", "-o", "cache_dir=.local/pytest-preflight",
-        ], cwd=ROOT))
+        raise SystemExit(run_preflight(args.profile))
 
 
 if __name__ == "__main__":
