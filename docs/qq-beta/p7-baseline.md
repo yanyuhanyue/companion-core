@@ -58,3 +58,7 @@ P7-A base 保持 #19 分支；未合并、改 base、强推或删除分支。
 5条 Demo 回复经手机确认每次1条、无重复，最终 Outbox SENT=5/attempts=5，Spool accepted=5。
 发送窗口已关闭，常驻 delivery=false；memory=false、真实客户端延迟 null，付费模型/DSH/Windows 为0。
 严格五场景仍 PARTIAL、完整20场景签收0/20，production_ready=false。
+
+后续主人已确认Reader资料保留语义，并形成独立[G1 Draft #21](https://github.com/yanyuhanyue/companion-core/pull/21)
+候选`907d62c1491e0a3613a7653f2d4eb0275ec4a357`。其本地731项通过与发布包/回放/冒烟结果
+单独记录；它与本P7报告均以#19为base，尚未部署，不改变本报告的运行源码和关闭开关。

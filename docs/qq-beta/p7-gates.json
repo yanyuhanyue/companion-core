@@ -8,7 +8,7 @@
   "baseline_main": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
   "baseline_pr18_head": "33dff1186899d3a91f4c2023ab0d594024761971",
   "validated_code_commit": "940b6f28c16f7d495c3ff86e6b5bc7fad63e917a",
-  "report_revision": "P7-A.2",
+  "report_revision": "P7-A.3",
   "report_commit_resolution": "P7-A PR head and private final-manifest.json; independently recorded after commit",
   "config_version": "P7-DEMO-1",
   "images": {
@@ -121,7 +121,23 @@
   "G7_M1_AND_G1": {
     "state": "BLOCKED",
     "memory_enabled": false,
-    "reader_grant_closure": "FAIL"
+    "reader_grant_closure": "FAIL",
+    "owner_retention_semantics_confirmed": true,
+    "retention_semantics": "Expiry or future-read revocation retain history; explicit processing withdrawal erases attributable derived data and prevents backup revival.",
+    "candidate": {
+      "pr": "https://github.com/yanyuhanyue/companion-core/pull/21",
+      "commit": "907d62c1491e0a3613a7653f2d4eb0275ec4a357",
+      "local_full": {
+        "passed": 731,
+        "skipped": 2,
+        "warnings": 1
+      },
+      "package_replay_worker_smoke": "PASS",
+      "deployed": false,
+      "runtime_grant_closure_verified": false,
+      "legacy_review_and_processing_freeze_required_on_upgrade": true,
+      "ci_resolution": "See independent G1 draft checks and validation manifest."
+    }
   },
   "G8_PRODUCTION": {
     "state": "BLOCKED",

@@ -48,8 +48,12 @@ Demo固定回复不能验收语义问答/上下文；真实同ID重复未观察�
 继续实测应先批准新范围/窗口；付费模型需明确provider/model/endpoint/费率/单轮和周期硬上限，
 Key只进Core私密配置；M1仍需独立授权。不能自动续期、清队列或开启长期投递。
 
-Reader G1 grant归属/派生闭包保持FAIL；自然过期、撤销后续访问、撤销既有处理授权尚需澄清，
-另起独立修复PR。memory/Reader/diary/探索/唤醒/社交/content/executive/media/Android全部关闭，
+主人已确认自然过期/停止后续读取保留历史、明确遗忘清除相关派生资料的规则。
+独立 [G1 Draft #21](https://github.com/yanyuhanyue/companion-core/pull/21) 候选
+`907d62c1491e0a3613a7653f2d4eb0275ec4a357` 的完整本地检查731 passed/2 skipped/1 warning，
+包验证、回放和worker冒烟通过；候选尚未部署，真实运行G1仍未通过。
+旧资料归属清单若非空仍需冻结相关处理并由主人审查；不能用离线回归代替真实账号验收。
+memory/Reader/diary/探索/唤醒/社交/content/executive/media/Android全部关闭，
 没有产品DSH或Windows执行。原服务恢复点、生产异地恢复、真实费用、账号长期稳定性和20自然日记仍缺，
 production_ready=false。
 
