@@ -50,7 +50,7 @@ $env:PLAYWRIGHT_BROWSERS_PATH = (Resolve-Path .local/playwright-browsers).Path
 | B站/门禁收口 | 9 passed；修正演练时钟与构造参数，计数/同日伪二十天反例通过 |
 | 本地全量 | **628 passed / 2 skipped**，515.56 秒；Ruff PASS，四项本机 Chromium 实测通过；两个 skip 是 Windows symlink 权限限制 |
 | 独立打包 | PASS；`uv build --offline --out-dir .local/p4/dist`，`scripts/verify_package.py --dist-dir .local/p4/dist` |
-| 新 SHA CI | PENDING；最终 Draft PR 关联的两轮 rollup 是权威结果 |
+| 实现 SHA CI | **5/5 success**；[39365674261](https://github.com/yanyuhanyue/companion-core/actions/runs/39365674261)，Win/Linux 各 **626 passed / 4 skipped**，Chromium/native/container、回放、六进程 smoke、发行包通过；[固定记录](p4-ci.json) |
 
 打包独立检查 wheel/sdist、无 Git 源码导出重建、私密 canary 排除、notices 与安装后的迁移
 初始化。uv 提示缓存位于源目录；实际 archive 内容检查确认 `.local` 被排除。
@@ -59,6 +59,10 @@ $env:PLAYWRIGHT_BROWSERS_PATH = (Resolve-Path .local/playwright-browsers).Path
 3 条七日生活链、7 项正式门禁/隔离配置检查。本轮完整执行含两个本机权限 skip；
 跨平台 CI 继续核对 POSIX 分支。初期演练中构造参数/时钟配置失败已修正；
 完整检查基于收口后的代码，不以早期失败替代最终结果。
+
+固定实现提交为 `fd321dcaaa67e6f21b12290bc69d0e02c065860d`。
+文档证据收尾提交只更新报告/JSON；最终提交 HEAD 与 push/PR 两轮 CI 在 Draft PR 描述
+独立记录，避免把初始实现的五个 job 误称为最终候选的十个检查。
 
 ## 场景矩阵
 

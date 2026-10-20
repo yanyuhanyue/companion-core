@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
   "taskbook": "CC-NEXT-20261020-P4",
-  "actual_head_sha": "df28f595f714219b78c88858af6ff4c57c055c14",
-  "head_scope": "Input candidate; P4 repair SHA and CI recorded in PR description after verification",
+  "actual_head_sha": "fd321dcaaa67e6f21b12290bc69d0e02c065860d",
+  "head_scope": "Fixed verified implementation commit; subsequent evidence-only commit final HEAD/CI is independently checked in the Draft PR description",
   "p3_source_status": "VERIFIED_FOR_LISTED_SAMPLES_ONLY",
   "code_review": "PASS",
-  "new_head_ci": "NOT_RUN",
+  "new_head_ci": "PASS",
+  "ci_evidence": "p4-ci.json",
   "isolated_transport_integration": "PASS",
   "integration_scope": "14 offline success scenarios and 12 failure/race scenarios; redacted titles/protocol fixtures, actual HTTP/SQLite and mock model/delivery",
   "local_full": {"passed": 628, "skipped": 2, "chromium_enabled": true},
@@ -25,7 +26,7 @@
     "Human PR merge decision", "Real QQ authorization and acceptance", "20 real diary days",
     "Offsite recovery", "Account source soak authorization", "Core grant expiry/revocation closure"
   ],
-  "evidence_links": ["p4-baseline.json", "p4-release-review.md", "p4-validation.md",
+  "evidence_links": ["p4-baseline.json", "p4-ci.json", "p4-release-review.md", "p4-validation.md",
                      "p4-real-qq-acceptance.md", "p4-source-soak.json"],
   "signoff": "NOT_GRANTED"
 }

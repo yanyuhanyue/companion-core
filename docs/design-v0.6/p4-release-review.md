@@ -3,7 +3,9 @@
 任务 `CC-NEXT-20261020-P4`，2026-10-20。输入候选为
 `df28f595f714219b78c88858af6ff4c57c055c14`。实时 HEAD/base/reviews/CI 的完整记录在
 [p4-baseline.json](p4-baseline.json)。审查后修复放在 `codex/p4-isolated-acceptance`，
-最终实现版本与新 CI 见本轮 Draft PR；没有调整或合并 #11–#16。
+已验证实现版本为 `fd321dcaaa67e6f21b12290bc69d0e02c065860d`，
+[实现 CI](p4-ci.json) 五个 job 全过。其后的文档证据收尾没有改动产品、脚本或测试；
+该最终候选的 HEAD/CI 另在本轮 Draft PR 精确核对。没有调整或合并 #11–#16。
 
 ## 结论
 
@@ -37,7 +39,7 @@ G1 需要明确的非凭据授权生命周期合同、既有来源归属迁移�
 | 身份 / 删除 | PASS（现有合同） | owner/private、不同 Reader/Bridge token、指纹幂等、event_dependencies、显式源删除与最新独立 Ledger 重放。grant 自动撤销不在此 PASS 内。 |
 | MIT / GPL 分离 | PASS | MIT notices 保留；正式 pyproject/uv.lock/Reader Dockerfile 无 bilibili-api-python/MCP 运行依赖；GPL 仅 `upstream-native-p3.lock` 隔离 QA。新包检查独立执行。 |
 | Windows 文件安全 | PASS（私密目录边界） | lstat 与 FD 检查一致，ctime 语义差异有正向回归；不宣称能隔离拥有目录写权限的恶意本地用户或管理员。需继续保持专用目录 ACL。 |
-| Linux 文件安全 | 以新 CI 为准 | POSIX NOFOLLOW/fstat/权限与 symlink 用例；本机 Windows 不能替代 Linux 路径执行。 |
+| Linux 文件安全 | PASS（新 CI） | POSIX NOFOLLOW/fstat/权限与 symlink 用例实际执行；Linux 626 passed / 4 browser opt-in skipped。 |
 | Linux Chromium / 目标主机资源 | UNVERIFIED / BLOCKED | 旧 sandbox 阻断保留。此次未连接、修改或重启生产服务和既有容器；没有新的目标主机峰值、网络或密钥挂载实测。 |
 
 ## 验证和跳过
