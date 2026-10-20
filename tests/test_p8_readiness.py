@@ -48,9 +48,10 @@ def test_stub_multiturn_context_keeps_sent_reply_and_excludes_uncertain_reply(co
         "第二轮：再讨论夏天",
         "第三轮：继续刚才的话题",
     ]
-    assert core.store.one(
-        "SELECT COUNT(*) AS n FROM outbox WHERE state='DELIVERY_UNCERTAIN'"
-    )["n"] == 1
+    assert (
+        core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE state='DELIVERY_UNCERTAIN'")["n"]
+        == 1
+    )
     assert core.store.rows("SELECT * FROM memories") == []
 
 
@@ -121,7 +122,8 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
     assert run(core.run_once())
     assert len(core.model.calls) == expected_calls
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
-        "state": "UNKNOWN", "billed_micro_usd": initial
+        "state": "UNKNOWN",
+        "billed_micro_usd": initial,
     }
     assert core.store.one("SELECT last_error_code FROM jobs")["last_error_code"] == (
         "MONTHLY_BUDGET_EXHAUSTED"
@@ -130,7 +132,12 @@ def test_unknown_reservation_is_retained_and_blocks_next_model_attempt(core, fai
 
 
 @pytest.mark.parametrize("missing_usage", [False, True])
-def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(core, missing_usage):
+def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
+    core, missing_usage, tmp_path
+):
+    from tests.test_paid_model_gate import approved_live
+
+    approved_live(core, tmp_path, provider="deepseek", model=core.settings.model_name)
     requests = []
 
     def handler(request):
@@ -147,19 +154,27 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(core
         body = {"choices": [{"message": {"content": "synthetic reply"}}]}
         if not missing_usage:
             body["usage"] = {
-                "prompt_tokens": 100, "completion_tokens": 20, "prompt_cache_hit_tokens": 200
+                "prompt_tokens": 50,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 40,
             }
         return httpx.Response(200, json=body)
 
     async def scenario():
         core.settings.mode = "live"
-        core.settings.model_url = "http://synthetic.invalid/v1"
+        core.settings.model_url = "https://synthetic.invalid/v1"
         messages = [{"role": "user", "content": "synthetic request"}]
-        request_id = budget.reserve(
-            core.store, core.settings, None, "chat", messages, core.clock()
-        )
+        request_id = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-            result = await ModelClient(core.settings, http).complete(messages, "chat")
+            result = await budget.complete(
+                ModelClient(core.settings, http),
+                core.store,
+                core.settings,
+                request_id,
+                messages,
+                "chat",
+                core.clock,
+            )
         budget.settle(core.store, core.settings, request_id, result)
         return result
 
@@ -167,12 +182,14 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(core
     assert len(requests) == 1
     if missing_usage:
         assert (response.input_tokens, response.output_tokens, response.cached_tokens) == (
-            None, None, 0
+            None,
+            None,
+            0,
         )
         usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
         assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
     else:
-        assert response.cached_tokens == response.input_tokens == 100
+        assert (response.cached_tokens, response.input_tokens) == (40, 50)
         assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
 
 
@@ -183,7 +200,10 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(core
         (httpx.Response(200, json={"choices": []}), "MODEL_INVALID_RESPONSE"),
     ],
 )
-def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, response, code):
+def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, response, code, tmp_path):
+    from tests.test_paid_model_gate import approved_live
+
+    approved_live(core, tmp_path, endpoint="https://synthetic.invalid")
     calls = []
 
     def handler(request):
@@ -192,7 +212,7 @@ def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, respons
 
     async def scenario():
         core.settings.mode = "live"
-        core.settings.model_url = "http://synthetic.invalid"
+        core.settings.model_url = "https://synthetic.invalid"
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             core.model = ModelClient(core.settings, http)
             ingest(core)
@@ -203,7 +223,8 @@ def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, respons
     run(scenario())
     assert len(calls) == 1
     assert core.store.one("SELECT state,last_error_code FROM jobs") == {
-        "state": "FAILED", "last_error_code": code
+        "state": "FAILED",
+        "last_error_code": code,
     }
     usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
     assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0

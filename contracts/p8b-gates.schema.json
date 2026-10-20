@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion.invalid/contracts/p8b-gates.schema.json",
+  "title": "P8-B offline evidence and unchanged live gates",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task", "evidence_level", "baseline", "pull_requests", "offline_gates", "runtime_gates", "validation", "actions", "approvals", "production_ready"],
+  "properties": {
+    "$schema": {"type": "string"},
+    "schema_version": {"const": 1},
+    "task": {"const": "CC-P8B-OFFLINE-HARD-GATES"},
+    "evidence_level": {"const": "OFFLINE_SYNTHETIC"},
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["main", "ci_run_id", "ci_successful_jobs", "prs_18_23_merged", "runtime_observation"],
+      "properties": {
+        "main": {"$ref": "#/$defs/sha"},
+        "ci_run_id": {"type": "integer", "minimum": 1},
+        "ci_successful_jobs": {"type": "integer", "minimum": 1},
+        "prs_18_23_merged": {"const": true},
+        "runtime_observation": {"const": "HISTORICAL_P8A_ONLY_NOT_RECHECKED"}
+      }
+    },
+    "pull_requests": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["track", "url", "head_sha", "ci_attestation"],
+        "properties": {
+          "track": {"enum": ["B1", "B2", "B3", "B4"]},
+          "url": {"type": ["string", "null"]},
+          "head_sha": {"oneOf": [{"$ref": "#/$defs/sha"}, {"type": "null"}]},
+          "ci_attestation": {"const": "EXACT_HEAD_EXTERNAL_ATTESTATION_REQUIRED"}
+        }
+      }
+    },
+    "offline_gates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["budget_gate", "input_gate", "provider_concurrency_gate", "window_lifetime_gate", "unknown_retention_gate", "bounded_sender_gate", "recovery_synthetic", "token_benchmark"],
+      "properties": {
+        "budget_gate": {"$ref": "#/$defs/offlineGate"},
+        "input_gate": {"$ref": "#/$defs/offlineGate"},
+        "provider_concurrency_gate": {"$ref": "#/$defs/offlineGate"},
+        "window_lifetime_gate": {"$ref": "#/$defs/offlineGate"},
+        "unknown_retention_gate": {"$ref": "#/$defs/offlineGate"},
+        "bounded_sender_gate": {"$ref": "#/$defs/offlineGate"},
+        "recovery_synthetic": {"$ref": "#/$defs/offlineGate"},
+        "token_benchmark": {"$ref": "#/$defs/offlineGate"}
+      }
+    },
+    "runtime_gates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["recovery_nonempty", "host_restore", "paid_provider", "M1", "G1_runtime", "real_QQ_strict", "live_E2E", "historical_phone_samples"],
+      "properties": {
+        "recovery_nonempty": {"const": "BLOCKED_NOT_VERIFIED"},
+        "host_restore": {"const": "BLOCKED_NOT_VERIFIED"},
+        "paid_provider": {"const": "BLOCKED_NOT_AUTHORIZED"},
+        "M1": {"const": "DISABLED_NOT_AUTHORIZED"},
+        "G1_runtime": {"const": "BLOCKED_NOT_DEPLOYED"},
+        "historical_phone_samples": {"const": 5},
+        "real_QQ_strict": {
+          "type": "object", "additionalProperties": false,
+          "required": ["first5", "all20"],
+          "properties": {"first5": {"const": 0}, "all20": {"const": 0}}
+        },
+        "live_E2E": {
+          "type": "object", "additionalProperties": false,
+          "required": ["paired_samples", "p50_ms", "p95_ms"],
+          "properties": {"paired_samples": {"const": 0}, "p50_ms": {"type": "null"}, "p95_ms": {"type": "null"}}
+        }
+      }
+    },
+    "validation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["commands_reference", "failures", "local_docker", "combined"],
+      "properties": {
+        "commands_reference": {"type": "string", "minLength": 1},
+        "failures": {"type": "array", "items": {"type": "string"}},
+        "local_docker": {"const": "SKIPPED_BY_ENV_DAEMON_OFF"},
+        "combined": {"type": "object"}
+      }
+    },
+    "actions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["vps_connections", "vps_writes", "qq_inputs", "qq_sends", "paid_requests", "real_data_copies", "merges", "branch_deletions", "protected_cleanup"],
+      "properties": {
+        "vps_connections": {"const": 0}, "vps_writes": {"const": 0},
+        "qq_inputs": {"const": 0}, "qq_sends": {"const": 0}, "paid_requests": {"const": 0},
+        "real_data_copies": {"const": 0}, "merges": {"const": 0},
+        "branch_deletions": {"const": 0}, "protected_cleanup": {"const": 0}
+      }
+    },
+    "approvals": {"const": "p8b-approvals.json"},
+    "production_ready": {"const": false}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "offlineGate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "evidence"],
+      "properties": {
+        "state": {"enum": ["PENDING", "OFFLINE_PASS", "BLOCKED"]},
+        "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      },
+      "if": {"properties": {"state": {"const": "OFFLINE_PASS"}}},
+      "then": {"properties": {"evidence": {"minItems": 1}}}
+    }
+  }
+}

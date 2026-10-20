@@ -51,12 +51,34 @@ class ModelResponse:
     cached_tokens: int = 0
 
 
+class ModelAdmission:
+    """Single-use payload capability. Accounting and authorization stay in budget."""
+
+    def __init__(self, payload_sha256):
+        self.payload_sha256 = payload_sha256
+        self.consumed = False
+
+
+def model_payload(settings, messages, scenario):
+    payload = {
+        "model": settings.model_name,
+        "messages": messages,
+        "max_tokens": settings.output_tokens(scenario),
+        "stream": False,
+    }
+    if scenario in {"memory_extract", "memory_review", "diary", "reflection"}:
+        payload["response_format"] = {"type": "json_object"}
+    if settings.provider == "deepseek":
+        payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
 class ModelClient:
     def __init__(self, settings, client):
         self.settings = settings
         self.client = client
 
-    async def complete(self, messages, scenario):
+    async def complete(self, messages, scenario, *, admission=None):
         if self.settings.mode == "demo":
             if scenario == "reflection":
                 return ModelResponse('{"suggestions":[]}', 0, 0)
@@ -70,21 +92,22 @@ class ModelClient:
                 else ("[演示模式] 我收到你的消息了。配置模型密钥后，这里会生成真实对话回复。")
             )
             return ModelResponse(text, 0, 0)
-        payload = {
-            "model": self.settings.model_name,
-            "messages": messages,
-            "max_tokens": self.settings.output_tokens(scenario),
-            "stream": False,
-        }
-        if scenario in {"memory_extract", "memory_review", "diary", "reflection"}:
-            payload["response_format"] = {"type": "json_object"}
-        if self.settings.provider == "deepseek":
-            payload["thinking"] = {"type": "disabled"}
+        from companion.paid_budget import sha
+
+        payload = model_payload(self.settings, messages, scenario)
+        if (
+            not isinstance(admission, ModelAdmission)
+            or admission.consumed
+            or admission.payload_sha256 != sha(payload)
+        ):
+            raise CoreError("MODEL_ADMISSION_REQUIRED", 503)
+        admission.consumed = True
         try:
             response = await self.client.post(
                 self.settings.model_url.rstrip("/") + "/chat/completions",
                 headers={"Authorization": f"Bearer {self.settings.model_key.get_secret_value()}"},
                 json=payload,
+                follow_redirects=False,
             )
             if response.status_code == 429 or response.status_code >= 500:
                 raise CoreError("MODEL_RETRYABLE", 503)
@@ -100,7 +123,7 @@ class ModelClient:
             cached = usage.get("prompt_cache_hit_tokens", 0)
             if not all(type(x) is int and x >= 0 for x in (prompt, output, cached)):
                 prompt, output, cached = None, None, 0
-            return ModelResponse(text, prompt, output, min(cached, prompt or 0))
+            return ModelResponse(text, prompt, output, cached)
         except (httpx.TimeoutException, httpx.TransportError) as error:
             raise CoreError("MODEL_RETRYABLE", 503) from error
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as error:

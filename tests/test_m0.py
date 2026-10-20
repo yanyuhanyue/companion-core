@@ -109,7 +109,11 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
 
 
 @pytest.mark.parametrize("failure", [429, 503, "timeout"])
-def test_m0_04_retry_bounded_and_accounted(core, failure):
+def test_m0_04_retry_bounded_and_accounted(core, failure, tmp_path):
+    from tests.test_paid_model_gate import approved_live
+
+    approved_live(core, tmp_path, concurrency=3)
+
     def handler(request):
         if failure == "timeout":
             raise httpx.ReadTimeout("do not log sensitive response", request=request)

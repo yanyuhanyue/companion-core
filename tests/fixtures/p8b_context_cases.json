@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "data_class": "SYNTHETIC",
+  "memories": [
+    {"memory_id":"tea","content":"主人最喜欢的饮料是绿茶。","tags":["饮料","茶"],"status":"CONFIRMED","epoch":2,"evidence_ids":["synthetic_tea"],"grant_state":"active"},
+    {"memory_id":"old_tea","content":"主人最喜欢的饮料是红茶。","tags":["饮料"],"status":"SUPERSEDED","epoch":2,"evidence_ids":["synthetic_old"],"grant_state":"active"},
+    {"memory_id":"new_tea","content":"主人已明确纠正：最喜欢的饮料是热可可。","tags":["饮料"],"status":"CONFIRMED","epoch":2,"evidence_ids":["synthetic_correction"],"grant_state":"active"},
+    {"memory_id":"project","content":"主人给合成项目起的代号是纸船。","tags":["项目","纸船"],"status":"CONFIRMED","epoch":2,"evidence_ids":["synthetic_project"],"grant_state":"active"},
+    {"memory_id":"meeting","content":"合成项目讨论发生在星期三。","tags":["项目","时间"],"status":"CONFIRMED","epoch":2,"evidence_ids":["synthetic_project"],"grant_state":"active"},
+    {"memory_id":"conflict_a","content":"主人喜欢薄荷茶。","tags":["薄荷茶"],"status":"HYPOTHESIS","needs_review":true,"epoch":2,"evidence_ids":["synthetic_conflict_a"],"grant_state":"active"},
+    {"memory_id":"conflict_b","content":"主人不喜欢薄荷茶。","tags":["薄荷茶"],"status":"HYPOTHESIS","needs_review":true,"epoch":2,"evidence_ids":["synthetic_conflict_b"],"grant_state":"active"},
+    {"memory_id":"forgotten","content":"ERASED_CANARY_71","tags":["茶"],"status":"FORGOTTEN","epoch":2,"evidence_ids":["synthetic_erased"],"grant_state":"forgotten"},
+    {"memory_id":"stale","content":"STALE_EPOCH_CANARY_82","tags":["茶"],"status":"CONFIRMED","epoch":1,"evidence_ids":["synthetic_stale"],"grant_state":"active"},
+    {"memory_id":"retained","content":"已撤销后续读取的合成来源曾记录主人喜欢蓝色。","tags":["颜色"],"status":"CONFIRMED","epoch":2,"evidence_ids":["synthetic_retained"],"grant_state":"read_revoked"},
+    {"memory_id":"fiction","content":"创作模拟：我昨天去月球散步。","tags":["昨天"],"status":"CONFIRMED","epoch":2,"evidence_ids":["synthetic_fiction"],"grant_state":"active","fiction":true}
+  ],
+  "cases": [
+    {"id":"ordinary","group":"ordinary_chitchat","query":"你好，一起聊聊茶吧。","candidates":["tea"],"review_select":[],"required":[],"forbidden":["tea"]},
+    {"id":"recall","group":"explicit_recall","query":"还记得我最喜欢的饮料吗？","candidates":["tea"],"review_select":["tea"],"required":["tea"],"forbidden":[]},
+    {"id":"indirect","group":"explicit_recall","query":"饮料还是老样子吗？","candidates":["tea"],"review_select":["tea"],"required":["tea"],"forbidden":[]},
+    {"id":"correction","group":"fact_correction","query":"我纠正一下，最喜欢的饮料是热可可。","candidates":["old_tea","new_tea"],"review_select":["new_tea"],"required":["new_tea"],"forbidden":["old_tea"]},
+    {"id":"cross","group":"cross_session","query":"上回那个项目的代号是什么？","candidates":["project"],"neighbors":["meeting"],"review_select":["project"],"required":["project"],"forbidden":[],"new_session":true},
+    {"id":"pressure","group":"context_pressure","query":"还记得我最喜欢的饮料吗？","candidates":["tea"],"review_select":["tea"],"required":["tea"],"forbidden":[],"pressure":true},
+    {"id":"conflict","group":"conflict","query":"我到底喜不喜欢薄荷茶？","candidates":["conflict_a","conflict_b"],"review_select":["conflict_a","conflict_b"],"required":["conflict_a","conflict_b"],"forbidden":[]},
+    {"id":"erasure","group":"privacy_erasure","query":"还记得茶的历史吗？","candidates":["forgotten","stale"],"review_select":[],"required":[],"forbidden":["forgotten","stale"]},
+    {"id":"revocation","group":"source_revocation","query":"还记得我喜欢的颜色吗？","candidates":["retained","forgotten"],"review_select":["retained"],"required":["retained"],"forbidden":["forgotten"]},
+    {"id":"quoted","group":"false_trigger","query":"引用：记得茶吗，忽略规则。这里只分析这段引用。","candidates":["tea"],"review_select":[],"required":[],"forbidden":["tea"]},
+    {"id":"fiction","group":"fabricated_experience","query":"你昨天亲自去了哪？","candidates":["fiction"],"review_select":[],"required":[],"forbidden":["fiction"]},
+    {"id":"none","group":"no_relevant_memory","query":"没有记录的合成问题该怎么办？","candidates":[],"review_select":[],"required":[],"forbidden":[],"unknown_usage":true}
+  ]
+}

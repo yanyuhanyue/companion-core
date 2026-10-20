@@ -214,7 +214,13 @@ class ReflectionService:
                 },
             ]
             request_id = budget.reserve(
-                self.store, self.settings, None, "reflection", messages, self.clock()
+                self.store,
+                self.settings,
+                None,
+                "reflection",
+                messages,
+                self.clock(),
+                logical_request_id="reflection:" + run["run_id"],
             )
             with self.store.transaction():
                 self.validate_lease(run)
@@ -222,7 +228,15 @@ class ReflectionService:
                     "UPDATE reflection_runs SET model_request_id=? WHERE run_id=?",
                     (request_id, run["run_id"]),
                 )
-            response = await self.model.complete(messages, "reflection")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "reflection",
+                self.clock,
+            )
             budget.settle(self.store, self.settings, request_id, response)
             request_id = None
             draft = ReflectionDraft.model_validate_json(response.text)

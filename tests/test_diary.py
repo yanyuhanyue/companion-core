@@ -488,7 +488,7 @@ def test_d19_unknown_prices_and_budget_rejection_do_not_call_model(core, failure
     assert core.store.rows("SELECT * FROM model_usage") == []
 
 
-def test_d19_diary_budget_and_output_limit_are_independent(core):
+def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     seed_day(core)
     core.settings.autonomous_daily_micro_usd = 0
     core.settings.memory_daily_micro_usd = 0
@@ -496,6 +496,8 @@ def test_d19_diary_budget_and_output_limit_are_independent(core):
     request_id = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
     row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
     assert row["output_tokens"] == 350
+    # Finish the no-I/O Demo probe before entering a separately approved mock-live scope.
+    budget.settle(core.store, core.settings, request_id, ModelResponse("demo", 0, 0))
     captured = []
 
     def respond(request):
@@ -508,14 +510,21 @@ def test_d19_diary_budget_and_output_limit_are_independent(core):
         )
 
     async def execute():
-        cfg = core.settings.model_copy(update={"mode": "live"})
+        from tests.test_paid_model_gate import approved_live
+
+        approved_live(core, tmp_path)
+        cfg = core.settings
+        reserved = budget.reserve(core.store, cfg, None, "diary", [], core.clock())
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            return await ModelClient(cfg, client).complete([], "diary")
+            return await budget.complete(
+                ModelClient(cfg, client), core.store, cfg, reserved, [], "diary", core.clock
+            )
 
     run(execute())
     assert (
         captured[0]["max_tokens"] == 350 and captured[0]["response_format"]["type"] == "json_object"
     )
+    core.settings.mode = "demo"
     assert generate(core)["state"] == "COMMITTED"
 
 

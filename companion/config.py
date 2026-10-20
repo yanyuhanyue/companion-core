@@ -1,5 +1,6 @@
 import os
 import tomllib
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
@@ -10,26 +11,79 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model
 from companion.content import ContentConfig
 from companion.executive_protocol import ExecutiveConfig
 from companion.media import MediaConfig
+from companion.sources import ObservationSource
 
 
 class ObservationAdapterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: SecretStr
-    source: Literal[
-        "bilibili",
-        "heybox",
-        "web",
-        "voice",
-        "camera",
-        "android",
-        "dsh",
-        "windows",
-        "simulation",
-        "qq_image",
-    ]
+    source: ObservationSource
     media_analysis: bool = False
     reader_max_requests: int = Field(default=1, ge=1, le=8)
     source_grant_required: bool = False
+
+
+class PaidModelApproval(BaseModel):
+    """Operator-supplied approval evidence. Defaults never authorize paid I/O."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    window_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,96}$")
+    approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
+    endpoint: str
+    currency: Literal["USD"]
+    timezone: str
+    region: str = Field(min_length=2, max_length=64)
+    starts_at: datetime
+    expires_at: datetime
+    rates_valid_until: datetime
+    rate_evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    input_rate: int = Field(strict=True, gt=0)
+    cached_input_rate: int = Field(strict=True, gt=0)
+    output_rate: int = Field(strict=True, gt=0)
+    tokenizer_path: str = Field(min_length=1)
+    tokenizer_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    # This attests the exact provider-side rendering, including hidden structured-mode tokens.
+    input_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    framing: Literal["chatml-v1"]
+    structured_suffix: str = Field(max_length=8192)
+    max_input_tokens: int = Field(strict=True, gt=0, le=1000000)
+    max_output_tokens: int = Field(strict=True, gt=0, le=8192)
+    per_attempt_micro_usd: int = Field(strict=True, gt=0)
+    per_request_micro_usd: int = Field(strict=True, gt=0)
+    per_request_calls: int = Field(strict=True, gt=0, le=10)
+    daily_micro_usd: int = Field(strict=True, gt=0)
+    daily_calls: int = Field(strict=True, gt=0)
+    monthly_micro_usd: int = Field(strict=True, gt=0)
+    window_micro_usd: int = Field(strict=True, gt=0)
+    window_calls: int = Field(strict=True, gt=0)
+    concurrency: int = Field(strict=True, gt=0, le=32)
+    sole_account_database: Literal[True]
+    provider_budget_evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    journal_path: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_approval(self):
+        ZoneInfo(self.timezone)
+        for value in (self.starts_at, self.expires_at, self.rates_valid_until):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("approval timestamps require timezone offsets")
+        if self.starts_at >= self.expires_at or self.rates_valid_until < self.expires_at:
+            raise ValueError("approval interval exceeds verified rate validity")
+        if self.cached_input_rate > self.input_rate:
+            raise ValueError("cached rate must not exceed uncached admission price")
+        parsed = urlparse(self.endpoint)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("paid endpoint requires HTTPS without credentials/query/fragment")
+        return self
 
 
 class Settings(BaseModel):
@@ -52,6 +106,7 @@ class Settings(BaseModel):
     input_rate: int | None = Field(default=None, ge=0)
     cached_input_rate: int | None = Field(default=None, ge=0)
     output_rate: int | None = Field(default=None, ge=0)
+    paid_model: PaidModelApproval | None = None
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
@@ -211,6 +266,8 @@ class Settings(BaseModel):
                     data[field] = MediaConfig.model_validate_json(value)
                 elif field == "content":
                     data[field] = ContentConfig.model_validate_json(value)
+                elif field == "paid_model":
+                    data[field] = PaidModelApproval.model_validate_json(value)
                 else:
                     data[field] = value
         return cls.model_validate(data)

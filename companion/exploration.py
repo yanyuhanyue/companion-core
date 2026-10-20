@@ -2,10 +2,8 @@
 
 import hashlib
 import json
-import re
 from datetime import UTC, datetime
 from typing import Annotated, Literal
-from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic import Field
@@ -20,40 +18,9 @@ from companion.observation import (
 )
 from companion.privacy import epoch
 from companion.source_grants import SourceGrantSnapshot
-from companion.store import after, encode, uid
+from companion.sources import content_target, observation_sources, supports
+from companion.store import after, encode, uid, utcnow
 from companion.transport import digest
-
-
-def content_target(url):
-    """Accept content identifiers only; adapters never fetch arbitrary user URLs."""
-    try:
-        parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.username
-            or parsed.password
-            or parsed.port not in {None, 443}
-        ):
-            raise ValueError()
-        if parsed.fragment:
-            raise ValueError()
-        if parsed.hostname in {"www.bilibili.com", "m.bilibili.com", "bilibili.com"}:
-            match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,20})/?", parsed.path)
-            if match:
-                return "bilibili", "https://www.bilibili.com/video/" + match[1]
-        if parsed.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
-            match = re.fullmatch(
-                r"/(?:(?:app/)?bbs/link|a)/([0-9]{1,32}|[0-9a-fA-F]{12})/?", parsed.path
-            )
-            post_id = match[1] if match else ""
-            if parsed.path == "/v3/bbs/app/api/web/share":
-                identifiers = parse_qs(parsed.query, keep_blank_values=True).get("link_id", [])
-                post_id = identifiers[0] if len(identifiers) == 1 else ""
-            if re.fullmatch(r"[0-9]{1,32}|[0-9a-fA-F]{12}", post_id):
-                return "heybox", "https://www.xiaoheihe.cn/app/bbs/link/" + post_id.lower()
-    except ValueError:
-        pass
-    raise CoreError("CONTENT_URL_NOT_ALLOWED", 400)
 
 
 class ReadItem(StrictModel):
@@ -97,19 +64,18 @@ def erase_exploration(store, event_ids):
 
 
 class ExplorationService:
-    def __init__(self, core):
-        self.core, self.store, self.settings, self.clock = (
-            core,
-            core.store,
-            core.settings,
-            core.clock,
-        )
+    def __init__(
+        self, store, settings, observations, goals, social, register_link_images, clock=utcnow,
+    ):
+        self.store, self.settings, self.clock = store, settings, clock
+        self.observations, self.goals, self.social = observations, goals, social
+        self.register_link_images = register_link_images
 
     def adapter(self, adapter_id):
-        policy = self.core.observations.policy(adapter_id)
+        policy = self.observations.policy(adapter_id)
         content_enabled = getattr(self.settings, "content_enabled", False)
         if (not self.settings.exploration_enabled and not content_enabled) or (
-            policy.source not in {"bilibili", "heybox"}
+            not supports(policy.source, "get")
         ):
             raise CoreError("EXPLORATION_DISABLED", 403)
         return policy
@@ -154,8 +120,8 @@ class ExplorationService:
             created_at=now,
             updated_at=now,
         )
-        sources = self.core.goals.source_ids(step["goal_id"]) if step else source_event_ids or []
-        self.core.goals.validate_sources(sources)
+        sources = self.goals.source_ids(step["goal_id"]) if step else source_event_ids or []
+        self.goals.validate_sources(sources)
         for source_id in set(sources):
             s.insert("exploration_evidence", request_id=request_id, event_id=source_id)
         return request_id
@@ -166,7 +132,7 @@ class ExplorationService:
         adapters = [
             name
             for name, adapter in self.settings.observation_adapters.items()
-            if adapter.source in {"bilibili", "heybox"}
+            if supports(adapter.source, "discover")
         ]
         if not adapters:
             return
@@ -184,7 +150,7 @@ class ExplorationService:
         self.recover()
         if not self.budget_available(for_read=True):
             return False
-        step = self.core.goals.claim()
+        step = self.goals.claim()
         if not step:
             return False
         try:
@@ -199,14 +165,14 @@ class ExplorationService:
                 None,
             )
             if not adapter_id or not self.settings.observation_enabled:
-                self.core.goals.fail(step, "READER_UNAVAILABLE", resource=True)
+                self.goals.fail(step, "READER_UNAVAILABLE", resource=True)
                 return False
             with self.store.transaction():
-                self.core.goals.validate_lease(step)
+                self.goals.validate_lease(step)
                 self.create(adapter_id, "read", step["lease_token"], url, step)
             return True
         except CoreError as error:
-            self.core.goals.fail(step, error.code)
+            self.goals.fail(step, error.code)
             return False
 
     def recover(self):
@@ -234,7 +200,7 @@ class ExplorationService:
                     ),
                 ).rowcount
             if changed and step:
-                self.core.goals.fail(
+                self.goals.fail(
                     step,
                     "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
                     retryable=was_started,
@@ -268,7 +234,7 @@ class ExplorationService:
         day, month = self.periods()
         with s.transaction():
             if source_grant or policy.source_grant_required:
-                self.core.observations.grants.require(adapter_id, source_grant)
+                self.observations.grants.require(adapter_id, source_grant)
             s.execute(
                 "UPDATE exploration_requests SET state='UNKNOWN',last_error_code='READ_TIMEOUT' "
                 "WHERE state='RUNNING' AND lease_until<=?",
@@ -315,7 +281,7 @@ class ExplorationService:
                     continue
                 if step:
                     try:
-                        self.core.goals.validate_lease(step)
+                        self.goals.validate_lease(step)
                     except CoreError:
                         s.execute(
                             "UPDATE exploration_requests SET state='CANCELLED' WHERE request_id=?",
@@ -374,10 +340,10 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
-            captured = self.core.observations.grants.captured(row)
+            captured = self.observations.grants.captured(row)
             if captured != validation.source_grant:
                 raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
-            self.core.observations.grants.require(adapter_id, captured)
+            self.observations.grants.require(adapter_id, captured)
         return {"valid": True}
 
     def complete(self, adapter_id, request_id, result):
@@ -409,17 +375,17 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
-            captured_grant = self.core.observations.grants.captured(row)
+            captured_grant = self.observations.grants.captured(row)
             if captured_grant != result.source_grant:
                 raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
             if captured_grant or policy.source_grant_required:
-                self.core.observations.grants.require(adapter_id, captured_grant)
+                self.observations.grants.require(adapter_id, captured_grant)
             step = json.loads(row["goal_step_json"])
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
             if paused and paused["value"] == "1" and self.autonomous(row, step):
                 raise CoreError("AUTONOMY_PAUSED", 409)
             if step:
-                self.core.goals.validate_lease(step)
+                self.goals.validate_lease(step)
             if result.used_bytes is not None and result.used_bytes > row["reserved_bytes"]:
                 raise CoreError("READER_BYTE_LIMIT", 400)
             used_requests = result.used_requests
@@ -444,9 +410,9 @@ class ExplorationService:
                 day, _ = self.periods()
                 count = s.one(
                     "SELECT COUNT(*) AS n FROM observations o JOIN events e USING(event_id) "
-                    "WHERE e.source IN ('observation.bilibili','observation.heybox') "
+                    "WHERE e.source IN (SELECT value FROM json_each(?)) "
                     "AND result_status='DISCOVERED' AND o.created_at>=?",
-                    (day,),
+                    (encode(observation_sources("discover")), day),
                 )["n"]
                 for index, item in enumerate(result.items):
                     source, canonical = content_target(item.url)
@@ -487,7 +453,7 @@ class ExplorationService:
                             article=item.article,
                         ),
                     )
-                    event_id = self.core.observations.append(adapter_id, observation)["event_id"]
+                    event_id = self.observations.append(adapter_id, observation)["event_id"]
                     s.insert("exploration_evidence", request_id=request_id, event_id=event_id)
                     result_ids.append(event_id)
                     if (
@@ -501,7 +467,7 @@ class ExplorationService:
                                 "AND source='qq.onebot'",
                                 (source_id,),
                             ):
-                                self.core.content.register_link_images(
+                                self.register_link_images(
                                     source_id, event_id, item.image_urls
                                 )
                     if discovered:
@@ -513,7 +479,7 @@ class ExplorationService:
                         )
                         if not existing and self.settings.goals_enabled:
                             try:
-                                self.core.goals.propose(
+                                self.goals.propose(
                                     GoalProposal(
                                         topic=item.topic or item.title[:80],
                                         source_event_ids=[event_id],
@@ -524,7 +490,7 @@ class ExplorationService:
                                 if error.code != "GOAL_CAPACITY_REACHED":
                                     raise
                     elif step:
-                        self.core.goals.finish(step, event_id)
+                        self.goals.finish(step, event_id)
                 state = "DONE"
             else:
                 if result.items:
@@ -547,8 +513,8 @@ class ExplorationService:
                 ),
             )
         if failed_step:
-            self.core.goals.fail(failed_step, result.error_code or "READ_FAILED", retryable=True)
+            self.goals.fail(failed_step, result.error_code or "READ_FAILED", retryable=True)
         if step and step["kind"] == "self":
             for event_id in result_ids:
-                self.core.social.consider(event_id)
+                self.social.consider(event_id)
         return {"state": state, "event_ids": result_ids, "duplicate": False}

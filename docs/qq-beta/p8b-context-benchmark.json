@@ -1,0 +1,1703 @@
+{
+  "schema_version": 1,
+  "evidence_level": "OFFLINE_SYNTHETIC",
+  "usage_kind": "synthetic_estimate",
+  "audited_base_sha": "a33d3cb77f348828b17e4bb48c621c53cfcdc017",
+  "audited_source_sha256": {
+    "companion/model.py": "cc083641f3711822c886c90201fbe024091ea9c872cd8c526f30f8f3bfb6af1b",
+    "companion/budget.py": "ecda07599ec6b77bb19ee6c38aa066f2c5b737d429c96a5480f1432d1caf5759",
+    "companion/core.py": "7809cf40ce965f57c0395d5fa87fdc7220f3488b049d8b5656e99e87b9596b93",
+    "companion/retrieval.py": "82caaf209cf558ac7b2705b1861fed16ce89f09bb1966fd8f542b1d46c691cff",
+    "companion/affect.py": "406850996047f55aea8a7a1aca67ea6ce519b17608b47ff0a535a91877a4c44e",
+    "companion/consolidation.py": "d6a14a6bdff4d414e6bb0ddce16eb442d0154b6d7924f29c713c52dbf7ed8bd2",
+    "companion/diary.py": "00f15c7155072d7ff5d760fe3b3ee324af7fe73e8f12e4cd466a06d7e1b30f61",
+    "companion/reflection.py": "544991e3d56ca6acc16ddca4d7d0b737dd62d1995b462fe8bd702bb26bf05345",
+    "companion/memory.py": "871dc6e8a0c2fdd3b394051dd4efcb29d616626c33032646bdb14052bf4d33f2"
+  },
+  "benchmark_script_sha256": "f3998d7c08e5af1a85688e25e12cae1994f9810b69a25b152f23491a6a7555ae",
+  "python_version": "3.12.10",
+  "dataset_sha256": "12a73ddac13a1188113c2c8a4840a6a19959a75425961e6d7a3eefd62f374d4c",
+  "provider_http_requests": 0,
+  "qq_send_attempts": 0,
+  "actual_tokenizer": null,
+  "configured_real_rates": null,
+  "currency": null,
+  "illustrative_rate_units_per_million": {
+    "input": 1000000,
+    "cached_input": 250000,
+    "output": 2000000
+  },
+  "cache_assumption": "zero hits; stable prefix potential is not provider evidence",
+  "embedding_model_executed": false,
+  "production_enabled": false,
+  "background_coverage": "payload simulation; no background worker executed",
+  "retrieval_coverage": "fixture candidate IDs; no FTS/BGE quality claim",
+  "semantic_answer_quality": "NOT_EVALUATED; review stub uses fixture oracle",
+  "local_timing_boundary": "context/recall including SQLite review reservation; excludes migration/seed/chat request and all provider/network I/O",
+  "variants": {
+    "baseline": {
+      "cases": [
+        {
+          "case_id": "ordinary",
+          "group": "ordinary_chitchat",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1695,
+          "context_local_ms": 8.1906,
+          "context_cpu_ms": 15.625,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 221,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 902,
+              "local_stub_ms": 0.1783
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1695,
+              "local_stub_ms": 0.0639
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "recall",
+          "group": "explicit_recall",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "tea"
+          ],
+          "visible_ids": [
+            "tea"
+          ],
+          "required_ids": [
+            "tea"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1985,
+          "context_local_ms": 7.9582,
+          "context_cpu_ms": 15.625,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 222,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 908,
+              "local_stub_ms": 0.1599
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 463,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1985,
+              "local_stub_ms": 0.0687
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "indirect",
+          "group": "explicit_recall",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "tea"
+          ],
+          "visible_ids": [
+            "tea"
+          ],
+          "required_ids": [
+            "tea"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1976,
+          "context_local_ms": 8.8432,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 220,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 899,
+              "local_stub_ms": 0.1905
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 462,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1976,
+              "local_stub_ms": 0.0895
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "correction",
+          "group": "fact_correction",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "new_tea"
+          ],
+          "visible_ids": [
+            "new_tea"
+          ],
+          "required_ids": [
+            "new_tea"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 2028,
+          "context_local_ms": 7.4238,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 228,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 944,
+              "local_stub_ms": 0.1516
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 473,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 2028,
+              "local_stub_ms": 0.0419
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "cross",
+          "group": "cross_session",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "project"
+          ],
+          "visible_ids": [
+            "project"
+          ],
+          "required_ids": [
+            "project"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1512,
+          "context_local_ms": 7.3971,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 224,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 920,
+              "local_stub_ms": 0.1799
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 336,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1512,
+              "local_stub_ms": 0.0581
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "pressure",
+          "group": "context_pressure",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "tea"
+          ],
+          "visible_ids": [],
+          "required_ids": [
+            "tea"
+          ],
+          "missing_ids": [
+            "tea"
+          ],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 2361,
+          "context_local_ms": 7.2433,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 222,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 908,
+              "local_stub_ms": 0.1681
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 422,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 2361,
+              "local_stub_ms": 0.0557
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "conflict",
+          "group": "conflict",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "conflict_a",
+            "conflict_b"
+          ],
+          "visible_ids": [
+            "conflict_a",
+            "conflict_b"
+          ],
+          "required_ids": [
+            "conflict_a",
+            "conflict_b"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 2118,
+          "context_local_ms": 7.9891,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 266,
+              "synthetic_output_units": 23,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1005,
+              "local_stub_ms": 0.1352
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 526,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 2118,
+              "local_stub_ms": 0.0627
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "erasure",
+          "group": "privacy_erasure",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1692,
+          "context_local_ms": 0.5464,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1692,
+              "local_stub_ms": 0.0826
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "revocation",
+          "group": "source_revocation",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [
+            "retained"
+          ],
+          "visible_ids": [
+            "retained"
+          ],
+          "required_ids": [
+            "retained"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 2017,
+          "context_local_ms": 9.3695,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 226,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 935,
+              "local_stub_ms": 0.0772
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 471,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 2017,
+              "local_stub_ms": 0.0604
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "quoted",
+          "group": "false_trigger",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1734,
+          "context_local_ms": 9.8841,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 227,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 941,
+              "local_stub_ms": 0.1986
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 360,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1734,
+              "local_stub_ms": 0.0685
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "fiction",
+          "group": "fabricated_experience",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1692,
+          "context_local_ms": 0.6221,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1692,
+              "local_stub_ms": 0.0733
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "none",
+          "group": "no_relevant_memory",
+          "variant": "baseline",
+          "level": "CURRENT",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1707,
+          "context_local_ms": 1.1548,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 355,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": true,
+              "conservative_reservation_byte_units": 1707,
+              "local_stub_ms": 0.1222
+            }
+          ],
+          "unknown_reservations": [
+            {
+              "state": "UNKNOWN",
+              "billed_micro_usd": 3243
+            }
+          ],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        }
+      ],
+      "background_records": [
+        {
+          "scenario": "memory_extract",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 257,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 202,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 935,
+          "local_stub_ms": 0.0372
+        },
+        {
+          "scenario": "diary",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 575,
+          "synthetic_output_units": 32,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 520,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 2121,
+          "local_stub_ms": 0.0198
+        },
+        {
+          "scenario": "reflection",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 224,
+          "synthetic_output_units": 20,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 169,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 841,
+          "local_stub_ms": 0.0112
+        },
+        {
+          "scenario": "activity",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 263,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 208,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 1286,
+          "local_stub_ms": 0.0093
+        }
+      ],
+      "scenarios": {
+        "chat": {
+          "calls": 12,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 4927,
+          "synthetic_output_units": 228,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 5383,
+          "unknown_calls": 1,
+          "unknown_ratio": 0.08333333333333333,
+          "local_stub_latency_ms": {
+            "n": 12,
+            "p50": 0.0662,
+            "p95": 0.1222
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "memory_review": {
+          "calls": 9,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 2056,
+          "synthetic_output_units": 187,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 2430,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 9,
+            "p50": 0.1681,
+            "p95": 0.1986
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "memory_extract": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 257,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 295,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0372,
+            "p95": 0.0372
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "diary": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 575,
+          "synthetic_output_units": 32,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 639,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0198,
+            "p95": 0.0198
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "reflection": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 224,
+          "synthetic_output_units": 20,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 264,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0112,
+            "p95": 0.0112
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "activity": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 263,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 301,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0093,
+            "p95": 0.0093
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        }
+      },
+      "case_count": 12,
+      "groups": [
+        "ordinary_chitchat",
+        "explicit_recall",
+        "explicit_recall",
+        "fact_correction",
+        "cross_session",
+        "context_pressure",
+        "conflict",
+        "privacy_erasure",
+        "source_revocation",
+        "false_trigger",
+        "fabricated_experience",
+        "no_relevant_memory"
+      ],
+      "required_reference_retention": {
+        "present": 7,
+        "total": 8
+      },
+      "reference_failures": [
+        {
+          "case_id": "pressure",
+          "missing_ids": [
+            "tea"
+          ],
+          "forbidden_ids_visible": []
+        }
+      ],
+      "privacy_forbidden_reference_count": 0,
+      "uncertain_reply_leak_count": 0,
+      "current_input_loss_count": 0,
+      "rules_loss_count": 0,
+      "context_local_ms": {
+        "n": 12,
+        "p50": 7.691,
+        "p95": 9.8841
+      },
+      "context_cpu_ms": {
+        "n": 12,
+        "p50": 0.0,
+        "p95": 15.625
+      },
+      "python_tracemalloc_peak_bytes": 5065213,
+      "process_rss_bytes": null
+    },
+    "experiment": {
+      "cases": [
+        {
+          "case_id": "ordinary",
+          "group": "ordinary_chitchat",
+          "variant": "experiment",
+          "level": "L0",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1695,
+          "context_local_ms": 0.8991,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1695,
+              "local_stub_ms": 0.0804
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "recall",
+          "group": "explicit_recall",
+          "variant": "experiment",
+          "level": "L1",
+          "selected_ids": [
+            "tea"
+          ],
+          "visible_ids": [
+            "tea"
+          ],
+          "required_ids": [
+            "tea"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1934,
+          "context_local_ms": 1.2139,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 438,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1934,
+              "local_stub_ms": 0.049
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "indirect",
+          "group": "explicit_recall",
+          "variant": "experiment",
+          "level": "L0",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [
+            "tea"
+          ],
+          "missing_ids": [
+            "tea"
+          ],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1692,
+          "context_local_ms": 1.4388,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1692,
+              "local_stub_ms": 0.0387
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "correction",
+          "group": "fact_correction",
+          "variant": "experiment",
+          "level": "L1",
+          "selected_ids": [
+            "new_tea"
+          ],
+          "visible_ids": [
+            "new_tea"
+          ],
+          "required_ids": [
+            "new_tea"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1977,
+          "context_local_ms": 0.6275,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 448,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1977,
+              "local_stub_ms": 0.1185
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "cross",
+          "group": "cross_session",
+          "variant": "experiment",
+          "level": "L2",
+          "selected_ids": [
+            "project"
+          ],
+          "visible_ids": [
+            "project"
+          ],
+          "required_ids": [
+            "project"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1461,
+          "context_local_ms": 9.2051,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 224,
+              "synthetic_output_units": 21,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 920,
+              "local_stub_ms": 0.1924
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 310,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1461,
+              "local_stub_ms": 0.0943
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "pressure",
+          "group": "context_pressure",
+          "variant": "experiment",
+          "level": "L1",
+          "selected_ids": [
+            "tea"
+          ],
+          "visible_ids": [
+            "tea"
+          ],
+          "required_ids": [
+            "tea"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 2594,
+          "context_local_ms": 1.6646,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 506,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 2594,
+              "local_stub_ms": 0.0796
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "conflict",
+          "group": "conflict",
+          "variant": "experiment",
+          "level": "L2",
+          "selected_ids": [
+            "conflict_a",
+            "conflict_b"
+          ],
+          "visible_ids": [
+            "conflict_a",
+            "conflict_b"
+          ],
+          "required_ids": [
+            "conflict_a",
+            "conflict_b"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 2067,
+          "context_local_ms": 7.7991,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "memory_review",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 266,
+              "synthetic_output_units": 23,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 136,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1005,
+              "local_stub_ms": 0.1179
+            },
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 501,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 2067,
+              "local_stub_ms": 0.0759
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "erasure",
+          "group": "privacy_erasure",
+          "variant": "experiment",
+          "level": "L1",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1692,
+          "context_local_ms": 0.5581,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1692,
+              "local_stub_ms": 0.0483
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "revocation",
+          "group": "source_revocation",
+          "variant": "experiment",
+          "level": "L1",
+          "selected_ids": [
+            "retained"
+          ],
+          "visible_ids": [
+            "retained"
+          ],
+          "required_ids": [
+            "retained"
+          ],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1966,
+          "context_local_ms": 1.1264,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 445,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1966,
+              "local_stub_ms": 0.076
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "quoted",
+          "group": "false_trigger",
+          "variant": "experiment",
+          "level": "L0",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1734,
+          "context_local_ms": 0.656,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 360,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1734,
+              "local_stub_ms": 0.0618
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "fiction",
+          "group": "fabricated_experience",
+          "variant": "experiment",
+          "level": "L0",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1692,
+          "context_local_ms": 0.9188,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 353,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": false,
+              "conservative_reservation_byte_units": 1692,
+              "local_stub_ms": 0.0772
+            }
+          ],
+          "unknown_reservations": [],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        },
+        {
+          "case_id": "none",
+          "group": "no_relevant_memory",
+          "variant": "experiment",
+          "level": "L0",
+          "selected_ids": [],
+          "visible_ids": [],
+          "required_ids": [],
+          "missing_ids": [],
+          "forbidden_ids_visible": [],
+          "current_input_preserved": true,
+          "stable_rules_preserved": true,
+          "uncertain_reply_leaked": false,
+          "context_soft_byte_units": 1707,
+          "context_local_ms": 0.8245,
+          "context_cpu_ms": 0.0,
+          "usage_records": [
+            {
+              "scenario": "chat",
+              "usage_kind": "synthetic_estimate",
+              "actual_input_tokens": null,
+              "actual_output_tokens": null,
+              "prompt_cache_hit_tokens": null,
+              "actual_cost": null,
+              "synthetic_input_units": 355,
+              "synthetic_output_units": 19,
+              "synthetic_cache_hit_units": 0,
+              "potential_stable_prefix_units": 208,
+              "unknown_usage": true,
+              "conservative_reservation_byte_units": 1707,
+              "local_stub_ms": 0.0583
+            }
+          ],
+          "unknown_reservations": [
+            {
+              "state": "UNKNOWN",
+              "billed_micro_usd": 3243
+            }
+          ],
+          "model_provider_http_requests": 0,
+          "qq_send_attempts": 0
+        }
+      ],
+      "background_records": [
+        {
+          "scenario": "memory_extract",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 257,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 202,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 935,
+          "local_stub_ms": 0.0203
+        },
+        {
+          "scenario": "diary",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 575,
+          "synthetic_output_units": 32,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 520,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 2121,
+          "local_stub_ms": 0.0107
+        },
+        {
+          "scenario": "reflection",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 224,
+          "synthetic_output_units": 20,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 169,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 841,
+          "local_stub_ms": 0.0058
+        },
+        {
+          "scenario": "activity",
+          "usage_kind": "synthetic_estimate",
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "synthetic_input_units": 263,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "potential_stable_prefix_units": 208,
+          "unknown_usage": false,
+          "conservative_reservation_byte_units": 1286,
+          "local_stub_ms": 0.0049
+        }
+      ],
+      "scenarios": {
+        "chat": {
+          "calls": 12,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 4775,
+          "synthetic_output_units": 228,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 5231,
+          "unknown_calls": 1,
+          "unknown_ratio": 0.08333333333333333,
+          "local_stub_latency_ms": {
+            "n": 12,
+            "p50": 0.07595,
+            "p95": 0.1185
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "memory_review": {
+          "calls": 2,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 490,
+          "synthetic_output_units": 44,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 578,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 2,
+            "p50": 0.15515,
+            "p95": 0.1924
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "memory_extract": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 257,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 295,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0203,
+            "p95": 0.0203
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "diary": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 575,
+          "synthetic_output_units": 32,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 639,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0107,
+            "p95": 0.0107
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "reflection": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 224,
+          "synthetic_output_units": 20,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 264,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0058,
+            "p95": 0.0058
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        },
+        "activity": {
+          "calls": 1,
+          "actual_input_tokens": null,
+          "actual_output_tokens": null,
+          "prompt_cache_hit_tokens": null,
+          "actual_cost": null,
+          "configured_real_rates": null,
+          "synthetic_input_units": 263,
+          "synthetic_output_units": 19,
+          "synthetic_cache_hit_units": 0,
+          "illustrative_cost_units": 301,
+          "unknown_calls": 0,
+          "unknown_ratio": 0.0,
+          "local_stub_latency_ms": {
+            "n": 1,
+            "p50": 0.0049,
+            "p95": 0.0049
+          },
+          "provider_latency_ms": {
+            "n": 0,
+            "p50": null,
+            "p95": null
+          }
+        }
+      },
+      "case_count": 12,
+      "groups": [
+        "ordinary_chitchat",
+        "explicit_recall",
+        "explicit_recall",
+        "fact_correction",
+        "cross_session",
+        "context_pressure",
+        "conflict",
+        "privacy_erasure",
+        "source_revocation",
+        "false_trigger",
+        "fabricated_experience",
+        "no_relevant_memory"
+      ],
+      "required_reference_retention": {
+        "present": 7,
+        "total": 8
+      },
+      "reference_failures": [
+        {
+          "case_id": "indirect",
+          "missing_ids": [
+            "tea"
+          ],
+          "forbidden_ids_visible": []
+        }
+      ],
+      "privacy_forbidden_reference_count": 0,
+      "uncertain_reply_leak_count": 0,
+      "current_input_loss_count": 0,
+      "rules_loss_count": 0,
+      "context_local_ms": {
+        "n": 12,
+        "p50": 1.0226,
+        "p95": 9.2051
+      },
+      "context_cpu_ms": {
+        "n": 12,
+        "p50": 0.0,
+        "p95": 0.0
+      },
+      "python_tracemalloc_peak_bytes": 3617061,
+      "process_rss_bytes": null
+    }
+  },
+  "decision": "DESIGN_ONLY_NO_PRODUCTION_BENEFIT_PROVEN"
+}

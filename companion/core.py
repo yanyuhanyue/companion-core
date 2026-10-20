@@ -19,10 +19,11 @@ from companion.media import MediaService
 from companion.memory import Memory
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.observation import ObservationService
-from companion.privacy import ErasureLedger, epoch, redact
+from companion.privacy import epoch, redact
 from companion.reflection import ReflectionService
+from companion.runtime import Runtime
 from companion.social import SocialPlanner, proactive_allowed, proactive_counts
-from companion.store import Store, after, encode, uid, utcnow
+from companion.store import after, encode, uid, utcnow
 from companion.telemetry import emit
 from companion.transport import (
     cancel_proactive_work,
@@ -34,52 +35,40 @@ from companion.transport import (
 from companion.wake import WakePlanner
 
 
-class Core:
+class Core(Runtime):
     def __init__(self, settings, model=None, clock=utcnow):
-        self.settings, self.model, self.clock = settings, model, clock
-        self.store = Store(settings.database)
-        self.ledger = ErasureLedger(settings.erasure_ledger)
-        self.ledger.initialize(self.store)
-        self.memory = Memory(self.store, settings, self.ledger)
-        if settings.memory_enabled:
-            try:
+        super().__init__(settings, clock)
+        self.model = model
+        try:
+            self.memory = Memory(self.store, settings, self.ledger)
+            if settings.memory_enabled:
                 self.memory.index.warmup()
-            except Exception:
-                self.store.close()
-                raise
-        with self.store.transaction():
-            for actor, kind in (
-                ("owner", "owner"),
-                ("companion", "companion"),
-                ("system", "system"),
-            ):
-                self.store.execute(
-                    "INSERT OR IGNORE INTO principals VALUES (?,?,?)", (actor, kind, self.clock())
-                )
-            # A persistent identity cannot silently be reassigned to a new QQ owner.
-            previous = self.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
-            if previous and previous["value"] != settings.owner_qq_id:
-                raise CoreError("OWNER_IDENTITY_MISMATCH", 503)
-            self.store.execute(
-                "INSERT OR IGNORE INTO runtime_meta VALUES ('owner_qq_id',?)",
-                (settings.owner_qq_id,),
+            self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
+            self.observations = ObservationService(self.store, settings, clock)
+            self.media = MediaService(self.store, settings, clock, self.observations)
+            self.affect = AffectEngine(self.store, settings, clock)
+            self.reflections = ReflectionService(
+                self.store, settings, model, self.diary.repo, self.ledger, clock
             )
-        self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
-        self.observations = ObservationService(self.store, settings, clock)
-        self.media = MediaService(self.store, settings, clock, self.observations)
-        self.affect = AffectEngine(self.store, settings, clock)
-        self.reflections = ReflectionService(
-            self.store, settings, model, self.diary.repo, self.ledger, clock
-        )
-        self.consolidation = NightlyConsolidator(self)
-        self.goals = GoalEngine(self.store, settings, self.ledger, clock)
-        self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
-        self.life = LifeService(self)
-        self.social = SocialPlanner(self)
-        self.exploration = ExplorationService(self)
-        self.content = ContentService(self)
-        self.expression = ExpressionEngine(self.store, settings, clock)
-        self.executive = Executive(self.store, settings, clock)
+            self.consolidation = NightlyConsolidator(self)
+            self.goals = GoalEngine(self.store, settings, self.ledger, clock)
+            self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
+            self.life = LifeService(self)
+            self.social = SocialPlanner(self.store, settings, clock)
+            # Only this finite callback is late-bound; neither service retains the Core.
+            self.content = ContentService(
+                self.store, settings, self.observations,
+                lambda *args, **kwargs: exploration.create(*args, **kwargs), clock,
+            )
+            exploration = self.exploration = ExplorationService(
+                self.store, settings, self.observations, self.goals, self.social,
+                self.content.register_link_images, clock,
+            )
+            self.expression = ExpressionEngine(self.store, settings, clock)
+            self.executive = Executive(self.store, settings, clock)
+        except BaseException:
+            self.close()
+            raise
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -99,8 +88,9 @@ class Core:
         fingerprint = digest(raw)
         try:
             with s.transaction():
-                if s.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                         ("erased_event:" + event.event_id,)):
+                if s.one(
+                    "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
+                ):
                     raise CoreError("EVENT_ERASED", 410)
                 existing = s.one(
                     "SELECT * FROM events WHERE (source=? AND source_event_id=?) "
@@ -396,7 +386,15 @@ class Core:
             request_id = budget.reserve(
                 self.store, self.settings, job["job_id"], "memory_review", messages, self.clock()
             )
-            response = await self.model.complete(messages, "memory_review")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "memory_review",
+                self.clock,
+            )
         except Exception as error:
             if request_id:
                 budget.settle(self.store, self.settings, request_id)
@@ -424,7 +422,9 @@ class Core:
             self.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"], self.clock())
             raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
 
-    async def prepare_memories(self, candidates, confirmed=False, job_id=None):
+    async def prepare_memories(
+        self, candidates, confirmed=False, job_id=None, logical_request_id=None
+    ):
         """Plan semantic matches without holding a SQLite transaction across model I/O."""
         s, cfg = self.store, self.settings
         candidates = [
@@ -459,9 +459,25 @@ class Core:
             {"role": "system", "content": REVIEW_RULES},
             {"role": "user", "content": encode(payload)},
         ]
-        request_id = budget.reserve(s, cfg, job_id, "memory_review", messages, self.clock())
+        request_id = budget.reserve(
+            s,
+            cfg,
+            job_id,
+            "memory_review",
+            messages,
+            self.clock(),
+            logical_request_id=logical_request_id,
+        )
         try:
-            response = await self.model.complete(messages, "memory_review")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "memory_review",
+                self.clock,
+            )
         except Exception:
             budget.settle(s, cfg, request_id)
             raise
@@ -626,9 +642,14 @@ class Core:
         if job is None:
             return False
         started_ns = time.perf_counter_ns()
-        emit("t_job_started", job["trace_id"], elapsed_ms=(
-            datetime.fromisoformat(self.clock()) - datetime.fromisoformat(job["created_at"])
-        ).total_seconds() * 1000)
+        emit(
+            "t_job_started",
+            job["trace_id"],
+            elapsed_ms=(
+                datetime.fromisoformat(self.clock()) - datetime.fromisoformat(job["created_at"])
+            ).total_seconds()
+            * 1000,
+        )
         request_id = None
         try:
             before_command = epoch(self.store)
@@ -672,8 +693,11 @@ class Core:
                         messages = self.context(job)
                     if captured_epoch != epoch(self.store):
                         raise CoreError("PRIVACY_CHANGED", 503)
-                    emit("t_context_ready", job["trace_id"],
-                         elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
+                    emit(
+                        "t_context_ready",
+                        job["trace_id"],
+                        elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6,
+                    )
                     request_id = budget.reserve(
                         self.store,
                         self.settings,
@@ -684,18 +708,29 @@ class Core:
                     )
                     model_started_ns = time.perf_counter_ns()
                     emit("t_model_request", job["trace_id"])
-                    response = await self.model.complete(messages, job["kind"])
+                    response = await budget.complete(
+                        self.model,
+                        self.store,
+                        self.settings,
+                        request_id,
+                        messages,
+                        job["kind"],
+                        self.clock,
+                    )
                     model_done_ns = time.perf_counter_ns()
                     budget.settle(self.store, self.settings, request_id, response)
                     usage = self.store.one(
                         "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
                         (request_id,),
                     )
-                    emit("t_model_done", job["trace_id"],
-                         elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
-                         budget_micro_usd=usage["billed_micro_usd"] if usage else None,
-                         model_usage_state=usage["state"] if usage else None,
-                         at_ns=model_done_ns)
+                    emit(
+                        "t_model_done",
+                        job["trace_id"],
+                        elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
+                        budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                        model_usage_state=usage["state"] if usage else None,
+                        at_ns=model_done_ns,
+                    )
                     request_id = None
                     reply = redact(response.text, self.settings)
             with self.store.transaction():
@@ -726,8 +761,11 @@ class Core:
                     (now, job["job_id"]),
                 )
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now)
-            emit("t_job_done", job["trace_id"],
-                 elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
+            emit(
+                "t_job_done",
+                job["trace_id"],
+                elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6,
+            )
         except Exception as error:
             emit("job_failed", job["trace_id"])
             if request_id:
@@ -736,9 +774,12 @@ class Core:
                     "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
                     (request_id,),
                 )
-                emit("t_model_failed", job["trace_id"],
-                     budget_micro_usd=usage["billed_micro_usd"] if usage else None,
-                     model_usage_state=usage["state"] if usage else None)
+                emit(
+                    "t_model_failed",
+                    job["trace_id"],
+                    budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                    model_usage_state=usage["state"] if usage else None,
+                )
             self.fail_job(job, error.code if isinstance(error, CoreError) else "INTERNAL_ERROR")
         return True
 
@@ -893,12 +934,22 @@ class Core:
         attempts = int(attempts["value"]) if attempts else 0
         request_id = None
         try:
-            request_id = budget.reserve(s, cfg, None, "memory_extract", messages, now)
+            request_id = budget.reserve(
+                s, cfg, None, "memory_extract", messages, now, logical_request_id=attempt_key
+            )
             attempts += 1
             s.execute(
                 "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (attempt_key, str(attempts))
             )
-            response = await self.model.complete(messages, "memory_extract")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "memory_extract",
+                self.clock,
+            )
             budget.settle(s, cfg, request_id, response)
             request_id = None
             extraction = Extraction.model_validate_json(response.text)
@@ -915,7 +966,9 @@ class Core:
                         s.audit(
                             "memory.candidate_rejected", candidate.evidence_event_id, "memory", now
                         )
-            candidates, resolutions = await self.prepare_memories(candidates)
+            candidates, resolutions = await self.prepare_memories(
+                candidates, logical_request_id=attempt_key
+            )
             with s.transaction():
                 if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                     return False
@@ -994,15 +1047,3 @@ class Core:
                 "FROM model_usage GROUP BY scenario"
             ),
         }
-
-    def expire_raw_events(self):
-        now = self.clock()
-        with self.store.transaction():
-            rows = self.store.rows(
-                "SELECT event_id FROM events WHERE redacted=0 AND ingested_at<? "
-                "ORDER BY rowid LIMIT 1000",
-                (after(now, -86400 * self.settings.raw_event_retention_days),),
-            )
-            if rows:
-                self.ledger.expire_events(self.store, [e["event_id"] for e in rows], now)
-            return len(rows)

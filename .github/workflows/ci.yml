@@ -1,9 +1,44 @@
 name: checks
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  merge_group:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name != github.event.repository.default_branch) }}
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      profile: ${{ steps.plan.outputs.profile }}
+    env:
+      UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: python scripts/ci_policy.py plan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.12.10
+      - run: uv sync --frozen --extra onebot
+      - run: uv run --extra onebot ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts
+      - name: Validate CI policy, evidence and fast runtime contracts
+        env:
+          CI_PROFILE: ${{ steps.plan.outputs.profile }}
+        run: uv run --extra onebot python scripts/ci_policy.py test --profile "$CI_PROFILE"
   test:
+    needs: preflight
+    if: ${{ needs.preflight.outputs.profile == 'full' }}
+    timeout-minutes: 15
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -25,20 +60,22 @@ jobs:
         with:
           path: data/embedding-cache
           key: bge-small-zh-${{ runner.os }}-46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59
-      - run: uv run --extra onebot ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts
-      - run: uv run --extra onebot pytest -q --basetemp=.local/test-temp
+      - run: uv run --extra onebot pytest -q --durations=15 --basetemp=.local/test-temp
       - run: uv run python scripts/replay.py
       - run: uv run python scripts/smoke.py
       - run: uv build
       - run: uv run python scripts/verify_package.py
   container:
+    needs: preflight
+    if: ${{ needs.preflight.outputs.profile == 'full' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - run: python scripts/verify_onebot_compose.py
       - run: docker build -t companion-core:test .
       - run: docker build -f deploy/executor.Dockerfile -t companion-executor:test .
       - run: docker build -f deploy/source-reader.Dockerfile -t companion-source-reader:test .
-      - run: python scripts/verify_onebot_compose.py
       - run: docker compose -f deploy/compose.onebot-build.yaml build onebot-bridge
       - run: >-
           docker run --rm --network none --read-only --cap-drop ALL
@@ -95,7 +132,10 @@ jobs:
           -e COMPANION_EMBEDDING_CACHE_DIR=/data/embedding-cache
           companion-core:test init
   browser-reader:
+    needs: preflight
+    if: ${{ needs.preflight.outputs.profile == 'full' }}
     runs-on: windows-latest
+    timeout-minutes: 10
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.local/playwright-browsers
@@ -113,7 +153,10 @@ jobs:
       - shell: pwsh
         run: ./scripts/check.ps1 -TestFiles tests/test_source_browser.py
   plugin-native:
+    needs: preflight
+    if: ${{ needs.preflight.outputs.profile == 'full' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
       PYTHONDONTWRITEBYTECODE: '1'
@@ -148,3 +191,15 @@ jobs:
           tests/test_feed_service.py tests/test_topic_service.py tests/test_permissions.py
           --basetemp=${{ github.workspace }}/.local/test-temp/native
           -o cache_dir=${{ github.workspace }}/.local/p3/pytest-cache
+  ci:
+    if: ${{ always() }}
+    needs: [preflight, test, container, browser-reader, plugin-native]
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require the selected validation to succeed
+        env:
+          CI_PROFILE: ${{ needs.preflight.outputs.profile }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python scripts/ci_policy.py gate --profile "$CI_PROFILE"
