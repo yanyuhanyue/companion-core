@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from companion.api import create_app
+from companion.transport import reconcile_delivery, recover_deliveries
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.spool import Spool
@@ -176,6 +177,44 @@ def test_restart_after_durable_send_intent_reports_uncertain_without_send(core, 
     run(scenario())
     assert sends == []
     assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
+
+
+@pytest.mark.parametrize("resolution", ["CANCELLED", "SENT"])
+def test_late_provider_receipt_cannot_override_human_reconciliation(core, tmp_path, resolution):
+    cfg = config(data_dir=str(tmp_path / "bridge"), delivery_enabled=True)
+    sends = []
+
+    async def scenario():
+        with Spool(cfg) as spool:
+            spool.put(normalized())
+            async with core_client(core) as http:
+                await spool.flush_one(http)
+                await core.run_once("offline-late-ack")
+                item = (await http.post(
+                    "/internal/v1/deliveries/lease", json={"worker_id": "offline", "limit": 1}
+                )).json()["items"][0]
+                started = await http.post(
+                    f"/internal/v1/deliveries/{item['message_id']}/begin-send",
+                    json={"lease_token": item["lease_token"]},
+                )
+                started.raise_for_status()
+                spool.start_delivery(item)
+                spool.finish_delivery(item["message_id"], "123456")
+                core.clock.advance(130)
+                with core.store.transaction():
+                    recover_deliveries(core.store, core.clock())
+                reconcile_delivery(core.store, item["message_id"], resolution, core.clock())
+                assert await spool.flush_result(http)
+                assert spool.db.execute("SELECT state FROM results").fetchone()[0] == "rejected"
+                async with httpx.AsyncClient(
+                    base_url="http://onebot",
+                    transport=httpx.MockTransport(lambda r: provider(r, sends)),
+                ) as protocol:
+                    assert not await deliver_tick(http, OneBotClient(cfg, protocol), spool)
+
+    run(scenario())
+    assert core.store.one("SELECT state FROM outbox")["state"] == resolution
+    assert sends == []
 
 
 @pytest.mark.parametrize("mutation", ["owner", "action", "content", "account", "disabled"])

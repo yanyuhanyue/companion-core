@@ -38,17 +38,30 @@ jobs:
       - run: docker build -t companion-core:test .
       - run: docker build -f deploy/executor.Dockerfile -t companion-executor:test .
       - run: docker build -f deploy/source-reader.Dockerfile -t companion-source-reader:test .
-      - run: docker build -f deploy/onebot-bridge.Dockerfile -t companion-onebot-bridge:test .
+      - run: python scripts/verify_onebot_compose.py
+      - run: docker compose -f deploy/compose.onebot-build.yaml build onebot-bridge
       - run: >-
           docker run --rm --network none --read-only --cap-drop ALL
           --security-opt no-new-privileges --memory 256m --pids-limit 64
-          companion-onebot-bridge:test --help
+          companion-onebot-bridge:review --help
       - run: >-
           docker run --rm --network none --read-only --cap-drop ALL
           --security-opt no-new-privileges --memory 256m --pids-limit 64
           -v companion-onebot-smoke:/bridge-data
           -v "${{ github.workspace }}/scripts/smoke_onebot.py:/app/verify.py:ro"
-          --entrypoint python companion-onebot-bridge:test /app/verify.py
+          --entrypoint python companion-onebot-bridge:review /app/verify.py
+      # Root only prepares a deliberately incompatible test volume; bridge stays UID 10004.
+      - run: >-
+          docker run --rm --network none --read-only --user 0:0
+          -v companion-onebot-wrong-owner:/bridge-data
+          --entrypoint python companion-onebot-bridge:review
+          -c "import os; os.chown('/bridge-data',0,0); os.chmod('/bridge-data',0o700)"
+      - run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --security-opt no-new-privileges --memory 256m --pids-limit 64
+          -v companion-onebot-wrong-owner:/bridge-data
+          -v "${{ github.workspace }}/scripts/smoke_onebot.py:/app/verify.py:ro"
+          --entrypoint python companion-onebot-bridge:review /app/verify.py --wrong-owner
       - run: >-
           docker run --rm --network none --read-only --cap-drop ALL
           --security-opt no-new-privileges --memory 768m --pids-limit 96

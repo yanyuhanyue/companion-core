@@ -4,9 +4,6 @@ services:
   onebot-bridge:
     profiles: [qq-beta]
     image: ${ONEBOT_BRIDGE_IMAGE:?set a reviewed image@sha256 digest}
-    build:
-      context: .
-      dockerfile: deploy/onebot-bridge.Dockerfile
     volumes:
       - ${ONEBOT_BRIDGE_CONFIG_PATH:?set private bridge.toml absolute path}:/run/bridge.toml:ro
       - onebot-spool:/bridge-data

@@ -1,10 +1,17 @@
 import asyncio
+import socket
+import ssl
 import threading
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from websockets.asyncio.server import serve
 from websockets.exceptions import InvalidStatus
 
@@ -103,3 +110,83 @@ def test_websocket_redirect_is_not_followed():
 
     run(scenario())
     assert calls == ["/"]
+
+
+def test_private_tcp_pinning_preserves_https_wss_hostname_sni_and_auth(tmp_path, monkeypatch):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "snowluma")])
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder().subject_name(name).issuer_name(name)
+        .public_key(key.public_key()).serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("snowluma")]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ))
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert_path, key_path)
+    sni, http_headers, ws_headers = [], [], []
+    server_context.set_servername_callback(lambda conn, host, ctx: sni.append(host))
+    trust = ssl.create_default_context(cafile=str(cert_path))
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            http_headers.append((self.headers["Host"], self.headers["Authorization"]))
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.socket = server_context.wrap_socket(server.socket, server_side=True)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+
+        async def dns(host, port, **kw):
+            assert host == "snowluma"
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
+
+        monkeypatch.setattr(loop, "getaddrinfo", dns)
+        cfg = config(onebot_http_url=f"https://snowluma:{server.server_address[1]}",
+                     onebot_ws_url="wss://snowluma:3001")
+        async with private_http_client(cfg.onebot_http_url, cfg.onebot_token) as client:
+            # Trust only our synthetic CA; certificate hostname checking stays enabled.
+            client._transport._pool._ssl_context = trust
+            assert (await client.post("/get_status", json={})).status_code == 200
+
+        async def handler(ws):
+            ws_headers.append((ws.request.headers["Host"], ws.request.headers["Authorization"]))
+            await ws.send("fixture")
+
+        async with serve(handler, "127.0.0.1", 0, ssl=server_context) as ws_server:
+            port = ws_server.sockets[0].getsockname()[1]
+            ws_config = config(onebot_http_url=cfg.onebot_http_url,
+                               onebot_ws_url=f"wss://snowluma:{port}")
+            connector = await websocket(ws_config)
+            connector.connection_kwargs["ssl"] = trust
+            async with connector as ws:
+                assert await ws.recv() == "fixture"
+        assert http_headers == [(f"snowluma:{server.server_address[1]}",
+                                 "Bearer " + cfg.onebot_token)]
+        assert ws_headers == [(f"snowluma:{port}", "Bearer " + cfg.onebot_token)]
+        assert sni == ["snowluma", "snowluma"]
+
+    try:
+        run(scenario())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=3)

@@ -1,0 +1,8 @@
+# Development/CI build only. Run separately; do not merge into digest-pinned runtime Compose.
+# docker compose -f deploy/compose.onebot-build.yaml build onebot-bridge
+services:
+  onebot-bridge:
+    image: companion-onebot-bridge:review
+    build:
+      context: ..
+      dockerfile: deploy/onebot-bridge.Dockerfile

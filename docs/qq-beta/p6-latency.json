@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "OFFLINE_FIXTURE": {
+    "status": "PASS",
+    "samples": 100,
+    "report": {
+      "schema_version": 1,
+      "evidence_type": "OFFLINE_FIXTURE",
+      "stage_counts": {
+        "t_onebot_received": 100,
+        "t_spool_commit": 100,
+        "t_core_ingest_ack": 100,
+        "t_job_started": 100,
+        "t_context_ready": 100,
+        "t_model_request": 100,
+        "t_model_done": 100,
+        "t_job_done": 100,
+        "t_outbox_lease": 100,
+        "t_begin_send": 100,
+        "t_onebot_send_ack": 100,
+        "t_bridge_send_ack": 100,
+        "duplicate_suppressed": 100
+      },
+      "latency": {
+        "t_spool_commit": {
+          "samples": 100,
+          "p50_ms": 7.7161,
+          "p95_ms": 8.8279,
+          "max_ms": 11.3744
+        },
+        "t_core_ingest_ack": {
+          "samples": 100,
+          "p50_ms": 22.0752,
+          "p95_ms": 25.939,
+          "max_ms": 48.663
+        },
+        "t_job_started": {
+          "samples": 100,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "max_ms": 0
+        },
+        "t_context_ready": {
+          "samples": 100,
+          "p50_ms": 0.8075,
+          "p95_ms": 1.5743,
+          "max_ms": 1.6551
+        },
+        "t_model_done": {
+          "samples": 100,
+          "p50_ms": 0.0542,
+          "p95_ms": 0.0823,
+          "max_ms": 0.176
+        },
+        "t_job_done": {
+          "samples": 100,
+          "p50_ms": 10.9844,
+          "p95_ms": 13.0932,
+          "max_ms": 333.0898
+        },
+        "t_onebot_send_ack": {
+          "samples": 100,
+          "p50_ms": 0.4097,
+          "p95_ms": 0.6354,
+          "max_ms": 0.8909
+        },
+        "t_bridge_send_ack": {
+          "samples": 100,
+          "p50_ms": 53.6856,
+          "p95_ms": 59.4563,
+          "max_ms": 808.6666
+        }
+      },
+      "durable_delivery_counts": {
+        "SENT": 100
+      },
+      "unknown_delivery_count": 0,
+      "observed_uncertain_stage_count": 0,
+      "observed_send_uncertainty_rate": 0.0,
+      "failed_job_attempts": 0,
+      "duplicate_suppressed": 100,
+      "model_budget_estimate_micro_usd": 4300,
+      "model_budget_estimate_complete": true,
+      "unknown_model_usage_attempts": 0,
+      "model_invoice_verified": false,
+      "real_qq_private_scenarios_accepted": 0,
+      "latency_real_p50_ms": null,
+      "latency_real_p95_ms": null,
+      "note": "Stage durations are local spans; platform acceptance is not client receipt. Stage logs may be lost on crash; complete outstanding unknown counts require a matching Core delivery-state snapshot. Budget completeness covers recorded attempts only; reconcile with durable model_usage after a crash. Human QQ acceptance and provider invoices require separate evidence."
+    },
+    "actual_cost_micro_usd": 0,
+    "limitations": [
+      "Windows local filesystem/ASGI/FakeModel/MockTransport only; full suite ran concurrently.",
+      "t_job_started uses fixture Clock; zero queue age is synthetic, not production measurement.",
+      "OneBot ACK is simulated and cannot prove QQ client delivery."
+    ]
+  },
+  "LIVE_ONEBOT": {
+    "status": "NOT_RUN",
+    "samples": 0,
+    "latency": {}
+  },
+  "LIVE_QQ_HUMAN": {
+    "status": "NOT_RUN",
+    "samples": 0,
+    "p50_ms": null,
+    "p95_ms": null
+  },
+  "PAID_MODEL": {
+    "status": "NOT_RUN",
+    "requests": 0,
+    "actual_cost_micro_usd": 0,
+    "latency": {}
+  },
+  "latency_real_p50_ms": null,
+  "latency_real_p95_ms": null,
+  "provider_invoice_verified": false,
+  "note": "Synthetic local spans and model budget estimates do not establish QQ delivery, client round trips or provider invoices."
+}

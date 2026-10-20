@@ -1,0 +1,38 @@
+# P6 停止与恢复清单
+
+本轮只有本地研发和远端只读查询，服务器没有新增部署，现有服务无须回滚。
+主机仍保留 1Panel/OpenResty/redroid。下列步骤只供未来经批准的独立部署使用。
+
+## 安装前
+
+确认 SnowLuma EULA 5.4 所需书面许可及操作授权，记录供应商快照与独立加密备份位置，
+核对剩余空间和恢复人；独立目录、项目名、网络及卷不得覆盖现有挂载。
+Core DB 使用本地 ext4 等受支持文件系统；最新 ErasureLedger 独立于库和旧备份保存。
+私有配置 uid10004/0600、卷0700；不兼容旧卷由操作者修正所有权，不提升 Bridge 为 root。
+
+本地构建采用单独 `deploy/compose.onebot-build.yaml` 的 `:review` 标签，经审核得到真实
+RepoDigest 后运行配置才设置 image@sha256。不要把构建文件合并进运行 Compose。
+管理端口只回环+SSH 隧道，OneBot/Core 不发布，SnowLuma 特权只属于该容器。
+
+## 停止条件与保全
+
+账号/probe 不匹配、公网端口意外暴露、多个组件抢回复、重复、错误对象、Spool 满、
+冲突 ID、401/403、权限或格式变化：停止本轮新增 Bridge 的输入/发送和新 worker，
+保留原服务。先关闭发送、记录队列状态、保留 Spool/DB/最新 Ledger/QQ 三卷和匿名证据。
+不用 `down -v`、清空队列或新 epoch 消除故障，不停止既有 1Panel/OpenResty/redroid。
+
+## UNKNOWN 与迟到回执
+
+`SENDING/DELIVERY_UNCERTAIN` 必须先真人核对客户端，再走已认证主人“发送状态/核对发送”
+收口为 SENT/CANCELLED；不能设回 PENDING 或盲目补发。
+旧 lease 的迟到结果保留为 rejected 隔离记录，不推翻人工决定，检查后才恢复正常新消息。
+
+## 恢复
+
+在新路径恢复经校验加密备份，先回放最新独立 ErasureLedger，再运行迁移/健康检查。
+不回退 Ledger、不覆盖在线库、不重放未知发送。事件旧备份回放测试通过不能替代异地恢复。
+代码回退先停止新 Bridge，保留原卷和 epoch、记录候选 SHA/镜像摘要及队列状态，
+换回已审镜像；本轮没有新 migration，不降级业务 schema。
+
+QQ 登出/会话撤销由批准的账号操作者完成，不擅删登录卷。Reader/G1、DSH、Windows 和
+付费模型分开批准；第一轮 QQ 失败只停止该轮，不扩大权限或降低身份/DNS/TLS 校验。

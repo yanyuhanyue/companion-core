@@ -46,7 +46,9 @@ timedatectl、docker version/compose/network ls/ps、ss、ufw status，无账号
    `.env` 中 `COMPANION_MODE=demo`、模型 Key 留空，仅同一 owner/bot 和 Bridge token。
    不复制带 live 环境覆盖的旧 `.env`。先仅启动 migrate/API/chat worker，不使用其它 profiles。
    验证 schema head、API live/ready、单 Worker、Core DB 与最新独立 Ledger。
-6. 独立构建并审核 Bridge 镜像、记录其本地 image ID；进入部署注册表前不得假冒 image@sha256。
+6. 独立构建并审核 Bridge 镜像：`docker compose -f deploy/compose.onebot-build.yaml build onebot-bridge`，
+   本地标签为 `companion-onebot-bridge:review`，此构建文件不要与运行配置合并。
+   记录其本地 image ID；进入部署注册表前不得假冒 image@sha256。
    构建验证通过后由操作者固定真实 RepoDigest。Compose 要求明确摘要参数，不默认 latest。
    Bridge 无默认自动重启；检查 ws_connected、Core ack 和本地 Spool，初始 delivery_enabled=false。
    开启发送前确认 Core 没有历史 PENDING/SENDING/UNKNOWN，并记录队列；配置开关不是发送许可。

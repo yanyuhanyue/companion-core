@@ -12,12 +12,15 @@ STAGES = {
     "t_context_ready",
     "t_model_request",
     "t_model_done",
+    "t_model_failed",
     "t_job_done",
     "job_failed",
 }
 
 
-def emit(stage, trace_id, *, elapsed_ms=None, budget_micro_usd=None, at_ns=None):
+def emit(
+    stage, trace_id, *, elapsed_ms=None, budget_micro_usd=None, model_usage_state=None, at_ns=None
+):
     if os.environ.get("COMPANION_TELEMETRY") != "1":
         return
     evidence = os.environ.get("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
@@ -39,6 +42,8 @@ def emit(stage, trace_id, *, elapsed_ms=None, budget_micro_usd=None, at_ns=None)
         record["elapsed_ms"] = round(max(0, elapsed_ms), 4)
     if budget_micro_usd is not None:
         record["budget_micro_usd"] = budget_micro_usd
+    if model_usage_state in {"SETTLED", "UNKNOWN"}:
+        record["model_usage_state"] = model_usage_state
     try:
         print(json.dumps(record), flush=True)
     except OSError:

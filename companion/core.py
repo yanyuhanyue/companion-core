@@ -688,11 +688,13 @@ class Core:
                     model_done_ns = time.perf_counter_ns()
                     budget.settle(self.store, self.settings, request_id, response)
                     usage = self.store.one(
-                        "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (request_id,)
+                        "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                        (request_id,),
                     )
                     emit("t_model_done", job["trace_id"],
                          elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
                          budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                         model_usage_state=usage["state"] if usage else None,
                          at_ns=model_done_ns)
                     request_id = None
                     reply = redact(response.text, self.settings)
@@ -726,16 +728,18 @@ class Core:
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now)
             emit("t_job_done", job["trace_id"],
                  elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
-        except CoreError as error:
+        except Exception as error:
             emit("job_failed", job["trace_id"])
             if request_id:
                 budget.settle(self.store, self.settings, request_id)
-            self.fail_job(job, error.code)
-        except Exception:
-            emit("job_failed", job["trace_id"])
-            if request_id:
-                budget.settle(self.store, self.settings, request_id)
-            self.fail_job(job, "INTERNAL_ERROR")
+                usage = self.store.one(
+                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    (request_id,),
+                )
+                emit("t_model_failed", job["trace_id"],
+                     budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                     model_usage_state=usage["state"] if usage else None)
+            self.fail_job(job, error.code if isinstance(error, CoreError) else "INTERNAL_ERROR")
         return True
 
     def fail_job(self, job, code):

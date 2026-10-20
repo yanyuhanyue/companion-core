@@ -16,6 +16,7 @@ FIELDS = {
     "monotonic_ns",
     "elapsed_ms",
     "budget_micro_usd",
+    "model_usage_state",
 }
 
 
@@ -39,7 +40,7 @@ def summarize(records, evidence_type, *, delivery_states=None):
     ):
         raise ValueError("INVALID_DURABLE_DELIVERY_COUNTS")
     stages, durations = Counter(), defaultdict(list)
-    costs = []
+    costs, usage_states = [], Counter()
     for record in records:
         if set(record) - FIELDS or record.get("schema_version") != 1:
             raise ValueError("UNRECOGNIZED_METRIC_FIELDS")
@@ -51,9 +52,14 @@ def summarize(records, evidence_type, *, delivery_states=None):
         stages[stage] += 1
         cost = record.get("budget_micro_usd")
         if cost is not None:
-            if type(cost) is not int or cost < 0 or stage != "t_model_done":
+            if type(cost) is not int or cost < 0 or stage not in {"t_model_done", "t_model_failed"}:
                 raise ValueError("INVALID_COST")
             costs.append(cost)
+        usage_state = record.get("model_usage_state")
+        if usage_state is not None:
+            if usage_state not in {"SETTLED", "UNKNOWN"} or cost is None:
+                raise ValueError("INVALID_USAGE_STATE")
+            usage_states[usage_state] += 1
         value = record.get("elapsed_ms")
         if value is not None:
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -83,14 +89,18 @@ def summarize(records, evidence_type, *, delivery_states=None):
         "failed_job_attempts": stages["job_failed"],
         "duplicate_suppressed": stages["duplicate_suppressed"],
         "model_budget_estimate_micro_usd": sum(costs) if costs else None,
+        "model_budget_estimate_complete": bool(stages["t_model_request"])
+        and stages["t_model_request"] == len(costs),
+        "unknown_model_usage_attempts": usage_states["UNKNOWN"],
         "model_invoice_verified": False,
         "real_qq_private_scenarios_accepted": 0,
         "latency_real_p50_ms": None,
         "latency_real_p95_ms": None,
         "note": "Stage durations are local spans; platform acceptance is not client receipt. "
         "Stage logs may be lost on crash; complete outstanding unknown counts require a "
-        "matching Core delivery-state snapshot. Human QQ acceptance and provider invoices "
-        "require separate evidence.",
+        "matching Core delivery-state snapshot. Budget completeness covers recorded attempts "
+        "only; reconcile with durable model_usage after a crash. Human QQ acceptance and "
+        "provider invoices require separate evidence.",
     }
 
 

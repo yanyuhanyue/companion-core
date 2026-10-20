@@ -1,3 +1,5 @@
+import httpx
+import pytest
 from cryptography.fernet import Fernet
 
 from astrbot_plugin_companion_bridge.bridge import Spool as LegacySpool
@@ -10,6 +12,32 @@ from tests.conftest import FakeModel, run
 from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import config, normalized, raw_event
 from tests.test_protocol_backends import astrbot_event
+
+
+@pytest.mark.parametrize("body", [
+    b'{"error":"OTHER","error":"EVENT_ERASED"}',
+    b'{"error":"EVENT_ERASED","extra":true}',
+    b'{"error":"OTHER"}',
+    b'not json',
+])
+def test_legacy_spool_preserves_non_exact_erasure_receipts(tmp_path, body):
+    spool = LegacySpool(str(tmp_path / "legacy.db"))
+    try:
+        spool.put(*legacy_normalize(astrbot_event(), "10001", "10002"))
+
+        async def scenario():
+            async with httpx.AsyncClient(
+                base_url="http://core",
+                transport=httpx.MockTransport(lambda r: httpx.Response(410, content=body)),
+            ) as http:
+                with pytest.raises(httpx.HTTPStatusError):
+                    await spool.flush_one(http)
+
+        run(scenario())
+        pending = spool.db.execute("SELECT COUNT(*) FROM inbox WHERE state='pending'").fetchone()[0]
+        assert pending == 1
+    finally:
+        spool.db.close()
 
 
 def test_pre_event_backup_latest_ledger_blocks_pending_spool_resurrection(core, tmp_path):

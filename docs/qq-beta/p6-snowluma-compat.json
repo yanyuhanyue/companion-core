@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "evidence_type": "LIVE_ONEBOT",
+  "status": "NOT_RUN",
+  "blocked_by": ["BLOCKED_HOST_BACKUP", "runtime_installation_not_authorized", "qq_login_not_authorized"],
+  "license_permission": "PASS_OWNER_ATTESTED",
+  "upstream_release": "v2.0.3",
+  "source_commit": "db142db9e6398c779283eab9afc3552da1e2c361",
+  "source_contract_checked": true,
+  "expected_app_name": "SnowLuma",
+  "expected_app_version": "2.0.3-node",
+  "observed_app_name": null,
+  "observed_app_version": null,
+  "observed_qq_version": null,
+  "probe": null,
+  "real_ws_event": null,
+  "image_pulled": false,
+  "runtime_started": false,
+  "private_message_delivery_verified": false
+}

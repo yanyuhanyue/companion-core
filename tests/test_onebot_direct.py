@@ -60,6 +60,11 @@ def test_owner_friend_message_has_stable_core_identity(core):
     assert core.ingest(InboundEvent.model_validate(normalized()), event.event_id)["duplicate"]
 
 
+def test_expanding_redaction_is_rejected_before_it_can_poison_the_spool():
+    with pytest.raises(ValueError, match="INVALID_TEXT_LENGTH"):
+        normalized(raw_event(text="token=x " * 2500))
+
+
 @pytest.mark.parametrize(
     "change",
     [

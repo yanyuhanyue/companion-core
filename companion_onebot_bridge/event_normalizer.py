@@ -132,6 +132,9 @@ def normalize(frame, config, *, now=None):
     source = f"{config.bot_qq_id}:{config.origin}:epoch:{config.protocol_epoch}:{message_id}"
     key = hashlib.sha256(source.encode()).hexdigest()
     text = redact(text_only(raw.get("message")), config)
+    # Redaction can expand short credentials; never persist an event Core will reject.
+    if len(text) > 20000:
+        raise ValueError("INVALID_TEXT_LENGTH")
     return {
         "schema_version": 1,
         "event_id": "evt_" + key,
