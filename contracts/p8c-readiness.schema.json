@@ -249,8 +249,8 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "host",
-            "ssh_port",
+            "private_target_ref",
+            "target_inventory_sha256",
             "evidence",
             "core_deployed",
             "observed_config_sha256",
@@ -258,13 +258,28 @@
             "observed_image_inventory_sha256"
           ],
           "properties": {
-            "host": {"const":"154.89.148.204"},
-            "ssh_port": {"const":60022},
-            "evidence": {"const":"USER_SUPPLIED_NOT_PROBED"},
-            "core_deployed": {"const":false},
-            "observed_config_sha256": {"type":"null"},
-            "observed_schema_head": {"type":"null"},
-            "observed_image_inventory_sha256": {"type":"null"}
+            "private_target_ref": {
+              "type": "string",
+              "pattern": "^private_target_[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "target_inventory_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "evidence": {
+              "const": "USER_SUPPLIED_NOT_PROBED"
+            },
+            "core_deployed": {
+              "const": false
+            },
+            "observed_config_sha256": {
+              "type": "null"
+            },
+            "observed_schema_head": {
+              "type": "null"
+            },
+            "observed_image_inventory_sha256": {
+              "type": "null"
+            }
           }
         },
         "windows_gateway": {

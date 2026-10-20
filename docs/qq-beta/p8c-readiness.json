@@ -158,8 +158,8 @@
       "real_nonempty_restore": "NOT_VERIFIED"
     },
     "final_target": {
-      "host": "154.89.148.204",
-      "ssh_port": 60022,
+      "private_target_ref": "private_target_final",
+      "target_inventory_sha256": null,
       "evidence": "USER_SUPPLIED_NOT_PROBED",
       "core_deployed": false,
       "observed_config_sha256": null,

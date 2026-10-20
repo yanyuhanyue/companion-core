@@ -42,7 +42,7 @@ main 为 `bbd712c1a79497762275e718e9f76959bedf6583`，
 | 对象 | 可据以填写的事实 | 尚缺的实测 |
 |---|---|---|
 | 旧测试主机 | [P7/P8 历史记录](p8-host-recovery-review.md)：源码 `940b6f28c16f7d495c3ff86e6b5bc7fad63e917a`、Demo、`P7-DEMO-1`、schema `0015_article_images`，五条真人输入/五条 SENT | 五条消息后的真实非空恢复、QQ 三卷/Spool/原服务/整机恢复均未证实；地址不从历史推猜 |
-| 最终目标 | 用户提供 `154.89.148.204:60022`；先前仅完成 Tailscale 链路与 Windows 受限文件执行器连通；尚未部署本项目 Core | 未连接/探测；实际目录、挂载、服务清单、配置、镜像、DB/schema、备份和延迟均待填 |
+| 最终目标 | 仅以 `private_target_ref=private_target_final` 引用受控私密目标清单；用户交接尚未由本轮探测确认，Core 尚未部署 | `target_inventory_sha256=null`；实际目录、挂载、服务清单、配置、镜像、DB/schema、备份和延迟待独立批准后填写 |
 | Windows 工作站 | 已配置的范围只有 `windows.read_text/windows.write_text`；Core 未启用该能力 | 截图、键鼠、应用启动未接入；链路探针不证明桌面端到端性能 |
 | 历史 QQ 与 E2E | 旧主机 Demo 样本 5/5；严格 0/5、完整 0/20；手机成对 E2E `n=0,p50/p95=null` | 最终目标的新严格窗口和手机证据均无；旧样本不得迁移归属到新服务器 |
 
