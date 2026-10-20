@@ -115,7 +115,10 @@ delivery key, message ID and text hash must match its new approved input/reply.
 
 An attempt is persisted before Core begin-send and protocol probes. Immediately
 before external send I/O, a separate IO_STARTED journal/fence and deadline check
-are persisted. An in-memory one-call permission then uses the existing text sender;
+are persisted. A final per-request guard repeats the current journal/fence/clock
+check after asynchronous HTTP network preflight (including private DNS pinning),
+immediately before transport dispatch. The guard is removed after that one call.
+An in-memory one-call permission then uses the existing text sender;
 the stored daemon delivery switch remains false. Timeouts, malformed/lost ACK,
 connection errors, process cancellation/death and missing Core result ACK never
 restore quota. The fifth acknowledged attempt automatically stops the window.

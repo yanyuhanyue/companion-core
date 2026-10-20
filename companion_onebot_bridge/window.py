@@ -565,6 +565,23 @@ class TestWindow:
         if not self.plan.start <= self.clock() < self.plan.end:
             raise ValueError("WINDOW_SEND_FENCED")
 
+    def before_dispatch(self):
+        # HTTP request hooks can await DNS pinning after before_io(). Check again
+        # after those hooks, at the transport boundary; keep the spent reservation.
+        self.verify(active=False)
+        row = self.row()
+        attempt = self.db.execute(
+            "SELECT state FROM window_attempts WHERE message_id=? AND fence=?", self.current
+        ).fetchone()
+        if (
+            row["state"] != "OPEN"
+            or row["fence"] != self.current[1]
+            or not attempt
+            or attempt["state"] != "IO_STARTED"
+            or not self.plan.start <= self.clock() < self.plan.end
+        ):
+            raise ValueError("WINDOW_SEND_FENCED")
+
     def complete(self, item, provider_id):
         state = "ACK" if provider_id else "UNKNOWN"
         head = self.append(state, {"fence": self.current[1]})
@@ -625,7 +642,18 @@ class WindowOneBot:
 
     async def send_text(self, text):
         self.window.before_io(text)
-        return await self.delegate.send_text(text)
+
+        async def after_network_preflight(request):
+            if request.url.path != "/send_private_msg":
+                raise ValueError("WINDOW_ACTION_REFUSED")
+            self.window.before_dispatch()
+
+        hooks = self.delegate.client.event_hooks["request"]
+        hooks.append(after_network_preflight)
+        try:
+            return await self.delegate.send_text(text)
+        finally:
+            hooks.remove(after_network_preflight)
 
 
 async def command(config, args):
