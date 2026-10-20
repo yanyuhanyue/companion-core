@@ -60,6 +60,11 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                if store.one("SELECT 1 FROM model_admissions LIMIT 1"):
+                    store.execute(
+                        "INSERT OR REPLACE INTO runtime_meta VALUES "
+                        "('model_budget_restore_required','1')"
+                    )
                 restore_executive(store, utcnow())
                 store.execute(
                     "UPDATE media_sessions SET state='CLOSED',closed_at=?,"
@@ -82,8 +87,9 @@ def restore(source, destination, key, ledger_path):
                 ).rowcount:
                     advance_epoch(store)
                 # A restored DB cannot restore authority for future account reads.
-                store.execute("UPDATE source_grants SET revoked_at=COALESCE(revoked_at,?)",
-                              (utcnow(),))
+                store.execute(
+                    "UPDATE source_grants SET revoked_at=COALESCE(revoked_at,?)", (utcnow(),)
+                )
             if store.one("PRAGMA integrity_check")["integrity_check"] != "ok":
                 raise CoreError("BACKUP_INTEGRITY_FAILED")
             if store.rows("PRAGMA foreign_key_check"):

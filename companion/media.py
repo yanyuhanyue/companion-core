@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from companion.budget import total_monthly
@@ -287,6 +288,11 @@ class MediaService:
         return data
 
     def _reserve(self, row, chunk, data, endpoint):
+        if self.settings.mode == "live" or (
+            isinstance(self.provider, HTTPMediaProvider)
+            and not isinstance(self.provider.transport, httpx.MockTransport)
+        ):
+            raise CoreError("PAID_MEDIA_INPUT_CONTRACT_UNPROVEN", 503)
         now, store = self.clock(), self.store
         fingerprint = hashlib.sha256(
             chunk.operation.encode() + b"\0" + chunk.mime_type.encode() + b"\0" + data

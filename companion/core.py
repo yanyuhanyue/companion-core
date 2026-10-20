@@ -99,8 +99,9 @@ class Core:
         fingerprint = digest(raw)
         try:
             with s.transaction():
-                if s.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                         ("erased_event:" + event.event_id,)):
+                if s.one(
+                    "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
+                ):
                     raise CoreError("EVENT_ERASED", 410)
                 existing = s.one(
                     "SELECT * FROM events WHERE (source=? AND source_event_id=?) "
@@ -396,7 +397,15 @@ class Core:
             request_id = budget.reserve(
                 self.store, self.settings, job["job_id"], "memory_review", messages, self.clock()
             )
-            response = await self.model.complete(messages, "memory_review")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "memory_review",
+                self.clock,
+            )
         except Exception as error:
             if request_id:
                 budget.settle(self.store, self.settings, request_id)
@@ -461,7 +470,15 @@ class Core:
         ]
         request_id = budget.reserve(s, cfg, job_id, "memory_review", messages, self.clock())
         try:
-            response = await self.model.complete(messages, "memory_review")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "memory_review",
+                self.clock,
+            )
         except Exception:
             budget.settle(s, cfg, request_id)
             raise
@@ -626,9 +643,14 @@ class Core:
         if job is None:
             return False
         started_ns = time.perf_counter_ns()
-        emit("t_job_started", job["trace_id"], elapsed_ms=(
-            datetime.fromisoformat(self.clock()) - datetime.fromisoformat(job["created_at"])
-        ).total_seconds() * 1000)
+        emit(
+            "t_job_started",
+            job["trace_id"],
+            elapsed_ms=(
+                datetime.fromisoformat(self.clock()) - datetime.fromisoformat(job["created_at"])
+            ).total_seconds()
+            * 1000,
+        )
         request_id = None
         try:
             before_command = epoch(self.store)
@@ -672,8 +694,11 @@ class Core:
                         messages = self.context(job)
                     if captured_epoch != epoch(self.store):
                         raise CoreError("PRIVACY_CHANGED", 503)
-                    emit("t_context_ready", job["trace_id"],
-                         elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
+                    emit(
+                        "t_context_ready",
+                        job["trace_id"],
+                        elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6,
+                    )
                     request_id = budget.reserve(
                         self.store,
                         self.settings,
@@ -684,18 +709,29 @@ class Core:
                     )
                     model_started_ns = time.perf_counter_ns()
                     emit("t_model_request", job["trace_id"])
-                    response = await self.model.complete(messages, job["kind"])
+                    response = await budget.complete(
+                        self.model,
+                        self.store,
+                        self.settings,
+                        request_id,
+                        messages,
+                        job["kind"],
+                        self.clock,
+                    )
                     model_done_ns = time.perf_counter_ns()
                     budget.settle(self.store, self.settings, request_id, response)
                     usage = self.store.one(
                         "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
                         (request_id,),
                     )
-                    emit("t_model_done", job["trace_id"],
-                         elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
-                         budget_micro_usd=usage["billed_micro_usd"] if usage else None,
-                         model_usage_state=usage["state"] if usage else None,
-                         at_ns=model_done_ns)
+                    emit(
+                        "t_model_done",
+                        job["trace_id"],
+                        elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
+                        budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                        model_usage_state=usage["state"] if usage else None,
+                        at_ns=model_done_ns,
+                    )
                     request_id = None
                     reply = redact(response.text, self.settings)
             with self.store.transaction():
@@ -726,8 +762,11 @@ class Core:
                     (now, job["job_id"]),
                 )
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now)
-            emit("t_job_done", job["trace_id"],
-                 elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6)
+            emit(
+                "t_job_done",
+                job["trace_id"],
+                elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6,
+            )
         except Exception as error:
             emit("job_failed", job["trace_id"])
             if request_id:
@@ -736,9 +775,12 @@ class Core:
                     "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
                     (request_id,),
                 )
-                emit("t_model_failed", job["trace_id"],
-                     budget_micro_usd=usage["billed_micro_usd"] if usage else None,
-                     model_usage_state=usage["state"] if usage else None)
+                emit(
+                    "t_model_failed",
+                    job["trace_id"],
+                    budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                    model_usage_state=usage["state"] if usage else None,
+                )
             self.fail_job(job, error.code if isinstance(error, CoreError) else "INTERNAL_ERROR")
         return True
 
@@ -893,12 +935,22 @@ class Core:
         attempts = int(attempts["value"]) if attempts else 0
         request_id = None
         try:
-            request_id = budget.reserve(s, cfg, None, "memory_extract", messages, now)
+            request_id = budget.reserve(
+                s, cfg, None, "memory_extract", messages, now, logical_request_id=attempt_key
+            )
             attempts += 1
             s.execute(
                 "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (attempt_key, str(attempts))
             )
-            response = await self.model.complete(messages, "memory_extract")
+            response = await budget.complete(
+                self.model,
+                self.store,
+                self.settings,
+                request_id,
+                messages,
+                "memory_extract",
+                self.clock,
+            )
             budget.settle(s, cfg, request_id, response)
             request_id = None
             extraction = Extraction.model_validate_json(response.text)

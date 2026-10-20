@@ -534,7 +534,13 @@ class DiaryService:
             with self.store.transaction():
                 self.repo.validate_run(run)
             request_id = budget.reserve(
-                self.store, self.settings, None, "diary", messages, self.clock()
+                self.store,
+                self.settings,
+                None,
+                "diary",
+                messages,
+                self.clock(),
+                logical_request_id="diary:" + run["run_id"],
             )
             with self.store.transaction():
                 self.repo.validate_run(run)
@@ -542,7 +548,9 @@ class DiaryService:
                     "UPDATE diary_runs SET model_request_id=? WHERE run_id=?",
                     (request_id, run["run_id"]),
                 )
-            response = await self.model.complete(messages, "diary")
+            response = await budget.complete(
+                self.model, self.store, self.settings, request_id, messages, "diary", self.clock
+            )
             budget.settle(self.store, self.settings, request_id, response)
             request_id = None
             draft = DiaryDraft.model_validate_json(response.text)

@@ -658,6 +658,11 @@ class ContentService:
         return adapter_id, policy
 
     def _reserve(self, row, data, mime):
+        if self.settings.mode == "live" or (
+            isinstance(self.provider, HTTPMediaProvider)
+            and not isinstance(self.provider.transport, httpx.MockTransport)
+        ):
+            raise CoreError("PAID_MEDIA_INPUT_CONTRACT_UNPROVEN", 503)
         self._source(row["owner_event_id"], upload=row["kind"] == "qq_image")
         validate_image(data, mime, self.options.max_image_bytes)
         fingerprint = hashlib.sha256(mime.encode() + b"\0" + data).hexdigest()

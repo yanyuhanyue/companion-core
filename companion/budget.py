@@ -1,8 +1,12 @@
+import json
+import re
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from companion import paid_budget
 from companion.contracts import CoreError
-from companion.store import uid
+from companion.store import after, encode, uid
 
 
 def token_upper_bound(messages):
@@ -35,7 +39,10 @@ def total_monthly(store, month):
     return total
 
 
-def reserve(store, settings, job_id, scenario, messages, now):
+def reserve(
+    store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None
+):
+    approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     autonomous = scenario != "chat"
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
@@ -44,8 +51,17 @@ def reserve(store, settings, job_id, scenario, messages, now):
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     estimated_input = token_upper_bound(messages)
     output_tokens = settings.output_tokens(scenario)
+    if approval:
+        estimated_input = paid_budget.input_bound(approval, messages, scenario)
+        if estimated_input > approval.max_input_tokens:
+            raise CoreError("MODEL_INPUT_LIMIT", 429)
+        if output_tokens > approval.max_output_tokens:
+            raise CoreError("MODEL_OUTPUT_LIMIT", 429)
     estimate = cost(settings, estimated_input, output_tokens)
     with store.transaction():
+        request_id = request_id or uid("model")
+        if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
+            raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
         if scenario == "activity":
             from companion.social import proactive_allowed
 
@@ -92,7 +108,9 @@ def reserve(store, settings, job_id, scenario, messages, now):
             )["n"]
             if spent + estimate > limit:
                 raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
-        request_id = uid("model")
+        if approval:
+            logical_request_id = logical_request_id or job_id or uid("logical")
+            _admit(store, settings, approval, logical_request_id, estimate, now, day, month)
         store.insert(
             "model_usage",
             usage_id=uid("usage"),
@@ -109,11 +127,125 @@ def reserve(store, settings, job_id, scenario, messages, now):
             state="RESERVED",
             occurred_at=now,
         )
+        if approval:
+            from companion.model import model_payload
+
+            snapshot = approval.model_dump(mode="json")
+            # Paths are operational settings, not pricing evidence or model input.
+            snapshot.pop("tokenizer_path")
+            snapshot.pop("journal_path")
+            contract_hash = paid_budget.sha(snapshot)
+            store.insert(
+                "model_admissions",
+                request_id=request_id,
+                logical_request_id=logical_request_id,
+                attempt_id=uid("attempt"),
+                attempt_number=1
+                + store.one(
+                    "SELECT COUNT(*) AS n FROM model_admissions WHERE logical_request_id=?",
+                    (logical_request_id,),
+                )["n"],
+                window_id=approval.window_id,
+                contract_sha256=contract_hash,
+                payload_sha256=paid_budget.sha(model_payload(settings, messages, scenario)),
+                snapshot_json=encode(snapshot),
+                reserved_micro_usd=estimate,
+                input_bound=estimated_input,
+                output_bound=output_tokens,
+                lease_token=uid("model_lease"),
+                lease_until=after(now, settings.timeout_seconds + 10),
+            )
+            paid_budget.journal(
+                store,
+                approval,
+                {
+                    "kind": "reserve",
+                    "request_id": request_id,
+                    "minimum_micro_usd": estimate,
+                    "contract_sha256": contract_hash,
+                },
+            )
         return request_id
+
+
+def _admit(store, settings, approval, logical, estimate, now, day, month):
+    if store.one(
+        "SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
+        "WHERE a.request_id IS NULL AND m.state IN ('RESERVED','UNKNOWN') LIMIT 1"
+    ):
+        raise CoreError("MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED", 503)
+    if store.one(
+        "SELECT 1 FROM runtime_meta WHERE key IN "
+        "('model_budget_blocked','model_budget_restore_required')"
+    ):
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+    snapshot = approval.model_dump(mode="json", exclude={"tokenizer_path", "journal_path"})
+    frozen = paid_budget.sha(snapshot)
+    prior = store.one(
+        "SELECT contract_sha256 FROM model_budget_windows WHERE window_id=?", (approval.window_id,)
+    )
+    if prior and prior["contract_sha256"] != frozen:
+        raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
+    store.execute(
+        "INSERT OR IGNORE INTO model_budget_windows VALUES (?,?)", (approval.window_id, frozen)
+    )
+    if estimate <= 0 or estimate > approval.per_attempt_micro_usd:
+        raise CoreError("MODEL_ATTEMPT_BUDGET_EXHAUSTED", 429)
+    # Every charge counts, including pre-migration and media/tool estimates; unresolved
+    # admissions consume concurrency forever until independent provider reconciliation.
+    daily = store.one(
+        "SELECT COUNT(*) AS calls,COALESCE(SUM(billed_micro_usd),0) AS amount "
+        "FROM model_usage WHERE occurred_at>=?",
+        (day.isoformat(timespec="microseconds"),),
+    )
+    if (
+        daily["calls"] >= approval.daily_calls
+        or daily["amount"] + estimate > approval.daily_micro_usd
+    ):
+        raise CoreError("MODEL_DAILY_BUDGET_EXHAUSTED", 429)
+    if (
+        total_monthly(store, month.isoformat(timespec="microseconds")) + estimate
+        > approval.monthly_micro_usd
+    ):
+        raise CoreError("MODEL_MONTHLY_BUDGET_EXHAUSTED", 429)
+    for column, value, amount, calls, code in (
+        (
+            "window_id",
+            approval.window_id,
+            approval.window_micro_usd,
+            approval.window_calls,
+            "WINDOW",
+        ),
+        (
+            "logical_request_id",
+            logical,
+            approval.per_request_micro_usd,
+            approval.per_request_calls,
+            "REQUEST",
+        ),
+    ):
+        usage = store.one(
+            "SELECT COUNT(*) AS calls,COALESCE(SUM(m.billed_micro_usd),0) AS amount "
+            "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a." + column + "=?",
+            (value,),
+        )
+        if usage["calls"] >= calls or usage["amount"] + estimate > amount:
+            raise CoreError("MODEL_" + code + "_BUDGET_EXHAUSTED", 429)
+    running = store.one(
+        "SELECT COUNT(*) AS n FROM model_usage m JOIN model_admissions a USING(request_id) "
+        "WHERE m.state IN ('RESERVED','UNKNOWN')"
+    )["n"]
+    if running >= approval.concurrency:
+        raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
+    paid_budget.journal(store, approval)
 
 
 def settle(store, settings, request_id, response=None):
     with store.transaction():
+        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
+        if admission:
+            _settle_paid(store, settings, admission, response)
+            return
         if response is None or response.input_tokens is None or response.output_tokens is None:
             store.execute(
                 "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (request_id,)
@@ -137,3 +269,191 @@ def settle(store, settings, request_id, response=None):
                 ),
             )
         # Prices are configured upper bounds; monetary amounts remain estimates even with usage.
+
+
+def _settle_paid(store, settings, admission, response):
+    approval = settings.paid_model
+    if approval is None:
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+    paid_budget.journal(store, approval)
+    usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (admission["request_id"],))
+    if usage["state"] == "SETTLED":
+        return
+    snapshot = json.loads(admission["snapshot_json"])
+    pricing = SimpleNamespace(
+        pricing_known=True,
+        **{name: snapshot[name] for name in ("input_rate", "cached_input_rate", "output_rate")},
+    )
+    valid = (
+        response is not None
+        and all(
+            type(value) is int and value >= 0
+            for value in (response.input_tokens, response.output_tokens, response.cached_tokens)
+        )
+        and response.cached_tokens <= response.input_tokens
+    )
+    amount, state, blocked = (
+        admission["reserved_micro_usd"],
+        "UNKNOWN",
+        response is not None and not valid,
+    )
+    if valid:
+        actual = cost(
+            pricing, response.input_tokens, response.output_tokens, response.cached_tokens
+        )
+        if (
+            response.input_tokens > admission["input_bound"]
+            or response.output_tokens > admission["output_bound"]
+            or actual > amount
+        ):
+            amount, blocked = max(actual, amount), True
+        else:
+            amount, state = actual, "SETTLED"
+    current_rates = (settings.input_rate, settings.cached_input_rate, settings.output_rate)
+    if current_rates != (pricing.input_rate, pricing.cached_input_rate, pricing.output_rate):
+        amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
+    if usage["state"] == "UNKNOWN":
+        # Unsolicited/late results do not release money or concurrency automatically.
+        amount, state = max(amount, usage["billed_micro_usd"]), "UNKNOWN"
+    if blocked:
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
+    if valid:
+        store.execute(
+            "UPDATE model_usage SET input_tokens=?,output_tokens=?,cached_input_tokens=? "
+            "WHERE request_id=?",
+            (
+                response.input_tokens,
+                response.output_tokens,
+                response.cached_tokens,
+                admission["request_id"],
+            ),
+        )
+    store.execute(
+        "UPDATE model_usage SET billed_micro_usd=?,state=? WHERE request_id=?",
+        (amount, state, admission["request_id"]),
+    )
+    paid_budget.journal(
+        store,
+        approval,
+        {
+            "kind": "blocked" if blocked else "settle",
+            "request_id": admission["request_id"],
+            "minimum_micro_usd": amount,
+            "contract_sha256": admission["contract_sha256"],
+            "io_started_at": admission["io_started_at"],
+        },
+    )
+
+
+async def complete(model, store, settings, request_id, messages, scenario, clock):
+    """The one Core calling seam: persisted admission is fenced before adapter I/O."""
+    if settings.mode != "live":
+        return await model.complete(messages, scenario)
+    if not callable(clock):
+        raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
+    now = clock()
+    from companion.model import ModelAdmission, ModelClient, model_payload
+
+    approval = paid_budget.contract(settings, now)
+    with store.transaction():
+        paid_budget.contract(settings, clock())
+        paid_budget.journal(store, approval)
+        row = store.one(
+            "SELECT a.*,m.state FROM model_admissions a JOIN model_usage m USING(request_id) "
+            "WHERE request_id=?",
+            (request_id,),
+        )
+        if not row or row["io_started_at"] or row["state"] != "RESERVED":
+            raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
+        if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
+            raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+        snapshot = approval.model_dump(mode="json", exclude={"tokenizer_path", "journal_path"})
+        if row["contract_sha256"] != paid_budget.sha(snapshot):
+            raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
+        if paid_budget.input_bound(approval, messages, scenario) != row["input_bound"]:
+            raise CoreError("MODEL_INPUT_BOUND_UNPROVEN", 503)
+        if row["payload_sha256"] != paid_budget.sha(model_payload(settings, messages, scenario)):
+            raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+        if store.one(
+            "SELECT 1 FROM runtime_meta WHERE key IN "
+            "('model_budget_blocked','model_budget_restore_required')"
+        ):
+            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        store.execute(
+            "UPDATE model_admissions SET io_started_at=? WHERE request_id=?", (now, request_id)
+        )
+        paid_budget.journal(
+            store,
+            approval,
+            {
+                "kind": "io_started",
+                "request_id": request_id,
+                "minimum_micro_usd": row["reserved_micro_usd"],
+                "contract_sha256": row["contract_sha256"],
+                "io_started_at": now,
+            },
+        )
+    # Re-read after lock acquisition, input proof and journal fsync; no stale
+    # pre-lock timestamp may authorize an HTTP request after the deadline.
+    try:
+        paid_budget.contract(settings, clock())
+        if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
+            raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+    except CoreError:
+        settle(store, settings, request_id)
+        raise
+    if isinstance(model, ModelClient):
+        return await model.complete(
+            messages, scenario, admission=ModelAdmission(row["payload_sha256"])
+        )
+    return await model.complete(messages, scenario)
+
+
+def record_provider_discrepancy(
+    store, settings, request_id, actual_micro_usd, currency, evidence_sha256
+):
+    """Private operator reconciliation input; never clears a stop or authorizes I/O.
+
+    Currency/FX uncertainty stops admission without inventing a conversion. The
+    operator must independently verify the statement and keep its private evidence.
+    """
+    if (
+        type(actual_micro_usd) is not int
+        or actual_micro_usd < 0
+        or not re.fullmatch(r"[a-f0-9]{64}", evidence_sha256)
+    ):
+        raise CoreError("INVALID_PROVIDER_RECONCILIATION", 400)
+    with store.transaction():
+        approval = settings.paid_model
+        if approval is None:
+            raise CoreError("PAID_APPROVAL_REQUIRED", 503)
+        paid_budget.journal(store, approval)
+        row = store.one(
+            "SELECT a.*,m.billed_micro_usd FROM model_admissions a "
+            "JOIN model_usage m USING(request_id) WHERE request_id=?",
+            (request_id,),
+        )
+        if row is None:
+            raise CoreError("MODEL_REQUEST_NOT_FOUND", 404)
+        amount = max(
+            row["billed_micro_usd"],
+            row["reserved_micro_usd"],
+            actual_micro_usd if currency == "USD" else 0,
+        )
+        store.execute(
+            "UPDATE model_usage SET state='UNKNOWN',billed_micro_usd=? WHERE request_id=?",
+            (amount, request_id),
+        )
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
+        paid_budget.journal(
+            store,
+            approval,
+            {
+                "kind": "blocked",
+                "request_id": request_id,
+                "minimum_micro_usd": amount,
+                "contract_sha256": row["contract_sha256"],
+                "io_started_at": row["io_started_at"],
+                "evidence_sha256": evidence_sha256,
+            },
+        )
