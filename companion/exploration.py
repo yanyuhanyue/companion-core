@@ -63,7 +63,7 @@ class ReadItem(StrictModel):
     reading: ReadingEvidence | None = None
     article: ArticleEvidence | None = None
     image_urls: list[Annotated[str, Field(max_length=2048)]] = Field(
-        default_factory=list, max_length=2
+        default_factory=list, max_length=32
     )
 
 

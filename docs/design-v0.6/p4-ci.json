@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "taskbook": "CC-NEXT-20261020-P4",
+  "verified_implementation_sha": "fd321dcaaa67e6f21b12290bc69d0e02c065860d",
+  "run_id": 39365674261,
+  "run_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39365674261",
+  "status": "completed",
+  "conclusion": "success",
+  "jobs": [
+    {
+      "id": 118441850983,
+      "name": "browser-reader",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118441851103,
+      "name": "container",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118441851319,
+      "name": "test (windows-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118441851339,
+      "name": "plugin-native",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 118441851604,
+      "name": "test (ubuntu-latest)",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "full_suite": {
+    "windows": {
+      "passed": 626,
+      "skipped": 4,
+      "seconds": 118.25
+    },
+    "linux": {
+      "passed": 626,
+      "skipped": 4,
+      "seconds": 76.56
+    }
+  },
+  "local_full_suite": {
+    "passed": 628,
+    "skipped": 2,
+    "seconds": 515.56,
+    "chromium_enabled": true
+  },
+  "skip_scope": {
+    "ci": "Four browser opt-in cases execute in the separate browser-reader job.",
+    "local": "Two symlink creation permission limits; four Chromium cases executed."
+  },
+  "final_documentation_commit_ci": "Final PR current-head push and pull_request runs are independently checked; this file pins the preceding implementation run to avoid a self-referencing commit SHA.",
+  "production_ready": false
+}

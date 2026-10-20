@@ -115,33 +115,37 @@ def article_parts(value):
 
 def render_article(parts, limit=11500):
     text, images, body_chars, truncated = "", [], 0, False
+    prepared, urls = [], []
     for kind, value in parts:
-        if kind == "text":
-            addition = value.strip()
-        else:
+        if kind == "image":
             try:
-                url = image_url(value)
+                value = image_url(value)
             except (TypeError, ValueError):
                 truncated = True
                 continue
-            if any(image["url"] == url for image in images):
+            if value in urls:
                 continue
-            if len(images) == 2:
+            if len(urls) == 32:
                 truncated = True
                 continue
-            addition = f"[图片{len(images) + 1}链接]"
+            urls.append(value)
+        prepared.append((kind, value))
+    # Reserve image placeholders before truncating long prose so later images remain queued.
+    remaining_text = limit - sum(len(f"[图片{i + 1}链接]") + 1 for i in range(len(urls)))
+    for kind, value in prepared:
         separator = "\n" if text else ""
-        remaining = limit - len(text) - len(separator)
-        if len(addition) > remaining:
-            if kind == "text" and remaining > 0:
-                text += separator + addition[:remaining]
-                body_chars += remaining
-            truncated = True
-            break
         if kind == "image":
-            images.append({"url": url, "text_offset": len(text) + len(separator)})
+            addition = f"[图片{len(images) + 1}链接]"
+            images.append({"url": value, "text_offset": len(text) + len(separator)})
         else:
+            addition = value.strip()
+            available = max(0, remaining_text - len(separator))
+            if len(addition) > available:
+                addition, truncated = addition[:available], True
+            if not addition:
+                continue
             body_chars += len(addition)
+            remaining_text -= len(separator) + len(addition)
         text += separator + addition
     if not body_chars:
         raise ReadFailure("READ_BODY_UNAVAILABLE")

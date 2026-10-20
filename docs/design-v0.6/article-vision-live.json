@@ -1,0 +1,124 @@
+{
+  "checked_at": "2026-10-20T03:03:53.778119+00:00",
+  "model": "deepseek-flash",
+  "max_calls": 3,
+  "total_test_budget_micro_usd": 10000,
+  "source_url": "https://www.xiaoheihe.cn/app/bbs/link/168860244",
+  "real_qq_messages": 0,
+  "real_chat_calls": 0,
+  "production_deployed": false,
+  "article_images_retained": 14,
+  "article_response_sha256": "d941699e4880d727f02e072741a0a26541cc17765584a5b388c072126d3ed56c",
+  "batch_sizes": [
+    2,
+    1
+  ],
+  "image_states": [
+    {
+      "index": 1,
+      "state": "SUCCEEDED",
+      "error_code": null
+    },
+    {
+      "index": 2,
+      "state": "SUCCEEDED",
+      "error_code": null
+    },
+    {
+      "index": 3,
+      "state": "SUCCEEDED",
+      "error_code": null
+    },
+    {
+      "index": 4,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 5,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 6,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 7,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 8,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 9,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 10,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 11,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 12,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 13,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    },
+    {
+      "index": 14,
+      "state": "FAILED",
+      "error_code": "CONTENT_ARTICLE_IMAGE_LIMIT"
+    }
+  ],
+  "real_vision_calls": 3,
+  "images": [
+    {
+      "image_sha256": "2dacde58bcea75a64e4930e0b3c3cf12ce29c817180416b72a55340a28644645",
+      "image_bytes": 98648,
+      "mime": "image/jpeg",
+      "result_chars": 465,
+      "result_sha256": "d53cbedc85ccaf0036ff4af3a07821fcd6f5afa57630f3a19b12659eb661423b",
+      "elapsed_seconds": 4.046
+    },
+    {
+      "image_sha256": "25fb8ff6edf407f7df55cdd0b8a744acbcddfe56442b550b364a628d855e3ae1",
+      "image_bytes": 57663,
+      "mime": "image/jpeg",
+      "result_chars": 413,
+      "result_sha256": "94cd3d4b475f75252e6aecc7209575f15ddbbab0054136eb938d3c5554099e9d",
+      "elapsed_seconds": 3.609
+    },
+    {
+      "image_sha256": "eb5f11191c4d4b018155201e9e1538243da79de3ec49192ec7df5cf618a219c2",
+      "image_bytes": 140635,
+      "mime": "image/jpeg",
+      "result_chars": 460,
+      "result_sha256": "d830fe96729f293b60d736f4a72dc668af9da6718529ec9afd3dfca1952d45d2",
+      "elapsed_seconds": 4.281
+    }
+  ],
+  "recognized": 3,
+  "reserved_or_settled_micro_usd": 6000,
+  "context_contains_three_image_analyses": true,
+  "context_image_indices": [
+    1,
+    2,
+    3
+  ],
+  "encrypted_restore_latest_erasure": "PASS"
+}

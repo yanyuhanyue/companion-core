@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from datetime import datetime
 from pathlib import Path
 
@@ -13,17 +14,42 @@ HEYBOX_COMMIT = "90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac"
 BILIBILI_COMMIT = "9a3e0e67d82feedf755c763807c806c4d125a245"
 
 
+def _grant_identity(info):
+    if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & getattr(
+        stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
+    ):
+        raise ValueError("grant")
+    if os.name != "nt" and info.st_mode & 0o077:
+        raise ValueError("permissions")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        # Windows lstat/fstat can expose creation/change times differently.
+        info.st_ctime_ns if os.name != "nt" else None,
+    )
+
+
 def account_grant(path, now, source="heybox"):
     if path is None:
         raise ReadFailure("OWNER_ACCOUNT_AUTHORIZATION_REQUIRED")
     try:
         path = Path(path)
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("grant")
-        if os.name != "nt" and path.stat().st_mode & 0o077:
-            raise ValueError("permissions")
-        with path.open("rb") as stream:
+        identity = _grant_identity(path.lstat())
+        flags = os.O_RDONLY
+        for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_BINARY"):
+            flags |= getattr(os, name, 0)
+        with os.fdopen(os.open(path, flags), "rb") as stream:
+            if _grant_identity(os.fstat(stream.fileno())) != identity:
+                raise ValueError("grant changed")
             raw = stream.read(8193)
+            if (
+                _grant_identity(os.fstat(stream.fileno())) != identity
+                or _grant_identity(path.lstat()) != identity
+            ):
+                raise ValueError("grant changed")
         if len(raw) > 8192:
             raise ValueError("size")
         data = json.loads(raw)
