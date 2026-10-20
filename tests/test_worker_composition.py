@@ -5,6 +5,7 @@ import importlib
 import sqlite3
 from functools import partial
 
+import httpx
 import pytest
 
 from companion.config import Settings
@@ -149,7 +150,7 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     from tests.test_article_vision import article
     from tests.test_content import enable, png
 
-    service, vision = enable(core)
+    service, _ = enable(core)
     owner_id, article_id = article(core, 1)
     settings = core.settings.model_copy(update={"memory_enabled": True, "content": service.options})
     clock = core.clock
@@ -161,14 +162,26 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     async def stop(_seconds):
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(content, "HTTPMediaProvider", lambda options: vision)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "离线图片结果"}}]})
+
+    original_provider_init = content.HTTPMediaProvider.__init__
+
+    def offline_provider_init(provider, options):
+        original_provider_init(provider, options, transport=httpx.MockTransport(respond))
+
+    monkeypatch.setattr(content.HTTPMediaProvider, "__init__", offline_provider_init)
     monkeypatch.setattr(content, "fetch_public_image", fetch)
     monkeypatch.setattr(content_worker, "Runtime", partial(Runtime, clock=clock))
     monkeypatch.setattr(asyncio, "sleep", stop)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(content_worker.content_worker(settings))
     assert unavailable_semantics == []
-    assert len(vision.calls) == 1
+    assert len(calls) == 1
+    assert calls[0].method == "POST"
     assert len(opened_stores) == 1
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         opened_stores[0].one("SELECT 1")
