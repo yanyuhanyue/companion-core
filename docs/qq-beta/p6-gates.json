@@ -16,7 +16,7 @@
   "host": "BLOCKED_HOST",
   "host_target_confirmed": true,
   "existing_host_services_unchanged": true,
-  "provider_snapshot": "NOT_INSPECTED",
+  "provider_snapshot": "ABSENT_OWNER_CONFIRMED",
   "offsite_restore": "NOT_VERIFIED",
   "snowluma_actual_onebot_compat_verified": false,
   "protocol": "NOT_RUN_LIVE_ONEBOT",
@@ -45,7 +45,7 @@
     "LIVE_QQ_HUMAN": [],
     "PAID_MODEL": []
   },
-  "next_gate": "Confirm snapshot/backup path and explicitly approve isolated runtime installation; QQ login and a bounded first-five-message test window remain separate.",
+  "next_gate": "Establish and verify a recovery point, record its scope, separate target and successful time; then explicitly approve isolated runtime installation. QQ login and a bounded first-five-message test window remain separate.",
   "R0": "PASS",
   "R1": "BLOCKED_HOST_BACKUP",
   "offline_fixture_ready": true,
@@ -132,5 +132,12 @@
     "package_export_migration": "PASS",
     "replay_and_worker_smoke": "PASS",
     "report_followup": "Report-only followup; current head checks linked from Draft PR19."
+  },
+  "independent_backup": "ABSENT_OWNER_CONFIRMED",
+  "recovery_status_evidence": {
+    "type": "OWNER_REPORT",
+    "date": "2026-10-20",
+    "provider_snapshot_exists": false,
+    "independent_backup_exists": false
   }
 }

@@ -310,10 +310,18 @@
   "container_count_discrepancy": "Report actual inventory; do not assume 13 or alter existing containers.",
   "cloud_security_group": "NOT_INSPECTED",
   "provider_snapshots": "NOT_INSPECTED",
-  "offsite_backup_target": "NOT_CONFIRMED",
+  "offsite_backup_target": "NONE_OWNER_CONFIRMED",
   "host_gate": "BLOCKED_HOST",
   "new_component_ports_listening": [],
   "new_components_installed": [],
   "credentials_accounts_and_bind_source_paths_published": false,
-  "comparison_note": "Container uptime strings and live memory/disk utilization may change naturally. Identity/state/image/ports, network and volume inventories are compared; container environments, commands and user data were not read."
+  "comparison_note": "Container uptime strings and live memory/disk utilization may change naturally. Identity/state/image/ports, network and volume inventories are compared; container environments, commands and user data were not read.",
+  "owner_recovery_followup": {
+    "evidence_type": "OWNER_REPORT",
+    "date": "2026-10-20",
+    "provider_snapshot_exists": false,
+    "independent_backup_exists": false,
+    "server_mutations": [],
+    "gate": "BLOCKED_HOST_BACKUP"
+  }
 }

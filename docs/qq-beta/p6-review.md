@@ -67,4 +67,5 @@ Compose 原因可核对 [Docker loader 的 NamedTagged 要求](https://github.co
 本地 Windows 不证明 POSIX 权限；由新 Linux CI 的正/负卷 fixture 验证。
 stage 日志可能因崩溃丢失，完整费用/UNKNOWN 需要持久数据库和账单对照。
 G1 Reader 授权生命周期未关闭，来源关闭下的文字 Beta 仍需独立审批。
-云端安全组、供应商快照、异地备份目标及生产恢复仍未验证。
+云端安全组和生产恢复仍未验证。2026-10-20 主人确认当前没有供应商快照或独立备份，
+因此 R1 为 `BLOCKED_HOST_BACKUP`；须先建立恢复点，再批准独立安装及真实测试窗口。
