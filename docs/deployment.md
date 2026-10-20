@@ -66,7 +66,7 @@ docker compose up -d companion-api companion-worker companion-diary-worker
 
 初始化会迁移至 `0013_content`；开启 M1 时还会准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
 
-使用“记住这个：…”验证新会话的不同问法、冲突提示、确认、纠正和忘记。相似检索返回的是候选，最终回复前还会检查它是否直接对应问题。语义核对调用使用同一个模型适配器，记入每日记忆预算；预算不足时聊天会继续，并明确说明记忆核对暂不可用。
+使用“/记住这个：…”验证新会话的不同问法、冲突提示、确认、纠正和忘记。相似检索返回的是候选，最终回复前还会检查它是否直接对应问题。语义核对调用使用同一个模型适配器，记入每日记忆预算；预算不足时聊天会继续，并明确说明记忆核对暂不可用。
 
 自动记忆默认为待确认假设，有逐字引用证据，冲突内容标为待审查。敏感内容采用规则过滤加模型约束，仍应检查候选；这并非对所有自然语言敏感信息的完美分类器。Core 不将部署凭据加入上下文，并过滤已知密钥和常见凭据格式。外部内容始终作为数据。
 
@@ -95,7 +95,7 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 - `MODEL_RETRYABLE`：最多 3 次指数退避，保留未知计费预留。
 - `MONTHLY_BUDGET_EXHAUSTED`：停止新模型请求，普通消息得到明确失败提示；提高预算需修改配置。
-- `DELIVERY_UNCERTAIN`：不自动重发；查看 QQ 后使用“核对发送”指令。新普通聊天仍可继续。
+- `DELIVERY_UNCERTAIN`：不自动重发；查看 QQ 后使用“/核对发送”指令。新普通聊天仍可继续。
 - `ERASURE_LEDGER_MISSING/MISMATCH/TRUNCATED`：停止服务，找回最新独立日志再恢复。
 - `OWNER_IDENTITY_MISMATCH`：已有数据库属于另一主人，禁止直接更换 owner；新身份使用新数据库。
 - `WORKER_ALREADY_RUNNING`：已有 Worker 持有 OS 锁，正常关停该实例；不要删除锁文件绕过检查。

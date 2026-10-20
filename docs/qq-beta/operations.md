@@ -65,7 +65,7 @@ Docker 构建验证交给独立 CI 容器 job，Compose dry-run 用脱敏假值�
 
 - 身份不符、冲突 ID、队列满、错误主人、重复回复、账号异常时先停新增 Bridge 的输入与发送；
   不影响其他服务。WS 短暂断线用 0.25–30 秒有界退避，401/403、格式合同或磁盘错误停止等待检查。
-- Outbox `SENDING/DELIVERY_UNCERTAIN` 由真人先查 QQ，再用主人“发送状态 / 核对发送”收口；
+- Outbox `SENDING/DELIVERY_UNCERTAIN` 由真人先查 QQ，再用主人`/发送状态`、`/核对发送`收口；
   禁止改回 PENDING、重放发送、清空 Spool 或复用新 epoch 来解除错误。
 - 停 Core chat worker/API 前收敛已确认入件；保留 Spool、Core DB、最新 ErasureLedger、
   SnowLuma 三卷、加密备份及匿名证据。恢复到新数据库路径，回放最新独立 Ledger；

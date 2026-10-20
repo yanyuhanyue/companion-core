@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from companion import __version__, budget
 from companion.affect import AffectEngine
+from companion.commands import command_parts
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES, ContentService
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
@@ -131,21 +132,20 @@ class Core(Runtime):
                 )
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
+                command, arguments = command_parts(body["text"])
                 diary_command = is_diary_command(body["text"])
                 control_command = is_life_command(body["text"])
                 if control_command:
                     body["control_command"] = True
-                    body["goal_request"] = bool(
-                        re.match(r"安排任务\s+https://", body["text"].strip())
-                    )
+                    body["goal_request"] = command == "安排任务" and arguments.startswith("https://")
                 if diary_command:
                     body["diary_command"] = True
-                    body["diary_correction"] = body["text"].strip().startswith("修改日记")
+                    body["diary_correction"] = command == "修改日记"
                     body["diary_timezone"] = cfg.timezone
-                if body["text"].strip() == "暂停写日记":
+                if command == "暂停写日记" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
                     self.diary.repo.cancel_pending("DIARY_PAUSED")
-                if body["text"].strip() == "暂停主动分享":
+                if command == "暂停主动分享" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
                     s.execute(
                         "UPDATE jobs SET state='CANCELLED' WHERE kind='activity' "
@@ -546,6 +546,9 @@ class Core(Runtime):
 
     async def command_reply(self, job):
         text = json.loads(job["body_json"]).get("text", "").strip()
+        command, arguments = command_parts(text)
+        if not command:
+            return None
         now, s = self.clock(), self.store
         diary_reply = self.diary.command(text, self.settings.owner_qq_id)
         if diary_reply is not None:
@@ -553,6 +556,7 @@ class Core(Runtime):
         life_reply = self.life.command(text, job["event_id"])
         if life_reply is not None:
             return life_reply
+        text = command + (" " + arguments if arguments else "")
         if text == "发送状态":
             uncertain = s.rows(
                 "SELECT message_id,created_at FROM outbox "
@@ -583,8 +587,8 @@ class Core(Runtime):
                 )
                 or "目前还没有长期记忆。"
             )
-        if text.startswith("记住这个"):
-            content = text[len("记住这个") :].lstrip(" :：\n")
+        if command == "记住这个":
+            content = arguments
             evidence_id = job["event_id"]
             if not content:
                 prior = s.one(
@@ -597,7 +601,7 @@ class Core(Runtime):
                     evidence_id = prior["event_id"]
                     content = json.loads(prior["body_json"]).get("text", "")
             if not content or len(content) > 500:
-                return "请用“记住这个：内容”提供 1–500 字的明确事实。"
+                return "请用“/记住这个：内容”提供 1–500 字的明确事实。"
             candidate = Candidate(
                 subject="user",
                 kind="fact",
@@ -624,7 +628,7 @@ class Core(Runtime):
                 memory_id = self.add_memories(candidates, resolutions, now, confirmed=True)[0]
                 review = s.one("SELECT needs_review FROM memories WHERE memory_id=?", (memory_id,))
             if review["needs_review"]:
-                return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“纠正这一条”修订。"
+                return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“/纠正这一条”修订。"
             return f"已记住：{memory_id}"
         match = re.fullmatch(
             r"(确认这一条|忘记这一条|纠正这一条)\s+(mem_[a-f0-9]+)(?:\s+([\s\S]+))?", text
@@ -655,23 +659,19 @@ class Core(Runtime):
             before_command = epoch(self.store)
             reply = await self.command_reply(job) if job["kind"] == "chat" else None
             captured_epoch = epoch(self.store)
-            text = json.loads(job["body_json"]).get("text", "").strip()
+            command, _ = command_parts(json.loads(job["body_json"]).get("text", ""))
             if (
                 reply is not None
-                and (
-                    text.startswith(
-                        (
-                            "读日记",
-                            "日记列表",
-                            "目标列表",
-                            "承诺列表",
-                            "反思列表",
-                            "当前交互状态",
-                            "为什么形成偏好",
-                        )
-                    )
-                    or text == "你记得什么"
-                )
+                and command in {
+                    "读日记",
+                    "日记列表",
+                    "目标列表",
+                    "承诺列表",
+                    "反思列表",
+                    "当前交互状态",
+                    "为什么形成偏好",
+                    "你记得什么",
+                }
                 and before_command != captured_epoch
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)

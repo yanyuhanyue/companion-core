@@ -63,7 +63,7 @@ def test_paraphrased_question_in_new_session_with_old_fact_and_distractors(core,
         *[f"第{i}号项目的归档标签是编号{i:02}" for i in range(20)],
     ]
     for i, fact in enumerate(facts):
-        assert message(core, i, "记住这个：" + fact)["state"] == "SUCCEEDED"
+        assert message(core, i, "/记住这个：" + fact)["state"] == "SUCCEEDED"
     core.settings.max_recent_messages = 0
     assert message(core, 100, question, "new:FriendMessage:10001")["state"] == "SUCCEEDED"
     context = next(
@@ -76,9 +76,9 @@ def test_paraphrased_question_in_new_session_with_old_fact_and_distractors(core,
 
 
 def test_contradictory_remember_commands_mark_both_and_tell_owner(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
     core.model.review = lambda payload: relation(payload, conflict=True)
-    assert message(core, 2, "记住这个：我不喜欢绿茶")["state"] == "SUCCEEDED"
+    assert message(core, 2, "/记住这个：我不喜欢绿茶")["state"] == "SUCCEEDED"
     rows = core.store.rows("SELECT content,needs_review FROM memories")
     assert {r["content"] for r in rows} == {"我喜欢绿茶", "我不喜欢绿茶"}
     assert all(r["needs_review"] for r in rows)
@@ -90,8 +90,8 @@ def test_contradictory_remember_commands_mark_both_and_tell_owner(core):
 
 
 def test_compatible_preferences_are_not_mistaken_for_conflicts(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
-    message(core, 2, "记住这个：我喜欢红茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
+    message(core, 2, "/记住这个：我喜欢红茶")
     assert core.store.one("SELECT COUNT(*) AS n FROM memories")["n"] == 2
     assert not any(
         row["needs_review"] for row in core.store.rows("SELECT needs_review FROM memories")
@@ -122,7 +122,7 @@ def test_remember_promotes_extracted_candidate_and_keeps_id_and_both_evidence(co
     original = core.store.one("SELECT * FROM memories")
     assert original["status"] == "HYPOTHESIS"
     core.model.review = lambda payload: relation(payload, same=True)
-    message(core, 2, "记住这个：" + explicit)
+    message(core, 2, "/记住这个：" + explicit)
     rows = core.store.rows("SELECT * FROM memories")
     assert len(rows) == 1
     assert rows[0]["memory_id"] == original["memory_id"]
@@ -133,9 +133,9 @@ def test_remember_promotes_extracted_candidate_and_keeps_id_and_both_evidence(co
 
 
 def test_invalid_reconciliation_cannot_confirm_or_modify_memory(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
     core.model.review = lambda payload: '{"relations":[{"same":"m999","conflicts":[]}]}'
-    job = message(core, 2, "记住这个：我不喜欢绿茶")
+    job = message(core, 2, "/记住这个：我不喜欢绿茶")
     assert job["state"] == "RETRY_WAIT" and job["last_error_code"] == "MEMORY_REVIEW_INVALID"
     for _ in range(2):
         core.clock.advance(30)
@@ -147,28 +147,28 @@ def test_invalid_reconciliation_cannot_confirm_or_modify_memory(core):
 
 
 def test_reconciliation_timeout_keeps_new_fact_uncommitted(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
     core.model.error = CoreError("MODEL_RETRYABLE", 503)
-    job = message(core, 2, "记住这个：我不喜欢绿茶")
+    job = message(core, 2, "/记住这个：我不喜欢绿茶")
     assert job["state"] == "RETRY_WAIT"
     assert core.store.one("SELECT COUNT(*) AS n FROM memories")["n"] == 1
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
 
 def test_forgetting_during_reconciliation_cannot_reintroduce_old_fact(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
     mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
     core.model.review = lambda payload: relation(payload, same=True)
     core.model.callback = lambda: core.memory.decide(mid, "forget", core.clock())
-    job = message(core, 2, "记住这个：我爱喝绿茶")
+    job = message(core, 2, "/记住这个：我爱喝绿茶")
     assert job["state"] == "RETRY_WAIT" and job["last_error_code"] == "PRIVACY_CHANGED"
     assert core.store.one("SELECT COUNT(*) AS n FROM memories WHERE status!='FORGOTTEN'")["n"] == 0
 
 
 def test_expired_job_cannot_write_memory_after_model_review(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
     core.model.callback = lambda: core.clock.advance(121)
-    message(core, 2, "记住这个：我不喜欢绿茶")
+    message(core, 2, "/记住这个：我不喜欢绿茶")
     assert core.store.one("SELECT COUNT(*) AS n FROM memories")["n"] == 1
 
 
@@ -207,7 +207,7 @@ def test_same_extraction_batch_detects_conflicting_candidates(core):
 
 
 def test_aliased_review_references_cannot_hide_a_conflict_or_commit_partial_batch(core):
-    message(core, 1, "记住这个：我喜欢绿茶")
+    message(core, 1, "/记住这个：我喜欢绿茶")
     core.settings.extraction_min_events = 1
     core.settings.extraction_idle_seconds = 0
     for n, text in [(2, "我爱喝绿茶"), (3, "我不喜欢绿茶")]:
@@ -243,7 +243,7 @@ def test_aliased_review_references_cannot_hide_a_conflict_or_commit_partial_batc
 
 
 def test_semantic_index_is_erased_and_old_backup_cannot_restore_it(core, tmp_path):
-    message(core, 1, "记住这个：用户最喜欢的饮料是茉莉绿茶。")
+    message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
     found = core.memory.search("我平时最爱喝什么？")
     assert found and core.store.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 1
     key = Fernet.generate_key()
@@ -261,8 +261,8 @@ def test_semantic_index_is_erased_and_old_backup_cannot_restore_it(core, tmp_pat
 
 
 def test_similar_wording_does_not_replace_the_requested_attribute(core):
-    message(core, 1, "记住这个：用户最喜欢的饮料是茉莉绿茶。")
-    message(core, 2, "记住这个：用户最喜欢的颜色是蓝色。")
+    message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
+    message(core, 2, "/记住这个：用户最喜欢的颜色是蓝色。")
     hits = core.memory.search("我最喜欢什么颜色？")
     assert "蓝色" in hits[0]["content"]
     core.memory.decide(hits[0]["memory_id"], "forget", core.clock())
@@ -270,7 +270,7 @@ def test_similar_wording_does_not_replace_the_requested_attribute(core):
 
 
 def test_irrelevant_candidates_are_removed_before_the_chat_call(core):
-    message(core, 1, "记住这个：用户最喜欢的饮料是茉莉绿茶。")
+    message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
     core.settings.max_recent_messages = 0
     core.model.recall = lambda payload: '{"relevant":[]}'
     message(core, 2, "我最喜欢什么颜色？", "new:FriendMessage:10001")
@@ -280,7 +280,7 @@ def test_irrelevant_candidates_are_removed_before_the_chat_call(core):
 
 
 def test_memory_review_daily_limit_does_not_block_normal_chat(core):
-    message(core, 1, "记住这个：用户最喜欢的饮料是茉莉绿茶。")
+    message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
     core.settings.memory_daily_micro_usd = 0
     core.settings.max_recent_messages = 0
     job = message(core, 2, "我平时最爱喝什么？", "new:FriendMessage:10001")
@@ -291,7 +291,7 @@ def test_memory_review_daily_limit_does_not_block_normal_chat(core):
 
 
 def test_unknown_recall_reference_is_rejected_before_chat(core):
-    message(core, 1, "记住这个：用户最喜欢的饮料是茉莉绿茶。")
+    message(core, 1, "/记住这个：用户最喜欢的饮料是茉莉绿茶。")
     core.model.recall = lambda payload: '{"relevant":["m999"]}'
     job = message(core, 2, "我平时最爱喝什么？", "new:FriendMessage:10001")
     assert job["state"] == "RETRY_WAIT" and job["last_error_code"] == "MEMORY_REVIEW_INVALID"

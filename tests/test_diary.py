@@ -293,7 +293,7 @@ def test_d13_d14_generation_is_cancelled_by_pause_or_privacy_change(core, pause)
         if pause == "runtime":
             core.diary.set_mode(False, "10001")
         elif pause == "ingest":
-            ingest(core, 100, "暂停写日记")
+            ingest(core, 100, "/暂停写日记")
         elif pause == "config":
             core.settings.diary_enabled = False
         else:
@@ -403,9 +403,9 @@ def test_g0_delete_one_day_preserves_independent_diary_and_reply(core, tmp_path)
     core.diary.schedule_day(other_day)
     assert run(core.diary.generate_once("g0-check"))
     for i, day in ((20, DAY), (21, other_day)):
-        ingest(core, i, f"修改日记 {day} 这是该日期的主人修订")
+        ingest(core, i, f"/修改日记 {day} 这是该日期的主人修订")
         assert run(core.run_once())
-    ingest(core, 22, "读日记")
+    ingest(core, 22, "/读日记")
     assert run(core.run_once())
     saved = core.diary.get_day(other_day, "10001")
     assert saved
@@ -578,9 +578,9 @@ def test_owner_commands_do_not_reenter_diary_or_memory_and_delete_copies(core, s
     generate(core)
     for number, text in enumerate(
         (
-            "读日记",
-            separator.join(("修改日记", "2026-10-18", "私人修订内容")),
-            "删除日记 2026-10-18",
+            "/读日记",
+            separator.join(("/修改日记", "2026-10-18", "私人修订内容")),
+            "/删除日记 2026-10-18",
         ),
         101,
     ):
@@ -643,7 +643,7 @@ def test_read_command_does_not_enqueue_a_diary_erased_during_read(core, monkeypa
         return reply
 
     monkeypatch.setattr(core, "command_reply", erase_after_read)
-    ingest(core, 100, "读日记")
+    ingest(core, 100, "/读日记")
     assert run(core.run_once("chat"))
     assert core.store.rows("SELECT * FROM outbox") == []
     assert (
@@ -691,7 +691,7 @@ def test_malformed_diary_erasure_record_fails_closed(core):
 def test_diary_readback_is_excluded_from_later_model_and_diary_sources(core):
     seed_day(core)
     generate(core)
-    ingest(core, 100, "读日记")
+    ingest(core, 100, "/读日记")
     assert run(core.run_once("chat"))
     core.store.execute("UPDATE outbox SET state='SENT',sent_at=?", (core.clock(),))
     ingest(core, 101, "现在讨论新的事情")

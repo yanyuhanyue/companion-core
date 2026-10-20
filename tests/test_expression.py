@@ -116,7 +116,7 @@ def test_serious_recent_context_and_reply_are_both_checked(core):
 
 
 def test_expression_control_external_and_cross_conversation_are_not_image_sources(core):
-    ingest(core, 1, "读日记 2026-10-18")
+    ingest(core, 1, "/读日记 2026-10-18")
     assert engine(core).intent("evt_test_1", "日记内容。⬡happy⬡").image is None
     ingest(core, 2, "随便聊聊")
     core.store.execute("UPDATE events SET source='system.activity' WHERE event_id='evt_test_2'")
