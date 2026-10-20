@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -149,6 +150,10 @@ def reserve(
                 reserved_micro_usd=estimate,
                 input_bound=estimated_input,
                 output_bound=output_tokens,
+                journal_path=str(Path(approval.journal_path).resolve()),
+                journal_id=store.one(
+                    "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
+                )["value"],
                 lease_token=uid("model_lease"),
                 lease_until=after(now, settings.timeout_seconds + 10),
             )
@@ -157,6 +162,7 @@ def reserve(
                 approval,
                 {
                     "kind": "reserve",
+                    "state": "RESERVED",
                     "request_id": request_id,
                     "minimum_micro_usd": estimate,
                     "contract_sha256": contract_hash,
@@ -269,14 +275,22 @@ def settle(store, settings, request_id, response=None):
 
 
 def _settle_paid(store, settings, admission, response):
-    approval = settings.paid_model
-    if approval is None:
-        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
-    paid_budget.journal(store, approval, allow_settlement=True)
     usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (admission["request_id"],))
     if usage["state"] == "SETTLED":
         return
-    snapshot = json.loads(admission["snapshot_json"])
+    try:
+        snapshot = json.loads(admission["snapshot_json"])
+    except (ValueError, TypeError):
+        snapshot = None
+    if not isinstance(snapshot, dict) or paid_budget.sha(snapshot) != admission["contract_sha256"]:
+        _persist_accounting(
+            store,
+            admission,
+            max(usage["billed_micro_usd"], admission["reserved_micro_usd"]),
+            "UNKNOWN",
+            True,
+        )
+        return
     pricing = SimpleNamespace(
         pricing_known=True,
         **{name: snapshot[name] for name in ("input_rate", "cached_input_rate", "output_rate")},
@@ -308,14 +322,16 @@ def _settle_paid(store, settings, admission, response):
             amount, blocked = max(actual, amount), True
         else:
             amount, state = actual, "SETTLED"
-    current_rates = (settings.input_rate, settings.cached_input_rate, settings.output_rate)
-    if current_rates != (pricing.input_rate, pricing.cached_input_rate, pricing.output_rate):
+    if (settings.input_rate, settings.cached_input_rate, settings.output_rate) != (
+        pricing.input_rate,
+        pricing.cached_input_rate,
+        pricing.output_rate,
+    ):
         amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
     if usage["state"] == "UNKNOWN":
-        # Unsolicited/late results do not release money or concurrency automatically.
         amount, state = max(amount, usage["billed_micro_usd"]), "UNKNOWN"
-    if blocked:
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
+    # Mutable enabling approval is deliberately irrelevant to accounting custody.
+    _persist_accounting(store, admission, amount, state, blocked)
     if valid:
         store.execute(
             "UPDATE model_usage SET input_tokens=?,output_tokens=?,cached_input_tokens=? "
@@ -327,22 +343,50 @@ def _settle_paid(store, settings, admission, response):
                 admission["request_id"],
             ),
         )
+
+
+def _persist_accounting(store, admission, amount, state, blocked, evidence_sha256=None):
+    """Record known costs even when approval is disabled or journal custody fails.
+
+    No journal failure may roll back a known larger charge. The DB stop is committed;
+    a damaged/missing independent journal additionally prevents future admission.
+    """
+    custody = SimpleNamespace(journal_path=admission["journal_path"])
+    journal_failed = False
+    try:
+        identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+        if not identity or identity["value"] != admission["journal_id"]:
+            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        paid_budget.journal(store, custody, allow_settlement=True)
+    except CoreError:
+        journal_failed = True
+    if journal_failed:
+        amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
     store.execute(
         "UPDATE model_usage SET billed_micro_usd=?,state=? WHERE request_id=?",
         (amount, state, admission["request_id"]),
     )
-    paid_budget.journal(
-        store,
-        approval,
-        {
+    if not journal_failed:
+        record = {
             "kind": "blocked" if blocked else "settle",
+            "state": state,
             "request_id": admission["request_id"],
             "minimum_micro_usd": amount,
             "contract_sha256": admission["contract_sha256"],
             "io_started_at": admission["io_started_at"],
-        },
-        allow_settlement=True,
-    )
+        }
+        if evidence_sha256:
+            record["evidence_sha256"] = evidence_sha256
+        try:
+            paid_budget.journal(store, custody, record, allow_settlement=True)
+        except CoreError:
+            amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
+            store.execute(
+                "UPDATE model_usage SET billed_micro_usd=?,state=? WHERE request_id=?",
+                (amount, state, admission["request_id"]),
+            )
+    if blocked:
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
 
 
 async def complete(model, store, settings, request_id, messages, scenario, clock):
@@ -392,6 +436,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             approval,
             {
                 "kind": "io_started",
+                "state": "RESERVED",
                 "request_id": request_id,
                 "minimum_micro_usd": row["reserved_micro_usd"],
                 "contract_sha256": row["contract_sha256"],
@@ -431,10 +476,6 @@ def record_provider_discrepancy(
     ):
         raise CoreError("INVALID_PROVIDER_RECONCILIATION", 400)
     with store.transaction():
-        approval = settings.paid_model
-        if approval is None:
-            raise CoreError("PAID_APPROVAL_REQUIRED", 503)
-        paid_budget.journal(store, approval, allow_settlement=True)
         row = store.one(
             "SELECT a.*,m.billed_micro_usd FROM model_admissions a "
             "JOIN model_usage m USING(request_id) WHERE request_id=?",
@@ -447,21 +488,4 @@ def record_provider_discrepancy(
             row["reserved_micro_usd"],
             actual_micro_usd if currency == "USD" else 0,
         )
-        store.execute(
-            "UPDATE model_usage SET state='UNKNOWN',billed_micro_usd=? WHERE request_id=?",
-            (amount, request_id),
-        )
-        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
-        paid_budget.journal(
-            store,
-            approval,
-            {
-                "kind": "blocked",
-                "request_id": request_id,
-                "minimum_micro_usd": amount,
-                "contract_sha256": row["contract_sha256"],
-                "io_started_at": row["io_started_at"],
-                "evidence_sha256": evidence_sha256,
-            },
-            allow_settlement=True,
-        )
+        _persist_accounting(store, row, amount, "UNKNOWN", True, evidence_sha256)

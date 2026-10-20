@@ -19,7 +19,8 @@ def upgrade():
         "contract_sha256 TEXT NOT NULL,payload_sha256 TEXT NOT NULL,snapshot_json TEXT NOT NULL,"
         "reserved_micro_usd INTEGER NOT NULL CHECK(reserved_micro_usd>0),"
         "input_bound INTEGER NOT NULL,output_bound INTEGER NOT NULL,lease_token TEXT NOT NULL,"
-        "lease_until TEXT NOT NULL,io_started_at TEXT)"
+        "lease_until TEXT NOT NULL,io_started_at TEXT,"
+        "journal_path TEXT NOT NULL,journal_id TEXT NOT NULL)"
     )
     op.execute("CREATE INDEX model_admission_logical ON model_admissions(logical_request_id)")
 

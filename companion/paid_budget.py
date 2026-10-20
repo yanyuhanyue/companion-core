@@ -136,7 +136,7 @@ def journal(store, approval, record=None, *, allow_settlement=False):
             if record and request_id == record["request_id"]:
                 continue
             usage = store.one(
-                "SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (request_id,)
+                "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?", (request_id,)
             )
             admission = store.one(
                 "SELECT contract_sha256,io_started_at FROM model_admissions WHERE request_id=?",
@@ -146,6 +146,7 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 not usage
                 or not admission
                 or usage["billed_micro_usd"] < row["minimum_micro_usd"]
+                or usage["state"] != row["state"]
                 or admission["contract_sha256"] != row["contract_sha256"]
                 or admission["io_started_at"] != row.get("io_started_at")
             ):
