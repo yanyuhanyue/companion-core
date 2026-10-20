@@ -18,10 +18,12 @@ Mock/Fake/本地隔离夹具，`paid_requests=0`、`new_live_QQ_inputs=0`、`new
 |---|---|
 | 开始基线 | `git fetch --prune origin`、status/branch/worktree/PR 与 main CI 查询，退出0；没有改用户文件 |
 | B3 恢复定向 | 下方 Windows 命令：57 passed、0 skipped、2 warnings、59.49s，退出0；包含8个机器证据约束/负例 |
-| B1 预算 | 候选完成后由其独立报告和固定 SHA CI 记录，不预填 PASS |
-| B2 有界发送 | 候选完成后由其独立报告和固定 SHA CI 记录，不预填 PASS |
-| B4 成本基准 | 候选完成后由其独立报告和固定 SHA CI 记录，不预填收益 |
-| 完整组合 | 待本地组合验证；不是 main 已合并或在线已升级 |
+| B1 预算 | 精确 `5cf997a801f1ab3826456b9264dcf67e71f3eba4`：`./scripts/check.ps1 -TestFiles @('tests/test_paid_model_gate.py','tests/test_diary.py','tests/test_release_migration.py')`，118 passed、1既有warning、196.10s；预算62/日记50/迁移6；独立资金矩阵7 passed、14.94s |
+| B2 有界发送 | 精确 `1a452d287185e969cff7ecb52a469e218b194d57`：公开窗口集47 passed、92.63s，独立故障集7 passed、16.87s |
+| B4 成本基准 | 精确 `1346fa29cb1f63651377dc33525a09fc96cd526a`：基准/M0/affect定向37 passed、1既有warning、89.56s；基准CLI退出0 |
+| 完整组合 | 冻结组合 `3e5400d82ea58623118f6f97d84357e35d4135c6`，`./scripts/check.ps1`：895 passed、6 skipped、1既有warning、892.19s，退出0 |
+| 显式浏览器补测 | 同一冻结源码，`COMPANION_TEST_BROWSER=1 ./scripts/check.ps1 -TestFiles tests/test_source_browser.py`：4 passed、1既有warning、8.99s，退出0 |
+| 冻结组合附加验证 | 同一 `3e5400d`：`uv build --offline`、`scripts/verify_package.py`、`scripts/replay.py`、`scripts/smoke.py`、`scripts/verify_onebot_compose.py` 均退出0 |
 
 ```powershell
 uv sync --frozen --extra onebot --group reader
@@ -32,6 +34,45 @@ B3 验证在 Windows/Python3.12.10、冻结62依赖的独立工作树进行，ru
 两个警告分别为既有 Starlette/httpx 弃用提示，以及本轮 Windows pytest 缓存重命名权限提示；
 后者不属于既有警告，测试没有因此失败。只清理了该次检查自己新建的 GUID 临时目录，
 未触碰旧审批拒绝清理的材料。
+
+最终组合全量的6项跳过包括默认未开启的4个 Chromium 用例，已以上述显式补测通过；
+另2项是本机无法创建符号链接。两次运行都只有既有 Starlette/httpx 弃用提示。
+完整组合开始前与结束后163个源码、测试、脚本及冻结依赖文件 SHA256 不变。
+最终门禁的8个约束测试另跑通过（0.32s），源码不再改动；不把组合树冒称为任一支线 HEAD。
+
+| 工作包 | 固定候选 / Draft PR | 同 HEAD CI 证明位置 |
+|---|---|---|
+| B1 | `5cf997a801f1ab3826456b9264dcf67e71f3eba4` / [#24](https://github.com/yanyuhanyue/companion-core/pull/24) | push 39411592236 / PR 39411607122，最终逐项结论在 PR 说明 |
+| B2 | `1a452d287185e969cff7ecb52a469e218b194d57` / [#25](https://github.com/yanyuhanyue/companion-core/pull/25) | push 39411621337 / PR 39411634894，最终逐项结论在 PR 说明 |
+| B4 | `1346fa29cb1f63651377dc33525a09fc96cd526a` / [#26](https://github.com/yanyuhanyue/companion-core/pull/26) | push 39411647511 / PR 39411661227，最终逐项结论在 PR 说明 |
+| B3 | 本文所在支线的最终 PR HEAD | 自身完整 SHA、push/PR run ID 与结论由 PR 元数据/说明及外部执行清单证明，避免自引用提交循环 |
+
+这些是实际创建的 Draft PR 和工作流 ID，不能仅凭 ID 宣称成功。
+此文档冻结时各新 CI 尚在执行；最终交付须另外核对准确 head_sha 和每个 job，
+结果写入各 PR 说明及私密机器清单，不改写本提交来伪造自身 CI。
+`validation.failures` 仅表示最终未解决失败；红例、被替代的中间运行及基准失败样本均保留。
+
+附加验证使用已有冻结依赖与公开 embedding cache，`HF_HUB_OFFLINE=1`，没有下载模型。
+wheel/sdist 及无 Git 导出重包排除私密 canary，安装 wheel 初始化迁移通过；回放100事件/30事实，
+recall@6=1、公开动作0，实际模型准确率未测。smoke 覆盖 API、chat/diary/life/executive/content 五类 worker、Demo 私密投递及鉴权。
+Compose 仅合成配置/build plan 检查，未连接 daemon、读取真实环境或拉起 SnowLuma；
+本地 daemon 关闭，不将其记作容器运行通过。
+
+预算与发送独立审查见 [独立安全审查](p8b-independent-review.md)。B3 草案另由非作者检查，
+8个机器证据约束测试通过（0.31s），最终报告增量继续接受审查。
+中途源码被新缺陷修复替代的全量运行均标记 CANCELLED_SUPERSEDED，不能当作全量通过。
+曾有一次组合测试准确阻断遗留 Demo RESERVED 账目：调整的是合成日记测试夹具，
+在切换 live Mock 前结算 Demo 记录，未放宽未决账目 guard。
+
+B4 的12样本/11组结果：chat均12次，合成 relevance review 从9次变为2次；
+两组必要参考均只保留7/8，试验遗漏间接回忆，基线在压力样本遗漏偏好。
+结论 DESIGN_ONLY_NO_PRODUCTION_BENEFIT_PROVEN，保留失败，不实施生产优化；
+真实 usage/token/cache/cost/provider latency 全为 null。synthetic_estimate 为 Unicode 字符代理，
+与另列的保守 UTF-8 字节上界区分，均不是真实 tokenizer usage；
+后台四场景仅为 payload simulation，不能冒称实际 worker 收益。
+
+三个作者子任务清理本轮新建临时/缓存目录时被自动审批拒绝，原因仅为 `blocked by policy`。
+目录和诊断已保留，未换工具或路径重试；每次 check.ps1 只清理自己新建的 GUID 目录。
 
 恢复夹具证明的是：历史非空 SQLite 的旧列/FTS/向量/证据不被迁移破坏；最新独立
 ErasureLedger 在发布恢复文件前清除已遗忘闭包；source-grant 纠正后继/旧 COMPLETE 模糊归属

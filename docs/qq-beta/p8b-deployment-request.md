@@ -14,7 +14,7 @@
 
 历史运行依据是 P8-A 固定报告，**本轮没有重新观测主机**：
 源码 `940b6f28c16f7d495c3ff86e6b5bc7fad63e917a`、配置 `P7-DEMO-1`、schema `0015_article_images`。
-已合并 main 包含 `0016_source_grants`；B1 若新增迁移，必须把完整单链和最终 head 纳入批准，
+已合并 main 包含 `0016_source_grants`；B1 候选新增 `0017_paid_model_gate`，必须把完整单链和最终 head 纳入批准，
 不能把“0015→0016”当作自动批准以后的所有迁移。候选完整 SHA、配置哈希和迁移 head 现为 `null/BLOCKED`。
 
 | 对象 | 历史记录的准确 digest | 新候选获批 digest |
@@ -52,7 +52,9 @@
    SnowLuma 和原服务停机权限分别确认。先记录 PENDING/LEASED/SENDING/DELIVERY_UNCERTAIN、
    预算 RESERVED/UNKNOWN、Spool 未确认项、固定 epoch、窗口账本，禁止自动消费历史项。
 3. 使用现有 Core `backup` API 保全已提交 WAL。独立保存最新 ErasureLedger 的
-   ledger_id、末序号/链尾、hash、时间和一致性边界；预算恢复还须核对 B1 的持久准入账本。
+   ledger_id、末序号/链尾、hash、时间和一致性边界；另保全最新预算及窗口 journal 的身份、
+   序号/链尾、hash、独立故障域和不可变 custody，不能因已撤销审批或配置路径旋转而遗漏原账本。
+   预算恢复还须核对 B1 的持久准入账本、费用/状态/I/O fence，正式恢复后的付费准入仍被阻断。
    不能只恢复旧 DB 中的费用/次数而丢掉较新的调用。密钥与密文分离，演练独立密钥恢复。
 4. 仅向新隔离目标运行现有 `restore`。迁移单链到获批 head，在发布文件前回放最新 Ledger、
    检查身份/链、integrity/FK、归属冻结、未知费用和发送状态。任何失败均不发布恢复目标。

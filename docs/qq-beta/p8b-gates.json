@@ -10,16 +10,90 @@
     "prs_18_23_merged": true,
     "runtime_observation": "HISTORICAL_P8A_ONLY_NOT_RECHECKED"
   },
-  "pull_requests": [],
+  "pull_requests": [
+    {
+      "track": "B1",
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/24",
+      "head_sha": "5cf997a801f1ab3826456b9264dcf67e71f3eba4",
+      "ci_attestation": "EXACT_HEAD_EXTERNAL_ATTESTATION_REQUIRED"
+    },
+    {
+      "track": "B2",
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/25",
+      "head_sha": "1a452d287185e969cff7ecb52a469e218b194d57",
+      "ci_attestation": "EXACT_HEAD_EXTERNAL_ATTESTATION_REQUIRED"
+    },
+    {
+      "track": "B3",
+      "url": null,
+      "head_sha": null,
+      "ci_attestation": "EXACT_HEAD_EXTERNAL_ATTESTATION_REQUIRED"
+    },
+    {
+      "track": "B4",
+      "url": "https://github.com/yanyuhanyue/companion-core/pull/26",
+      "head_sha": "1346fa29cb1f63651377dc33525a09fc96cd526a",
+      "ci_attestation": "EXACT_HEAD_EXTERNAL_ATTESTATION_REQUIRED"
+    }
+  ],
   "offline_gates": {
-    "budget_gate": {"state": "PENDING", "evidence": []},
-    "input_gate": {"state": "PENDING", "evidence": []},
-    "provider_concurrency_gate": {"state": "PENDING", "evidence": []},
-    "window_lifetime_gate": {"state": "PENDING", "evidence": []},
-    "unknown_retention_gate": {"state": "PENDING", "evidence": []},
-    "bounded_sender_gate": {"state": "PENDING", "evidence": []},
-    "recovery_synthetic": {"state": "PENDING", "evidence": []},
-    "token_benchmark": {"state": "PENDING", "evidence": []}
+    "budget_gate": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "input_gate": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "provider_concurrency_gate": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "window_lifetime_gate": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "unknown_retention_gate": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "bounded_sender_gate": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "recovery_synthetic": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md"
+      ]
+    },
+    "token_benchmark": {
+      "state": "OFFLINE_PASS",
+      "evidence": [
+        "p8b-execution.md",
+        "p8b-independent-review.md",
+        "B4 1346fa29cb1f63651377dc33525a09fc96cd526a: DESIGN_ONLY_NO_PRODUCTION_BENEFIT_PROVEN; actual usage/cost/latency null"
+      ]
+    }
   },
   "runtime_gates": {
     "recovery_nonempty": "BLOCKED_NOT_VERIFIED",
@@ -28,19 +102,66 @@
     "M1": "DISABLED_NOT_AUTHORIZED",
     "G1_runtime": "BLOCKED_NOT_DEPLOYED",
     "historical_phone_samples": 5,
-    "real_QQ_strict": {"first5": 0, "all20": 0},
-    "live_E2E": {"paired_samples": 0, "p50_ms": null, "p95_ms": null}
+    "real_QQ_strict": {
+      "first5": 0,
+      "all20": 0
+    },
+    "live_E2E": {
+      "paired_samples": 0,
+      "p50_ms": null,
+      "p95_ms": null
+    }
   },
   "validation": {
     "commands_reference": "p8b-execution.md",
     "failures": [],
     "local_docker": "SKIPPED_BY_ENV_DAEMON_OFF",
-    "combined": {"state": "PENDING"}
+    "combined": {
+      "state": "OFFLINE_PASS",
+      "source_sha": "3e5400d82ea58623118f6f97d84357e35d4135c6",
+      "passed": 895,
+      "skipped": 6,
+      "warnings": 1,
+      "seconds": 892.19,
+      "opt_in_browser": {
+        "passed": 4,
+        "skipped": 0,
+        "warnings": 1,
+        "seconds": 8.99
+      },
+      "remaining_local_skip_reason": "2 tests: symlink privileges unavailable",
+      "source_manifest_files": 163,
+      "source_hashes_unchanged": true,
+      "ci_run_references": {
+        "B1": {
+          "push": 39411592236,
+          "pull_request": 39411607122
+        },
+        "B2": {
+          "push": 39411621337,
+          "pull_request": 39411634894
+        },
+        "B4": {
+          "push": 39411647511,
+          "pull_request": 39411661227
+        },
+        "B3": null
+      },
+      "ci_conclusion": "EXACT_HEAD_EXTERNAL_ATTESTATION_REQUIRED_IN_FINAL_PR_DESCRIPTIONS",
+      "resolved_findings_reference": "p8b-independent-review.md",
+      "original_monthly_transaction_race": "NOT_REPRODUCED"
+    }
   },
   "actions": {
-    "vps_connections": 0, "vps_writes": 0, "qq_inputs": 0, "qq_sends": 0,
-    "paid_requests": 0, "real_data_copies": 0, "merges": 0,
-    "branch_deletions": 0, "protected_cleanup": 0
+    "vps_connections": 0,
+    "vps_writes": 0,
+    "qq_inputs": 0,
+    "qq_sends": 0,
+    "paid_requests": 0,
+    "real_data_copies": 0,
+    "merges": 0,
+    "branch_deletions": 0,
+    "protected_cleanup": 0
   },
   "approvals": "p8b-approvals.json",
   "production_ready": false
