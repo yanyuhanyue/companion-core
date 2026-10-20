@@ -19,6 +19,7 @@ from companion.core import Core
 from companion.exploration import ReadItem, ReadResult
 from companion.model import ModelResponse
 from companion.observation import ArticleEvidence, ReadingEvidence, ReadingSource, SubtitleSpan
+from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot
 from companion.store import encode
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import FakeModel, ingest, run
@@ -30,11 +31,7 @@ class GroundedDiaryModel(FakeModel):
             return await super().complete(messages, scenario)
         self.calls.append((messages, scenario))
         payload = json.loads(messages[-1]["content"])
-        source = next(
-            item
-            for item in payload["sources"]
-            if item.get("result_status") == "FETCHED"
-        )
+        source = next(item for item in payload["sources"] if item.get("result_status") == "FETCHED")
         return ModelResponse(
             encode(
                 {
@@ -56,9 +53,7 @@ class GroundedDiaryModel(FakeModel):
                         {
                             "kind": "question",
                             "text": "之后可以继续了解这个话题。",
-                            "evidence": [
-                                {"source_id": source["source_id"], "exact_quote": ""}
-                            ],
+                            "evidence": [{"source_id": source["source_id"], "exact_quote": ""}],
                         },
                     ],
                 }
@@ -149,6 +144,19 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
     diary_model = GroundedDiaryModel()
     core.diary.model = diary_model
     active, started = core, core.clock.now
+    grants = {}
+    for name in sources:
+        snapshot = SourceGrantSnapshot(
+            grant_id="grant_" + ("1" if name == "heybox" else "2") * 32,
+            epoch=1,
+            fingerprint=("a" if name == "heybox" else "b") * 64,
+            expires_at=started + timedelta(days=8),
+        )
+        core.observations.grants.register(
+            SourceGrantRegistration(adapter_id=name, **snapshot.snapshot())
+        )
+        cfg.observation_adapters[name].source_grant_required = True
+        grants[name] = snapshot
     records = []
     try:
         for day in range(7):
@@ -164,7 +172,7 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
                 if adapter == "bili"
                 else f"https://www.xiaoheihe.cn/app/bbs/link/{1000 + day}"
             )
-            lease = active.exploration.lease(adapter)
+            lease = active.exploration.lease(adapter, grants[adapter])
             assert lease and lease["operation"] == "discover"
             discovered = active.exploration.complete(
                 adapter,
@@ -173,6 +181,7 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
                     lease_token=lease["lease_token"],
                     status="SUCCESS",
                     used_bytes=500,
+                    source_grant=grants[adapter],
                     items=[ReadItem(title=f"探索设计材料{day + 1}", topic="探索设计", url=url)],
                 ),
             )["event_ids"][0]
@@ -183,21 +192,25 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             assert len(decisions) == 1 and decisions[0]["decision"] == "EXPLORE"
             goal_id = decisions[0]["goal_id"]
             assert active.exploration.schedule_goal()
-            lease = active.exploration.lease(adapter)
+            lease = active.exploration.lease(adapter, grants[adapter])
             item = read_item(active, adapter, day, url)
             receipt = ReadResult(
                 lease_token=lease["lease_token"],
                 status="SUCCESS",
                 used_bytes=1200,
+                source_grant=grants[adapter],
                 items=[item],
             )
             completed = active.exploration.complete(adapter, lease["request_id"], receipt)
             assert active.exploration.complete(adapter, lease["request_id"], receipt)["duplicate"]
             fetched = completed["event_ids"][0]
             assert active.goals.get(goal_id)["state"] == "DONE"
-            assert active.store.one(
-                "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (fetched,)
-            )["source_event_id"] == discovered
+            assert (
+                active.store.one(
+                    "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (fetched,)
+                )["source_event_id"]
+                == discovered
+            )
             trait = active.store.one("SELECT * FROM traits WHERE category='interest'")
             assert trait["independent_days"] == day + 1
             assert trait["independent_sessions"] == day + 1
@@ -217,9 +230,7 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             assert active.social.flush()
             assert not active.social.flush()
             assert not active.schedule_proactive()  # One common daily allowance.
-            message = active.store.one(
-                "SELECT * FROM outbox WHERE origin_event_id=?", (fetched,)
-            )
+            message = active.store.one("SELECT * FROM outbox WHERE origin_event_id=?", (fetched,))
             assert message["action_type"] == "qq.private.proactive"
             assert item.text in json.loads(message["content_json"])["text"]
             assert "看完" not in message["content_json"]
@@ -239,9 +250,12 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
                 active = Core(cfg, core.model, core.clock)
                 active.diary.model = diary_model
                 assert active.store.one("SELECT COUNT(*) n FROM traits")["n"] == 1
-                assert active.store.one(
-                    "SELECT COUNT(*) n FROM wake_decisions WHERE decision<>'SKIP'"
-                )["n"] == 6
+                assert (
+                    active.store.one(
+                        "SELECT COUNT(*) n FROM wake_decisions WHERE decision<>'SKIP'"
+                    )["n"]
+                    == 6
+                )
 
         assert len(diary_model.calls) == 7
         assert len(active.store.rows("SELECT * FROM diary_entries WHERE status='COMMITTED'")) == 7
@@ -256,9 +270,7 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
         try:
             for instance in (active, restored):
                 for event_id in (source, fetched):
-                    event = instance.store.one(
-                        "SELECT * FROM events WHERE event_id=?", (event_id,)
-                    )
+                    event = instance.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
                     assert event["redacted"] and event["body_json"] == "{}"
                 with pytest.raises(CoreError, match="GOAL_NOT_FOUND"):
                     instance.goals.get(goal_id)
@@ -266,17 +278,23 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
                     "SELECT topic,scope_json FROM goals WHERE goal_id=?", (goal_id,)
                 ) == {"topic": "", "scope_json": "{}"}
                 assert not instance.store.rows("SELECT * FROM traits")
-                assert instance.store.one(
-                    "SELECT state FROM social_candidates WHERE event_id=?", (fetched,)
-                )["state"] == "ERASED"
+                assert (
+                    instance.store.one(
+                        "SELECT state FROM social_candidates WHERE event_id=?", (fetched,)
+                    )["state"]
+                    == "ERASED"
+                )
                 message = instance.store.one(
                     "SELECT * FROM outbox WHERE message_id=?", (message_id,)
                 )
                 assert message["state"] == "CANCELLED" and message["content_json"] == "{}"
                 assert instance.diary.get_day(day, cfg.owner_qq_id) is None
-                assert instance.store.one(
-                    "SELECT status FROM diary_entries WHERE local_date=?", (day.isoformat(),)
-                )["status"] == "REDACTED"
+                assert (
+                    instance.store.one(
+                        "SELECT status FROM diary_entries WHERE local_date=?", (day.isoformat(),)
+                    )["status"]
+                    == "REDACTED"
+                )
                 assert not instance.store.rows("PRAGMA foreign_key_check")
                 assert instance.store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
         finally:

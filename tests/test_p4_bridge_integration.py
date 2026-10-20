@@ -24,7 +24,7 @@ from companion.store import Store
 from source_reader.bili_tools import BilibiliToolReader
 from source_reader.heybox import HeyboxReader
 from source_reader.heybox_source import NativeHeyboxSource
-from source_reader.network import PublicHTTP
+from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import tick
 from tests.conftest import FakeModel, run
 from tests.test_content_bridge import bridge_module  # noqa: F401
@@ -32,7 +32,7 @@ from tests.test_content_bridge import config as bridge_config
 from tests.test_content_bridge import event as bridge_event
 from tests.test_exploration import configure
 from tests.test_heybox_reader import URL, mock_pool
-from tests.test_plugin_readonly import SECRET, grant, native_post
+from tests.test_plugin_readonly import SECRET, native_post, registered_grant
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response
 from tests.test_source_reader import URL as BILI_URL
 
@@ -122,7 +122,7 @@ def article(sample=None):
 
 async def read_source(core, app, tmp_path, *rows, before=None):
     pool, backend = mock_pool(*rows)
-    path = grant(tmp_path, now=datetime.fromisoformat(core.clock()))
+    path = registered_grant(core, tmp_path)
     async with NativeHeyboxSource(
         path, pool, clock=lambda: datetime.fromisoformat(core.clock())
     ) as source:
@@ -131,7 +131,11 @@ async def read_source(core, app, tmp_path, *rows, before=None):
         async with client(
             app, core.settings.observation_adapters["heybox"].token.get_secret_value()
         ) as http:
-            worked = await tick(http, HeyboxReader(None, source, clock=core.clock), "heybox")
+            try:
+                worked = await tick(http, HeyboxReader(None, source, clock=core.clock), "heybox")
+            except ReadFailure as error:
+                assert before is not None and str(error) == "OWNER_ACCOUNT_AUTHORIZATION_REQUIRED"
+                worked = False
     assert all(w.startswith(b"GET ") for w in backend.requests)
     return worked, backend
 
@@ -222,14 +226,19 @@ def test_p4_grant_disabled_blocks_io_before_get(rehearsal, tmp_path):
     async def scenario():
         async with client(app, core.settings.bridge_token.get_secret_value()) as http:
             await submit(bridge, http)
-            _, backend = await read_source(core, app, tmp_path, response(article()), before=revoke)
-            assert not backend.requests
-            assert (
-                core.store.one("SELECT last_error_code FROM exploration_requests")[
-                    "last_error_code"
-                ]
-                == "OWNER_ACCOUNT_AUTHORIZATION_REQUIRED"
+            worked, backend = await read_source(
+                core, app, tmp_path, response(article()), before=revoke
             )
+            assert not worked and not backend.requests
+            row = core.store.one(
+                "SELECT state,reserved_requests,started_at FROM exploration_requests"
+            )
+            assert row == {"state": "QUEUED", "reserved_requests": 1, "started_at": None}
+            core.clock.advance(
+                31
+            )  # No lease was acquired; the existing bounded fallback still works.
+            assert await core.run_once()
+            await receipt(http, [])
 
     run(scenario())
 

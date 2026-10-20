@@ -15,8 +15,16 @@ async def read_result(reader, item):
     )
     result = {"lease_token": item["lease_token"], "status": "SUCCESS", "items": []}
     try:
+        snapshot = getattr(reader, "grant_snapshot", lambda **kwargs: None)
+        current_grant = snapshot(required=bool(item.get("source_grant")))
+        if current_grant is not None:
+            result["source_grant"] = current_grant
+        if item.get("source_grant") is not None and current_grant != item["source_grant"]:
+            raise ReadFailure("SOURCE_GRANT_REVISION_CHANGED")
         async with asyncio.timeout(20):
             result["items"] = await reader.read(item, budget)
+        if snapshot(required=bool(current_grant)) != current_grant:
+            raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
         if budget.used_bytes > budget.max_bytes:
             raise ReadFailure("READER_BYTE_LIMIT")
     except ReadFailure as error:
@@ -42,11 +50,15 @@ async def read_result(reader, item):
 
 async def tick(core_client, reader, adapter_id):
     prefix = "/internal/v2/readers/" + adapter_id
-    response = await core_client.post(prefix + "/lease")
+    snapshot = getattr(reader, "grant_snapshot", lambda **kwargs: None)(required=True)
+    response = await core_client.post(prefix + "/lease", **(
+        {"json": {"source_grant": snapshot}} if snapshot is not None else {}))
     response.raise_for_status()
     item = response.json()["item"]
     if item is None:
         return False
+    if item.get("source_grant") != snapshot:
+        raise ReadFailure("SOURCE_GRANT_LEASE_MISMATCH")
     result = await read_result(reader, item)
     # An uncertain receipt is never followed by replaying public I/O locally.
     response = await core_client.post(prefix + "/" + item["request_id"] + "/result", json=result)

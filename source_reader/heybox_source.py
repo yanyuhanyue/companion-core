@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 
 import httpcore
 
-from source_reader.accounts import HEYBOX_COMMIT, account_grant
+from source_reader.accounts import HEYBOX_COMMIT, account_grant, source_grant
 from source_reader.heybox_signing import generate_hkey
 from source_reader.network import PublicNetwork, ReadFailure, post_url, response_body
 
@@ -62,6 +62,9 @@ class NativeHeyboxSource:
 
     async def __aenter__(self):
         return self
+
+    def grant_snapshot(self, required=False):
+        return source_grant(self.account_file, self.clock(), "heybox", required)
 
     async def __aexit__(self, *args):
         await self.pool.aclose()
