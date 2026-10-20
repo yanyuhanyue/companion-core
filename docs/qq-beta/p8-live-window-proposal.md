@@ -1,5 +1,12 @@
 # P8 新 QQ 窗口审批提案（未授权执行）
 
+P8-B 增量：本文件的 CLI 缺口描述冻结于 main `a33d3cb`；B2 的独立 Draft
+候选用于离线补齐硬限额，不意味着已经部署或取得新发送许可。
+待签字段见 [p8b-approvals.json](p8b-approvals.json) 的 `qq_window`，
+部署与停止程序见 [申请草案](p8b-deployment-request.md)。必须固定 B2 最终 SHA、
+具体 CLI、私密计划/独立窗口审计账本、镜像/配置 attestation 和合成故障结果后再单独签署。
+ACK 仍不替代手机可见回执，任何 UNKNOWN 都先停止；P7 旧许可不能复用。
+
 状态：`PROPOSAL_ONLY / LIVE_BLOCKED`。本轮 P8-A 没有新增 QQ 登录、发送、撤回或付费调用。
 P7 的五次发送额度已经用完，旧窗口已关闭，**可复用的旧发送许可为 0**。
 本提案不把代码合并、分支清理或 P8-A 离线通过解释为部署、登录、发送、付费或 M1 授权。
