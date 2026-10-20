@@ -5,6 +5,7 @@ provider rendering contract; a local artifact alone does not prove remote framin
 """
 
 import hashlib
+import hmac
 import json
 import os
 from datetime import datetime
@@ -20,10 +21,24 @@ def sha(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
+def snapshot(settings):
+    approval = settings.paid_model
+    value = approval.model_dump(mode="json", exclude={"tokenizer_path", "journal_path"})
+    # Private per-window credential binding, never the raw key or a public account identifier.
+    value["credential_tag"] = hmac.new(
+        settings.model_key.get_secret_value().encode(),
+        encode([approval.window_id, approval.provider, approval.endpoint]).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return value
+
+
 def contract(settings, now):
     approval = settings.paid_model
     if approval is None:
         raise CoreError("PAID_APPROVAL_REQUIRED", 503)
+    if not settings.model_key.get_secret_value():
+        raise CoreError("PAID_MODEL_KEY_REQUIRED", 503)
     current = datetime.fromisoformat(now)
     if current.tzinfo is None or not approval.starts_at <= current < approval.expires_at:
         raise CoreError("PAID_APPROVAL_EXPIRED", 503)

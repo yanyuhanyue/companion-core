@@ -813,3 +813,45 @@ def test_model_adapter_with_different_settings_cannot_use_another_admission(core
 
     asyncio.run(exercise())
     assert calls == []
+
+
+@pytest.mark.parametrize("stage", ["after_reserve", "between_requests"])
+def test_credential_rotation_cannot_reuse_existing_approval_window(core, tmp_path, stage):
+    from companion import budget
+    from companion.model import ModelResponse
+
+    approved_live(core, tmp_path)
+    messages = [{"role": "user", "content": "hello"}]
+    request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    if stage == "between_requests":
+        budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
+    core.settings.model_key = SecretStr("different-synthetic-account-key")
+    calls = []
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: (
+                    calls.append(req)
+                    or httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+                )
+            )
+        ) as client:
+            with pytest.raises(CoreError, match="WINDOW_CONTRACT_CHANGED"):
+                current = request
+                if stage == "between_requests":
+                    current = budget.reserve(
+                        core.store, core.settings, None, "chat", messages, core.clock()
+                    )
+                await budget.complete(
+                    ModelClient(core.settings, client),
+                    core.store,
+                    core.settings,
+                    current,
+                    messages,
+                    "chat",
+                    core.clock,
+                )
+
+    asyncio.run(exercise())
+    assert calls == []
