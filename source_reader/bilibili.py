@@ -144,6 +144,18 @@ class BilibiliReader:
                     method = "browser_render"
                 elif method != "account_api":
                     method = "static_page"
+                if (
+                    (identifier.startswith("BV") and rendered.get("bvid", identifier) != identifier)
+                    or (
+                        identifier.startswith("av")
+                        and str(rendered.get("aid", identifier[2:])) != identifier[2:]
+                    )
+                    or any(
+                        key in rendered and key in data and rendered[key] != data[key]
+                        for key in ("aid", "bvid", "cid")
+                    )
+                ):
+                    raise ReadFailure("READER_TARGET_MISMATCH")
                 data = {**data, **{k: v for k, v in rendered.items() if v}}
             except ReadFailure as error:
                 if str(error) not in {"READER_REQUEST_LIMIT", "READER_BYTE_LIMIT"}:

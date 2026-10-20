@@ -120,8 +120,9 @@ class NativeHeyboxSource:
                 raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
             source_status(raw)
             return raw
-        except ReadFailure:
+        except ReadFailure as error:
             # A rejected grant/contract is latched until the operator changes the grant.
             # Network uncertainty is handled by the existing worker and is never retried.
-            self.blocked_grant = fingerprint
+            if str(error) not in {"READER_BYTE_LIMIT", "READER_REQUEST_LIMIT"}:
+                self.blocked_grant = fingerprint
             raise
