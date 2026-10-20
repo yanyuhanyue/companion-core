@@ -13,6 +13,14 @@ from companion.contracts import CoreError, StrictModel
 from companion.policy import ConsentService
 from companion.privacy import epoch, redact
 from companion.source_grants import SourceGrantService, SourceGrantSnapshot
+from companion.sources import (
+    ObservationSource,
+    content_target,
+    source_names,
+    supports,
+    validate_article_image_url,
+    validate_reading_evidence_url,
+)
 from companion.store import after, encode
 from companion.transport import digest
 
@@ -31,18 +39,7 @@ class ReadingSource(StrictModel):
 
     @model_validator(mode="after")
     def public_source(self):
-        url = urlsplit(self.url)
-        if (
-            url.scheme != "https"
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-            or url.port not in {None, 443}
-            or url.hostname
-            not in {"www.bilibili.com", "api.bilibili.com", "aisubtitle.hdslb.com", "i0.hdslb.com"}
-        ):
-            raise ValueError("Invalid reading evidence URL")
+        validate_reading_evidence_url(self.url)
         return self
 
 
@@ -84,18 +81,7 @@ class ArticleImage(StrictModel):
 
     @model_validator(mode="after")
     def source_image(self):
-        url = urlsplit(self.url)
-        if (
-            url.scheme != "https"
-            or url.hostname not in {"imgheybox.max-c.com", "imgheybox1.max-c.com"}
-            or url.username
-            or url.password
-            or url.query
-            or url.fragment
-            or url.port not in {None, 443}
-            or not url.path.startswith("/")
-        ):
-            raise ValueError("Invalid article image reference")
+        validate_article_image_url(self.url)
         return self
 
 
@@ -136,18 +122,7 @@ class ObservationEvent(StrictModel):
     schema_version: Literal[2]
     event_id: str = Field(min_length=8, max_length=128)
     event_type: Literal["content.observed"]
-    source: Literal[
-        "bilibili",
-        "heybox",
-        "web",
-        "voice",
-        "camera",
-        "android",
-        "dsh",
-        "windows",
-        "simulation",
-        "qq_image",
-    ]
+    source: ObservationSource
     source_kind: Literal[
         "title", "text", "video_analysis", "image_analysis", "audio_transcript", "tool_result"
     ]
@@ -252,6 +227,13 @@ class ObservationService:
                 raise CoreError("INVALID_OBSERVATION_URL", 400) from error
             if url.scheme != "https" or not url.hostname or url.username or url.fragment:
                 raise CoreError("INVALID_OBSERVATION_URL", 400)
+            if observation.source in source_names("read"):
+                try:
+                    source, _ = content_target(value)
+                except CoreError:
+                    raise CoreError("INVALID_OBSERVATION_URL", 400) from None
+                if source != observation.source:
+                    raise CoreError("OBSERVATION_SOURCE_MISMATCH", 403)
         occurred = observation.occurred_at.astimezone(UTC).isoformat(timespec="microseconds")
         if (
             not after(self.clock(), -86400 * self.settings.raw_event_retention_days)
@@ -263,7 +245,7 @@ class ObservationService:
         if payload.article is not None:
             fetched = payload.article.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
             if (
-                observation.source != "heybox"
+                not supports(observation.source, "article")
                 or status != "FETCHED"
                 or kind != "text"
                 or any(image.text_offset >= len(payload.text) for image in payload.article.images)
@@ -275,7 +257,7 @@ class ObservationService:
         if payload.reading is not None:
             fetched = payload.reading.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
             if (
-                observation.source != "bilibili"
+                not supports(observation.source, "reading")
                 or status != "FETCHED"
                 or kind != "text"
                 or not after(self.clock(), -86400 * self.settings.raw_event_retention_days)

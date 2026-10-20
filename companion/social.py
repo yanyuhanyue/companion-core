@@ -7,7 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from companion.contracts import CoreError
 from companion.privacy import epoch
+from companion.sources import content_target, observation_sources, source_definition, supports
 from companion.store import after, uid, utcnow
 from companion.transport import enqueue
 
@@ -76,6 +78,45 @@ def semantic_duplicate(text, candidates, settings):
     )
 
 
+def share_source(event):
+    """Accepted historical text stays usable; revoked future reads do not erase it.
+
+    Recheck stored attribution before queueing or sending, without fetching or
+    requiring a still-live grant. Only explicit erasure invalidates that history.
+    """
+    try:
+        if (
+            event["source"] not in observation_sources("share")
+            or event["source_kind"] != "text"
+            or event["result_status"] != "FETCHED"
+        ):
+            return None
+        definition = source_definition(event["source"].removeprefix("observation."))
+        body = json.loads(event["body_json"])
+        if (
+            not isinstance(body["title"], str)
+            or not isinstance(body["text"], str)
+            or not body["text"].strip()
+            or hashlib.sha256(body["text"].encode()).hexdigest() != event["source_sha256"]
+        ):
+            return None
+        canonical = event["canonical_url"]
+        if not isinstance(canonical, str):
+            return None
+        source = definition.name
+        if canonical:
+            source, canonical = content_target(canonical)
+            if source != definition.name:
+                return None
+        evidence = json.loads(event["evidence_json"])
+        if any(evidence.get(kind) is not None and not supports(source, kind)
+               for kind in ("reading", "article")):
+            return None
+        return definition, body, canonical
+    except (AttributeError, CoreError, KeyError, TypeError, ValueError):
+        return None
+
+
 class SocialPlanner:
     def __init__(self, store, settings, clock=utcnow):
         self.store, self.settings, self.clock = store, settings, clock
@@ -85,17 +126,20 @@ class SocialPlanner:
             return None
         s, now, captured = self.store, self.clock(), epoch(self.store)
         event = s.one(
-            "SELECT o.*,e.body_json FROM observations o JOIN events e USING(event_id) "
+            "SELECT o.*,e.body_json,e.source FROM observations o JOIN events e USING(event_id) "
             "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
-            "AND e.source IN ('observation.bilibili','observation.heybox')",
-            (event_id,),
+            "AND e.source IN (SELECT value FROM json_each(?))",
+            (event_id, json.dumps(observation_sources("share"))),
         )
         if not event:
             return None
+        resolved = share_source(event)
+        if resolved is None:
+            return None
+        _, body, canonical = resolved
         existing = s.one("SELECT candidate_id FROM social_candidates WHERE event_id=?", (event_id,))
         if existing:
             return existing["candidate_id"]
-        body = json.loads(event["body_json"])
         comparison = body["title"] + "\n" + body["text"][:1500]
         normalized = text_key(comparison)
         key = hashlib.sha256(normalized.encode()).hexdigest()
@@ -111,7 +155,7 @@ class SocialPlanner:
             if s.one(
                 "SELECT 1 FROM social_candidates WHERE state<>'ERASED' "
                 "AND (canonical_url=? OR content_sha256=?)",
-                (event["canonical_url"], key),
+                (canonical, key),
             ):
                 reason = "DUPLICATE_CONTENT"
             elif recent:
@@ -137,7 +181,7 @@ class SocialPlanner:
                     "social_candidates",
                     candidate_id=candidate_id,
                     event_id=event_id,
-                    canonical_url=event["canonical_url"],
+                    canonical_url=canonical,
                     content_sha256=key,
                     comparison_text=comparison,
                     state="SKIPPED" if reason else "CANDIDATE",
@@ -179,14 +223,24 @@ class SocialPlanner:
             if recent or count >= cfg.proactive_daily_limit:
                 return False
             candidate = s.one(
-                "SELECT c.*,e.body_json FROM social_candidates c JOIN events e USING(event_id) "
-                "WHERE c.state='CANDIDATE' AND e.redacted=0 ORDER BY c.created_at LIMIT 1"
+                "SELECT c.*,e.body_json,e.source,o.source_kind,o.result_status,"
+                "o.source_sha256,o.evidence_json,o.canonical_url AS source_url "
+                "FROM social_candidates c JOIN events e USING(event_id) "
+                "JOIN observations o USING(event_id) WHERE c.state='CANDIDATE' "
+                "AND e.redacted=0 AND o.redacted=0 ORDER BY c.created_at LIMIT 1"
             )
             if not candidate:
                 return False
-            body = json.loads(candidate["body_json"])
-            source = s.one("SELECT source FROM events WHERE event_id=?", (candidate["event_id"],))
-            label = "视频简介" if source["source"] == "observation.bilibili" else "帖子正文"
+            resolved = share_source({**candidate, "canonical_url": candidate["source_url"]})
+            if resolved is None or resolved[2] != candidate["canonical_url"]:
+                s.execute(
+                    "UPDATE social_candidates SET state='SKIPPED',reason_code='SOURCE_CHANGED',"
+                    "updated_at=? WHERE candidate_id=?",
+                    (now, candidate["candidate_id"]),
+                )
+                return False
+            definition, body, _ = resolved
+            label = definition.share_label
             text = (
                 "读到一段"
                 + label
