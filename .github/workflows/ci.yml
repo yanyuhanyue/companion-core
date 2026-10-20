@@ -116,6 +116,7 @@ jobs:
       - run: >-
           .local/p3/native-venv/bin/python scripts/verify_plugin_native.py
           --upstream-root .local/p3/upstream
+      - run: mkdir -p .local/test-temp
       - working-directory: .local/p3/upstream/heybox
         run: >-
           ${{ github.workspace }}/.local/p3/native-venv/bin/python -m pytest -q

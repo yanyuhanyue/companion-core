@@ -58,6 +58,8 @@ B站最终固定样本：
 
 全量覆盖旧 0003/0004/0013/0014、有数据重开、旧幂等指纹、UNKNOWN 预留及独立最新
 ErasureLedger 恢复。本轮不新增迁移。CI 当前 HEAD 才是最终平台回归结论，初跑失败记录保留。
+新增 native job 的两处启动配置问题已修正：`uv pip sync` 使用位置参数传入锁文件，
+并在 pytest 启动前创建 `.local/test-temp` 父目录；真实 MCP 原生校验已在 Linux 成功运行。
 
 Linux 目标用固定 P2 runtime 镜像加只读新源码挂载验证默认拒绝和工具边界，2.689 秒退出 0；
 见 [Linux 实测](linux-readonly-p3.json)。UID 10003、1 CPU、768 MiB、96 PID、根只读、
@@ -85,6 +87,8 @@ Linux Chromium 仍保留 P2 `No usable sandbox` 阻断；没有改变宿主隔�
 两个新账号 grant 已在验证后设置 `enabled=false`；没有全局退出或修改原在线账号。
 私密凭据、扫码材料、浏览器 Profile 保留在忽略目录，不入包/报告。
 六个此前被清理策略阻止的目录只做了[只读台账](retained-caches-p3.json)，没有删除重试或权限修改。
+本轮另外 13 个临时测试/缓存目录的删除也被自动审批审查以 `blocked by policy` 拒绝，
+因此保留且未重试。它们在忽略的 `.local/test-temp/p3-*` 和 `.local/p3` 下，不入 Git 或发行包。
 安全与许可审查见 [plugin-security-p3.md](plugin-security-p3.md) 和
 [plugin-compat-p3.md](plugin-compat-p3.md)。
 
