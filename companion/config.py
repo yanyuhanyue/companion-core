@@ -1,7 +1,7 @@
 import os
 import tomllib
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -10,23 +10,13 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model
 from companion.content import ContentConfig
 from companion.executive_protocol import ExecutiveConfig
 from companion.media import MediaConfig
+from companion.sources import ObservationSource
 
 
 class ObservationAdapterConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: SecretStr
-    source: Literal[
-        "bilibili",
-        "heybox",
-        "web",
-        "voice",
-        "camera",
-        "android",
-        "dsh",
-        "windows",
-        "simulation",
-        "qq_image",
-    ]
+    source: ObservationSource
     media_analysis: bool = False
     reader_max_requests: int = Field(default=1, ge=1, le=8)
     source_grant_required: bool = False
