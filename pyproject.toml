@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.15,<2",
     "cryptography>=44,<48",
     "fastembed==0.9.0",
+    "tokenizers==0.23.3",
     "pillow>=12,<13",
 ]
 
@@ -52,3 +53,4 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
