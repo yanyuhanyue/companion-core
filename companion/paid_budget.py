@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -128,12 +129,23 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 ):
                     raise ValueError("journal identity")
             else:
+                if row.get("kind") == "window_stop":
+                    if (
+                        set(row) != {"kind", "window_id", "plan_sha256", "previous"}
+                        or not isinstance(row["window_id"], str)
+                        or not re.fullmatch(r"win_[a-f0-9]{32}", row["window_id"])
+                        or not isinstance(row["plan_sha256"], str)
+                        or not re.fullmatch(r"[a-f0-9]{64}", row["plan_sha256"])
+                    ):
+                        raise ValueError("invalid window stop")
+                    blocked = True
+                    continue
                 latest[row["request_id"]] = row
                 blocked |= row["kind"] == "blocked"
         if not lines or (blocked and not allow_settlement):
             raise ValueError("journal reconciliation")
         for request_id, row in latest.items():
-            if record and request_id == record["request_id"]:
+            if record and request_id == record.get("request_id"):
                 continue
             usage = store.one(
                 "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?", (request_id,)
@@ -154,8 +166,8 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         # A DB from a different journal cannot accept an older valid prefix.
         ids = {r["request_id"] for r in store.rows("SELECT request_id FROM model_admissions")}
         if record:
-            ids.discard(record["request_id"])
-        if set(latest) - ({record["request_id"]} if record else set()) != ids:
+            ids.discard(record.get("request_id"))
+        if set(latest) - ({record.get("request_id")} if record else set()) != ids:
             raise ValueError("journal behind DB")
         if record is not None:
             row = {**record, "previous": previous}

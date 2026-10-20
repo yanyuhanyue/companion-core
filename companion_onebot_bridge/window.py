@@ -120,7 +120,8 @@ class WindowPlan:
         if self.mode == "live_text":
             scope = value["live_text"]
             expected_scope = {
-                "live_approved", "window_id", "starts_at", "ends_at", "core_config_sha256",
+                "live_approved", "execution", "window_id", "starts_at", "ends_at",
+                "core_config_sha256",
                 "core_code_sha256", "bridge_code_sha256", "candidate_sha", "paid_contract_sha256",
                 "budget_journal_id", "custodian_sha256", "approval_sha256", "max_inputs",
                 "max_model_attempts", "max_input_chars", "max_reply_chars",
@@ -134,6 +135,7 @@ class WindowPlan:
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
             if (
                 scope["bridge_code_sha256"] != bridge_code_sha256()
+                or scope["execution"] != value["execution"]
                 or scope["window_id"] != value["window_id"]
                 or instant(scope["starts_at"]) != self.start
                 or instant(scope["ends_at"]) != self.end
@@ -243,6 +245,7 @@ class TestWindow:
         self.current = None
         self.current_item = None
         self.model_attempts = None
+        self.core_stop_ack = False
 
     def row(self):
         self.db.row_factory = sqlite3.Row
@@ -388,16 +391,56 @@ class TestWindow:
             or client.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
         ):
             raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+        hooks = client.event_hooks["request"]
+        for hook in list(hooks):
+            prior = getattr(hook, "live_window_scope", None)
+            if prior is not None:
+                if prior != self.plan.sha256:
+                    raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+                hooks.remove(hook)
+
+        async def after_core_network_preflight(request):
+            if (
+                not request.url.path.startswith("/internal/v1/")
+                or request.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
+                or not private_request_matches(
+                    request, self.plan.config.core_url, request.url.path,
+                    synthetic=self.plan.value["execution"] == "local_synthetic",
+                )
+            ):
+                raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+
+        after_core_network_preflight.live_window_scope = self.plan.sha256
+        hooks.append(after_core_network_preflight)
 
     async def stop_core(self, client):
         if self.plan.mode != "live_text":
             return
-        self.check_core_client(client)
-        result = await bounded_post(client, "/internal/v1/live-text/stop", {
-            "window_sha256": self.plan.sha256,
-        })
-        if result != {"stopped": True}:
-            raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED")
+        try:
+            self.verify(active=False)
+            records, _ = self.read_journal()
+            self.core_stop_ack = any(r.get("kind") == "CORE_STOP_CONFIRMED" for r in records)
+            if self.core_stop_ack:
+                return
+            self.check_core_client(client)
+            result = await bounded_post(client, "/internal/v1/live-text/stop", {
+                "window_sha256": self.plan.sha256,
+            })
+            if result != {"stopped": True}:
+                raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED")
+            head = self.append("CORE_STOP_CONFIRMED", {})
+            with self.db:
+                self.db.execute("UPDATE test_window SET journal_head=?", (head,))
+            self.core_stop_ack = True
+        except Exception:
+            raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED") from None
+
+    async def stop_live(self, client, reason="OWNER_STOP"):
+        if self.plan.mode != "live_text":
+            raise ValueError("LIVE_TEXT_WINDOW_REQUIRED")
+        self.stop(reason)
+        await self.stop_core(client)
+        return self.status()
 
     async def open(self, client):
         if self.plan.journal.exists() or self.plan.journal.is_symlink():
@@ -467,7 +510,12 @@ class TestWindow:
             "e2e_p95_ms": None,
         }
         if self.plan.mode == "live_text":
-            result.update(mode="live_text", model_attempts=self.model_attempts)
+            records, _ = self.read_journal()
+            confirmed = any(record.get("kind") == "CORE_STOP_CONFIRMED" for record in records)
+            result.update(mode="live_text", model_attempts=self.model_attempts,
+                          local_state=row["state"], core_stop_confirmed=confirmed)
+            if row["state"] == "STOPPED" and not confirmed:
+                result["state"] = "CORE_STOP_UNCONFIRMED"
         return result
 
     def stop(self, reason="OWNER_STOP"):
@@ -500,7 +548,7 @@ class TestWindow:
         self.busy = True
         try:
             return await self._ingest(client, raw, approval)
-        except BaseException:
+        except BaseException as error:
             try:
                 await self.stop_core(client)
             except BaseException:
@@ -509,6 +557,11 @@ class TestWindow:
                 self.stop("INPUT_FAILED_CLOSED")
             except Exception:
                 pass
+            if (
+                self.plan.mode == "live_text" and not self.core_stop_ack
+                and isinstance(error, Exception)
+            ):
+                raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED") from None
             raise
         finally:
             self.busy = False
@@ -719,6 +772,7 @@ class TestWindow:
             raise ValueError("WINDOW_EXECUTOR_BUSY")
         self.busy, self.approval = True, approval
         self.core_client = client
+        sender = None
         try:
             self.verify()
             self.check_spool()
@@ -730,7 +784,7 @@ class TestWindow:
             if self.row()["state"] == "STOPPED":
                 await self.stop_core(client)
             return self.status()
-        except BaseException:
+        except BaseException as error:
             try:
                 await self.stop_core(client)
             except BaseException:
@@ -741,9 +795,16 @@ class TestWindow:
                 self.stop("SEND_FAILED_CLOSED")
             except Exception:
                 pass
+            if (
+                self.plan.mode == "live_text" and not self.core_stop_ack
+                and isinstance(error, Exception)
+            ):
+                raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED") from None
             raise
         finally:
             self.busy = False
+            if sender is not None:
+                sender.detach()
 
 
 class WindowOneBot:
@@ -756,6 +817,27 @@ class WindowOneBot:
             or protocol.headers.get("Authorization") != "Bearer " + self.config.onebot_token
         ):
             raise ValueError("LIVE_TEXT_ONEBOT_ENDPOINT_CHANGED")
+        self.endpoint_hook = None
+        if window.plan.mode == "live_text":
+            async def after_network_preflight(request):
+                if (
+                    request.url.path not in {
+                        "/get_login_info", "/get_status", "/get_version_info", "/send_private_msg"
+                    }
+                    or not private_request_matches(
+                        request, self.config.onebot_http_url, request.url.path,
+                        synthetic=window.plan.value["execution"] == "local_synthetic",
+                    )
+                    or request.headers.get("Authorization") != "Bearer " + self.config.onebot_token
+                ):
+                    raise ValueError("LIVE_TEXT_ONEBOT_REQUEST_CHANGED")
+
+            self.endpoint_hook = after_network_preflight
+            protocol.event_hooks["request"].append(self.endpoint_hook)
+
+    def detach(self):
+        if self.endpoint_hook is not None:
+            self.delegate.client.event_hooks["request"].remove(self.endpoint_hook)
 
     async def probe(self):
         return await self.delegate.probe()
@@ -821,11 +903,10 @@ async def command(config, args):
                 return window.status()
             # Always persist the local stop; an unreachable Core is not a confirmed
             # global stop. Report that failure, never claim a paid call was revoked.
-            result = window.stop()
             if plan.mode == "live_text":
                 async with private_http_client(config.core_url, config.bridge_token) as client:
-                    await window.stop_core(client)
-            return result
+                    return await window.stop_live(client)
+            return window.stop()
     if args.window is None or args.inventory is None:
         raise ValueError("WINDOW_AND_INVENTORY_REQUIRED")
     plan = WindowPlan(

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import socket
 from dataclasses import dataclass
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 import httpx
@@ -32,6 +33,7 @@ def private_request_matches(request, url, path, *, synthetic=False):
             (pin.authority, pin.scheme, pin.hostname, pin.port)
             == (original.netloc, original.scheme, original.hostname, original.port)
             and private_address(pin.address) and request.url.host == pin.address
+            and (not synthetic or ip_address(pin.address).is_loopback)
             and request.headers.get("Host") == original.netloc
             and request.extensions.get("sni_hostname") == original.hostname
             and request.url.copy_with(host=original.hostname) == expected

@@ -176,7 +176,12 @@ def main():
             print(json.dumps(asyncio.run(command(config, args))), flush=True)
     except KeyboardInterrupt:
         return
-    except Exception:
+    except Exception as error:
         # Never print transport exceptions: URLs, response bodies and headers are private.
-        print(json.dumps({"state": "STOPPED", "error": "BRIDGE_FAILED_CLOSED"}), flush=True)
+        unconfirmed = (isinstance(error, ValueError)
+                       and error.args == ("LIVE_TEXT_CORE_STOP_UNCONFIRMED",))
+        print(json.dumps({
+            "state": "CORE_STOP_UNCONFIRMED" if unconfirmed else "STOPPED",
+            "error": "LIVE_TEXT_CORE_STOP_UNCONFIRMED" if unconfirmed else "BRIDGE_FAILED_CLOSED",
+        }), flush=True)
         raise SystemExit(1) from None

@@ -20,6 +20,7 @@ CRITICAL_FILES = {
     "companion/transport.py", "companion/source_grants.py", "companion/worker_lock.py",
     "companion/api.py", "companion/policy.py", "companion/backup.py", "companion/core.py",
     "companion/runtime.py", "companion/model.py", "companion/memory.py",
+    "companion/live_text.py",
     "companion/retrieval.py", "companion/observation.py", "companion/content.py",
     "companion/executive.py", "companion/executive_protocol.py", "companion/executor_gateway.py",
     "companion/executor_budget_proxy.py", "companion/executor_files.py", "companion/dsh_job.py",
