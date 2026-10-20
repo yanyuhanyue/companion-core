@@ -75,6 +75,9 @@ Core 在既有 runtime_meta 中保存少量批准、输入及回复哈希凭据�
 模型失败不转为可重试任务，也不产生一条未经单独确认的错误回复。最终 HTTP 请求钩子重新
 检查批准、租约、隐私、费用身份、实际 URL、Authorization 和完整 payload。费用先按原
 保管责任结算，再决定是否允许迟到结果入 Outbox；撤销不丢弃已知费用。
+所有 journal、源码和 SQLite 校验完成后，还会执行不含文件/DB I/O、锁或 await 的最终
+dispatch fence，重新采样 live/paid/费率截止及 job/admission 租约。账本校验跨过截止时
+不会发出模型请求，保守预留仍记 UNKNOWN；不能只在模型晚回包时拒绝 Outbox。
 
 发送继续调用原 `deliver_tick`：先在独立 Window Journal 预留一次额度，再走原 lease /
 begin-send、Spool 的不确定结果回执及一次 HTTP。网络/DNS 钩子之后核对原 authority、
