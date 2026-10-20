@@ -496,6 +496,8 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     request_id = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
     row = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
     assert row["output_tokens"] == 350
+    # Finish the no-I/O Demo probe before entering a separately approved mock-live scope.
+    budget.settle(core.store, core.settings, request_id, ModelResponse("demo", 0, 0))
     captured = []
 
     def respond(request):
