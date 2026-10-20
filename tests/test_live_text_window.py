@@ -29,7 +29,7 @@ def test_existing_demo_window_still_rejects_live_core(core, tmp_path):
 
         with Spool(cfg) as spool:
             window = TestWindow(spool, WindowPlan(value, cfg, inventory), clock=lambda: now)
-            async with core_client(core) as client:
+            async with core_client(core, bridge_config=cfg) as client:
                 with pytest.raises(ValueError, match="DEMO_CLOSED_FEATURES_REQUIRED"):
                     await window.open(client)
 
@@ -65,6 +65,7 @@ def live_fixture(
         paid_budget.journal(core.store, approval)
     scope = LiveTextWindowApproval(
         live_approved=True, plan_sha256="0" * 64, window_id=value["window_id"],
+        capture_public_key=cfg.capture_public_key,
         starts_at=value["starts_at"], ends_at=value["ends_at"],
         core_config_sha256=live_text.config_sha256(core.settings),
         core_code_sha256=live_text.code_sha256(), bridge_code_sha256=bridge_code_sha256(),

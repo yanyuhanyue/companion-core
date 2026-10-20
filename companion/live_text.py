@@ -7,12 +7,16 @@ and its independent journal remain in budget/paid_budget; delivery remains Outbo
 import hashlib
 import hmac
 import json
+import re
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Literal
 
-from pydantic import Field
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from pydantic import AwareDatetime, Field
 
 from companion import paid_budget
 from companion.contracts import CoreError, StrictModel
@@ -21,16 +25,33 @@ from companion.store import encode
 
 BINDING = "live_text_window"
 INPUT = "live_text_input:"
+CAPTURE_SIGNATURE_DOMAIN = b"companion-core/onebot-capture/v1\x00"
 
 
 class WindowReference(StrictModel):
     window_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class CaptureReceipt(WindowReference):
+    kind: Literal["authenticated_onebot_ws"]
+    event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
+    source_event_id: str = Field(min_length=1, max_length=512)
+    input_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    frame_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    config_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    protocol_epoch: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+    received_at: AwareDatetime
+    occurred_at: AwareDatetime
+    signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{128}$")
+
+
 class InputApproval(WindowReference):
     event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
     input_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    capture: CaptureReceipt | None = None
 
 
 class SendCheck(WindowReference):
@@ -168,7 +189,45 @@ def approve_input(store, settings, clock, body):
         approval, binding, attempts = guard(store, settings, clock)
         if body.window_sha256 != approval.plan_sha256:
             raise CoreError("LIVE_TEXT_WINDOW_MISMATCH", 403)
-        value = {**body.model_dump(), "privacy_epoch": binding["privacy_epoch"]}
+        capture = body.capture
+        if approval.execution == "approved_live" and capture is None:
+            raise CoreError("LIVE_TEXT_AUTHENTICATED_CAPTURE_REQUIRED", 403)
+        if capture is not None:
+            if approval.execution == "approved_live":
+                try:
+                    signed = capture.model_dump(mode="json", exclude={"signature"})
+                    for key in ("received_at", "occurred_at"):
+                        signed[key] = getattr(capture, key).isoformat()
+                    Ed25519PublicKey.from_public_bytes(bytes.fromhex(
+                        approval.capture_public_key or ""
+                    )).verify(bytes.fromhex(capture.signature or ""),
+                              CAPTURE_SIGNATURE_DOMAIN + encode(signed).encode())
+                except (ValueError, InvalidSignature):
+                    raise CoreError("LIVE_TEXT_CAPTURE_SIGNATURE_REQUIRED", 403) from None
+            source_prefix = (
+                f"{settings.bot_qq_id}:onebot-direct:FriendMessage:{settings.owner_qq_id}:"
+                f"epoch:{capture.protocol_epoch}:"
+            )
+            source_id = capture.source_event_id.removeprefix(source_prefix)
+            if (
+                capture.window_sha256 != body.window_sha256 or capture.event_id != body.event_id
+                or capture.input_sha256 != body.input_sha256
+                or capture.identity_sha256 != paid_budget.sha([
+                    settings.owner_qq_id, settings.bot_qq_id
+                ])
+                or not capture.source_event_id.startswith(source_prefix)
+                or not re.fullmatch(r"-?[1-9][0-9]{0,19}", source_id)
+                or body.event_id != "evt_" + hashlib.sha256(
+                    capture.source_event_id.encode()
+                ).hexdigest()
+                or not approval.starts_at <= capture.occurred_at <= (
+                    capture.received_at
+                ) < approval.ends_at
+                or not 0 <= (capture.received_at - capture.occurred_at).total_seconds() <= 30
+                or (capture.received_at - datetime.fromisoformat(clock())).total_seconds() > 2
+            ):
+                raise CoreError("LIVE_TEXT_CAPTURE_BINDING_CHANGED", 403)
+        value = {**body.model_dump(mode="json"), "privacy_epoch": binding["privacy_epoch"]}
         prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + body.event_id,))
         if prior:
             if json.loads(prior["value"]) != value:
@@ -204,6 +263,12 @@ def check_input(store, settings, clock, event):
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event.event_id,))
     if not receipt or json.loads(receipt["value"])["input_sha256"] != paid_budget.sha(text):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 403)
+    capture = json.loads(receipt["value"]).get("capture")
+    if capture and (
+        capture["source_event_id"] != event.source_event_id
+        or datetime.fromisoformat(capture["occurred_at"]) != event.occurred_at
+    ):
+        raise CoreError("LIVE_TEXT_CAPTURE_BINDING_CHANGED", 403)
     return True
 
 
@@ -306,7 +371,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         or row["state"] != "SENDING" or row["lease_until"] <= clock()
     ):
         raise CoreError("LIVE_TEXT_SEND_FENCED", 409)
-    return {"approved": True}
+    return {"approved": True, "lease_until": row["lease_until"]} if check else {"approved": True}
 
 
 def record_reply(store, settings, clock, job, message_id, reply):

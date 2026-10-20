@@ -107,6 +107,7 @@ def lease_deliveries(store, settings, request, now):
                     "conversation_platform_session_key": row["platform_session_key"],
                     "content": json.loads(row["content_json"]),
                     "lease_token": token,
+                    "lease_until": after(now, settings.lease_seconds),
                     "delivery_key": row["delivery_key"],
                     "action_type": row["action_type"],
                 }

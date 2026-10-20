@@ -26,6 +26,8 @@ async def pause(stop, seconds):
 
 
 async def receive(config, spool, wake, stop, metrics):
+    if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
+        raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
     delay = 0.25
     while not stop.is_set():
         try:
@@ -155,6 +157,8 @@ def main():
             "daemon",
             "window-open",
             "window-ingest",
+            "window-capture-once",
+            "window-approve-input",
             "window-send-once",
             "window-status",
             "window-stop",
@@ -180,8 +184,13 @@ def main():
         # Never print transport exceptions: URLs, response bodies and headers are private.
         unconfirmed = (isinstance(error, ValueError)
                        and error.args == ("LIVE_TEXT_CORE_STOP_UNCONFIRMED",))
+        pending = isinstance(error, ValueError) and error.args == ("WINDOW_STOP_PENDING",)
         print(json.dumps({
-            "state": "CORE_STOP_UNCONFIRMED" if unconfirmed else "STOPPED",
-            "error": "LIVE_TEXT_CORE_STOP_UNCONFIRMED" if unconfirmed else "BRIDGE_FAILED_CLOSED",
+            "state": "STOP_REQUESTED" if pending else (
+                "CORE_STOP_UNCONFIRMED" if unconfirmed else "STOPPED"
+            ),
+            "error": "WINDOW_STOP_PENDING" if pending else (
+                "LIVE_TEXT_CORE_STOP_UNCONFIRMED" if unconfirmed else "BRIDGE_FAILED_CLOSED"
+            ),
         }), flush=True)
         raise SystemExit(1) from None

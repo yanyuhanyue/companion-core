@@ -52,7 +52,32 @@ async def resolve_private(host, port):
     return addresses[0][4][0]
 
 
-def private_http_client(url, token):
+class CheckedTransport(httpx.AsyncBaseTransport):
+    """One operation's final check, after every request hook (including DNS pinning)."""
+
+    def __init__(self, delegate, check, *, owns_delegate=False):
+        self.delegate, self.check, self.owns_delegate = delegate, check, owns_delegate
+
+    async def handle_async_request(self, request):
+        await self.check(request)
+        return await self.delegate.handle_async_request(request)
+
+    async def aclose(self):
+        if self.owns_delegate:
+            await self.delegate.aclose()
+
+
+def checked_http_client(client, check):
+    # Borrow the transport, never close it or mutate the caller's hook lifecycle.
+    return httpx.AsyncClient(
+        base_url=client.base_url, headers=client.headers, timeout=client.timeout,
+        follow_redirects=False, trust_env=False,
+        event_hooks={key: list(value) for key, value in client.event_hooks.items()},
+        transport=CheckedTransport(client._transport, check),
+    )
+
+
+def private_http_client(url, token, *, check=None, transport=None):
     parsed = urlsplit(url)
 
     async def pin(request):
@@ -72,8 +97,11 @@ def private_http_client(url, token):
         )
         request.url = request.url.copy_with(host=address)
 
-    client = http_client(url, token)
+    client = (http_client(url, token) if transport is None
+              else http_client(url, token, transport=transport))
     client.event_hooks["request"] = [pin]
+    if check is not None:
+        client._transport = CheckedTransport(client._transport, check, owns_delegate=True)
     return client
 
 
@@ -82,10 +110,14 @@ class NoRedirectConnect(connect):
         return exc
 
 
-async def websocket(config):
+async def websocket(config, *, synthetic=False, check=None):
     parsed = urlsplit(config.onebot_ws_url)
     address = await resolve_private(parsed.hostname, parsed.port)
-    return NoRedirectConnect(
+    if not private_address(address) or (synthetic and not ip_address(address).is_loopback):
+        raise ValueError("WEBSOCKET_DESTINATION_REFUSED")
+    if check is not None:
+        check()
+    connector = NoRedirectConnect(
         config.onebot_ws_url,
         host=address,
         port=parsed.port,
@@ -98,3 +130,5 @@ async def websocket(config):
         close_timeout=3,
         logger=QUIET_LOG,
     )
+    connector.companion_private_destination = address
+    return connector

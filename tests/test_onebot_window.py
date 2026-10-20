@@ -118,9 +118,10 @@ def test_actual_core_five_attempts_restart_duplicate_and_sixth_input_cap(core, t
 
     async def scenario():
         async with (
-            core_client(core) as http,
+            core_client(core, bridge_config=cfg) as http,
             httpx.AsyncClient(
-                base_url="http://onebot",
+                base_url=cfg.onebot_http_url,
+                headers={"Authorization": "Bearer " + cfg.onebot_token},
                 transport=httpx.MockTransport(lambda r: provider(r, sends)),
             ) as protocol,
         ):
@@ -173,9 +174,10 @@ def test_unknown_counts_as_attempt_stops_and_never_retries_after_restart(core, t
 
     async def scenario():
         async with (
-            core_client(core) as http,
+            core_client(core, bridge_config=cfg) as http,
             httpx.AsyncClient(
-                base_url="http://onebot",
+                base_url=cfg.onebot_http_url,
+                headers={"Authorization": "Bearer " + cfg.onebot_token},
                 transport=httpx.MockTransport(lambda r: provider(r, sends, receipt)),
             ) as protocol,
         ):
@@ -220,7 +222,7 @@ def test_unapproved_inputs_never_reach_core(core, tmp_path, mutation):
     async def scenario():
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
-            async with core_client(core) as http:
+            async with core_client(core, bridge_config=cfg) as http:
                 await window.open(http)
                 with pytest.raises(ValueError):
                     await window.ingest(http, raw, approval)
@@ -239,7 +241,7 @@ def test_same_source_id_changed_body_or_time_is_conflict(core, tmp_path, mutatio
     async def scenario():
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
-            async with core_client(core) as http:
+            async with core_client(core, bridge_config=cfg) as http:
                 await window.open(http)
                 raw = raw_event(1)
                 await window.ingest(http, raw, input_approval(plan, raw))
@@ -304,7 +306,7 @@ def test_invalid_input_stops_window_before_later_valid_input(core, tmp_path):
     async def scenario():
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
-            async with core_client(core) as http:
+            async with core_client(core, bridge_config=cfg) as http:
                 await window.open(http)
                 raw = raw_event(1)
                 with pytest.raises(ValueError):
@@ -334,9 +336,11 @@ def test_deadline_pre_io_and_already_in_flight_receipt(core, tmp_path, phase):
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: clock[0])
             async with (
-                core_client(core) as http,
+                core_client(core, bridge_config=cfg) as http,
                 httpx.AsyncClient(
-                    base_url="http://onebot", transport=httpx.MockTransport(transport)
+                    base_url=cfg.onebot_http_url,
+                    headers={"Authorization": "Bearer " + cfg.onebot_token},
+                    transport=httpx.MockTransport(transport),
                 ) as protocol,
             ):
                 await window.open(http)
@@ -348,6 +352,7 @@ def test_deadline_pre_io_and_already_in_flight_receipt(core, tmp_path, phase):
                     assert window.status()["attempts_reserved"] == 0
                 else:
                     clock[0] = plan.end - timedelta(microseconds=1)
+                    core.clock.now = clock[0]
                     result = await window.send_once(http, protocol, approval)
                     assert result["attempts_reserved"] == 1
                     assert result["attempt_states"] == {
@@ -386,9 +391,10 @@ def test_core_disconnects_stop_and_preserve_attempt_before_restart(core, tmp_pat
 
     async def scenario():
         async with (
-            core_client(core, LoseAck()) as http,
+            core_client(core, LoseAck(), bridge_config=cfg) as http,
             httpx.AsyncClient(
-                base_url="http://onebot",
+                base_url=cfg.onebot_http_url,
+                headers={"Authorization": "Bearer " + cfg.onebot_token},
                 transport=httpx.MockTransport(lambda r: provider(r, sends)),
             ) as protocol,
         ):
@@ -430,9 +436,11 @@ def test_reply_approval_and_live_identity_must_match_exact_item(core, tmp_path, 
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
             async with (
-                core_client(core) as http,
+                core_client(core, bridge_config=cfg) as http,
                 httpx.AsyncClient(
-                    base_url="http://onebot", transport=httpx.MockTransport(response)
+                    base_url=cfg.onebot_http_url,
+                    headers={"Authorization": "Bearer " + cfg.onebot_token},
+                    transport=httpx.MockTransport(response),
                 ) as protocol,
             ):
                 await window.open(http)
@@ -471,7 +479,7 @@ def test_initial_unconfirmed_history_cannot_be_drained(core, tmp_path, initial):
     async def scenario():
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
-            async with core_client(core) as http:
+            async with core_client(core, bridge_config=cfg) as http:
                 if initial.startswith("spool"):
                     if initial == "spool-pending":
                         spool.put(normalized())
@@ -502,7 +510,7 @@ def test_full_spool_rejects_input_before_core_http(core, tmp_path):
     async def scenario():
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
-            async with core_client(core) as http:
+            async with core_client(core, bridge_config=cfg) as http:
                 await window.open(http)
                 # Unattended process staged an unapproved input; the bounded command stops.
                 spool.put(normalized(raw_event(99)))
@@ -523,7 +531,7 @@ def test_journal_survives_spool_reset_and_detects_rollback(core, tmp_path):
     plan = WindowPlan(value, cfg, inventory)
 
     async def scenario():
-        async with core_client(core) as http:
+        async with core_client(core, bridge_config=cfg) as http:
             with Spool(cfg) as spool:
                 window = TestWindow(spool, plan, clock=lambda: now)
                 await window.open(http)
@@ -585,10 +593,14 @@ def child_process():
             async def crash():
                 async with (
                     httpx.AsyncClient(
-                        base_url="http://core", transport=httpx.MockTransport(fake_core)
+                        base_url=cfg.core_url,
+                        transport=httpx.MockTransport(fake_core),
+                        headers={"Authorization": "Bearer " + cfg.bridge_token},
                     ) as http,
                     httpx.AsyncClient(
-                        base_url="http://onebot", transport=httpx.MockTransport(die_after_reserve)
+                        base_url=cfg.onebot_http_url,
+                        headers={"Authorization": "Bearer " + cfg.onebot_token},
+                        transport=httpx.MockTransport(die_after_reserve),
                     ) as protocol,
                 ):
                     await window.send_once(http, protocol, request["approval"])
@@ -651,7 +663,7 @@ def test_process_death_after_durable_reserve_never_restores_quota(core, tmp_path
     async def setup():
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
-            async with core_client(core) as http:
+            async with core_client(core, bridge_config=cfg) as http:
                 await window.open(http)
                 return await stage(window, http, core)
 
@@ -667,6 +679,7 @@ def test_process_death_after_durable_reserve_never_restores_quota(core, tmp_path
         "item": {
             "message_id": row["message_id"],
             "lease_token": "lease_" + "a" * 32,
+            "lease_until": (now + timedelta(seconds=120)).isoformat(),
             "conversation_platform_session_key": cfg.origin,
             "content": json.loads(row["content_json"]),
             "delivery_key": row["delivery_key"],
@@ -683,9 +696,10 @@ def test_process_death_after_durable_reserve_never_restores_quota(core, tmp_path
             window = TestWindow(spool, plan, clock=lambda: now)
             assert window.status()["attempt_states"] == {"RESERVED": 1}
             async with (
-                core_client(core) as http,
+                core_client(core, bridge_config=cfg) as http,
                 httpx.AsyncClient(
-                    base_url="http://onebot",
+                    base_url=cfg.onebot_http_url,
+                    headers={"Authorization": "Bearer " + cfg.onebot_token},
                     transport=httpx.MockTransport(lambda r: provider(r, sends)),
                 ) as protocol,
             ):
@@ -716,9 +730,11 @@ def test_in_process_concurrent_once_invocations_send_at_most_one(core, tmp_path)
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: now)
             async with (
-                core_client(core) as http,
+                core_client(core, bridge_config=cfg) as http,
                 httpx.AsyncClient(
-                    base_url="http://onebot", transport=httpx.MockTransport(response)
+                    base_url=cfg.onebot_http_url,
+                    headers={"Authorization": "Bearer " + cfg.onebot_token},
+                    transport=httpx.MockTransport(response),
                 ) as protocol,
             ):
                 await window.open(http)
@@ -748,9 +764,10 @@ def test_async_http_preflight_expiry_blocks_dispatch_and_retains_attempt(core, t
         with Spool(cfg) as spool:
             window = TestWindow(spool, plan, clock=lambda: clock[0])
             async with (
-                core_client(core) as http,
+                core_client(core, bridge_config=cfg) as http,
                 httpx.AsyncClient(
-                    base_url="http://onebot",
+                    base_url=cfg.onebot_http_url,
+                    headers={"Authorization": "Bearer " + cfg.onebot_token},
                     transport=httpx.MockTransport(lambda r: provider(r, sends)),
                     event_hooks={"request": [preflight]},
                 ) as protocol,
@@ -758,6 +775,7 @@ def test_async_http_preflight_expiry_blocks_dispatch_and_retains_attempt(core, t
                 await window.open(http)
                 approval = await stage(window, http, core)
                 clock[0] = plan.end - timedelta(microseconds=1)
+                core.clock.now = clock[0]
                 status = await window.send_once(http, protocol, approval)
                 assert status["attempts_reserved"] == 1
                 assert status["attempt_states"] == {"UNKNOWN": 1}
