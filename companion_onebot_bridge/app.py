@@ -115,6 +115,8 @@ async def run(config):
             signal.signal(sig, lambda *_: stop.set())
     metrics = Metrics()
     with Spool(config) as spool:
+        if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
+            raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
         async with (
             private_http_client(config.core_url, config.bridge_token) as core,
             private_http_client(config.onebot_http_url, config.onebot_token) as protocol,
@@ -136,13 +138,42 @@ async def run(config):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Single-owner OneBot v11 bridge")
+    class PrivateParser(argparse.ArgumentParser):
+        def error(self, message):
+            print(json.dumps({"state": "STOPPED", "error": "INVALID_BRIDGE_ARGUMENTS"}), flush=True)
+            raise SystemExit(2)
+
+    parser = PrivateParser(description="Single-owner OneBot v11 bridge")
     parser.add_argument(
         "--config", type=Path, default=os.environ.get("ONEBOT_BRIDGE_CONFIG", "/run/bridge.toml")
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="daemon",
+        choices=(
+            "daemon",
+            "window-open",
+            "window-ingest",
+            "window-send-once",
+            "window-status",
+            "window-stop",
+        ),
+    )
+    parser.add_argument("--window", type=Path)
+    parser.add_argument("--inventory", type=Path)
+    parser.add_argument("--authorization", type=Path)
+    parser.add_argument("--event", type=Path)
+    parser.add_argument("--approval", type=Path)
     args = parser.parse_args()
     try:
-        asyncio.run(run(BridgeConfig.load(args.config)))
+        config = BridgeConfig.load(args.config)
+        if args.command == "daemon":
+            asyncio.run(run(config))
+        else:
+            from .window import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
     except KeyboardInterrupt:
         return
     except Exception:
