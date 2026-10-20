@@ -58,3 +58,18 @@ Core validation and an upstream GET cannot be one atomic distributed operation. 
 An old record may have lost its grant-to-memory evidence association. An existing `FORGOTTEN` predecessor plus an explicit successor relationship is still evidence of a prior erasure decision and can support careful descendant reconciliation; it must not be represented as newly proved grant attribution. Any unresolved real historical inventory needs explicit owner review and the documented freeze procedure.
 
 Original PR21 is not eligible on its own while the findings remain. A green candidate requires the parent's independent diff review, exact committed-head checks and integration decision. **Runtime G1 remains BLOCKED regardless of synthetic test success.**
+
+## 后继修复与完整组合验证
+
+独立 [G1 后继补丁](https://github.com/yanyuhanyue/companion-core/pull/23) 固定 `6d200378aaeed5a13e2aa76a676cb0c7d8e594c4`，保留原始审查结论，
+并分别修复每次账号 GET 前的 Core 授权复核与显式纠正后继的遗忘闭包。
+最终定向81项、原两条失败复现和第二位审查者独立7项均通过。
+已丢失必要归属的旧 COMPLETE 以明确错误阻止启动/恢复发布；没有推断归属或追加恢复期 Ledger。
+真实 Reader/G1 仍未部署、未授权启用。
+
+完整组合验证提交 `fbb5861f336d3cd6da74b13ae67454cfd715aad9`：**771 passed、2 skipped、
+1 warning，605.83s**，Chromium 执行、ruff通过。
+它包含本P8回归、#21原实现、上述G1补丁和固定P7报告，额外验证组合后的源码，
+不把P8单支线测试冒充已验证G1组合。最终报告提交仅追加文档；代码/测试哈希由私密清单核对。
+精确最终 P8 与 G1 补丁 HEAD 的 push/PR CI 须实际全部成功，最终 run ID 与 SHA
+在对应 PR 和最终 manifest 中关联；本条不预填尚未发生的 CI 结果。
