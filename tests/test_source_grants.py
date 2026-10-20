@@ -427,6 +427,7 @@ def test_metadata_excludes_cookie_fingerprint_and_late_local_change_discards_ite
 def test_legacy_migration_inventory_preserves_unknown_records_without_invented_attribution(core):
     configure(core)
     event = observation(core, source="heybox")
+    event.payload.url = URL
     core.observations.append("heybox", event)
     before = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
     core.store.close()

@@ -5,6 +5,7 @@ from datetime import UTC
 from pydantic import AwareDatetime, Field
 
 from companion.contracts import CoreError, StrictModel
+from companion.sources import supports
 
 
 class SourceGrantSnapshot(StrictModel):
@@ -74,7 +75,7 @@ class SourceGrantService:
     def register(self, request):
         policy = self.settings.observation_adapters.get(request.adapter_id)
         data, s, now = request.snapshot(), self.store, self.clock()
-        if policy is None or policy.source not in {"bilibili", "heybox"}:
+        if policy is None or not supports(policy.source, "source_grant"):
             raise CoreError("SOURCE_GRANT_ADAPTER_INVALID", 400)
         if data["expires_at"] <= now:
             raise CoreError("SOURCE_GRANT_EXPIRED", 403)
