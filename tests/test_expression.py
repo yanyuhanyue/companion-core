@@ -21,7 +21,9 @@ from tests.test_m0 import lease
 def engine(core, enabled=True):
     return ExpressionEngine(
         core.store,
-        SimpleNamespace(expression_enabled=enabled, expression_cooldown_minutes=30),
+        core.settings.model_copy(update={
+            "expression_enabled": enabled, "expression_cooldown_minutes": 30,
+        }),
         core.clock,
     )
 

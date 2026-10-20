@@ -141,7 +141,7 @@ class ContentService:
     ):
         self.store, self.settings, self.clock = store, settings, clock
         self.observations, self.create_read = observations, create_read
-        self.options = options or getattr(settings, "content", ContentConfig())
+        self.options = options or settings.content
         if self.options.use_chat_model_for_vision:
             endpoint = MediaEndpoint(
                 url=self.settings.model_url.rstrip("/") + "/chat/completions",
@@ -154,7 +154,7 @@ class ContentService:
         self.image_transport = image_transport
 
     def _source(self, event_id, upload=False):
-        if not getattr(self.settings, "content_enabled", False):
+        if not self.settings.content_enabled:
             raise CoreError("CONTENT_DISABLED", 403)
         event = self.store.one(
             "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
@@ -179,7 +179,7 @@ class ContentService:
         return event, body
 
     def schedule(self, event_id):
-        if not getattr(self.settings, "content_enabled", False):
+        if not self.settings.content_enabled:
             return []
         event, body = self._source(event_id)
         links = shared_links(body.get("text", ""))
@@ -321,7 +321,7 @@ class ContentService:
         }
 
     def context(self, event_id):
-        if not getattr(self.settings, "content_enabled", False):
+        if not self.settings.content_enabled:
             return []
         event, _ = self._source(event_id)
         roots = self.store.rows(
@@ -829,7 +829,7 @@ class ContentService:
         }
 
     async def run_once(self):
-        if not getattr(self.settings, "content_enabled", False):
+        if not self.settings.content_enabled:
             return False
         s, now = self.store, self.clock()
         day, _ = self._periods()

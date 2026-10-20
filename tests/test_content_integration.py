@@ -42,12 +42,14 @@ def finish_read(core, text="作者讨论游戏关卡设计，有自己的观点�
     )
 
 
-def test_content_default_off_and_v1_empty_manifest_fingerprint_compatible(core):
-    legacy = event(core).model_dump(mode="json", exclude={"event_id", "trace_id"})
-    legacy["payload"].pop("shared_content")
+def test_content_default_off_uses_canonical_payload_fingerprint(core):
+    canonical = event(core).model_dump(mode="json", exclude={"event_id", "trace_id"})
     ingest(core)
-    assert core.store.one("SELECT fingerprint FROM events")["fingerprint"] == digest(legacy)
+    assert core.store.one("SELECT fingerprint FROM events")["fingerprint"] == digest(canonical)
     assert ingest(core)["duplicate"]
+    omitted = event(core).model_dump(mode="json")
+    omitted["payload"].pop("shared_content")
+    assert core.ingest(InboundEvent.model_validate(omitted), "key-1")["duplicate"]
     share(core, 2)
     assert not core.store.rows("SELECT * FROM content_items")
     assert not core.store.rows("SELECT * FROM exploration_requests")

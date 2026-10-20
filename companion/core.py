@@ -88,9 +88,6 @@ class Core(Runtime):
         if not key or len(key) > 512:
             raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)
         raw = event.model_dump(mode="json", exclude={"event_id", "trace_id"})
-        # Preserve the v1 fingerprint for messages queued before shared content existed.
-        if not raw["payload"]["shared_content"]:
-            raw["payload"].pop("shared_content")
         fingerprint = digest(raw)
         try:
             with s.transaction():

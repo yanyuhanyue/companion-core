@@ -11,7 +11,6 @@ from companion.contracts import CoreError, StrictModel
 from companion.store import after, encode
 from companion.transport import digest, enqueue
 
-DEFAULT_CATEGORIES = ("happy", "like", "surprised", "morning", "sleep")
 MARKER = re.compile(r"⬡([^⬡\r\n]{1,80})⬡")
 CATEGORY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 SERIOUS = re.compile(
@@ -40,11 +39,11 @@ class ExpressionEngine:
         self.store, self.settings, self.clock = store, settings, clock
 
     def categories(self):
-        configured = getattr(self.settings, "expression_meme_categories", DEFAULT_CATEGORIES)
+        configured = self.settings.expression_meme_categories
         return tuple(dict.fromkeys(c for c in configured if CATEGORY.fullmatch(c)))[:12]
 
     def instruction(self):
-        if not getattr(self.settings, "expression_enabled", False):
+        if not self.settings.expression_enabled:
             return ""
         return (
             "表达自然，按当下内容选择长短，不必固定开场、重复总结或刻意卖萌。"
@@ -58,7 +57,7 @@ class ExpressionEngine:
 
     def intent(self, event_id, reply, now=None):
         now = now or self.clock()
-        if not getattr(self.settings, "expression_enabled", False):
+        if not self.settings.expression_enabled:
             return ResponseIntent(text=reply)
         markers = list(MARKER.finditer(reply))
         text = MARKER.sub("", reply).strip()
@@ -95,7 +94,7 @@ class ExpressionEngine:
         context = "\n".join(json.loads(row["body_json"]).get("text", "") for row in recent)
         if SERIOUS.search(context + "\n" + text):
             return intent
-        cooldown = getattr(self.settings, "expression_cooldown_minutes", 30)
+        cooldown = self.settings.expression_cooldown_minutes
         if self.store.one(
             "SELECT 1 FROM outbox WHERE conversation_id=? "
             "AND state NOT IN ('CANCELLED','FAILED') AND created_at>=? "
@@ -132,7 +131,7 @@ class ExpressionEngine:
                 raise CoreError("PRIVACY_CHANGED", 503)
             if event["conversation_id"] != conversation_id:
                 raise CoreError("EXPRESSION_CONVERSATION_MISMATCH", 400)
-            if not getattr(self.settings, "expression_enabled", False):
+            if not self.settings.expression_enabled:
                 return enqueue(
                     self.store, event_id, conversation_id, reply, now, action=action, key=key
                 )

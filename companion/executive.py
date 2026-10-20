@@ -11,7 +11,7 @@ import httpx
 
 from companion.budget import total_monthly
 from companion.contracts import CoreError
-from companion.executive_protocol import ExecutionEnvelope, ExecutiveConfig, ToolReceipt
+from companion.executive_protocol import ExecutionEnvelope, ToolReceipt
 from companion.privacy import epoch, redact
 from companion.store import after, encode, uid
 from companion.transport import digest
@@ -99,7 +99,7 @@ class Executive:
 
     @property
     def config(self):
-        return getattr(self.settings, "executive", ExecutiveConfig())
+        return self.settings.executive
 
     def policy(self):
         if not self.config.enabled:
