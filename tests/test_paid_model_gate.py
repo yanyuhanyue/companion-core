@@ -913,3 +913,125 @@ def test_stopping_admission_does_not_discard_later_inflight_cost_evidence(core, 
     )
     with pytest.raises(CoreError, match="RECONCILIATION"):
         budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+
+
+@pytest.mark.parametrize("change", ["disabled", "path_changed", "write_failure"])
+def test_known_cost_uses_reserved_accounting_custody_after_live_config_changes(
+    core, tmp_path, change, monkeypatch
+):
+    from companion import budget
+
+    approved_live(core, tmp_path)
+    original_approval = core.settings.paid_model
+    messages = [{"role": "user", "content": "hello"}]
+    request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    calls = []
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: (
+                    calls.append(req)
+                    or httpx.Response(
+                        200,
+                        json={
+                            "choices": [{"message": {"content": "ok"}}],
+                            "usage": {"prompt_tokens": 900000, "completion_tokens": 2},
+                        },
+                    )
+                )
+            )
+        ) as client:
+            response = await budget.complete(
+                ModelClient(core.settings, client),
+                core.store,
+                core.settings,
+                request,
+                messages,
+                "chat",
+                core.clock,
+            )
+        if change == "disabled":
+            core.settings.paid_model = None
+        elif change == "path_changed":
+            core.settings.paid_model = original_approval.model_copy(
+                update={"journal_path": str(tmp_path / "different.jsonl")}
+            )
+        else:
+            original = budget.paid_budget.journal
+
+            def fail_write(*args, **kwargs):
+                if len(args) > 2:
+                    raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(budget.paid_budget, "journal", fail_write)
+        budget.settle(core.store, core.settings, request, response)
+
+    asyncio.run(exercise())
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "UNKNOWN",
+        "billed_micro_usd": 900004,
+    }
+    core.settings.paid_model = original_approval
+    with pytest.raises(CoreError, match="RECONCILIATION"):
+        budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    assert len(calls) == 1
+
+
+def test_invoice_survives_disabled_live_approval(core, tmp_path):
+    from companion import budget
+
+    approved_live(core, tmp_path)
+    messages = [{"role": "user", "content": "hello"}]
+    request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    core.settings.paid_model = None
+    budget.record_provider_discrepancy(core.store, core.settings, request, 900004, "USD", "f" * 64)
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "UNKNOWN",
+        "billed_micro_usd": 900004,
+    }
+
+
+def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
+    import sqlite3
+
+    from companion import budget
+    from companion.store import Store
+
+    approved_live(core, tmp_path)
+    messages = [{"role": "user", "content": "hello"}]
+    request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    path = tmp_path / "before-unknown.db"
+    connection = sqlite3.connect(path)
+    core.store.db.backup(connection)
+    connection.close()
+    budget.settle(core.store, core.settings, request)
+    old = Store(str(path))
+    calls = []
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: (
+                    calls.append(req)
+                    or httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+                )
+            )
+        ) as client:
+            with pytest.raises(CoreError, match="RECONCILIATION"):
+                await budget.complete(
+                    ModelClient(core.settings, client),
+                    old,
+                    core.settings,
+                    request,
+                    messages,
+                    "chat",
+                    core.clock,
+                )
+
+    try:
+        asyncio.run(exercise())
+        assert calls == []
+    finally:
+        old.close()
