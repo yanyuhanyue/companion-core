@@ -24,8 +24,8 @@ EVENT = {"repository": {"default_branch": "main"}}
 
 
 @pytest.mark.parametrize("name,ref,files,expected", [
-    ("push", "refs/heads/topic", ["companion/expression.py"], "fast"),
-    ("push", "refs/heads/topic", ["tests/test_expression.py"], "fast"),
+    ("push", "refs/heads/topic", ["companion/expression.py"], "full"),
+    ("push", "refs/heads/topic", ["tests/test_expression.py"], "full"),
     ("push", "refs/heads/topic", ["docs/guide.md", "README.md"], "docs"),
     ("pull_request", "refs/pull/1/merge", ["docs/guide.md"], "docs"),
     ("pull_request", "refs/pull/1/merge", ["companion/expression.py"], "full"),
@@ -76,7 +76,7 @@ def needs(profile):
     }}
 
 
-@pytest.mark.parametrize("profile", ["full", "fast", "docs"])
+@pytest.mark.parametrize("profile", ["full", "docs"])
 def test_gate_accepts_only_the_expected_complete_result_set(profile):
     assert check_results(profile, needs(profile))
     assert not check_results("unknown", needs(profile))
@@ -91,8 +91,8 @@ def test_full_gate_rejects_failed_cancelled_missing_or_skipped_required_job(job,
     assert not check_results("full", results)
 
 
-@pytest.mark.parametrize("profile", ["fast", "docs"])
-def test_short_gate_cannot_hide_a_failed_attempted_job(profile):
+def test_docs_gate_cannot_hide_a_failed_attempted_job():
+    profile = "docs"
     results = needs(profile)
     results["container"]["result"] = "failure"
     assert not check_results(profile, results)
@@ -170,17 +170,17 @@ def test_cli_event_failure_chooses_full_and_gate_failure_returns_nonzero(tmp_pat
                             cwd=ROOT, env=env, capture_output=True, text=True)
     assert result.returncode == 0
     assert output.read_text("utf-8") == "profile=full\n"
-    env["NEEDS_JSON"] = json.dumps(needs("fast"))
+    env["NEEDS_JSON"] = json.dumps(needs("docs"))
     result = subprocess.run([sys.executable, "scripts/ci_policy.py", "gate", "--profile", "full"],
                             cwd=ROOT, env=env, capture_output=True, text=True)
     assert result.returncode != 0
 
 
 def test_preflight_files_exist_and_optional_new_workers_are_not_silently_missed(tmp_path):
-    assert all((ROOT / node.split("::")[0]).is_file() for node in preflight_tests("fast"))
+    assert all((ROOT / node.split("::")[0]).is_file() for node in preflight_tests("full"))
     assert "tests/test_source_reader_image.py" not in preflight_tests("docs")
     assert "tests/test_p8_readiness.py" not in preflight_tests("docs")
-    assert set(preflight_tests("docs")) < set(preflight_tests("fast"))
+    assert set(preflight_tests("docs")) < set(preflight_tests("full"))
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_worker_composition.py").touch()
     assert "tests/test_worker_composition.py" in preflight_tests("full", tmp_path)
@@ -204,7 +204,7 @@ def test_preflight_bootstraps_fresh_scratch_and_cleans_only_its_own_round(
         return result
 
     monkeypatch.setattr("scripts.ci_policy.subprocess.call", pytest_process)
-    assert run_preflight("fast", tmp_path) == result
+    assert run_preflight("full", tmp_path) == result
     assert not rounds[0].exists()
     assert (scratch / "retained.txt").read_text("utf-8") == "synthetic diagnostic"
 
@@ -221,6 +221,10 @@ def test_workflow_keeps_full_platform_checks_and_final_gate_after_preflight():
     assert jobs["ci"]["if"] == "${{ always() }}"
     assert set(jobs["ci"]["needs"]) == {"preflight", *FULL_JOBS}
     assert set(workflow["on"]) == {"push", "pull_request", "merge_group", "workflow_dispatch"}
+    # A branch push has no check until a PR is opened. Only its PR merge preview
+    # may produce the required `ci` check, so a short push cannot mask a failed PR.
+    assert workflow["on"]["push"] == {"branches": ["main"], "tags": ["**"]}
+    assert workflow["permissions"] == {"contents": "read"}
     concurrency = workflow["concurrency"]
     assert "github.workflow" in concurrency["group"] and "github.ref" in concurrency["group"]
     assert "default_branch" in concurrency["cancel-in-progress"]

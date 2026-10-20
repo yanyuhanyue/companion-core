@@ -28,8 +28,6 @@ CRITICAL_FILES = {
 }
 CRITICAL_DIRS = (".github/", "contracts/", "migrations/", "db/", "deploy/",
                  "companion_onebot_bridge/", "astrbot_plugin_companion_bridge/")
-CODE_DIRS = ("companion/", "source_reader/", "astrbot_plugin_companion_bridge/",
-             "scripts/", "tests/")
 
 
 def safe_path(name):
@@ -59,10 +57,6 @@ def choose_profile(event_name, ref, event, files):
         return "docs", "markdown-only"
     if event_name == "pull_request":
         return "full", "pr-merge-preview"
-    if ref.startswith("refs/heads/") and all(
-        name.endswith(".py") and name.startswith(CODE_DIRS) for name in files
-    ):
-        return "fast", "development-code"
     return "full", "unrecognized-change"
 
 
@@ -98,7 +92,7 @@ def changed_files(event_name, event, root=ROOT):
 def check_results(profile, needs):
     expected = "success" if profile == "full" else "skipped"
     return (
-        profile in {"full", "fast", "docs"}
+        profile in {"full", "docs"}
         and needs.get("preflight", {}).get("result") == "success"
         and all(needs.get(name, {}).get("result") == expected for name in FULL_JOBS)
     )
@@ -141,7 +135,7 @@ def run_preflight(profile, root=ROOT):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["plan", "test", "gate"])
-    parser.add_argument("--profile", choices=["full", "fast", "docs"])
+    parser.add_argument("--profile", choices=["full", "docs"])
     args = parser.parse_args()
     if args.operation == "plan":
         try:
