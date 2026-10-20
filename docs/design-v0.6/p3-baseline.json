@@ -1,0 +1,190 @@
+{
+  "checked_at": "2026-10-20T02:14:35.1592385Z",
+  "main": "676f6143a40d08ffe44862a8897b4953dfa6c02e",
+  "pull_requests": [
+    {
+      "number": 11,
+      "head": "aee7b16fd4808bb78597f68e79836d146cc00e5b",
+      "branch": "release/v0.5",
+      "base": "main",
+      "state": "OPEN",
+      "draft": false,
+      "checks": [
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248256712/job/118045390784"
+        },
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248251634/job/118045374271"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248256712/job/118045391060"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248251634/job/118045373876"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248256712/job/118045391076"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39248251634/job/118045374561"
+        }
+      ],
+      "reviews": 0
+    },
+    {
+      "number": 12,
+      "head": "89c60f08ab4707f169d7fc268fc7d72a55faec78",
+      "branch": "fix/v05-release-gates",
+      "base": "release/v0.5",
+      "state": "OPEN",
+      "draft": false,
+      "checks": [
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259868931/job/118084403324"
+        },
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259860191/job/118084374415"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259868931/job/118084403317"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259860191/job/118084375296"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259868931/job/118084403195"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39259860191/job/118084375265"
+        }
+      ],
+      "reviews": 0
+    },
+    {
+      "number": 13,
+      "head": "c74cae69022fa09543a4e59209002c5282784140",
+      "branch": "feat/v06-source-browser",
+      "base": "fix/v05-release-gates",
+      "state": "OPEN",
+      "draft": false,
+      "checks": [
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269744258/job/118118589816"
+        },
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269737160/job/118118565480"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269744258/job/118118589498"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269737160/job/118118565384"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269744258/job/118118589862"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269737160/job/118118565612"
+        },
+        {
+          "name": "browser-reader",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269744258/job/118118590015"
+        },
+        {
+          "name": "browser-reader",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39269737160/job/118118565442"
+        }
+      ],
+      "reviews": 0
+    },
+    {
+      "number": 14,
+      "head": "058cb62d7323ad23195a2077b96ede36fd24a0d2",
+      "branch": "feat/v06-heybox-reader",
+      "base": "feat/v06-source-browser",
+      "state": "OPEN",
+      "draft": true,
+      "checks": [
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344891358/job/118375015175"
+        },
+        {
+          "name": "test (ubuntu-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344759809/job/118374581545"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344891358/job/118375014788"
+        },
+        {
+          "name": "test (windows-latest)",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344759809/job/118374581495"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344891358/job/118375015145"
+        },
+        {
+          "name": "container",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344759809/job/118374581616"
+        },
+        {
+          "name": "browser-reader",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344891358/job/118375015037"
+        },
+        {
+          "name": "browser-reader",
+          "conclusion": "SUCCESS",
+          "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39344759809/job/118374581119"
+        }
+      ],
+      "reviews": 0
+    }
+  ]
+}

@@ -170,7 +170,8 @@ def test_text_and_images_are_bounded_and_invalid_images_are_not_requested():
     result, backend = run(read(response(post)))
     item = result["items"][0]
     assert len(item["text"]) == 11500 and item["article"]["truncated"]
-    assert item["image_urls"] == [IMAGE, IMAGE + "2"] and len(backend.requests) == 1
+    assert item["image_urls"] == [IMAGE, IMAGE + "2", IMAGE + "3"]
+    assert len(backend.requests) == 1
 
 
 def test_source_response_must_match_the_requested_post():

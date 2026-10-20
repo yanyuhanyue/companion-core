@@ -115,33 +115,37 @@ def article_parts(value):
 
 def render_article(parts, limit=11500):
     text, images, body_chars, truncated = "", [], 0, False
+    prepared, urls = [], []
     for kind, value in parts:
-        if kind == "text":
-            addition = value.strip()
-        else:
+        if kind == "image":
             try:
-                url = image_url(value)
+                value = image_url(value)
             except (TypeError, ValueError):
                 truncated = True
                 continue
-            if any(image["url"] == url for image in images):
+            if value in urls:
                 continue
-            if len(images) == 2:
+            if len(urls) == 32:
                 truncated = True
                 continue
-            addition = f"[图片{len(images) + 1}链接]"
+            urls.append(value)
+        prepared.append((kind, value))
+    # Reserve image placeholders before truncating long prose so later images remain queued.
+    remaining_text = limit - sum(len(f"[图片{i + 1}链接]") + 1 for i in range(len(urls)))
+    for kind, value in prepared:
         separator = "\n" if text else ""
-        remaining = limit - len(text) - len(separator)
-        if len(addition) > remaining:
-            if kind == "text" and remaining > 0:
-                text += separator + addition[:remaining]
-                body_chars += remaining
-            truncated = True
-            break
         if kind == "image":
-            images.append({"url": url, "text_offset": len(text) + len(separator)})
+            addition = f"[图片{len(images) + 1}链接]"
+            images.append({"url": value, "text_offset": len(text) + len(separator)})
         else:
+            addition = value.strip()
+            available = max(0, remaining_text - len(separator))
+            if len(addition) > available:
+                addition, truncated = addition[:available], True
+            if not addition:
+                continue
             body_chars += len(addition)
+            remaining_text -= len(separator) + len(addition)
         text += separator + addition
     if not body_chars:
         raise ReadFailure("READ_BODY_UNAVAILABLE")
@@ -241,14 +245,26 @@ class HeyboxReader:
                         target = "https://www.xiaoheihe.cn/app/bbs/link/" + identifier.lower()
                         found.setdefault(target, {"url": target, "title": title.strip()[:300]})
                 return list(found.values())
-            post = payload["result"].get("link")
+            post = payload["result"].get("link", payload["result"].get("post"))
             if not isinstance(post, dict):
                 raise ReadFailure("READ_BODY_UNAVAILABLE")
             identifier = url.rsplit("/", 1)[1]
-            if str(post.get("linkid", identifier)).lower() != identifier:
+            if str(post.get("linkid", post.get("link_id", identifier))).lower() != identifier:
                 raise ReadFailure("READER_TARGET_MISMATCH")
             title = post.get("title", "")
-            parts = article_parts(post.get("text", ""))
+            parts = article_parts(post.get("text", post.get("content", "")))
+            # The native tree response may keep images separately. Their original relative
+            # placement is unknown; append references after the body, never invent captions.
+            extra_images = post.get("images", post.get("image_urls", []))
+            if not isinstance(extra_images, list) or len(extra_images) > 1000:
+                raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+            parts.extend(
+                (
+                    "image",
+                    value.get("url", value.get("src", "")) if isinstance(value, dict) else value,
+                )
+                for value in extra_images
+            )
             method = "source_api"
         else:
             raw = await self.public.get(url, budget, "page")

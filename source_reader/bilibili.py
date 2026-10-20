@@ -64,7 +64,7 @@ def api_data(raw):
     return payload["data"]
 
 
-def subtitle_excerpt(raw, limit=8000):
+def subtitle_excerpt(raw, limit=8000, duration=None):
     payload = json.loads(raw)
     rows = payload.get("body")
     if not isinstance(rows, list) or not rows:
@@ -82,6 +82,8 @@ def subtitle_excerpt(raw, limit=8000):
             or not text.strip()
         ):
             raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+        if duration is not None and end > duration + 1:
+            raise ReadFailure("READER_SUBTITLE_TARGET_MISMATCH")
         line = f"[{start:.2f}–{end:.2f}s] {text.strip()}"
         if used + len(line) + 1 > limit:
             break
@@ -94,8 +96,11 @@ def subtitle_excerpt(raw, limit=8000):
 
 
 class BilibiliReader:
-    def __init__(self, public, renderer=None, clock=lambda: datetime.now(UTC).isoformat()):
+    def __init__(
+        self, public, renderer=None, clock=lambda: datetime.now(UTC).isoformat(), subtitles=True
+    ):
         self.public, self.renderer, self.clock = public, renderer, clock
+        self.subtitles = subtitles
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
@@ -118,11 +123,15 @@ class BilibiliReader:
         url = video_url(item["url"])
         identifier = url.rsplit("/", 1)[1]
         params = {"bvid": identifier} if identifier.startswith("BV") else {"aid": identifier[2:]}
-        method = "public_api"
+        method = getattr(self.public, "reading_method", "public_api")
         raw = await self.public.get(
             "https://api.bilibili.com/x/web-interface/view?" + urlencode(params), budget, "metadata"
         )
         data = api_data(raw)
+        if (identifier.startswith("BV") and data.get("bvid", identifier) != identifier) or (
+            identifier.startswith("av") and str(data.get("aid", identifier[2:])) != identifier[2:]
+        ):
+            raise ReadFailure("READER_TARGET_MISMATCH")
         if not str(data.get("desc", "")).strip():
             # Fall back only after a successful public response, never around an access denial.
             try:
@@ -133,8 +142,20 @@ class BilibiliReader:
                 if not str(rendered.get("desc", "")).strip() and self.renderer:
                     rendered = await self.renderer.metadata(url, raw)
                     method = "browser_render"
-                else:
+                elif method != "account_api":
                     method = "static_page"
+                if (
+                    (identifier.startswith("BV") and rendered.get("bvid", identifier) != identifier)
+                    or (
+                        identifier.startswith("av")
+                        and str(rendered.get("aid", identifier[2:])) != identifier[2:]
+                    )
+                    or any(
+                        key in rendered and key in data and rendered[key] != data[key]
+                        for key in ("aid", "bvid", "cid")
+                    )
+                ):
+                    raise ReadFailure("READER_TARGET_MISMATCH")
                 data = {**data, **{k: v for k, v in rendered.items() if v}}
             except ReadFailure as error:
                 if str(error) not in {"READER_REQUEST_LIMIT", "READER_BYTE_LIMIT"}:
@@ -161,15 +182,23 @@ class BilibiliReader:
         }
         subtitle = ""
         cid = data.get("cid")
-        if isinstance(cid, int) and cid > 0:
+        if self.subtitles and isinstance(cid, int) and cid > 0:
             try:
+                aid = data.get("aid")
+                player_params = {"aid": aid} if type(aid) is int and aid > 0 else params
                 player = api_data(
                     await self.public.get(
-                        "https://api.bilibili.com/x/player/v2?" + urlencode({**params, "cid": cid}),
+                        "https://api.bilibili.com/x/player/v2?"
+                        + urlencode({**player_params, "cid": cid}),
                         budget,
                         "player",
                     )
                 )
+                if any(
+                    key in player and key in data and player[key] != data[key]
+                    for key in ("aid", "bvid", "cid")
+                ):
+                    raise ReadFailure("READER_SUBTITLE_TARGET_MISMATCH")
                 info = player.get("subtitle") or {}
                 tracks = info.get("subtitles") or []
                 if not tracks:
@@ -183,8 +212,29 @@ class BilibiliReader:
                         (t for t in tracks if str(t.get("lan", "")).startswith("zh")), tracks[0]
                     )
                     caption_url = urljoin("https://aisubtitle.hdslb.com/", track["subtitle_url"])
+                    # Observed upstream AI URLs bind a video/part to a 32-hex content key.
+                    # Reject a mismatched target before fetching someone else's transcript.
+                    ai_path = "/bfs/ai_subtitle/prod/"
+                    if ai_path in caption_url and (
+                        type(aid) is not int
+                        or not re.fullmatch(
+                            r"https://aisubtitle\.hdslb\.com"
+                            + ai_path
+                            + str(aid)
+                            + str(cid)
+                            + r"[0-9a-fA-F]{32}(?:\.json)?(?:\?[^#]*)?",
+                            caption_url,
+                        )
+                    ):
+                        raise ReadFailure("READER_SUBTITLE_TARGET_MISMATCH")
                     raw = await self.public.get(caption_url, budget, "subtitle")
-                    subtitle, spans, truncated = subtitle_excerpt(raw)
+                    duration = data.get("duration")
+                    pages = data.get("pages") or []
+                    if pages and pages[0].get("cid") == cid:
+                        duration = pages[0].get("duration", duration)
+                    if type(duration) not in {int, float} or not math.isfinite(duration):
+                        duration = None
+                    subtitle, spans, truncated = subtitle_excerpt(raw, duration=duration)
                     evidence.update(
                         level="L2",
                         subtitle_status="available",
@@ -193,6 +243,14 @@ class BilibiliReader:
                         truncated=truncated,
                     )
             except ReadFailure as error:
+                if str(error) in {
+                    "OWNER_ACCOUNT_AUTHORIZATION_REQUIRED",
+                    "SOURCE_CREDENTIAL_REVOKED",
+                    "SOURCE_DISABLED",
+                    "PLUGIN_UNAVAILABLE",
+                    "READER_SUBTITLE_TARGET_MISMATCH",
+                }:
+                    raise
                 evidence["subtitle_status"] = (
                     "restricted"
                     if str(error) == "UPSTREAM_ACCESS_LIMIT"
@@ -204,10 +262,11 @@ class BilibiliReader:
                 evidence["subtitle_status"] = "unavailable"
         else:
             evidence["subtitle_status"] = "unavailable"
+        access = "账号授权" if method == "account_api" else "公开"
         scope = (
-            "读取范围：公开元数据及第1分P的部分字幕；未分析画面或音频，未完整观看。"
+            f"读取范围：{access}元数据及第1分P的部分字幕；未分析画面或音频，未完整观看。"
             if subtitle
-            else f"读取范围：公开标题和简介；字幕{evidence['subtitle_status']}；未观看视频。"
+            else f"读取范围：{access}标题和简介；字幕{evidence['subtitle_status']}；未观看视频。"
         )
         evidence["fetched_at"] = self.clock()
         return [

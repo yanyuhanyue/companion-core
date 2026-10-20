@@ -59,10 +59,19 @@ def permitted_url(value):
         or len(value) > 2048
     ):
         raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
-    if url.hostname == "api.bilibili.com" and url.path in {"/x/web-interface/view", "/x/player/v2"}:
+    if url.hostname == "api.bilibili.com" and url.path in {
+        "/x/web-interface/view",
+        "/x/player/v2",
+        "/x/web-interface/search/type",
+        "/x/v2/reply",
+    }:
         return
     if url.hostname in {"aisubtitle.hdslb.com", "i0.hdslb.com"} and re.fullmatch(
         r"/bfs/subtitle/[A-Za-z0-9_.-]{1,240}\.json", url.path
+    ):
+        return
+    if url.hostname == "aisubtitle.hdslb.com" and re.fullmatch(
+        r"/bfs/ai_subtitle/prod/[0-9a-fA-F]{32,128}(?:\.json)?", url.path
     ):
         return
     if (
@@ -126,6 +135,7 @@ class ReadBudget:
     used_bytes: int = 0
     used_requests: int = 0
     sources: list = field(default_factory=list)
+    authorization: bytes | None = field(default=None, repr=False)
 
     def reserve(self):
         if self.used_requests >= self.max_requests:
@@ -172,13 +182,17 @@ class PublicHTTP:
     async def __aexit__(self, *args):
         await self.pool.aclose()
 
-    async def get(self, url, budget, role):
+    async def get(self, url, budget, role, *, headers=None):
         permitted_url(url)
         budget.reserve()
         async with self.pool.stream(
             "GET",
             url,
-            headers={"Accept-Encoding": "identity", "User-Agent": "CompanionSourceReader/0.6"},
+            headers={
+                **(headers or {}),
+                "Accept-Encoding": "identity",
+                "User-Agent": "CompanionSourceReader/0.6",
+            },
             extensions={"timeout": {key: 8.0 for key in ("connect", "read", "write", "pool")}},
         ) as response:
             body = await response_body(response, budget)

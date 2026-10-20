@@ -58,7 +58,7 @@ class SubtitleSpan(StrictModel):
 
 class ReadingEvidence(StrictModel):
     level: Literal["L1", "L2"]
-    method: Literal["public_api", "static_page", "browser_render"]
+    method: Literal["public_api", "account_api", "static_page", "browser_render"]
     fetched_at: AwareDatetime
     part: Literal[1] = 1
     subtitle_status: Literal["available", "missing", "restricted", "unavailable", "budget_limited"]
@@ -103,7 +103,7 @@ class ArticleEvidence(StrictModel):
     fetched_at: AwareDatetime
     response_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     response_bytes: int = Field(gt=0, le=1048576)
-    images: list[ArticleImage] = Field(default_factory=list, max_length=2)
+    images: list[ArticleImage] = Field(default_factory=list, max_length=32)
     truncated: bool = False
 
     @model_validator(mode="after")

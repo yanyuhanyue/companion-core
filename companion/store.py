@@ -113,9 +113,15 @@ class Store:
             "media_requests": {"request_key", "fingerprint", "usage_request_id", "event_id"},
             "content_items": {"owner_event_id", "read_request_id", "usage_request_id", "deadline"},
         }
-        return all(
+        columns_present = all(
             columns <= {row["name"] for row in self.rows(f"PRAGMA table_info({table})")}
             for table, columns in required.items()
+        )
+        content = self.one(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_items'"
+        )
+        return columns_present and bool(
+            content and "slot<64" in "".join(content["sql"].split()).lower()
         )
 
     def insert(self, table, **values):
