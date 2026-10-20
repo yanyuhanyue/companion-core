@@ -356,6 +356,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
+    if isinstance(model, ModelClient) and model.settings is not settings:
+        raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
     approval = paid_budget.contract(settings, now)
     with store.transaction():
         paid_budget.contract(settings, clock())
