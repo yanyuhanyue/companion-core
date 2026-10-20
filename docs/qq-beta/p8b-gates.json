@@ -1,0 +1,47 @@
+{
+  "$schema": "../../contracts/p8b-gates.schema.json",
+  "schema_version": 1,
+  "task": "CC-P8B-OFFLINE-HARD-GATES",
+  "evidence_level": "OFFLINE_SYNTHETIC",
+  "baseline": {
+    "main": "a33d3cb77f348828b17e4bb48c621c53cfcdc017",
+    "ci_run_id": 39400867023,
+    "ci_successful_jobs": 5,
+    "prs_18_23_merged": true,
+    "runtime_observation": "HISTORICAL_P8A_ONLY_NOT_RECHECKED"
+  },
+  "pull_requests": [],
+  "offline_gates": {
+    "budget_gate": {"state": "PENDING", "evidence": []},
+    "input_gate": {"state": "PENDING", "evidence": []},
+    "provider_concurrency_gate": {"state": "PENDING", "evidence": []},
+    "window_lifetime_gate": {"state": "PENDING", "evidence": []},
+    "unknown_retention_gate": {"state": "PENDING", "evidence": []},
+    "bounded_sender_gate": {"state": "PENDING", "evidence": []},
+    "recovery_synthetic": {"state": "PENDING", "evidence": []},
+    "token_benchmark": {"state": "PENDING", "evidence": []}
+  },
+  "runtime_gates": {
+    "recovery_nonempty": "BLOCKED_NOT_VERIFIED",
+    "host_restore": "BLOCKED_NOT_VERIFIED",
+    "paid_provider": "BLOCKED_NOT_AUTHORIZED",
+    "M1": "DISABLED_NOT_AUTHORIZED",
+    "G1_runtime": "BLOCKED_NOT_DEPLOYED",
+    "historical_phone_samples": 5,
+    "real_QQ_strict": {"first5": 0, "all20": 0},
+    "live_E2E": {"paired_samples": 0, "p50_ms": null, "p95_ms": null}
+  },
+  "validation": {
+    "commands_reference": "p8b-execution.md",
+    "failures": [],
+    "local_docker": "SKIPPED_BY_ENV_DAEMON_OFF",
+    "combined": {"state": "PENDING"}
+  },
+  "actions": {
+    "vps_connections": 0, "vps_writes": 0, "qq_inputs": 0, "qq_sends": 0,
+    "paid_requests": 0, "real_data_copies": 0, "merges": 0,
+    "branch_deletions": 0, "protected_cleanup": 0
+  },
+  "approvals": "p8b-approvals.json",
+  "production_ready": false
+}

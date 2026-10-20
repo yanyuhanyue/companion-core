@@ -1,5 +1,11 @@
 # P8-A 模型与预算预接入合同
 
+P8-B 增量：本文件保留 P8-A 固定代码的缺口与测试快照；B1 独立 Draft 候选
+补齐的离线门禁不能当作真实 provider 准入。所有真实模型、费率、额度与账户控制仍未确认，
+见 [p8b-approvals.json](p8b-approvals.json) 的 `paid_model`；缺字段即 BLOCKED。
+新增持久账本随非空 DB/最新 Ledger 一起纳入独立恢复申请，不能恢复旧 DB 后重新获得额度。
+供应商最终扣费须独立核账，单库软件预算不覆盖同账号的其他数据库/客户端。
+
 证据等级：`OFFLINE`；输入均为 `SYNTHETIC`。审计基线为
 `940b6f28c16f7d495c3ff86e6b5bc7fad63e917a`。本文件是关机状态的审查材料，
 不是模型、费用、QQ 发送或 M1 的批准。`paid_model_requests=0`，
