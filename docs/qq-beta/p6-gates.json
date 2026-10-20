@@ -3,8 +3,8 @@
   "task": "CC-NEXT-20261020-P6-SNOWLUMA-LIVE-BETA",
   "baseline_main": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
   "baseline_pr18_head": "33dff1186899d3a91f4c2023ab0d594024761971",
-  "code_ready": false,
-  "code_gate": "PENDING_CURRENT_CANDIDATE_CHECKS",
+  "code_ready": true,
+  "code_gate": "PASS",
   "test_source_ready": false,
   "production_ready": false,
   "license": "PASS_OWNER_ATTESTED",
@@ -34,6 +34,103 @@
   "paid_model_requests": 0,
   "dsh_runs": 0,
   "windows_device_runs": 0,
-  "evidence": {"OFFLINE_FIXTURE": [], "LIVE_ONEBOT": [], "LIVE_QQ_HUMAN": [], "PAID_MODEL": []},
-  "next_gate": "Confirm snapshot/backup path and explicitly approve isolated runtime installation; QQ login and a bounded first-five-message test window remain separate."
+  "evidence": {
+    "OFFLINE_FIXTURE": [
+      "p6-review.md",
+      "p6-latency.json",
+      "https://github.com/yanyuhanyue/companion-core/actions/runs/39376354697",
+      "https://github.com/yanyuhanyue/companion-core/actions/runs/39376360900"
+    ],
+    "LIVE_ONEBOT": [],
+    "LIVE_QQ_HUMAN": [],
+    "PAID_MODEL": []
+  },
+  "next_gate": "Confirm snapshot/backup path and explicitly approve isolated runtime installation; QQ login and a bounded first-five-message test window remain separate.",
+  "R0": "PASS",
+  "R1": "BLOCKED_HOST_BACKUP",
+  "offline_fixture_ready": true,
+  "validated_code_commit": "c1986a39178755ddec20f330523cfdeee68be685",
+  "validation": {
+    "local_windows": {
+      "passed": 715,
+      "skipped": 2,
+      "warnings": 3,
+      "seconds": 539.81,
+      "chromium_enabled": true
+    },
+    "onebot": {
+      "passed": 87,
+      "seconds": 52.13
+    },
+    "ci": [
+      {
+        "run_id": 39376354697,
+        "head_sha": "c1986a39178755ddec20f330523cfdeee68be685",
+        "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39376354697",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "container",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (windows-latest)",
+            "conclusion": "success"
+          },
+          {
+            "name": "browser-reader",
+            "conclusion": "success"
+          },
+          {
+            "name": "plugin-native",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (ubuntu-latest)",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "run_id": 39376360900,
+        "head_sha": "c1986a39178755ddec20f330523cfdeee68be685",
+        "url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39376360900",
+        "conclusion": "success",
+        "jobs": [
+          {
+            "name": "browser-reader",
+            "conclusion": "success"
+          },
+          {
+            "name": "container",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (ubuntu-latest)",
+            "conclusion": "success"
+          },
+          {
+            "name": "plugin-native",
+            "conclusion": "success"
+          },
+          {
+            "name": "test (windows-latest)",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "ci_full_suite_each_os": {
+      "passed": 713,
+      "skipped_browser_cases": 4,
+      "warnings": 1
+    },
+    "ci_chromium_each_run": 4,
+    "ci_native_fixture_each_run": 58,
+    "ci_four_images_and_uid_volume_smoke": "PASS",
+    "compose_isolated_synthetic_env": "PASS",
+    "package_export_migration": "PASS",
+    "replay_and_worker_smoke": "PASS",
+    "report_followup": "Report-only followup; current head checks linked from Draft PR19."
+  }
 }

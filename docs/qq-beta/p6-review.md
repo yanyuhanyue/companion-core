@@ -49,7 +49,15 @@ Compose 原因可核对 [Docker loader 的 NamedTagged 要求](https://github.co
 - 首轮新 CI 的权限负例暴露夹具问题：空旧卷在 Docker 挂载初始化后未保持预设 owner。
   现使用非空合成卷和 volume-nocopy，并先断言 root/0700；
   [Docker 的空卷复制行为](https://docs.docker.com/engine/storage/volumes/)与此相符。
-  修订后的 Linux 镜像及权限 CI 结果将在完成后补充，不能引用 #18 的 10/10。
+  修订后的 Linux 镜像及权限 CI 已通过，不引用 #18 的旧检查作为本轮证据。
+- 已验证源码候选 **`c1986a39178755ddec20f330523cfdeee68be685`**：
+  [Push 39376354697](https://github.com/yanyuhanyue/companion-core/actions/runs/39376354697) 与
+  [PR 39376360900](https://github.com/yanyuhanyue/companion-core/actions/runs/39376360900)，均 **5/5 success**。
+  每组 Linux/Windows 各 **713 passed / 4 skipped / 1 warning**；这四项 browser 测试未在全量作业启用，
+  在独立 Chromium 作业 **4 passed**；上游 native fixture **58 passed**。
+  容器作业真实构建四镜像，Compose 独立构建及 UID10004 的新卷/重开/旧 owner 拒绝均 PASS。
+- 随后提交仅填写 P6 报告和门禁证据，保留上述固定源码 SHA；最终 head 的重新验证见
+  [Draft #19 checks](https://github.com/yanyuhanyue/companion-core/pull/19/checks)。
 - 本地生成临时文件位于工作区，禁止接触此前保护目录。自动审核拒绝三个清理操作，
   涉及两个审核子任务目录和本轮 red/green 两个测试目录，理由均为 `blocked by policy`；未改工具重试。
 
