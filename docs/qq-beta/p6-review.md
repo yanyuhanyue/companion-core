@@ -46,8 +46,12 @@ Compose 原因可核对 [Docker loader 的 NamedTagged 要求](https://github.co
 - OneBot 专项：`./scripts/check.ps1 -TestFiles <tests/test_onebot*.py>`，**87 passed，52.13s**。
 - `verify_onebot_compose.py` PASS；`uv build --offline`、`verify_package.py` 的归档/无 Git 导出重包/
   wheel 迁移初始化 PASS；`scripts/replay.py` 与 `scripts/smoke.py` PASS。
-- 当前新 CI 仍待运行，不能引用 #18 的 10/10；Linux 镜像及权限执行结果将在完成后补充。
-- 本地生成临时文件位于工作区，禁止接触此前保护目录。自动审核拒绝了两个审核子任务各自临时目录的清理，理由均为 `blocked by policy`；未改工具重试。
+- 首轮新 CI 的权限负例暴露夹具问题：空旧卷在 Docker 挂载初始化后未保持预设 owner。
+  现使用非空合成卷和 volume-nocopy，并先断言 root/0700；
+  [Docker 的空卷复制行为](https://docs.docker.com/engine/storage/volumes/)与此相符。
+  修订后的 Linux 镜像及权限 CI 结果将在完成后补充，不能引用 #18 的 10/10。
+- 本地生成临时文件位于工作区，禁止接触此前保护目录。自动审核拒绝三个清理操作，
+  涉及两个审核子任务目录和本轮 red/green 两个测试目录，理由均为 `blocked by policy`；未改工具重试。
 
 ## 覆盖边界与遗留
 

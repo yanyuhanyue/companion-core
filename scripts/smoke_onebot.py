@@ -25,6 +25,8 @@ payload = {
     "payload": {"text": "Synthetic image smoke only"},
 }
 if "--wrong-owner" in sys.argv:
+    assert Path(config.data_dir).stat().st_uid == 0
+    assert stat.S_IMODE(Path(config.data_dir).stat().st_mode) == 0o700
     try:
         with Spool(config):
             raise AssertionError("wrong-owner volume must be rejected")

@@ -55,11 +55,11 @@ jobs:
           docker run --rm --network none --read-only --user 0:0
           -v companion-onebot-wrong-owner:/bridge-data
           --entrypoint python companion-onebot-bridge:review
-          -c "import os; os.chown('/bridge-data',0,0); os.chmod('/bridge-data',0o700)"
+          -c "import os; from pathlib import Path; Path('/bridge-data/legacy.sentinel').write_text('SYNTHETIC'); os.chown('/bridge-data',0,0); os.chmod('/bridge-data',0o700)"
       - run: >-
           docker run --rm --network none --read-only --cap-drop ALL
           --security-opt no-new-privileges --memory 256m --pids-limit 64
-          -v companion-onebot-wrong-owner:/bridge-data
+          --mount type=volume,source=companion-onebot-wrong-owner,target=/bridge-data,volume-nocopy
           -v "${{ github.workspace }}/scripts/smoke_onebot.py:/app/verify.py:ro"
           --entrypoint python companion-onebot-bridge:review /app/verify.py --wrong-owner
       - run: >-
