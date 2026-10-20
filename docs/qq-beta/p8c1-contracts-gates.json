@@ -6,9 +6,9 @@
     "main_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
     "privacy_sha": "e24d8788d4c597f9e938d96d87ed76805504f044",
     "code_migration_head": "0017_paid_model_gate",
-    "frozen_product_candidate_sha": null,
-    "offline_compatibility": "PENDING_OTHER_WORKSTREAM",
-    "compatibility_evidence_reference": null
+    "frozen_product_candidate_sha": "e5bdc075be060e1366a8171f43b84fac408b27a5",
+    "offline_compatibility": "OFFLINE_COMPATIBILITY_READY",
+    "compatibility_evidence_reference": "p8c1-gates.json"
   },
   "targets": {
     "legacy_ref": "private_target_legacy",

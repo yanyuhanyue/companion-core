@@ -2,10 +2,10 @@
   "$schema": "../../contracts/p8c1-gates.schema.json",
   "schema_version": 1,
   "baseline_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
-  "product_candidate_sha": null,
+  "product_candidate_sha": "e5bdc075be060e1366a8171f43b84fac408b27a5",
   "evidence_level": "OFFLINE_SYNTHETIC_WITH_RUNTIME_BLOCKERS",
   "gates": {
-    "offline_compatibility": "PENDING_INTEGRATION",
+    "offline_compatibility": "OFFLINE_COMPATIBILITY_READY",
     "slash_commands": "OFFLINE_PASS",
     "provider_contract": "PROVIDER_CONTRACT_UNVERIFIABLE",
     "privacy_review": "OFFLINE_PASS_WITH_HISTORY_RESIDUAL",
@@ -18,13 +18,13 @@
     "optional_C5": "DEFERRED"
   },
   "validation": {
-    "independent_review": "PENDING",
+    "independent_review": "PASS",
     "local": {
-      "state": "PENDING",
-      "passed": null,
-      "skipped": null,
-      "warnings": null,
-      "seconds": null
+      "state": "PASS",
+      "passed": 1221,
+      "skipped": 6,
+      "warnings": 1,
+      "seconds": 1088.97
     },
     "exact_head_ci": "EXTERNAL_ATTESTATION_REQUIRED_FOR_FINAL_PR_AND_MAIN_SHA",
     "required_jobs": [
@@ -47,7 +47,10 @@
     "p8c1-public-evidence-review.md",
     "p8c1-provider-contract-review.md",
     "p8c1-recovery-approval-delta.md",
-    "p8c1-contracts-gates.json"
+    "p8c1-contracts-gates.json",
+    "p8c1-window-live-compat.md",
+    "p8c1-independent-review.md",
+    "p8c1-execution.md"
   ],
   "production_ready": false
 }
