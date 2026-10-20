@@ -1,5 +1,7 @@
 import asyncio
 import json
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 
 import pytest
@@ -91,8 +93,16 @@ def ingest(core, number=1, text="今天想聊聊茶", **kwargs):
     return core.ingest(event(core, number, text, **kwargs), f"key-{number}")
 
 
+@pytest.fixture(scope="session")
+def migrated_database(tmp_path_factory):
+    """Run the real migration chain once; each test receives an independent database."""
+    path = tmp_path_factory.mktemp("schema") / "empty.db"
+    migrate(str(path))
+    return path
+
+
 @pytest.fixture
-def core(tmp_path):
+def core(tmp_path, migrated_database):
     cfg = Settings(
         owner_qq_id="10001",
         bot_qq_id="10002",
@@ -104,7 +114,10 @@ def core(tmp_path):
         output_rate=1200000,
         proactive_enabled=False,
     )
-    migrate(cfg.database)
+    # SQLite backup includes committed WAL data and never copies another test's state.
+    with closing(sqlite3.connect(migrated_database)) as source:
+        with closing(sqlite3.connect(cfg.database)) as destination:
+            source.backup(destination)
     instance = Core(cfg, FakeModel(), Clock())
     yield instance
     instance.store.close()
