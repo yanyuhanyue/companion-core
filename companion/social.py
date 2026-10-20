@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from companion.privacy import epoch
-from companion.store import after, uid
+from companion.store import after, uid, utcnow
 from companion.transport import enqueue
 
 
@@ -77,13 +77,8 @@ def semantic_duplicate(text, candidates, settings):
 
 
 class SocialPlanner:
-    def __init__(self, core):
-        self.core, self.store, self.settings, self.clock = (
-            core,
-            core.store,
-            core.settings,
-            core.clock,
-        )
+    def __init__(self, store, settings, clock=utcnow):
+        self.store, self.settings, self.clock = store, settings, clock
 
     def consider(self, event_id):
         if not self.settings.social_enabled:
