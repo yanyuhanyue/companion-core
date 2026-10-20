@@ -5,8 +5,8 @@
   "date": "2026-10-20",
   "timezone": "Asia/Shanghai",
   "p8_a": {
-    "state": "OFFLINE_CANDIDATE",
-    "completion_rule": "Local checks and exact final head push/PR CI must both pass; final PR and private manifest resolve current head.",
+    "state": "OFFLINE_READY",
+    "completion_rule": "Local and combined checks passed. Exact final report/patch head push+PR CI remains a mandatory external attestation resolved by the actual PR checks and final manifest.",
     "new_live_qa_performed": false
   },
   "baseline": {
@@ -123,7 +123,17 @@
       "P1 pre-GET Core revocation revalidation missing",
       "P1 owner-corrected memory successor omitted from grant erasure closure"
     ],
-    "repair": "SEPARATE_PATCH_REQUIRED_UNTIL_EXACT_HEAD_VERIFIED",
+    "repair": {
+      "commit": "6d200378aaeed5a13e2aa76a676cb0c7d8e594c4",
+      "pr": "https://github.com/yanyuhanyue/companion-core/pull/23",
+      "targeted_passed": 81,
+      "original_red_reproductions_now_passed": 2,
+      "second_independent_passed": 7,
+      "combined_validation_passed": true,
+      "legacy_ambiguous_complete": "FAIL_CLOSED_ISOLATED_REVIEW_REQUIRED",
+      "deployed": false,
+      "original_findings_remain_a_fixed_head_snapshot": true
+    },
     "legacy_review_required": true
   },
   "m1": {
@@ -173,7 +183,17 @@
     "ci": "EXACT_FINAL_HEAD_EXTERNAL_ATTESTATION_REQUIRED",
     "local_linux_container_run": "SKIPPED_BY_ENV_DOCKER_ENGINE_OFF",
     "native_fixture": "PASS_PINNED_CHECKOUTS_LOCAL_NO_ASTRBOT_DSH",
-    "bounded_regression_tests_passed": 146
+    "bounded_regression_tests_passed": 146,
+    "combined_full": {
+      "validation_commit": "fbb5861f336d3cd6da74b13ae67454cfd715aad9",
+      "scope": "P8 regressions + original G1 + G1 repair + pinned P7 reports",
+      "exit_code": 0,
+      "passed": 771,
+      "skipped": 2,
+      "warnings": 1,
+      "seconds": 605.83,
+      "chromium_enabled": true
+    }
   },
   "repository_workflow": {
     "merge_and_integrated_branch_cleanup_authorized_by_latest_user": true,
