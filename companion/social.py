@@ -78,6 +78,18 @@ def semantic_duplicate(text, candidates, settings):
     )
 
 
+def _share_url(value, source):
+    if not isinstance(value, str):
+        return None
+    if not value:
+        return ""
+    try:
+        platform, canonical = content_target(value)
+        return canonical if platform == source else None
+    except CoreError:
+        return None
+
+
 def share_source(event):
     """Accepted historical text stays usable; revoked future reads do not erase it.
 
@@ -100,16 +112,11 @@ def share_source(event):
             or hashlib.sha256(body["text"].encode()).hexdigest() != event["source_sha256"]
         ):
             return None
-        canonical = event["canonical_url"]
-        if not isinstance(canonical, str):
+        canonical = _share_url(event["canonical_url"], definition.name)
+        if canonical is None:
             return None
-        source = definition.name
-        if canonical:
-            source, canonical = content_target(canonical)
-            if source != definition.name:
-                return None
         evidence = json.loads(event["evidence_json"])
-        if any(evidence.get(kind) is not None and not supports(source, kind)
+        if any(evidence.get(kind) is not None and not supports(definition.name, kind)
                for kind in ("reading", "article")):
             return None
         return definition, body, canonical
@@ -237,14 +244,16 @@ class SocialPlanner:
             if not candidate:
                 return False
             resolved = share_source({**candidate, "canonical_url": candidate["source_url"]})
-            if resolved is None or resolved[2] != candidate["canonical_url"]:
+            if resolved is None or resolved[2] != _share_url(
+                candidate["canonical_url"], resolved[0].name
+            ):
                 s.execute(
                     "UPDATE social_candidates SET state='SKIPPED',reason_code='SOURCE_CHANGED',"
                     "updated_at=? WHERE candidate_id=?",
                     (now, candidate["candidate_id"]),
                 )
                 return False
-            definition, body, _ = resolved
+            definition, body, canonical = resolved
             label = definition.share_label
             text = (
                 "读到一段"
@@ -254,7 +263,7 @@ class SocialPlanner:
                 + "\n"
                 + body["text"][:500]
                 + "\n"
-                + candidate["canonical_url"]
+                + canonical
             )
             message_id = enqueue(
                 s,
