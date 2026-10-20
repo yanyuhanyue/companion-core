@@ -197,6 +197,75 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
         ) == {"state": "SETTLED"}
 
 
+def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_retry(
+    core, unavailable_semantics, opened_stores, monkeypatch,
+):
+    from companion import content, content_worker
+    from tests.test_article_vision import article
+    from tests.test_content import enable, png
+
+    service, vision = enable(core)
+    owner_id, article_id = article(core, 1)
+    fetches, provider_calls = [], []
+
+    async def fetch(*args, **kwargs):
+        fetches.append(args)
+        return png(), "image/png"
+
+    async def die_after_reservation(row, data, mime):
+        # Model a hard process exit after the durable reservation, before a receipt.
+        reserved, duplicate = service._reserve(row, data, mime)
+        assert not duplicate and reserved["state"] == "RUNNING"
+        raise SystemExit("SYNTHETIC_PROCESS_EXIT")
+
+    monkeypatch.setattr(content, "fetch_public_image", fetch)
+    monkeypatch.setattr(service, "_analyze", die_after_reservation)
+    with pytest.raises(SystemExit, match="SYNTHETIC_PROCESS_EXIT"):
+        asyncio.run(service.run_once())
+    image = core.store.one("SELECT * FROM content_items WHERE kind='link_image'")
+    usage = core.store.one(
+        "SELECT * FROM model_usage WHERE request_id=?", (image["usage_request_id"],),
+    )
+    assert len(fetches) == 1 and vision.calls == []
+    assert usage["state"] == "RESERVED" and usage["billed_micro_usd"] > 0
+    settings = core.settings.model_copy(update={"memory_enabled": True, "content": service.options})
+    clock = core.clock
+    clock.advance(service.options.provider_timeout_seconds + 6)
+    core.store.close()
+    fetches.clear()
+
+    async def forbidden_provider(*args, **kwargs):
+        provider_calls.append(args)
+        raise AssertionError("An interrupted image must not be dispatched again")
+
+    async def stop(_seconds):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(content.HTTPMediaProvider, "process", forbidden_provider)
+    monkeypatch.setattr(content_worker, "Runtime", partial(Runtime, clock=clock))
+    monkeypatch.setattr(asyncio, "sleep", stop)
+    for _ in range(2):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(content_worker.content_worker(settings))
+    assert fetches == provider_calls == unavailable_semantics == []
+    assert len(opened_stores) == 2
+    for store in opened_stores:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            store.one("SELECT 1")
+    with Runtime(settings, clock) as runtime:
+        recovered = runtime.store.one(
+            "SELECT * FROM content_items WHERE item_id=?", (image["item_id"],),
+        )
+        assert recovered["state"] == "UNKNOWN"
+        assert recovered["error_code"] == "CONTENT_PROCESSOR_LOST"
+        assert recovered["output_event_id"] is None
+        assert (recovered["owner_event_id"], recovered["source_event_id"]) == (owner_id, article_id)
+        assert recovered["reserved_bytes"] == image["reserved_bytes"]
+        assert runtime.store.one(
+            "SELECT * FROM model_usage WHERE request_id=?", (image["usage_request_id"],),
+        ) == {**usage, "state": "UNKNOWN"}
+
+
 def test_init_bootstraps_identity_without_semantic_index(
     worker_settings, unavailable_semantics, opened_stores, monkeypatch, capsys,
 ):
