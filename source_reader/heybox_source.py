@@ -86,6 +86,11 @@ class NativeHeyboxSource:
         grant, fingerprint = account_grant(self.account_file, self.clock())
         if fingerprint == self.blocked_grant:
             raise ReadFailure("SOURCE_DISABLED")
+        if budget.validate_account_read:
+            await budget.validate_account_read()
+            grant, current = account_grant(self.account_file, self.clock())
+            if current != fingerprint:
+                raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
         timestamp, nonce = int(self.clock().timestamp()), secrets.token_hex(16).upper()
         params = {
             **WEB_PARAMS,

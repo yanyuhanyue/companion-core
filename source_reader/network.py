@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import re
 import socket
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit, urlunsplit
 
@@ -136,6 +137,7 @@ class ReadBudget:
     used_requests: int = 0
     sources: list = field(default_factory=list)
     authorization: bytes | None = field(default=None, repr=False)
+    validate_account_read: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
 
     def reserve(self):
         if self.used_requests >= self.max_requests:

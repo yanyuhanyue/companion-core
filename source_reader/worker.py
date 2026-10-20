@@ -8,10 +8,11 @@ import httpx
 from source_reader.network import ReadBudget, ReadFailure
 
 
-async def read_result(reader, item):
+async def read_result(reader, item, validate_account_read=None):
     budget = ReadBudget(
         max_bytes=min(1048576, int(item["max_bytes"])),
         max_requests=min(8, int(item.get("max_requests", 1))),
+        validate_account_read=validate_account_read,
     )
     result = {"lease_token": item["lease_token"], "status": "SUCCESS", "items": []}
     try:
@@ -50,7 +51,8 @@ async def read_result(reader, item):
 
 async def tick(core_client, reader, adapter_id):
     prefix = "/internal/v2/readers/" + adapter_id
-    snapshot = getattr(reader, "grant_snapshot", lambda **kwargs: None)(required=True)
+    grant_snapshot = getattr(reader, "grant_snapshot", lambda **kwargs: None)
+    snapshot = grant_snapshot(required=True)
     response = await core_client.post(prefix + "/lease", **(
         {"json": {"source_grant": snapshot}} if snapshot is not None else {}))
     response.raise_for_status()
@@ -59,7 +61,24 @@ async def tick(core_client, reader, adapter_id):
         return False
     if item.get("source_grant") != snapshot:
         raise ReadFailure("SOURCE_GRANT_LEASE_MISMATCH")
-    result = await read_result(reader, item)
+    async def validate_account_read():
+        if grant_snapshot(required=True) != snapshot:
+            raise ReadFailure("SOURCE_GRANT_REVISION_CHANGED")
+        response = await core_client.post(prefix + "/" + item["request_id"] + "/validate", json={
+            "lease_token": item["lease_token"], "source_grant": snapshot,
+        })
+        if response.status_code != 200:
+            raise ReadFailure("SOURCE_GRANT_REVALIDATION_FAILED")
+        decision = response.json()
+        if (
+            not isinstance(decision, dict) or set(decision) != {"valid"}
+            or decision["valid"] is not True
+        ):
+            raise ReadFailure("SOURCE_GRANT_REVALIDATION_FAILED")
+        if grant_snapshot(required=True) != snapshot:
+            raise ReadFailure("SOURCE_GRANT_REVISION_CHANGED")
+
+    result = await read_result(reader, item, validate_account_read if snapshot else None)
     # An uncertain receipt is never followed by replaying public I/O locally.
     response = await core_client.post(prefix + "/" + item["request_id"] + "/result", json=result)
     response.raise_for_status()

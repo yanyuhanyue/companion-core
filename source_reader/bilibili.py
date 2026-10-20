@@ -251,6 +251,8 @@ class BilibiliReader:
                     "OWNER_ACCOUNT_AUTHORIZATION_REQUIRED",
                     "SOURCE_CREDENTIAL_REVOKED",
                     "SOURCE_DISABLED",
+                    "SOURCE_GRANT_REVALIDATION_FAILED",
+                    "SOURCE_GRANT_REVISION_CHANGED",
                     "PLUGIN_UNAVAILABLE",
                     "READER_SUBTITLE_TARGET_MISMATCH",
                 }:

@@ -30,6 +30,11 @@ class ReaderLeaseRequest(StrictModel):
     source_grant: SourceGrantSnapshot | None = None
 
 
+class ReaderReadValidation(StrictModel):
+    lease_token: str = Field(min_length=8, max_length=128)
+    source_grant: SourceGrantSnapshot
+
+
 def grant_tombstone(grant_id):
     return "erased_source_grant:" + grant_id
 
