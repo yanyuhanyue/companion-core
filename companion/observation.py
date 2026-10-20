@@ -58,7 +58,7 @@ class SubtitleSpan(StrictModel):
 
 class ReadingEvidence(StrictModel):
     level: Literal["L1", "L2"]
-    method: Literal["public_api", "static_page", "browser_render"]
+    method: Literal["public_api", "account_api", "static_page", "browser_render"]
     fetched_at: AwareDatetime
     part: Literal[1] = 1
     subtitle_status: Literal["available", "missing", "restricted", "unavailable", "budget_limited"]

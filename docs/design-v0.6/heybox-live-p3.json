@@ -1,0 +1,437 @@
+{
+  "checked_at": "2026-10-20T01:29:45.910489+00:00",
+  "source": "heybox",
+  "upstream_commit": "90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac",
+  "credentials_used": true,
+  "authorization": "owner_interactive_login_in_this_task",
+  "real_model_calls": 0,
+  "qq_messages": 0,
+  "core_transport": "actual_ASGI_HTTP_and_SQLite",
+  "production_ready": false,
+  "mock_chat_calls": 2,
+  "outbox_rows_not_sent": 2,
+  "observations_fetched": 10,
+  "encrypted_restore_latest_erasure_replay": "PASS",
+  "elapsed_seconds": 42.046,
+  "samples": [
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/168860244",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 23460,
+      "receipt_idempotent": true,
+      "title": "《黑猫速递》：瑞恩猫司令，基米在搁浅",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2025/11/16/fa625fe94eec3396bfb58c0b5f547796/thumb.jpeg",
+        "https://imgheybox1.max-c.com/web/bbs/2025/11/16/8c57c53b8f2c870dd12c0fd5773818a8/thumb.jpeg"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:29:49.554602+00:00",
+        "response_sha256": "7babc31c94f9f401748196576fb852b2799a02dc313699ecca6248d2af5621a9",
+        "response_bytes": 23460,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2025/11/16/fa625fe94eec3396bfb58c0b5f547796/thumb.jpeg",
+            "text_offset": 2635
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2025/11/16/8c57c53b8f2c870dd12c0fd5773818a8/thumb.jpeg",
+            "text_offset": 2643
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 2650,
+      "text_sha256": "488106fbca189b7245e5d0663654cd2d286ed93d27f17dc75ce4d8db298b22c3",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/152986484",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 39890,
+      "receipt_idempotent": true,
+      "title": "终于轮到我来裁人了！可代价是……",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2025/04/24/827cd91af1d961fa8450632b62f27a37/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2025/04/27/23236cb63f94f34c1d53fa4498288e8e/thumb.png"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:29:53.776379+00:00",
+        "response_sha256": "01dfe1c59334839ad464846f91fb61023d8ef8062dc386bc8e7f370e737282fe",
+        "response_bytes": 39890,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2025/04/24/827cd91af1d961fa8450632b62f27a37/thumb.png",
+            "text_offset": 4021
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2025/04/27/23236cb63f94f34c1d53fa4498288e8e/thumb.png",
+            "text_offset": 4029
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 4036,
+      "text_sha256": "2491ccdf23373b0f4a748de7bea4f0df2f06f99defd352d65a066c07ede6b855",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/177617584",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 51481,
+      "receipt_idempotent": true,
+      "title": "《孔雀小姐》测评——一名中尉在法属越南小村庄的生存之路",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/03/21/7dd7c951032cc393a5e18769d01573d3/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/03/21/4b5e3e74229e8b2974576065a801ef7a/thumb.png"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:29:57.716357+00:00",
+        "response_sha256": "52c152985387612c5f7b90db67cc1aed70221a606aa61e6cb7c8d18f1a74e727",
+        "response_bytes": 51481,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/03/21/7dd7c951032cc393a5e18769d01573d3/thumb.png",
+            "text_offset": 6029
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/03/21/4b5e3e74229e8b2974576065a801ef7a/thumb.png",
+            "text_offset": 6037
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 6044,
+      "text_sha256": "ce8265d99bd23dcd57db110b18d1b3d621a227a090e530c658b61a9b48634af5",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/185073726",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 25437,
+      "receipt_idempotent": true,
+      "title": "神网站！全网ACG资源一站式导航！二次元资源站点清单全覆盖",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/05/22e776f99262c9226dfc59a5cff6e03a/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/05/e18e2e511f62c89d4e8b1a8d8fe1e605/thumb.webp"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:12.050512+00:00",
+        "response_sha256": "de6e0fd55fdba4ca2fd670b3924ff9822ba637d1506f3dda1e5d3a9d3e7aff4d",
+        "response_bytes": 25437,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/05/22e776f99262c9226dfc59a5cff6e03a/thumb.png",
+            "text_offset": 1674
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/05/e18e2e511f62c89d4e8b1a8d8fe1e605/thumb.webp",
+            "text_offset": 1682
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 1689,
+      "text_sha256": "4ec0e09ed49873cad903441dcab3d985e76c0503c2c779945a1fe28474c194e5",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/185060603",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 14135,
+      "receipt_idempotent": true,
+      "title": "不错！国内外社交软件对照网站，一键看懂国内外社交软件对应清单",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/05/d2fbf3253051a60cc5b65f268d996fdc/thumb.webp"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:17.201740+00:00",
+        "response_sha256": "d4b14d9faf302f793faa10e0033309780bdf9dd50e5385132870fc7bf66634f2",
+        "response_bytes": 14135,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+            "text_offset": 1361
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/05/d2fbf3253051a60cc5b65f268d996fdc/thumb.webp",
+            "text_offset": 1369
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 1376,
+      "text_sha256": "5e9aafa33abc06cf7f8677806ff2b3fd18fc46313e57d629c58ed017731ca9f3",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184921242",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 23465,
+      "receipt_idempotent": true,
+      "title": "快收藏一个！3000个在线免费计算器聚集！什么都能算，全场景覆盖",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/03/bd5742b4eac3679dc9f254a8d1082f3f/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/03/7a6c69146f9b1db94aafefa5cd3773ac/thumb.png"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:21.001364+00:00",
+        "response_sha256": "0558fe0900790a028008e2b0fe199fbc8448a4fad1c8e1e4b7bc476f6fbdeab5",
+        "response_bytes": 23465,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/03/bd5742b4eac3679dc9f254a8d1082f3f/thumb.png",
+            "text_offset": 2065
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/03/7a6c69146f9b1db94aafefa5cd3773ac/thumb.png",
+            "text_offset": 2073
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 2080,
+      "text_sha256": "a761b04744ea61cf364e42228f190b47b709f89b3c702128f57d4fbc3faa5564",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184904308",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 16299,
+      "receipt_idempotent": true,
+      "title": "家装配色黑科技网站！从电影镜头提取色调，解锁治愈系居家色彩",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/03/536588945c28f631436dc5ded325006b/thumb.webp"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:24.821751+00:00",
+        "response_sha256": "c1fb64eba19ca06eaa4bd4e536c94e20cadd7c45d16ef1f4d53af40c72ea053a",
+        "response_bytes": 16299,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+            "text_offset": 1771
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/03/536588945c28f631436dc5ded325006b/thumb.webp",
+            "text_offset": 1779
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 1786,
+      "text_sha256": "d0d4d9ff5fcf488a5d86ff1b0d21cdb7698368a36759186959d8f4900337fec8",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184839596",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 17767,
+      "receipt_idempotent": true,
+      "title": "白板工具：Markdown一键生成思维导图+Mermaid 语法直接转流程图",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/02/b108707b522a7e2f6e56e9858db9a6ad/thumb.png"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:28.742353+00:00",
+        "response_sha256": "c9b12df09ed4133fe667ddf001306f5ccbc0131633b24712db0b8ff73befb124",
+        "response_bytes": 17767,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+            "text_offset": 2155
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/02/b108707b522a7e2f6e56e9858db9a6ad/thumb.png",
+            "text_offset": 2163
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 2170,
+      "text_sha256": "dff44d4be18a6ec86d869a4789545628f3b042cdcf16a4fad585cabc15418e81",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184746213",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 16975,
+      "receipt_idempotent": true,
+      "title": "圈公认发音学习神器！一键搜索该单词视频片段，并提供英美澳口音",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/07/01/2229b019ecd48fdf412fb8064b01e01d/thumb.png"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:33.271430+00:00",
+        "response_sha256": "8fc84b8b921df69c7c5b8cbdaa0b0e38359e3c3e3aa5914b1fcadda4736d5741",
+        "response_bytes": 16975,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/06/18/a63430fcf22cc006a07466337229657e/thumb.png",
+            "text_offset": 2100
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/07/01/2229b019ecd48fdf412fb8064b01e01d/thumb.png",
+            "text_offset": 2108
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 2115,
+      "text_sha256": "cf06161d6014aa8548abc4baadeb40ba8107f7ad6e8a7d5c9cf911eeab9bdd05",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    },
+    {
+      "url": "https://www.xiaoheihe.cn/app/bbs/link/184673780",
+      "status": "SUCCESS",
+      "error_code": null,
+      "used_requests": 1,
+      "used_bytes": 23493,
+      "receipt_idempotent": true,
+      "title": "清华硕士研究生：仅用13章4300行代码快速理解Claude Code精髓",
+      "image_urls": [
+        "https://imgheybox1.max-c.com/web/bbs/2026/06/18/902fcab995605fe33ae61b78f6a424ae/thumb.png",
+        "https://imgheybox1.max-c.com/web/bbs/2026/06/30/6ce8deb53fe8d88bd392a9a6c77dcfcc/thumb.png"
+      ],
+      "article": {
+        "method": "source_api",
+        "fetched_at": "2026-10-20T01:42:36.819355+00:00",
+        "response_sha256": "c9370c095bf94e1ac012a4a81aef42d7a9082a98d7a501f174cf5fb56186eab1",
+        "response_bytes": 23493,
+        "images": [
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/06/18/902fcab995605fe33ae61b78f6a424ae/thumb.png",
+            "text_offset": 985
+          },
+          {
+            "url": "https://imgheybox1.max-c.com/web/bbs/2026/06/30/6ce8deb53fe8d88bd392a9a6c77dcfcc/thumb.png",
+            "text_offset": 993
+          }
+        ],
+        "truncated": true
+      },
+      "text_chars": 1000,
+      "text_sha256": "fa5503626c8f30e9a766094e0cc673daa16b61fec2c2720c89be479146bdc82c",
+      "context_has_source_text": true,
+      "external_untrusted": true
+    }
+  ],
+  "scope": "10 preselected distinct posts in two independent test Cores; metadata only",
+  "text_body_success_count": 10,
+  "image_analysis_performed": false,
+  "official_web_comparison": {
+    "mode": "independent_official_web_UI",
+    "screenshots_private": true,
+    "samples": [
+      {
+        "url": "https://www.xiaoheihe.cn/app/bbs/link/168860244",
+        "ui_text_chars": 3920,
+        "source_text_chars": 2636,
+        "title_visible": true,
+        "body_excerpt_matches": [
+          true,
+          true,
+          true
+        ],
+        "elapsed_seconds": 9.985
+      },
+      {
+        "url": "https://www.xiaoheihe.cn/app/bbs/link/152986484",
+        "ui_text_chars": 5997,
+        "source_text_chars": 4022,
+        "title_visible": true,
+        "body_excerpt_matches": [
+          true,
+          true,
+          true
+        ],
+        "elapsed_seconds": 9.968
+      },
+      {
+        "url": "https://www.xiaoheihe.cn/app/bbs/link/177617584",
+        "ui_text_chars": 6966,
+        "source_text_chars": 6030,
+        "title_visible": true,
+        "body_excerpt_matches": [
+          true,
+          true,
+          true
+        ],
+        "elapsed_seconds": 10.047
+      }
+    ],
+    "ui_requests": 173,
+    "screenshots_visually_inspected": 3
+  },
+  "discovery": {
+    "source": "heybox",
+    "query": null,
+    "actual_model_calls": 0,
+    "qq_messages": 0,
+    "wake_decision": "OBSERVE",
+    "discovery": {
+      "status": "SUCCESS",
+      "items": [
+        {
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/193551523",
+          "title": "刚才去上个厕所，回来人都傻了……小孩哥寿命借得挺狠啊？"
+        },
+        {
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/193927244",
+          "title": "为什么钓鱼小游戏几乎成为3A游戏的标配？"
+        },
+        {
+          "url": "https://www.xiaoheihe.cn/app/bbs/link/186405133",
+          "title": "兄弟因为玩生化危机4重制版，已经失去与异性正常交流的能力了"
+        }
+      ],
+      "used_requests": 1,
+      "used_bytes": 112936
+    },
+    "observation_states": [
+      "DISCOVERED",
+      "DISCOVERED",
+      "DISCOVERED"
+    ],
+    "encrypted_restore_latest_erasure": "PASS"
+  }
+}

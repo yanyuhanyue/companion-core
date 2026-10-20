@@ -241,14 +241,26 @@ class HeyboxReader:
                         target = "https://www.xiaoheihe.cn/app/bbs/link/" + identifier.lower()
                         found.setdefault(target, {"url": target, "title": title.strip()[:300]})
                 return list(found.values())
-            post = payload["result"].get("link")
+            post = payload["result"].get("link", payload["result"].get("post"))
             if not isinstance(post, dict):
                 raise ReadFailure("READ_BODY_UNAVAILABLE")
             identifier = url.rsplit("/", 1)[1]
-            if str(post.get("linkid", identifier)).lower() != identifier:
+            if str(post.get("linkid", post.get("link_id", identifier))).lower() != identifier:
                 raise ReadFailure("READER_TARGET_MISMATCH")
             title = post.get("title", "")
-            parts = article_parts(post.get("text", ""))
+            parts = article_parts(post.get("text", post.get("content", "")))
+            # The native tree response may keep images separately. Their original relative
+            # placement is unknown; append references after the body, never invent captions.
+            extra_images = post.get("images", post.get("image_urls", []))
+            if not isinstance(extra_images, list) or len(extra_images) > 1000:
+                raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+            parts.extend(
+                (
+                    "image",
+                    value.get("url", value.get("src", "")) if isinstance(value, dict) else value,
+                )
+                for value in extra_images
+            )
             method = "source_api"
         else:
             raw = await self.public.get(url, budget, "page")

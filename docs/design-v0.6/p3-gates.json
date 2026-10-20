@@ -1,0 +1,64 @@
+{
+  "taskbook": "CC-NEXT-20261020-P3V2",
+  "checked_at": "2026-10-20T02:25:15.674414+00:00",
+  "base_sha": "058cb62d7323ad23195a2077b96ede36fd24a0d2",
+  "code_ready": true,
+  "source_ready": {
+    "heybox_post": true,
+    "heybox_feed": true,
+    "bilibili_l2": true,
+    "bilibili_search": true,
+    "bilibili_comments": "FIXTURES_ONLY",
+    "asr": false,
+    "visual_analysis": false
+  },
+  "core_integrated": true,
+  "production_ready": false,
+  "real_sources": {
+    "heybox_distinct_posts": 10,
+    "heybox_body_success": 10,
+    "heybox_official_web_samples": 3,
+    "heybox_body_excerpt_matches": 9,
+    "bilibili_fixed_samples": 3,
+    "bilibili_verified_l2": 1,
+    "bilibili_l1_only": 2,
+    "bilibili_interest_candidates": 3,
+    "bilibili_interest_goal": "DONE_L1"
+  },
+  "code_checks": {
+    "local_focused_tests_passed": 130,
+    "upstream_fixture_tests_passed": 58,
+    "initial_full_run": {
+      "passed": 573,
+      "skipped": 1,
+      "failed": 1,
+      "failure": "New FIFO test omitted simulated delivery receipts; repaired and passed in focused rerun."
+    },
+    "final_full_platform_checks": "GitHub Actions check rollup for this PR current HEAD; see PR description for final run URLs."
+  },
+  "native_mcp_tools": [
+    "bili_comments",
+    "bili_search",
+    "bili_subtitle",
+    "bili_video_info"
+  ],
+  "full_astrbot_or_dsh_agent_started": false,
+  "linux_reader_smoke": "PASS",
+  "linux_browser": "BLOCKED_UNCHANGED_P2",
+  "existing_containers_unchanged": true,
+  "production_services_changed": false,
+  "real_model_calls": 0,
+  "real_qq_messages": 0,
+  "public_write_calls": 0,
+  "temporary_account_grants": "DISABLED_AFTER_VERIFICATION",
+  "grant_directory_acl": "current user, SYSTEM, Administrators; no broad user allow rules",
+  "remaining_gates": [
+    "Human review/merge of stacked PRs",
+    "Real QQ private delivery/reconnect acceptance",
+    "20 distinct natural-day diary reviews",
+    "Production offsite encrypted restore with newest independent ErasureLedger",
+    "Long-term account/session stability"
+  ],
+  "upstream_native_lock_sha256": "f8d956571ed56def54fb8a49023587b9e1b4f289c900ca3cbb8e1f0fbd1e4cc5",
+  "rollback": "Stop opt-in Readers, revoke adapter tokens/disable grants; preserve Core DB, Outbox, UNKNOWN reservations and ErasureLedger; no migration downgrade."
+}

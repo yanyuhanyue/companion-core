@@ -27,6 +27,34 @@ services:
               --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
               --adapter-id, "${COMPANION_HEYBOX_READER_ID:-heybox_source}"]
     env_file: ../privacy/heybox-reader.env
+  heybox-native-reader:
+    <<: *reader
+    profiles: [heybox-native]
+    command: [--source, heybox, --heybox-native, --account-file, /account/grant.json,
+              --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
+              --adapter-id, "${COMPANION_HEYBOX_READER_ID:-heybox_source}"]
+    env_file: ../privacy/heybox-reader.env
+    volumes:
+      - type: bind
+        source: ${COMPANION_HEYBOX_ACCOUNT_FILE:-../privacy/heybox-account.json}
+        target: /account/grant.json
+        read_only: true
+        bind:
+          create_host_path: false
+  bilibili-tools-reader:
+    <<: *reader
+    profiles: [bilibili-tools]
+    command: [--bili-tools, --account-file, /account/grant.json,
+              --search-keyword, "${COMPANION_BILI_SEARCH_KEYWORD:-独立游戏}",
+              --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
+              --adapter-id, "${COMPANION_READER_ID:-bilibili_source}"]
+    volumes:
+      - type: bind
+        source: ${COMPANION_BILI_ACCOUNT_FILE:-../privacy/bilibili-account.json}
+        target: /account/grant.json
+        read_only: true
+        bind:
+          create_host_path: false
 networks:
   reader:
     external: true
