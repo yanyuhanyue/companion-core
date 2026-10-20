@@ -77,9 +77,9 @@ Reader 的导入变化只更换图片主机常量来源。实际网络仍走 `so
 `upstream_requests=0`。最终 main smoke 记录内存峰值 28,467,200 bytes、pids 峰值 6。
 本地 image 边界测试另外阻止导入 Core 业务模块及 fastapi/fastembed/pydantic/alembic/sqlite3。
 
-限制：本机 Docker daemon 未运行。没有声称本轮在本机重新启动容器；上述容器证据来自精确 SHA CI。
-容器 smoke 覆盖启动和拒绝未授权读取，受限 HTTP MockTransport、DNS/grant 行为主要由宿主测试覆盖，
-未额外取得“容器内成功 HTTP fixture 全流程”的新证据。这是覆盖限制，没有发现相应实现缺陷。
+初审时本机 Docker daemon 未运行，所引用的容器证据来自精确 SHA CI；当时容器 smoke 仅覆盖启动和
+拒绝未授权读取，没有容器内成功 HTTP fixture 全流程。交付轮已在现有 container job 挂载的 smoke 中
+补齐该验收点，方法与精确交付 CI 见第8节。真实上游和账号读取仍未验证。
 
 ## 4. A1-R2：图片 Worker 红例根因与恢复覆盖
 
@@ -106,7 +106,8 @@ link_image 为 SUCCEEDED、owner/source 关系一致、输出 observation 为 FE
 
 回归提交：**`2ac4a154f50307d72d56769b4350c6655b267e92`**，仅新增
 `tests/test_worker_composition.py:200` 的测试。本轮产品 `fix_commits=[]`。
-该补充尚未进入最终 main，也没有本提交的 GitHub CI；它的实际证明是本地单文件 10 项通过。
+该补充在初审时尚未进入最终 main，当时仅有本地单文件 10 项通过。后续基于 main 的移植提交和
+Draft PR CI 见第8节；原审查提交及其证据没有被重写。
 
 ## 5. A3：资金、发送、恢复与隐私结论
 
@@ -172,7 +173,7 @@ GitHub 原始 job 元数据、红例/绿例日志、本地结果和独立探针�
   原因仅为 `blocked by policy`；没有删除，也没有换工具重试。
   保留 `.local/test-temp/reader-worker-review`、`.local/a3-review-pytest`、
   `.local/test-temp/a3-budget-rerun`、`.local/test-temp/a3-budget-review`；均为合成测试资料。
-- 没有创建新 PR；本地回归提交和报告提交可供统筹选择 cherry-pick。没有产品修复需要集成，也没有未解决重大缺陷。
+- 初审交付为本地回归和报告提交；后续已按授权形成第8节的 Draft PR。没有产品修复需要集成，也没有未解决重大缺陷。
 - 回退只能使用兼容代码/隔离目标；已经产生 admission 后不得删除0017账目、降级丢表或把 UNKNOWN 改回 RESERVED。
   保留原始数据库、最新 ErasureLedger、预算及窗口 journal。部署停止责任人/窗口/镜像 digest 仍由单独审批填写。
 
@@ -183,3 +184,33 @@ GitHub 原始 job 元数据、红例/绿例日志、本地结果和独立探针�
 > 用明确指向该工作树的 PYTHONPATH 运行 Worker 定向检查；新增产品差异才追加相关验证。
 > 复用本报告及精确 SHA CI 的既有结果，不重跑相同全量。后续部署/迁移、真实非空恢复、QQ最多5次新窗口、
 > 付费模型、M1、Reader账号读取分别取证和单独审批；本报告不授予任何实机权限。
+
+## 8. 后续评审交付与容器成功 fixture
+
+按后续明确授权，在 `bbd712c1a79497762275e718e9f76959bedf6583` 上创建干净独立分支
+`codex/p8b1-review-delivery`，原审查分支保持原样。原回归 `2ac4a154...` 移植为
+`347659d9eea389b3d945409476871eb2c1242776`，原报告 `e5026d816...` 移植为
+`6cb4a3dbe320c3586ebb6592a22a2dc350005dd4`，随后仅补充本节与容器 smoke。
+评审交付为 [Draft PR #31](https://github.com/yanyuhanyue/companion-core/pull/31)；没有自行合并。
+
+`scripts/smoke_plugin_readonly.py` 使用明确的 HTTPCore 内存合成 fixture：
+AsyncMockStream 提供固定 HTTP 元数据响应，FixtureBackend 只返回内存流，不打开 socket，
+PublicNetwork 使用固定合成 DNS 结果。实际 PublicHTTP 仍执行目标许可、请求/字节预算、读取和来源哈希，
+实际 BilibiliToolReader / read_result 仍执行解析、范围声明与结果回执。
+验证一个 L1 成功读取及精确标题/简介、目标 URL、metadata SHA256/字节数；
+字幕读取受单请求预算阻断，明确为 budget_limited；原始 mock GET 不含 Cookie/Authorization。
+另拒绝私网目标、已耗尽请求额度及超字节响应，前两项不增加 fixture 请求，超字节返回 FAILED 且 items 为空。
+既有写入/登录能力、无账号 Heybox 与空 discovery 拒绝断言继续保留。
+
+本地执行扩展 smoke 为 PASS：`fixture_reads=1`、`fixture_requests=2`、`restricted_rejections=3`、
+`upstream_requests=0`。相关 Reader image、读取证据、URL、响应限制、DNS pin 定向组
+**20 passed / 1 existing warning / 1.67s**，Ruff 通过；移植后的 Worker 文件
+**10 passed / 1 existing warning / 20.45s**。
+
+CI 使用已有 container job 原样将该脚本只读挂进 Reader 镜像，维持 `--network none`、
+`--read-only`、`--cap-drop ALL`、`no-new-privileges`、UID 10003 和原 scratch/资源限制。
+该验收点要求本报告版本的 [PR #31 checks](https://github.com/yanyuhanyue/companion-core/pull/31/checks)
+中 container 成功，且日志显示上述 fixture 计数、`status=PASS`、`uid=10003`、真实上游请求0。
+精确交付 HEAD、run/job URL 与实际 CI 结果同步写入约定 `review-status.json` 的 `pr_ci` 字段，
+不将原审查 SHA 的绿 CI 替代该新增容器验证。
+此项补齐容器内成功 fixture 的覆盖缺口，仍不证明真实站点读取、真实 DNS/TLS、账号或付费链路。
