@@ -20,13 +20,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install uv==0.12.10
-      - run: uv sync --frozen
+      - run: uv sync --frozen --extra onebot
       - uses: actions/cache@v4
         with:
           path: data/embedding-cache
           key: bge-small-zh-${{ runner.os }}-46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59
-      - run: uv run ruff check companion source_reader migrations astrbot_plugin_companion_bridge tests scripts
-      - run: uv run pytest -q --basetemp=.local/test-temp
+      - run: uv run --extra onebot ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts
+      - run: uv run --extra onebot pytest -q --basetemp=.local/test-temp
       - run: uv run python scripts/replay.py
       - run: uv run python scripts/smoke.py
       - run: uv build
@@ -38,6 +38,17 @@ jobs:
       - run: docker build -t companion-core:test .
       - run: docker build -f deploy/executor.Dockerfile -t companion-executor:test .
       - run: docker build -f deploy/source-reader.Dockerfile -t companion-source-reader:test .
+      - run: docker build -f deploy/onebot-bridge.Dockerfile -t companion-onebot-bridge:test .
+      - run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --security-opt no-new-privileges --memory 256m --pids-limit 64
+          companion-onebot-bridge:test --help
+      - run: >-
+          docker run --rm --network none --read-only --cap-drop ALL
+          --security-opt no-new-privileges --memory 256m --pids-limit 64
+          -v companion-onebot-smoke:/bridge-data
+          -v "${{ github.workspace }}/scripts/smoke_onebot.py:/app/verify.py:ro"
+          --entrypoint python companion-onebot-bridge:test /app/verify.py
       - run: >-
           docker run --rm --network none --read-only --cap-drop ALL
           --security-opt no-new-privileges --memory 768m --pids-limit 96

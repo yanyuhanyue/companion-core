@@ -1,0 +1,24 @@
+{
+  "taskbook": "CC-NEXT-20261020-P5-DIRECT",
+  "frozen_main_sha": "7bd47a659f60b4904b87508a3dbf0a4d6934d87d",
+  "onebot_direct_bridge_code_ready": true,
+  "snowluma_actual_onebot_compat_verified": false,
+  "real_qq_private_scenarios_accepted": 0,
+  "real_qq_target": 20,
+  "latency_real_p50_ms": null,
+  "latency_real_p95_ms": null,
+  "latency_sample_count": 0,
+  "grant_revocation_dependency_closure": "FAIL",
+  "real_diary_natural_dates_reviewed": 0,
+  "offsite_encrypted_restore_latest_erasure": "NOT_VERIFIED",
+  "dsh_plugin_profile_gate": "NOT_RUN",
+  "windows_computer_use_gate": "NOT_RUN",
+  "production_ready": false,
+  "evidence": {
+    "OFFLINE_FIXTURE": ["tests/test_onebot_direct.py", "tests/test_onebot_delivery.py",
+      "tests/test_onebot_runtime.py", "tests/test_onebot_network.py",
+      "tests/test_onebot_erasure.py", "tests/test_onebot_benchmark.py",
+      "tests/test_onebot_metrics.py", "tests/test_onebot_deploy.py"],
+    "LIVE_ONEBOT": [], "LIVE_QQ_HUMAN": [], "PAID_MODEL": [], "WINDOWS_DEVICE": []
+  }
+}

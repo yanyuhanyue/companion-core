@@ -1,0 +1,33 @@
+{
+  "checked_date": "2026-10-20",
+  "snowluma": {
+    "repository": "https://github.com/SnowLuma/SnowLuma",
+    "release": "v2.0.3",
+    "commit": "db142db9e6398c779283eab9afc3552da1e2c361",
+    "onebot_reported_version_expected": "2.0.3-node",
+    "runtime_version_verified": false,
+    "source_license": "SnowLuma Source-Available Non-Commercial License 1.0",
+    "native_components": "Proprietary; EULA 5.4 prior written authorization for automated deployment",
+    "automated_installation_performed": false
+  },
+  "docker_framework": {
+    "repository": "https://github.com/SnowLuma/SnowLuma.Docker.Framework",
+    "commit": "3f388b17f8baf47b4c2c9606b8a3121eb8599fef",
+    "official_image": "motricseven7/snowluma",
+    "registry_tag_observed": "latest",
+    "tag_last_updated": "2026-10-19T02:10:41.548323Z",
+    "index_digest": "sha256:84e6b7800b4002040f39f1b89687d66874afafa352fa2c2928e4f0560b6b6b6c",
+    "linux_amd64_digest": "sha256:78b66d568e3c0991a8ba89bfc188281f87d5d45f32e259c885f43e2312ff0f4a",
+    "linux_arm64_digest": "sha256:749aa0fed12e9a17098dbe6306daf035138dff4d8b1e5de4afeab5a1799da5d4",
+    "metadata_url": "https://hub.docker.com/v2/repositories/motricseven7/snowluma/tags/latest",
+    "metadata_only": true,
+    "pulled_or_started": false,
+    "qq_version": null
+  },
+  "bridge": {"websockets": "15.0.1", "httpx": "0.28.1",
+    "container_dependencies": "deploy/onebot-bridge.lock"},
+  "dsh": {"status": "DEFERRED", "profile": "sdk-minimal isolated per job",
+    "desktop_plugins_inherited": false},
+  "astrbot_installation": false,
+  "napcat_installation": false
+}

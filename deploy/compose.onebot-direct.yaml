@@ -1,0 +1,50 @@
+# Dry-run proposal. Review/approval and SnowLuma written automation authorization precede use.
+# Combine from repository root: -f compose.yaml -f deploy/compose.onebot-direct.yaml
+services:
+  onebot-bridge:
+    profiles: [qq-beta]
+    image: ${ONEBOT_BRIDGE_IMAGE:?set a reviewed image@sha256 digest}
+    build:
+      context: .
+      dockerfile: deploy/onebot-bridge.Dockerfile
+    volumes:
+      - ${ONEBOT_BRIDGE_CONFIG_PATH:?set private bridge.toml absolute path}:/run/bridge.toml:ro
+      - onebot-spool:/bridge-data
+    networks: [qq-protocol, companion]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    restart: "no" # Fatal identity/conflict/capacity errors require operator inspection.
+    stop_grace_period: 30s
+  snowluma:
+    profiles: [manual-snowluma]
+    image: ${SNOWLUMA_IMAGE:?set official image@sha256 digest after license review}
+    shm_size: 1gb
+    cap_add: [SYS_PTRACE]
+    security_opt: [seccomp=unconfined]
+    restart: "no"
+    environment:
+      TZ: Asia/Shanghai
+      VNC_PASSWD: ${SNOWLUMA_VNC_PASSWORD:?set independent strong VNC password}
+      SNOWLUMA_WEBUI_HOST: 0.0.0.0
+      SNOWLUMA_WEBUI_PORT: "5099"
+    ports:
+      - "127.0.0.1:6081:6081"
+      - "127.0.0.1:5099:5099"
+    volumes:
+      - snowluma-data:/app/data
+      - snowluma-qq-config:/app/.config
+      - snowluma-qq-data:/app/.local/share
+    networks: [qq-protocol]
+networks:
+  qq-protocol:
+    name: qq-protocol-internal
+    # A private bridge with no published OneBot ports; QQ still needs outbound internet.
+volumes:
+  onebot-spool:
+  snowluma-data:
+  snowluma-qq-config:
+  snowluma-qq-data:

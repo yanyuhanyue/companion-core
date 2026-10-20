@@ -1,0 +1,16 @@
+# Synthetic identities/secrets only. Create a PRIVATE 0600 copy outside tracked sources.
+owner_qq_id = "10001"
+bot_qq_id = "10002"
+bridge_token = "SYNTHETIC_CORE_TOKEN_REPLACE_32_BYTES"
+onebot_token = "SYNTHETIC_ONEBOT_TOKEN_REPLACE_32_BYTES"
+# Generate once with secrets.token_urlsafe(24); preserve across restarts/reconnections.
+protocol_epoch = "SYNTHETIC_REPLACE_WITH_FRESH_RANDOM_EPOCH"
+core_url = "http://companion-api:8765"
+onebot_http_url = "http://snowluma:3000"
+onebot_ws_url = "ws://snowluma:3001"
+data_dir = "/bridge-data"
+delivery_enabled = false
+max_frame_bytes = 65536
+max_pending = 1000
+max_disk_bytes = 67108864
+poll_seconds = 0.1

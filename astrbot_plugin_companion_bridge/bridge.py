@@ -112,6 +112,12 @@ class Spool:
             content=row[1].encode(),
             headers={"X-Idempotency-Key": row[0], "Content-Type": "application/json"},
         )
+        if (response.status_code == 410 and len(response.content) <= 65536
+                and response.json() == {"error": "EVENT_ERASED"}):
+            with self.db:
+                self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return
         with self.db:
             if response.status_code == 202:
                 self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))

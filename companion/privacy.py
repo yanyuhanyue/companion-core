@@ -305,6 +305,11 @@ class ErasureLedger:
             raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
         with store.transaction():
             for record in lines[1:]:
+                # Rebuild this projection even for pre-upgrade COMPLETE records.
+                # A backup may predate the event itself, so UPDATE events is insufficient.
+                for event_id in record["event_ids"]:
+                    store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+                                  ("erased_event:" + event_id, record["erasure_id"]))
                 applied = store.one(
                     "SELECT 1 FROM privacy_erasure_ledger WHERE erasure_id=?",
                     (record["erasure_id"],),
@@ -358,6 +363,8 @@ class ErasureLedger:
         erase_media_links(store, event_ids)
         erase_content(store, event_ids)
         for event_id in event_ids:
+            store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+                          ("erased_event:" + event_id, record["erasure_id"]))
             store.execute(
                 "UPDATE events SET body_json='{}',redacted=1,memory_processed=1 WHERE event_id=?",
                 (event_id,),
