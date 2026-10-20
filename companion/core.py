@@ -4,7 +4,7 @@ import sqlite3
 import time
 from datetime import UTC, datetime
 
-from companion import __version__, budget
+from companion import __version__, budget, live_text
 from companion.affect import AffectEngine
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES, ContentService
@@ -88,6 +88,7 @@ class Core(Runtime):
         fingerprint = digest(raw)
         try:
             with s.transaction():
+                bounded_text = live_text.check_input(s, cfg, self.clock, event)
                 if s.one(
                     "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
                 ):
@@ -131,8 +132,8 @@ class Core(Runtime):
                 )
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
-                diary_command = is_diary_command(body["text"])
-                control_command = is_life_command(body["text"])
+                diary_command = not bounded_text and is_diary_command(body["text"])
+                control_command = not bounded_text and is_life_command(body["text"])
                 if control_command:
                     body["control_command"] = True
                     body["goal_request"] = bool(
@@ -142,10 +143,10 @@ class Core(Runtime):
                     body["diary_command"] = True
                     body["diary_correction"] = body["text"].strip().startswith("修改日记")
                     body["diary_timezone"] = cfg.timezone
-                if body["text"].strip() == "暂停写日记":
+                if not bounded_text and body["text"].strip() == "暂停写日记":
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
                     self.diary.repo.cancel_pending("DIARY_PAUSED")
-                if body["text"].strip() == "暂停主动分享":
+                if not bounded_text and body["text"].strip() == "暂停主动分享":
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
                     s.execute(
                         "UPDATE jobs SET state='CANCELLED' WHERE kind='activity' "
@@ -652,8 +653,14 @@ class Core(Runtime):
         )
         request_id = None
         try:
+            bounded_text = live_text.active(self.store, self.settings)
+            if bounded_text:
+                live_text.check_job(self.store, self.settings, self.clock, job)
             before_command = epoch(self.store)
-            reply = await self.command_reply(job) if job["kind"] == "chat" else None
+            reply = (
+                await self.command_reply(job)
+                if job["kind"] == "chat" and not bounded_text else None
+            )
             captured_epoch = epoch(self.store)
             text = json.loads(job["body_json"]).get("text", "").strip()
             if (
@@ -705,6 +712,7 @@ class Core(Runtime):
                         job["kind"],
                         messages,
                         self.clock(),
+                        clock=self.clock,
                     )
                     model_started_ns = time.perf_counter_ns()
                     emit("t_model_request", job["trace_id"])
@@ -734,6 +742,8 @@ class Core(Runtime):
                     request_id = None
                     reply = redact(response.text, self.settings)
             with self.store.transaction():
+                if bounded_text:
+                    live_text.check_job(self.store, self.settings, self.clock, job)
                 current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
                 if current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
                     return True
@@ -746,7 +756,7 @@ class Core(Runtime):
                     self.store, self.settings, now
                 )
                 if job["kind"] != "activity" or should_send:
-                    self.expression.enqueue(
+                    message_id = self.expression.enqueue(
                         job["event_id"],
                         job["conversation_id"],
                         reply,
@@ -755,6 +765,10 @@ class Core(Runtime):
                         if job["kind"] == "activity"
                         else "qq.private.reply",
                     )
+                    if bounded_text:
+                        live_text.record_reply(
+                            self.store, self.settings, self.clock, job, message_id, reply
+                        )
                 self.store.execute(
                     "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
                     "WHERE job_id=?",
@@ -786,6 +800,11 @@ class Core(Runtime):
     def fail_job(self, job, code):
         now = self.clock()
         with self.store.transaction():
+            bounded_text = live_text.active(self.store, self.settings)
+            if bounded_text:
+                self.store.execute(
+                    "INSERT OR REPLACE INTO runtime_meta VALUES ('live_text_stopped',?)", (code,)
+                )
             retryable = code in {
                 "MODEL_RETRYABLE",
                 "PRIVACY_CHANGED",
@@ -793,9 +812,8 @@ class Core(Runtime):
                 "MEMORY_INDEX_UNAVAILABLE",
                 "MEMORY_REVIEW_INVALID",
             }
-            state = (
-                "RETRY_WAIT" if retryable and job["attempts"] < job["max_attempts"] else "FAILED"
-            )
+            state = ("RETRY_WAIT" if retryable and not bounded_text
+                     and job["attempts"] < job["max_attempts"] else "FAILED")
             changed = self.store.execute(
                 "UPDATE jobs SET state=?,last_error_code=?,next_attempt_at=?,"
                 "lease_token=NULL,updated_at=? WHERE job_id=? "
@@ -813,7 +831,7 @@ class Core(Runtime):
                 self.store.audit(
                     "job.failed", job["job_id"], job["trace_id"], now, code=code, state=state
                 )
-                if state == "FAILED" and job["kind"] == "chat":
+                if state == "FAILED" and job["kind"] == "chat" and not bounded_text:
                     enqueue(
                         self.store,
                         job["event_id"],
@@ -1008,6 +1026,7 @@ class Core(Runtime):
         return {
             "version": __version__,
             "mode": self.settings.mode,
+            "live_text_window": live_text.status(s, self.settings, self.clock),
             "features": {
                 "memory": self.settings.memory_enabled,
                 "diary": self.diary.repo.enabled(),
