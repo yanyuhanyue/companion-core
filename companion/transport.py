@@ -47,9 +47,33 @@ def recover_deliveries(store, now):
     )
 
 
+def cancel_proactive_work(store, now):
+    # Caller holds the write transaction. Started I/O keeps its uncertain accounting.
+    store.execute(
+        "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id IN "
+        "(SELECT job_id FROM jobs WHERE kind='activity' AND state='RUNNING')"
+    )
+    store.execute(
+        "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
+        "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+        (now,),
+    )
+    store.execute(
+        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "last_error_code='AUTONOMY_PAUSED' WHERE action_type='qq.private.proactive' "
+        "AND state IN ('PENDING','LEASED','RETRY_WAIT')",
+        (now,),
+    )
+
+
 def lease_deliveries(store, settings, request, now):
+    from companion.social import proactive_allowed
+
     with store.transaction():
         recover_deliveries(store, now)
+        if not proactive_allowed(store, settings, now):
+            cancel_proactive_work(store, now)
         # One delivery at a time per conversation. Uncertain items are never replayed;
         # later ordinary replies can continue so the owner can reconcile over QQ.
         rows = store.rows(
@@ -65,15 +89,6 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
-            if row["action_type"] == "qq.private.proactive":
-                from companion.social import quiet_hours
-
-                paused = store.one(
-                    "SELECT 1 FROM runtime_meta WHERE key IN "
-                    "('proactive_paused','life_paused') AND value='1'"
-                )
-                if not settings.proactive_enabled or paused or quiet_hours(settings, now):
-                    continue
             token = uid("lease")
             store.execute(
                 "UPDATE outbox SET state='LEASED',lease_owner=?,lease_token=?,"
@@ -107,16 +122,9 @@ def begin_send(store, message_id, token, now, settings=None):
             (message_id, token, now),
         )
         if pending and pending["action_type"] == "qq.private.proactive":
-            from companion.social import quiet_hours
+            from companion.social import proactive_allowed
 
-            paused = store.one(
-                "SELECT 1 FROM runtime_meta WHERE key IN "
-                "('proactive_paused','life_paused') AND value='1'"
-            )
-            if paused or (
-                settings is not None
-                and (not settings.proactive_enabled or quiet_hours(settings, now))
-            ):
+            if not proactive_allowed(store, settings, now):
                 raise CoreError("PROACTIVE_SEND_PAUSED", 409)
         changed = store.execute(
             "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "

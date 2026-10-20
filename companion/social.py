@@ -18,6 +18,20 @@ def quiet_hours(settings, now):
     return start != end and (start <= hour < end if start < end else hour >= start or hour < end)
 
 
+def proactive_allowed(store, settings, now):
+    if store.one(
+        "SELECT 1 FROM runtime_meta WHERE key IN ('proactive_paused','life_paused') AND value='1'"
+    ):
+        return False
+    if settings is None:
+        return True
+    if not settings.proactive_enabled or quiet_hours(settings, now):
+        return False
+    from companion.affect import AffectEngine
+
+    return AffectEngine(store, settings, lambda: now).snapshot()["state"]["engagement"] != "pause"
+
+
 def proactive_counts(store, settings, now):
     day = (
         datetime.fromisoformat(now)
@@ -141,20 +155,16 @@ class SocialPlanner:
 
     def flush(self):
         cfg, s, now = self.settings, self.store, self.clock()
-        if not cfg.social_enabled or not cfg.proactive_enabled or quiet_hours(cfg, now):
+        if not cfg.social_enabled:
             return False
         with s.transaction():
-            for key in ("life_paused", "proactive_paused"):
-                paused = s.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
-                if paused and paused["value"] == "1":
-                    return False
+            if not proactive_allowed(s, cfg, now):
+                return False
             s.execute(
                 "UPDATE social_candidates SET state='EXPIRED' WHERE state='CANDIDATE' "
                 "AND expires_at<=?",
                 (now,),
             )
-            if self.core.affect.snapshot()["state"]["engagement"] == "pause":
-                return False
             conversation = s.one(
                 "SELECT * FROM conversations WHERE platform='qq.onebot' AND scope='private' "
                 "AND owner_actor_id='owner' ORDER BY last_event_at DESC LIMIT 1"

@@ -1,0 +1,9 @@
+{
+  "checked_at_utc": "2026-10-20T07:28:59.854036+08:00",
+  "checked_at_asia_shanghai": "2026-10-20T07:28:59.854036+08:00",
+  "scope": "Read-only host/container introspection and pre-existing evidence files; no UI dump, interaction, restart, cold start, login or configuration change",
+  "cohost_assessment": "No running Companion Core, QQ, AstrBot or NapCat service/container/process name or working-directory match was observed. Only redroid and OpenResty containers are running, alongside 1Panel and standard host services. This does not inventory or certify absence of private files.",
+  "foreground_assessment": "Current focused/resumed activity is com.max.xiaoheihe/.MainActivity. No fresh screenshot or UI hierarchy was collected; current tab/text is not independently confirmed.",
+  "exit_history_assessment": "No retained SIGNALED / APP_CRASH / NATIVE_CRASH / ANR entries since this redroid container started, for either package. Bounded exit-info history is not continuous monitoring.",
+  "sample_url_assessment": "No reproducible Xiaoheihe post URL was found in the prior test logs or UI XML. Do not infer a URL or post ID from visible titles, image counters, or UI coordinates."
+}

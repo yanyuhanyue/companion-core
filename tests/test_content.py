@@ -404,14 +404,14 @@ def test_vision_budget_includes_unknown_tool_costs(core):
     assert vision.calls == []
 
 
-def test_link_images_have_get_only_origin_binding_and_share_the_two_image_limit(core):
+def test_link_images_have_get_only_origin_binding_and_separate_article_limit(core):
     service, vision = enable(core)
     event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
     service.schedule(event_id)
     obs_id = source_observation(core)
     service.register_link_images(event_id, obs_id, [CDN + "?imageMogr2/private", CDN + "2"])
     rows = core.store.rows("SELECT * FROM content_items WHERE kind='link_image'")
-    assert len(rows) == 1 and rows[0]["target_url"] == CDN
+    assert len(rows) == 2 and rows[0]["target_url"] == CDN
     calls = []
 
     def handler(request):
@@ -432,6 +432,8 @@ def test_link_images_have_get_only_origin_binding_and_share_the_two_image_limit(
         )
     }
     assert roots == {event_id, obs_id}
+    assert run(service.run_once())
+    assert len(vision.calls) == 2
     assert not run(service.run_once())
 
 

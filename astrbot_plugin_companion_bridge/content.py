@@ -17,19 +17,28 @@ QQ_IMAGE_HOSTS = {"multimedia.nt.qq.com.cn", "gchat.qpic.cn", "c2cpicdw.qpic.cn"
 def canonical_link(url):
     try:
         parsed = urlsplit(url)
-        if parsed.scheme != "https" or parsed.username or parsed.port not in {None, 443}:
+        if (
+            parsed.scheme != "https"
+            or parsed.username
+            or parsed.password
+            or parsed.fragment
+            or parsed.port not in {None, 443}
+        ):
             return None
         if parsed.hostname in {"www.bilibili.com", "m.bilibili.com", "bilibili.com"}:
             match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,20})/?", parsed.path)
             if match:
                 return "https://www.bilibili.com/video/" + match[1]
         if parsed.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
-            match = re.fullmatch(r"/(?:app/)?bbs/link/([0-9]{1,32})/?", parsed.path)
+            match = re.fullmatch(
+                r"/(?:(?:app/)?bbs/link|a)/([0-9]{1,32}|[0-9a-fA-F]{12})/?", parsed.path
+            )
             post_id = match[1] if match else ""
             if parsed.path == "/v3/bbs/app/api/web/share":
-                post_id = parse_qs(parsed.query).get("link_id", [""])[0]
-            if re.fullmatch(r"[0-9]{1,32}", post_id):
-                return "https://www.xiaoheihe.cn/app/bbs/link/" + post_id
+                identifiers = parse_qs(parsed.query, keep_blank_values=True).get("link_id", [])
+                post_id = identifiers[0] if len(identifiers) == 1 else ""
+            if re.fullmatch(r"[0-9]{1,32}|[0-9a-fA-F]{12}", post_id):
+                return "https://www.xiaoheihe.cn/app/bbs/link/" + post_id.lower()
         if parsed.hostname == "b23.tv" and re.fullmatch(r"/[A-Za-z0-9]{1,32}/?", parsed.path):
             return "https://b23.tv" + parsed.path.rstrip("/")
     except (TypeError, ValueError):
@@ -162,9 +171,11 @@ async def fetch_qq_image(url, max_bytes=1_000_000, transport=None):
             transport=transport, timeout=10, trust_env=False, follow_redirects=False
         ) as client,
     ):
-        async with client.stream("GET", url) as response:
+        async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
             if response.status_code != 200:
                 raise ValueError("CONTENT_IMAGE_FETCH_FAILED")
+            if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                raise ValueError("CONTENT_IMAGE_ENCODING_UNSUPPORTED")
             mime = response.headers.get("content-type", "").split(";")[0].lower().strip()
             if mime not in {"image/png", "image/jpeg"}:
                 raise ValueError("CONTENT_IMAGE_TYPE_UNSUPPORTED")

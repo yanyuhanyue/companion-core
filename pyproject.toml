@@ -11,6 +11,7 @@ dependencies = [
     "fastapi>=0.115,<1",
     "uvicorn>=0.34,<1",
     "httpx>=0.28,<1",
+    "httpcore>=1,<2",
     "pydantic>=2.10,<3",
     "tzdata>=2025.1",
     "alembic>=1.15,<2",
@@ -21,12 +22,18 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1", "jsonschema>=4.23,<5", "pyyaml>=6,<7"]
+reader = ["playwright==1.64.0", "httpx==0.28.1", "httpcore==1.0.9"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["companion"]
+packages = ["companion", "source_reader"]
 
 [tool.hatch.build]
-exclude = [".codex-remote-attachments/**", ".playwright-cli/**", "output/playwright/**"]
+exclude = [
+    ".local/**", ".venv/**", "data/**", "privacy/**", "backups/**", "dist/**",
+    ".env", "config.toml", "**/__pycache__/**", "**/*.py[cod]", "*.sqlite*", "*.log",
+    ".pytest_cache/**", ".ruff_cache/**", ".codex-remote-attachments/**",
+    ".playwright-cli/**", "output/playwright/**",
+]
 
 [tool.hatch.build.targets.wheel.force-include]
 "migrations" = "companion/migrations"

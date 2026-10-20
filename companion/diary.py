@@ -11,6 +11,7 @@ from pydantic import ConfigDict, Field, ValidationError
 
 from companion import budget
 from companion.contracts import CoreError, StrictModel
+from companion.observation import expired_sources
 from companion.privacy import advance_epoch, epoch, redact, sensitive
 from companion.store import after, encode, uid, utcnow
 
@@ -283,6 +284,12 @@ class DiaryRepository:
                 (start, end, after(self.clock(), -86400 * self.settings.raw_event_retention_days)),
             )
             for row in observations:
+                if expired_sources(
+                    self.store,
+                    [row["event_id"]],
+                    after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+                ):
+                    continue
                 text = json.loads(row["body_json"]).get("text", "")[:500]
                 if text and not sensitive(text) and redact(text, self.settings) == text:
                     sources.append(
@@ -619,16 +626,17 @@ class DiaryService:
         # Readers must not return expired evidence while a background worker is stopped.
         # Called outside existing transactions; correction uses a single enclosing transaction.
         def expire():
-            rows = self.store.rows(
-                "SELECT DISTINCT e.event_id FROM events e JOIN diary_evidence de "
-                "ON de.event_id=e.event_id JOIN diary_entries d ON d.entry_id=de.entry_id "
-                "WHERE d.status='COMMITTED' AND (e.redacted=1 OR e.ingested_at<?)",
-                (after(self.clock(), -86400 * self.settings.raw_event_retention_days),),
+            sources = self.store.rows(
+                "SELECT DISTINCT de.event_id FROM diary_evidence de JOIN diary_entries d "
+                "USING(entry_id) WHERE d.status='COMMITTED'"
             )
-            if rows:
-                self.ledger.expire_events(
-                    self.store, [row["event_id"] for row in rows], self.clock()
-                )
+            expired = expired_sources(
+                self.store,
+                [row["event_id"] for row in sources],
+                after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+            )
+            if expired:
+                self.ledger.expire_events(self.store, expired, self.clock())
 
         if self.store.db.in_transaction:
             expire()

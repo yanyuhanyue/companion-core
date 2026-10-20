@@ -17,6 +17,10 @@ def register_content_routes(app, bridge_dependencies):
     async def content_status(event_id: str):
         return app.state.core.content.status(event_id)
 
+    @app.post(prefix + "/images/resume", dependencies=bridge_dependencies)
+    async def resume_images(event_id: str):
+        return app.state.core.content.resume_link_images(event_id)
+
     @app.post(prefix + "/image/claim", dependencies=bridge_dependencies)
     async def claim_image(event_id: str, body: ImageClaim):
         return app.state.core.content.claim_upload(event_id, body.request_key)

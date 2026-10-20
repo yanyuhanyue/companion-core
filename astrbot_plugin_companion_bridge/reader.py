@@ -101,11 +101,15 @@ async def read_heybox_api(client, item):
         params = {"page": 1, "index": 1, "limit": 1, "is_first": 1, "owner_only": 1}
     else:
         raise ReadFailure("READER_OPERATION_INVALID")
-    async with client.stream("GET", path, params=params, follow_redirects=False) as response:
+    async with client.stream(
+        "GET", path, params=params, follow_redirects=False, headers={"Accept-Encoding": "identity"}
+    ) as response:
         if response.status_code in {401, 403, 429}:
             raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
         if response.status_code != 200:
             raise ReadFailure("UPSTREAM_HTTP_ERROR")
+        if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+            raise ReadFailure("READER_ENCODING_UNSUPPORTED")
         raw = bytearray()
         async for chunk in response.aiter_bytes():
             raw.extend(chunk)
@@ -207,7 +211,7 @@ def safe_target(source, url):
         if match:
             return "https://www.bilibili.com/video/" + match[1]
     if source == "heybox" and parsed.hostname == "www.xiaoheihe.cn":
-        match = re.fullmatch(r"/app/bbs/link/([0-9]{1,32})/?", parsed.path)
+        match = re.fullmatch(r"/app/bbs/link/([0-9]{1,32}|[0-9a-fA-F]{12})/?", parsed.path)
         if match:
             return "https://www.xiaoheihe.cn/app/bbs/link/" + match[1]
     raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
@@ -224,11 +228,15 @@ async def bounded_get(client, url, max_bytes, params=None):
         safe_target("heybox" if parsed.hostname == "www.xiaoheihe.cn" else "bilibili", url)
     if parsed.scheme != "https" or parsed.username or parsed.port not in {None, 443}:
         raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
-    async with client.stream("GET", url, params=params, follow_redirects=False) as response:
+    async with client.stream(
+        "GET", url, params=params, follow_redirects=False, headers={"Accept-Encoding": "identity"}
+    ) as response:
         if response.status_code in {401, 403, 412, 429}:
             raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
         if response.status_code != 200:
             raise ReadFailure("UPSTREAM_HTTP_ERROR")
+        if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+            raise ReadFailure("READER_ENCODING_UNSUPPORTED")
         if int(response.headers.get("content-length", "0")) > max_bytes:
             raise ReadFailure("READER_BYTE_LIMIT")
         chunks = bytearray()

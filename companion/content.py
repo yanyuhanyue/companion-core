@@ -38,9 +38,12 @@ class ContentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     max_links_per_event: int = Field(default=2, ge=1, le=2)
     max_images_per_event: int = Field(default=2, ge=1, le=2)
+    max_images_per_article: int = Field(default=32, ge=1, le=32)
+    article_image_micro_usd: int = Field(default=50_000, ge=0)
+    use_chat_model_for_vision: bool = False
     max_image_bytes: int = Field(default=1_000_000, ge=1024, le=4_000_000)
-    max_daily_image_bytes: int = Field(default=4_000_000, ge=0, le=100_000_000)
-    max_daily_images: int = Field(default=4, ge=0, le=50)
+    max_daily_image_bytes: int = Field(default=32_000_000, ge=0, le=100_000_000)
+    max_daily_images: int = Field(default=32, ge=0, le=50)
     image_daily_micro_usd: int = Field(default=0, ge=0)
     wait_seconds: int = Field(default=30, ge=1, le=90)
     upload_window_seconds: int = Field(default=300, ge=30, le=900)
@@ -92,11 +95,13 @@ async def fetch_public_image(url, source, limit, transport=None):
             transport=transport, timeout=10, trust_env=False, follow_redirects=False
         ) as client,
     ):
-        async with client.stream("GET", url) as response:
+        async with client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
             if response.status_code != 200:
                 raise CoreError("CONTENT_IMAGE_FETCH_FAILED", 502)
+            if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                raise CoreError("CONTENT_IMAGE_ENCODING_UNSUPPORTED", 502)
             mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
-            if mime not in {"image/png", "image/jpeg"}:
+            if mime not in {"image/png", "image/jpeg", "image/webp"}:
                 raise CoreError("CONTENT_IMAGE_TYPE_UNSUPPORTED", 415)
             data = bytearray()
             async for part in response.aiter_bytes():
@@ -109,7 +114,7 @@ async def fetch_public_image(url, source, limit, transport=None):
 def validate_image(data, mime, limit):
     if not data or len(data) > limit:
         raise CoreError("CONTENT_IMAGE_TOO_LARGE", 413)
-    if mime not in {"image/png", "image/jpeg"}:
+    if mime not in {"image/png", "image/jpeg", "image/webp"}:
         raise CoreError("CONTENT_IMAGE_TYPE_UNSUPPORTED", 415)
     try:
         from PIL import Image
@@ -120,7 +125,8 @@ def validate_image(data, mime, limit):
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(data)) as image:
                 if (
-                    image.format != {"image/png": "PNG", "image/jpeg": "JPEG"}[mime]
+                    image.format
+                    != {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}[mime]
                     or max(image.size) > 4096
                     or min(image.size) < 1
                     or image.width * image.height > 16_000_000
@@ -162,6 +168,14 @@ class ContentService:
             core.clock,
         )
         self.options = options or getattr(core.settings, "content", ContentConfig())
+        if self.options.use_chat_model_for_vision:
+            endpoint = MediaEndpoint(
+                url=self.settings.model_url.rstrip("/") + "/chat/completions",
+                key=self.settings.model_key,
+                model=self.settings.model_name,
+                max_request_micro_usd=self.options.vision.max_request_micro_usd,
+            )
+            self.options = self.options.model_copy(update={"vision": endpoint})
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
 
@@ -305,7 +319,8 @@ class ContentService:
                         state = "ERASED"
             pending = state in {"WAITING", "QUEUED", "FETCHING", "RUNNING"}
             if pending and row["deadline"] <= self.clock():
-                state, error, pending = "UNKNOWN", "CONTENT_WAIT_EXPIRED", False
+                state = state if row["kind"] == "link_image" else "UNKNOWN"
+                error, pending = "CONTENT_WAIT_EXPIRED", False
             if pending:
                 deadlines.append(row["deadline"])
             items.append(
@@ -315,6 +330,20 @@ class ContentService:
             "items": items,
             "pending": bool(deadlines),
             "wait_until": max(deadlines) if deadlines else None,
+        }
+
+    def _article_progress(self, source_event_id):
+        rows = self.store.rows(
+            "SELECT state,error_code FROM content_items WHERE source_event_id=? "
+            "AND kind='link_image' AND redacted=0",
+            (source_event_id,),
+        )
+        return {
+            "total": len(rows),
+            "recognized": sum(row["state"] == "SUCCEEDED" for row in rows),
+            "queued": sum(row["state"] == "QUEUED" for row in rows),
+            "failed": sum(row["state"] == "FAILED" for row in rows),
+            "unknown": sum(row["state"] == "UNKNOWN" for row in rows),
         }
 
     def context(self, event_id):
@@ -339,7 +368,8 @@ class ContentService:
                 if status is None:
                     continue
                 observations = self.store.rows(
-                    "SELECT o.event_id,o.source_kind,o.result_status,o.canonical_url,e.body_json "
+                    "SELECT o.event_id,o.source_kind,o.result_status,o.canonical_url,"
+                    "o.evidence_json,e.body_json "
                     "FROM observations o JOIN events e USING(event_id) WHERE o.redacted=0 "
                     "AND e.redacted=0 AND (o.event_id=? OR o.event_id IN (SELECT ee.event_id "
                     "FROM exploration_evidence ee WHERE ee.request_id=?)) ORDER BY e.rowid LIMIT 1",
@@ -351,6 +381,21 @@ class ContentService:
                     "url": row["target_url"] if row["kind"] == "link" else "",
                     "trust": "external_untrusted",
                 }
+                if row["kind"] == "link_image":
+                    source = self.store.one(
+                        "SELECT evidence_json FROM observations WHERE event_id=? AND redacted=0",
+                        (row["source_event_id"],),
+                    )
+                    images = (
+                        (json.loads(source["evidence_json"]).get("article") or {}).get("images", [])
+                        if source
+                        else []
+                    )
+                    item["article_event_id"] = row["source_event_id"]
+                    for index, reference in enumerate(images):
+                        if reference["url"] == row["target_url"]:
+                            item.update(image_index=index + 1, text_offset=reference["text_offset"])
+                            break
                 if observations and status["state"] not in {"ERASED", "FAILED"}:
                     obs = observations[0]
                     body = json.loads(obs["body_json"])
@@ -361,27 +406,46 @@ class ContentService:
                             "result_status": obs["result_status"],
                             "title": body.get("title", ""),
                             "text": body.get("text", "")[:6000],
+                            "reading": json.loads(obs["evidence_json"]).get("reading"),
+                            "article": json.loads(obs["evidence_json"]).get("article"),
                         }
                     )
+                    if row["kind"] == "link":
+                        item["image_progress"] = self._article_progress(obs["event_id"])
                 result.append(item)
+        # Reserve room for each source and image instead of dropping the article after six images.
+        root_order = {root["event_id"]: index for index, root in enumerate(roots)}
+        result.sort(
+            key=lambda row: (root_order[row["owner_event_id"]], row["kind"] != "link", row["slot"])
+        )
         kept, remaining = [], self.options.max_context_chars
-        for item in reversed(result):
-            if len(kept) == 6:
-                break
+        wanted = {
+            root["event_id"]: sum(
+                min(len(row.get("text", "")), 6000 if row["kind"] == "link" else 600)
+                for row in result
+                if row["owner_event_id"] == root["event_id"]
+            )
+            for root in roots
+        }
+        for item in result:
             text = item.get("text", "")
             if text:
-                item = {**item, "text": text[:remaining]}
-                remaining -= len(item["text"])
+                cap = min(len(text), 6000 if item["kind"] == "link" else 600)
+                owner = item["owner_event_id"]
+                allowance = min(cap, remaining * cap // max(1, wanted[owner]))
+                item = {**item, "text": text[:allowance], "excerpt": allowance < len(text)}
+                remaining -= allowance
+                wanted[owner] -= cap
             kept.append(item)
-        return list(reversed(kept))
+        return kept
 
     def context_message(self, event_id, max_bytes):
         """Fit real excerpts in a UTF-8 budget, preserving their source labels."""
         if max_bytes < 64:
             return ""
-        rows = list(reversed(self.context(event_id)))
-        rows.sort(key=lambda item: item["owner_event_id"] != event_id)
-        selected, originals = [], []
+        rows = self.context(event_id)
+        rows.sort(key=lambda item: (item["owner_event_id"] != event_id, item["kind"] != "link"))
+        selected, originals, original_excerpts = [], [], []
 
         def render(items):
             return encode({"shared_content": items})
@@ -394,10 +458,31 @@ class ContentService:
                 "trust": row["trust"],
                 "kind": row.get("source_kind", row["kind"]),
             }
+            if row.get("reading"):
+                reading = row["reading"]
+                item["reading"] = {
+                    key: reading[key] for key in ("level", "part", "subtitle_status", "truncated")
+                }
+            if row.get("article"):
+                article = row["article"]
+                item["article"] = {
+                    "method": article["method"],
+                    "truncated": article["truncated"],
+                    "image_links": len(article["images"]),
+                }
+            for key in ("article_event_id", "image_index", "text_offset", "image_progress"):
+                if key in row:
+                    item[key] = row[key]
+            if row.get("error_code"):
+                item["error_code"] = row["error_code"]
+            if row.get("image_progress"):
+                # Updated after selection; reserve its bytes before allocating text excerpts.
+                item["image_details_omitted"] = row["image_progress"]["total"]
             if len(render([*selected, item]).encode()) > max_bytes:
                 return False
             selected.append(item)
             originals.append(row.get("text", ""))
+            original_excerpts.append(row.get("excerpt", False))
             return True
 
         def add_excerpt(index, byte_limit):
@@ -410,7 +495,7 @@ class ContentService:
                 candidate = {
                     **selected[index],
                     "text": original[:middle],
-                    "excerpt": middle < len(original),
+                    "excerpt": middle < len(original) or original_excerpts[index],
                 }
                 trial = [*selected[:index], candidate, *selected[index + 1 :]]
                 if len(render(trial).encode()) <= byte_limit:
@@ -433,6 +518,10 @@ class ContentService:
         for row in rows:
             if row["owner_event_id"] != primary_root and add_metadata(row):
                 add_excerpt(len(selected) - 1, max_bytes)
+        for item in selected:
+            if "image_details_omitted" in item:
+                included = sum(row.get("article_event_id") == item["event_id"] for row in selected)
+                item["image_details_omitted"] = max(0, item["image_progress"]["total"] - included)
         return render(selected) if selected else ""
 
     def register_link_images(self, owner_event_id, source_event_id, image_urls):
@@ -458,20 +547,24 @@ class ContentService:
             ):
                 raise CoreError("CONTENT_IMAGE_PROVENANCE_REQUIRED", 403)
             existing = s.rows(
-                "SELECT target_url,slot,kind FROM content_items WHERE owner_event_id=? "
-                "AND kind IN ('qq_image','link_image')",
+                "SELECT target_url,slot,source_event_id FROM content_items WHERE owner_event_id=? "
+                "AND kind='link_image'",
                 (owner_event_id,),
             )
-            for raw in image_urls[:2]:
-                if len(existing) >= self.options.max_images_per_event:
+            for raw in image_urls[:32]:
+                if len(existing) >= 64:
                     break
                 try:
                     url = public_image_url(raw, platform)
                 except CoreError:
                     continue
-                if any(item["target_url"] == url for item in existing):
+                article_images = [
+                    item for item in existing if item["source_event_id"] == source_event_id
+                ]
+                if any(item["target_url"] == url for item in article_images):
                     continue
-                slot = sum(item["kind"] == "link_image" for item in existing)
+                slot = max((item["slot"] for item in existing), default=-1) + 1
+                limited = len(article_images) >= self.options.max_images_per_article
                 s.insert(
                     "content_items",
                     item_id=uid("content"),
@@ -480,13 +573,65 @@ class ContentService:
                     slot=slot,
                     source_event_id=source_event_id,
                     target_url=url,
-                    state="QUEUED",
+                    state="FAILED" if limited else "QUEUED",
+                    error_code="CONTENT_ARTICLE_IMAGE_LIMIT" if limited else None,
                     captured_privacy_epoch=epoch(s),
                     deadline=after(owner["ingested_at"], self.options.wait_seconds),
                     created_at=now,
                     updated_at=now,
                 )
-                existing.append({"target_url": url, "slot": slot, "kind": "link_image"})
+                existing.append(
+                    {"target_url": url, "slot": slot, "source_event_id": source_event_id}
+                )
+
+    def resume_link_images(self, event_id):
+        """Explicitly resume only budget-blocked images that never started I/O."""
+        with self.store.transaction():
+            self._source(event_id)
+            changed = self.store.execute(
+                "UPDATE content_items SET state='QUEUED',error_code=NULL,updated_at=?,deadline=? "
+                "WHERE owner_event_id=? AND kind='link_image' AND state='FAILED' "
+                "AND redacted=0 AND reserved_bytes=0 AND usage_request_id IS NULL "
+                "AND error_code IN ('CONTENT_VISION_BUDGET_EXHAUSTED',"
+                "'CONTENT_IMAGE_TRAFFIC_EXHAUSTED','CONTENT_ARTICLE_VISION_BUDGET_EXHAUSTED',"
+                "'CONTENT_ARTICLE_IMAGE_LIMIT')",
+                (self.clock(), after(self.clock(), self.options.wait_seconds), event_id),
+            ).rowcount
+        return {"resumed": changed, **self.status(event_id)}
+
+    def _check_vision_budget(self, row):
+        endpoint = self.options.vision
+        if not endpoint.url or not endpoint.model or not endpoint.max_request_micro_usd:
+            raise CoreError("CONTENT_VISION_NOT_CONFIGURED", 503)
+        day, month = self._periods()
+        daily = self.store.one(
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+            "WHERE occurred_at>=? AND scenario='content_vision'",
+            (day,),
+        )["n"]
+        price = endpoint.max_request_micro_usd
+        if (
+            daily + price > self.options.image_daily_micro_usd
+            or budget.total_monthly(self.store, month) + price
+            > self.settings.monthly_limit_micro_usd
+        ):
+            raise CoreError("CONTENT_VISION_BUDGET_EXHAUSTED", 429)
+        if row["kind"] == "link_image":
+            prior = self.store.one(
+                "SELECT COUNT(*) AS n FROM content_items WHERE owner_event_id=? "
+                "AND source_event_id=? AND kind='link_image' AND slot<?",
+                (row["owner_event_id"], row["source_event_id"], row["slot"]),
+            )["n"]
+            if prior >= self.options.max_images_per_article:
+                raise CoreError("CONTENT_ARTICLE_IMAGE_LIMIT", 429)
+            spent = self.store.one(
+                "SELECT COALESCE(SUM(m.billed_micro_usd),0) AS n FROM model_usage m "
+                "JOIN content_items c ON c.usage_request_id=m.request_id "
+                "WHERE c.source_event_id=?",
+                (row["source_event_id"],),
+            )["n"]
+            if spent + price > self.options.article_image_micro_usd:
+                raise CoreError("CONTENT_ARTICLE_VISION_BUDGET_EXHAUSTED", 429)
 
     def _periods(self):
         now = datetime.fromisoformat(self.clock()).astimezone(ZoneInfo(self.settings.timezone))
@@ -517,7 +662,7 @@ class ContentService:
         validate_image(data, mime, self.options.max_image_bytes)
         fingerprint = hashlib.sha256(mime.encode() + b"\0" + data).hexdigest()
         endpoint, s, now = self.options.vision, self.store, self.clock()
-        day, month = self._periods()
+        day, _ = self._periods()
         with s.transaction():
             self._source(row["owner_event_id"], upload=row["kind"] == "qq_image")
             row = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
@@ -532,25 +677,13 @@ class ContentService:
             if row["state"] == "FETCHING" and row["lease_until"] <= now:
                 raise CoreError("CONTENT_IMAGE_LEASE_EXPIRED", 409)
             self._policy(row)
+            self._check_vision_budget(row)
             price = endpoint.max_request_micro_usd
-            if not endpoint.url or not endpoint.model or not price:
-                raise CoreError("CONTENT_VISION_NOT_CONFIGURED", 503)
-            daily = s.one(
-                "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-                "WHERE occurred_at>=? AND scenario='content_vision'",
-                (day,),
-            )["n"]
-            monthly = budget.total_monthly(s, month)
             traffic = s.one(
                 "SELECT COUNT(*) AS n,COALESCE(SUM(reserved_bytes),0) AS bytes FROM content_items "
                 "WHERE COALESCE(started_at,created_at)>=? AND reserved_bytes>0 AND item_id<>?",
                 (day, row["item_id"]),
             )
-            if (
-                daily + price > self.options.image_daily_micro_usd
-                or monthly + price > self.settings.monthly_limit_micro_usd
-            ):
-                raise CoreError("CONTENT_VISION_BUDGET_EXHAUSTED", 429)
             reserved = max(len(data), row["reserved_bytes"])
             if (
                 traffic["n"] >= self.options.max_daily_images
@@ -596,6 +729,8 @@ class ContentService:
             async with asyncio.timeout(self.options.provider_timeout_seconds):
                 result = await self.provider.process("camera", data, mime, self.options.vision)
             text = redact(result.text, self.settings)
+            if result.truncated:
+                text = "[图片识别达到输出长度上限，以下仅为部分内容]\n" + text
             secret = self.options.vision.key.get_secret_value()
             if secret:
                 text = text.replace(secret, "[REDACTED]")
@@ -750,11 +885,13 @@ class ContentService:
                     (row["item_id"],),
                 )
                 return True
-            if not self.options.vision.url or not self.options.vision.max_request_micro_usd:
+            try:
+                self._policy(row)
+                self._check_vision_budget(row)
+            except CoreError as error:
                 s.execute(
-                    "UPDATE content_items SET state='FAILED',"
-                    "error_code='CONTENT_VISION_NOT_CONFIGURED' WHERE item_id=?",
-                    (row["item_id"],),
+                    "UPDATE content_items SET state='FAILED',error_code=? WHERE item_id=?",
+                    (error.code, row["item_id"]),
                 )
                 return True
             traffic = s.one(
@@ -794,3 +931,11 @@ class ContentService:
                 (code, self.clock(), row["item_id"]),
             )
         return True
+
+    async def run_batch(self):
+        completed = 0
+        for _ in range(2):
+            if not await self.run_once():
+                break
+            completed += 1
+        return completed

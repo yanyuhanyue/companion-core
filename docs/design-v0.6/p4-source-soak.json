@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "taskbook": "CC-NEXT-20261020-P4",
+  "status": "BLOCKED_AUTHORIZATION_NOT_GRANTED",
+  "observation_hours": 0,
+  "started_at": null,
+  "ended_at": null,
+  "required_hours": 24,
+  "recommended_hours": 72,
+  "sources": {
+    "heybox": {"requests": 0, "new_distinct_posts": 0, "success_rate": null,
+      "mean_latency_ms": null, "p95_latency_ms": null, "bytes": 0,
+      "http_401_403_412_429": null, "captcha": null, "unknown_reservations": null},
+    "bilibili": {"requests": 0, "new_l2_samples": 0, "success_rate": null,
+      "mean_latency_ms": null, "p95_latency_ms": null, "bytes": 0,
+      "http_401_403_412_429": null, "captcha": null, "unknown_reservations": null}
+  },
+  "missing_intervals": "The entire 24-hour observation window is unobserved; no background monitor was started.",
+  "historical_evidence": ["heybox-live-p3.json", "bilibili-live-p3.json", "article-vision-live.json"],
+  "historical_evidence_scope": "Short preselected samples on 2026-10-20, not a new P4 sample or SLA.",
+  "required_authorization": ["Dedicated account and scope", "Grant expiry", "Request/byte caps",
+    "Cooldown and stop conditions", "Operating window and recovery owner"],
+  "stop_conditions": ["Expired/revoked grant", "401/403/412/429/captcha",
+    "Unknown cost or request outcome", "Unexpected platform write", "Privacy incident"],
+  "linux_browser": "BLOCKED_UNCHANGED_NO_SANDBOX_PRIVILEGE_CHANGE",
+  "target_linux_peak_memory_network_secrets_mount": "NOT_VERIFIED_THIS_ROUND",
+  "production_ready": false
+}

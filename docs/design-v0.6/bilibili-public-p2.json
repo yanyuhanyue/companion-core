@@ -1,0 +1,120 @@
+{
+  "checked_at": "2026-10-19T23:50:20.584743+00:00",
+  "source": "bilibili",
+  "credentials_used": false,
+  "model_calls": 0,
+  "qq_messages": 0,
+  "samples": [
+    {
+      "url": "https://www.bilibili.com/video/BV1Sb41127UZ",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "有关b站cc字幕科普和开启方法",
+          "url": "https://www.bilibili.com/video/BV1Sb41127UZ",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T23:50:23.432182+00:00",
+            "part": 1,
+            "subtitle_status": "restricted",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "62d76c144432a5428beae6a6fa71ab6fa409a4db78ddaf983ef739f0a7ccdaf8",
+                "bytes": 3763
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "a8f13b4138ebf83542050d9f0ed4b770d6b00360e61d94dd11a0e46777ab08dc",
+                "bytes": 2281
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 305
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 6044
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1Lb411h7gY",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "【iPad终于支持CC字幕】以及B站CC字幕的一些问题以及说明",
+          "url": "https://www.bilibili.com/video/BV1Lb411h7gY",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T23:50:27.197397+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "b7f23b9b1c5e64b066eecea00662238f215690abd379fa3400e5b7b775ae9115",
+                "bytes": 3608
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "970cebcbbf415fc1dc250b99c74c63f499016a95e303e2339aa8bb3f23e61eba",
+                "bytes": 2501
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 317
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 6109
+    },
+    {
+      "url": "https://www.bilibili.com/video/BV1SE411v7qy",
+      "status": "SUCCESS",
+      "items": [
+        {
+          "title": "怎样打开CC字幕（B站外挂字幕）",
+          "url": "https://www.bilibili.com/video/BV1SE411v7qy",
+          "reading": {
+            "level": "L1",
+            "method": "public_api",
+            "fetched_at": "2026-10-19T23:50:30.984311+00:00",
+            "part": 1,
+            "subtitle_status": "missing",
+            "language": "",
+            "spans": [],
+            "sources": [
+              {
+                "role": "metadata",
+                "url": "https://api.bilibili.com/x/web-interface/view",
+                "sha256": "9a116615c9c753795a5e62bd1896c7dd943029d4366063be8f86c58f93c3d19a",
+                "bytes": 2001
+              },
+              {
+                "role": "player",
+                "url": "https://api.bilibili.com/x/player/v2",
+                "sha256": "7185bc26e98957c7e49dd3d8e519a367976c23ea5406e415af4744ae87de4617",
+                "bytes": 2280
+              }
+            ],
+            "truncated": false
+          },
+          "text_chars": 69
+        }
+      ],
+      "used_requests": 2,
+      "used_bytes": 4281
+    }
+  ]
+}
