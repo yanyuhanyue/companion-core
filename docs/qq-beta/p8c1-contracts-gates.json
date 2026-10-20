@@ -1,0 +1,83 @@
+{
+  "$schema": "../../contracts/p8c1-contracts-gates.schema.json",
+  "schema_version": 1,
+  "evidence_level": "OFFLINE_PROPOSAL",
+  "source": {
+    "main_sha": "bbd712c1a79497762275e718e9f76959bedf6583",
+    "privacy_sha": "e24d8788d4c597f9e938d96d87ed76805504f044",
+    "code_migration_head": "0017_paid_model_gate",
+    "frozen_product_candidate_sha": null,
+    "offline_compatibility": "PENDING_OTHER_WORKSTREAM",
+    "compatibility_evidence_reference": null
+  },
+  "targets": {
+    "legacy_ref": "private_target_legacy",
+    "final_ref": "private_target_final",
+    "target_inventory_sha256": null,
+    "observed_runtime_schema": null,
+    "probed_this_phase": false
+  },
+  "provider": {
+    "decision": "PROVIDER_CONTRACT_UNVERIFIABLE",
+    "report": "p8c1-provider-contract-review.md",
+    "approved_model": null,
+    "approved_region": null,
+    "approved_rates": null,
+    "verified_remote_input_contract": null,
+    "account_hard_cap_reference": null,
+    "sole_account_entry_reference": null,
+    "alternatives_review": "REVIEWED_DESIGN_ONLY_BLOCKED",
+    "review_reference": "p8c1-provider-contract-review.md#9-审查与验证记录"
+  },
+  "privacy": {
+    "candidate_sha": "e24d8788d4c597f9e938d96d87ed76805504f044",
+    "state": "OFFLINE_PASS_WITH_HISTORY_RESIDUAL",
+    "review": "p8c1-public-evidence-review.md",
+    "history_residual": true
+  },
+  "approval_template": "p8c-readiness.json",
+  "independent_approvals": {
+    "recovery": "BLOCKED",
+    "deployment": "BLOCKED",
+    "qq_window": "BLOCKED",
+    "paid_model": "BLOCKED",
+    "m1": "DISABLED",
+    "reader_g1": "DISABLED"
+  },
+  "recovery": {
+    "report": "p8c1-recovery-approval-delta.md",
+    "consistent_backup_manifest_sha256": null,
+    "latest_three_records_reference": null,
+    "new_isolated_restore_reference": null,
+    "compatible_rollback_reference": null
+  },
+  "actual": {
+    "provider_usage": null,
+    "input_tokens": null,
+    "output_tokens": null,
+    "cache_hit_tokens": null,
+    "provider_cost": null,
+    "billing_reconciled_cost": null,
+    "provider_latency": {
+      "n": 0,
+      "p50": null,
+      "p95": null
+    },
+    "phone_e2e_latency": {
+      "n": 0,
+      "p50": null,
+      "p95": null
+    },
+    "strict_qq_first5": 0,
+    "strict_qq_all20": 0
+  },
+  "actions": {
+    "runtime_host_connections": 0,
+    "real_data_reads": 0,
+    "real_data_copies": 0,
+    "paid_requests": 0,
+    "qq_sends": 0,
+    "deployments": 0
+  },
+  "production_ready": false
+}

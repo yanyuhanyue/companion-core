@@ -1,0 +1,299 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "P8-C.1 contracts-only evidence; no runtime authority",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "evidence_level",
+    "source",
+    "targets",
+    "provider",
+    "privacy",
+    "approval_template",
+    "independent_approvals",
+    "recovery",
+    "actual",
+    "actions",
+    "production_ready"
+  ],
+  "properties": {
+    "$schema": {"const":"../../contracts/p8c1-contracts-gates.schema.json"},
+    "schema_version": {"const":1},
+    "evidence_level": {"const":"OFFLINE_PROPOSAL"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "main_sha",
+        "privacy_sha",
+        "code_migration_head",
+        "frozen_product_candidate_sha",
+        "offline_compatibility",
+        "compatibility_evidence_reference"
+      ],
+      "properties": {
+        "main_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "privacy_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "code_migration_head": {"type":"string","minLength":1},
+        "frozen_product_candidate_sha": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            {"type":"null"}
+          ]
+        },
+        "offline_compatibility": {"enum":["PENDING_OTHER_WORKSTREAM","OFFLINE_COMPATIBILITY_READY"]},
+        "compatibility_evidence_reference": {"type":["string","null"],"minLength":1}
+      }
+    },
+    "targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "legacy_ref",
+        "final_ref",
+        "target_inventory_sha256",
+        "observed_runtime_schema",
+        "probed_this_phase"
+      ],
+      "properties": {
+        "legacy_ref": {
+          "type": "string",
+          "pattern": "^private_target_[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "final_ref": {
+          "type": "string",
+          "pattern": "^private_target_[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "target_inventory_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            {"type":"null"}
+          ]
+        },
+        "observed_runtime_schema": {"type":"null"},
+        "probed_this_phase": {"const":false}
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "report",
+        "approved_model",
+        "approved_region",
+        "approved_rates",
+        "verified_remote_input_contract",
+        "account_hard_cap_reference",
+        "sole_account_entry_reference",
+        "alternatives_review",
+        "review_reference"
+      ],
+      "properties": {
+        "decision": {"const":"PROVIDER_CONTRACT_UNVERIFIABLE"},
+        "report": {"const":"p8c1-provider-contract-review.md"},
+        "approved_model": {"type":"null"},
+        "approved_region": {"type":"null"},
+        "approved_rates": {"type":"null"},
+        "verified_remote_input_contract": {"type":"null"},
+        "account_hard_cap_reference": {"type":"null"},
+        "sole_account_entry_reference": {"type":"null"},
+        "alternatives_review": {"enum":["PENDING","REVIEWED_DESIGN_ONLY_BLOCKED"]},
+        "review_reference": {"type":["string","null"],"minLength":1}
+      }
+    },
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_sha",
+        "state",
+        "review",
+        "history_residual"
+      ],
+      "properties": {
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "state": {"const":"OFFLINE_PASS_WITH_HISTORY_RESIDUAL"},
+        "review": {"const":"p8c1-public-evidence-review.md"},
+        "history_residual": {"const":true}
+      }
+    },
+    "approval_template": {"const":"p8c-readiness.json"},
+    "independent_approvals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recovery",
+        "deployment",
+        "qq_window",
+        "paid_model",
+        "m1",
+        "reader_g1"
+      ],
+      "properties": {
+        "recovery": {"const":"BLOCKED"},
+        "deployment": {"const":"BLOCKED"},
+        "qq_window": {"const":"BLOCKED"},
+        "paid_model": {"const":"BLOCKED"},
+        "m1": {"const":"DISABLED"},
+        "reader_g1": {"const":"DISABLED"}
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report",
+        "consistent_backup_manifest_sha256",
+        "latest_three_records_reference",
+        "new_isolated_restore_reference",
+        "compatible_rollback_reference"
+      ],
+      "properties": {
+        "report": {"const":"p8c1-recovery-approval-delta.md"},
+        "consistent_backup_manifest_sha256": {"type":"null"},
+        "latest_three_records_reference": {"type":"null"},
+        "new_isolated_restore_reference": {"type":"null"},
+        "compatible_rollback_reference": {"type":"null"}
+      }
+    },
+    "actual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_usage",
+        "input_tokens",
+        "output_tokens",
+        "cache_hit_tokens",
+        "provider_cost",
+        "billing_reconciled_cost",
+        "provider_latency",
+        "phone_e2e_latency",
+        "strict_qq_first5",
+        "strict_qq_all20"
+      ],
+      "properties": {
+        "provider_usage": {"type":"null"},
+        "input_tokens": {"type":"null"},
+        "output_tokens": {"type":"null"},
+        "cache_hit_tokens": {"type":"null"},
+        "provider_cost": {"type":"null"},
+        "billing_reconciled_cost": {"type":"null"},
+        "provider_latency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "n",
+            "p50",
+            "p95"
+          ],
+          "properties": {
+            "n": {"const":0},
+            "p50": {"type":"null"},
+            "p95": {"type":"null"}
+          }
+        },
+        "phone_e2e_latency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "n",
+            "p50",
+            "p95"
+          ],
+          "properties": {
+            "n": {"const":0},
+            "p50": {"type":"null"},
+            "p95": {"type":"null"}
+          }
+        },
+        "strict_qq_first5": {"const":0},
+        "strict_qq_all20": {"const":0}
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_host_connections",
+        "real_data_reads",
+        "real_data_copies",
+        "paid_requests",
+        "qq_sends",
+        "deployments"
+      ],
+      "properties": {
+        "runtime_host_connections": {"const":0},
+        "real_data_reads": {"const":0},
+        "real_data_copies": {"const":0},
+        "paid_requests": {"const":0},
+        "qq_sends": {"const":0},
+        "deployments": {"const":0}
+      }
+    },
+    "production_ready": {"const":false}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "offline_compatibility": {"const":"OFFLINE_COMPATIBILITY_READY"}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "frozen_product_candidate_sha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              "compatibility_evidence_reference": {"type":"string","minLength":1}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "properties": {
+              "alternatives_review": {"const":"REVIEWED_DESIGN_ONLY_BLOCKED"}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "provider": {
+            "properties": {
+              "review_reference": {"type":"string","minLength":1}
+            }
+          }
+        }
+      }
+    }
+  ]
+}
