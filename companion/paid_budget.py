@@ -89,7 +89,7 @@ def input_bound(approval, messages, scenario):
         raise CoreError("MODEL_INPUT_BOUND_UNPROVEN", 503) from error
 
 
-def journal(store, approval, record=None):
+def journal(store, approval, record=None, *, allow_settlement=False):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
@@ -130,7 +130,7 @@ def journal(store, approval, record=None):
             else:
                 latest[row["request_id"]] = row
                 blocked |= row["kind"] == "blocked"
-        if not lines or blocked:
+        if not lines or (blocked and not allow_settlement):
             raise ValueError("journal reconciliation")
         for request_id, row in latest.items():
             if record and request_id == record["request_id"]:

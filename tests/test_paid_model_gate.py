@@ -855,3 +855,61 @@ def test_credential_rotation_cannot_reuse_existing_approval_window(core, tmp_pat
 
     asyncio.run(exercise())
     assert calls == []
+
+
+def test_chat_reservation_cannot_pay_for_activity_scenario(core, tmp_path):
+    from companion import budget
+
+    approved_live(core, tmp_path)
+    messages = [{"role": "user", "content": "hello"}]
+    request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    calls = []
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: (
+                    calls.append(req)
+                    or httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+                )
+            )
+        ) as client:
+            with pytest.raises(CoreError, match="PAYLOAD_CHANGED"):
+                await budget.complete(
+                    ModelClient(core.settings, client),
+                    core.store,
+                    core.settings,
+                    request,
+                    messages,
+                    "activity",
+                    core.clock,
+                )
+
+    asyncio.run(exercise())
+    assert calls == []
+
+
+def test_stopping_admission_does_not_discard_later_inflight_cost_evidence(core, tmp_path):
+    from companion import budget
+    from companion.model import ModelResponse
+
+    approved_live(core, tmp_path)
+    messages = [{"role": "user", "content": "hello"}]
+    first = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    second = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    budget.settle(core.store, core.settings, first, ModelResponse("ok", 999999, 2))
+    budget.settle(core.store, core.settings, second, ModelResponse("ok", 888888, 2))
+    rows = core.store.rows("SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid")
+    assert rows == [
+        {"state": "UNKNOWN", "billed_micro_usd": 1000003},
+        {"state": "UNKNOWN", "billed_micro_usd": 888892},
+    ]
+    budget.record_provider_discrepancy(core.store, core.settings, second, 2000000, "USD", "f" * 64)
+    assert (
+        core.store.one("SELECT billed_micro_usd FROM model_usage WHERE request_id=?", (second,))[
+            "billed_micro_usd"
+        ]
+        == 2000000
+    )
+    with pytest.raises(CoreError, match="RECONCILIATION"):
+        budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
