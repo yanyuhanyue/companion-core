@@ -2,7 +2,7 @@ import os
 import tomllib
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
