@@ -15,11 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from companion import budget
 from companion.contracts import CoreError
-from companion.exploration import content_target
 from companion.media_provider import HTTPMediaProvider, MediaEndpoint
 from companion.observation import ObservationEvent, ObservationPayload
 from companion.privacy import epoch, redact
-from companion.sources import public_image_url, supports
+from companion.sources import content_target, public_image_url, supports
 from companion.store import after, encode, uid, utcnow
 
 CONTEXT_RULES = (
