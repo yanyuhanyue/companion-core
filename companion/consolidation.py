@@ -32,13 +32,10 @@ def erase_consolidation(store, event_ids):
 
 
 class NightlyConsolidator:
-    def __init__(self, core):
-        self.core, self.store, self.settings, self.clock = (
-            core,
-            core.store,
-            core.settings,
-            core.clock,
-        )
+    def __init__(self, store, settings, diary, reflections, goals, extract_once, clock):
+        self.store, self.settings, self.clock = store, settings, clock
+        self.diary, self.reflections, self.goals = diary, reflections, goals
+        self.extract_once = extract_once
 
     def enabled(self):
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
@@ -47,7 +44,7 @@ class NightlyConsolidator:
     def schedule_day(self, day):
         if not self.enabled():
             return None
-        self.core.reflections.validate_day(day)
+        self.reflections.validate_day(day)
         with self.store.transaction():
             existing = self.status(day)
             if existing:
@@ -112,7 +109,7 @@ class NightlyConsolidator:
             )
             if not row:
                 return None
-            sources = self.core.diary.repo.sources(date.fromisoformat(row["local_date"]))
+            sources = self.diary.repo.sources(date.fromisoformat(row["local_date"]))
             # Erasure cancels leased/partial coordinators in the same DB transaction.
             # Benign Memory writes may advance the epoch before a crashed coordinator
             # checkpoints. Resume against fresh state only when its sources are unchanged;
@@ -174,7 +171,7 @@ class NightlyConsolidator:
                 raise CoreError("CONSOLIDATION_STALE_LEASE", 409)
             if erasure_version != run["erasure_version"] or source_hash(
                 run["sources"]
-            ) != source_hash(self.core.diary.repo.sources(date.fromisoformat(run["local_date"]))):
+            ) != source_hash(self.diary.repo.sources(date.fromisoformat(run["local_date"]))):
                 raise CoreError("PRIVACY_CHANGED", 409)
             run["captured_privacy_epoch"] = epoch(self.store)
             self.store.execute(
@@ -223,7 +220,7 @@ class NightlyConsolidator:
                 steps["memory"] = "RUNNING"
                 self.checkpoint(run)
                 worked = (
-                    await self.core.extract_once(day) if self.settings.memory_enabled else False
+                    await self.extract_once(day) if self.settings.memory_enabled else False
                 )
                 if worked:
                     self.after_memory_commit(run)
@@ -250,7 +247,7 @@ class NightlyConsolidator:
             if steps.get("diary") not in {"COMMITTED", "SKIPPED", "FAILED", "CANCELLED"}:
                 steps["diary"] = "RUNNING"
                 self.checkpoint(run)
-                diary_id = self.core.diary.schedule_day(day)
+                diary_id = self.diary.schedule_day(day)
                 if not diary_id:
                     steps["diary"] = "SKIPPED"
                 else:
@@ -258,7 +255,7 @@ class NightlyConsolidator:
                     if row["state"] in {"PENDING", "RETRY_WAIT"} or (
                         row["state"] == "RUNNING" and row["lease_until"] <= self.clock()
                     ):
-                        await self.core.diary.generate_once(worker_id)
+                        await self.diary.generate_once(worker_id)
                         row = self.store.one("SELECT * FROM diary_runs WHERE run_id=?", (diary_id,))
                     steps["diary"] = row["state"]
                     if row["state"] in {"PENDING", "RUNNING", "RETRY_WAIT"}:
@@ -268,7 +265,7 @@ class NightlyConsolidator:
             if steps.get("reflection") not in {"COMMITTED", "SKIPPED", "FAILED", "CANCELLED"}:
                 self.checkpoint(run)
                 result = (
-                    await self.core.reflections.run_day(day)
+                    await self.reflections.run_day(day)
                     if self.settings.reflection_enabled
                     else None
                 )
@@ -296,7 +293,7 @@ class NightlyConsolidator:
                         )
                     ]
                     try:
-                        self.core.goals.propose(
+                        self.goals.propose(
                             GoalProposal(
                                 topic=proposal["content"][:300], source_event_ids=source_ids
                             )

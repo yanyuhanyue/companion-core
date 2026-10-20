@@ -51,10 +51,15 @@ class Core(Runtime):
             self.reflections = ReflectionService(
                 self.store, settings, model, self.diary.repo, self.ledger, clock
             )
-            self.consolidation = NightlyConsolidator(self)
             self.goals = GoalEngine(self.store, settings, self.ledger, clock)
+            self.consolidation = NightlyConsolidator(
+                self.store, settings, self.diary, self.reflections, self.goals,
+                self.extract_once, clock,
+            )
             self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
-            self.life = LifeService(self)
+            self.life = LifeService(
+                self.store, settings, self.goals, self.reflections, self.affect, clock,
+            )
             self.social = SocialPlanner(self.store, settings, clock)
             # Only this finite callback is late-bound; neither service retains the Core.
             self.content = ContentService(
