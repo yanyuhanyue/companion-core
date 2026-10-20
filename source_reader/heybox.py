@@ -10,7 +10,7 @@ from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
 import httpcore
 
-from companion.sources import source_definition
+from companion.source_policy import source_definition
 from source_reader.network import ReadFailure, post_url, response_body
 
 IMAGE_HOSTS = source_definition("heybox").image_hosts
