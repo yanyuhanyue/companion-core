@@ -1,0 +1,1024 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://companion.invalid/contracts/p8c-readiness.schema.json",
+  "title": "P8-C offline readiness template, never runtime authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "evidence_level",
+    "authority",
+    "snapshot",
+    "environment",
+    "requests",
+    "runtime",
+    "actions",
+    "validation"
+  ],
+  "properties": {
+    "$schema": {"const":"../../contracts/p8c-readiness.schema.json"},
+    "schema_version": {"const":1},
+    "evidence_level": {"const":"OFFLINE_PROPOSAL"},
+    "authority": {"const":"Preparation only; six separately signed private approvals are required. This JSON is not a runtime approval."},
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_at",
+        "main_sha",
+        "main_ci",
+        "reviewed_source_sha",
+        "candidate_sha",
+        "integration_pr",
+        "original_prs",
+        "source_contracts",
+        "integrated_candidate_sha",
+        "integrated_tree",
+        "code_migration_head",
+        "independent_review"
+      ],
+      "properties": {
+        "observed_at": {"type":"string","format":"date-time"},
+        "main_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "main_ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_url",
+            "status",
+            "conclusion",
+            "successful_jobs",
+            "jobs"
+          ],
+          "properties": {
+            "run_url": {"type":"string","pattern":"^https://github[.]com/yanyuhanyue/companion-core/"},
+            "status": {"enum":["completed","in_progress","queued"]},
+            "conclusion": {"enum":["success","failure","cancelled","skipped",null]},
+            "successful_jobs": {"type":"integer","minimum":0},
+            "jobs": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "conclusion",
+                  "url"
+                ],
+                "properties": {
+                  "name": {"type":"string","minLength":1},
+                  "conclusion": {"enum":["success","failure","cancelled","skipped"]},
+                  "url": {"type":"string","pattern":"^https://github[.]com/yanyuhanyue/companion-core/"}
+                }
+              }
+            }
+          }
+        },
+        "reviewed_source_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "candidate_sha": {"$ref":"#/$defs/commit"},
+        "integration_pr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "url",
+            "state",
+            "head_sha",
+            "ci_status",
+            "run_urls",
+            "merged_sha"
+          ],
+          "properties": {
+            "url": {"type":"string","pattern":"^https://github[.]com/yanyuhanyue/companion-core/"},
+            "state": {"enum":["OPEN","CLOSED","MERGED"]},
+            "head_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "ci_status": {"type":"string","minLength":1},
+            "run_urls": {
+              "type": "array",
+              "minItems": 1,
+              "items": {"type":"string","pattern":"^https://github[.]com/yanyuhanyue/companion-core/"}
+            },
+            "merged_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            }
+          }
+        },
+        "original_prs": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "number",
+              "head_sha",
+              "state",
+              "draft_at_source"
+            ],
+            "properties": {
+              "number": {"enum":[24,25,26,27]},
+              "head_sha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              "state": {"enum":["OPEN","CLOSED","MERGED"]},
+              "draft_at_source": {"type":"boolean"}
+            }
+          }
+        },
+        "source_contracts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha",
+              "evidence"
+            ],
+            "properties": {
+              "path": {"type":"string","minLength":1},
+              "sha": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{40}$"
+              },
+              "evidence": {"const":"CODE_ONLY"}
+            }
+          }
+        },
+        "integrated_candidate_sha": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "integrated_tree": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        "code_migration_head": {
+          "type": "string",
+          "pattern": "^[0-9]{4}_[a-z0-9_]+$"
+        },
+        "independent_review": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "reviewed_sha",
+            "reported_findings",
+            "done",
+            "reference",
+            "conclusion",
+            "report_commit",
+            "report_url",
+            "coverage_limits"
+          ],
+          "properties": {
+            "state": {"enum":["IN_PROGRESS","COMPLETED","FINDINGS_OPEN"]},
+            "reviewed_sha": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{40}$"
+            },
+            "reported_findings": {
+              "type": "array",
+              "items": {}
+            },
+            "done": {"type":"boolean"},
+            "reference": {"type":"string","minLength":1},
+            "conclusion": {"type":["string","null"]},
+            "report_commit": {"$ref":"#/$defs/commit"},
+            "report_url": {"$ref":"#/$defs/text"},
+            "coverage_limits": {
+              "type": "array",
+              "items": {"type":"string","minLength":1}
+            }
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "historical_test_host",
+        "final_target",
+        "windows_gateway"
+      ],
+      "properties": {
+        "historical_test_host": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host",
+            "evidence",
+            "source",
+            "source_sha",
+            "mode",
+            "config_version",
+            "schema_head",
+            "qq_demo_inputs",
+            "qq_demo_sent",
+            "real_nonempty_restore"
+          ],
+          "properties": {
+            "host": {"type":"null"},
+            "evidence": {"const":"HISTORICAL_REPOSITORY_REPORT_ONLY"},
+            "source": {"const":"docs/qq-beta/p8-host-recovery-review.md"},
+            "source_sha": {"const":"940b6f28c16f7d495c3ff86e6b5bc7fad63e917a"},
+            "mode": {"const":"demo"},
+            "config_version": {"const":"P7-DEMO-1"},
+            "schema_head": {"const":"0015_article_images"},
+            "qq_demo_inputs": {"const":5},
+            "qq_demo_sent": {"const":5},
+            "real_nonempty_restore": {"const":"NOT_VERIFIED"}
+          }
+        },
+        "final_target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "private_target_ref",
+            "target_inventory_sha256",
+            "evidence",
+            "core_deployed",
+            "observed_config_sha256",
+            "observed_schema_head",
+            "observed_image_inventory_sha256"
+          ],
+          "properties": {
+            "private_target_ref": {
+              "type": "string",
+              "pattern": "^private_target_[a-z0-9][a-z0-9_-]{0,63}$"
+            },
+            "target_inventory_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "evidence": {
+              "const": "USER_SUPPLIED_NOT_PROBED"
+            },
+            "core_deployed": {
+              "const": false
+            },
+            "observed_config_sha256": {
+              "type": "null"
+            },
+            "observed_schema_head": {
+              "type": "null"
+            },
+            "observed_image_inventory_sha256": {
+              "type": "null"
+            }
+          }
+        },
+        "windows_gateway": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "evidence",
+            "private_link",
+            "connected_executor_methods",
+            "core_enabled",
+            "screenshot_connected",
+            "keyboard_mouse_connected",
+            "app_launch_connected",
+            "desktop_e2e_p50_ms",
+            "desktop_e2e_p95_ms"
+          ],
+          "properties": {
+            "evidence": {"const":"USER_SUPPLIED_NOT_PROBED"},
+            "private_link": {"const":"TAILSCALE_CONFIGURED"},
+            "connected_executor_methods": {
+              "type": "array",
+              "items": {},
+              "const": [
+                "windows.read_text",
+                "windows.write_text"
+              ]
+            },
+            "core_enabled": {"const":false},
+            "screenshot_connected": {"const":false},
+            "keyboard_mouse_connected": {"const":false},
+            "app_launch_connected": {"const":false},
+            "desktop_e2e_p50_ms": {"type":"null"},
+            "desktop_e2e_p95_ms": {"type":"null"}
+          }
+        }
+      }
+    },
+    "requests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "recovery",
+        "deployment",
+        "qq_window",
+        "paid_model",
+        "m1",
+        "reader_g1"
+      ],
+      "properties": {
+        "recovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "approval_reference",
+            "owner",
+            "operator",
+            "candidate_sha",
+            "starts_at",
+            "ends_at",
+            "dependencies",
+            "fields"
+          ],
+          "properties": {
+            "status": {"const":"BLOCKED"},
+            "approval_reference": {"$ref":"#/$defs/text"},
+            "owner": {"$ref":"#/$defs/text"},
+            "operator": {"$ref":"#/$defs/text"},
+            "candidate_sha": {"$ref":"#/$defs/commit"},
+            "starts_at": {"$ref":"#/$defs/timestamp"},
+            "ends_at": {"$ref":"#/$defs/timestamp"},
+            "dependencies": {"const":[]},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_inventory_reference",
+                "source_hosts_reference",
+                "new_isolated_destination_reference",
+                "destination_fault_domain",
+                "source_fault_domain",
+                "consistency_boundary_reference",
+                "writer_stop_scope_reference",
+                "snowluma_stop_reference",
+                "original_services_stop_reference",
+                "whole_host_scope_reference",
+                "encrypted_storage_reference",
+                "key_custodian",
+                "independent_key_recovery_reference",
+                "backup_manifest_reference",
+                "core_schema_head",
+                "core_nonempty_restore_reference",
+                "spool_restore_reference",
+                "qq_volumes_restore_reference",
+                "original_services_restore_reference",
+                "whole_host_restore_reference",
+                "source_grant_attribution_review_reference",
+                "restore_signoff_reference",
+                "currency",
+                "storage_transfer_cost_reference",
+                "isolation_attestation_reference",
+                "source_inventory_sha256",
+                "core_archive_sha256",
+                "erasure_file_sha256",
+                "erasure_last_record_sha256",
+                "budget_file_sha256",
+                "budget_chain_head_sha256",
+                "spool_archive_sha256",
+                "protocol_epoch_sha256",
+                "window_file_sha256",
+                "window_chain_head_sha256",
+                "snowluma_data_archive_sha256",
+                "snowluma_config_archive_sha256",
+                "snowluma_qq_archive_sha256",
+                "original_services_manifest_sha256",
+                "erasure_ledger_id",
+                "budget_journal_id",
+                "window_id",
+                "core_events",
+                "core_outbox",
+                "core_model_usage",
+                "archive_bytes",
+                "erasure_last_native_seq",
+                "budget_last_entry_ordinal",
+                "budget_record_count",
+                "window_last_native_seq",
+                "initial_delivery_uncertain",
+                "initial_model_unknown",
+                "initial_model_reserved",
+                "initial_unconfirmed_spool",
+                "rpo_seconds",
+                "rto_seconds",
+                "maximum_downtime_seconds",
+                "maximum_cost_minor_units",
+                "restore_destination_is_new",
+                "qq_model_social_and_site_egress_denied",
+                "stop_operator",
+                "stop_command_reference",
+                "all_budget_journals_inventory_reference",
+                "all_window_journals_inventory_reference"
+              ],
+              "properties": {
+                "source_inventory_reference": {"$ref":"#/$defs/text"},
+                "source_hosts_reference": {"$ref":"#/$defs/text"},
+                "new_isolated_destination_reference": {"$ref":"#/$defs/text"},
+                "destination_fault_domain": {"$ref":"#/$defs/text"},
+                "source_fault_domain": {"$ref":"#/$defs/text"},
+                "consistency_boundary_reference": {"$ref":"#/$defs/text"},
+                "writer_stop_scope_reference": {"$ref":"#/$defs/text"},
+                "snowluma_stop_reference": {"$ref":"#/$defs/text"},
+                "original_services_stop_reference": {"$ref":"#/$defs/text"},
+                "whole_host_scope_reference": {"$ref":"#/$defs/text"},
+                "encrypted_storage_reference": {"$ref":"#/$defs/text"},
+                "key_custodian": {"$ref":"#/$defs/text"},
+                "independent_key_recovery_reference": {"$ref":"#/$defs/text"},
+                "backup_manifest_reference": {"$ref":"#/$defs/text"},
+                "core_schema_head": {"$ref":"#/$defs/text"},
+                "core_nonempty_restore_reference": {"$ref":"#/$defs/text"},
+                "spool_restore_reference": {"$ref":"#/$defs/text"},
+                "qq_volumes_restore_reference": {"$ref":"#/$defs/text"},
+                "original_services_restore_reference": {"$ref":"#/$defs/text"},
+                "whole_host_restore_reference": {"$ref":"#/$defs/text"},
+                "source_grant_attribution_review_reference": {"$ref":"#/$defs/text"},
+                "restore_signoff_reference": {"$ref":"#/$defs/text"},
+                "currency": {"$ref":"#/$defs/text"},
+                "storage_transfer_cost_reference": {"$ref":"#/$defs/text"},
+                "isolation_attestation_reference": {"$ref":"#/$defs/text"},
+                "source_inventory_sha256": {"$ref":"#/$defs/sha256"},
+                "core_archive_sha256": {"$ref":"#/$defs/sha256"},
+                "erasure_file_sha256": {"$ref":"#/$defs/sha256"},
+                "erasure_last_record_sha256": {"$ref":"#/$defs/sha256"},
+                "budget_file_sha256": {"$ref":"#/$defs/sha256"},
+                "budget_chain_head_sha256": {"$ref":"#/$defs/sha256"},
+                "spool_archive_sha256": {"$ref":"#/$defs/sha256"},
+                "protocol_epoch_sha256": {"$ref":"#/$defs/sha256"},
+                "window_file_sha256": {"$ref":"#/$defs/sha256"},
+                "window_chain_head_sha256": {"$ref":"#/$defs/sha256"},
+                "snowluma_data_archive_sha256": {"$ref":"#/$defs/sha256"},
+                "snowluma_config_archive_sha256": {"$ref":"#/$defs/sha256"},
+                "snowluma_qq_archive_sha256": {"$ref":"#/$defs/sha256"},
+                "original_services_manifest_sha256": {"$ref":"#/$defs/sha256"},
+                "erasure_ledger_id": {"$ref":"#/$defs/text"},
+                "budget_journal_id": {"$ref":"#/$defs/text"},
+                "window_id": {"$ref":"#/$defs/text"},
+                "core_events": {"$ref":"#/$defs/integer"},
+                "core_outbox": {"$ref":"#/$defs/integer"},
+                "core_model_usage": {"$ref":"#/$defs/integer"},
+                "archive_bytes": {"$ref":"#/$defs/integer"},
+                "erasure_last_native_seq": {"$ref":"#/$defs/integer"},
+                "budget_last_entry_ordinal": {"$ref":"#/$defs/integer"},
+                "budget_record_count": {"$ref":"#/$defs/integer"},
+                "window_last_native_seq": {"$ref":"#/$defs/integer"},
+                "initial_delivery_uncertain": {"$ref":"#/$defs/integer"},
+                "initial_model_unknown": {"$ref":"#/$defs/integer"},
+                "initial_model_reserved": {"$ref":"#/$defs/integer"},
+                "initial_unconfirmed_spool": {"$ref":"#/$defs/integer"},
+                "rpo_seconds": {"$ref":"#/$defs/integer"},
+                "rto_seconds": {"$ref":"#/$defs/integer"},
+                "maximum_downtime_seconds": {"$ref":"#/$defs/integer"},
+                "maximum_cost_minor_units": {"$ref":"#/$defs/integer"},
+                "restore_destination_is_new": {"$ref":"#/$defs/boolean"},
+                "qq_model_social_and_site_egress_denied": {"$ref":"#/$defs/boolean"},
+                "stop_operator": {"$ref":"#/$defs/text"},
+                "stop_command_reference": {"$ref":"#/$defs/text"},
+                "all_budget_journals_inventory_reference": {"$ref":"#/$defs/text"},
+                "all_window_journals_inventory_reference": {"$ref":"#/$defs/text"}
+              }
+            }
+          }
+        },
+        "deployment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "approval_reference",
+            "owner",
+            "operator",
+            "candidate_sha",
+            "starts_at",
+            "ends_at",
+            "dependencies",
+            "fields"
+          ],
+          "properties": {
+            "status": {"const":"BLOCKED"},
+            "approval_reference": {"$ref":"#/$defs/text"},
+            "owner": {"$ref":"#/$defs/text"},
+            "operator": {"$ref":"#/$defs/text"},
+            "candidate_sha": {"$ref":"#/$defs/commit"},
+            "starts_at": {"$ref":"#/$defs/timestamp"},
+            "ends_at": {"$ref":"#/$defs/timestamp"},
+            "dependencies": {"const":["recovery: real nonempty isolated restore of approved data scope"]},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "target_inventory_reference",
+                "config_version",
+                "compose_inventory_reference",
+                "migration_validation_reference",
+                "verified_real_nonempty_restore_reference",
+                "latest_three_ledgers_manifest_reference",
+                "legacy_attribution_review_reference",
+                "stop_scope_reference",
+                "compatible_rollback_validation_reference",
+                "rollback_stop_operator",
+                "core_image_digest",
+                "bridge_image_digest",
+                "snowluma_image_digest",
+                "compatible_rollback_image_digest",
+                "config_sha256",
+                "compose_inventory_sha256",
+                "mount_network_inventory_sha256",
+                "approved_migration_head",
+                "maximum_downtime_seconds",
+                "stop_operator",
+                "stop_command_reference"
+              ],
+              "properties": {
+                "target_inventory_reference": {"$ref":"#/$defs/text"},
+                "config_version": {"$ref":"#/$defs/text"},
+                "compose_inventory_reference": {"$ref":"#/$defs/text"},
+                "migration_validation_reference": {"$ref":"#/$defs/text"},
+                "verified_real_nonempty_restore_reference": {"$ref":"#/$defs/text"},
+                "latest_three_ledgers_manifest_reference": {"$ref":"#/$defs/text"},
+                "legacy_attribution_review_reference": {"$ref":"#/$defs/text"},
+                "stop_scope_reference": {"$ref":"#/$defs/text"},
+                "compatible_rollback_validation_reference": {"$ref":"#/$defs/text"},
+                "rollback_stop_operator": {"$ref":"#/$defs/text"},
+                "core_image_digest": {"$ref":"#/$defs/imageDigest"},
+                "bridge_image_digest": {"$ref":"#/$defs/imageDigest"},
+                "snowluma_image_digest": {"$ref":"#/$defs/imageDigest"},
+                "compatible_rollback_image_digest": {"$ref":"#/$defs/imageDigest"},
+                "config_sha256": {"$ref":"#/$defs/sha256"},
+                "compose_inventory_sha256": {"$ref":"#/$defs/sha256"},
+                "mount_network_inventory_sha256": {"$ref":"#/$defs/sha256"},
+                "approved_migration_head": {"$ref":"#/$defs/text"},
+                "maximum_downtime_seconds": {"$ref":"#/$defs/integer"},
+                "stop_operator": {"$ref":"#/$defs/text"},
+                "stop_command_reference": {"$ref":"#/$defs/text"}
+              }
+            }
+          }
+        },
+        "qq_window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "approval_reference",
+            "owner",
+            "operator",
+            "candidate_sha",
+            "starts_at",
+            "ends_at",
+            "dependencies",
+            "fields",
+            "max_new_inputs",
+            "max_external_attempts",
+            "max_replies_per_input",
+            "concurrency",
+            "paid_requests",
+            "persistent_delivery_enabled",
+            "max_visible_replies_upper_bound"
+          ],
+          "properties": {
+            "status": {"const":"BLOCKED"},
+            "approval_reference": {"$ref":"#/$defs/text"},
+            "owner": {"$ref":"#/$defs/text"},
+            "operator": {"$ref":"#/$defs/text"},
+            "candidate_sha": {"$ref":"#/$defs/commit"},
+            "starts_at": {"$ref":"#/$defs/timestamp"},
+            "ends_at": {"$ref":"#/$defs/timestamp"},
+            "dependencies": {
+              "const": [
+                "deployment: exact frozen target",
+                "Current bounded entry is Demo-only; paid/M1/Reader interoperability requires a separately implemented and reviewed bounded entry."
+              ]
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "window_id",
+                "fixed_private_identity_reference",
+                "approved_input_manifest_reference",
+                "approved_output_manifest_reference",
+                "image_inventory_reference",
+                "config_version",
+                "latest_window_journal_reference",
+                "stop_command_reference",
+                "stop_operator",
+                "human_acceptance_reference",
+                "phone_clock_and_error_reference",
+                "identity_sha256",
+                "protocol_epoch_sha256",
+                "config_sha256",
+                "image_inventory_sha256",
+                "initial_pending",
+                "initial_uncertain",
+                "initial_unconfirmed_spool",
+                "previous_attempts_used"
+              ],
+              "properties": {
+                "window_id": {"$ref":"#/$defs/text"},
+                "fixed_private_identity_reference": {"$ref":"#/$defs/text"},
+                "approved_input_manifest_reference": {"$ref":"#/$defs/text"},
+                "approved_output_manifest_reference": {"$ref":"#/$defs/text"},
+                "image_inventory_reference": {"$ref":"#/$defs/text"},
+                "config_version": {"$ref":"#/$defs/text"},
+                "latest_window_journal_reference": {"$ref":"#/$defs/text"},
+                "stop_command_reference": {"$ref":"#/$defs/text"},
+                "stop_operator": {"$ref":"#/$defs/text"},
+                "human_acceptance_reference": {"$ref":"#/$defs/text"},
+                "phone_clock_and_error_reference": {"$ref":"#/$defs/text"},
+                "identity_sha256": {"$ref":"#/$defs/sha256"},
+                "protocol_epoch_sha256": {"$ref":"#/$defs/sha256"},
+                "config_sha256": {"$ref":"#/$defs/sha256"},
+                "image_inventory_sha256": {"$ref":"#/$defs/sha256"},
+                "initial_pending": {"$ref":"#/$defs/integer"},
+                "initial_uncertain": {"$ref":"#/$defs/integer"},
+                "initial_unconfirmed_spool": {"$ref":"#/$defs/integer"},
+                "previous_attempts_used": {"$ref":"#/$defs/integer"}
+              }
+            },
+            "max_new_inputs": {"const":5},
+            "max_external_attempts": {"const":5},
+            "max_replies_per_input": {"const":1},
+            "concurrency": {"const":1},
+            "paid_requests": {"const":0},
+            "persistent_delivery_enabled": {"const":false},
+            "max_visible_replies_upper_bound": {"const":5}
+          }
+        },
+        "paid_model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "approval_reference",
+            "owner",
+            "operator",
+            "candidate_sha",
+            "starts_at",
+            "ends_at",
+            "dependencies",
+            "fields"
+          ],
+          "properties": {
+            "status": {"const":"BLOCKED"},
+            "approval_reference": {"$ref":"#/$defs/text"},
+            "owner": {"$ref":"#/$defs/text"},
+            "operator": {"$ref":"#/$defs/text"},
+            "candidate_sha": {"$ref":"#/$defs/commit"},
+            "starts_at": {"$ref":"#/$defs/timestamp"},
+            "ends_at": {"$ref":"#/$defs/timestamp"},
+            "dependencies": {"const":["deployment: exact frozen target","recovery: latest independent budget journal and provider reconciliation"]},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "provider",
+                "account_scope_reference",
+                "model_id",
+                "https_endpoint",
+                "region",
+                "terms_reference",
+                "currency",
+                "timezone",
+                "rate_evidence_reference",
+                "key_custodian",
+                "tokenizer_artifact_reference",
+                "framing_contract_reference",
+                "structured_suffix_reference",
+                "sole_database_reference",
+                "independent_journal_reference",
+                "journal_fault_domain",
+                "provider_account_cap_reference",
+                "independent_database_usage_exclusion_reference",
+                "credential_rotation_reference",
+                "stop_operator",
+                "billing_reconciliation_reference",
+                "tokenizer_artifact_sha256",
+                "framing_contract_sha256",
+                "rate_valid_from",
+                "rate_valid_until",
+                "input_rate_micro_usd_per_million",
+                "cached_input_rate_micro_usd_per_million",
+                "output_rate_micro_usd_per_million",
+                "tax_fx_rounding_upper_micro_usd",
+                "input_hard_tokens",
+                "output_max_tokens",
+                "per_attempt_micro_usd",
+                "per_request_micro_usd",
+                "per_request_calls",
+                "daily_micro_usd",
+                "daily_calls",
+                "monthly_micro_usd",
+                "window_micro_usd",
+                "window_calls",
+                "global_concurrency",
+                "stop_command_reference",
+                "window_id"
+              ],
+              "properties": {
+                "provider": {"$ref":"#/$defs/text"},
+                "account_scope_reference": {"$ref":"#/$defs/text"},
+                "model_id": {"$ref":"#/$defs/text"},
+                "https_endpoint": {"$ref":"#/$defs/text"},
+                "region": {"$ref":"#/$defs/text"},
+                "terms_reference": {"$ref":"#/$defs/text"},
+                "currency": {"$ref":"#/$defs/text"},
+                "timezone": {"$ref":"#/$defs/text"},
+                "rate_evidence_reference": {"$ref":"#/$defs/text"},
+                "key_custodian": {"$ref":"#/$defs/text"},
+                "tokenizer_artifact_reference": {"$ref":"#/$defs/text"},
+                "framing_contract_reference": {"$ref":"#/$defs/text"},
+                "structured_suffix_reference": {"$ref":"#/$defs/text"},
+                "sole_database_reference": {"$ref":"#/$defs/text"},
+                "independent_journal_reference": {"$ref":"#/$defs/text"},
+                "journal_fault_domain": {"$ref":"#/$defs/text"},
+                "provider_account_cap_reference": {"$ref":"#/$defs/text"},
+                "independent_database_usage_exclusion_reference": {"$ref":"#/$defs/text"},
+                "credential_rotation_reference": {"$ref":"#/$defs/text"},
+                "stop_operator": {"$ref":"#/$defs/text"},
+                "billing_reconciliation_reference": {"$ref":"#/$defs/text"},
+                "tokenizer_artifact_sha256": {"$ref":"#/$defs/sha256"},
+                "framing_contract_sha256": {"$ref":"#/$defs/sha256"},
+                "rate_valid_from": {"$ref":"#/$defs/timestamp"},
+                "rate_valid_until": {"$ref":"#/$defs/timestamp"},
+                "input_rate_micro_usd_per_million": {"$ref":"#/$defs/integer"},
+                "cached_input_rate_micro_usd_per_million": {"$ref":"#/$defs/integer"},
+                "output_rate_micro_usd_per_million": {"$ref":"#/$defs/integer"},
+                "tax_fx_rounding_upper_micro_usd": {"$ref":"#/$defs/integer"},
+                "input_hard_tokens": {"$ref":"#/$defs/integer"},
+                "output_max_tokens": {"$ref":"#/$defs/integer"},
+                "per_attempt_micro_usd": {"$ref":"#/$defs/integer"},
+                "per_request_micro_usd": {"$ref":"#/$defs/integer"},
+                "per_request_calls": {"$ref":"#/$defs/integer"},
+                "daily_micro_usd": {"$ref":"#/$defs/integer"},
+                "daily_calls": {"$ref":"#/$defs/integer"},
+                "monthly_micro_usd": {"$ref":"#/$defs/integer"},
+                "window_micro_usd": {"$ref":"#/$defs/integer"},
+                "window_calls": {"$ref":"#/$defs/integer"},
+                "global_concurrency": {"$ref":"#/$defs/integer"},
+                "stop_command_reference": {"$ref":"#/$defs/text"},
+                "window_id": {"$ref":"#/$defs/text"}
+              }
+            }
+          }
+        },
+        "m1": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "approval_reference",
+            "owner",
+            "operator",
+            "candidate_sha",
+            "starts_at",
+            "ends_at",
+            "dependencies",
+            "fields"
+          ],
+          "properties": {
+            "status": {"const":"DISABLED"},
+            "approval_reference": {"$ref":"#/$defs/text"},
+            "owner": {"$ref":"#/$defs/text"},
+            "operator": {"$ref":"#/$defs/text"},
+            "candidate_sha": {"$ref":"#/$defs/commit"},
+            "starts_at": {"$ref":"#/$defs/timestamp"},
+            "ends_at": {"$ref":"#/$defs/timestamp"},
+            "dependencies": {"const":["deployment: exact frozen target","recovery: latest ErasureLedger","paid_model/qq_window separately when used"]},
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "approved_real_evidence_set_reference",
+                "subject_scope_reference",
+                "retention_reference",
+                "private_confirmation_reference",
+                "sensitive_and_conflict_policy_reference",
+                "correction_and_supersedes_reference",
+                "erasure_derivative_reference",
+                "old_backup_latest_ledger_replay_reference",
+                "stop_operator",
+                "signoff_reference",
+                "config_sha256",
+                "max_initial_writes",
+                "max_initial_retrievals",
+                "stop_command_reference"
+              ],
+              "properties": {
+                "approved_real_evidence_set_reference": {"$ref":"#/$defs/text"},
+                "subject_scope_reference": {"$ref":"#/$defs/text"},
+                "retention_reference": {"$ref":"#/$defs/text"},
+                "private_confirmation_reference": {"$ref":"#/$defs/text"},
+                "sensitive_and_conflict_policy_reference": {"$ref":"#/$defs/text"},
+                "correction_and_supersedes_reference": {"$ref":"#/$defs/text"},
+                "erasure_derivative_reference": {"$ref":"#/$defs/text"},
+                "old_backup_latest_ledger_replay_reference": {"$ref":"#/$defs/text"},
+                "stop_operator": {"$ref":"#/$defs/text"},
+                "signoff_reference": {"$ref":"#/$defs/text"},
+                "config_sha256": {"$ref":"#/$defs/sha256"},
+                "max_initial_writes": {"$ref":"#/$defs/integer"},
+                "max_initial_retrievals": {"$ref":"#/$defs/integer"},
+                "stop_command_reference": {"$ref":"#/$defs/text"}
+              }
+            }
+          }
+        },
+        "reader_g1": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "approval_reference",
+            "owner",
+            "operator",
+            "candidate_sha",
+            "starts_at",
+            "ends_at",
+            "dependencies",
+            "fields"
+          ],
+          "properties": {
+            "status": {"const":"DISABLED"},
+            "approval_reference": {"$ref":"#/$defs/text"},
+            "owner": {"$ref":"#/$defs/text"},
+            "operator": {"$ref":"#/$defs/text"},
+            "candidate_sha": {"$ref":"#/$defs/commit"},
+            "starts_at": {"$ref":"#/$defs/timestamp"},
+            "ends_at": {"$ref":"#/$defs/timestamp"},
+            "dependencies": {
+              "const": [
+                "deployment: isolated Reader boundary",
+                "recovery: latest ErasureLedger and source attribution",
+                "paid_model plus a separate media contract when used"
+              ]
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_platform",
+                "account_ownership_reference",
+                "readonly_scope_reference",
+                "grant_id",
+                "login_volume_scope_reference",
+                "historical_inventory_reference",
+                "revocation_plan_reference",
+                "erasure_closure_reference",
+                "old_complete_attribution_reference",
+                "isolation_deployment_reference",
+                "pre_get_and_pre_commit_recheck_reference",
+                "paid_media_separate_contract_reference",
+                "stop_operator",
+                "signoff_reference",
+                "grant_expires_at",
+                "max_requests",
+                "max_response_bytes",
+                "max_duration_seconds",
+                "max_cost_micro_usd",
+                "stop_command_reference"
+              ],
+              "properties": {
+                "source_platform": {"$ref":"#/$defs/text"},
+                "account_ownership_reference": {"$ref":"#/$defs/text"},
+                "readonly_scope_reference": {"$ref":"#/$defs/text"},
+                "grant_id": {"$ref":"#/$defs/text"},
+                "login_volume_scope_reference": {"$ref":"#/$defs/text"},
+                "historical_inventory_reference": {"$ref":"#/$defs/text"},
+                "revocation_plan_reference": {"$ref":"#/$defs/text"},
+                "erasure_closure_reference": {"$ref":"#/$defs/text"},
+                "old_complete_attribution_reference": {"$ref":"#/$defs/text"},
+                "isolation_deployment_reference": {"$ref":"#/$defs/text"},
+                "pre_get_and_pre_commit_recheck_reference": {"$ref":"#/$defs/text"},
+                "paid_media_separate_contract_reference": {"$ref":"#/$defs/text"},
+                "stop_operator": {"$ref":"#/$defs/text"},
+                "signoff_reference": {"$ref":"#/$defs/text"},
+                "grant_expires_at": {"$ref":"#/$defs/timestamp"},
+                "max_requests": {"$ref":"#/$defs/integer"},
+                "max_response_bytes": {"$ref":"#/$defs/integer"},
+                "max_duration_seconds": {"$ref":"#/$defs/integer"},
+                "max_cost_micro_usd": {"$ref":"#/$defs/integer"},
+                "stop_command_reference": {"$ref":"#/$defs/text"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "new_qq_strict_first5",
+        "new_qq_strict_all20",
+        "phone_e2e_paired_samples",
+        "phone_e2e_p50_ms",
+        "phone_e2e_p95_ms",
+        "provider_usage",
+        "provider_cache_hits",
+        "provider_tokens",
+        "provider_cost",
+        "provider_p50_ms",
+        "provider_p95_ms",
+        "production_ready"
+      ],
+      "properties": {
+        "new_qq_strict_first5": {"const":0},
+        "new_qq_strict_all20": {"const":0},
+        "phone_e2e_paired_samples": {"const":0},
+        "phone_e2e_p50_ms": {"type":"null"},
+        "phone_e2e_p95_ms": {"type":"null"},
+        "provider_usage": {"type":"null"},
+        "provider_cache_hits": {"type":"null"},
+        "provider_tokens": {"type":"null"},
+        "provider_cost": {"type":"null"},
+        "provider_p50_ms": {"type":"null"},
+        "provider_p95_ms": {"type":"null"},
+        "production_ready": {"const":false}
+      }
+    },
+    "actions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host_connections",
+        "host_writes",
+        "private_data_reads",
+        "real_data_copies",
+        "qq_sends",
+        "paid_requests",
+        "deployments",
+        "merges"
+      ],
+      "properties": {
+        "host_connections": {"const":0},
+        "host_writes": {"const":0},
+        "private_data_reads": {"const":0},
+        "real_data_copies": {"const":0},
+        "qq_sends": {"const":0},
+        "paid_requests": {"const":0},
+        "deployments": {"const":0},
+        "merges": {"const":0}
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "commands",
+        "result"
+      ],
+      "properties": {
+        "reference": {"$ref":"#/$defs/text"},
+        "commands": {
+          "type": "array",
+          "items": {"type":"string","minLength":1}
+        },
+        "result": {"enum":["PENDING","PASS","FAIL"]}
+      }
+    }
+  },
+  "$defs": {
+    "text": {"type":["string","null"],"minLength":1},
+    "integer": {"type":["integer","null"],"minimum":0},
+    "boolean": {"type":["boolean","null"]},
+    "sha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        {"type":"null"}
+      ]
+    },
+    "commit": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[a-f0-9]{40}$"
+        },
+        {"type":"null"}
+      ]
+    },
+    "timestamp": {"type":["string","null"],"format":"date-time"},
+    "imageDigest": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}$"
+        },
+        {"type":"null"}
+      ]
+    }
+  }
+}
