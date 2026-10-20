@@ -291,6 +291,8 @@ def _settle_paid(store, settings, admission, response):
             for value in (response.input_tokens, response.output_tokens, response.cached_tokens)
         )
         and response.cached_tokens <= response.input_tokens
+        and response.input_tokens > 0
+        and response.output_tokens > 0
     )
     amount, state, blocked = (
         admission["reserved_micro_usd"],

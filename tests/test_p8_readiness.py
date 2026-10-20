@@ -154,7 +154,7 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
         body = {"choices": [{"message": {"content": "synthetic reply"}}]}
         if not missing_usage:
             body["usage"] = {
-                "prompt_tokens": 100,
+                "prompt_tokens": 50,
                 "completion_tokens": 20,
                 "prompt_cache_hit_tokens": 40,
             }
@@ -189,7 +189,7 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
         usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
         assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
     else:
-        assert (response.cached_tokens, response.input_tokens) == (40, 100)
+        assert (response.cached_tokens, response.input_tokens) == (40, 50)
         assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
 
 
