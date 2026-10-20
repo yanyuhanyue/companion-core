@@ -266,87 +266,16 @@ class ErasureLedger:
             os.fsync(stream.fileno())
         self.apply(store, record)
 
-    def erase_diary_projections(self, store, record):
-        if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='diary_entries'"):
-            return set()
-        targets = set()
-        if record.get("target_type") == "diary":
-            day, timezone = record["diary_day"], record["diary_timezone"]
-            targets = {
-                row["entry_id"]
-                for row in store.rows(
-                    "SELECT entry_id FROM diary_entries WHERE identity_id='companion' "
-                    "AND local_date=? AND timezone=?",
-                    (day, timezone),
-                )
-            }
-            # A date tombstone also survives restoration of a backup taken before generation.
-            store.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
-                ("diary_deleted:" + timezone + ":" + day, record["erasure_id"]),
-            )
-            store.execute(
-                "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,"
-                "last_error_code='DIARY_DELETED',updated_at=? WHERE local_date=? "
-                "AND timezone=?",
-                (record["at"], day, timezone),
-            )
-        affected = set(targets)
-        for event_id in record["event_ids"]:
-            affected.update(
-                row["entry_id"]
-                for row in store.rows(
-                    "SELECT entry_id FROM diary_evidence WHERE event_id=?",
-                    (event_id,),
-                )
-            )
-        if record.get("target_type") != "diary":
-            # Raw-fact erasure still clears every reply that could paraphrase that fact.
-            affected.update(
-                row["entry_id"]
-                for row in store.rows(
-                    "SELECT entry_id FROM diary_evidence WHERE outbox_message_id IS NOT NULL"
-                )
-            )
-            affected.update(
-                row["entry_id"]
-                for row in store.rows(
-                    "SELECT d.entry_id FROM diary_entries d WHERE status='COMMITTED' AND "
-                    "(generator_version<>'diary-1' OR NOT EXISTS "
-                    "(SELECT 1 FROM diary_evidence e WHERE e.entry_id=d.entry_id))"
-                )
-            )
-        dates = {
-            (row["local_date"], row["timezone"])
-            for row in store.rows("SELECT entry_id,local_date,timezone FROM diary_entries")
-            if row["entry_id"] in affected
-        }
-        copies = (
-            diary_copies(
-                store, dates, before=record["at"] if record.get("target_type") == "diary" else None
-            )
-            if dates
-            else set()
-        )
-        for entry_id in affected:
-            store.execute(
-                "UPDATE diary_entries SET title='',body_md='',source_set_sha256='',"
-                "status=CASE WHEN status='DELETED' THEN 'DELETED' ELSE ? END,updated_at=? "
-                "WHERE entry_id=?",
-                ("DELETED" if entry_id in targets else "REDACTED", record["at"], entry_id),
-            )
-            store.execute("DELETE FROM diary_revisions WHERE entry_id=?", (entry_id,))
-            store.execute("DELETE FROM diary_evidence WHERE entry_id=?", (entry_id,))
-        # Never retry a model output captured before an erasure, even after a process crash.
-        store.execute(
-            "UPDATE diary_runs SET state='CANCELLED',lease_token=NULL,"
-            "last_error_code='PRIVACY_CHANGED',updated_at=? "
-            "WHERE state IN ('RUNNING','RETRY_WAIT')",
-            (record["at"],),
-        )
-        return copies
+    @staticmethod
+    def erase_diary_projections(store, record):
+        # Compatibility entry point; the diary module owns projection cleanup.
+        from companion.diary import erase_diary_projections
+
+        return erase_diary_projections(store, record)
 
     def replay(self, store):
+        from companion.erasure import CONTRACT_KEY, contract_signature
+
         lines = self.read()
         applied = store.one(
             "SELECT MAX(restore_min_replay_version) AS n FROM privacy_erasure_ledger"
@@ -354,6 +283,9 @@ class ErasureLedger:
         if (applied["n"] or 0) > len(lines) - 1:
             raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
         with store.transaction():
+            signature = contract_signature()
+            previous = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTRACT_KEY,))
+            repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:
                 # Rebuild this projection even for pre-upgrade COMPLETE records.
                 # A backup may predate the event itself, so UPDATE events is insufficient.
@@ -396,17 +328,51 @@ class ErasureLedger:
                     )
                 if not applied or remaining_diary_copies or remaining_grant:
                     self.apply(store, record)
+                elif repair_contracts:
+                    self.repair_derivatives(store, record)
+            # Publish only after every owner handler succeeded. A failure leaves
+            # the durable Ledger unchanged and the entire replay transaction undone.
+            if repair_contracts:
+                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                              (CONTRACT_KEY, signature))
+
+    def repair_derivatives(self, store, record):
+        """Upgrade COMPLETE projections once, using recorded source identities only."""
+        from companion.diary import erase_diary_projections
+        from companion.erasure import ErasureScope, erase_derivatives
+
+        if not store.db.in_transaction:
+            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+
+        # Older apply() expanded dependencies only in memory, then deleted those
+        # links. Its per-event tombstone still names this exact erasure, so use
+        # that explicit attribution rather than guessing from content or dates.
+        prefix = "erased_event:"
+        recorded = {row["key"][len(prefix):] for row in store.rows(
+            "SELECT key FROM runtime_meta WHERE value=? AND substr(key,1,?)=? "
+            "AND length(key)>?", (record["erasure_id"], len(prefix), prefix, len(prefix)),
+        )}
+        event_ids, memory_ids = source_grant_closure(
+            store, set(record["event_ids"]) | recorded, record["memory_ids"]
+        )
+        scoped_record = {**record, "event_ids": sorted(event_ids),
+                         "memory_ids": sorted(memory_ids)}
+        copies = erase_diary_projections(store, scoped_record, conservative=False)
+        self.erase_memories(store, memory_ids, record["at"])
+        event_ids |= copies
+        erase_derivatives(store, ErasureScope(frozenset(event_ids), False))
+        self.erase_events(store, record, event_ids)
+        # COMPLETE repair has no proof that later unrelated summaries/replies came
+        # from the forgotten fact. Never repeat the broad new-erasure fallback.
+        self.clear_event_replies(store, event_ids)
+        advance_epoch(store)
 
     def apply(self, store, record):
-        from companion.affect import erase_affect
-        from companion.consolidation import erase_consolidation
-        from companion.content import erase_content
-        from companion.executive import erase_executive
-        from companion.exploration import erase_exploration
-        from companion.goals import erase_goals
-        from companion.media import erase_media_links
-        from companion.observation import dependent_events, erase_observations
-        from companion.reflection import erase_reflections
+        from companion.erasure import ErasureScope, erase_derivatives
+        from companion.observation import dependent_events
+
+        if not store.db.in_transaction:
+            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
 
         if record.get("target_type") == "source_grant":
             from companion.source_grants import cancel_grant_reads, grant_tombstone
@@ -438,24 +404,38 @@ class ErasureLedger:
             )
         record = {**record, "event_ids": sorted(event_ids), "memory_ids": sorted(memory_ids)}
         copies = self.erase_diary_projections(store, record)
-        for memory_id in record["memory_ids"]:
+        self.erase_memories(store, record["memory_ids"], record["at"])
+        event_ids = set(record["event_ids"]) | copies
+        erase_derivatives(store, ErasureScope(frozenset(event_ids),
+                                             record.get("target_type") != "diary"))
+        self.erase_events(store, record, event_ids)
+        if record.get("target_type") == "diary":
+            # Diary commands never enter chat context, memory extraction, or diary sources.
+            self.clear_event_replies(store, event_ids)
+        else:
+            # No complete source lineage exists for these paraphrases. Keep the
+            # existing conservative cleanup on every new raw-fact erasure.
+            store.execute("DELETE FROM conversation_summaries")
+            store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
+            store.execute("DELETE FROM trait_evidence")
+            store.execute("DELETE FROM traits")
+            store.execute(self.clear_reply_sql())
+        advance_epoch(store)
+        self.record_complete(store, record)
+
+    @staticmethod
+    def erase_memories(store, memory_ids, at):
+        for memory_id in memory_ids:
             store.execute(
                 "UPDATE memories SET content='',status='FORGOTTEN',fact_key='',"
                 "confidence=0,updated_at=? WHERE memory_id=?",
-                (record["at"], memory_id),
+                (at, memory_id),
             )
             store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
             store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (memory_id,))
-        event_ids = set(record["event_ids"]) | copies
-        erase_observations(store, event_ids)
-        erase_affect(store, event_ids)
-        erase_reflections(store, event_ids, record.get("target_type") != "diary")
-        erase_consolidation(store, event_ids)
-        erase_goals(store, event_ids)
-        erase_exploration(store, event_ids)
-        erase_executive(store, event_ids)
-        erase_media_links(store, event_ids)
-        erase_content(store, event_ids)
+
+    @staticmethod
+    def erase_events(store, record, event_ids):
         for event_id in event_ids:
             store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
                           ("erased_event:" + event_id, record["erasure_id"]))
@@ -469,24 +449,17 @@ class ErasureLedger:
                 "WHERE event_id=? AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
                 (event_id,),
             )
-        clear_reply = (
+    @staticmethod
+    def clear_reply_sql():
+        return (
             "UPDATE outbox SET content_json='{}',content_sha256='',"
             "state=CASE WHEN state='SENDING' THEN 'DELIVERY_UNCERTAIN' "
             "WHEN state IN ('PENDING','LEASED','RETRY_WAIT') THEN 'CANCELLED' ELSE state END"
         )
-        if record.get("target_type") == "diary":
-            # Diary commands never enter chat context, memory extraction, or diary sources.
-            for event_id in event_ids:
-                store.execute(clear_reply + " WHERE origin_event_id=?", (event_id,))
-        else:
-            # Summaries/replies may paraphrase the forgotten raw fact.
-            store.execute("DELETE FROM conversation_summaries")
-            store.execute("UPDATE episodes SET title='',summary='',status='REDACTED'")
-            store.execute("DELETE FROM trait_evidence")
-            store.execute("DELETE FROM traits")
-            store.execute(clear_reply)
-        advance_epoch(store)
-        self.record_complete(store, record)
+
+    def clear_event_replies(self, store, event_ids):
+        for event_id in event_ids:
+            store.execute(self.clear_reply_sql() + " WHERE origin_event_id=?", (event_id,))
 
     @staticmethod
     def record_complete(store, record):
