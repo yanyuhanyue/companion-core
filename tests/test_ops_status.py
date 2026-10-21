@@ -1,0 +1,170 @@
+import json
+import shutil
+import sqlite3
+import sys
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+from companion import __main__, ops_status
+from companion.api import create_app
+from companion.config import Settings
+from companion.core import Core
+from companion.privacy import ErasureLedger
+from companion.runtime import Runtime
+from companion.store import Store
+from tests.conftest import ingest, run
+
+
+def settings(tmp_path):
+    return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="synthetic-token-" * 3,
+                    database=str(tmp_path / "core.db"),
+                    erasure_ledger=str(tmp_path / "erasures.jsonl"), proactive_enabled=False)
+
+
+def test_missing_database_diagnostic_never_creates_or_initializes_state(tmp_path, monkeypatch):
+    cfg = settings(tmp_path / "absent")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("diagnostics must not initialize services")
+
+    for cls in (Core, Runtime, Store):
+        monkeypatch.setattr(cls, "__init__", forbidden)
+    result = ops_status.snapshot(cfg)
+    assert "DATABASE_MISSING" in result["blockers"]
+    assert not Path(cfg.database).parent.exists()
+    assert not Path(cfg.erasure_ledger).exists()
+
+
+def test_uninitialized_migrated_database_is_reported_without_bootstrap(
+    tmp_path, migrated_database, monkeypatch,
+):
+    cfg = settings(tmp_path)
+    shutil.copyfile(migrated_database, cfg.database)
+    before = Path(cfg.database).read_bytes()
+    monkeypatch.setattr(ErasureLedger, "initialize", lambda *_: (_ for _ in ()).throw(
+        AssertionError("no ledger initialization")))
+    result = ops_status.snapshot(cfg)
+    assert "OWNER_IDENTITY_UNINITIALIZED_OR_MISMATCH" in result["blockers"]
+    assert "ERASURE_IDENTITY_UNINITIALIZED" in result["blockers"]
+    assert Path(cfg.database).read_bytes() == before
+    assert not Path(cfg.erasure_ledger).exists()
+    with sqlite3.connect(cfg.database) as db:
+        assert db.execute("SELECT COUNT(*) FROM runtime_meta").fetchone()[0] == 0
+
+
+def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(core, monkeypatch):
+    ingest(core, text="SYNTHETIC_PRIVATE_MESSAGE_NEVER_IN_STATUS")
+    assert run(core.run_once("synthetic-worker"))
+    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN'")
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
+    core.store.execute("INSERT INTO runtime_meta VALUES ('model_budget_blocked','private detail')")
+    before = list(core.store.db.iterdump())
+    ledger = Path(core.settings.erasure_ledger).read_bytes()
+    calls = len(core.model.calls)
+    traces = []
+    connect = sqlite3.connect
+
+    def readonly(*args, **kwargs):
+        assert "mode=ro" in args[0] and "immutable" not in args[0]
+        connection = connect(*args, **kwargs)
+        connection.set_trace_callback(traces.append)
+        return connection
+
+    monkeypatch.setattr(ops_status.sqlite3, "connect", readonly)
+    result = ops_status.snapshot(core.settings)
+    assert result["database"]["wal_bytes"] > 0
+    assert result["deliveries"]["states"] == {"DELIVERY_UNCERTAIN": 1}
+    assert result["budget"]["unknown_calls"] == 1
+    assert result["budget"]["calibration"]["calibrated_calls"] == 0
+    assert result["budget"]["calibration"]["currency"] is None
+    assert result["budget"]["calibration"]["billing_basis"] == "configured_rates_not_invoice"
+    assert {"MODEL_BUDGET_BLOCKED", "DELIVERY_UNCERTAIN", "MODEL_USAGE_UNSETTLED"} <= set(
+        result["blockers"]
+    )
+    assert result["worker_progress"]["state"] == "UNOBSERVED"
+    assert result["database"]["integrity"] == "NOT_CHECKED"
+    assert not any("quick_check" in sql.lower() or "BEGIN IMMEDIATE" in sql for sql in traces)
+    assert list(core.store.db.iterdump()) == before
+    assert Path(core.settings.erasure_ledger).read_bytes() == ledger
+    assert len(core.model.calls) == calls
+    encoded = json.dumps(result)
+    for private in ("SYNTHETIC_PRIVATE", "private detail", core.settings.owner_qq_id,
+                    core.settings.bridge_token.get_secret_value(), core.settings.database):
+        assert private not in encoded
+
+
+def test_explicit_integrity_checks_erasure_replay_without_applying_it(core):
+    path = Path(core.settings.erasure_ledger)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"seq": 1, "erasure_id": "erase_synthetic", "memory_id": "none",
+                                 "memory_ids": [], "event_ids": [], "at": core.clock()}) + "\n")
+    before = path.read_bytes()
+    light = ops_status.snapshot(core.settings)
+    assert light["resources"]["erasure_ledger"]["checked"] == "HEADER_ONLY"
+    assert "ERASURE_LEDGER_RECONCILIATION_REQUIRED" not in light["blockers"]
+    result = ops_status.snapshot(core.settings, integrity=True)
+    assert result["database"]["integrity"] == "OK"
+    assert "ERASURE_LEDGER_RECONCILIATION_REQUIRED" in result["blockers"]
+    assert path.read_bytes() == before
+    assert core.store.one("SELECT COUNT(*) n FROM privacy_erasure_ledger")["n"] == 0
+
+
+def test_missing_or_old_schema_fails_closed_without_migrating(tmp_path):
+    cfg = settings(tmp_path)
+    with sqlite3.connect(cfg.database) as db:
+        db.execute("CREATE TABLE alembic_version(version_num TEXT)")
+        db.execute("INSERT INTO alembic_version VALUES ('0001_m0')")
+    before = Path(cfg.database).read_bytes()
+    assert "MIGRATION_REQUIRED" in ops_status.snapshot(cfg)["blockers"]
+    assert Path(cfg.database).read_bytes() == before
+    assert not Path(cfg.erasure_ledger).exists()
+
+
+def test_cli_status_avoids_core_and_semantic_initialization(core, monkeypatch, capsys):
+    monkeypatch.setattr(__main__.Settings, "load", lambda: core.settings.model_copy(
+        update={"memory_enabled": True}
+    ))
+    monkeypatch.setattr(Core, "__init__", lambda *_: (_ for _ in ()).throw(
+        AssertionError("no Core construction")))
+    monkeypatch.setattr(sys, "argv", ["companion", "status"])
+    __main__.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["read_only"] is True
+    assert result["resources"]["embedding_cache"]["model_loaded"] is False
+
+
+def test_ops_summary_and_liveness_do_not_claim_worker_health(core, monkeypatch):
+    app = create_app(core.settings)
+    app.state.core = core
+    monkeypatch.setattr(core, "status", lambda: (_ for _ in ()).throw(
+        AssertionError("summary must not run full live window/journal guard")))
+    client = TestClient(app)
+    assert client.get("/internal/v1/ops/status?summary_only=true").status_code == 401
+    response = client.get("/internal/v1/ops/status?summary_only=true", headers={
+        "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
+    })
+    assert response.headers["Cache-Control"] == "no-store"
+    result = response.json()
+    assert result["operations"]["worker_progress"]["state"] == "UNOBSERVED"
+    assert result["observation"]["worker_health_proven"] is False
+    assert len(result["observation"]["api_instance"]) == 32
+    assert client.get("/internal/v1/health/live").json()["worker_health_proven"] is False
+
+
+def test_missing_budget_journal_identity_is_never_reinitialized(core):
+    core.store.execute(
+        "INSERT INTO runtime_meta VALUES ('model_budget_journal_id','budget_unknown')"
+    )
+    before = list(core.store.db.iterdump())
+    result = ops_status.snapshot(core.settings, integrity=True)
+    assert "BUDGET_JOURNAL_RECONCILIATION_REQUIRED" in result["blockers"]
+    assert list(core.store.db.iterdump()) == before
+
+
+def test_schema_capabilities_reuse_existing_readiness_contract(core):
+    core.store.execute("UPDATE alembic_version SET version_num='future_compatible'")
+    result = ops_status.snapshot(core.settings)
+    assert result["database"]["schema"] == "future_compatible"
+    assert result["database"]["capabilities_present"] is True
+    assert "MIGRATION_REQUIRED" not in result["blockers"]

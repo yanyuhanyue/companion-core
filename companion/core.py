@@ -1016,10 +1016,13 @@ class Core(Runtime):
             return False
 
     def status(self):
+        from companion.ops_status import snapshot
+
         s = self.store
         return {
             "version": __version__,
             "mode": self.settings.mode,
+            "operations": snapshot(self.settings),
             "live_text_window": live_text.status(s, self.settings, self.clock),
             "features": {
                 "memory": self.settings.memory_enabled,
