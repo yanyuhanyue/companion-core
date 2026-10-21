@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from alembic.script import ScriptDirectory
+from alembic.util import CommandError
 
 from companion import __version__, budget
 from companion.contracts import CoreError
@@ -31,11 +32,17 @@ class _ReadView:
 
 @lru_cache(maxsize=1)
 def schema_head():
-    root = Path(__file__).resolve().parent
-    migrations = root.parent / "migrations"
-    if not migrations.is_dir():
-        migrations = root / "migrations"
-    return ScriptDirectory(str(migrations)).get_current_head()
+    try:
+        root = Path(__file__).resolve().parent
+        migrations = root.parent / "migrations"
+        if not migrations.is_dir():
+            migrations = root / "migrations"
+        head = ScriptDirectory(str(migrations)).get_current_head()
+    except (OSError, CommandError) as error:
+        raise CoreError("SCHEMA_HEAD_UNAVAILABLE", 503) from error
+    if not isinstance(head, str) or not head:
+        raise CoreError("SCHEMA_HEAD_UNAVAILABLE", 503)
+    return head
 
 
 def _resource(path):
@@ -191,7 +198,12 @@ def snapshot(settings, *, integrity=False):
                 return result
             version = view.one("SELECT version_num FROM alembic_version")
             result["database"]["schema"] = version["version_num"] if version else None
-            result["database"]["expected_schema"] = schema_head()
+            result["database"]["expected_schema"] = None
+            try:
+                result["database"]["expected_schema"] = schema_head()
+            except CoreError as error:
+                result["blockers"].append(error.code)
+                return result
             # Reuse the existing pure capability query without invoking Store.__init__.
             capable = Store.schema_capabilities(view)
             result["database"]["capabilities_present"] = capable

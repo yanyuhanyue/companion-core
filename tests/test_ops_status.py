@@ -4,6 +4,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+from alembic.script import ScriptDirectory
+from alembic.util import CommandError
 from fastapi.testclient import TestClient
 
 from companion import __main__, ops_status
@@ -168,3 +171,40 @@ def test_schema_capabilities_reuse_existing_readiness_contract(core):
     assert result["database"]["schema"] == "future_compatible"
     assert result["database"]["capabilities_present"] is True
     assert "MIGRATION_REQUIRED" not in result["blockers"]
+
+
+@pytest.mark.parametrize("failure", ["empty_versions", "permission", "unavailable"])
+def test_unavailable_migration_head_blocks_snapshot_and_ready_without_writes(
+    core, tmp_path, monkeypatch, failure,
+):
+    scripts = tmp_path / "public-migrations"
+    (scripts / "versions").mkdir(parents=True)
+    # Alembic returns None for an empty/unlistable versions tree rather than proving a head.
+    assert ScriptDirectory(str(scripts)).get_current_head() is None
+
+    def directory(_):
+        if failure == "permission":
+            raise PermissionError("synthetic private path must not be exposed")
+        if failure == "unavailable":
+            raise CommandError("synthetic broken migration tree")
+        return ScriptDirectory(str(scripts))
+
+    before = list(core.store.db.iterdump())
+    ledger = Path(core.settings.erasure_ledger).read_bytes()
+    ops_status.schema_head.cache_clear()
+    monkeypatch.setattr(ops_status, "ScriptDirectory", directory)
+    try:
+        result = ops_status.snapshot(core.settings)
+        assert result["database"]["expected_schema"] is None
+        assert result["blockers"] == ["SCHEMA_HEAD_UNAVAILABLE"]
+        app = create_app(core.settings)
+        app.state.core = core
+        response = TestClient(app).get("/internal/v1/health/ready", headers={
+            "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
+        })
+        assert response.status_code == 503
+        assert response.json() == {"error": "SCHEMA_HEAD_UNAVAILABLE"}
+        assert list(core.store.db.iterdump()) == before
+        assert Path(core.settings.erasure_ledger).read_bytes() == ledger
+    finally:
+        ops_status.schema_head.cache_clear()
