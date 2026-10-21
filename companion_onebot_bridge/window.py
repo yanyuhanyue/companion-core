@@ -116,7 +116,7 @@ class WindowPlan:
             "identity_sha256",
             "config_sha256",
             "config_version",
-            "image_digests",
+            "image_ids",
             "runtime_attestation_sha256",
             "authorization_sha256",
             "journal_path",
@@ -209,13 +209,13 @@ class WindowPlan:
         ):
             if not isinstance(value[field], str) or not SHA.fullmatch(value[field]):
                 raise ValueError("INVALID_WINDOW_DIGEST")
-        images = value["image_digests"]
+        images = value["image_ids"]
         if (
             not isinstance(images, dict)
             or set(images) != {"core", "bridge", "protocol"}
             or any(
                 not isinstance(image, str)
-                or not re.fullmatch(r"[A-Za-z0-9_./:-]+@sha256:[a-f0-9]{64}", image)
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", image)
                 for image in images.values()
             )
         ):
@@ -238,7 +238,7 @@ class WindowPlan:
                 "protocol_epoch",
                 "config_sha256",
                 "config_version",
-                "image_digests",
+                "image_ids",
             )
         }
         if inventory != expected or digest(inventory) != value["runtime_attestation_sha256"]:

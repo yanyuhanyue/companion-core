@@ -49,7 +49,9 @@ timedatectl、docker version/compose/network ls/ps、ss、ufw status，无账号
 6. 独立构建并审核 Bridge 镜像：`docker compose -f deploy/compose.onebot-build.yaml build onebot-bridge`，
    本地标签为 `companion-onebot-bridge:review`，此构建文件不要与运行配置合并。
    记录其本地 image ID；进入部署注册表前不得假冒 image@sha256。
-   构建验证通过后由操作者固定真实 RepoDigest。Compose 要求明确摘要参数，不默认 latest。
+   当前受控窗口的 `image_ids` 直接固定 Core/Bridge/protocol 三个实际 `sha256:64` Docker ID，
+   宿主核对 container.Image 等于 docker image inspect Id；Bridge 无 Docker 读取权限。
+   若运行配置采用 registry pull ref，另记真实 RepoDigest；它不替代窗口 image_ids，不默认 latest，也不要求为本地 ID 发布镜像。
    Bridge 无默认自动重启；检查 ws_connected、Core ack 和本地 Spool，初始 delivery_enabled=false。
    开启发送前确认 Core 没有历史 PENDING/SENDING/UNKNOWN，并记录队列；配置开关不是发送许可。
 7. 人工批准具体 owner/bot、Asia/Shanghai 时段、5 条上限及回退人后，才可开启首轮文字测试。
