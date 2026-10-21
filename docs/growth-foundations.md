@@ -10,6 +10,7 @@ quality evidence.
 All HTTP routes below require the existing owner control token. A Bridge token
 does not authorize them. Views return the current privacy epoch and rebuild from
 SQLite. They create no queue, budget reservation, model request or retained copy.
+Responses use `Cache-Control: no-store`, including empty views after forgetting.
 
 | Route | Result |
 | --- | --- |
@@ -43,6 +44,9 @@ original analysis coverage meaning. Simulation sources are visibly prefixed
 never becomes a completed conversation. No model-generated diary or summary is
 promoted to independent event evidence. This view is requested explicitly and
 is not automatically inserted into chat prompts.
+Explicit Memory/Life/Diary management commands are excluded from both the
+timeline and current/prior diary sources, including retained events without an
+old `control_command` marker. Unknown slash text remains ordinary conversation.
 
 ## Expression and source lifetime
 

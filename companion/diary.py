@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ConfigDict, Field, ValidationError
 
 from companion import budget
-from companion.commands import command_parts
+from companion.commands import command_parts, is_memory_command
 from companion.contracts import CoreError, StrictModel
 from companion.observation import expired_sources
 from companion.privacy import advance_epoch, diary_copies, epoch, redact, sensitive
@@ -170,6 +170,13 @@ def is_diary_command(text):
     return command_parts(text)[0] in DIARY_COMMANDS
 
 
+def is_management_command(text):
+    # Import lazily: Life reuses Goal and Reflection/Diary services at runtime.
+    from companion.life import is_life_command
+
+    return is_diary_command(text) or is_memory_command(text) or is_life_command(text)
+
+
 def day_bounds(day, timezone):
     """Local midnight boundaries, including 23/25-hour DST days."""
     zone = ZoneInfo(timezone)
@@ -279,7 +286,7 @@ class DiaryRepository:
                 not text
                 or body.get("diary_command")
                 or body.get("control_command")
-                or is_diary_command(text)
+                or is_management_command(text)
                 or sensitive(text)
                 or redact(text, self.settings) != text
             ):
@@ -349,7 +356,7 @@ class DiaryRepository:
                     not text
                     or body.get("diary_command")
                     or body.get("control_command")
-                    or is_diary_command(text)
+                    or is_management_command(text)
                     or sensitive(text)
                     or redact(text, self.settings) != text
                 ):

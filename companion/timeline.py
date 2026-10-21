@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from companion.contracts import CoreError
-from companion.diary import day_bounds
+from companion.diary import day_bounds, is_management_command
 from companion.observation import expired_sources
 from companion.privacy import epoch, redact, sensitive
 from companion.store import after
@@ -55,6 +55,7 @@ def recent_timeline(store, settings, now, requester, *, topic, days=7, limit=40)
         if (
             not isinstance(text, str)
             or not text.strip()
+            or (row["actor_id"] == "owner" and is_management_command(text))
             or query not in text.casefold()
             or sensitive(text)
             or redact(text, settings) != text

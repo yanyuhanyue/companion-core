@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -345,3 +346,78 @@ def test_core_context_and_life_explanation_recheck_stale_interest_sources(core, 
     core.clock.advance(core.settings.raw_event_retention_days * 86400 + 1)
     assert "self.interest" not in encode(core.context(job))
     assert "还没有足够" in core.life.command("/为什么形成偏好", "evt_test_10")
+
+
+@pytest.mark.parametrize("prior", [False, True])
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("/记住这个：天文偏好", False),
+        ("/目标列表 天文", False),
+        ("/修改日记 2026-10-18 天文笔记", False),
+        ("/随便聊聊 天文", True),
+    ],
+)
+def test_unmarked_control_sources_are_filtered_but_unknown_slash_is_ordinary(
+    core, prior, text, expected
+):
+    ingest(core, 1, text, at="2026-10-17T04:00:00Z" if prior else "2026-10-18T04:00:00Z")
+    event = core.store.one("SELECT * FROM events WHERE event_id='evt_test_1'")
+    body = json.loads(event["body_json"])
+    # Retained bounded-window / legacy events may have no control marker.
+    for key in ("control_command", "diary_command", "diary_correction", "diary_timezone"):
+        body.pop(key, None)
+    core.store.execute("UPDATE events SET body_json=? WHERE event_id='evt_test_1'", (encode(body),))
+    if prior:
+        core.settings.memory_enabled = True
+        core.memory.episodes([event], core.clock())
+        ingest(core, 2, "天文今天普通聊天", at="2026-10-18T04:00:00Z")
+    sources = core.diary.repo.sources(DAY)
+    assert ("evt_test_1" in {row["event_id"] for row in sources}) is expected
+    assert ("evt_test_1" in {row["event_id"] for row in timeline(core)["items"]}) is expected
+    assert not core.model.calls
+
+
+@pytest.mark.parametrize(
+    "path,field",
+    [
+        ("/internal/v2/interests", "owner.preference"),
+        ("/internal/v2/timeline?topic=天文", "items"),
+        ("/internal/v2/social/obs_test_10/preview", "draft"),
+        ("/internal/v2/affect/evt_test_2/preview", "proposal"),
+    ],
+)
+def test_private_growth_responses_never_cache_and_forget_updates_current_response(
+    core, path, field
+):
+    remember(core, 1, "天文私人偏好", confirmed=True)
+    core.settings.memory_enabled = False  # Inspect evidence; no semantic index warmup is needed.
+    ingest(core, 2, "简短一点")
+    enable_observations(core)
+    configure(core)
+    core.observations.append(
+        "heybox",
+        observation(
+            core,
+            10,
+            source="heybox",
+            text="天文新进展",
+            payload={"title": "开发进展", "text": "天文新进展"},
+        ),
+    )
+    with TestClient(create_app(core.settings)) as client:
+        api_core = client.app.state.core
+        api_core.clock = api_core.affect.clock = api_core.social.clock = core.clock
+        bridge = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
+        owner = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
+        assert client.get(path, headers=bridge).status_code == 401
+        before = client.get(path, headers=owner)
+        assert before.status_code == 200 and before.json()[field]
+        assert before.headers.get("Cache-Control") == "no-store"
+        with core.store.transaction():
+            core.ledger.expire_events(
+                core.store, ["evt_test_1", "evt_test_2", "obs_test_10"], core.clock()
+            )
+        after = client.get(path, headers=owner)
+        assert after.status_code == 200 and not after.json()[field]
+        assert after.headers.get("Cache-Control") == "no-store"
