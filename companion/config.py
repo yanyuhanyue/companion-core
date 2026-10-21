@@ -131,6 +131,8 @@ class LiveTextWindowApproval(BaseModel):
     max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
     max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
     rich_input_scope: Literal["none", "references_v1"] = "none"
+    image_scope: Literal["none", "owner_image_v1"] = "none"
+    image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     history_scope: Literal["none", "approved_window"] = "none"
     history_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
@@ -142,17 +144,33 @@ class LiveTextWindowApproval(BaseModel):
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if (self.image_scope == "none" and self.image_approval_sha256 is not None) or (
+            self.image_scope == "owner_image_v1"
+            and (
+                not self.image_approval_sha256
+                or self.rich_input_scope != "references_v1"
+                or self.history_scope != "none"
+                or self.memory_scope != "none"
+                or not self.capture_public_key
+            )
+        ):
+            raise ValueError("independent current-owner image approval required")
         if (
             (self.memory_scope == "none" and (self.memory_facts or self.memory_approval_sha256))
-            or (self.memory_scope == "approved_facts" and (
-                not self.memory_facts or not self.memory_approval_sha256
-                or not self.capture_public_key
-            ))
+            or (
+                self.memory_scope == "approved_facts"
+                and (
+                    not self.memory_facts
+                    or not self.memory_approval_sha256
+                    or not self.capture_public_key
+                )
+            )
             or len({fact.memory_id for fact in self.memory_facts}) != len(self.memory_facts)
         ):
             raise ValueError("explicit bounded readonly memory scope required")
         if (self.history_scope == "none" and self.history_approval_sha256 is not None) or (
-            self.history_scope == "approved_window" and self.memory_scope == "approved_facts"
+            self.history_scope == "approved_window"
+            and self.memory_scope == "approved_facts"
             and not self.history_approval_sha256
         ):
             raise ValueError("separate explicit history approval required for combined recall")
@@ -163,16 +181,20 @@ class LiveTextWindowApproval(BaseModel):
             or self.handoff.evidence_sha256 != self.approval_sha256
         ):
             raise ValueError("distinct explicitly approved authenticated handoff required")
-        if (self.history_scope == "none" and (
-            self.max_history_turns or self.max_history_utf8_bytes
-        )) or (self.history_scope == "approved_window" and not (
-            self.max_history_turns and self.max_history_utf8_bytes and self.capture_public_key
-        )):
+        if (
+            self.history_scope == "none" and (self.max_history_turns or self.max_history_utf8_bytes)
+        ) or (
+            self.history_scope == "approved_window"
+            and not (
+                self.max_history_turns and self.max_history_utf8_bytes and self.capture_public_key
+            )
+        ):
             raise ValueError("explicit bounded authenticated window history scope required")
         if self.execution == "approved_live" and self.capture_public_key is None:
             raise ValueError("independent authenticated capture public key required")
         if (
-            self.starts_at.tzinfo is None or self.ends_at.tzinfo is None
+            self.starts_at.tzinfo is None
+            or self.ends_at.tzinfo is None
             or self.starts_at >= self.ends_at
         ):
             raise ValueError("absolute live text approval interval required")

@@ -128,22 +128,34 @@ def input_event(window, frame, received_at):
     raw = decode(frame, window.plan.config.max_frame_bytes)
     message = raw.get("message")
     plain = (isinstance(message, str) and "[CQ:" not in message) or (
-        isinstance(message, list) and bool(message) and all(
-            isinstance(segment, dict) and set(segment) == {"type", "data"}
-            and segment["type"] == "text" and isinstance(segment["data"], dict)
-            and set(segment["data"]) == {"text"} for segment in message
+        isinstance(message, list)
+        and bool(message)
+        and all(
+            isinstance(segment, dict)
+            and set(segment) == {"type", "data"}
+            and segment["type"] == "text"
+            and isinstance(segment["data"], dict)
+            and set(segment["data"]) == {"text"}
+            for segment in message
         )
     )
     scope = (window.plan.value.get("live_text") or {}).get("rich_input_scope", "none")
-    event = normalize(frame, window.plan.config, now=received_at.timestamp(),
-                      rich_input_scope=scope)
+    image_scope = (window.plan.value.get("live_text") or {}).get("image_scope", "none")
+    event = normalize(
+        frame,
+        window.plan.config,
+        now=received_at.timestamp(),
+        rich_input_scope=scope,
+        image_scope=image_scope,
+    )
     if (not plain and scope == "none") or event is None:
         raise ValueError("WINDOW_OWNER_TEXT_INPUT_REQUIRED")
     occurred_at = datetime.fromisoformat(event["occurred_at"])
     text = event["payload"]["text"]
     references_only = scope == "references_v1" and bool(event["payload"].get("rich"))
     if (
-        (not text.strip() and not references_only) or text.strip().startswith("/")
+        (not text.strip() and not references_only)
+        or text.strip().startswith("/")
         or len(text) > window.plan.value["max_input_chars"]
         or not window.plan.start <= occurred_at <= received_at < window.plan.end
         or (received_at - occurred_at).total_seconds() > MAX_AGE_SECONDS
@@ -435,7 +447,7 @@ async def capture_once(window, client, protocol):
         window.busy = False
 
 
-async def approve_captured(window, client, approval):
+async def approve_captured(window, client, approval, *, image_transport=None, image_resolver=None):
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
     window.busy = True
@@ -452,13 +464,23 @@ async def approve_captured(window, client, approval):
             raise ValueError("PERSISTED_CAPTURE_REQUIRED")
         receipt = json.loads(row["capture_json"])
         records, _ = window.read_journal()
-        if not any(record["kind"] == "CAPTURED" and record["data"] == {
-            "event_hash": digest(row["event_id"]), "capture_sha256": digest(receipt),
-            "frame_sha256": receipt["frame_sha256"],
-        } for record in records):
+        if not any(
+            record["kind"] == "CAPTURED"
+            and record["data"]
+            == {
+                "event_hash": digest(row["event_id"]),
+                "capture_sha256": digest(receipt),
+                "frame_sha256": receipt["frame_sha256"],
+            }
+            for record in records
+        ):
             raise ValueError("CAPTURE_JOURNAL_BINDING_CHANGED")
-        expected = {"window_sha256": window.plan.sha256, "event_id": row["event_id"],
-                    "input_sha256": row["input_hash"], "capture_sha256": digest(receipt)}
+        expected = {
+            "window_sha256": window.plan.sha256,
+            "event_id": row["event_id"],
+            "input_sha256": row["input_hash"],
+            "capture_sha256": digest(receipt),
+        }
         if (
             set(approval) != {*expected, "evidence_sha256"}
             or any(approval[key] != value for key, value in expected.items())
@@ -472,16 +494,22 @@ async def approve_captured(window, client, approval):
         )
         if digest(evidence) != receipt["evidence_sha256"]:
             raise ValueError("CAPTURE_EVIDENCE_CHANGED")
-        original_receipt = {key: value for key, value in receipt.items()
-                            if key not in {"evidence_sha256", "signature"}}
+        original_receipt = {
+            key: value
+            for key, value in receipt.items()
+            if key not in {"evidence_sha256", "signature"}
+        }
         frame = evidence.get("frame")
-        if not isinstance(frame, str) or evidence.get("receipt") != original_receipt or (
-            hashlib.sha256(frame.encode()).hexdigest() != receipt["frame_sha256"]
+        if (
+            not isinstance(frame, str)
+            or evidence.get("receipt") != original_receipt
+            or (hashlib.sha256(frame.encode()).hexdigest() != receipt["frame_sha256"])
         ):
             raise ValueError("CAPTURE_EVIDENCE_CHANGED")
         raw, event = input_event(window, frame, datetime.fromisoformat(receipt["received_at"]))
         if (
-            encode(event) != row["body"] or receipt["event_id"] != event["event_id"]
+            encode(event) != row["body"]
+            or receipt["event_id"] != event["event_id"]
             or receipt["source_event_id"] != event["source_event_id"]
             or receipt["input_sha256"] != input_digest(event["payload"])
             or row["fingerprint"] != digest({"message": raw["message"], "time": raw["time"]})
@@ -494,16 +522,76 @@ async def approve_captured(window, client, approval):
         if window.plan.mode == "live_text":
             await window.core_post(client, "/internal/v1/live-text/inputs/approve", core_approval)
         window.verify()
-        head = window.append("INPUT_APPROVED", {"event_hash": digest(event["event_id"]),
-                                               "approval_sha256": digest(approval)})
+        head = window.append(
+            "INPUT_APPROVED",
+            {"event_hash": digest(event["event_id"]), "approval_sha256": digest(approval)},
+        )
         with window.db:
-            window.db.execute("UPDATE window_inputs SET state='APPROVED',approval_hash=? "
-                              "WHERE event_id=? AND plan_hash=?",
-                              (digest(approval), event["event_id"], window.plan.sha256))
+            window.db.execute(
+                "UPDATE window_inputs SET state='APPROVED',approval_hash=? "
+                "WHERE event_id=? AND plan_hash=?",
+                (digest(approval), event["event_id"], window.plan.sha256),
+            )
             window.db.execute("UPDATE test_window SET journal_head=?", (head,))
         async with window.core_http(client) as scoped:
             await window.spool.flush_one(scoped)
         window.verify()
+        if event["payload"].get("shared_content"):
+            from .images import fetch_image, original_image
+
+            image = original_image(raw["message"])
+            if image is None:
+                raise ValueError("ORIGINAL_OWNER_IMAGE_REQUIRED")
+            prefix = "/internal/v2/content/" + event["event_id"] + "/image"
+            claim = await window.core_post(
+                client,
+                prefix + "/claim",
+                {
+                    "request_key": "image:0",
+                    "source_sha256": image.source_sha256,
+                },
+            )
+
+            async def check_image():
+                await window.core_post(
+                    client,
+                    prefix + "/check",
+                    {
+                        "lease_token": claim["lease_token"],
+                        "source_sha256": image.source_sha256,
+                    },
+                )
+                window.verify()
+                if datetime.fromisoformat(claim["lease_until"]) <= window.clock():
+                    raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
+
+            options = {"resolver": image_resolver} if image_resolver is not None else {}
+            data, mime = await fetch_image(
+                image, claim["max_bytes"], check=check_image, transport=image_transport, **options
+            )
+            await check_image()
+            proof = {"plan_sha256": window.plan.sha256, "event_id": event["event_id"],
+                     "source_sha256": image.source_sha256, "lease_token": claim["lease_token"],
+                     "media_sha256": hashlib.sha256(data).hexdigest(), "mime": mime}
+            proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+                window.plan.config.capture_signing_key)).sign(
+                    b"companion-core/onebot-owner-image/v1\x00" + encode(proof).encode()).hex()
+            async with window.core_http(client) as scoped:
+                response = await scoped.post(
+                    prefix,
+                    content=data,
+                    timeout=40,
+                    headers={
+                        "Content-Type": mime,
+                        "X-Content-Key": "image:0",
+                        "X-Content-Lease": claim["lease_token"],
+                        "X-Content-Proof": encode(proof),
+                    },
+                )
+                response.raise_for_status()
+                if response.json().get("state") != "SUCCEEDED":
+                    raise ValueError("IMAGE_ANALYSIS_FAILED_CLOSED")
+            window.verify()
         return window.status()
     except BaseException:
         await failed(window, client, "CAPTURE_APPROVAL_FAILED_CLOSED")

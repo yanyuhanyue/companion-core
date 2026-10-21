@@ -61,10 +61,11 @@ class Core(Runtime):
                 self.store, settings, self.goals, self.reflections, self.affect, clock,
             )
             self.social = SocialPlanner(self.store, settings, clock)
-            # Only this finite callback is late-bound; neither service retains the Core.
+            # These finite callbacks expose only the read/model operations each service needs.
             self.content = ContentService(
                 self.store, settings, self.observations,
                 lambda *args, **kwargs: exploration.create(*args, **kwargs), clock,
+                model=lambda: self.model,
             )
             exploration = self.exploration = ExplorationService(
                 self.store, settings, self.observations, self.goals, self.social,
