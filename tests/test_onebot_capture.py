@@ -1250,3 +1250,126 @@ def test_final_send_matches_persisted_reservation_despite_mutable_item_and_body(
                 assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
 
     run(scenario())
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("change", ["stream", "transfer_encoding", "unbounded_stream"])
+def test_final_wire_bytes_match_approval_when_only_httpx_stream_is_replaced(
+    core,
+    tmp_path,
+    live,
+    change,
+):
+    sends = []
+
+    async def scenario():
+        with onebot_http(sends, config().onebot_token) as port:
+            cfg, plan = pinned_plan(core, tmp_path, 3001, http_port=port, live=live)
+            from tests.test_live_text_window import live_clients
+            from tests.test_onebot_delivery import core_client
+
+            async with (
+                core_client(core, bridge_config=cfg) as client,
+                network.private_http_client(cfg.onebot_http_url, cfg.onebot_token) as protocol,
+                live_clients(core, cfg) if live else nullcontext(),
+            ):
+                with Spool(cfg) as spool:
+                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
+                    await window.open(client)
+                    approval = await stage(window, client, core)
+
+                    async def replace_stream(request):
+                        if request.url.path == "/send_private_msg":
+                            if change == "transfer_encoding":
+                                request.headers["Transfer-Encoding"] = "chunked"
+                                return
+                            if change == "unbounded_stream":
+
+                                class UnknownStream(httpx.AsyncByteStream):
+                                    async def __aiter__(self):
+                                        pytest.fail("unknown request stream must not be consumed")
+                                        yield b"unreachable"
+
+                                request.stream = UnknownStream()
+                                return
+                            body = json.loads(request.content)
+                            body["message"][0]["data"]["text"] = "synthetic unapproved wire stream"
+                            wire = json.dumps(body).encode()
+                            request.stream = httpx.ByteStream(wire)
+                            request.headers["Content-Length"] = str(len(wire))
+
+                    protocol.event_hooks["request"].append(replace_stream)
+                    result = await window.send_once(client, protocol, approval)
+                    if change == "transfer_encoding":
+                        assert sends == [] and result["attempt_states"] == {"UNKNOWN": 1}
+                    else:
+                        assert len(sends) == 1 and result["attempt_states"] == {"ACK": 1}
+                        assert (
+                            digest(sends[0]["message"][0]["data"]["text"])
+                            == approval["reply_sha256"]
+                        )
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("phase", ["capture", "send"])
+def test_probe_wire_body_is_the_checked_empty_object(core, tmp_path, live, phase):
+    received = []
+
+    async def source(ws):
+        await ws.send(json.dumps(raw_event()))
+        await ws.wait_closed()
+
+    async def scenario():
+        async with source_window(core, tmp_path, source, live=live) as (
+            window,
+            client,
+            protocol,
+            _,
+            sends,
+        ):
+
+            async def receive_protocol(scope, receive, send):
+                body = bytearray()
+                while True:
+                    part = await receive()
+                    body.extend(part.get("body", b""))
+                    if not part.get("more_body"):
+                        break
+                received.append((scope["path"], bytes(body)))
+                result = provider(
+                    httpx.Request(
+                        "POST",
+                        "http://synthetic" + scope["path"],
+                        content=bytes(body),
+                    ),
+                    sends,
+                )
+                await send(
+                    {"type": "http.response.start", "status": result.status_code, "headers": []}
+                )
+                await send({"type": "http.response.body", "body": result.content})
+
+            async def replace_probe_stream(request):
+                if request.url.path != "/send_private_msg":
+                    wire = b'{"unexpected":true}'
+                    request.stream = httpx.ByteStream(wire)
+                    request.headers["Content-Length"] = str(len(wire))
+
+            protocol._transport = httpx.ASGITransport(app=receive_protocol)
+            protocol.event_hooks["request"].append(replace_probe_stream)
+            from tests.test_live_text_window import live_clients
+
+            async with live_clients(core, window.plan.config) if live else nullcontext():
+                if phase == "capture":
+                    result = await window.capture_once(client, protocol)
+                    assert result["new_inputs"] == 1
+                else:
+                    approval = await stage(window, client, core)
+                    result = await window.send_once(client, protocol, approval)
+                    assert result["attempt_states"] == {"ACK": 1}
+            probes = [body for path, body in received if path != "/send_private_msg"]
+            assert len(probes) == 3 and all(body == b"{}" for body in probes)
+
+    run(scenario())

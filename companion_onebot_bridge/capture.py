@@ -18,7 +18,7 @@ from .event_normalizer import decode, identifier, normalize
 from .network import checked_http_client, websocket
 from .onebot_client import OneBotClient
 from .spool import encode
-from .window import SHA, check_protocol_request, digest, private_json
+from .window import SHA, check_protocol_request, digest, private_json, seal_protocol_content
 
 MAX_AGE_SECONDS = 30
 MAX_CLOCK_DRIFT_SECONDS = 2
@@ -182,11 +182,13 @@ async def capture_once(window, client, protocol):
         # Fixed authority and Bearer apply to all three probes, even in Demo mode.
         async def probe_boundary(request):
             check_protocol_request(window, request)
+            content = request.content
             if request.url.path not in {"/get_login_info", "/get_status", "/get_version_info"} or (
-                json.loads(request.content) != {}
+                decode(content, 64) != {}
             ):
                 raise ValueError("CAPTURE_PROBE_CHANGED")
             verify_capture()
+            seal_protocol_content(request, content)
 
         async with checked_http_client(protocol, probe_boundary) as scoped:
             if not (await OneBotClient(window.plan.config, scoped).probe())["connection_ready"]:

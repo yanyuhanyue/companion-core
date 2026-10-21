@@ -16,6 +16,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
+
 from .event_normalizer import decode, normalize
 from .network import checked_http_client, private_http_client, private_request_matches
 from .onebot_client import OneBotClient, bounded_post
@@ -851,7 +853,8 @@ class SendOperation:
             expected = {"user_id": int(self.window.plan.config.owner_qq_id),
                         "message": [{"type": "text", "data": {"text": item["content"]["text"]}}],
                         "auto_escape": True}
-            body = decode(request.content, 65536)
+            content = request.content
+            body = decode(content, 65536)
             if (
                 body != expected or not attempt
                 or digest(body["message"][0]["data"]["text"]) != attempt["text_hash"]
@@ -875,6 +878,8 @@ class SendOperation:
             or now >= lease_until
         ):
             raise ValueError("WINDOW_SEND_FENCED")
+        if request is not None:
+            seal_protocol_content(request, content)
 
     def complete(self, item, provider_id):
         state = "ACK" if provider_id else "UNKNOWN"
@@ -918,9 +923,11 @@ class WindowOneBot:
         live = self.window.plan.mode == "live_text"
         check_protocol_request(self.window, request)
         if request.url.path != "/send_private_msg":
-            if json.loads(request.content) != {}:
+            content = request.content
+            if decode(content, 64) != {}:
                 raise ValueError("WINDOW_PROBE_CHANGED")
             self.operation.before_dispatch(state="RESERVED")
+            seal_protocol_content(request, content)
             return
         item, approval = self.operation.current_item, self.operation.approval
         if live:
@@ -943,6 +950,15 @@ class WindowOneBot:
     async def send_text(self, text):
         self.operation.before_io(text)
         return await self.delegate.send_text(text)
+
+
+def seal_protocol_content(request, content):
+    # HTTPX sends stream, not its content cache. Seal exactly the bounded
+    # bytes just checked; never consume an arbitrary replacement stream.
+    if "Transfer-Encoding" in request.headers:
+        raise ValueError("WINDOW_REQUEST_FRAMING_CHANGED")
+    request.stream = httpx.ByteStream(content)
+    request.headers["Content-Length"] = str(len(content))
 
 
 def check_protocol_request(window, request):
