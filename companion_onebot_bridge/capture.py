@@ -57,9 +57,9 @@ def capacity(window, capture_fence=None):
     window.verify(capture_fence=capture_fence)
     window.check_spool()
     window.spool.capacity(window.plan.config.max_frame_bytes * 3)
-    if window.db.execute("SELECT 1 FROM window_inputs WHERE state!='ACK' LIMIT 1").fetchone():
+    if window.count("window_inputs", "state!='ACK'"):
         raise ValueError("ONE_INPUT_AT_A_TIME")
-    if window.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] >= (
+    if window.count("window_inputs") >= (
         window.plan.value["max_new_inputs"]
     ):
         raise ValueError("WINDOW_INPUT_CAP")
@@ -263,8 +263,9 @@ async def capture_once(window, client, protocol):
             with window.db:
                 window.spool.put(event, fingerprint)
                 window.db.execute(
-                    "INSERT INTO window_inputs VALUES(?,?,?,'CAPTURED',?)",
-                    (event["event_id"], receipt["input_sha256"], "", encode(receipt)),
+                    "INSERT INTO window_inputs VALUES(?,?,?,'CAPTURED',?,?)",
+                    (event["event_id"], receipt["input_sha256"], "", encode(receipt),
+                     window.plan.sha256),
                 )
                 window.db.execute("UPDATE test_window SET state='OPEN',journal_head=?", (head,))
             window.verify()
@@ -290,7 +291,8 @@ async def approve_captured(window, client, approval):
             raise ValueError("INDIVIDUAL_CAPTURE_APPROVAL_REQUIRED")
         row = window.db.execute(
             "SELECT w.*,i.body,i.fingerprint FROM window_inputs w JOIN inbox i ON i.key=w.event_id "
-            "WHERE w.event_id=?", (approval.get("event_id"),),
+            "WHERE w.event_id=? AND w.plan_hash=?",
+            (approval.get("event_id"), window.plan.sha256),
         ).fetchone()
         if not row or not row["capture_json"] or row["state"] != "CAPTURED" or not row["body"]:
             raise ValueError("PERSISTED_CAPTURE_REQUIRED")
@@ -342,7 +344,8 @@ async def approve_captured(window, client, approval):
                                                "approval_sha256": digest(approval)})
         with window.db:
             window.db.execute("UPDATE window_inputs SET state='APPROVED',approval_hash=? "
-                              "WHERE event_id=?", (digest(approval), event["event_id"]))
+                              "WHERE event_id=? AND plan_hash=?",
+                              (digest(approval), event["event_id"], window.plan.sha256))
             window.db.execute("UPDATE test_window SET journal_head=?", (head,))
         async with window.core_http(client) as scoped:
             await window.spool.flush_one(scoped)

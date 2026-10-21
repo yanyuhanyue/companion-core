@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from alembic.script import ScriptDirectory
 from alembic.util import CommandError
 
-from companion import __version__, budget
+from companion import __version__, budget, paid_budget
 from companion.contracts import CoreError
 from companion.privacy import ErasureLedger
 from companion.store import Store
@@ -236,10 +236,18 @@ def snapshot(settings, *, integrity=False):
             if settings.mode == "live" and settings.paid_model is None:
                 result["blockers"].append("PAID_APPROVAL_REQUIRED")
             for key in (
-                "model_budget_blocked", "model_budget_restore_required", "live_text_stopped",
+                "model_budget_blocked", "model_budget_restore_required",
             ):
                 if view.one("SELECT 1 FROM runtime_meta WHERE key=?", (key,)):
                     result["blockers"].append(key.upper())
+            from companion.live_text import stopped
+
+            lifecycle = paid_budget.live_lifecycle(view)
+            plan = settings.live_text_window.plan_sha256 if (
+                settings.live_text_window and lifecycle and lifecycle["state"] == "OPEN"
+            ) else None
+            if stopped(view, plan):
+                result["blockers"].append("LIVE_TEXT_STOPPED")
             if result["budget"]["unsettled_calls"]:
                 result["blockers"].append("MODEL_USAGE_UNSETTLED")
             if result["deliveries"]["states"].get("DELIVERY_UNCERTAIN"):

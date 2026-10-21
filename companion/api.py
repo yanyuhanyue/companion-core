@@ -371,9 +371,14 @@ def create_app(settings=None):
         return app.state.core.ingest(event, x_idempotency_key)
 
     @app.post(prefix + "/live-text/open", dependencies=auth)
-    async def live_text_open(body: live_text.WindowReference):
+    async def live_text_open(body: live_text.OpenWindow):
         core = app.state.core
         return live_text.open_window(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/live-text/handoff", dependencies=auth)
+    async def live_text_handoff(body: live_text.WindowReference):
+        core = app.state.core
+        return live_text.prepare_handoff(core.store, settings, core.clock, body)
 
     @app.post(prefix + "/live-text/inputs/approve", dependencies=auth)
     async def live_text_input(body: live_text.InputApproval):

@@ -796,9 +796,7 @@ class Core(Runtime):
         with self.store.transaction():
             bounded_text = live_text.active(self.store, self.settings)
             if bounded_text:
-                self.store.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES ('live_text_stopped',?)", (code,)
-                )
+                live_text.record_failure(self.store, self.settings, code)
             retryable = code in {
                 "MODEL_RETRYABLE",
                 "PRIVACY_CHANGED",

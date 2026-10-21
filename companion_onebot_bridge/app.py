@@ -156,6 +156,7 @@ def main():
         choices=(
             "daemon",
             "window-open",
+            "window-handoff",
             "window-ingest",
             "window-capture-once",
             "window-approve-input",

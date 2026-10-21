@@ -97,6 +97,59 @@ def estimate_input_tokens(approval, messages, scenario):
         raise CoreError("MODEL_INPUT_ESTIMATE_INVALID", 503) from error
 
 
+LIVE_LIFECYCLE = "model_budget_live_lifecycle"
+
+
+def live_lifecycle(store):
+    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (LIVE_LIFECYCLE,))
+    return json.loads(row["value"]) if row else None
+
+
+def _live_record(row, digest, current, seen):
+    kind = row.get("kind")
+    if kind not in {"window_open", "window_stop", "window_handoff"}:
+        return current
+    fields = {"kind", "window_id", "plan_sha256", "previous"}
+    if kind != "window_stop":
+        fields.add("handoff_sha256")
+    if kind == "window_handoff":
+        fields |= {"predecessor_window_id", "predecessor_plan_sha256"}
+    if set(row) != fields or not re.fullmatch(r"win_[a-f0-9]{32}", row["window_id"]) or (
+        not re.fullmatch(r"[a-f0-9]{64}", row["plan_sha256"])
+    ):
+        raise ValueError("invalid live lifecycle")
+    if kind != "window_stop" and row["handoff_sha256"] is not None and not re.fullmatch(
+        r"[a-f0-9]{64}", row["handoff_sha256"]
+    ):
+        raise ValueError("invalid handoff hash")
+    same = current and (current["window_id"], current["plan_sha256"]) == (
+        row["window_id"], row["plan_sha256"]
+    )
+    if kind == "window_handoff":
+        if (
+            not current or current["state"] != "STOPPED" or not row["handoff_sha256"]
+            or (current["window_id"], current["plan_sha256"]) != (
+                row["predecessor_window_id"], row["predecessor_plan_sha256"]
+            ) or row["window_id"] in seen or row["plan_sha256"] in seen
+        ):
+            raise ValueError("invalid lifecycle predecessor")
+    elif kind == "window_open":
+        if current and (not same or current["state"] != "PREPARED"):
+            raise ValueError("stopped or replaced window")
+        if current and row["handoff_sha256"] != current["handoff_sha256"]:
+            raise ValueError("handoff changed")
+        if not current and row["handoff_sha256"] is not None:
+            raise ValueError("missing predecessor")
+    elif current and not same:
+        raise ValueError("stale window stop")
+    seen.update((row["window_id"], row["plan_sha256"]))
+    return {"window_id": row["window_id"], "plan_sha256": row["plan_sha256"],
+            "state": {"window_open": "OPEN", "window_stop": "STOPPED",
+                      "window_handoff": "PREPARED"}[kind],
+            "handoff_sha256": row.get("handoff_sha256", (current or {}).get("handoff_sha256")),
+            "head_sha256": digest}
+
+
 def journal(store, approval, record=None, *, allow_settlement=False):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
@@ -122,6 +175,7 @@ def journal(store, approval, record=None, *, allow_settlement=False):
             identity = {"value": journal_id}
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, False
+        lifecycle, seen, managed = None, set(), False
         for index, line in enumerate(lines):
             row = json.loads(line)
             digest = row.pop("sha256")
@@ -136,21 +190,29 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 ):
                     raise ValueError("journal identity")
             else:
-                if row.get("kind") == "window_stop":
-                    if (
-                        set(row) != {"kind", "window_id", "plan_sha256", "previous"}
-                        or not isinstance(row["window_id"], str)
-                        or not re.fullmatch(r"win_[a-f0-9]{32}", row["window_id"])
-                        or not isinstance(row["plan_sha256"], str)
-                        or not re.fullmatch(r"[a-f0-9]{64}", row["plan_sha256"])
-                    ):
-                        raise ValueError("invalid window stop")
-                    blocked = True
+                if row.get("kind") in {"window_stop", "window_open", "window_handoff"}:
+                    lifecycle = _live_record(row, digest, lifecycle, seen)
+                    managed |= row["kind"] != "window_stop"
                     continue
                 latest[row["request_id"]] = row
                 blocked |= row["kind"] == "blocked"
-        if not lines or (blocked and not allow_settlement):
+        stored_lifecycle = live_lifecycle(store)
+        if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
+            raise ValueError("live lifecycle behind journal or DB")
+        lifecycle_record = record and record.get("kind") in {
+            "window_stop", "window_open", "window_handoff"
+        }
+        if not lines or (blocked and (
+            not allow_settlement or (
+                record and record.get("kind") in {"window_open", "window_handoff"}
+            )
+        )):
             raise ValueError("journal reconciliation")
+        if lifecycle and not allow_settlement and (
+            lifecycle["state"] == "STOPPED"
+            or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"]
+        ):
+            raise ValueError("live window stopped or replaced")
         for request_id, row in latest.items():
             if record and request_id == record.get("request_id"):
                 continue
@@ -179,9 +241,18 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         if record is not None:
             row = {**record, "previous": previous}
             row["sha256"] = sha(row)
+            next_lifecycle = _live_record(
+                {k: v for k, v in row.items() if k != "sha256"}, row["sha256"], lifecycle, seen
+            )
             with path.open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(encode(row) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            previous = row["sha256"]
+            if lifecycle_record:
+                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                              (LIVE_LIFECYCLE, encode(next_lifecycle)))
+                lifecycle = next_lifecycle
+        return {"head_sha256": previous, "lifecycle": lifecycle}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error

@@ -147,7 +147,7 @@ async def source_window(
         ):
             with Spool(cfg) as spool:
                 window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
+                await window.open(client, protocol if approved else None)
                 yield window, client, protocol, handshakes, sends
 
 
@@ -216,7 +216,9 @@ def test_authenticated_ws_real_http_five_input_model_outbox_send_chain(core, tmp
                 ):
                     core.model = ModelClient(core.settings, model)
                     with Spool(cfg) as spool:
-                        await TestWindow(spool, plan, clock=lambda: core.clock.now).open(client)
+                        await TestWindow(spool, plan, clock=lambda: core.clock.now).open(
+                            client, protocol if approved else None
+                        )
                     for number in range(1, 6):
                         with Spool(cfg) as spool:
                             window = TestWindow(spool, plan, clock=lambda: core.clock.now)

@@ -5,6 +5,7 @@
   "baseline_sha": "9eb673747ccdf05372426926370d018e05665e3d",
   "source_sha": "108059a90a1ac408d2e0522df0d4f683d39c7b34",
   "integration_report": "p10-continuity-operations-integration.md",
+  "subsequent_runtime_report": "p10-runtime-observations.md",
   "authority": "Development policy and public runtime template. Specific real actions require their own authorization; this record grants none.",
   "development_blocked": false,
   "provider": {
