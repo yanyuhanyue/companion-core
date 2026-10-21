@@ -80,7 +80,7 @@ def pinned_plan(
                 "protocol_epoch",
                 "config_sha256",
                 "config_version",
-                "image_digests",
+                "image_ids",
             )
         }
     else:
@@ -1007,7 +1007,7 @@ def test_hard_exit_during_receive_or_raw_fsync_cannot_resume_or_restore_quota(
                     "protocol_epoch",
                     "config_sha256",
                     "config_version",
-                    "image_digests",
+                    "image_ids",
                 )
             }
             window.spool.close()

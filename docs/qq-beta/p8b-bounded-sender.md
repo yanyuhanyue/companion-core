@@ -39,7 +39,8 @@ All JSON files must be regular non-symlink files, at most 64 KiB, with POSIX mod
   absolute `starts_at` / `ends_at` with `+08:00`; the end is exclusive;
 - the existing stable `protocol_epoch`, owner/bot identity digest, canonical Bridge
   configuration digest, private configuration version and exact Core/Bridge/protocol
-  `image@sha256:` digests;
+  Docker image IDs (`sha256:` plus 64 lowercase hexadecimal digits), stored under
+  `image_ids` with exactly the `core`, `bridge`, and `protocol` roles;
 - independent inventory and new-window authorization hashes;
 - fixed limits: at most 5 new inputs, 5 attempt reservations, 5 possible visible
   replies, concurrency exactly 1; approved text length bounds at most 500 characters;
@@ -54,11 +55,18 @@ The identity digest is of the private two-item owner/bot list. Do not publish th
 private JSON, configuration, raw IDs, message bodies, paths or authorization evidence.
 
 The independent inventory is exactly the plan's `identity_sha256`,
-`protocol_epoch`, `config_sha256`, `config_version`, and `image_digests`. Its canonical
+`protocol_epoch`, `config_sha256`, `config_version`, and `image_ids`. Its canonical
 digest must equal `runtime_attestation_sha256`. Bridge has no Docker socket and
 does not independently discover image identity: a trusted deployment operator must
-attest the actual running images/configuration. Matching a self-written inventory
+attest the actual running images/configuration, checking each container's `Image`
+against the approved local `docker image inspect` `Id`. A local image ID is a
+configuration digest, not a registry manifest digest. Registry pull references,
+when used, remain separate deployment metadata; no registry publication is needed
+to express a local image ID. Tags and `name@sha256` references are rejected in
+`image_ids`. Matching a self-written inventory
 does not prove deployment provenance. That operational check remains BLOCKED here.
+New plans require `image_ids`; historical receipts remain unchanged and are not
+converted into authorization for another window.
 
 `local_synthetic` rejects any configured Core/OneBot HTTP/WS hostname other than
 `localhost`, `127.0.0.1`, or `::1`; normal private-address DNS pinning still applies.

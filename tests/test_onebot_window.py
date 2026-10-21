@@ -30,8 +30,9 @@ def plan_fixture(tmp_path, **changes):
         "protocol_epoch": cfg.protocol_epoch,
         "config_sha256": digest(asdict(cfg)),
         "config_version": "SYNTHETIC-ONLY-1",
-        "image_digests": {
-            name: f"synthetic/{name}@sha256:" + "a" * 64 for name in ("core", "bridge", "protocol")
+        "image_ids": {
+            name: "sha256:" + digit * 64
+            for name, digit in (("core", "a"), ("bridge", "b"), ("protocol", "c"))
         },
     }
     value = {
@@ -279,7 +280,7 @@ def test_mutated_runtime_or_window_rejected_before_any_io(tmp_path, mutation):
     elif mutation == "epoch":
         cfg = replace(cfg, protocol_epoch="other-epoch")
     elif mutation == "image":
-        value["image_digests"] = {**value["image_digests"], "core": "latest"}
+        value["image_ids"] = {**value["image_ids"], "core": "latest"}
     elif mutation == "inventory":
         inventory = {**inventory, "config_version": "UNAPPROVED"}
     elif mutation == "time":
@@ -295,6 +296,69 @@ def test_mutated_runtime_or_window_rejected_before_any_io(tmp_path, mutation):
         value["config_sha256"] = inventory["config_sha256"] = digest(asdict(cfg))
         value["runtime_attestation_sha256"] = digest(inventory)
     with pytest.raises(ValueError):
+        WindowPlan(value, cfg, inventory)
+
+
+def test_local_docker_image_ids_bind_the_existing_plan_and_inventory(tmp_path):
+    cfg, value, inventory, _ = plan_fixture(tmp_path)
+    plan = WindowPlan(value, cfg, inventory)
+    assert plan.value["image_ids"] == inventory["image_ids"]
+    assert plan.sha256 == digest(value)
+    assert value["runtime_attestation_sha256"] == digest(inventory)
+
+
+@pytest.mark.parametrize(
+    "image_id",
+    [
+        "companion-core:latest",
+        "companion/core@sha256:" + "a" * 64,
+        "a" * 64,
+        "sha256:" + "a" * 63,
+        "sha256:" + "A" * 64,
+        123,
+    ],
+)
+def test_non_docker_image_ids_are_rejected_even_with_matching_attestation(tmp_path, image_id):
+    cfg, value, inventory, _ = plan_fixture(tmp_path)
+    value["image_ids"] = inventory["image_ids"] = {**value["image_ids"], "core": image_id}
+    value["runtime_attestation_sha256"] = digest(inventory)
+    with pytest.raises(ValueError, match="PINNED_RUNTIME_IMAGES_REQUIRED"):
+        WindowPlan(value, cfg, inventory)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "renamed"])
+def test_image_roles_must_be_exact_even_with_matching_attestation(tmp_path, mutation):
+    cfg, value, inventory, _ = plan_fixture(tmp_path)
+    images = dict(value["image_ids"])
+    if mutation == "missing":
+        images.pop("protocol")
+    elif mutation == "extra":
+        images["worker"] = images["core"]
+    else:
+        images["snowluma"] = images.pop("protocol")
+    value["image_ids"] = inventory["image_ids"] = images
+    value["runtime_attestation_sha256"] = digest(inventory)
+    with pytest.raises(ValueError, match="PINNED_RUNTIME_IMAGES_REQUIRED"):
+        WindowPlan(value, cfg, inventory)
+
+
+@pytest.mark.parametrize("mutation", ["inventory-only", "changed-attestation", "stale-attestation"])
+def test_image_id_changes_require_the_original_exact_runtime_attestation(tmp_path, mutation):
+    cfg, value, inventory, _ = plan_fixture(tmp_path)
+    images = {**inventory["image_ids"], "core": "sha256:" + "d" * 64}
+    inventory = {**inventory, "image_ids": images}
+    if mutation == "changed-attestation":
+        value["runtime_attestation_sha256"] = digest(inventory)
+    elif mutation == "stale-attestation":
+        value["image_ids"] = images
+    with pytest.raises(ValueError, match="RUNTIME_ATTESTATION_MISMATCH"):
+        WindowPlan(value, cfg, inventory)
+
+
+def test_previous_image_digest_field_is_not_a_new_window_contract(tmp_path):
+    cfg, value, inventory, _ = plan_fixture(tmp_path)
+    value["image_digests"] = value.pop("image_ids")
+    with pytest.raises(ValueError, match="INVALID_WINDOW_PLAN"):
         WindowPlan(value, cfg, inventory)
 
 

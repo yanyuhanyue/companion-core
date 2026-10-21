@@ -24,7 +24,7 @@ Wake、探索、社交、主动消息、表达图片、媒体、DSH 和设备执
 ## 固定批准
 
 原计划继续绑定身份摘要、protocol epoch、Bridge 全配置摘要、配置版本、三项
-`image@sha256`、运行清单、独立授权摘要、独立 Window Journal 路径、绝对上海时间及
+Docker `image_ids`（core/bridge/protocol 三角色的真实 `sha256:64` ID）、运行清单、独立授权摘要、独立 Window Journal 路径、绝对上海时间及
 最多五输入/五次发送/一并发。常驻 Bridge 的 `delivery_enabled` 必须保持 `false`。
 
 新增 `live_text` 对象与 Core 批准的字段相同，唯独 Core 另保存整个计划的 `plan_sha256`，
@@ -50,7 +50,9 @@ PaidModelApproval 不变：实际 HTTPS provider/model、USD、地区、有效�
 本阶段进一步要求 `per_request_calls=1`、`concurrency=1`。无法证明真实厂商 framing 的
 账户继续 BLOCKED；合成 ByteLevel/chatml-v1 合同只证明测试路径，不能用于实际付费。
 
-源码摘要是运行文件的测量，Git SHA/镜像 digest 是独立部署证明，二者不能混称。wheel 和
+宿主操作者须核对 container.Image 等于批准的 docker image inspect Id；Bridge 只核对固定清单，不读取 Docker。
+本地 Docker image ID 是配置摘要，不能冒充 registry manifest digest；registry pull ref 另存部署 metadata，不要求公开发布镜像。
+源码摘要是运行文件的测量，Git SHA/实际镜像 ID 是独立部署证明，二者不能混称。wheel 和
 源码目录的打包内容可能不同，应在最终固定镜像内计算摘要；不能直接照抄开发工作树摘要。
 填写一个 digest 或 `live_approved=true` 不是自动取得人的授权。
 
