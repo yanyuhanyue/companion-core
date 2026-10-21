@@ -20,17 +20,34 @@ from pydantic import AwareDatetime, Field
 
 from companion import paid_budget
 from companion.contracts import CoreError, StrictModel
-from companion.privacy import epoch
+from companion.privacy import ErasureLedger, epoch
 from companion.store import encode
 
 BINDING = "live_text_window"
 INPUT = "live_text_input:"
 CONTEXT = "live_text_context:"
 CAPTURE_SIGNATURE_DOMAIN = b"companion-core/onebot-capture/v1\x00"
+HANDOFF_SIGNATURE_DOMAIN = b"companion-core/window-handoff/v1\x00"
+HISTORY = "live_text_window:"
+STOP = "live_text_stopped:"
+LEGACY_STOP = "live_text_legacy_stop"
 
 
 class WindowReference(StrictModel):
     window_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class HandoffReceipt(WindowReference):
+    kind: Literal["stopped_window_handoff"]
+    predecessor_window_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    handoff_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    core_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bridge_journal_head_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    signature: str = Field(pattern=r"^[a-f0-9]{128}$")
+
+
+class OpenWindow(WindowReference):
+    handoff_receipt: HandoffReceipt | None = None
 
 
 class CaptureReceipt(WindowReference):
@@ -85,7 +102,38 @@ def active(store, settings):
     )
 
 
-def guard(store, settings, clock, *, opening=False, current_request=None, current_delivery=None):
+def _meta(store, key):
+    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
+    return json.loads(row["value"]) if row else None
+
+
+def _put(store, key, value):
+    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (key, encode(value)))
+
+
+def stopped(store, plan_sha256=None):
+    binding = _meta(store, BINDING)
+    plan_sha256 = plan_sha256 or (binding or {}).get("plan_sha256")
+    if plan_sha256 and store.one("SELECT 1 FROM runtime_meta WHERE key=?", (STOP + plan_sha256,)):
+        return True
+    legacy = store.one("SELECT value FROM runtime_meta WHERE key='live_text_stopped'")
+    archived = _meta(store, LEGACY_STOP)
+    return bool(legacy and (not archived or archived["value"] != legacy["value"]
+                           or archived["plan_sha256"] == plan_sha256))
+
+
+def record_failure(store, settings, code):
+    approval = settings.live_text_window
+    binding = _meta(store, BINDING)
+    plan = approval.plan_sha256 if approval else (binding or {}).get("plan_sha256")
+    if plan:
+        store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)", (STOP + plan, code))
+    else:
+        store.execute("INSERT OR IGNORE INTO runtime_meta VALUES ('live_text_stopped',?)", (code,))
+
+
+def guard(store, settings, clock, *, opening=False, current_request=None, current_delivery=None,
+          preparing=False):
     # Read the clock after BEGIN IMMEDIATE, including any SQLite lock wait.
     with nullcontext() if store.db.in_transaction else store.transaction():
         approval = settings.live_text_window
@@ -123,9 +171,11 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
         journal = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not journal or journal["value"] != approval.budget_journal_id:
             raise CoreError("LIVE_TEXT_BUDGET_JOURNAL_CHANGED", 503)
-        paid_budget.journal(store, paid)
+        custody = paid_budget.journal(store, paid, allow_settlement=preparing)
         if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                     "('model_budget_blocked','model_budget_restore_required','live_text_stopped')"):
+                     "('model_budget_blocked','model_budget_restore_required')") or (
+            not preparing and stopped(store, approval.plan_sha256)
+        ):
             raise CoreError("LIVE_TEXT_RECONCILIATION_REQUIRED", 503)
         if store.one(
             "SELECT 1 FROM model_usage WHERE state IN ('UNKNOWN','RESERVED') "
@@ -141,8 +191,33 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
                     "window_id": approval.window_id,
                     "budget_journal_id": approval.budget_journal_id,
                     "budget_journal_path": str(Path(paid.journal_path).resolve())}
-        if (binding and json.loads(binding["value"]) != expected) or (not binding and not opening):
+        if approval.handoff:
+            expected.update(identity_sha256=approval.handoff.identity_sha256,
+                            protocol_epoch=approval.handoff.protocol_epoch,
+                            handoff_sha256=paid_budget.sha(approval.handoff.model_dump(mode="json")))
+        lifecycle = custody["lifecycle"]
+        prepared = bool(lifecycle and lifecycle["state"] == "PREPARED" and opening
+                        and lifecycle["plan_sha256"] == approval.plan_sha256 and approval.handoff)
+        if prepared:
+            predecessor = _meta(store, HISTORY + approval.handoff.predecessor_plan_sha256)
+            if (not predecessor or predecessor["state"] != "RETIRED" or not binding
+                or predecessor["binding"] != json.loads(binding["value"])
+                or predecessor["successor_plan_sha256"] != approval.plan_sha256):
+                raise CoreError("LIVE_TEXT_HANDOFF_PREDECESSOR_CHANGED", 409)
+        if not preparing and lifecycle and (
+            lifecycle["plan_sha256"] != approval.plan_sha256
+            or (lifecycle["state"] != "OPEN" and not prepared)
+        ):
+            raise CoreError("LIVE_TEXT_HANDOFF_NOT_OPEN", 409)
+        if not preparing and (
+            (binding and json.loads(binding["value"]) != expected and not prepared)
+            or (not binding and (not opening or lifecycle))
+        ):
             raise CoreError("LIVE_TEXT_BINDING_OR_PRIVACY_CHANGED", 503)
+        if not preparing and lifecycle:
+            history = _meta(store, HISTORY + approval.plan_sha256)
+            if not history or history["state"] != lifecycle["state"]:
+                raise CoreError("LIVE_TEXT_LIFECYCLE_MISMATCH", 503)
         attempts = store.one(
             "SELECT COUNT(*) AS n FROM model_admissions WHERE window_id=?", (paid.window_id,)
         )["n"]
@@ -173,16 +248,163 @@ def open_window(store, settings, clock, reference):
         approval, binding, attempts = guard(store, settings, clock, opening=True)
         if reference.window_sha256 != approval.plan_sha256:
             raise CoreError("LIVE_TEXT_WINDOW_MISMATCH", 403)
-        if not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (BINDING,)):
-            if attempts or store.one(
-                "SELECT 1 FROM jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1"
-            ) or store.one(
-                "SELECT 1 FROM outbox WHERE state IN "
-                "('PENDING','LEASED','SENDING','RETRY_WAIT','DELIVERY_UNCERTAIN') LIMIT 1"
-            ):
+        history = _meta(store, HISTORY + approval.plan_sha256)
+        receipt = getattr(reference, "handoff_receipt", None)
+        if approval.handoff:
+            if not history or not receipt:
+                raise CoreError("LIVE_TEXT_HANDOFF_RECEIPT_REQUIRED", 403)
+            predecessor = _meta(store, HISTORY + approval.handoff.predecessor_plan_sha256)
+            _handoff_custody(store, settings, approval, predecessor["binding"])
+            _verify_handoff_receipt(approval, history, receipt)
+            if history["state"] == "OPEN":
+                if history["bridge_receipt_sha256"] != paid_budget.sha(
+                    receipt.model_dump(mode="json")
+                ):
+                    raise CoreError("LIVE_TEXT_HANDOFF_RECEIPT_CHANGED", 409)
+                return status(store, settings, clock)
+        elif receipt:
+            raise CoreError("LIVE_TEXT_UNEXPECTED_HANDOFF_RECEIPT", 403)
+        if not history or history["state"] != "OPEN":
+            _idle(store)
+            if attempts:
                 raise CoreError("LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO", 409)
-            store.insert("runtime_meta", key=BINDING, value=encode(binding))
+            paid_budget.journal(store, settings.paid_model, {
+                "kind": "window_open", "window_id": approval.window_id,
+                "plan_sha256": approval.plan_sha256,
+                "handoff_sha256": binding.get("handoff_sha256"),
+            })
+            _put(store, BINDING, binding)
+            history = {**(history or {}), "state": "OPEN", "binding": binding,
+                       "approval": approval.model_dump(mode="json")}
+            if receipt:
+                history["bridge_receipt_sha256"] = paid_budget.sha(receipt.model_dump(mode="json"))
+            _put(store, HISTORY + approval.plan_sha256, history)
     return status(store, settings, clock)
+
+
+def _idle(store):
+    if (
+        store.one("SELECT 1 FROM model_usage WHERE state!='SETTLED' LIMIT 1")
+        or any(store.one(f"SELECT 1 FROM {table} WHERE state NOT IN ({states}) LIMIT 1")
+               for table, states in (
+                   ("jobs", "'SUCCEEDED','FAILED','CANCELLED'"),
+                   ("outbox", "'SENT','FAILED','CANCELLED'"),
+                   ("tool_tasks", "'SUCCEEDED','FAILED','CANCELLED'"),
+               ))
+    ):
+        raise CoreError("LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO", 409)
+
+
+def _handoff_custody(store, settings, approval, old):
+    scope = approval.handoff
+    owner = store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+    if (
+        not owner or owner["value"] != settings.owner_qq_id
+        or scope.identity_sha256 != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
+        or old.get("identity_sha256", scope.identity_sha256) != scope.identity_sha256
+        or old.get("protocol_epoch", scope.protocol_epoch) != scope.protocol_epoch
+        or scope.privacy_epoch != epoch(store) or old["privacy_epoch"] > scope.privacy_epoch
+        or old["budget_journal_id"] != approval.budget_journal_id
+        or old["budget_journal_path"] != str(Path(settings.paid_model.journal_path).resolve())
+    ):
+        raise CoreError("LIVE_TEXT_HANDOFF_CUSTODY_CHANGED", 409)
+    ledger = ErasureLedger(settings.erasure_ledger)
+    raw = ledger.path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != scope.erasure_ledger_sha256:
+        raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
+    records = ledger.read()
+    ledger_id = store.one("SELECT value FROM runtime_meta WHERE key='ledger_id'")
+    if not ledger_id or ledger_id["value"] != records[0]["ledger_id"]:
+        raise CoreError("ERASURE_LEDGER_MISMATCH", 503)
+    applied = {row["erasure_id"]: row for row in store.rows(
+        "SELECT erasure_id,state,restore_min_replay_version FROM privacy_erasure_ledger"
+    )}
+    if len(applied) != len(records) - 1 or any(
+        not (row := applied.get(record["erasure_id"])) or row["state"] != "COMPLETE"
+        or row["restore_min_replay_version"] != record["seq"] for record in records[1:]
+    ):
+        raise CoreError("ERASURE_REPLAY_REQUIRED", 503)
+    if ledger.path.read_bytes() != raw:
+        raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
+    for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?", (INPUT + "%",)):
+        value = json.loads(row["value"])
+        if value.get("window_sha256") != old["plan_sha256"]:
+            continue
+        capture = value.get("capture")
+        if not store.one("SELECT 1 FROM events WHERE event_id=?", (value["event_id"],)) or (
+            capture and (capture["identity_sha256"] != scope.identity_sha256
+                         or capture["protocol_epoch"] != scope.protocol_epoch)
+        ):
+            raise CoreError("LIVE_TEXT_HANDOFF_INPUT_UNRESOLVED", 409)
+
+
+def prepare_handoff(store, settings, clock, reference):
+    with store.transaction():
+        approval, binding, _ = guard(store, settings, clock, preparing=True)
+        scope = approval.handoff
+        if not scope or reference.window_sha256 != approval.plan_sha256:
+            raise CoreError("LIVE_TEXT_APPROVED_HANDOFF_REQUIRED", 403)
+        old = _meta(store, BINDING)
+        if not old or (old["window_id"], old["plan_sha256"]) != (
+            scope.predecessor_window_id, scope.predecessor_plan_sha256
+        ):
+            raise CoreError("LIVE_TEXT_HANDOFF_PREDECESSOR_CHANGED", 409)
+        _idle(store)
+        _handoff_custody(store, settings, approval, old)
+        existing = _meta(store, HISTORY + approval.plan_sha256)
+        custody = paid_budget.journal(store, settings.paid_model, allow_settlement=True)
+        if existing:
+            if (existing["state"] != "PREPARED" or existing["binding"] != binding
+                or existing["approval"] != approval.model_dump(mode="json")
+                or custody["lifecycle"]["state"] != "PREPARED"):
+                raise CoreError("LIVE_TEXT_HANDOFF_ALREADY_USED", 409)
+            return existing["prepared_receipt"]
+        if store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?", (approval.window_id,)):
+            raise CoreError("LIVE_TEXT_HANDOFF_ALREADY_USED", 409)
+        lifecycle = custody["lifecycle"]
+        if (
+            not lifecycle or lifecycle["state"] != "STOPPED"
+            or lifecycle["plan_sha256"] != old["plan_sha256"]
+            or custody["head_sha256"] != scope.budget_journal_head_sha256
+        ):
+            raise CoreError("LIVE_TEXT_HANDOFF_STOP_REQUIRED", 409)
+        head = paid_budget.journal(store, settings.paid_model, {
+            "kind": "window_handoff", "window_id": approval.window_id,
+            "plan_sha256": approval.plan_sha256, "handoff_sha256": binding["handoff_sha256"],
+            "predecessor_window_id": old["window_id"],
+            "predecessor_plan_sha256": old["plan_sha256"],
+        }, allow_settlement=True)["head_sha256"]
+        receipt = {"state": "PREPARED", "window_sha256": approval.plan_sha256,
+                   "predecessor_window_sha256": old["plan_sha256"],
+                   "handoff_sha256": binding["handoff_sha256"],
+                   "budget_journal_head_sha256": head, "privacy_epoch": scope.privacy_epoch,
+                   "erasure_ledger_sha256": scope.erasure_ledger_sha256}
+        legacy = store.one("SELECT value FROM runtime_meta WHERE key='live_text_stopped'")
+        if legacy and not _meta(store, LEGACY_STOP):
+            _put(store, LEGACY_STOP, {"plan_sha256": old["plan_sha256"], **legacy})
+        previous = _meta(store, HISTORY + old["plan_sha256"]) or {"binding": old}
+        _put(store, HISTORY + old["plan_sha256"], {**previous, "state": "RETIRED",
+             "successor_plan_sha256": approval.plan_sha256})
+        _put(store, HISTORY + approval.plan_sha256, {"state": "PREPARED", "binding": binding,
+             "approval": approval.model_dump(mode="json"), "prepared_receipt": receipt})
+        return receipt
+
+
+def _verify_handoff_receipt(approval, history, receipt):
+    value = receipt.model_dump(mode="json", exclude={"signature"})
+    if (
+        value["window_sha256"] != approval.plan_sha256
+        or value["predecessor_window_sha256"] != approval.handoff.predecessor_plan_sha256
+        or value["handoff_sha256"] != paid_budget.sha(approval.handoff.model_dump(mode="json"))
+        or value["core_receipt_sha256"] != paid_budget.sha(history["prepared_receipt"])
+    ):
+        raise CoreError("LIVE_TEXT_HANDOFF_RECEIPT_CHANGED", 403)
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(approval.capture_public_key)).verify(
+            bytes.fromhex(receipt.signature), HANDOFF_SIGNATURE_DOMAIN + encode(value).encode()
+        )
+    except (ValueError, InvalidSignature):
+        raise CoreError("LIVE_TEXT_HANDOFF_SIGNATURE_REQUIRED", 403) from None
 
 
 def approve_input(store, settings, clock, body):
@@ -236,8 +458,11 @@ def approve_input(store, settings, clock, body):
         else:
             if store.one("SELECT 1 FROM events WHERE event_id=?", (body.event_id,)):
                 raise CoreError("LIVE_TEXT_HISTORICAL_INPUT_REFUSED", 409)
-            count = store.one("SELECT COUNT(*) AS n FROM runtime_meta WHERE key LIKE ?",
-                              (INPUT + "%",))["n"]
+            count = store.one(
+                "SELECT COUNT(*) AS n FROM runtime_meta WHERE key LIKE ? "
+                "AND json_extract(value,'$.window_sha256')=?",
+                (INPUT + "%", approval.plan_sha256),
+            )["n"]
             if count >= approval.max_inputs or attempts >= approval.max_model_attempts:
                 raise CoreError("LIVE_TEXT_INPUT_OR_MODEL_CAP", 429)
             if store.one(
@@ -262,7 +487,10 @@ def check_input(store, settings, clock, event):
     ):
         raise CoreError("LIVE_TEXT_ORDINARY_OWNER_TEXT_REQUIRED", 403)
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event.event_id,))
-    if not receipt or json.loads(receipt["value"])["input_sha256"] != paid_budget.sha(text):
+    value = json.loads(receipt["value"]) if receipt else {}
+    if (value.get("window_sha256") != approval.plan_sha256
+        or value.get("privacy_epoch") != epoch(store)
+        or value.get("input_sha256") != paid_budget.sha(text)):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 403)
     capture = json.loads(receipt["value"]).get("capture")
     if capture and (
@@ -279,7 +507,10 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
     )
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + job["event_id"],))
     event = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
-    if not event or event["redacted"] or not receipt or job["kind"] != "chat":
+    value = json.loads(receipt["value"]) if receipt else {}
+    if (not event or event["redacted"] or job["kind"] != "chat"
+        or value.get("window_sha256") != approval.plan_sha256
+        or value.get("privacy_epoch") != epoch(store)):
         raise CoreError("LIVE_TEXT_APPROVED_JOB_REQUIRED", 403)
     text = json.loads(event["body_json"])["text"]
     if text.strip().startswith("/") or paid_budget.sha(text) != json.loads(
@@ -530,22 +761,40 @@ def send_check(store, settings, clock, body):
 def stop_window(store, reference):
     # Revocation must remain possible after expiry, approval removal or code drift.
     with store.transaction():
-        binding = store.one("SELECT value FROM runtime_meta WHERE key=?", (BINDING,))
-        if not binding or json.loads(binding["value"])["plan_sha256"] != reference.window_sha256:
+        history = _meta(store, HISTORY + reference.window_sha256)
+        binding = _meta(store, BINDING)
+        if history and history["state"] in {"STOPPED", "RETIRED"}:
+            # Idempotent old STOP cannot alter the successor's journal or pointer.
+            current = paid_budget.journal(store, SimpleNamespace(
+                journal_path=history["binding"]["budget_journal_path"]
+            ), allow_settlement=True)["lifecycle"]
+            if not current or (current["plan_sha256"] == reference.window_sha256
+                               and current["state"] != "STOPPED"):
+                raise CoreError("LIVE_TEXT_LIFECYCLE_MISMATCH", 503)
+            return {"stopped": True}
+        if history and history["state"] == "PREPARED":
+            binding = history["binding"]
+        if not binding or binding["plan_sha256"] != reference.window_sha256:
             raise CoreError("LIVE_TEXT_WINDOW_MISMATCH", 403)
-        frozen = json.loads(binding["value"])
+        frozen = binding
         identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not identity or identity["value"] != frozen["budget_journal_id"]:
             raise CoreError("LIVE_TEXT_BUDGET_JOURNAL_CHANGED", 503)
         # Fsync the stop outside the DB's failure domain before acknowledging it.
         # Existing in-flight settlements can still record known costs, but this
         # record permanently fences new admission even if an old DB loses its flag.
-        paid_budget.journal(
-            store, SimpleNamespace(journal_path=frozen["budget_journal_path"]),
-            {"kind": "window_stop", "window_id": frozen["window_id"],
-             "plan_sha256": reference.window_sha256}, allow_settlement=True,
-        )
+        custody = SimpleNamespace(journal_path=frozen["budget_journal_path"])
+        current = paid_budget.journal(store, custody, allow_settlement=True)["lifecycle"]
+        if not current or current["state"] != "STOPPED":
+            paid_budget.journal(
+                store, custody, {"kind": "window_stop", "window_id": frozen["window_id"],
+                                 "plan_sha256": reference.window_sha256}, allow_settlement=True,
+            )
+        store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+                      (STOP + reference.window_sha256, "OWNER_STOP"))
         store.execute(
-            "INSERT OR REPLACE INTO runtime_meta VALUES ('live_text_stopped','OWNER_STOP')"
+            "INSERT OR IGNORE INTO runtime_meta VALUES ('live_text_stopped','OWNER_STOP')"
         )
+        _put(store, HISTORY + reference.window_sha256,
+             {**(history or {}), "binding": frozen, "state": "STOPPED"})
     return {"stopped": True}

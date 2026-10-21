@@ -80,6 +80,21 @@ class PaidModelApproval(BaseModel):
         return self
 
 
+class LiveTextHandoff(BaseModel):
+    """Approved predecessor custody, never supplied by the HTTP caller."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    predecessor_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    predecessor_window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
+    budget_journal_head_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bridge_journal_head_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    identity_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    protocol_epoch: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+    privacy_epoch: int = Field(strict=True, ge=0)
+    erasure_ledger_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class LiveTextWindowApproval(BaseModel):
     """Separate private approval for one closed-by-default text-only experiment."""
 
@@ -106,9 +121,17 @@ class LiveTextWindowApproval(BaseModel):
     history_scope: Literal["none", "approved_window"] = "none"
     max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
+    handoff: LiveTextHandoff | None = None
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if self.handoff and (
+            not self.capture_public_key
+            or self.handoff.predecessor_window_id == self.window_id
+            or self.handoff.predecessor_plan_sha256 == self.plan_sha256
+            or self.handoff.evidence_sha256 != self.approval_sha256
+        ):
+            raise ValueError("distinct explicitly approved authenticated handoff required")
         if (self.history_scope == "none" and (
             self.max_history_turns or self.max_history_utf8_bytes
         )) or (self.history_scope == "approved_window" and not (

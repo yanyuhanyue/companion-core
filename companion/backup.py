@@ -60,7 +60,10 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
-                if store.one("SELECT 1 FROM model_admissions LIMIT 1"):
+                if store.one("SELECT 1 FROM model_admissions LIMIT 1") or store.one(
+                    "SELECT 1 FROM runtime_meta WHERE key IN "
+                    "('live_text_window','model_budget_live_lifecycle') LIMIT 1"
+                ):
                     store.execute(
                         "INSERT OR REPLACE INTO runtime_meta VALUES "
                         "('model_budget_restore_required','1')"

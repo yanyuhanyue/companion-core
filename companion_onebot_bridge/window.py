@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from .event_normalizer import decode, normalize
 from .network import checked_http_client, private_http_client, private_request_matches
@@ -26,6 +27,7 @@ from .spool import Spool, encode
 
 SHA = re.compile(r"[a-f0-9]{64}")
 ACTIVE = {"PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN"}
+HANDOFF_DOMAIN = b"companion-core/window-handoff/v1\x00"
 
 
 def digest(value):
@@ -51,13 +53,33 @@ def private_json(path, max_bytes=65536):
     return decode(target.read_bytes(), max_bytes)
 
 
-def request_stop(directory):
+def stop_path(directory, value, plan_hash):
+    return Path(directory) / (
+        f"window-{plan_hash}.stop" if value.get("live_text", {}).get("handoff") else "window.stop"
+    )
+
+
+def request_stop(directory, *, plan=None):
     directory = Path(directory)
     if directory.is_symlink() or not directory.is_dir() or (
         os.name != "nt" and directory.stat().st_mode & 0o077
     ):
         raise ValueError("PRIVATE_DATA_DIRECTORY_REQUIRED")
-    path = directory / "window.stop"
+    if plan is None:
+        # A WAL reader does not need the receiver's OS-held Spool lock.
+        database = directory / "spool.sqlite3"
+        if database.is_symlink() or not database.is_file():
+            raise ValueError("WINDOW_NOT_FOUND")
+        with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=1) as db:
+            row = db.execute(
+                "SELECT plan_hash,plan_json FROM test_window WHERE singleton=1"
+            ).fetchone()
+        if not row or digest(value := json.loads(row[1])) != row[0]:
+            raise ValueError("WINDOW_PLAN_MISMATCH")
+        plan_hash = row[0]
+    else:
+        value, plan_hash = plan.value, plan.sha256
+    path = stop_path(directory, value, plan_hash)
     try:
         descriptor = os.open(
             path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
@@ -103,6 +125,17 @@ def counts(rows):
             raise ValueError("INVALID_CORE_COUNTS")
         result[row["state"]] = row["count"]
     return result
+
+
+def stored_plan(encoded, config):
+    """Read retired authority without re-authorizing its expired configuration."""
+    plan = object.__new__(WindowPlan)
+    plan.value, plan.config = json.loads(encoded), config
+    plan.sha256 = digest(plan.value)
+    plan.mode = plan.value.get("mode", "demo")
+    plan.journal = Path(plan.value["journal_path"])
+    plan.start, plan.end = instant(plan.value["starts_at"]), instant(plan.value["ends_at"])
+    return plan
 
 
 class WindowPlan:
@@ -156,6 +189,7 @@ class WindowPlan:
                 "max_model_attempts", "max_input_chars", "max_reply_chars",
                 "capture_public_key",
                 "history_scope", "max_history_turns", "max_history_utf8_bytes",
+                "handoff",
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
                 raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
@@ -164,6 +198,23 @@ class WindowPlan:
                 for k in expected_scope if k.endswith("_sha256")
             ):
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
+            handoff = scope["handoff"]
+            if handoff is not None and (
+                not isinstance(handoff, dict) or set(handoff) != {
+                    "predecessor_plan_sha256", "predecessor_window_id",
+                    "budget_journal_head_sha256", "bridge_journal_head_sha256",
+                    "identity_sha256", "protocol_epoch", "privacy_epoch",
+                    "erasure_ledger_sha256", "evidence_sha256",
+                }
+                or any(not isinstance(handoff[key], str) or not SHA.fullmatch(handoff[key])
+                       for key in handoff if key.endswith("_sha256"))
+                or not re.fullmatch(r"win_[a-f0-9]{32}", handoff["predecessor_window_id"])
+                or type(handoff["privacy_epoch"]) is not int or handoff["privacy_epoch"] < 0
+                or handoff["identity_sha256"] != value["identity_sha256"]
+                or handoff["protocol_epoch"] != value["protocol_epoch"]
+                or not config.capture_signing_key
+            ):
+                raise ValueError("INVALID_WINDOW_HANDOFF")
             if (
                 scope["history_scope"] not in ("none", "approved_window")
                 or type(scope["max_history_turns"]) is not int
@@ -286,11 +337,12 @@ class TestWindow:
 
     def __init__(self, spool, plan, *, clock=None):
         self.spool, self.db, self.plan = spool, spool.db, plan
+        self.db.row_factory = sqlite3.Row
         self.clock = clock or (lambda: datetime.now(UTC))
         self.busy = False
         self.model_attempts = None
         self.core_stop_ack = False
-        self.stop_path = spool.directory / "window.stop"
+        self.stop_path = stop_path(spool.directory, plan.value, plan.sha256)
 
     def row(self):
         self.db.row_factory = sqlite3.Row
@@ -298,6 +350,82 @@ class TestWindow:
         if not row or row["plan_hash"] != self.plan.sha256:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
         return row
+
+    def ensure_schema(self):
+        # Legacy ownership is assigned only after the current plan and journal match.
+        # New inserts are explicit; event/message uniqueness remains global.
+        missing = []
+        for table in ("window_inputs", "window_attempts"):
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            if not columns:
+                raise ValueError("WINDOW_SCHEMA_MISSING")
+            if "plan_hash" not in columns:
+                missing.append(table)
+        history = self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='window_history'"
+        ).fetchone()
+        if not missing and history:
+            return
+        if self.db.execute("SELECT COUNT(*) FROM test_window").fetchone()[0] != 1:
+            raise ValueError("WINDOW_SCHEMA_AMBIGUOUS")
+        self.db.execute("SAVEPOINT window_ownership")
+        try:
+            for table in missing:
+                self.db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN plan_hash TEXT NOT NULL "
+                    f"DEFAULT '{self.plan.sha256}'"
+                )
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS window_history(plan_hash TEXT PRIMARY KEY,"
+                "record_json TEXT NOT NULL,retirement_head TEXT NOT NULL,"
+                "successor_hash TEXT NOT NULL)"
+            )
+        except BaseException:
+            self.db.execute("ROLLBACK TO window_ownership")
+            raise
+        finally:
+            self.db.execute("RELEASE window_ownership")
+
+    def count(self, table, condition="1=1"):
+        if table not in {"window_inputs", "window_attempts"}:
+            raise ValueError("INVALID_WINDOW_TABLE")
+        return self.db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE plan_hash=? AND ({condition})",
+            (self.plan.sha256,),
+        ).fetchone()[0]
+
+    def verify_history(self, records):
+        plan, journal = self.plan, records
+        seen = set()
+        while scope := plan.value.get("live_text", {}).get("handoff"):
+            predecessor = scope["predecessor_plan_sha256"]
+            if predecessor in seen:
+                raise ValueError("WINDOW_HISTORY_MISMATCH")
+            seen.add(predecessor)
+            saved = self.db.execute(
+                "SELECT * FROM window_history WHERE plan_hash=?", (predecessor,)
+            ).fetchone()
+            if not saved or saved["successor_hash"] != plan.sha256:
+                raise ValueError("WINDOW_HISTORY_MISMATCH")
+            snapshot = json.loads(saved["record_json"])
+            old = stored_plan(snapshot["plan_json"], self.plan.config)
+            old_records, old_head = TestWindow(self.spool, old, clock=self.clock).read_journal()
+            if (
+                old.sha256 != predecessor or old_head != saved["retirement_head"]
+                or not old_records or old_records[-1]["kind"] != "RETIRED"
+                or old_records[-1]["data"].get("snapshot_sha256") != digest(snapshot)
+                or old_records[-1]["data"].get("successor_window_sha256") != plan.sha256
+                or not journal or journal[0]["kind"] != "HANDOFF_PREPARED"
+                or journal[0]["data"].get("retirement_head") != old_head
+                or journal[0]["data"].get("predecessor_window_sha256") != predecessor
+                or journal[0]["data"].get("handoff_sha256") != digest(scope)
+            ):
+                raise ValueError("WINDOW_HISTORY_MISMATCH")
+            marker = stop_path(self.spool.directory, old.value, old.sha256)
+            if (marker.is_symlink() or not marker.is_file()
+                    or marker.read_bytes() != b"OWNER_STOP\n"):
+                raise ValueError("WINDOW_STOP_EVIDENCE_MISSING")
+            plan, journal = old, old_records
 
     def verify(self, *, active=True, dispatch=False, capture_fence=None):
         if digest(self.plan.value) != self.plan.sha256:
@@ -315,6 +443,8 @@ class TestWindow:
         records, head = self.read_journal()
         if not records or head != row["journal_head"]:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
+        self.ensure_schema()
+        self.verify_history(records)
         if active:
             capturing = (capture_fence is not None and row["state"] == "CAPTURING"
                          and row["fence"] == capture_fence)
@@ -322,9 +452,7 @@ class TestWindow:
                 raise ValueError("CAPTURE_RECONCILIATION_REQUIRED")
             if row["state"] != "OPEN" and not capturing:
                 raise ValueError("WINDOW_STOPPED")
-            unknown = self.db.execute(
-                "SELECT 1 FROM window_attempts WHERE state!='ACK' LIMIT 1"
-            ).fetchone()
+            unknown = self.count("window_attempts", "state!='ACK'")
             if unknown:
                 raise ValueError("WINDOW_ATTEMPT_RECONCILIATION_REQUIRED")
             if not self.plan.start <= self.clock() < self.plan.end:
@@ -426,9 +554,7 @@ class TestWindow:
                 raise ValueError("INITIAL_PENDING_MUST_BE_ZERO")
         else:
             baseline = json.loads(self.row()["initial_counts"])
-            acked = self.db.execute(
-                "SELECT COUNT(*) FROM window_attempts WHERE state='ACK'"
-            ).fetchone()[0]
+            acked = self.count("window_attempts", "state='ACK'")
             for state in ("SENT", "FAILED", "CANCELLED"):
                 if deliveries.get(state, 0) != baseline.get(state, 0) + (
                     acked if state == "SENT" else 0
@@ -492,15 +618,214 @@ class TestWindow:
         await self.stop_core(client)
         return self.status()
 
-    async def open(self, client):
-        if self.stop_path.exists():
+    def check_opening(self):
+        if digest(self.plan.value) != self.plan.sha256:
+            raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
+        if digest(asdict(self.plan.config)) != self.plan.value["config_sha256"] or (
+            self.plan.mode == "live_text"
+            and self.plan.value["live_text"]["bridge_code_sha256"] != bridge_code_sha256()
+        ):
+            raise ValueError("LIVE_TEXT_RUNTIME_CHANGED")
+        if self.stop_path.exists() or self.stop_path.is_symlink():
             raise ValueError("WINDOW_STOPPED")
-        if self.plan.journal.exists() or self.plan.journal.is_symlink():
-            raise ValueError("WINDOW_ALREADY_REGISTERED")
-        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
-            raise ValueError("WINDOW_ALREADY_REGISTERED")
+        # All runtime/file checks precede the final clock sample. The probe's
+        # transport calls this after every request hook, including DNS pinning.
         if not self.plan.start <= self.clock() < self.plan.end:
             raise ValueError("WINDOW_OUTSIDE_INTERVAL")
+
+    async def probe(self, protocol):
+        if (
+            str(protocol.base_url).rstrip("/") != self.plan.config.onebot_http_url.rstrip("/")
+            or protocol.headers.get("Authorization") != "Bearer " + self.plan.config.onebot_token
+        ):
+            raise ValueError("LIVE_TEXT_ONEBOT_ENDPOINT_CHANGED")
+
+        async def boundary(request):
+            check_protocol_request(self, request)
+            content = request.content
+            if request.url.path == "/send_private_msg" or decode(content, 64) != {}:
+                raise ValueError("WINDOW_PROBE_CHANGED")
+            self.check_opening()
+            seal_protocol_content(request, content)
+
+        async with checked_http_client(protocol, boundary) as scoped:
+            if not (await OneBotClient(self.plan.config, scoped).probe())["connection_ready"]:
+                raise ValueError("ONEBOT_NOT_READY")
+
+    async def handoff(self, client):
+        scope = self.plan.value.get("live_text", {}).get("handoff")
+        if self.plan.mode != "live_text" or not scope:
+            raise ValueError("WINDOW_HANDOFF_APPROVAL_REQUIRED")
+        if digest(self.plan.value) != self.plan.sha256 or (
+            digest(asdict(self.plan.config)) != self.plan.value["config_sha256"]
+            or self.plan.value["live_text"]["bridge_code_sha256"] != bridge_code_sha256()
+        ):
+            raise ValueError("LIVE_TEXT_RUNTIME_CHANGED")
+        current = self.db.execute("SELECT * FROM test_window WHERE singleton=1").fetchone()
+        if not current:
+            raise ValueError("WINDOW_NOT_FOUND")
+        old = TestWindow(self.spool, stored_plan(current["plan_json"], self.plan.config),
+                         clock=self.clock)
+        source = old.verify(active=False)
+        records, head = old.read_journal()
+        capturing = False
+        for record in records:
+            if record["kind"] == "CAPTURE_STARTED":
+                capturing = True
+            elif record["kind"] in {"CAPTURED", "CAPTURE_DUPLICATE"}:
+                capturing = False
+            elif record["kind"] == "STOP" and record["data"].get("reason") == (
+                "CAPTURE_FAILED_CLOSED"
+            ):
+                # The exclusive receiver exited its WS context before persisting
+                # this terminal failure. A CAPTURED-fsync/DB crash instead leaves
+                # a mismatching head (already refused), or an unresolved input.
+                capturing = False
+        if (
+            source["state"] != "STOPPED" or old.plan.mode != "live_text"
+            or scope["predecessor_plan_sha256"] != old.plan.sha256
+            or scope["predecessor_window_id"] != old.plan.value["window_id"]
+            or scope["bridge_journal_head_sha256"] != head
+            or scope["identity_sha256"] != old.plan.value["identity_sha256"]
+            or scope["protocol_epoch"] != old.plan.value["protocol_epoch"]
+            or self.plan.value["live_text"]["budget_journal_id"]
+            != old.plan.value["live_text"]["budget_journal_id"]
+            or self.plan.value["window_id"] == old.plan.value["window_id"]
+            or self.plan.journal == old.plan.journal or self.plan.journal.exists()
+            or self.plan.journal.is_symlink() or self.stop_path.exists()
+            or not self.plan.start <= self.clock() < self.plan.end
+        ):
+            raise ValueError("WINDOW_HANDOFF_SOURCE_MISMATCH")
+        if capturing:
+            raise ValueError("CAPTURE_RECONCILIATION_REQUIRED")
+        if not any(record["kind"] == "CORE_STOP_CONFIRMED" for record in records):
+            raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED")
+        identity = self.db.execute("SELECT value FROM identity").fetchall()
+        if len(identity) != 1 or identity[0][0] != encode([
+            self.plan.config.owner_qq_id, self.plan.config.bot_qq_id,
+            self.plan.config.origin, self.plan.config.protocol_epoch,
+        ]):
+            raise ValueError("BRIDGE_IDENTITY_CHANGED")
+        if self.db.execute("SELECT 1 FROM window_history WHERE plan_hash=?", (
+            self.plan.sha256,
+        )).fetchone() or any(
+            json.loads(json.loads(row[0])["plan_json"])[
+                "window_id"
+            ] == self.plan.value["window_id"]
+            for row in self.db.execute("SELECT record_json FROM window_history")
+        ):
+            raise ValueError("WINDOW_ALREADY_REGISTERED")
+        old.check_spool()
+        if self.db.execute("SELECT 1 FROM window_inputs WHERE state!='ACK' LIMIT 1").fetchone() or (
+            self.db.execute("SELECT 1 FROM window_attempts WHERE state!='ACK' LIMIT 1").fetchone()
+        ) or self.db.execute(
+            "SELECT 1 FROM results WHERE state!='accepted' "
+            "OR json_extract(body,'$.result')!='SENT' LIMIT 1"
+        ).fetchone():
+            raise ValueError("WINDOW_HANDOFF_RECONCILIATION_REQUIRED")
+        if (
+            old.stop_path.is_symlink() or not old.stop_path.is_file()
+            or old.stop_path.read_bytes() != b"OWNER_STOP\n"
+        ):
+            raise ValueError("WINDOW_STOP_EVIDENCE_MISSING")
+        snapshot = dict(source)
+        # Close locally BEFORE crossing HTTP. A lost acknowledgment is never an
+        # invitation to retry another successor or refill the old allowance.
+        requested = old.append("HANDOFF_REQUESTED", {
+            "successor_window_sha256": self.plan.sha256, "handoff_sha256": digest(scope),
+        })
+        with self.db:
+            self.db.execute("UPDATE test_window SET state='HANDOFF_UNCONFIRMED',journal_head=?",
+                            (requested,))
+        result = await self.core_post(client, "/internal/v1/live-text/handoff", {
+            "window_sha256": self.plan.sha256,
+        })
+        if (
+            not isinstance(result, dict) or set(result) != {
+                "state", "window_sha256", "predecessor_window_sha256", "handoff_sha256",
+                "budget_journal_head_sha256", "privacy_epoch", "erasure_ledger_sha256",
+            }
+            or result["state"] != "PREPARED" or result["window_sha256"] != self.plan.sha256
+            or result["predecessor_window_sha256"] != old.plan.sha256
+            or result["handoff_sha256"] != digest(scope)
+            or result["privacy_epoch"] != scope["privacy_epoch"]
+            or result["erasure_ledger_sha256"] != scope["erasure_ledger_sha256"]
+            or not isinstance(result["budget_journal_head_sha256"], str)
+            or not SHA.fullmatch(result["budget_journal_head_sha256"])
+        ):
+            raise ValueError("WINDOW_HANDOFF_CORE_UNCONFIRMED")
+        closed = old.verify(active=False)
+        if closed["state"] != "HANDOFF_UNCONFIRMED" or closed["journal_head"] != requested:
+            raise ValueError("WINDOW_HANDOFF_SOURCE_MISMATCH")
+        old.check_spool()
+        retired = old.append("RETIRED", {
+            "snapshot_sha256": digest(snapshot), "successor_window_sha256": self.plan.sha256,
+            "core_receipt_sha256": digest(result), "handoff_sha256": digest(scope),
+        })
+        prepared = self.append("HANDOFF_PREPARED", {
+            "predecessor_window_sha256": old.plan.sha256, "retirement_head": retired,
+            "core_receipt": result, "handoff_sha256": digest(scope),
+        }, create=True)
+        with self.db:
+            self.db.execute("INSERT INTO window_history VALUES(?,?,?,?)", (
+                old.plan.sha256, encode(snapshot), retired, self.plan.sha256,
+            ))
+            self.db.execute(
+                "UPDATE test_window SET plan_hash=?,plan_json=?,journal_head=?,state='PREPARED',"
+                "fence=0,initial_counts='{}',initial_inbox_rowid=?,reason=NULL", (
+                    self.plan.sha256, encode(self.plan.value), prepared,
+                    self.db.execute("SELECT COALESCE(MAX(rowid),0) FROM inbox").fetchone()[0],
+                ),
+            )
+        return self.status()
+
+    async def open_successor(self, client):
+        row = self.verify(active=False)
+        records, head = self.read_journal()
+        if row["state"] != "PREPARED" or len(records) != 1:
+            raise ValueError("WINDOW_HANDOFF_NOT_PREPARED")
+        data = records[0]["data"]
+        receipt = {
+            "kind": "stopped_window_handoff", "window_sha256": self.plan.sha256,
+            "predecessor_window_sha256": data["predecessor_window_sha256"],
+            "handoff_sha256": data["handoff_sha256"],
+            "core_receipt_sha256": digest(data["core_receipt"]),
+            "bridge_journal_head_sha256": head,
+        }
+        receipt["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+            self.plan.config.capture_signing_key
+        )).sign(HANDOFF_DOMAIN + encode(receipt).encode()).hex()
+        requested = self.append("OPEN_REQUESTED", {"receipt_sha256": digest(receipt)})
+        with self.db:
+            self.db.execute("UPDATE test_window SET state='OPEN_UNCONFIRMED',journal_head=?",
+                            (requested,))
+        await self.core_post(client, "/internal/v1/live-text/open", {
+            "window_sha256": self.plan.sha256, "handoff_receipt": receipt,
+        })
+        baseline = await self.core_counts(client, initial=True)
+        self.verify(active=False)
+        if not self.plan.start <= self.clock() < self.plan.end or self.stop_path.exists():
+            raise ValueError("WINDOW_STOPPED")
+        head = self.append("OPEN", {"plan_sha256": self.plan.sha256})
+        with self.db:
+            self.db.execute("UPDATE test_window SET state='OPEN',journal_head=?,initial_counts=?",
+                            (head, encode(baseline)))
+        return self.status()
+
+    async def open(self, client, protocol=None):
+        self.check_opening()
+        successor = bool(self.plan.value.get("live_text", {}).get("handoff"))
+        if successor:
+            row = self.verify(active=False)
+            records, _ = self.read_journal()
+            if row["state"] != "PREPARED" or len(records) != 1:
+                raise ValueError("WINDOW_HANDOFF_NOT_PREPARED")
+        elif self.plan.journal.exists() or self.plan.journal.is_symlink() or self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='test_window'"
+        ).fetchone():
+            raise ValueError("WINDOW_ALREADY_REGISTERED")
+        if self.plan.value["execution"] == "approved_live" and protocol is None:
+            raise ValueError("ONEBOT_READINESS_REQUIRED")
         if (
             self.spool.pending_count
             or self.db.execute(
@@ -509,6 +834,11 @@ class TestWindow:
             ).fetchone()
         ):
             raise ValueError("INITIAL_SPOOL_MUST_BE_CONFIRMED")
+        if protocol is not None:
+            await self.probe(protocol)
+        self.check_opening()
+        if successor:
+            return await self.open_successor(client)
         if self.plan.mode == "live_text":
             self.check_core_client(client)
             await self.core_post(client, "/internal/v1/live-text/open", {
@@ -524,11 +854,15 @@ class TestWindow:
             "state TEXT NOT NULL,fence INTEGER NOT NULL,initial_counts TEXT NOT NULL,"
             "initial_inbox_rowid INTEGER NOT NULL,reason TEXT);"
             "CREATE TABLE window_inputs(event_id TEXT PRIMARY KEY,input_hash TEXT NOT NULL,"
-            "approval_hash TEXT NOT NULL,state TEXT NOT NULL,capture_json TEXT);"
+            "approval_hash TEXT NOT NULL,state TEXT NOT NULL,capture_json TEXT,"
+            "plan_hash TEXT NOT NULL);"
             "CREATE TABLE window_attempts(message_id TEXT PRIMARY KEY,"
             "event_id TEXT NOT NULL UNIQUE,"
             "fence INTEGER NOT NULL,state TEXT NOT NULL,text_hash TEXT NOT NULL,"
-            "approval_hash TEXT NOT NULL,provider_ack_hash TEXT,item_hash TEXT NOT NULL);"
+            "approval_hash TEXT NOT NULL,provider_ack_hash TEXT,item_hash TEXT NOT NULL,"
+            "plan_hash TEXT NOT NULL);"
+            "CREATE TABLE window_history(plan_hash TEXT PRIMARY KEY,record_json TEXT NOT NULL,"
+            "retirement_head TEXT NOT NULL,successor_hash TEXT NOT NULL);"
         )
         with self.db:
             self.db.execute(
@@ -546,14 +880,15 @@ class TestWindow:
     def status(self):
         row = self.verify(active=False)
         attempts = dict(
-            self.db.execute("SELECT state,COUNT(*) FROM window_attempts GROUP BY state").fetchall()
+            self.db.execute("SELECT state,COUNT(*) FROM window_attempts WHERE plan_hash=? "
+                            "GROUP BY state", (self.plan.sha256,)).fetchall()
         )
         result = {
             "state": row["state"],
             "reason": row["reason"],
             "plan_sha256": row["plan_hash"],
             "fence": row["fence"],
-            "new_inputs": self.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0],
+            "new_inputs": self.count("window_inputs"),
             "attempts_reserved": sum(attempts.values()),
             "attempt_states": attempts,
             "visible_replies_upper_bound": sum(attempts.values()),
@@ -576,6 +911,7 @@ class TestWindow:
 
     def stop(self, reason="OWNER_STOP"):
         self.verify(active=False)
+        request_stop(self.spool.directory, plan=self.plan)
         head = self.append("STOP", {"reason": reason})
         with self.db:
             self.db.execute(
@@ -593,8 +929,8 @@ class TestWindow:
             raise ValueError("SPOOL_RECONCILIATION_REQUIRED")
         if self.db.execute(
             "SELECT 1 FROM inbox i WHERE i.rowid>? AND NOT EXISTS "
-            "(SELECT 1 FROM window_inputs w WHERE w.event_id=i.key) LIMIT 1",
-            (row["initial_inbox_rowid"],),
+            "(SELECT 1 FROM window_inputs w WHERE w.event_id=i.key AND w.plan_hash=?) LIMIT 1",
+            (row["initial_inbox_rowid"], self.plan.sha256),
         ).fetchone():
             raise ValueError("UNAPPROVED_SPOOL_INPUT")
 
@@ -669,20 +1005,22 @@ class TestWindow:
         ):
             raise ValueError("INDIVIDUAL_INPUT_APPROVAL_REQUIRED")
         prior = self.db.execute(
-            "SELECT input_hash FROM window_inputs WHERE event_id=?", (event_id,)
+            "SELECT input_hash,plan_hash FROM window_inputs WHERE event_id=?", (event_id,)
         ).fetchone()
         if prior:
+            if prior["plan_hash"] != self.plan.sha256:
+                raise ValueError("HISTORICAL_INPUT_REFUSED")
             # Spool also checks full source fingerprint: same ID/time/text changes are conflicts.
             if prior[0] != text_hash:
                 raise ValueError("SOURCE_EVENT_CONFLICT")
             self.spool.put(event, digest({"message": raw["message"], "time": raw["time"]}))
             return self.status()
         if (
-            self.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0]
+            self.count("window_inputs")
             >= self.plan.value["max_new_inputs"]
         ):
             raise ValueError("WINDOW_INPUT_CAP")
-        if self.db.execute("SELECT 1 FROM window_inputs WHERE state!='ACK' LIMIT 1").fetchone():
+        if self.count("window_inputs", "state!='ACK'"):
             raise ValueError("ONE_INPUT_AT_A_TIME")
         if self.db.execute("SELECT 1 FROM inbox WHERE key=?", (event_id,)).fetchone():
             raise ValueError("HISTORICAL_INPUT_REFUSED")
@@ -701,8 +1039,8 @@ class TestWindow:
         with self.db:
             self.spool.put(event, digest({"message": raw["message"], "time": raw["time"]}))
             self.db.execute(
-                "INSERT INTO window_inputs VALUES(?,?,?,'APPROVED',NULL)",
-                (event_id, text_hash, digest(approval)),
+                "INSERT INTO window_inputs VALUES(?,?,?,'APPROVED',NULL,?)",
+                (event_id, text_hash, digest(approval), self.plan.sha256),
             )
             self.db.execute("UPDATE test_window SET journal_head=?", (head,))
         self.verify()
@@ -792,10 +1130,11 @@ class SendOperation:
         if len(item["content"]["text"]) > self.window.plan.value["max_reply_chars"]:
             raise ValueError("WINDOW_REPLY_TEXT_LIMIT")
         if not self.db.execute(
-            "SELECT 1 FROM window_inputs WHERE event_id=? AND state='APPROVED'", (event_id,)
+            "SELECT 1 FROM window_inputs WHERE event_id=? AND state='APPROVED' AND plan_hash=?",
+            (event_id, self.window.plan.sha256),
         ).fetchone():
             raise ValueError("UNAPPROVED_DELIVERY_INPUT")
-        attempts = self.db.execute("SELECT COUNT(*) FROM window_attempts").fetchone()[0]
+        attempts = self.window.count("window_attempts")
         if attempts >= min(
             self.window.plan.value["max_attempts"], self.window.plan.value["max_visible_replies"]
         ):
@@ -813,9 +1152,9 @@ class SendOperation:
         )
         with self.db:
             self.db.execute(
-                "INSERT INTO window_attempts VALUES(?,?,?,'RESERVED',?,?,NULL,?)",
+                "INSERT INTO window_attempts VALUES(?,?,?,'RESERVED',?,?,NULL,?,?)",
                 (item["message_id"], event_id, fence, expected["reply_sha256"], digest(approval),
-                 item_hash),
+                 item_hash, self.window.plan.sha256),
             )
             self.db.execute("UPDATE test_window SET fence=?,journal_head=?", (fence, head))
         self.current = (item["message_id"], fence)
@@ -833,7 +1172,8 @@ class SendOperation:
         ):
             raise ValueError("WINDOW_SEND_FENCED")
         attempt = self.db.execute(
-            "SELECT * FROM window_attempts WHERE message_id=? AND fence=?", self.current
+            "SELECT * FROM window_attempts WHERE message_id=? AND fence=? AND plan_hash=?",
+            (*self.current, self.window.plan.sha256),
         ).fetchone()
         if not attempt or attempt["state"] != "RESERVED" or attempt["text_hash"] != digest(text):
             raise ValueError("WINDOW_SEND_FENCED")
@@ -854,7 +1194,8 @@ class SendOperation:
         self.window.verify(active=False, dispatch=True)
         row = self.window.row()
         attempt = self.db.execute(
-            "SELECT * FROM window_attempts WHERE message_id=? AND fence=?", self.current
+            "SELECT * FROM window_attempts WHERE message_id=? AND fence=? AND plan_hash=?",
+            (*self.current, self.window.plan.sha256),
         ).fetchone()
         item = self.current_item
         lease_until = min(self.lease_until, datetime.fromisoformat(item["lease_until"]))
@@ -911,7 +1252,7 @@ class SendOperation:
             self.db.execute("UPDATE test_window SET journal_head=?", (head,))
         if not provider_id:
             self.window.stop("DELIVERY_UNCERTAIN")
-        elif self.db.execute("SELECT COUNT(*) FROM window_attempts").fetchone()[0] >= min(
+        elif self.window.count("window_attempts") >= min(
             self.window.plan.value["max_attempts"],
             self.window.plan.value["max_visible_replies"],
             self.window.plan.value["max_new_inputs"],
@@ -1010,10 +1351,7 @@ async def command(config, args):
                 raise ValueError("WINDOW_NOT_FOUND")
             value = json.loads(spool.db.execute("SELECT plan_json FROM test_window").fetchone()[0])
             # Stop/status performs no network I/O and does not require unexpired authorization.
-            plan = object.__new__(WindowPlan)
-            plan.value, plan.config, plan.sha256 = value, config, digest(value)
-            plan.mode = value.get("mode", "demo")
-            plan.journal = Path(value["journal_path"])
+            plan = stored_plan(encode(value), config)
             window = TestWindow(spool, plan)
             if args.command == "window-status":
                 return window.status()
@@ -1035,7 +1373,12 @@ async def command(config, args):
         window = TestWindow(spool, plan)
         async with private_http_client(config.core_url, config.bridge_token) as client:
             if args.command == "window-open":
-                return await window.open(client)
+                async with private_http_client(
+                    config.onebot_http_url, config.onebot_token
+                ) as protocol:
+                    return await window.open(client, protocol)
+            if args.command == "window-handoff":
+                return await window.handoff(client)
             if args.command == "window-ingest":
                 if args.event is None or args.approval is None:
                     raise ValueError("INPUT_AND_APPROVAL_REQUIRED")
