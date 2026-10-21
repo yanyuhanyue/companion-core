@@ -10,6 +10,10 @@ $env:TMP = $env:TEMP
 $env:UV_CACHE_DIR = Join-Path $taskRoot '.local/uv-cache'
 $env:PYTHONDONTWRITEBYTECODE = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+# Child scripts must import this checkout even when a worktree borrows a virtualenv.
+$env:PYTHONPATH = if ($env:PYTHONPATH) {
+    $taskRoot + [IO.Path]::PathSeparator + $env:PYTHONPATH
+} else { $taskRoot }
 try {
     & .venv/Scripts/python.exe -m ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
     if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
