@@ -1,7 +1,7 @@
-"""Local input proof and append-only durability extension for the existing usage ledger.
+"""Local token estimation and append-only custody for the existing usage ledger.
 
-No downloads and no provider I/O. A pinned tokenizer is useful only with an approved
-provider rendering contract; a local artifact alone does not prove remote framing.
+Estimates are planning inputs, not proof of remote tokenization or maximum charges.
+No tokenizer download, provider attestation or external account access is required.
 """
 
 import hashlib
@@ -11,8 +11,6 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-
-from tokenizers import Tokenizer
 
 from companion.contracts import CoreError
 from companion.store import encode, uid
@@ -24,7 +22,17 @@ def sha(value):
 
 def snapshot(settings):
     approval = settings.paid_model
-    value = approval.model_dump(mode="json", exclude={"tokenizer_path", "journal_path"})
+    value = approval.model_dump(mode="json", exclude={"journal_path"})
+    value["estimator"] = "utf8-third-v1"
+    value["local_monthly_micro_usd"] = settings.monthly_limit_micro_usd
+    value["scenario_daily_micro_usd"] = {
+        "memory_extract": settings.memory_daily_micro_usd,
+        "memory_review": settings.memory_daily_micro_usd,
+        "diary": settings.diary_daily_micro_usd,
+        "reflection": settings.reflection_daily_micro_usd,
+        "activity": settings.autonomous_daily_micro_usd,
+    }
+    value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(
         settings.model_key.get_secret_value().encode(),
@@ -35,9 +43,13 @@ def snapshot(settings):
 
 
 def contract(settings, now):
+    if settings.mode != "live":
+        raise CoreError("PAID_LIVE_MODE_REQUIRED", 503)
     approval = settings.paid_model
     if approval is None:
         raise CoreError("PAID_APPROVAL_REQUIRED", 503)
+    if not approval.live_approved:
+        raise CoreError("PAID_LIVE_OPT_IN_REQUIRED", 503)
     if not settings.model_key.get_secret_value():
         raise CoreError("PAID_MODEL_KEY_REQUIRED", 503)
     current = datetime.fromisoformat(now)
@@ -61,16 +73,15 @@ def contract(settings, now):
     return approval
 
 
-def input_bound(approval, messages, scenario):
+def estimate_input_tokens(approval, messages, scenario):
+    """Estimate text input locally, without claiming a provider-side token bound.
+
+    UTF-8 bytes / 3 approximates mixed Chinese/Latin text, with per-message and
+    structured-response overhead plus an explicit owner-configured safety margin.
+    Actual provider usage is the calibration signal; this is never an upper proof.
+    """
     try:
-        data = Path(approval.tokenizer_path).read_bytes()
-        if hashlib.sha256(data).hexdigest() != approval.tokenizer_sha256:
-            raise ValueError("hash")
-        tokenizer = Tokenizer.from_str(data.decode("utf-8"))
-        # Truncation would disguise input overflow; padding is not provider input proof.
-        if tokenizer.truncation is not None or tokenizer.padding is not None:
-            raise ValueError("tokenizer truncation/padding")
-        prompt = ""
+        estimate = 32
         for message in messages:
             if (
                 set(message) != {"role", "content"}
@@ -78,16 +89,12 @@ def input_bound(approval, messages, scenario):
                 or not isinstance(message["content"], str)
             ):
                 raise ValueError("unsupported message contract")
-            prompt += "<|im_start|>" + message["role"] + "\n" + message["content"] + "<|im_end|>\n"
+            estimate += 8 + (len(message["content"].encode("utf-8")) + 2) // 3
         if scenario in {"memory_review", "memory_extract", "diary", "reflection"}:
-            prompt += approval.structured_suffix
-        prompt += "<|im_start|>assistant\n"
-        count = len(tokenizer.encode(prompt, add_special_tokens=True).ids)
-        if not count:
-            raise ValueError("empty tokenizer result")
-        return count
-    except (OSError, ValueError, TypeError, KeyError, UnicodeError) as error:
-        raise CoreError("MODEL_INPUT_BOUND_UNPROVEN", 503) from error
+            estimate += 32
+        return (estimate * approval.input_estimate_safety_percent + 99) // 100
+    except (ValueError, TypeError, KeyError, UnicodeError) as error:
+        raise CoreError("MODEL_INPUT_ESTIMATE_INVALID", 503) from error
 
 
 def journal(store, approval, record=None, *, allow_settlement=False):

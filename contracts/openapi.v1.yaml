@@ -13,6 +13,7 @@ paths:
   /internal/v1/health/live:
     get:
       operationId: liveness
+      description: API process alive only; worker_health_proven is false.
       security: []
       responses:
         '200': {description: Service process alive}
@@ -185,7 +186,14 @@ paths:
   /internal/v1/ops/status:
     get:
       operationId: opsStatus
-      description: Counters only; do not return raw secrets or private memory.
+      description: >-
+        Content-free counters and read-only operations snapshot. API instance is
+        process evidence, not a worker heartbeat. No model invocation or state repair.
+      parameters:
+        - in: query
+          name: summary_only
+          schema: {type: boolean, default: false}
+          description: Lightweight operations snapshot without the full live-window guard.
       responses:
         '200': {description: Queue depth, model budget, degraded modules}
   /internal/v1/diary:

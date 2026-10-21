@@ -1,5 +1,7 @@
 # P8-C 六项独立实机准入包
 
+本页保留 P8-C 时点的审批草案；当前模型费用依据 [P10 用量与费用观测](p10-provider-evidence-delta.md)，当前真实操作范围见 [P10 对象与签收](p10-r1-r2-signoff.md)。
+
 本包仅准备可填写的审批与验收材料，证据等级 `OFFLINE_PROPOSAL`。
 [机器清单](p8c-readiness.json)新增六个独立条目，不改变
 [P8-B 旧审批格式](p8b-approvals.json)或旧门禁 Schema，也不被运行程序读取为授权。

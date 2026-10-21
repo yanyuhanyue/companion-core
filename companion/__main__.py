@@ -11,7 +11,6 @@ from pydantic import ValidationError
 from companion.backup import backup, restore
 from companion.config import Settings
 from companion.contracts import CoreError
-from companion.core import Core
 from companion.model import ModelClient
 from companion.runtime import Runtime
 from companion.store import encode, migrate, uid
@@ -19,6 +18,8 @@ from companion.worker_lock import single_worker
 
 
 async def worker(settings):
+    from companion.core import Core
+
     async with httpx.AsyncClient(timeout=settings.timeout_seconds, trust_env=False) as client:
         core = Core(settings, ModelClient(settings, client))
         core.store.execute(
@@ -50,7 +51,18 @@ def main():
     sub.add_parser("life-worker")
     sub.add_parser("executive-worker")
     sub.add_parser("content-worker")
-    sub.add_parser("status")
+    diagnostic = sub.add_parser("status")
+    diagnostic.add_argument("--integrity", action="store_true")
+    observation = sub.add_parser("observe")
+    observation.add_argument("--output", required=True)
+    observation.add_argument("--samples", type=int, default=3)
+    observation.add_argument("--interval-seconds", type=float, default=5)
+    observation.add_argument("--max-gap-seconds", type=float)
+    observation.add_argument("--url")
+    observation.add_argument("--allow-external", action="store_true")
+    observation.add_argument("--evidence-type", choices=("local_synthetic", "authorized_runtime"),
+                             default="local_synthetic")
+    observation.add_argument("--authorization-sha256")
     server = sub.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
@@ -88,9 +100,24 @@ def main():
             with single_worker(settings.database, "diary-worker"):
                 asyncio.run(diary_worker(settings))
         elif args.command == "status":
-            core = Core(settings)
-            print(encode(core.status()))
-            core.store.close()
+            from companion.ops_status import snapshot
+
+            print(encode(snapshot(settings, integrity=args.integrity)))
+        elif args.command == "observe":
+            from companion.observe import http_collector, observe
+            from companion.ops_status import snapshot
+
+            if args.allow_external and (not args.url or args.evidence_type != "authorized_runtime"):
+                raise ValueError("OBSERVATION_EXTERNAL_AUTHORIZATION_REQUIRED")
+            collect = (http_collector(settings, args.url, allow_external=args.allow_external,
+                                      authorization_sha256=args.authorization_sha256)
+                       if args.url else lambda: (snapshot(settings), None))
+            print(encode(observe(
+                collect, args.output, samples=args.samples, interval_seconds=args.interval_seconds,
+                max_gap_seconds=args.max_gap_seconds, evidence_type=args.evidence_type,
+                authorization_sha256=args.authorization_sha256,
+                source="http_endpoint" if args.url else "local_database",
+            )))
         elif args.command == "life-worker":
             from companion.life_worker import life_worker
 
@@ -137,6 +164,13 @@ def main():
     except KeyError:
         print("Required environment variable missing.", file=sys.stderr)
         sys.exit(2)
+    except (OSError, ValueError):
+        print("Command failed; no diagnostic details or private paths emitted.", file=sys.stderr)
+        sys.exit(2)
+    except KeyboardInterrupt:
+        print("Interrupted; an observation file without an end record is incomplete.",
+              file=sys.stderr)
+        sys.exit(130)
 
 
 if __name__ == "__main__":

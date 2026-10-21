@@ -48,42 +48,23 @@ def test_reserve_rejects_missing_approval_before_model(core):
 
 
 def approved_live(core, tmp_path, **changes):
-    import hashlib
-
-    from tokenizers import Tokenizer, models, pre_tokenizers
-
     from companion.config import PaidModelApproval
 
-    tokenizer = Tokenizer(
-        models.BPE(
-            vocab={x: i for i, x in enumerate(sorted(pre_tokenizers.ByteLevel.alphabet()))},
-            merges=[],
-        )
-    )
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
-    path = tmp_path / "offline-tokenizer.json"
-    tokenizer.save(str(path))
     values = dict(
+        live_approved=True,
         window_id="offline-window-1",
         approval_sha256="a" * 64,
         provider="offline-fixture",
-        model="offline-chatml-v1",
+        model="offline-text",
         endpoint="https://synthetic.invalid/v1",
         currency="USD",
         timezone="Asia/Shanghai",
-        region="offline",
         starts_at="2026-10-01T00:00:00+08:00",
         expires_at="2026-12-01T00:00:00+08:00",
         rates_valid_until="2026-12-01T00:00:00+08:00",
-        rate_evidence_sha256="b" * 64,
         input_rate=1000000,
         cached_input_rate=100000,
         output_rate=2000000,
-        tokenizer_path=str(path),
-        tokenizer_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-        input_contract_sha256="c" * 64,
-        framing="chatml-v1",
-        structured_suffix="\nJSON object only.",
         max_input_tokens=20000,
         max_output_tokens=1000,
         per_attempt_micro_usd=30000,
@@ -95,8 +76,6 @@ def approved_live(core, tmp_path, **changes):
         window_micro_usd=2000000,
         window_calls=20,
         concurrency=2,
-        sole_account_database=True,
-        provider_budget_evidence_sha256="d" * 64,
         journal_path=str(tmp_path / "budget.jsonl"),
     )
     values.update(changes)
@@ -192,7 +171,7 @@ def test_approved_call_requires_durable_admission_and_uses_shared_window(core, t
         ({"window_micro_usd": 1}, "WINDOW"),
         ({"per_request_micro_usd": 1}, "REQUEST"),
         ({"max_output_tokens": 128}, "OUTPUT"),
-        ({"tokenizer_sha256": "0" * 64}, "INPUT_BOUND_UNPROVEN"),
+        ({"live_approved": False}, "LIVE_OPT_IN_REQUIRED"),
     ],
 )
 def test_limits_reject_with_no_model_io(core, tmp_path, changes, code):
@@ -219,13 +198,13 @@ def test_all_scenarios_share_daily_call_limit(core, tmp_path, scenario):
     from companion import budget
     from companion.model import ModelResponse
 
+    core.settings.proactive_enabled = True
+    core.settings.reflection_daily_micro_usd = 50000
+    core.settings.reflection_monthly_micro_usd = 50000
     approved_live(core, tmp_path, daily_calls=1)
     messages = [{"role": "user", "content": "hello"}]
     request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
-    core.settings.proactive_enabled = True
-    core.settings.reflection_daily_micro_usd = 50000
-    core.settings.reflection_monthly_micro_usd = 50000
     with pytest.raises(CoreError, match="DAILY"):
         budget.reserve(core.store, core.settings, None, scenario, messages, core.clock())
     assert core.model.calls == []
@@ -679,20 +658,20 @@ def test_provider_invoice_discrepancy_stops_new_calls_and_records_upper_differen
     }
 
 
-def test_window_expiry_during_input_proof_keeps_unknown_without_http(core, tmp_path, monkeypatch):
+def test_window_expiry_during_estimation_keeps_unknown_without_http(core, tmp_path, monkeypatch):
     from companion import budget
 
     approved_live(core, tmp_path)
     messages = [{"role": "user", "content": "hello"}]
     request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
-    original = budget.paid_budget.input_bound
+    original = budget.paid_budget.estimate_input_tokens
 
-    def slow_proof(*args):
+    def slow_estimation(*args):
         result = original(*args)
         core.clock.advance(70 * 86400)
         return result
 
-    monkeypatch.setattr(budget.paid_budget, "input_bound", slow_proof)
+    monkeypatch.setattr(budget.paid_budget, "estimate_input_tokens", slow_estimation)
     calls = []
 
     async def exercise():
@@ -773,7 +752,7 @@ def test_extraction_and_reconciliation_share_one_logical_request_cap(core, tmp_p
     assert core.store.rows("SELECT * FROM memories") == []
 
 
-@pytest.mark.parametrize("field", ["provider", "model", "tokenizer_path", "journal_path"])
+@pytest.mark.parametrize("field", ["provider", "model", "journal_path"])
 def test_empty_identity_or_proof_location_cannot_form_approval(core, tmp_path, field):
     from pydantic import ValidationError
 

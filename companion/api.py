@@ -2,8 +2,9 @@ import hmac
 import re
 from contextlib import asynccontextmanager
 from datetime import date
+from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -77,6 +78,7 @@ def create_app(settings=None):
         redoc_url=None,
         openapi_url=None,
     )
+    app.state.observation_instance = uuid4().hex
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
@@ -133,7 +135,7 @@ def create_app(settings=None):
 
     @app.get(prefix + "/health/live")
     async def live():
-        return {"status": "alive"}
+        return {"status": "alive", "worker_health_proven": False}
 
     @app.get(prefix + "/health/ready", dependencies=auth)
     async def ready():
@@ -415,8 +417,15 @@ def create_app(settings=None):
         return core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content)
 
     @app.get(prefix + "/ops/status", dependencies=auth)
-    async def status():
-        return app.state.core.status()
+    async def status(response: Response, summary_only: bool = False):
+        from companion.ops_status import snapshot
+
+        response.headers["Cache-Control"] = "no-store"
+        result = {"operations": snapshot(settings)} if summary_only else app.state.core.status()
+        return result | {"observation": {
+            "api_instance": app.state.observation_instance,
+            "worker_health_proven": False,
+        }}
 
     @app.post(prefix + "/tasks", dependencies=auth)
     @app.post(prefix + "/approvals/{approval_id}/decision", dependencies=auth)

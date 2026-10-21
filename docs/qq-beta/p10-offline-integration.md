@@ -1,5 +1,8 @@
 # P8-C.2 / P9 离线集成记录
 
+本页保存 PR #35/#36 当时的实现与验证结果；后续费用政策见 [当前模型用量与费用观测](p10-provider-evidence-delta.md)。
+后续连续对话、用量校准和运行观察的实现与验证见 [P9/P10 集成记录](p10-continuity-operations-integration.md)。
+
 日期：2026-10-21。持续执行基线为 `12a3f5b5e282900c0b6d8e233b5b86f8b635e255`；
 CI 优化已通过 [PR #35](https://github.com/yanyuhanyue/companion-core/pull/35) 合入
 `8bd28718003b7ab087bf5dc01759fe18beeee3f3`。这是一份实现与验证记录，不是实机授权或新任务书。

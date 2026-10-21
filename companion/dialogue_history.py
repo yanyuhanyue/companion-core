@@ -9,10 +9,28 @@ from companion.budget import token_upper_bound
 
 def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
     """Return oldest first, with one complete private SENT reply per owner input."""
+    return [turn_messages(row) for row in recent_sent_sources(
+        store, conversation_id, current_event_id, max_turns,
+    )]
+
+
+def turn_messages(source):
+    return [{"role": "user", "content": source["user_text"]},
+            {"role": "assistant", "content": source["reply_text"]}]
+
+
+def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None):
+    """Return source-bound turns; an optional small allowlist is applied before LIMIT."""
     if max_turns <= 0:
         return []
+    if event_ids is not None and not event_ids:
+        return []
+    allowed = ""
+    if event_ids is not None:
+        allowed = "AND e.event_id IN (" + ",".join("?" for _ in event_ids) + ") "
     rows = store.rows(
-        "SELECT json_extract(e.body_json,'$.text') AS user_text,"
+        "SELECT e.*,o.message_id,o.content_json,o.content_sha256,o.delivery_key,"
+        "json_extract(e.body_json,'$.text') AS user_text,"
         "json_extract(o.content_json,'$.text') AS reply_text FROM events e "
         "JOIN outbox o ON o.origin_event_id=e.event_id AND o.rowid IN "
         "(SELECT MAX(reply.rowid) FROM outbox reply WHERE reply.conversation_id=? "
@@ -29,16 +47,10 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
         "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "
         "AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
         "JOIN memories m ON m.memory_id=me.memory_id WHERE me.event_id=e.event_id "
-        "AND m.status IN ('SUPERSEDED','FORGOTTEN')) ORDER BY e.rowid DESC LIMIT ?",
-        (conversation_id, conversation_id, current_event_id, max_turns),
+        "AND m.status IN ('SUPERSEDED','FORGOTTEN')) " + allowed + "ORDER BY e.rowid DESC LIMIT ?",
+        (conversation_id, conversation_id, current_event_id, *(event_ids or ()), max_turns),
     )
-    return [
-        [
-            {"role": "user", "content": row["user_text"]},
-            {"role": "assistant", "content": row["reply_text"]},
-        ]
-        for row in reversed(rows)
-    ]
+    return list(reversed(rows))
 
 
 def fit_context(rules, references, turns, current_input, soft_limit):

@@ -25,6 +25,7 @@ from companion.store import encode
 
 BINDING = "live_text_window"
 INPUT = "live_text_input:"
+CONTEXT = "live_text_context:"
 CAPTURE_SIGNATURE_DOMAIN = b"companion-core/onebot-capture/v1\x00"
 
 
@@ -105,7 +106,7 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
         if (
             any(getattr(settings, name) for name in disabled)
             or settings.executive.enabled or settings.media.enabled or settings.observation_adapters
-            or settings.max_recent_messages != 0
+            or settings.max_recent_messages != approval.max_history_turns * 2
         ):
             raise CoreError("LIVE_TEXT_CLOSED_FEATURES_REQUIRED", 503)
         now = datetime.fromisoformat(clock())
@@ -285,7 +286,138 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
         receipt["value"]
     )["input_sha256"]:
         raise CoreError("LIVE_TEXT_INPUT_CHANGED", 403)
+    _check_context(store, settings, job, approval)
     return approval, attempts
+
+
+def _history_fingerprint(store, settings, approval, source):
+    """Validate original input/reply receipts without copying private text into metadata."""
+    receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + source["event_id"],))
+    reply = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                      ("live_text_reply:" + source["message_id"],))
+    if not receipt or not reply:
+        return None
+    value, reply_value = json.loads(receipt["value"]), json.loads(reply["value"])
+    capture = value.get("capture")
+    if not capture:
+        return None
+    try:
+        capture = CaptureReceipt.model_validate(capture)
+        signed = capture.model_dump(mode="json", exclude={"signature"})
+        for key in ("received_at", "occurred_at"):
+            signed[key] = getattr(capture, key).isoformat()
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(approval.capture_public_key or "")).verify(
+            bytes.fromhex(capture.signature or ""),
+            CAPTURE_SIGNATURE_DOMAIN + encode(signed).encode(),
+        )
+    except (ValueError, InvalidSignature):
+        return None
+    body = json.loads(source["body_json"])
+    usage = store.rows(
+        "SELECT j.job_id,j.state AS job_state,m.request_id,m.state FROM jobs j "
+        "JOIN model_usage m USING(job_id) WHERE j.event_id=? AND j.kind='chat'",
+        (source["event_id"],),
+    )
+    source_prefix = (f"{settings.bot_qq_id}:onebot-direct:FriendMessage:{settings.owner_qq_id}:"
+                     f"epoch:{capture.protocol_epoch}:")
+    if (
+        value.get("window_sha256") != approval.plan_sha256
+        or value.get("privacy_epoch") != epoch(store)
+        or value.get("event_id") != source["event_id"]
+        or value.get("input_sha256") != paid_budget.sha(source["user_text"])
+        or capture.window_sha256 != approval.plan_sha256
+        or capture.event_id != source["event_id"]
+        or capture.source_event_id != source["source_event_id"]
+        or capture.input_sha256 != value["input_sha256"]
+        or not capture.source_event_id.startswith(source_prefix)
+        or capture.identity_sha256 != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
+        or datetime.fromisoformat(source["occurred_at"]) != capture.occurred_at
+        or not approval.starts_at <= capture.occurred_at <= capture.received_at < approval.ends_at
+        or body.get("media") or body.get("shared_content")
+        or source["user_text"].strip().startswith("/")
+        or source["event_type"] != "message.received"
+        or len(usage) != 1 or usage[0]["state"] != "SETTLED" or usage[0]["job_state"] != "SUCCEEDED"
+        or source["delivery_key"] != f"reply:{source['event_id']}:v1"
+        or source["content_sha256"] != paid_budget.sha({"text": source["reply_text"]})
+        or reply_value != {
+            "message_id": source["message_id"], "event_id": source["event_id"],
+            "job_id": usage[0]["job_id"], "request_id": usage[0]["request_id"],
+            "reply_sha256": paid_budget.sha(source["reply_text"]),
+            "plan_sha256": approval.plan_sha256,
+            "privacy_epoch": epoch(store),
+        }
+    ):
+        return None
+    return {"event_id": source["event_id"], "message_id": source["message_id"],
+            "source_sha256": paid_budget.sha(dict(source)),
+            "input_receipt_sha256": paid_budget.sha(value),
+            "reply_receipt_sha256": paid_budget.sha(reply_value)}
+
+
+def history_sources(store, settings, clock, job):
+    from companion import dialogue_history
+
+    approval, _ = check_job(store, settings, clock, job)
+    if approval.history_scope == "none":
+        return []
+    allowed = [row["key"].removeprefix(INPUT) for row in store.rows(
+        "SELECT key FROM runtime_meta WHERE key LIKE ?", (INPUT + "%",)
+    )]
+    sources = [source for source in dialogue_history.recent_sent_sources(
+        store, job["conversation_id"], job["event_id"], approval.max_inputs, event_ids=allowed,
+    ) if _history_fingerprint(store, settings, approval, source)]
+    sources = sources[-approval.max_history_turns:]
+    while sources and sum(len((s["user_text"] + s["reply_text"]).encode("utf-8"))
+                          for s in sources) > approval.max_history_utf8_bytes:
+        sources.pop(0)
+    return sources
+
+
+def freeze_context(store, settings, clock, job, sources, messages):
+    from companion.model import model_payload
+
+    with store.transaction():
+        approval, _ = check_job(store, settings, clock, job)
+        frozen = [_history_fingerprint(store, settings, approval, source) for source in sources]
+        if any(source is None for source in frozen):
+            raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+        value = {"plan_sha256": approval.plan_sha256, "privacy_epoch": epoch(store),
+                 "conversation_id": job["conversation_id"], "event_id": job["event_id"],
+                 "sources": frozen,
+                 "payload_sha256": paid_budget.sha(model_payload(settings, messages, "chat"))}
+        prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTEXT + job["job_id"],))
+        if prior and json.loads(prior["value"]) != value:
+            raise CoreError("LIVE_TEXT_CONTEXT_ALREADY_FROZEN", 409)
+        if not prior:
+            store.insert("runtime_meta", key=CONTEXT + job["job_id"], value=encode(value))
+
+
+def _check_context(store, settings, job, approval, *, required=False):
+    from companion import dialogue_history
+
+    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTEXT + job["job_id"],))
+    if not row:
+        # Early job checks precede context construction. Once an attempt has been
+        # reserved, missing evidence must also fence response acceptance/delivery.
+        if required or store.one("SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],)):
+            raise CoreError("LIVE_TEXT_CONTEXT_REQUIRED", 503)
+        return None
+    value = json.loads(row["value"])
+    event = store.one("SELECT conversation_id FROM events WHERE event_id=?", (job["event_id"],))
+    if (
+        value["plan_sha256"] != approval.plan_sha256 or value["privacy_epoch"] != epoch(store)
+        or value["event_id"] != job["event_id"]
+        or not event or value["conversation_id"] != event["conversation_id"]
+    ):
+        raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+    expected = value["sources"]
+    sources = dialogue_history.recent_sent_sources(
+        store, event["conversation_id"], job["event_id"], approval.max_history_turns,
+        event_ids=[item["event_id"] for item in expected],
+    )
+    if [_history_fingerprint(store, settings, approval, s) for s in sources] != expected:
+        raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+    return value
 
 
 def reserve_model(store, settings, clock, job_id, scenario):
@@ -310,7 +442,12 @@ def check_model(store, settings, clock, request_id):
     )
     if not job or job["state"] != "RUNNING" or job["lease_until"] <= clock():
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
-    check_job(store, settings, clock, job, current_request=request_id)
+    approval, _ = check_job(store, settings, clock, job, current_request=request_id)
+    context = _check_context(store, settings, job, approval, required=True)
+    admission = store.one("SELECT payload_sha256 FROM model_admissions WHERE request_id=?",
+                          (request_id,))
+    if not admission or admission["payload_sha256"] != context["payload_sha256"]:
+        raise CoreError("LIVE_TEXT_CONTEXT_PAYLOAD_CHANGED", 503)
     current = store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
     if not current or current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)

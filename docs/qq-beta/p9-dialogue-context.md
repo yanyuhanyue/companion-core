@@ -33,8 +33,11 @@ and paid missing-approval zero-I/O checks. The P8 synthetic uncertain-delivery
 expectation now excludes both sides of that turn; its uncertainty state stays intact.
 The frozen P8-B 7/8 benchmark and its examples were not changed or rerun.
 
-These are synthetic prompt and privacy checks. `live_text.guard` still requires
-`max_recent_messages == 0`; no approval switch, provider contract, memory retrieval
-policy, model admission, delivery queue or deployment was changed. Real provider
+These are synthetic prompt and privacy checks. At this initial P9 validation,
+`live_text.guard` required `max_recent_messages == 0`; no approval switch, provider
+contract, memory retrieval policy, model admission, delivery queue or deployment was changed. Real provider
 HTTP, QQ I/O, private-data access, billing and continuous-dialogue acceptance remain
 unverified and require their separate approvals.
+
+The separately approved-window extension is described in
+`p9-approved-window-continuity.md`; its history scope remains closed by default.
