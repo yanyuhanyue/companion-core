@@ -326,16 +326,26 @@ class Core(Runtime):
                         ),
                     }
                 )
-        turns = dialogue_history.recent_sent_turns(
-            s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2,
-        )
+        bounded_text = live_text.active(s, cfg)
+        if bounded_text:
+            sources = live_text.history_sources(s, cfg, self.clock, job)
+            turns = [dialogue_history.turn_messages(source) for source in sources]
+        else:
+            turns = dialogue_history.recent_sent_turns(
+                s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2,
+            )
         current_input = []
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         current_input.append(current)
-        return dialogue_history.fit_context(
+        messages = dialogue_history.fit_context(
             rules, references, turns, current_input, cfg.context_soft_tokens,
         )
+        if bounded_text:
+            selected = [source for source, turn in zip(sources, turns, strict=True)
+                        if any(message is turn[0] for message in messages)]
+            live_text.freeze_context(s, cfg, self.clock, job, selected, messages)
+        return messages
 
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""

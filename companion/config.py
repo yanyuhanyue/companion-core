@@ -103,9 +103,18 @@ class LiveTextWindowApproval(BaseModel):
     max_model_attempts: int = Field(default=5, strict=True, ge=1, le=5)
     max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
     max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
+    history_scope: Literal["none", "approved_window"] = "none"
+    max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
+    max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if (self.history_scope == "none" and (
+            self.max_history_turns or self.max_history_utf8_bytes
+        )) or (self.history_scope == "approved_window" and not (
+            self.max_history_turns and self.max_history_utf8_bytes and self.capture_public_key
+        )):
+            raise ValueError("explicit bounded authenticated window history scope required")
         if self.execution == "approved_live" and self.capture_public_key is None:
             raise ValueError("independent authenticated capture public key required")
         if (

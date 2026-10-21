@@ -532,9 +532,9 @@ def test_sqlite_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
 
 @pytest.mark.parametrize("limits", [
     {"per_attempt_micro_usd": 1}, {"daily_micro_usd": 1}, {"monthly_micro_usd": 1},
-    {"window_micro_usd": 1}, {"tokenizer_sha256": "0" * 64},
+    {"window_micro_usd": 1}, {"max_input_tokens": 1},
 ])
-def test_existing_paid_proof_and_amount_limits_are_not_relaxed(core, tmp_path, limits):
+def test_existing_paid_approval_and_amount_limits_are_not_relaxed(core, tmp_path, limits):
     cfg, plan = live_fixture(core, tmp_path, paid_options=limits)
 
     async def scenario():

@@ -155,6 +155,7 @@ class WindowPlan:
                 "budget_journal_id", "custodian_sha256", "approval_sha256", "max_inputs",
                 "max_model_attempts", "max_input_chars", "max_reply_chars",
                 "capture_public_key",
+                "history_scope", "max_history_turns", "max_history_utf8_bytes",
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
                 raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
@@ -164,7 +165,19 @@ class WindowPlan:
             ):
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
             if (
-                scope["bridge_code_sha256"] != bridge_code_sha256()
+                scope["history_scope"] not in ("none", "approved_window")
+                or type(scope["max_history_turns"]) is not int
+                or type(scope["max_history_utf8_bytes"]) is not int
+                or not 0 <= scope["max_history_turns"] <= 4
+                or not 0 <= scope["max_history_utf8_bytes"] <= 16000
+                or (scope["history_scope"] == "none" and (
+                    scope["max_history_turns"] or scope["max_history_utf8_bytes"]
+                ))
+                or (scope["history_scope"] == "approved_window" and not (
+                    scope["max_history_turns"] and scope["max_history_utf8_bytes"]
+                    and scope["capture_public_key"]
+                ))
+                or scope["bridge_code_sha256"] != bridge_code_sha256()
                 or scope["capture_public_key"] != config.capture_public_key
                 or scope["execution"] != value["execution"]
                 or scope["window_id"] != value["window_id"]
