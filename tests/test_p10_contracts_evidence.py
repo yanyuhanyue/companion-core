@@ -7,22 +7,22 @@ ROOT = Path(__file__).resolve().parents[1]
 RECORD = json.loads((ROOT / "docs/qq-beta/p10-contracts-evidence.json").read_text("utf-8"))
 
 
-def test_public_review_preserves_provider_block_and_unselected_route():
+def test_development_uses_estimates_without_granting_live_authority():
     provider = RECORD["provider"]
-    assert provider["decision"] == "PROVIDER_BLOCKED_WITH_ACTIONABLE_EVIDENCE_GAPS"
-    assert provider["A_exact_contract"] == provider["B_conservative_bound"] == "NOT_PROVEN"
-    assert provider["C_alternatives"] == "EVALUATION_ONLY"
-    for field in (
-        "selected_route", "verified_input_or_cost_contract", "account_hard_cap_reference",
-        "sole_account_entry_reference", "approved_currency_rates_region_validity",
-    ):
-        assert provider[field] is None
+    assert RECORD["development_blocked"] is False
+    assert provider["decision"] == "ESTIMATE_THEN_CALIBRATE_ACTUAL_USAGE"
+    assert provider["selected_route"] == "DeepSeek"
+    assert provider["usage_cost_basis"] == "CONFIGURED_RATES_NOT_INVOICE"
+    assert provider["budget_scope"] == "LOCAL_APPLICATION_ATTEMPTS"
+    assert provider["live_execution_authorized"] is False
+    assert provider["actual_usage_reference"] is None
+    assert provider["billing_reconciliation_reference"] is None
 
 
 def test_templates_have_no_real_approval_or_execution_receipt():
     approvals = RECORD["approvals"]
     assert {key: approvals[key] for key in ("R1", "R2", "R3", "R4", "R5", "R6")} == {
-        "R1": "BLOCKED", "R2": "BLOCKED", "R3": "BLOCKED", "R4": "BLOCKED",
+        "R1": "UNAPPROVED", "R2": "UNAPPROVED", "R3": "UNAPPROVED", "R4": "UNAPPROVED",
         "R5": "DISABLED", "R6": "DISABLED",
     }
     references = {
@@ -30,6 +30,7 @@ def test_templates_have_no_real_approval_or_execution_receipt():
         "R1", "R2", "R3", "R4", "R5", "R6",
     }
     assert all(value is None for key, value in approvals.items() if key not in references)
+    assert RECORD["actions_scope"] == "THIS_OFFLINE_CODE_BATCH_ONLY"
     assert set(RECORD["actions_this_batch"].values()) == {0}
     assert RECORD["production_ready"] is False
 
@@ -44,7 +45,7 @@ def test_real_time_and_measurements_are_explicitly_unobserved():
     assert actual and all(value is None for value in actual.values())
 
 
-def test_snapshot_points_to_existing_review_and_original_approval_template():
+def test_snapshot_points_to_existing_policy_and_original_approval_template():
     directory = ROOT / "docs/qq-beta"
     for name in (
         RECORD["provider"]["report"], RECORD["approvals"]["template"],
