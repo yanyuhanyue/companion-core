@@ -19,15 +19,21 @@ class Memory:
         if actor != "owner" or not self.settings.memory_enabled:
             raise CoreError("MEMORY_ACCESS_DENIED", 403)
 
-    def search(self, query, actor="owner", subjects=(), limit=6):
+    def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None):
         self.require_owner(actor)
         s = self.store
+        if memory_ids is not None and not memory_ids:
+            return []
+        allowed_sql = ""
+        if memory_ids is not None:
+            allowed_sql = " AND memory_id IN (" + ",".join("?" for _ in memory_ids) + ")"
         # Missing evidence must never remain confidently retrievable.
         s.execute(
             "UPDATE memories SET confidence=0,needs_review=1,status='HYPOTHESIS' "
             "WHERE status IN ('CONFIRMED','HYPOTHESIS') AND NOT EXISTS "
             "(SELECT 1 FROM memory_evidence m JOIN events e ON e.event_id=m.event_id "
-            "WHERE m.memory_id=memories.memory_id AND e.redacted=0)"
+            "WHERE m.memory_id=memories.memory_id AND e.redacted=0)" + allowed_sql,
+            tuple(memory_ids or ()),
         )
         base = (
             "SELECT m.* FROM memories m WHERE m.status IN ('CONFIRMED','HYPOTHESIS') "
@@ -36,6 +42,9 @@ class Memory:
             "WHERE v.memory_id=m.memory_id AND e.redacted=0 AND e.actor_id='owner') "
         )
         params = []
+        if memory_ids is not None:
+            base += "AND m.memory_id IN (" + ",".join("?" for _ in memory_ids) + ") "
+            params.extend(memory_ids)
         if subjects:
             base += "AND m.subject IN (" + ",".join("?" for _ in subjects) + ") "
             params.extend(subjects)
@@ -60,8 +69,10 @@ class Memory:
                         row["memory_id"]
                         for row in s.rows(
                             "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? "
-                            "ORDER BY bm25(memories_fts)",
-                            (match,),
+                            + ("AND memory_id IN (" + ",".join("?" for _ in allowed) + ") "
+                               if memory_ids is not None else "")
+                            + "ORDER BY bm25(memories_fts)",
+                            (match, *allowed) if memory_ids is not None else (match,),
                         )
                         if row["memory_id"] in allowed
                     ]

@@ -95,6 +95,16 @@ class LiveTextHandoff(BaseModel):
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class LiveTextMemoryFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    memory_id: str = Field(pattern=r"^mem_[a-f0-9]{32}$")
+    subject: Literal["user", "project"]
+    status: Literal["CONFIRMED"]
+    content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    memory_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class LiveTextWindowApproval(BaseModel):
     """Separate private approval for one closed-by-default text-only experiment."""
 
@@ -121,10 +131,23 @@ class LiveTextWindowApproval(BaseModel):
     history_scope: Literal["none", "approved_window"] = "none"
     max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
+    memory_scope: Literal["none", "approved_facts"] = "none"
+    memory_facts: list[LiveTextMemoryFact] = Field(default_factory=list, max_length=6)
+    memory_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     handoff: LiveTextHandoff | None = None
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if (
+            (self.memory_scope == "none" and (self.memory_facts or self.memory_approval_sha256))
+            or (self.memory_scope == "approved_facts" and (
+                not self.memory_facts or not self.memory_approval_sha256
+                or self.history_scope != "none"
+                or not self.capture_public_key
+            ))
+            or len({fact.memory_id for fact in self.memory_facts}) != len(self.memory_facts)
+        ):
+            raise ValueError("explicit bounded readonly memory scope required")
         if self.handoff and (
             not self.capture_public_key
             or self.handoff.predecessor_window_id == self.window_id

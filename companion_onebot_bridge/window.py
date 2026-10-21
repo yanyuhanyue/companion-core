@@ -189,15 +189,44 @@ class WindowPlan:
                 "max_model_attempts", "max_input_chars", "max_reply_chars",
                 "capture_public_key",
                 "history_scope", "max_history_turns", "max_history_utf8_bytes",
+                "memory_scope", "memory_facts", "memory_approval_sha256",
                 "handoff",
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
                 raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
             if set(scope) != expected_scope or any(
                 not isinstance(scope[k], str) or not SHA.fullmatch(scope[k])
-                for k in expected_scope if k.endswith("_sha256")
+                for k in expected_scope if k.endswith("_sha256") and k != "memory_approval_sha256"
             ):
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
+            facts = scope["memory_facts"]
+            if (
+                scope["memory_scope"] not in {"none", "approved_facts"}
+                or not isinstance(facts, list) or len(facts) > 6
+                or (scope["memory_scope"] == "none" and (
+                    facts or scope["memory_approval_sha256"] is not None
+                ))
+                or (scope["memory_scope"] == "approved_facts" and (
+                    not facts or scope["history_scope"] != "none"
+                    or not isinstance(scope["memory_approval_sha256"], str)
+                    or not SHA.fullmatch(scope["memory_approval_sha256"])
+                    or not scope["capture_public_key"]
+                ))
+                or any(
+                    not isinstance(fact, dict) or set(fact) != {
+                        "memory_id", "subject", "status", "content_sha256", "evidence_sha256",
+                        "memory_sha256",
+                    }
+                    or not isinstance(fact["memory_id"], str)
+                    or not re.fullmatch(r"mem_[a-f0-9]{32}", fact["memory_id"])
+                    or fact["subject"] not in {"user", "project"} or fact["status"] != "CONFIRMED"
+                    or any(not isinstance(fact[k], str) or not SHA.fullmatch(fact[k])
+                           for k in ("content_sha256", "evidence_sha256", "memory_sha256"))
+                    for fact in facts
+                )
+                or len({fact["memory_id"] for fact in facts}) != len(facts)
+            ):
+                raise ValueError("INVALID_READONLY_MEMORY_SCOPE")
             handoff = scope["handoff"]
             if handoff is not None and (
                 not isinstance(handoff, dict) or set(handoff) != {
@@ -518,9 +547,14 @@ class TestWindow:
                         raise ValueError("INVALID_CORE_COUNTS")
         status = decode(bytes(content), 65536)
         deliveries, jobs = counts(status.get("deliveries")), counts(status.get("jobs"))
+        readonly_memory = (self.plan.mode == "live_text" and self.plan.value["live_text"][
+            "memory_scope"
+        ] == "approved_facts")
         closed = (
             isinstance(status.get("features"), dict)
-            and all(value is False for value in status["features"].values())
+            and all(value is (readonly_memory if key == "memory" else False)
+                    for key, value in status["features"].items())
+            and (not readonly_memory or status["features"].get("memory") is True)
         )
         if self.plan.mode == "live_text":
             live = status.get("live_text_window", {})
