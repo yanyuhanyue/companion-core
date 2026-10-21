@@ -54,9 +54,24 @@ class ModelResponse:
 class ModelAdmission:
     """Single-use payload capability. Accounting and authorization stay in budget."""
 
-    def __init__(self, payload_sha256):
+    def __init__(self, payload_sha256, before_dispatch=None):
         self.payload_sha256 = payload_sha256
+        self.before_dispatch = before_dispatch
         self.consumed = False
+
+
+class _AdmissionTransport(httpx.AsyncBaseTransport):
+    """Borrow one client's transport after its hooks, without sharing hook mutations."""
+
+    def __init__(self, client, check):
+        self.client, self.check = client, check
+
+    async def handle_async_request(self, request):
+        await self.check(request)
+        return await self.client._transport_for_url(request.url).handle_async_request(request)
+
+    async def aclose(self):
+        pass  # The caller owns the borrowed transport and its connection pool.
 
 
 def model_payload(settings, messages, scenario):
@@ -102,13 +117,41 @@ class ModelClient:
         ):
             raise CoreError("MODEL_ADMISSION_REQUIRED", 503)
         admission.consumed = True
+        endpoint = self.settings.model_url.rstrip("/") + "/chat/completions"
+        authorization = "Bearer " + self.settings.model_key.get_secret_value()
+
+        async def check(request):
+            try:
+                valid = (
+                    request.method == "POST" and str(request.url) == endpoint
+                    and request.headers.get("Host") == httpx.URL(endpoint).netloc.decode("ascii")
+                    and request.headers.get("Authorization") == authorization
+                    and "Transfer-Encoding" not in request.headers
+                    and sha(json.loads(request.content)) == admission.payload_sha256
+                )
+            except (ValueError, TypeError, httpx.RequestNotRead):
+                valid = False
+            if not valid:
+                raise CoreError("MODEL_ADMISSION_REQUEST_CHANGED", 503)
+            if admission.before_dispatch is not None:
+                await admission.before_dispatch(request)
+            # The transport sends stream, not HTTPX's content cache. Never iterate
+            # an arbitrary hook-supplied stream; send only the bytes built above.
+            request.stream = httpx.ByteStream(content)
+            request.headers["Content-Length"] = str(len(content))
+
         try:
-            response = await self.client.post(
-                self.settings.model_url.rstrip("/") + "/chat/completions",
-                headers={"Authorization": f"Bearer {self.settings.model_key.get_secret_value()}"},
-                json=payload,
-                follow_redirects=False,
-            )
+            async with httpx.AsyncClient(
+                headers=self.client.headers, timeout=self.client.timeout,
+                follow_redirects=False, trust_env=False,
+                event_hooks={key: list(value) for key, value in self.client.event_hooks.items()},
+                transport=_AdmissionTransport(self.client, check),
+            ) as scoped:
+                request = scoped.build_request(
+                    "POST", endpoint, headers={"Authorization": authorization}, json=payload,
+                )
+                content = request.content
+                response = await scoped.send(request)
             if response.status_code == 429 or response.status_code >= 500:
                 raise CoreError("MODEL_RETRYABLE", 503)
             if response.status_code >= 400:
@@ -118,6 +161,8 @@ class ModelClient:
             if not isinstance(text, str) or not text.strip() or len(text) > 32000:
                 raise ValueError("invalid model response")
             usage = body.get("usage") or {}
+            if not isinstance(usage, dict):
+                usage = {}
             prompt = usage.get("prompt_tokens")
             output = usage.get("completion_tokens")
             cached = usage.get("prompt_cache_hit_tokens", 0)

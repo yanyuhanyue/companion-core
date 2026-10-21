@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -28,16 +28,18 @@ def cost(settings, input_tokens, output_tokens, cached=0):
     return (numerator + 999999) // 1000000
 
 
-def total_monthly(store, month):
+def total_monthly(store, month, before=None):
     """Shared cost ceiling includes unknown/reserved model and isolated tool charges."""
     total = store.one(
-        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=?",
-        (month,),
+        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage WHERE occurred_at>=?"
+        + (" AND occurred_at<?" if before else ""),
+        (month, before) if before else (month,),
     )["n"]
     if store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tool_tasks'"):
         total += store.one(
-            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM tool_tasks WHERE dispatched_at>=?",
-            (month,),
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM tool_tasks WHERE dispatched_at>=?"
+            + (" AND dispatched_at<?" if before else ""),
+            (month, before) if before else (month,),
         )["n"]
     return total
 
@@ -56,7 +58,7 @@ def reserve(
     estimated_input = token_upper_bound(messages)
     output_tokens = settings.output_tokens(scenario)
     if approval:
-        estimated_input = paid_budget.input_bound(approval, messages, scenario)
+        estimated_input = paid_budget.estimate_input_tokens(approval, messages, scenario)
         if estimated_input > approval.max_input_tokens:
             raise CoreError("MODEL_INPUT_LIMIT", 429)
         if output_tokens > approval.max_output_tokens:
@@ -154,7 +156,7 @@ def reserve(
                 payload_sha256=paid_budget.sha(model_payload(settings, messages, scenario)),
                 snapshot_json=encode(snapshot),
                 reserved_micro_usd=estimate,
-                input_bound=estimated_input,
+                input_bound=estimated_input,  # Historical SQL column; this is a local estimate.
                 output_bound=output_tokens,
                 journal_path=str(Path(approval.journal_path).resolve()),
                 journal_id=store.one(
@@ -312,22 +314,45 @@ def _settle_paid(store, settings, admission, response):
         and response.output_tokens > 0
     )
     amount, state, blocked = (
-        admission["reserved_micro_usd"],
-        "UNKNOWN",
-        response is not None and not valid,
+        admission["reserved_micro_usd"], "UNKNOWN", response is not None and not valid,
     )
+    diagnostic = {
+        "code": "TRANSPORT_USAGE_UNKNOWN" if response is None else "USAGE_MISSING_OR_INVALID",
+        "actual_usage_known": False,
+    }
     if valid:
         actual = cost(
             pricing, response.input_tokens, response.output_tokens, response.cached_tokens
         )
-        if (
-            response.input_tokens > admission["input_bound"]
-            or response.output_tokens > admission["output_bound"]
-            or actual > amount
-        ):
-            amount, blocked = max(actual, amount), True
-        else:
-            amount, state = actual, "SETTLED"
+        # A reservation is an estimate. Small estimation errors settle normally;
+        # actual local amount limits and the requested output cap remain hard stops.
+        amount, state, blocked = actual, "SETTLED", False
+        limits = _actual_limit_violations(store, admission, snapshot, usage, actual)
+        if response.output_tokens > admission["output_bound"]:
+            limits.append("OUTPUT_CAP_EXCEEDED")
+        spike = response.input_tokens > max(
+            admission["input_bound"] * snapshot.get("usage_anomaly_ratio", 4),
+            admission["input_bound"] + snapshot.get("usage_anomaly_min_tokens", 256),
+        )
+        diagnostic = {
+            "code": (
+                "LOCAL_LIMIT_EXCEEDED" if limits else "INPUT_USAGE_SPIKE" if spike else "NORMAL"
+            ),
+            "actual_usage_known": True,
+            "input_estimated_tokens": admission["input_bound"],
+            "input_actual_tokens": response.input_tokens,
+            "input_error_tokens": response.input_tokens - admission["input_bound"],
+            "output_actual_tokens": response.output_tokens,
+            "cached_input_tokens": response.cached_tokens,
+            "reserved_micro_usd": admission["reserved_micro_usd"],
+            "usage_priced_micro_usd": actual,
+            "cost_error_micro_usd": actual - admission["reserved_micro_usd"],
+            "currency": snapshot["currency"],
+            "billing_basis": "configured_rates_not_invoice",
+            "limits": limits,
+        }
+        if limits:
+            amount, state, blocked = max(actual, admission["reserved_micro_usd"]), "UNKNOWN", True
     if (settings.input_rate, settings.cached_input_rate, settings.output_rate) != (
         pricing.input_rate,
         pricing.cached_input_rate,
@@ -349,6 +374,100 @@ def _settle_paid(store, settings, admission, response):
                 admission["request_id"],
             ),
         )
+    store.audit(
+        "model.usage_diagnostic", admission["request_id"], "budget", usage["occurred_at"],
+        **diagnostic,
+    )
+
+
+def _actual_limit_violations(store, admission, snapshot, usage, actual):
+    """Replace this reservation with known usage before comparing frozen local limits."""
+    delta = actual - usage["billed_micro_usd"]
+    local = datetime.fromisoformat(usage["occurred_at"]).astimezone(ZoneInfo(snapshot["timezone"]))
+    day = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    month = day.replace(day=1)
+    next_day = (day + timedelta(days=1)).astimezone(UTC).isoformat(timespec="microseconds")
+    next_month = (month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    next_month = next_month.astimezone(UTC).isoformat(timespec="microseconds")
+    day = day.astimezone(UTC).isoformat(timespec="microseconds")
+    month = month.astimezone(UTC).isoformat(timespec="microseconds")
+    limits = []
+    if actual > snapshot["per_attempt_micro_usd"]:
+        limits.append("ATTEMPT_AMOUNT")
+    for column, value, cap, code in (
+        ("window_id", admission["window_id"], snapshot["window_micro_usd"], "WINDOW_AMOUNT"),
+        ("logical_request_id", admission["logical_request_id"], snapshot["per_request_micro_usd"],
+         "REQUEST_AMOUNT"),
+    ):
+        total = store.one(
+            "SELECT SUM(m.billed_micro_usd) AS n FROM model_admissions a "
+            "JOIN model_usage m USING(request_id) WHERE a." + column + "=?", (value,),
+        )["n"]
+        if total + delta > cap:
+            limits.append(code)
+    daily = store.one(
+        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+        "WHERE occurred_at>=? AND occurred_at<?", (day, next_day),
+    )["n"]
+    if daily + delta > snapshot["daily_micro_usd"]:
+        limits.append("DAILY_AMOUNT")
+    monthly = total_monthly(store, month, next_month) + delta
+    if monthly > min(snapshot["monthly_micro_usd"], snapshot.get(
+        "local_monthly_micro_usd", snapshot["monthly_micro_usd"],
+    )):
+        limits.append("MONTHLY_AMOUNT")
+    scenario = usage["scenario"]
+    cap = snapshot.get("scenario_daily_micro_usd", {}).get(scenario)
+    if cap is not None:
+        scenarios = ("memory_extract", "memory_review") if scenario.startswith("memory_") else (
+            scenario,
+        )
+        total = store.one(
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+            "WHERE occurred_at>=? AND occurred_at<? AND scenario IN ("
+            + ",".join("?" for _ in scenarios) + ")",
+            (day, next_day, *scenarios),
+        )["n"]
+        if total + delta > cap:
+            limits.append("SCENARIO_DAILY_AMOUNT")
+    if scenario == "reflection" and "reflection_monthly_micro_usd" in snapshot:
+        total = store.one(
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+            "WHERE occurred_at>=? AND occurred_at<? AND scenario='reflection'",
+            (month, next_month),
+        )["n"]
+        if total + delta > snapshot["reflection_monthly_micro_usd"]:
+            limits.append("SCENARIO_MONTHLY_AMOUNT")
+    return limits
+
+
+def usage_diagnostics(db):
+    """Read-only calibration from settled paid usage; no prompts or account identifiers."""
+    cursor = db.execute(
+        "SELECT COUNT(*) AS calibrated_calls,COALESCE(SUM(a.input_bound),0) AS "
+        "input_estimated_tokens,COALESCE(SUM(m.input_tokens),0) AS input_actual_tokens,"
+        "COALESCE(SUM(m.output_tokens),0) AS output_actual_tokens,"
+        "COALESCE(SUM(m.cached_input_tokens),0) AS cached_input_tokens,"
+        "COALESCE(SUM(a.reserved_micro_usd),0) AS reserved_micro_usd,"
+        "COALESCE(SUM(m.billed_micro_usd),0) AS usage_priced_micro_usd "
+        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE m.state='SETTLED'"
+    )
+    row = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
+    # Diagnostics never reinterpret the reserved tokens of an UNKNOWN as observed usage.
+    anomalies = db.execute(
+        "SELECT COUNT(DISTINCT entity_id) FROM audit_log "
+        "WHERE action='model.usage_diagnostic' "
+        "AND json_extract(safe_detail_json,'$.code') IN "
+        "('INPUT_USAGE_SPIKE','LOCAL_LIMIT_EXCEEDED','USAGE_MISSING_OR_INVALID')"
+    ).fetchone()[0]
+    return {
+        **row,
+        "input_error_tokens": row["input_actual_tokens"] - row["input_estimated_tokens"],
+        "cost_error_micro_usd": row["usage_priced_micro_usd"] - row["reserved_micro_usd"],
+        "anomaly_calls": anomalies,
+        "currency": "USD" if row["calibrated_calls"] else None,
+        "billing_basis": "configured_rates_not_invoice",
+    }
 
 
 def _persist_accounting(store, admission, amount, state, blocked, evidence_sha256=None):
@@ -435,8 +554,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         snapshot = paid_budget.snapshot(settings)
         if row["contract_sha256"] != paid_budget.sha(snapshot):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-        if paid_budget.input_bound(approval, messages, scenario) != row["input_bound"]:
-            raise CoreError("MODEL_INPUT_BOUND_UNPROVEN", 503)
+        if paid_budget.estimate_input_tokens(approval, messages, scenario) != row["input_bound"]:
+            raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
         if row["payload_sha256"] != paid_budget.sha(model_payload(settings, messages, scenario)):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
         if store.one(
@@ -459,7 +578,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                 "io_started_at": now,
             },
         )
-    # Re-read after lock acquisition, input proof and journal fsync; no stale
+    # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     try:
         paid_budget.contract(settings, clock())
@@ -472,35 +591,50 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         settle(store, settings, request_id)
         raise
     if isinstance(model, ModelClient):
-        if live_text.active(store, settings):
-            async def after_preflight(request):
+        async def before_dispatch(request):
+            # Every user hook has completed. Custody and current runtime checks
+            # remain here; the adapter only binds the actual HTTP request bytes.
+            with store.transaction():
+                paid_budget.journal(store, approval)
                 current_job = live_text.check_model(store, settings, clock, request_id)
+                current = store.one(
+                    "SELECT a.*,m.state FROM model_admissions a JOIN model_usage m "
+                    "USING(request_id) WHERE request_id=?", (request_id,),
+                )
+                if (
+                    not current or current["state"] != "RESERVED"
+                    or current["lease_token"] != row["lease_token"]
+                    or current["io_started_at"] != now
+                    or current["payload_sha256"] != row["payload_sha256"]
+                    or current["contract_sha256"] != row["contract_sha256"]
+                ):
+                    raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+                if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
+                             "('model_budget_blocked','model_budget_restore_required')"):
+                    raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+            paid_budget.contract(settings, clock())
+            if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
+                raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
+            if row["payload_sha256"] != paid_budget.sha(
+                model_payload(settings, messages, scenario),
+            ):
+                raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+            if live_text.active(store, settings):
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport
                 ):
                     raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
-                if (
-                    request.method != "POST"
-                    or str(request.url) != settings.model_url.rstrip("/") + "/chat/completions"
-                    or request.headers.get("Authorization")
-                    != "Bearer " + settings.model_key.get_secret_value()
-                    or paid_budget.sha(json.loads(request.content)) != row["payload_sha256"]
-                ):
-                    raise CoreError("LIVE_TEXT_MODEL_REQUEST_CHANGED", 503)
                 live_text.dispatch_fence(
-                    settings, clock, current_job["lease_until"], row["lease_until"]
+                    settings, clock, current_job["lease_until"], current["lease_until"],
                 )
-
-            hooks = model.client.event_hooks["request"]
-            hooks.append(after_preflight)
-            try:
-                return await model.complete(
-                    messages, scenario, admission=ModelAdmission(row["payload_sha256"])
-                )
-            finally:
-                hooks.remove(after_preflight)
+            else:
+                paid_budget.contract(settings, clock())
+                if datetime.fromisoformat(current["lease_until"]) <= datetime.fromisoformat(
+                    clock(),
+                ):
+                    raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         return await model.complete(
-            messages, scenario, admission=ModelAdmission(row["payload_sha256"])
+            messages, scenario, admission=ModelAdmission(row["payload_sha256"], before_dispatch),
         )
     return await model.complete(messages, scenario)
 

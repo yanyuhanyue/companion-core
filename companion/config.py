@@ -24,9 +24,10 @@ class ObservationAdapterConfig(BaseModel):
 
 
 class PaidModelApproval(BaseModel):
-    """Operator-supplied approval evidence. Defaults never authorize paid I/O."""
+    """Explicit owner limits and configured prices, not a provider billing guarantee."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
+    live_approved: bool = Field(default=False, strict=True)
     window_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,96}$")
     approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     provider: str = Field(min_length=1, max_length=64)
@@ -34,20 +35,15 @@ class PaidModelApproval(BaseModel):
     endpoint: str
     currency: Literal["USD"]
     timezone: str
-    region: str = Field(min_length=2, max_length=64)
     starts_at: datetime
     expires_at: datetime
     rates_valid_until: datetime
-    rate_evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_rate: int = Field(strict=True, gt=0)
     cached_input_rate: int = Field(strict=True, gt=0)
     output_rate: int = Field(strict=True, gt=0)
-    tokenizer_path: str = Field(min_length=1)
-    tokenizer_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    # This attests the exact provider-side rendering, including hidden structured-mode tokens.
-    input_contract_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    framing: Literal["chatml-v1"]
-    structured_suffix: str = Field(max_length=8192)
+    input_estimate_safety_percent: int = Field(default=125, strict=True, ge=100, le=400)
+    usage_anomaly_ratio: int = Field(default=4, strict=True, ge=2, le=16)
+    usage_anomaly_min_tokens: int = Field(default=256, strict=True, ge=64, le=1000000)
     max_input_tokens: int = Field(strict=True, gt=0, le=1000000)
     max_output_tokens: int = Field(strict=True, gt=0, le=8192)
     per_attempt_micro_usd: int = Field(strict=True, gt=0)
@@ -59,8 +55,6 @@ class PaidModelApproval(BaseModel):
     window_micro_usd: int = Field(strict=True, gt=0)
     window_calls: int = Field(strict=True, gt=0)
     concurrency: int = Field(strict=True, gt=0, le=32)
-    sole_account_database: Literal[True]
-    provider_budget_evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     journal_path: str = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -70,7 +64,7 @@ class PaidModelApproval(BaseModel):
             if value.tzinfo is None or value.utcoffset() is None:
                 raise ValueError("approval timestamps require timezone offsets")
         if self.starts_at >= self.expires_at or self.rates_valid_until < self.expires_at:
-            raise ValueError("approval interval exceeds verified rate validity")
+            raise ValueError("approval interval exceeds configured rate validity")
         if self.cached_input_rate > self.input_rate:
             raise ValueError("cached rate must not exceed uncached admission price")
         parsed = urlparse(self.endpoint)
