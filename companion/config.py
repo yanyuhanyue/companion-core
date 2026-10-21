@@ -129,6 +129,7 @@ class LiveTextWindowApproval(BaseModel):
     max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
     max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
     history_scope: Literal["none", "approved_window"] = "none"
+    history_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
     memory_scope: Literal["none", "approved_facts"] = "none"
@@ -142,12 +143,16 @@ class LiveTextWindowApproval(BaseModel):
             (self.memory_scope == "none" and (self.memory_facts or self.memory_approval_sha256))
             or (self.memory_scope == "approved_facts" and (
                 not self.memory_facts or not self.memory_approval_sha256
-                or self.history_scope != "none"
                 or not self.capture_public_key
             ))
             or len({fact.memory_id for fact in self.memory_facts}) != len(self.memory_facts)
         ):
             raise ValueError("explicit bounded readonly memory scope required")
+        if (self.history_scope == "none" and self.history_approval_sha256 is not None) or (
+            self.history_scope == "approved_window" and self.memory_scope == "approved_facts"
+            and not self.history_approval_sha256
+        ):
+            raise ValueError("separate explicit history approval required for combined recall")
         if self.handoff and (
             not self.capture_public_key
             or self.handoff.predecessor_window_id == self.window_id
