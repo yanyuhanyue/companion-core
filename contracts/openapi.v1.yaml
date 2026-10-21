@@ -311,12 +311,13 @@ components:
         state: {enum: [QUEUED, RUNNING, SUCCEEDED, FAILED]}
     Delivery:
       type: object
-      required: [message_id, conversation_platform_session_key, content, lease_token, delivery_key]
+      required: [message_id, conversation_platform_session_key, content, lease_token, lease_until, delivery_key]
       properties:
         message_id: {type: string}
         conversation_platform_session_key: {type: string}
         content: {type: object}
         lease_token: {type: string}
+        lease_until: {type: string, format: date-time}
         delivery_key: {type: string}
         action_type: {enum: [qq.private.reply, qq.private.proactive]}
     MemoryResult:

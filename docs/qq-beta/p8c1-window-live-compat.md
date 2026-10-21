@@ -39,6 +39,7 @@ Wake、探索、社交、主动消息、表达图片、媒体、DSH 和设备执
 | `paid_contract_sha256` | 既有 paid_budget snapshot，包含实际凭据绑定、精确 framing/tokenizer/费率和费用上限 |
 | `budget_journal_id` | 已由 Core 初始化并核实的独立 Budget Journal 身份；Bridge 不读取该文件 |
 | `custodian_sha256`、`approval_sha256` | 费用保管责任人和独立私密批准的证据引用摘要 |
+| `capture_public_key` | approved_live 固定独立接收器 Ed25519 公钥；私钥只在 Bridge 受限配置 |
 | `max_inputs`、`max_model_attempts` | 各自 1–5；输入数与原计划一致；PaidModelApproval 的 window_calls 不得更大 |
 | `max_input_chars`、`max_reply_chars` | 各自不超过 500，与原计划一致 |
 
@@ -58,7 +59,7 @@ Core 新增四个受原 HTTP v1 Bearer 认证保护的严格 JSON 端点：
 | 端点 | 资料 |
 | --- | --- |
 | `POST /internal/v1/live-text/open` | `window_sha256`；登记不可静默替换的批准、隐私 epoch 和窗口身份 |
-| `POST /internal/v1/live-text/inputs/approve` | `window_sha256,event_id,input_sha256,evidence_sha256`；保存最多五条准确输入批准凭据 |
+| `POST /internal/v1/live-text/inputs/approve` | `window_sha256,event_id,input_sha256,evidence_sha256,capture`；approved_live 要求独立接收器签名 capture，保存最多五条准确输入批准凭据 |
 | `POST /internal/v1/live-text/send-check` | `window_sha256,event_id,message_id,reply_sha256,lease_token`；核对原 SENDING 租约和已结算回复凭据 |
 | `POST /internal/v1/live-text/stop` | `window_sha256`；持久撤销该 Core 窗口，过期/撤销配置后仍能停止 |
 
@@ -114,18 +115,12 @@ I/O，必须保留不确定结果，不能声称跨网络具有瞬时撤回能�
   DB/WAL、Spool/epoch 和外部登录/原服务必须一致。恢复旧 DB 不会返还额度；若独立账本
   也全部被一起回滚，本地代码不能凭空识别外部最新事实，真实恢复仍需要独立核对。
 
-## 真实 OneBot 事件来源仍是独立门禁
+## 认证 OneBot 接收与真实准入
 
-`local_synthetic` 只允许 loopback，用 ModelClient(MockTransport)、真实 Core HTTP API、
-原 Spool/Outbox/window-send-once 和 FakeOneBot 完成整条五次链。源码中的 staged JSON
-及其哈希不能证明平台真人来源。
-
-`approved_live` 的 staged `window-ingest` 因此拒绝。未来真实验收需要在独占的、已验证
-SnowLuma 身份/版本与 Bearer 认证 WebSocket 接收边界捕获原始 frame，保存绑定接收时刻、
-窗口/epoch、source message_id、frame fingerprint 和最小必要正文的私密证据，再由操作者
-逐条批准准确输入。捕获器须先检查五输入上限并 fsync 原窗口的输入凭据，复用原 Spool，
-不能用单独监听器、可任意上传的文件或伪造 `source=live` 字段替代真实接收边界。
-该接收能力、真实账号登录及平台消息不在本轮执行或验收范围内。
+[P8-C.2 接收合同](p10-authenticated-capture.md) 规定独占认证 WS 捕获、原 Spool/Window
+Journal 中的 CAPTURED→APPROVED 阶段，以及固定公钥验证的独立接收器签名。
+approved_live 不接受 staged JSON 或只有普通 HTTP bridge token 的手写来源证明。
+真实恢复、部署、QQ 和付费仍需各项准入；本地合成成功不属于实机验收。
 
 ## 验证位置
 

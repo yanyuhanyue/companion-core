@@ -73,7 +73,7 @@ class ExplorationService:
 
     def adapter(self, adapter_id):
         policy = self.observations.policy(adapter_id)
-        content_enabled = getattr(self.settings, "content_enabled", False)
+        content_enabled = self.settings.content_enabled
         if (not self.settings.exploration_enabled and not content_enabled) or (
             not supports(policy.source, "get")
         ):
@@ -459,7 +459,7 @@ class ExplorationService:
                     if (
                         not discovered
                         and item.image_urls
-                        and getattr(self.settings, "content_enabled", False)
+                        and self.settings.content_enabled
                     ):
                         for source_id in sources:
                             if s.one(

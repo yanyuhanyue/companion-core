@@ -76,6 +76,10 @@ class Spool:
             if not row:
                 with self.db:
                     self.db.execute("INSERT INTO identity VALUES (?)", (identity,))
+            for accepted in self.db.execute(
+                "SELECT key FROM inbox WHERE state IN ('accepted','erased') AND body IS NULL"
+            ).fetchall():
+                self.remove_capture_text(accepted[0])
         except BaseException:
             self.close()
             raise
@@ -101,6 +105,7 @@ class Spool:
 
     def capacity(self, extra_bytes=0):
         size = sum(path.stat().st_size for path in self.directory.glob("spool.sqlite3*"))
+        size += sum(path.stat().st_size for path in (self.directory / "captures").glob("*.json"))
         if size + extra_bytes + 32768 >= self.config.max_disk_bytes:
             raise ValueError("SPOOL_DISK_CAPACITY")
 
@@ -147,6 +152,7 @@ class Spool:
                 raise ValueError("INVALID_ERASURE_RECEIPT")
             with self.db:
                 self.db.execute("UPDATE inbox SET state='erased',body=NULL WHERE key=?", (row[0],))
+            self.remove_capture_text(row[0])
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return json.loads(row[1])
         if (
@@ -161,8 +167,37 @@ class Spool:
             raise ValueError("INVALID_CORE_ACCEPTANCE")
         with self.db:
             self.db.execute("UPDATE inbox SET state='accepted',body=NULL WHERE key=?", (row[0],))
+        self.remove_capture_text(row[0])
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return json.loads(row[1])
+
+    def remove_capture_text(self, event_id):
+        # Same lifetime as inbox.body: Core owns accepted text and erasure replay.
+        # Keep signed/hash receipts; never create a second plaintext archive here.
+        if not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='window_inputs'"
+        ).fetchone():
+            return
+        row = self.db.execute(
+            "SELECT capture_json FROM window_inputs WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if not row or not row[0]:
+            return
+        evidence_hash = json.loads(row[0])["evidence_sha256"]
+        if not re.fullmatch(r"[a-f0-9]{64}", evidence_hash):
+            raise ValueError("INVALID_CAPTURE_EVIDENCE")
+        path = self.directory / "captures" / (evidence_hash + ".json")
+        if path.is_symlink() or path.parent.is_symlink():
+            raise ValueError("SYMLINK_REFUSED")
+        if not path.exists():
+            return
+        path.unlink(missing_ok=True)
+        if os.name != "nt" and path.parent.exists():
+            descriptor = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
 
     def trace_for(self, delivery_key):
         match = re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v1", delivery_key or "")

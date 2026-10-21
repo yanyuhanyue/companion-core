@@ -56,7 +56,9 @@ def decode(frame, max_bytes):
 
 
 def redact(text, config):
-    for secret in (config.bridge_token, config.onebot_token):
+    for secret in (config.bridge_token, config.onebot_token, config.capture_signing_key):
+        if secret is None:
+            continue
         text = text.replace(secret, "[REDACTED]")
     for pattern in (
         r"(?i)\b(?:sk-|ghp_|gho_)[a-z0-9_-]{12,}",

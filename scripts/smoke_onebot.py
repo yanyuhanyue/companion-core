@@ -6,18 +6,27 @@ import stat
 import sys
 from pathlib import Path
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
+from companion_onebot_bridge.capture import SIGNATURE_DOMAIN
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.spool import Spool
 
 assert importlib.util.find_spec("astrbot") is None
 assert importlib.util.find_spec("companion") is None
 assert os.geteuid() == 10004
+capture_key = Ed25519PrivateKey.generate()
 config = BridgeConfig(
     owner_qq_id="10001",
     bot_qq_id="10002",
     bridge_token="SYNTHETIC_CORE_TOKEN_32_CHARACTERS",
     onebot_token="SYNTHETIC_ONEBOT_TOKEN_32_CHARACTERS",
     protocol_epoch="offline-image-smoke-20261020",
+    capture_signing_key=capture_key.private_bytes_raw().hex(),
+)
+signed = SIGNATURE_DOMAIN + b"synthetic-image-smoke"
+Ed25519PublicKey.from_public_bytes(bytes.fromhex(config.capture_public_key)).verify(
+    capture_key.sign(signed), signed,
 )
 payload = {
     "event_id": "evt_offline_image_smoke",

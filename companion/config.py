@@ -105,12 +105,15 @@ class LiveTextWindowApproval(BaseModel):
     custodian_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     max_inputs: int = Field(default=5, strict=True, ge=1, le=5)
+    capture_public_key: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     max_model_attempts: int = Field(default=5, strict=True, ge=1, le=5)
     max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
     max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if self.execution == "approved_live" and self.capture_public_key is None:
+            raise ValueError("independent authenticated capture public key required")
         if (
             self.starts_at.tzinfo is None or self.ends_at.tzinfo is None
             or self.starts_at >= self.ends_at

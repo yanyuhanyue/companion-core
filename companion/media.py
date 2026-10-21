@@ -108,7 +108,7 @@ class MediaService:
             clock,
             observations,
         )
-        self.options = options or getattr(settings, "media", MediaConfig())
+        self.options = options or settings.media
         self.provider = provider or HTTPMediaProvider(self.options)
         self.inflight = {}
 

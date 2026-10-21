@@ -3,6 +3,9 @@ owner_qq_id = "10001"
 bot_qq_id = "10002"
 bridge_token = "SYNTHETIC_CORE_TOKEN_REPLACE_32_BYTES"
 onebot_token = "SYNTHETIC_ONEBOT_TOKEN_REPLACE_32_BYTES"
+# For approved_live only: independent random Ed25519 32-byte seed as 64 lowercase hex.
+# Pin its public key in Core's live_text_window approval; never reuse a transport token.
+# capture_signing_key = "REPLACE_IN_PRIVATE_0600_COPY_ONLY"
 # Generate once with secrets.token_urlsafe(24); preserve across restarts/reconnections.
 protocol_epoch = "SYNTHETIC_REPLACE_WITH_FRESH_RANDOM_EPOCH"
 core_url = "http://companion-api:8765"

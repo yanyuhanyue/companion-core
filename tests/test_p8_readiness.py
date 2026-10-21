@@ -31,7 +31,7 @@ def finish_reply(core, state):
     )
 
 
-def test_stub_multiturn_context_keeps_sent_reply_and_excludes_uncertain_reply(core):
+def test_stub_multiturn_context_keeps_sent_turn_and_excludes_uncertain_turn(core):
     ingest(core, 1, "第一轮：我们讨论春天")
     assert run(core.run_once())
     finish_reply(core, "SENT")
@@ -45,7 +45,6 @@ def test_stub_multiturn_context_keeps_sent_reply_and_excludes_uncertain_reply(co
     assert [row["content"] for row in messages[1:]] == [
         "第一轮：我们讨论春天",
         "回复：第一轮：我们讨论春天",
-        "第二轮：再讨论夏天",
         "第三轮：继续刚才的话题",
     ]
     assert (

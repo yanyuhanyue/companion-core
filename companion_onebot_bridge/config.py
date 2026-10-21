@@ -51,6 +51,7 @@ class BridgeConfig:
     max_pending: int = 1000
     max_disk_bytes: int = 67108864
     poll_seconds: float = 0.1
+    capture_signing_key: str | None = None
 
     def __post_init__(self):
         for identity in (self.owner_qq_id, self.bot_qq_id):
@@ -69,6 +70,12 @@ class BridgeConfig:
                 raise ValueError("INVALID_TOKEN")
         if self.bridge_token == self.onebot_token:
             raise ValueError("DISTINCT_TOKENS_REQUIRED")
+        if self.capture_signing_key is not None and (
+            not isinstance(self.capture_signing_key, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", self.capture_signing_key)
+            or self.capture_signing_key in {self.bridge_token, self.onebot_token}
+        ):
+            raise ValueError("INVALID_CAPTURE_SIGNING_KEY")
         validate_endpoint(self.core_url, {"http", "https"}, "companion-api")
         http = validate_endpoint(self.onebot_http_url, {"http", "https"}, "snowluma")
         ws = validate_endpoint(self.onebot_ws_url, {"ws", "wss"}, "snowluma")
@@ -99,3 +106,13 @@ class BridgeConfig:
     @property
     def origin(self):
         return f"onebot-direct:FriendMessage:{self.owner_qq_id}"
+
+    @property
+    def capture_public_key(self):
+        if self.capture_signing_key is None:
+            return None
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        return Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+            self.capture_signing_key
+        )).public_key().public_bytes_raw().hex()

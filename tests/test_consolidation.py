@@ -116,7 +116,7 @@ def test_nightly_own_memory_commit_can_advance_to_diary_and_reflection(
         return result
 
     if forget_after:
-        monkeypatch.setattr(core, "extract_once", extract_then_forget)
+        monkeypatch.setattr(core.consolidation, "extract_once", extract_then_forget)
     core.consolidation.schedule_day(DAY)
     assert run(core.consolidation.run_once())
     assert core.consolidation.status(DAY)["state"] == ("CANCELLED" if forget_after else "COMPLETE")

@@ -1,5 +1,6 @@
 import re
 import time
+from datetime import datetime
 
 from .onebot_client import bounded_post
 
@@ -7,6 +8,12 @@ from .onebot_client import bounded_post
 def validate_item(item, config):
     if not isinstance(item, dict):
         raise ValueError("INVALID_DELIVERY")
+    try:
+        lease_until = datetime.fromisoformat(item["lease_until"])
+        if lease_until.utcoffset() is None:
+            raise ValueError("INVALID_DELIVERY_LEASE")
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("INVALID_DELIVERY_LEASE") from None
     for name, prefix in (("message_id", "msg"), ("lease_token", "lease")):
         if not isinstance(item.get(name), str) or not re.fullmatch(
             prefix + r"_[a-f0-9]{32}", item[name]
