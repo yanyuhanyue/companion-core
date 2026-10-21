@@ -41,4 +41,5 @@ Core 仍为组合根；模型适配层不持有存储、审批或投递职责，
 DeepSeek 为选定路线，开发按 [用量与费用观测](p10-provider-evidence-delta.md) 继续。
 本批真实 QQ 发送、供应商调用和部署均为零；真实 usage、账单、手机签收、恢复和持续运行签收仍为空，
 `production_ready=false`。已获准的早前元数据仅用于准备准确的后续范围。
-当前状态见 [公共证据记录](p10-contracts-evidence.json)，实际操作使用 [对象与签收模板](p10-r1-r2-signoff.md)。
+[公共证据记录](p10-contracts-evidence.json) 保留本次离线时点的证据与审批模板快照；
+后续最新实际结果见 [真实运行记录](p10-runtime-observations.md)，实际操作使用 [对象与签收模板](p10-r1-r2-signoff.md)。

@@ -2,8 +2,8 @@
 
 本页描述接收实现及其离线验证合同。测试使用合成身份、临时密钥、真实
 localhost WS/Core HTTP/OneBot HTTP 和 Mock 模型，不能作为平台或付费实测。
-后续真实部署和协议操作见[运行记录](p10-runtime-observations.md)；手机可见回执、收费模型、
-恢复和 production_ready 仍未签收。
+后续真实部署和协议操作、五条文字往返的手机确认与模型 usage 见[运行记录](p10-runtime-observations.md)。
+该有界结果不扩展为恢复、M1、长期稳定运行或 production_ready 签收。
 
 ## 接收与批准
 
