@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from companion import __version__, live_text
+from companion import __version__, live_text, qq_rich
 from companion.config import Settings
 from companion.content_api import register_content_routes
 from companion.contracts import (
@@ -49,6 +49,11 @@ class BodyLimit:
                 return await JSONResponse({"error": "BODY_TOO_LARGE"}, 413)(scope, receive, send)
             if not message.get("more_body"):
                 break
+        if scope["path"] == "/internal/v1/inbox/events":
+            try:
+                qq_rich.check_http_json(bytes(body))
+            except (ValueError, RecursionError):
+                return await JSONResponse({"error": "INVALID_CONTRACT"}, 400)(scope, receive, send)
         consumed = False
 
         async def replay():

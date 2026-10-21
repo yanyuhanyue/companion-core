@@ -21,6 +21,7 @@ from pydantic import AwareDatetime, Field
 from companion import paid_budget
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger, epoch
+from companion.qq_rich import input_digest as _input_digest
 from companion.store import after, encode
 
 BINDING = "live_text_window"
@@ -486,6 +487,7 @@ def check_input(store, settings, clock, event):
     if (
         event.event_type != "message.received"
         or event.payload.media or event.payload.shared_content
+        or (event.payload.rich and approval.rich_input_scope != "references_v1")
         or not text.strip() or text.strip().startswith("/")
         or len(text) > approval.max_input_chars
         or not approval.starts_at <= event.occurred_at < approval.ends_at
@@ -495,7 +497,7 @@ def check_input(store, settings, clock, event):
     value = json.loads(receipt["value"]) if receipt else {}
     if (value.get("window_sha256") != approval.plan_sha256
         or value.get("privacy_epoch") != epoch(store)
-        or value.get("input_sha256") != paid_budget.sha(text)):
+        or value.get("input_sha256") != _input_digest(event.payload.model_dump())):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 403)
     capture = json.loads(receipt["value"]).get("capture")
     if capture and (
@@ -517,10 +519,13 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
         or value.get("window_sha256") != approval.plan_sha256
         or value.get("privacy_epoch") != epoch(store)):
         raise CoreError("LIVE_TEXT_APPROVED_JOB_REQUIRED", 403)
-    text = json.loads(event["body_json"])["text"]
-    if text.strip().startswith("/") or paid_budget.sha(text) != json.loads(
+    body = json.loads(event["body_json"])
+    text = body["text"]
+    if (text.strip().startswith("/")
+        or (body.get("rich") and approval.rich_input_scope != "references_v1")
+        or _input_digest(body) != json.loads(
         receipt["value"]
-    )["input_sha256"]:
+    )["input_sha256"]):
         raise CoreError("LIVE_TEXT_INPUT_CHANGED", 403)
     _check_context(store, settings, job, approval)
     if approval.memory_scope == "approved_facts":
@@ -562,7 +567,8 @@ def _history_fingerprint(store, settings, approval, source):
         value.get("window_sha256") != approval.plan_sha256
         or value.get("privacy_epoch") != epoch(store)
         or value.get("event_id") != source["event_id"]
-        or value.get("input_sha256") != paid_budget.sha(source["user_text"])
+        or value.get("input_sha256") != _input_digest(body)
+        or (body.get("rich") and approval.rich_input_scope != "references_v1")
         or capture.window_sha256 != approval.plan_sha256
         or capture.event_id != source["event_id"]
         or capture.source_event_id != source["source_event_id"]
@@ -605,8 +611,10 @@ def history_sources(store, settings, clock, job):
         store, job["conversation_id"], job["event_id"], approval.max_inputs, event_ids=allowed,
     ) if _history_fingerprint(store, settings, approval, source)]
     sources = sources[-approval.max_history_turns:]
-    while sources and sum(len((s["user_text"] + s["reply_text"]).encode("utf-8"))
-                          for s in sources) > approval.max_history_utf8_bytes:
+    while sources and sum(
+        len(message["content"].encode("utf-8"))
+        for source in sources for message in dialogue_history.turn_messages(source)
+    ) > approval.max_history_utf8_bytes:
         sources.pop(0)
     return sources
 

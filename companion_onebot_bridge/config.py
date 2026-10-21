@@ -52,8 +52,11 @@ class BridgeConfig:
     max_disk_bytes: int = 67108864
     poll_seconds: float = 0.1
     capture_signing_key: str | None = None
+    rich_input_scope: str = "none"
 
     def __post_init__(self):
+        if self.rich_input_scope not in ("none", "references_v1"):
+            raise ValueError("INVALID_RICH_INPUT_SCOPE")
         for identity in (self.owner_qq_id, self.bot_qq_id):
             if not isinstance(identity, str) or not re.fullmatch(r"[1-9][0-9]{4,19}", identity):
                 raise ValueError("INVALID_ACCOUNT")

@@ -128,6 +128,7 @@ class LiveTextWindowApproval(BaseModel):
     max_model_attempts: int = Field(default=5, strict=True, ge=1, le=5)
     max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
     max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
+    rich_input_scope: Literal["none", "references_v1"] = "none"
     history_scope: Literal["none", "approved_window"] = "none"
     max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
@@ -193,6 +194,7 @@ class Settings(BaseModel):
     output_rate: int | None = Field(default=None, ge=0)
     paid_model: PaidModelApproval | None = None
     live_text_window: LiveTextWindowApproval | None = None
+    rich_input_scope: Literal["none", "references_v1"] = "none"
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)

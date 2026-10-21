@@ -5,6 +5,7 @@ engine still checks the complete final prompt under its own admission contract.
 """
 
 from companion.budget import token_upper_bound
+from companion.qq_rich import context
 
 
 def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
@@ -15,7 +16,10 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
 
 
 def turn_messages(source):
-    return [{"role": "user", "content": source["user_text"]},
+    import json
+
+    rich = context(json.loads(source["body_json"])) if source.get("body_json") else None
+    return [*([rich] if rich else []), {"role": "user", "content": source["user_text"]},
             {"role": "assistant", "content": source["reply_text"]}]
 
 
