@@ -13,6 +13,7 @@ import pytest
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
+from tests.journal_assertions import assert_private_journal
 from tests.test_onebot_delivery import core_client, provider
 from tests.test_onebot_direct import config, normalized, raw_event
 
@@ -156,8 +157,9 @@ def test_actual_core_five_attempts_restart_duplicate_and_sixth_input_cap(core, t
     assert len(sends) == 5
     assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 5
     audit = (tmp_path / "window-audit.jsonl").read_text("utf-8")
-    for secret in ("10001", "10002", cfg.bridge_token, cfg.onebot_token, "你好", cfg.core_url):
-        assert secret not in audit
+    assert_private_journal(
+        audit, ("10001", "10002", cfg.bridge_token, cfg.onebot_token, "你好", cfg.core_url),
+    )
 
 
 @pytest.mark.parametrize(

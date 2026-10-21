@@ -27,6 +27,7 @@ from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, WindowPlan, digest
 from tests.conftest import run
+from tests.journal_assertions import assert_private_journal
 from tests.test_live_text_window import live_fixture
 from tests.test_onebot_delivery import provider
 from tests.test_onebot_direct import config, raw_event
@@ -246,15 +247,14 @@ def test_authenticated_ws_real_http_five_input_model_outbox_send_chain(core, tmp
                     assert len(model_calls) == len(sends) == 5
                     assert len(connections) == 9
                     journal = await asyncio.to_thread(plan.journal.read_text, "utf-8")
-                    assert all(
-                        secret not in journal
-                        for secret in (
+                    assert_private_journal(
+                        journal, (
                             cfg.owner_qq_id,
                             cfg.bot_qq_id,
                             cfg.onebot_token,
                             "你好",
                             cfg.onebot_ws_url,
-                        )
+                        ),
                     )
                     assert list((spool.directory / "captures").glob("*.json")) == []
                     receipts = core.store.rows(
