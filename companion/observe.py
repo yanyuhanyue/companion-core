@@ -1,11 +1,12 @@
 """Bounded observation evidence, not a heartbeat, queue, or health authority."""
 
+import asyncio
 import hashlib
 import json
 import math
 import os
 import re
-import socket
+import ssl
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,143 @@ import httpx
 
 from companion.store import encode
 
+HTTP_TOTAL_SECONDS = 5
+BLOCKER_CODES = frozenset({
+    "DISK_RESOURCE_UNAVAILABLE", "DATABASE_MISSING", "MIGRATION_REQUIRED",
+    "DATABASE_INTEGRITY_FAILED", "DATABASE_SNAPSHOT_UNAVAILABLE",
+    "OWNER_IDENTITY_UNINITIALIZED_OR_MISMATCH", "ERASURE_IDENTITY_UNINITIALIZED",
+    "ERASURE_LEDGER_RECONCILIATION_REQUIRED", "ERASURE_REPLAY_REQUIRED",
+    "ERASURE_LEDGER_UNAVAILABLE_OR_TOO_LARGE", "BUDGET_JOURNAL_RECONCILIATION_REQUIRED",
+    "BUDGET_JOURNAL_UNAVAILABLE_OR_TOO_LARGE", "PAID_APPROVAL_REQUIRED",
+    "MODEL_BUDGET_BLOCKED", "MODEL_BUDGET_RESTORE_REQUIRED", "LIVE_TEXT_STOPPED",
+    "MODEL_USAGE_UNSETTLED", "DELIVERY_UNCERTAIN", "EXPIRED_LEASES", "EMBEDDING_CACHE_MISSING",
+})
+
+
+def _integer(value, *, signed=False):
+    if type(value) is not int or not (-(2**63 - 1) if signed else 0) <= value < 2**63:
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    return value
+
+
+def _boolean(value):
+    if type(value) is not bool:
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    return value
+
+
+def _queue(value, active, terminal):
+    states = value["states"]
+    if not isinstance(states, dict) or set(states) - set(active + terminal):
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    states = {state: _integer(count) for state, count in states.items()}
+    count, expired = _integer(value["active"]), _integer(value["expired_leases"])
+    age = value["oldest_age_seconds"]
+    if (count != sum(states.get(state, 0) for state in active) or expired > count
+        or (age is None) != (count == 0)
+        or (age is not None and (type(age) not in {int, float} or not math.isfinite(age)
+                                 or not 0 <= age < 2**63))):
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    return {"states": states, "active": count, "expired_leases": expired,
+            "oldest_age_seconds": age}
+
+
+def _resource(value):
+    if not isinstance(value, dict):
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    result = {}
+    for key in ("required", "exists", "model_loaded"):
+        if key in value:
+            result[key] = _boolean(value[key])
+    for key in ("bytes", "records"):
+        if key in value:
+            result[key] = (None if key == "bytes" and value[key] is None
+                           else _integer(value[key]))
+    if "checked" in value:
+        checked = value["checked"]
+        if checked is not False and checked not in {"HEADER_ONLY", "FULL_LEDGER", "FULL_JOURNAL"}:
+            raise ValueError("OBSERVATION_RESPONSE_INVALID")
+        result["checked"] = checked
+    return result
+
+
+def _safe_operations(raw, observed):
+    """Project this endpoint's small aggregate contract; never retain remote objects."""
+    codes = raw["blockers"]
+    if (type(raw["schema_version"]) is not int or raw["schema_version"] != 1
+        or raw["read_only"] is not True or raw["mode"] not in {"demo", "live"}
+        or not isinstance(codes, list) or len(codes) > 64
+        or any(type(code) is not str or code not in BLOCKER_CODES for code in codes)
+        or raw["worker_progress"].get("state") != "UNOBSERVED"
+        or raw["worker_progress"].get("reason") != "NO_WORKER_HEARTBEAT"):
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    result = {"schema_version": 1, "read_only": True, "mode": raw["mode"],
+              "observed_at": observed.astimezone(UTC).isoformat(), "blockers": list(codes),
+              "worker_progress": {"state": "UNOBSERVED", "reason": "NO_WORKER_HEARTBEAT"}}
+    database = raw["database"]
+    if not {"exists", "bytes"} <= database.keys():
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    result["database"] = _resource(database)
+    if "wal_bytes" in database:
+        result["database"]["wal_bytes"] = (
+            None if database["wal_bytes"] is None else _integer(database["wal_bytes"])
+        )
+    if "capabilities_present" in database:
+        result["database"]["capabilities_present"] = _boolean(database["capabilities_present"])
+    if "integrity" in database:
+        if database["integrity"] not in {"NOT_CHECKED", "OK", "FAILED"}:
+            raise ValueError("OBSERVATION_RESPONSE_INVALID")
+        result["database"]["integrity"] = database["integrity"]
+    resources = raw["resources"]
+    if not codes and not {
+        "erasure_ledger", "budget_journal", "embedding_cache",
+    } <= resources.keys():
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    free = resources["disk_free_bytes"]
+    result["resources"] = {"disk_free_bytes": None if free is None else _integer(free)}
+    for key in ("erasure_ledger", "budget_journal", "embedding_cache"):
+        if key in resources:
+            result["resources"][key] = _resource(resources[key])
+    for key, active, terminal in (
+        ("jobs", ("QUEUED", "RUNNING", "RETRY_WAIT"), ("SUCCEEDED", "FAILED", "CANCELLED")),
+        ("deliveries", ("PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN"),
+         ("SENT", "FAILED", "CANCELLED")),
+    ):
+        if key in raw:
+            result[key] = _queue(raw[key], active, terminal)
+        elif not codes:
+            raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    if "budget" in raw:
+        budget = raw["budget"]
+        result["budget"] = {key: _integer(budget[key]) for key in (
+            "unsettled_calls", "unsettled_micro_usd", "unknown_calls",
+        )}
+        for key in ("pricing_configured", "paid_approval_configured"):
+            result["budget"][key] = _boolean(budget[key])
+        calibration = budget["calibration"]
+        safe = {key: _integer(calibration[key]) for key in (
+            "calibrated_calls", "input_estimated_tokens", "input_actual_tokens",
+            "output_actual_tokens", "cached_input_tokens", "reserved_micro_usd",
+            "usage_priced_micro_usd", "anomaly_calls",
+        )}
+        for key in ("input_error_tokens", "cost_error_micro_usd"):
+            safe[key] = _integer(calibration[key], signed=True)
+        currency = "USD" if safe["calibrated_calls"] else None
+        if (calibration["currency"] != currency
+            or calibration["billing_basis"] != "configured_rates_not_invoice"
+            or safe["input_error_tokens"] != (
+                safe["input_actual_tokens"] - safe["input_estimated_tokens"]
+            ) or safe["cost_error_micro_usd"] != (
+                safe["usage_priced_micro_usd"] - safe["reserved_micro_usd"]
+            ) or result["budget"]["unknown_calls"] > result["budget"]["unsettled_calls"]):
+            raise ValueError("OBSERVATION_RESPONSE_INVALID")
+        result["budget"]["calibration"] = safe | {
+            "currency": currency, "billing_basis": "configured_rates_not_invoice",
+        }
+    elif not codes:
+        raise ValueError("OBSERVATION_RESPONSE_INVALID")
+    return result
+
 
 def http_collector(settings, url, *, allow_external=False, authorization_sha256=None):
     parsed = urlsplit(url)
@@ -24,49 +162,53 @@ def http_collector(settings, url, *, allow_external=False, authorization_sha256=
         or parsed.username is not None or parsed.password is not None
         or parsed.query or parsed.fragment or parsed.path not in {"", "/"}):
         raise ValueError("OBSERVATION_ORIGIN_REQUIRED")
+    try:
+        address = ip_address(parsed.hostname)
+        if "%" in parsed.hostname:
+            raise ValueError("scoped address")
+    except ValueError:
+        raise ValueError("OBSERVATION_IP_LITERAL_REQUIRED") from None
+    if not allow_external and not address.is_loopback:
+        raise ValueError("OBSERVATION_LOOPBACK_REQUIRED")
     if allow_external and not re.fullmatch(r"[a-f0-9]{64}", authorization_sha256 or ""):
         raise ValueError("OBSERVATION_EXTERNAL_AUTHORIZATION_REQUIRED")
 
-    def collect():
-        started = datetime.now(UTC)
-        addresses = socket.getaddrinfo(parsed.hostname, parsed.port or (
-            443 if parsed.scheme == "https" else 80
-        ), type=socket.SOCK_STREAM)
-        if not addresses or (not allow_external and any(
-            not ip_address(row[4][0]).is_loopback for row in addresses
-        )):
-            raise ValueError("OBSERVATION_LOOPBACK_REQUIRED")
-        # Pin the actual request after checking DNS. Preserve original Host/SNI.
+    # HTTPS uses the normal trust store and IP SAN verification. HTTP never uses TLS.
+    tls = (ssl.create_default_context() if parsed.scheme == "https"
+           else ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+
+    async def receive():
+        deadline = time.monotonic() + HTTP_TOTAL_SECONDS
         target = httpx.URL(url.rstrip("/") + "/internal/v1/ops/status?summary_only=true")
-        target = target.copy_with(host=addresses[0][4][0])
-        with httpx.Client(timeout=5, trust_env=False, follow_redirects=False,
-                          verify=parsed.scheme == "https") as client:
-            request = client.build_request("GET", target, headers={
-                "Host": parsed.netloc,
+        async with asyncio.timeout(HTTP_TOTAL_SECONDS), httpx.AsyncClient(
+            timeout=HTTP_TOTAL_SECONDS, trust_env=False, follow_redirects=False, verify=tls,
+        ) as client:
+            async with client.stream("GET", target, headers={
                 "Authorization": "Bearer " + settings.bridge_token.get_secret_value(),
                 "Cache-Control": "no-cache",
-            }, extensions={"sni_hostname": parsed.hostname})
-            response = client.send(request, stream=True)
-            try:
+            }) as response:
                 if response.status_code != 200:
                     raise ValueError("OBSERVATION_HTTP_STATUS")
                 body = bytearray()
-                for part in response.iter_bytes(chunk_size=8192):
+                async for part in response.aiter_bytes():
                     body.extend(part)
                     if len(body) > 131072:
                         raise ValueError("OBSERVATION_RESPONSE_TOO_LARGE")
-            finally:
-                response.close()
         result = json.loads(body)
         operations, identity = result["operations"], result["observation"]["api_instance"]
         observed = datetime.fromisoformat(operations["observed_at"])
-        if (operations.get("schema_version") != 1 or operations.get("read_only") is not True
-            or not isinstance(operations.get("blockers"), list)
-            or not re.fullmatch(r"[a-f0-9]{32}", identity) or observed.tzinfo is None
-            or observed < started - timedelta(seconds=5)
-            or observed > datetime.now(UTC) + timedelta(seconds=5)):
+        completed = datetime.now(UTC)
+        if (not re.fullmatch(r"[a-f0-9]{32}", identity) or observed.tzinfo is None
+            or observed < completed - timedelta(seconds=5)
+            or observed > completed + timedelta(seconds=5) or time.monotonic() >= deadline):
             raise ValueError("OBSERVATION_RESPONSE_INVALID")
-        return operations, identity
+        projected = _safe_operations(operations, observed)
+        if time.monotonic() >= deadline:
+            raise ValueError("OBSERVATION_DEADLINE")
+        return projected, identity
+
+    def collect():
+        return asyncio.run(receive())
 
     return collect
 

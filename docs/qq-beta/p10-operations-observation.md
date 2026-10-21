@@ -22,10 +22,14 @@ python -m companion observe --output .local/observation-run.jsonl --samples 12 -
 
 `--url http://127.0.0.1:8765` 可观察已运行的 API；采集器只访问带原认证的
 `/internal/v1/ops/status?summary_only=true`，不启动 API/worker，不执行原 live window
-完整 guard。所有 DNS 结果默认必须 loopback，实际连接固定到已检查地址，保留
-Host/SNI，禁止跳转和环境代理。外部目标还必须明确给出 `--allow-external`、
+完整 guard。地址支持显式 IPv4/IPv6 literal，例如 `127.0.0.1` 和 `[::1]`；默认必须
+loopback，域名直接拒绝。HTTPS 正常验证信任链及 IP SAN。禁止跳转和环境代理。
+外部 IP 目标还必须明确给出 `--allow-external`、
 `--evidence-type authorized_runtime` 和 `--authorization-sha256`。哈希只是既有批准的
 引用，不会创造部署、数据或网络授权；此轮没有运行外部目标。
+单次 HTTP 连接和完整响应接收共用 5 秒绝对期限，超时取消 I/O；接收完成时再次核对
+snapshot UTC 新鲜度。远端响应只投影固定聚合字段；未知附加字段丢弃，未知阻断代码、
+错误类型、非法状态或越界计数让该次采样失败，原响应不会进入观察文件。
 
 `budget.calibration` 直接复用预算模块对原始只读 SQLite 连接的 usage 聚合，只有
 SETTLED 付费样本进入误差校准，UNKNOWN 预留不算实际 token。按配置费率计算的 USD

@@ -1,13 +1,21 @@
 import json
+import socket
+import ssl
 import threading
 import time
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
 
 from companion import observe, ops_status
+from tests.conftest import ingest, run
 
 
 def records(path):
@@ -15,7 +23,7 @@ def records(path):
 
 
 @contextmanager
-def status_server(core, *, fail=False, stale=False):
+def status_server(core, *, fail=False, stale=False, mutate=None, delays=(), ipv6=False, tls=None):
     requests = []
     instance = ["a" * 32]
 
@@ -28,18 +36,42 @@ def status_server(core, *, fail=False, stale=False):
             snapshot = ops_status.snapshot(core.settings)
             if stale:
                 snapshot["observed_at"] = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+            if mutate:
+                mutate(snapshot)
             body = json.dumps({"operations": snapshot,
                                "observation": {"api_instance": instance[0]}}).encode()
             self.send_response(503 if fail else 200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                for index in range(len(delays) + 1):
+                    if index:
+                        time.sleep(delays[index - 1])
+                    start = index * 10
+                    part = body[start:start + 10] if index < len(delays) else body[start:]
+                    self.wfile.write(part)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    class IPv6Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+
+    try:
+        server = (IPv6Server if ipv6 else ThreadingHTTPServer)(
+            ("::1" if ipv6 else "127.0.0.1", 0), Handler,
+        )
+    except OSError:
+        if ipv6:
+            pytest.skip("IPv6 loopback is unavailable")
+        raise
+    if tls:
+        server.socket = tls.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}", requests, instance
+        scheme, host = "https" if tls else "http", "[::1]" if ipv6 else "127.0.0.1"
+        yield f"{scheme}://{host}:{server.server_port}", requests, instance
     finally:
         server.shutdown()
         server.server_close()
@@ -119,16 +151,13 @@ def test_new_invocations_cannot_append_or_join_evidence(tmp_path):
     assert one["clear_segment_observed_seconds"] == two["clear_segment_observed_seconds"] == 0
 
 
-def test_nonloopback_dns_and_external_without_authorization_make_no_http(core, monkeypatch):
+def test_nonloopback_ip_and_external_without_authorization_make_no_http(core, monkeypatch):
     calls = []
-    monkeypatch.setattr(observe.socket, "getaddrinfo", lambda *_args, **_kwargs: [
-        (2, 1, 6, "", ("192.168.1.5", 8765)),
-    ])
-    monkeypatch.setattr(observe.httpx, "Client", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(observe.httpx, "AsyncClient", lambda **kwargs: calls.append(kwargs))
     with pytest.raises(ValueError, match="LOOPBACK"):
-        observe.http_collector(core.settings, "http://localhost:8765")()
+        observe.http_collector(core.settings, "http://192.168.1.5:8765")()
     with pytest.raises(ValueError, match="AUTHORIZATION"):
-        observe.http_collector(core.settings, "https://synthetic.invalid", allow_external=True)
+        observe.http_collector(core.settings, "https://192.168.1.5", allow_external=True)
     assert calls == []
 
 
@@ -214,3 +243,142 @@ def test_invalid_bounds_do_not_create_evidence(tmp_path, options):
     with pytest.raises(ValueError):
         observe.observe(lambda: ({"blockers": []}, None), output, **options)
     assert not output.exists()
+
+
+def test_http_snapshot_only_persists_known_safe_fields(core, tmp_path):
+    marker = "SYNTHETIC_PRIVATE_MESSAGE_ENDPOINT_KEY_PATH"
+
+    def mutate(snapshot):
+        snapshot["raw_message"] = marker
+        snapshot["endpoint"] = "http://SYNTHETIC_PRIVATE_ENDPOINT/"
+        snapshot["database"]["raw_path"] = marker
+        snapshot["resources"]["private_resource"] = marker
+        snapshot["jobs"]["private_detail"] = marker
+
+    output = tmp_path / "projected.jsonl"
+    with status_server(core, mutate=mutate) as (url, _, _):
+        summary = observe.observe(observe.http_collector(core.settings, url), output, samples=1)
+    assert summary["failures"] == 0
+    text = output.read_text("utf-8")
+    assert marker not in text and "SYNTHETIC_PRIVATE_ENDPOINT" not in text
+    assert records(output)[1]["snapshot"]["jobs"]["active"] == 0
+
+
+@pytest.mark.parametrize("change", ["private_blocker", "negative_queue", "boolean_count",
+                                   "unknown_state", "infinite_age", "negative_budget",
+                                   "calibration_type"])
+def test_invalid_remote_aggregate_is_a_failure_without_snapshot(core, tmp_path, change):
+    marker = "SYNTHETIC_PRIVATE_MESSAGE_ENDPOINT_KEY_PATH"
+
+    def mutate(snapshot):
+        if change == "private_blocker":
+            snapshot["blockers"] = [marker]
+        elif change == "negative_queue":
+            snapshot["jobs"]["active"] = -123
+        elif change == "boolean_count":
+            snapshot["jobs"]["active"] = True
+        elif change == "unknown_state":
+            snapshot["jobs"]["states"] = {marker: 1}
+        elif change == "infinite_age":
+            snapshot["jobs"]["oldest_age_seconds"] = float("inf")
+        elif change == "negative_budget":
+            snapshot["budget"]["unsettled_calls"] = -1
+        else:
+            snapshot["budget"]["calibration"]["calibrated_calls"] = marker
+
+    output = tmp_path / "rejected.jsonl"
+    with status_server(core, mutate=mutate) as (url, _, _):
+        summary = observe.observe(observe.http_collector(core.settings, url), output, samples=1)
+    assert summary["failures"] == 1
+    assert records(output)[1]["snapshot"] is None
+    assert marker not in output.read_text("utf-8")
+
+
+def test_http_total_deadline_cancels_slow_drip_before_entire_body(core, tmp_path):
+    output = tmp_path / "drip.jsonl"
+    with status_server(core, delays=(2.1, 2.1, 2.1)) as (url, _, _):
+        started = time.monotonic()
+        summary = observe.observe(observe.http_collector(core.settings, url), output, samples=1)
+        elapsed = time.monotonic() - started
+    assert summary["failures"] == 1
+    assert elapsed < 5.8
+    assert records(output)[1]["snapshot"] is None
+
+
+def test_remote_freshness_is_checked_at_receive_completion(core, tmp_path):
+    def mutate(snapshot):
+        snapshot["observed_at"] = (datetime.now(UTC) - timedelta(seconds=4.8)).isoformat()
+
+    output = tmp_path / "aged-during-read.jsonl"
+    with status_server(core, mutate=mutate, delays=(0.6,)) as (url, _, _):
+        summary = observe.observe(observe.http_collector(core.settings, url), output, samples=1)
+    assert summary["failures"] == 1
+    assert records(output)[1]["snapshot"] is None
+
+
+@pytest.mark.parametrize("ipv6", [False, True])
+def test_literal_loopback_never_needs_dns(core, monkeypatch, ipv6):
+    with status_server(core, ipv6=ipv6) as (url, requests, _):
+        def forbidden(*_args, **_kwargs):
+            pytest.fail("IP literal collection must not dispatch DNS work")
+
+        monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+        result, _ = observe.http_collector(core.settings, url)()
+    assert result["jobs"]["active"] == 0 and len(requests) == 1
+    assert requests[0][2] == url.removeprefix("http://")
+
+
+@pytest.mark.parametrize("url", ["http://localhost:8765", "https://synthetic.invalid",
+                                "http://127.1", "http://2130706433", "http://[::1%lo]"])
+def test_domains_and_ambiguous_hosts_are_rejected_without_http(core, monkeypatch, url):
+    calls = []
+    monkeypatch.setattr(observe.httpx, "AsyncClient", lambda **kwargs: calls.append(kwargs))
+    with pytest.raises(ValueError, match="IP_LITERAL"):
+        observe.http_collector(core.settings, url)
+    assert calls == []
+
+
+@pytest.mark.parametrize("matches", [False, True])
+def test_https_requires_trusted_certificate_with_matching_ip_san(
+    core, tmp_path, monkeypatch, matches,
+):
+    key = ec.generate_private_key(ec.SECP256R1())
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "synthetic-observer")])
+    now = datetime.now(UTC)
+    san = (x509.IPAddress(ip_address("127.0.0.1")) if matches
+           else x509.DNSName("synthetic.invalid"))
+    cert = (x509.CertificateBuilder().subject_name(subject).issuer_name(subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(hours=1))
+            .add_extension(x509.SubjectAlternativeName([san]), critical=False)
+            .sign(key, hashes.SHA256()))
+    certfile, keyfile = tmp_path / "certificate.pem", tmp_path / "key.pem"
+    certfile.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    keyfile.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                        serialization.PrivateFormat.PKCS8,
+                                        serialization.NoEncryption()))
+    server_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_tls.load_cert_chain(certfile, keyfile)
+    client_tls = ssl.create_default_context(cafile=str(certfile))
+    assert client_tls.check_hostname and client_tls.verify_mode == ssl.CERT_REQUIRED
+    monkeypatch.setattr(observe.ssl, "create_default_context", lambda: client_tls)
+    with status_server(core, tls=server_tls) as (url, requests, _):
+        output = tmp_path / "tls.jsonl"
+        summary = observe.observe(observe.http_collector(core.settings, url), output, samples=1)
+    assert summary["failures"] == (0 if matches else 1)
+    assert len(requests) == (1 if matches else 0)
+
+
+def test_valid_remote_unknown_counts_are_observed_as_blocked_not_rejected(core, tmp_path):
+    ingest(core)
+    assert run(core.run_once("synthetic-ops-worker"))
+    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN'")
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
+    output = tmp_path / "known-blocked.jsonl"
+    with status_server(core) as (url, _, _):
+        summary = observe.observe(observe.http_collector(core.settings, url), output, samples=1)
+    assert summary["failures"] == 0 and summary["discontinuities"] == 1
+    snapshot = records(output)[1]["snapshot"]
+    assert snapshot["budget"]["unknown_calls"] == snapshot["budget"]["unsettled_calls"] == 1
+    assert snapshot["deliveries"]["states"] == {"DELIVERY_UNCERTAIN": 1}
+    assert "MODEL_USAGE_UNSETTLED" in snapshot["blockers"]
