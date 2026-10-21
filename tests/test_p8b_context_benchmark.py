@@ -1,10 +1,13 @@
 import asyncio
 import copy
 import json
+import sqlite3
+from contextlib import closing
 from unittest.mock import patch
 
 import pytest
 
+from companion.store import migrate
 from scripts.benchmark_p8b_context import (
     FIXTURE,
     SCENARIOS,
@@ -18,15 +21,32 @@ from scripts.benchmark_p8b_context import (
 
 
 @pytest.fixture(scope="module")
-def evidence(tmp_path_factory):
+def benchmark_workspace(tmp_path_factory):
+    return tmp_path_factory.mktemp("p8b-context")
+
+
+@pytest.fixture(scope="module")
+def evidence(benchmark_workspace):
     dataset = json.loads(FIXTURE.read_text(encoding="utf-8"))
     with (
         patch("companion.retrieval.SemanticIndex.warmup", side_effect=AssertionError("encoder")),
         patch("httpx.Client.send", side_effect=AssertionError("network")),
         patch("httpx.AsyncClient.send", side_effect=AssertionError("network")),
         patch("socket.create_connection", side_effect=AssertionError("network")),
+        patch("scripts.benchmark_p8b_context.migrate", wraps=migrate) as migration,
     ):
-        return asyncio.run(benchmark(tmp_path_factory.mktemp("p8b-context"), dataset))
+        result = asyncio.run(benchmark(benchmark_workspace, dataset))
+    assert migration.call_count == 1
+    return result
+
+
+def test_benchmark_cases_cannot_contaminate_the_shared_empty_schema(evidence, benchmark_workspace):
+    assert len(list(benchmark_workspace.glob("*/*/core.sqlite3"))) == 24
+    with closing(sqlite3.connect(benchmark_workspace / "schema.sqlite3")) as template:
+        tables = template.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        for (name,) in tables:
+            if name != "alembic_version" and not name.startswith("memories_fts_"):
+                assert template.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] == 0
 
 
 def test_same_eleven_groups_have_raw_records_and_six_scenario_aggregates(evidence):

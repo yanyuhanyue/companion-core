@@ -620,68 +620,12 @@ def test_journal_survives_spool_reset_and_detects_rollback(core, tmp_path):
     run(scenario())
 
 
-def child_process():
-    """Synthetic subprocess fault fixture; receives no actual deployment credentials."""
-    from companion_onebot_bridge.config import BridgeConfig
-
-    request = json.loads(sys.stdin.readline())
-    cfg = BridgeConfig(**request["config"])
-    try:
-        with Spool(cfg) as spool:
-            if request["operation"] == "lock":
-                print("LOCKED", flush=True)
-                sys.stdin.readline()
-                return
-            plan = WindowPlan(request["plan"], cfg, request["inventory"])
-            window = TestWindow(spool, plan, clock=lambda: datetime.fromisoformat(request["now"]))
-
-            def fake_core(call):
-                if call.url.path.endswith("/ops/status"):
-                    return httpx.Response(
-                        200,
-                        json={
-                            "mode": "demo",
-                            "features": {},
-                            "jobs": [],
-                            "deliveries": [{"state": "PENDING", "count": 1}],
-                        },
-                    )
-                if call.url.path.endswith("/lease"):
-                    return httpx.Response(200, json={"items": [request["item"]]})
-                raise AssertionError("No Core begin or result expected before injected crash")
-
-            def die_after_reserve(call):
-                assert call.url.path == "/get_login_info"
-                os._exit(23)
-
-            async def crash():
-                async with (
-                    httpx.AsyncClient(
-                        base_url=cfg.core_url,
-                        transport=httpx.MockTransport(fake_core),
-                        headers={"Authorization": "Bearer " + cfg.bridge_token},
-                    ) as http,
-                    httpx.AsyncClient(
-                        base_url=cfg.onebot_http_url,
-                        headers={"Authorization": "Bearer " + cfg.onebot_token},
-                        transport=httpx.MockTransport(die_after_reserve),
-                    ) as protocol,
-                ):
-                    await window.send_once(http, protocol, request["approval"])
-
-            run(crash())
-    except RuntimeError as error:
-        assert str(error) == "BRIDGE_ALREADY_RUNNING"
-        print("LOCK_REJECTED", flush=True)
-        raise SystemExit(24) from None
-
-
 def spawn_child(payload):
     process = subprocess.Popen(
         [
             sys.executable,
             "-c",
-            "from tests.test_onebot_window import child_process;child_process()",
+            "from tests.process_helpers import window_child;window_child()",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

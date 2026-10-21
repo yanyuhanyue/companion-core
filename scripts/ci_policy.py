@@ -11,6 +11,17 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL_JOBS = ("test", "container", "browser-reader", "plugin-native")
+DOC_TESTS = (
+    "tests/test_ci_policy.py", "tests/test_p4_gates.py", "tests/test_p8b_evidence.py",
+    "tests/test_p8c_readiness.py", "tests/test_p8c_public_materials.py",
+    "tests/test_p8c1_gates.py", "tests/test_p8c1_contracts_gates.py",
+    "tests/test_p10_contracts_evidence.py",
+)
+DOC_EVIDENCE = {
+    "docs/design-v0.6/p4-gates.json", "docs/qq-beta/p8b-gates.json",
+    "docs/qq-beta/p8c-readiness.json", "docs/qq-beta/p8c1-gates.json",
+    "docs/qq-beta/p8c1-contracts-gates.json", "docs/qq-beta/p10-contracts-evidence.json",
+}
 CRITICAL_FILES = {
     "Dockerfile", "pyproject.toml", "uv.lock", "compose.yaml", "config.example.toml",
     "scripts/ci_policy.py", "tests/test_ci_policy.py", "AGENTS.md",
@@ -43,7 +54,7 @@ def choose_profile(event_name, ref, event, files):
     default = event.get("repository", {}).get("default_branch")
     if event_name in {"workflow_dispatch", "merge_group"}:
         return "full", "integration-or-manual"
-    if not default or ref == "refs/heads/" + default or ref.startswith("refs/tags/"):
+    if not default or ref.startswith("refs/tags/"):
         return "full", "protected-ref"
     if event_name not in {"push", "pull_request"} or not files:
         return "full", "unknown-change-set"
@@ -52,9 +63,12 @@ def choose_profile(event_name, ref, event, files):
     if any(name in CRITICAL_FILES or name.startswith(CRITICAL_DIRS)
            or name.endswith((".lock", ".Dockerfile")) for name in files):
         return "full", "critical-change"
-    if all(name.endswith(".md") and (name == "README.md" or name.startswith("docs/"))
-           for name in files):
-        return "docs", "markdown-only"
+    if all(name in DOC_EVIDENCE or (
+        name.endswith(".md") and (name == "README.md" or name.startswith("docs/"))
+    ) for name in files):
+        return "docs", "documentation-only"
+    if ref == "refs/heads/" + default:
+        return "full", "protected-ref"
     if event_name == "pull_request":
         return "full", "pr-merge-preview"
     return "full", "unrecognized-change"
@@ -94,39 +108,21 @@ def check_results(profile, needs):
     return (
         profile in {"full", "docs"}
         and needs.get("preflight", {}).get("result") == "success"
+        and needs.get("quality", {}).get("result") == "success"
         and all(needs.get(name, {}).get("result") == expected for name in FULL_JOBS)
     )
 
 
-def preflight_tests(profile, root=ROOT):
-    tests = ["tests/test_ci_policy.py", "tests/test_p4_gates.py"]
-    if (root / "tests/test_p8b_evidence.py").is_file():
-        tests.append("tests/test_p8b_evidence.py")
-    if profile != "docs":
-        tests += [
-            "tests/test_p8_readiness.py",
-            "tests/test_source_reader_image.py",
-            "tests/test_m0.py::test_m0_01_duplicate_event_and_content_conflict",
-            "tests/test_m0.py::test_m0_02_reject_unauthorized_group_echo",
-            "tests/test_m0.py::test_m0_08_leased_reclaim_but_sending_uncertain",
-            "tests/test_onebot_direct.py::test_spool_restart_ack_dedupe_and_conflict",
-        ]
-        # These workers are introduced by the separate module-boundary change.
-        if (root / "tests/test_worker_composition.py").is_file():
-            tests.append("tests/test_worker_composition.py")
-    return tests
-
-
-def run_preflight(profile, root=ROOT):
+def run_docs(root=ROOT):
     scratch = root / ".local/test-temp"
     scratch.mkdir(parents=True, exist_ok=True)
     # One owned directory per invocation; existing diagnostics are never cleared.
-    with tempfile.TemporaryDirectory(prefix="ci-preflight-", dir=scratch) as directory:
+    with tempfile.TemporaryDirectory(prefix="ci-docs-", dir=scratch) as directory:
         temporary = Path(directory)
         if temporary.resolve().parent != scratch.resolve():
             raise RuntimeError("CI temporary directory outside workspace scratch")
         return subprocess.call([
-            sys.executable, "-m", "pytest", "-q", *preflight_tests(profile, root),
+            sys.executable, "-m", "pytest", "-q", *DOC_TESTS,
             "--basetemp=" + str(temporary / "pytest"),
             "-o", "cache_dir=" + str(temporary / "cache"),
         ], cwd=root)
@@ -134,7 +130,7 @@ def run_preflight(profile, root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["plan", "test", "gate"])
+    parser.add_argument("operation", choices=["plan", "docs", "gate"])
     parser.add_argument("--profile", choices=["full", "docs"])
     args = parser.parse_args()
     if args.operation == "plan":
@@ -153,9 +149,7 @@ def main():
             raise SystemExit("Required CI validation did not complete successfully")
         print(f"CI passed: {args.profile}")
     else:
-        if not args.profile:
-            parser.error("test requires --profile")
-        raise SystemExit(run_preflight(args.profile))
+        raise SystemExit(run_docs())
 
 
 if __name__ == "__main__":

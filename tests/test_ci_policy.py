@@ -11,12 +11,13 @@ import yaml
 
 from scripts.ci_policy import (
     CRITICAL_FILES,
+    DOC_EVIDENCE,
+    DOC_TESTS,
     FULL_JOBS,
     changed_files,
     check_results,
     choose_profile,
-    preflight_tests,
-    run_preflight,
+    run_docs,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +30,12 @@ EVENT = {"repository": {"default_branch": "main"}}
     ("push", "refs/heads/topic", ["docs/guide.md", "README.md"], "docs"),
     ("pull_request", "refs/pull/1/merge", ["docs/guide.md"], "docs"),
     ("pull_request", "refs/pull/1/merge", ["companion/expression.py"], "full"),
-    ("push", "refs/heads/main", ["docs/guide.md"], "full"),
+    ("push", "refs/heads/main", ["docs/guide.md"], "docs"),
+    ("push", "refs/heads/main", ["docs/qq-beta/p10-contracts-evidence.json"], "docs"),
+    ("push", "refs/heads/main", ["companion/expression.py"], "full"),
+    ("push", "refs/heads/main", ["docs/guide.md", "companion/expression.py"], "full"),
+    ("pull_request", "refs/pull/1/merge", ["docs/unknown.json"], "full"),
+    ("pull_request", "refs/pull/1/merge", ["docs/experiment.py"], "full"),
     ("push", "refs/tags/v1", ["docs/guide.md"], "full"),
     ("workflow_dispatch", "refs/heads/topic", ["docs/guide.md"], "full"),
     ("merge_group", "refs/heads/queue", ["docs/guide.md"], "full"),
@@ -71,7 +77,7 @@ def test_auth_consent_restore_paid_io_and_evidence_paths_always_require_full(nam
 
 
 def needs(profile):
-    return {"preflight": {"result": "success"}, **{
+    return {"preflight": {"result": "success"}, "quality": {"result": "success"}, **{
         name: {"result": "success" if profile == "full" else "skipped"} for name in FULL_JOBS
     }}
 
@@ -83,7 +89,7 @@ def test_gate_accepts_only_the_expected_complete_result_set(profile):
     assert not check_results(profile, {})
 
 
-@pytest.mark.parametrize("job", ["preflight", *FULL_JOBS])
+@pytest.mark.parametrize("job", ["preflight", "quality", *FULL_JOBS])
 @pytest.mark.parametrize("state", ["failure", "cancelled", "skipped", ""])
 def test_full_gate_rejects_failed_cancelled_missing_or_skipped_required_job(job, state):
     results = needs("full")
@@ -176,18 +182,17 @@ def test_cli_event_failure_chooses_full_and_gate_failure_returns_nonzero(tmp_pat
     assert result.returncode != 0
 
 
-def test_preflight_files_exist_and_optional_new_workers_are_not_silently_missed(tmp_path):
-    assert all((ROOT / node.split("::")[0]).is_file() for node in preflight_tests("full"))
-    assert "tests/test_source_reader_image.py" not in preflight_tests("docs")
-    assert "tests/test_p8_readiness.py" not in preflight_tests("docs")
-    assert set(preflight_tests("docs")) < set(preflight_tests("full"))
-    (tmp_path / "tests").mkdir()
-    (tmp_path / "tests/test_worker_composition.py").touch()
-    assert "tests/test_worker_composition.py" in preflight_tests("full", tmp_path)
+def test_documentation_checks_cover_public_materials_and_every_fast_path_evidence_file():
+    assert all((ROOT / node).is_file() for node in DOC_TESTS)
+    assert "tests/test_p8c_public_materials.py" in DOC_TESTS
+    assert "tests/test_p10_contracts_evidence.py" in DOC_TESTS
+    for name in DOC_EVIDENCE:
+        assert (ROOT / name).is_file()
+        assert choose_profile("push", "refs/heads/main", EVENT, [name])[0] == "docs"
 
 
 @pytest.mark.parametrize("result", [0, 1])
-def test_preflight_bootstraps_fresh_scratch_and_cleans_only_its_own_round(
+def test_docs_bootstrap_fresh_scratch_and_clean_only_their_own_round(
     tmp_path, monkeypatch, result,
 ):
     scratch = tmp_path / ".local/test-temp"
@@ -204,22 +209,34 @@ def test_preflight_bootstraps_fresh_scratch_and_cleans_only_its_own_round(
         return result
 
     monkeypatch.setattr("scripts.ci_policy.subprocess.call", pytest_process)
-    assert run_preflight("full", tmp_path) == result
+    assert run_docs(tmp_path) == result
     assert not rounds[0].exists()
     assert (scratch / "retained.txt").read_text("utf-8") == "synthetic diagnostic"
 
 
-def test_workflow_keeps_full_platform_checks_and_final_gate_after_preflight():
+def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
     workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text("utf-8"),
                          Loader=yaml.BaseLoader)
     jobs = workflow["jobs"]
-    assert set(jobs) == {"preflight", "ci", *FULL_JOBS}
+    assert set(jobs) == {"preflight", "quality", "ci", *FULL_JOBS}
     assert jobs["test"]["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
+    assert jobs["test"]["strategy"]["matrix"]["shard"] == ["0", "1"]
+    assert jobs["test"]["strategy"]["fail-fast"] == "false"
     for name in FULL_JOBS:
         assert jobs[name]["needs"] == "preflight"
         assert jobs[name]["if"] == "${{ needs.preflight.outputs.profile == 'full' }}"
     assert jobs["ci"]["if"] == "${{ always() }}"
-    assert set(jobs["ci"]["needs"]) == {"preflight", *FULL_JOBS}
+    assert set(jobs["ci"]["needs"]) == {"preflight", "quality", *FULL_JOBS}
+    # Choosing work must not wait for dependency installs or duplicate runtime tests.
+    assert all("pytest" not in step.get("run", "") and "uv" not in step.get("run", "")
+               for step in jobs["preflight"]["steps"])
+    steps = jobs["test"]["steps"]
+    assert any("-p scripts.ci_shards" in step.get("run", "") for step in steps)
+    for script in ("replay.py", "smoke.py", "verify_package.py"):
+        step = next(step for step in steps if script in step.get("run", ""))
+        assert step["if"] == "${{ matrix.shard == 0 }}"
+    assert not any("ruff" in step.get("run", "")
+                   for step in jobs["browser-reader"]["steps"])
     assert set(workflow["on"]) == {"push", "pull_request", "merge_group", "workflow_dispatch"}
     # A branch push has no check until a PR is opened. Only its PR merge preview
     # may produce the required `ci` check, so a short push cannot mask a failed PR.
@@ -228,3 +245,10 @@ def test_workflow_keeps_full_platform_checks_and_final_gate_after_preflight():
     concurrency = workflow["concurrency"]
     assert "github.workflow" in concurrency["group"] and "github.ref" in concurrency["group"]
     assert "default_branch" in concurrency["cancel-in-progress"]
+
+
+@pytest.mark.parametrize("state", ["failure", "cancelled", "skipped", ""])
+def test_docs_gate_requires_its_documentation_validation(state):
+    results = needs("docs")
+    results["quality"]["result"] = state
+    assert not check_results("docs", results)
