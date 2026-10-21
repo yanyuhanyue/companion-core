@@ -23,6 +23,9 @@ def sha(value):
 def snapshot(settings):
     approval = settings.paid_model
     value = approval.model_dump(mode="json", exclude={"journal_path"})
+    # Existing text-only journals bind the original bytes, not a new null field.
+    if approval.image_input is None:
+        value.pop("image_input")
     value["estimator"] = "utf8-third-v1"
     value["local_monthly_micro_usd"] = settings.monthly_limit_micro_usd
     value["scenario_daily_micro_usd"] = {
@@ -32,6 +35,9 @@ def snapshot(settings):
         "reflection": settings.reflection_daily_micro_usd,
         "activity": settings.autonomous_daily_micro_usd,
     }
+    if approval.image_input is not None:
+        value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
+        value["scenario_daily_micro_usd"]["content_vision"] = settings.content.image_daily_micro_usd
     value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(
@@ -74,14 +80,21 @@ def contract(settings, now):
 
 
 def estimate_input_tokens(approval, messages, scenario):
-    """Estimate text input locally, without claiming a provider-side token bound.
+    """Estimate approved input locally, without claiming a provider-side token bound.
 
     UTF-8 bytes / 3 approximates mixed Chinese/Latin text, with per-message and
     structured-response overhead plus an explicit owner-configured safety margin.
+    A validated image adds its separately approved fixed estimate, never base64 tokens.
     Actual provider usage is the calibration signal; this is never an upper proof.
     """
     try:
         estimate = 32
+        if scenario == "content_vision":
+            from companion.image_input import text_and_estimate
+
+            text, image_estimate = text_and_estimate(approval.image_input, messages)
+            messages = [{"role": "user", "content": text}]
+            estimate += image_estimate
         for message in messages:
             if (
                 set(message) != {"role", "content"}

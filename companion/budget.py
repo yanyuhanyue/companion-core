@@ -49,16 +49,23 @@ def reserve(
     clock=None,
 ):
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
+    if scenario == "content_vision":
+        from companion.image_input import contract as image_contract
+
+        logical_request_id = logical_request_id or job_id
+        image_contract(settings, job_id, logical_request_id)
     autonomous = scenario != "chat"
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-    estimated_input = token_upper_bound(messages)
+    estimated_input = (
+        paid_budget.estimate_input_tokens(approval, messages, scenario) if approval
+        else token_upper_bound(messages)
+    )
     output_tokens = settings.output_tokens(scenario)
     if approval:
-        estimated_input = paid_budget.estimate_input_tokens(approval, messages, scenario)
         if estimated_input > approval.max_input_tokens:
             raise CoreError("MODEL_INPUT_LIMIT", 429)
         if output_tokens > approval.max_output_tokens:
@@ -71,6 +78,13 @@ def reserve(
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
+        if scenario == "content_vision":
+            if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
+                raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+            if store.one(
+                "SELECT 1 FROM model_usage WHERE job_id=? AND scenario='content_vision'", (job_id,),
+            ):
+                raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)
         if scenario == "activity":
             from companion.social import proactive_allowed
 
@@ -86,6 +100,9 @@ def reserve(
             elif scenario == "diary":
                 scenarios = ("diary",)
                 limit = settings.diary_daily_micro_usd
+            elif scenario == "content_vision":
+                scenarios = ("content_vision",)
+                limit = settings.content.image_daily_micro_usd
             elif scenario == "activity":
                 scenarios = ("activity",)
                 limit = settings.autonomous_daily_micro_usd
@@ -526,10 +543,12 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     now = clock()
     from companion.model import ModelAdmission, ModelClient, ModelResponseError, model_payload
 
-    if live_text.active(store, settings):
+    if live_text.active(store, settings) or scenario == "content_vision":
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
-        if settings.live_text_window.execution == "local_synthetic" and not isinstance(
+        if live_text.active(store, settings) and (
+            settings.live_text_window.execution == "local_synthetic"
+        ) and not isinstance(
             model.client._transport_for_url(httpx.URL(settings.model_url)), httpx.MockTransport
         ):
             raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
@@ -540,7 +559,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         paid_budget.contract(settings, clock())
         paid_budget.journal(store, approval)
         row = store.one(
-            "SELECT a.*,m.state,m.scenario AS usage_scenario "
+            "SELECT a.*,m.state,m.scenario AS usage_scenario,m.job_id AS usage_job_id "
             "FROM model_admissions a JOIN model_usage m USING(request_id) "
             "WHERE request_id=?",
             (request_id,),
@@ -549,6 +568,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
         if row["usage_scenario"] != scenario:
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+        if scenario == "content_vision":
+            from companion.image_input import contract as image_contract
+
+            image_contract(settings, row["usage_job_id"], row["logical_request_id"])
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         snapshot = paid_budget.snapshot(settings)
@@ -598,7 +621,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                 paid_budget.journal(store, approval)
                 current_job = live_text.check_model(store, settings, clock, request_id)
                 current = store.one(
-                    "SELECT a.*,m.state FROM model_admissions a JOIN model_usage m "
+                    "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
+                    "FROM model_admissions a JOIN model_usage m "
                     "USING(request_id) WHERE request_id=?", (request_id,),
                 )
                 if (
@@ -607,12 +631,19 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     or current["io_started_at"] != now
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
+                    or (scenario == "content_vision" and (
+                        current["scenario"] != scenario
+                        or current["usage_job_id"] != row["usage_job_id"]
+                        or current["logical_request_id"] != row["logical_request_id"]
+                    ))
                 ):
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
                 if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
                              "('model_budget_blocked','model_budget_restore_required')"):
                     raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
             paid_budget.contract(settings, clock())
+            if scenario == "content_vision":
+                image_contract(settings, row["usage_job_id"], row["logical_request_id"])
             if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                 raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
             if row["payload_sha256"] != paid_budget.sha(

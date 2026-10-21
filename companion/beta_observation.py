@@ -38,10 +38,13 @@ def _context(view, job_id, current_epoch):
     value = json.loads(row["value"])
     epoch = _number(value.get("privacy_epoch"))
     sources, memories = value.get("sources", []), value.get("memory_sources", [])
+    images = value.get("image_sources", [])
     if not isinstance(sources, list) or len(sources) > 10:
         raise ValueError("CONTEXT_SOURCES_INVALID")
     if not isinstance(memories, list) or len(memories) > 6:
         raise ValueError("CONTEXT_MEMORIES_INVALID")
+    if not isinstance(images, list) or len(images) > 1:
+        raise ValueError("CONTEXT_IMAGES_INVALID")
     return {
         "state": "RECORDED" if epoch is not None and epoch == current_epoch else "STALE_EPOCH",
         "source_validity": "NOT_REVALIDATED",
@@ -55,6 +58,19 @@ def _context(view, job_id, current_epoch):
                     "subject": _state(source.get("subject"), {"user", "project"}),
                     "evidence_sha256": _digest(source.get("evidence_sha256"))}
                    for source in memories],
+        "images": [{
+            "producer": "observation.qq_image", "subject": "owner_shared_image",
+            "source_validity": "NOT_REVALIDATED",
+            "privacy_epoch": _number(source["image"].get("privacy_epoch")),
+            "event_ref_sha256": _hash(source["image"]["event_id"]),
+            "item_ref_sha256": _hash(source["image"]["item_id"]),
+            "source_sha256": _digest(source["image"]["source"].get("source_sha256")),
+            "media_sha256": _digest(source["image"].get("media_sha256")),
+            "payload_sha256": _digest(source["image"].get("payload_sha256")),
+            **{key: _digest(source.get(key)) for key in (
+                "item_sha256", "observation_sha256", "admission_sha256",
+            )},
+        } for source in images],
     }
 
 
@@ -89,7 +105,7 @@ def _trace(view, trace_id):
             actual = row["state"] == "SETTLED" and row["io_started_at"] is not None
             calls.append({
                 "state": _state(row["state"], {"RESERVED", "SETTLED", "UNKNOWN"}),
-                "scenario": _state(row["scenario"], {"chat", "memory_review"}),
+                "scenario": _state(row["scenario"], {"chat", "memory_review", "content_vision"}),
                 "paid_dispatch_recorded": row["io_started_at"] is not None,
                 "attempt_number": _number(row["attempt_number"]),
                 "prompt_tokens": _number(row["input_tokens"]) if actual else None,
@@ -157,6 +173,7 @@ def inspect_context(settings, trace_id):
             "history": approval.history_scope if approval else "none",
             "memory": approval.memory_scope if approval else "none",
             "rich_input": getattr(approval, "rich_input_scope", "none"),
+            "image": getattr(approval, "image_scope", "none"),
         },
         "billing_basis": "configured_rates_not_invoice", "blockers": [],
     }

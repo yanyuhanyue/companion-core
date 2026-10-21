@@ -182,14 +182,30 @@ class WindowPlan:
         if self.mode == "live_text":
             scope = value["live_text"]
             expected_scope = {
-                "live_approved", "execution", "window_id", "starts_at", "ends_at",
+                "live_approved",
+                "execution",
+                "window_id",
+                "starts_at",
+                "ends_at",
                 "core_config_sha256",
-                "core_code_sha256", "bridge_code_sha256", "candidate_sha", "paid_contract_sha256",
-                "budget_journal_id", "custodian_sha256", "approval_sha256", "max_inputs",
-                "max_model_attempts", "max_input_chars", "max_reply_chars",
+                "core_code_sha256",
+                "bridge_code_sha256",
+                "candidate_sha",
+                "paid_contract_sha256",
+                "budget_journal_id",
+                "custodian_sha256",
+                "approval_sha256",
+                "max_inputs",
+                "max_model_attempts",
+                "max_input_chars",
+                "max_reply_chars",
                 "capture_public_key",
-                "history_scope", "max_history_turns", "max_history_utf8_bytes",
-                "memory_scope", "memory_facts", "memory_approval_sha256",
+                "history_scope",
+                "max_history_turns",
+                "max_history_utf8_bytes",
+                "memory_scope",
+                "memory_facts",
+                "memory_approval_sha256",
                 "handoff",
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
@@ -199,59 +215,115 @@ class WindowPlan:
                 expected_scope.add("rich_input_scope")
             if scope.get("rich_input_scope", "none") not in ("none", "references_v1"):
                 raise ValueError("INVALID_RICH_INPUT_SCOPE")
+            for field in ("image_scope", "image_approval_sha256"):
+                if field in scope:
+                    expected_scope.add(field)
+            if (
+                scope.get("image_scope", "none") not in ("none", "owner_image_v1")
+                or (
+                    scope.get("image_scope", "none") == "none"
+                    and scope.get("image_approval_sha256") is not None
+                )
+                or (
+                    scope.get("image_scope") == "owner_image_v1"
+                    and (
+                        scope.get("rich_input_scope") != "references_v1"
+                        or scope["history_scope"] != "none"
+                        or scope["memory_scope"] != "none"
+                        or not isinstance(scope.get("image_approval_sha256"), str)
+                        or not SHA.fullmatch(scope["image_approval_sha256"])
+                        or not scope["capture_public_key"]
+                    )
+                )
+            ):
+                raise ValueError("INVALID_IMAGE_SCOPE")
             # Old history-only authority remains byte exact; no new grant is inferred.
             if set(scope) - {"history_approval_sha256"} != expected_scope or any(
                 not isinstance(scope[k], str) or not SHA.fullmatch(scope[k])
-                for k in expected_scope if k.endswith("_sha256") and k != "memory_approval_sha256"
+                for k in expected_scope
+                if k.endswith("_sha256")
+                and k not in {"memory_approval_sha256", "image_approval_sha256"}
             ):
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
             facts = scope["memory_facts"]
             if (
                 scope["memory_scope"] not in {"none", "approved_facts"}
-                or not isinstance(facts, list) or len(facts) > 6
-                or (scope["memory_scope"] == "none" and (
-                    facts or scope["memory_approval_sha256"] is not None
-                ))
-                or (scope["memory_scope"] == "approved_facts" and (
-                    not facts
-                    or not isinstance(scope["memory_approval_sha256"], str)
-                    or not SHA.fullmatch(scope["memory_approval_sha256"])
-                    or not scope["capture_public_key"]
-                ))
+                or not isinstance(facts, list)
+                or len(facts) > 6
+                or (
+                    scope["memory_scope"] == "none"
+                    and (facts or scope["memory_approval_sha256"] is not None)
+                )
+                or (
+                    scope["memory_scope"] == "approved_facts"
+                    and (
+                        not facts
+                        or not isinstance(scope["memory_approval_sha256"], str)
+                        or not SHA.fullmatch(scope["memory_approval_sha256"])
+                        or not scope["capture_public_key"]
+                    )
+                )
                 or any(
-                    not isinstance(fact, dict) or set(fact) != {
-                        "memory_id", "subject", "status", "content_sha256", "evidence_sha256",
+                    not isinstance(fact, dict)
+                    or set(fact)
+                    != {
+                        "memory_id",
+                        "subject",
+                        "status",
+                        "content_sha256",
+                        "evidence_sha256",
                         "memory_sha256",
                     }
                     or not isinstance(fact["memory_id"], str)
                     or not re.fullmatch(r"mem_[a-f0-9]{32}", fact["memory_id"])
-                    or fact["subject"] not in {"user", "project"} or fact["status"] != "CONFIRMED"
-                    or any(not isinstance(fact[k], str) or not SHA.fullmatch(fact[k])
-                           for k in ("content_sha256", "evidence_sha256", "memory_sha256"))
+                    or fact["subject"] not in {"user", "project"}
+                    or fact["status"] != "CONFIRMED"
+                    or any(
+                        not isinstance(fact[k], str) or not SHA.fullmatch(fact[k])
+                        for k in ("content_sha256", "evidence_sha256", "memory_sha256")
+                    )
                     for fact in facts
                 )
                 or len({fact["memory_id"] for fact in facts}) != len(facts)
             ):
                 raise ValueError("INVALID_READONLY_MEMORY_SCOPE")
             history_approval = scope.get("history_approval_sha256")
-            if ((history_approval is not None and (
-                not isinstance(history_approval, str) or not SHA.fullmatch(history_approval)
-                or scope["history_scope"] == "none"
-            )) or (scope["history_scope"] == "approved_window"
-                   and scope["memory_scope"] == "approved_facts" and not history_approval)):
+            if (
+                history_approval is not None
+                and (
+                    not isinstance(history_approval, str)
+                    or not SHA.fullmatch(history_approval)
+                    or scope["history_scope"] == "none"
+                )
+            ) or (
+                scope["history_scope"] == "approved_window"
+                and scope["memory_scope"] == "approved_facts"
+                and not history_approval
+            ):
                 raise ValueError("SEPARATE_HISTORY_APPROVAL_REQUIRED")
             handoff = scope["handoff"]
             if handoff is not None and (
-                not isinstance(handoff, dict) or set(handoff) != {
-                    "predecessor_plan_sha256", "predecessor_window_id",
-                    "budget_journal_head_sha256", "bridge_journal_head_sha256",
-                    "identity_sha256", "protocol_epoch", "privacy_epoch",
-                    "erasure_ledger_sha256", "evidence_sha256",
+                not isinstance(handoff, dict)
+                or set(handoff)
+                != {
+                    "predecessor_plan_sha256",
+                    "predecessor_window_id",
+                    "budget_journal_head_sha256",
+                    "bridge_journal_head_sha256",
+                    "identity_sha256",
+                    "protocol_epoch",
+                    "privacy_epoch",
+                    "erasure_ledger_sha256",
+                    "evidence_sha256",
                 }
-                or any(not isinstance(handoff[key], str) or not SHA.fullmatch(handoff[key])
-                       for key in handoff if key.endswith("_sha256"))
+                or any(
+                    not isinstance(handoff[key], str) or not SHA.fullmatch(handoff[key])
+                    for key in handoff
+                    if key.endswith("_sha256")
+                )
                 or not re.fullmatch(r"win_[a-f0-9]{32}", handoff["predecessor_window_id"])
-                or type(handoff["privacy_epoch"]) is not int or handoff["privacy_epoch"] < 0
+                or type(handoff["privacy_epoch"]) is not int
+                or handoff["privacy_epoch"] < 0
                 or handoff["identity_sha256"] != value["identity_sha256"]
                 or handoff["protocol_epoch"] != value["protocol_epoch"]
                 or not config.capture_signing_key
@@ -263,13 +335,18 @@ class WindowPlan:
                 or type(scope["max_history_utf8_bytes"]) is not int
                 or not 0 <= scope["max_history_turns"] <= 4
                 or not 0 <= scope["max_history_utf8_bytes"] <= 16000
-                or (scope["history_scope"] == "none" and (
-                    scope["max_history_turns"] or scope["max_history_utf8_bytes"]
-                ))
-                or (scope["history_scope"] == "approved_window" and not (
-                    scope["max_history_turns"] and scope["max_history_utf8_bytes"]
-                    and scope["capture_public_key"]
-                ))
+                or (
+                    scope["history_scope"] == "none"
+                    and (scope["max_history_turns"] or scope["max_history_utf8_bytes"])
+                )
+                or (
+                    scope["history_scope"] == "approved_window"
+                    and not (
+                        scope["max_history_turns"]
+                        and scope["max_history_utf8_bytes"]
+                        and scope["capture_public_key"]
+                    )
+                )
                 or scope["bridge_code_sha256"] != bridge_code_sha256()
                 or scope["capture_public_key"] != config.capture_public_key
                 or scope["execution"] != value["execution"]
@@ -280,10 +357,14 @@ class WindowPlan:
                 or not re.fullmatch(r"budget_[a-f0-9]{32}", scope["budget_journal_id"])
                 or type(scope["max_model_attempts"]) is not int
                 or not 1 <= scope["max_model_attempts"] <= 5
-                or any(type(scope[key]) is not int or scope[key] != value[other] for key, other in (
-                    ("max_inputs", "max_new_inputs"), ("max_input_chars", "max_input_chars"),
-                    ("max_reply_chars", "max_reply_chars"),
-                ))
+                or any(
+                    type(scope[key]) is not int or scope[key] != value[other]
+                    for key, other in (
+                        ("max_inputs", "max_new_inputs"),
+                        ("max_input_chars", "max_input_chars"),
+                        ("max_reply_chars", "max_reply_chars"),
+                    )
+                )
             ):
                 raise ValueError("LIVE_TEXT_SCOPE_MISMATCH")
         for field in ("max_new_inputs", "max_attempts", "max_visible_replies"):
@@ -307,8 +388,7 @@ class WindowPlan:
             not isinstance(images, dict)
             or set(images) != {"core", "bridge", "protocol"}
             or any(
-                not isinstance(image, str)
-                or not re.fullmatch(r"sha256:[a-f0-9]{64}", image)
+                not isinstance(image, str) or not re.fullmatch(r"sha256:[a-f0-9]{64}", image)
                 for image in images.values()
             )
         ):
@@ -560,26 +640,36 @@ class TestWindow:
                         raise ValueError("INVALID_CORE_COUNTS")
         status = decode(bytes(content), 65536)
         deliveries, jobs = counts(status.get("deliveries")), counts(status.get("jobs"))
-        readonly_memory = (self.plan.mode == "live_text" and self.plan.value["live_text"][
-            "memory_scope"
-        ] == "approved_facts")
+        readonly_memory = (
+            self.plan.mode == "live_text"
+            and self.plan.value["live_text"]["memory_scope"] == "approved_facts"
+        )
+        owner_image = (
+            self.plan.mode == "live_text"
+            and self.plan.value["live_text"].get("image_scope") == "owner_image_v1"
+        )
         closed = (
             isinstance(status.get("features"), dict)
-            and all(value is (readonly_memory if key == "memory" else False)
-                    for key, value in status["features"].items())
+            and all(
+                value is (readonly_memory if key == "memory" else owner_image if key == "content"
+                          else False)
+                for key, value in status["features"].items()
+            )
             and (not readonly_memory or status["features"].get("memory") is True)
+            and (not owner_image or status["features"].get("content") is True)
         )
         if self.plan.mode == "live_text":
             live = status.get("live_text_window", {})
             if (
-                status.get("mode") != "live" or not closed
+                status.get("mode") != "live"
+                or not closed
                 or live.get("approved") is not True
                 or live.get("plan_sha256") != self.plan.sha256
                 or live.get("scope_sha256") != digest(self.plan.value["live_text"])
                 or type(live.get("model_attempts")) is not int
-                or not 0 <= live["model_attempts"] <= self.plan.value["live_text"][
-                    "max_model_attempts"
-                ]
+                or not 0
+                <= live["model_attempts"]
+                <= self.plan.value["live_text"]["max_model_attempts"]
             ):
                 raise ValueError("LIVE_TEXT_CORE_APPROVAL_REQUIRED")
             self.model_attempts = live["model_attempts"]
@@ -617,12 +707,24 @@ class TestWindow:
             or client.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
         ):
             raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+
     async def check_core_request(self, request):
         if (
-            not request.url.path.startswith("/internal/v1/")
+            not (
+                request.url.path.startswith("/internal/v1/")
+                or (
+                    self.plan.value.get("live_text", {}).get("image_scope") == "owner_image_v1"
+                    and re.fullmatch(
+                        r"/internal/v2/content/evt_[a-f0-9]{64}/image(?:/claim|/check)?",
+                        request.url.path,
+                    )
+                )
+            )
             or request.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
             or not private_request_matches(
-                request, self.plan.config.core_url, request.url.path,
+                request,
+                self.plan.config.core_url,
+                request.url.path,
                 synthetic=self.plan.value["execution"] == "local_synthetic",
             )
         ):
@@ -1100,10 +1202,10 @@ class TestWindow:
 
         return await capture_once(self, client, protocol)
 
-    async def approve_captured(self, client, approval):
+    async def approve_captured(self, client, approval, **image_options):
         from .capture import approve_captured
 
-        return await approve_captured(self, client, approval)
+        return await approve_captured(self, client, approval, **image_options)
 
     async def send_once(self, client, protocol, approval):
         if self.busy:

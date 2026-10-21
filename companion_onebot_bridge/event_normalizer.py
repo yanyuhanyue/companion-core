@@ -107,7 +107,7 @@ def text_only(message):
     return text
 
 
-def normalize(frame, config, *, now=None, rich_input_scope=None):
+def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="none"):
     raw = decode(frame, config.max_frame_bytes)
     if (
         raw.get("post_type") != "message"
@@ -158,6 +158,18 @@ def normalize(frame, config, *, now=None, rich_input_scope=None):
         "payload": {"text": text, "media": [], "shared_content": []},
         "trace_id": "trace_" + key,
     }
+    if image_scope != "none":
+        if image_scope != "owner_image_v1" or scope != "references_v1":
+            raise ValueError("INVALID_IMAGE_SCOPE")
+        from .images import original_image
+
+        image = original_image(raw.get("message"))
+        if image is not None:
+            rich["segments"] = [
+                image.projection() if item["index"] == image.index else item
+                for item in rich["segments"]
+            ]
+            event["payload"]["shared_content"] = [{"kind": "image", "slot": 0}]
     if rich:
         event["payload"]["rich"] = rich
     return event

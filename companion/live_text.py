@@ -18,7 +18,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, Field
 
-from companion import paid_budget
+from companion import paid_budget, qq_images
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger, epoch
 from companion.qq_rich import input_digest as _input_digest
@@ -134,8 +134,16 @@ def record_failure(store, settings, code):
         store.execute("INSERT OR IGNORE INTO runtime_meta VALUES ('live_text_stopped',?)", (code,))
 
 
-def guard(store, settings, clock, *, opening=False, current_request=None, current_delivery=None,
-          preparing=False):
+def guard(
+    store,
+    settings,
+    clock,
+    *,
+    opening=False,
+    current_request=None,
+    current_delivery=None,
+    preparing=False,
+):
     # Read the clock after BEGIN IMMEDIATE, including any SQLite lock wait.
     with nullcontext() if store.db.in_transaction else store.transaction():
         approval = settings.live_text_window
@@ -148,15 +156,30 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
         ):
             raise CoreError("LIVE_TEXT_RUNTIME_CHANGED", 503)
         disabled = (
-            "diary_enabled", "affect_enabled", "consolidation_enabled",
-            "reflection_enabled", "goals_enabled", "wake_enabled", "exploration_enabled",
-            "social_enabled", "expression_enabled", "content_enabled", "proactive_enabled",
-            "voice_enabled", "camera_enabled", "android_enabled",
+            "diary_enabled",
+            "affect_enabled",
+            "consolidation_enabled",
+            "reflection_enabled",
+            "goals_enabled",
+            "wake_enabled",
+            "exploration_enabled",
+            "social_enabled",
+            "expression_enabled",
+            "proactive_enabled",
+            "voice_enabled",
+            "camera_enabled",
+            "android_enabled",
         )
+        images = approval.image_scope == "owner_image_v1"
+        if images:
+            qq_images.policy(settings, approval)
         if (
             any(getattr(settings, name) for name in disabled)
+            or settings.content_enabled != images
             or settings.memory_enabled != (approval.memory_scope == "approved_facts")
-            or settings.executive.enabled or settings.media.enabled or settings.observation_adapters
+            or settings.executive.enabled
+            or settings.media.enabled
+            or (settings.observation_adapters and not images)
             or settings.max_recent_messages != approval.max_history_turns * 2
         ):
             raise CoreError("LIVE_TEXT_CLOSED_FEATURES_REQUIRED", 503)
@@ -165,57 +188,81 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
             raise CoreError("LIVE_TEXT_APPROVAL_EXPIRED", 503)
         paid = paid_budget.contract(settings, clock())
         if (
-            paid.window_id != approval.window_id or paid.concurrency != 1
-            or paid.per_request_calls != (2 if approval.memory_scope == "approved_facts" else 1)
+            paid.window_id != approval.window_id
+            or paid.concurrency != 1
+            or paid.per_request_calls
+            != (2 if approval.memory_scope == "approved_facts" or images else 1)
             or paid.window_calls > approval.max_model_attempts
-            or paid.starts_at > approval.starts_at or paid.expires_at < approval.ends_at
+            or paid.starts_at > approval.starts_at
+            or paid.expires_at < approval.ends_at
             or paid_budget.sha(paid_budget.snapshot(settings)) != approval.paid_contract_sha256
         ):
             raise CoreError("LIVE_TEXT_PAID_CONTRACT_CHANGED", 503)
         if approval.memory_scope == "approved_facts":
             memory_sources(store, settings, clock, approval)
+        if approval.memory_scope == "approved_facts" or images:
             ledger_sha256 = _ledger_custody(store, settings)
         journal = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not journal or journal["value"] != approval.budget_journal_id:
             raise CoreError("LIVE_TEXT_BUDGET_JOURNAL_CHANGED", 503)
         custody = paid_budget.journal(store, paid, allow_settlement=preparing)
-        if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
-                     "('model_budget_blocked','model_budget_restore_required')") or (
-            not preparing and stopped(store, approval.plan_sha256)
-        ):
+        if store.one(
+            "SELECT 1 FROM runtime_meta WHERE key IN "
+            "('model_budget_blocked','model_budget_restore_required')"
+        ) or (not preparing and stopped(store, approval.plan_sha256)):
             raise CoreError("LIVE_TEXT_RECONCILIATION_REQUIRED", 503)
         if store.one(
             "SELECT 1 FROM model_usage WHERE state IN ('UNKNOWN','RESERVED') "
-            "AND request_id!=? LIMIT 1", (current_request or "",),
+            "AND request_id!=? LIMIT 1",
+            (current_request or "",),
         ) or store.one(
             "SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN' "
-            "OR (state='SENDING' AND message_id!=?) LIMIT 1", (current_delivery or "",),
+            "OR (state='SENDING' AND message_id!=?) LIMIT 1",
+            (current_delivery or "",),
         ):
             raise CoreError("LIVE_TEXT_RECONCILIATION_REQUIRED", 503)
         binding = store.one("SELECT value FROM runtime_meta WHERE key=?", (BINDING,))
-        expected = {"approval_sha256": paid_budget.sha(approval.model_dump(mode="json")),
-                    "privacy_epoch": epoch(store), "plan_sha256": approval.plan_sha256,
-                    "window_id": approval.window_id,
-                    "budget_journal_id": approval.budget_journal_id,
-                    "budget_journal_path": str(Path(paid.journal_path).resolve())}
-        if approval.memory_scope == "approved_facts":
+        expected = {
+            "approval_sha256": paid_budget.sha(approval.model_dump(mode="json")),
+            "privacy_epoch": epoch(store),
+            "plan_sha256": approval.plan_sha256,
+            "window_id": approval.window_id,
+            "budget_journal_id": approval.budget_journal_id,
+            "budget_journal_path": str(Path(paid.journal_path).resolve()),
+        }
+        if approval.memory_scope == "approved_facts" or images:
             expected["erasure_ledger_sha256"] = ledger_sha256
         if approval.handoff:
-            expected.update(identity_sha256=approval.handoff.identity_sha256,
-                            protocol_epoch=approval.handoff.protocol_epoch,
-                            handoff_sha256=paid_budget.sha(approval.handoff.model_dump(mode="json")))
+            expected.update(
+                identity_sha256=approval.handoff.identity_sha256,
+                protocol_epoch=approval.handoff.protocol_epoch,
+                handoff_sha256=paid_budget.sha(approval.handoff.model_dump(mode="json")),
+            )
         lifecycle = custody["lifecycle"]
-        prepared = bool(lifecycle and lifecycle["state"] == "PREPARED" and opening
-                        and lifecycle["plan_sha256"] == approval.plan_sha256 and approval.handoff)
+        prepared = bool(
+            lifecycle
+            and lifecycle["state"] == "PREPARED"
+            and opening
+            and lifecycle["plan_sha256"] == approval.plan_sha256
+            and approval.handoff
+        )
         if prepared:
             predecessor = _meta(store, HISTORY + approval.handoff.predecessor_plan_sha256)
-            if (not predecessor or predecessor["state"] != "RETIRED" or not binding
+            if (
+                not predecessor
+                or predecessor["state"] != "RETIRED"
+                or not binding
                 or predecessor["binding"] != json.loads(binding["value"])
-                or predecessor["successor_plan_sha256"] != approval.plan_sha256):
+                or predecessor["successor_plan_sha256"] != approval.plan_sha256
+            ):
                 raise CoreError("LIVE_TEXT_HANDOFF_PREDECESSOR_CHANGED", 409)
-        if not preparing and lifecycle and (
-            lifecycle["plan_sha256"] != approval.plan_sha256
-            or (lifecycle["state"] != "OPEN" and not prepared)
+        if (
+            not preparing
+            and lifecycle
+            and (
+                lifecycle["plan_sha256"] != approval.plan_sha256
+                or (lifecycle["state"] != "OPEN" and not prepared)
+            )
         ):
             raise CoreError("LIVE_TEXT_HANDOFF_NOT_OPEN", 409)
         if not preparing and (
@@ -500,20 +547,29 @@ def check_input(store, settings, clock, event):
     references_only = approval.rich_input_scope == "references_v1" and bool(event.payload.rich)
     if (
         event.event_type != "message.received"
-        or event.payload.media or event.payload.shared_content
+        or event.payload.media
+        or (event.payload.shared_content and approval.image_scope == "none")
         or (event.payload.rich and approval.rich_input_scope != "references_v1")
-        or (not text.strip() and not references_only) or text.strip().startswith("/")
+        or (not text.strip() and not references_only)
+        or text.strip().startswith("/")
         or len(text) > approval.max_input_chars
         or not approval.starts_at <= event.occurred_at < approval.ends_at
     ):
         raise CoreError("LIVE_TEXT_ORDINARY_OWNER_TEXT_REQUIRED", 403)
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event.event_id,))
     value = json.loads(receipt["value"]) if receipt else {}
-    if (value.get("window_sha256") != approval.plan_sha256
+    if (
+        value.get("window_sha256") != approval.plan_sha256
         or value.get("privacy_epoch") != epoch(store)
-        or value.get("input_sha256") != _input_digest(event.payload.model_dump())):
+        or value.get("input_sha256") != _input_digest(event.payload.model_dump())
+    ):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 403)
+    image = qq_images.manifest(event.payload.model_dump())
+    if image and approval.image_scope != "owner_image_v1":
+        raise CoreError("LIVE_IMAGE_APPROVAL_REQUIRED", 403)
     capture = json.loads(receipt["value"]).get("capture")
+    if image and not capture:
+        raise CoreError("LIVE_TEXT_AUTHENTICATED_CAPTURE_REQUIRED", 403)
     if capture and (
         capture["source_event_id"] != event.source_event_id
         or datetime.fromisoformat(capture["occurred_at"]) != event.occurred_at
@@ -529,18 +585,24 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + job["event_id"],))
     event = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
     value = json.loads(receipt["value"]) if receipt else {}
-    if (not event or event["redacted"] or job["kind"] != "chat"
+    if (
+        not event
+        or event["redacted"]
+        or job["kind"] != "chat"
         or value.get("window_sha256") != approval.plan_sha256
-        or value.get("privacy_epoch") != epoch(store)):
+        or value.get("privacy_epoch") != epoch(store)
+    ):
         raise CoreError("LIVE_TEXT_APPROVED_JOB_REQUIRED", 403)
     body = json.loads(event["body_json"])
     text = body["text"]
-    if (text.strip().startswith("/")
+    if (
+        text.strip().startswith("/")
         or (body.get("rich") and approval.rich_input_scope != "references_v1")
-        or _input_digest(body) != json.loads(
-        receipt["value"]
-    )["input_sha256"]):
+        or _input_digest(body) != json.loads(receipt["value"])["input_sha256"]
+    ):
         raise CoreError("LIVE_TEXT_INPUT_CHANGED", 403)
+    if qq_images.manifest(body):
+        qq_images.source(store, settings, approval, job["event_id"])
     _check_context(store, settings, clock, job, approval)
     if approval.memory_scope == "approved_facts":
         _check_memory(store, settings, clock, job, approval)
@@ -807,15 +869,33 @@ def freeze_context(store, settings, clock, job, sources, messages, memories=()):
         frozen = [_history_fingerprint(store, settings, clock, approval, s) for s in sources]
         if any(source is None for source in frozen):
             raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
-        value = {"plan_sha256": approval.plan_sha256, "privacy_epoch": epoch(store),
-                 "conversation_id": job["conversation_id"], "event_id": job["event_id"],
-                 "sources": frozen,
-                 "payload_sha256": paid_budget.sha(model_payload(settings, messages, "chat"))}
+        value = {
+            "plan_sha256": approval.plan_sha256,
+            "privacy_epoch": epoch(store),
+            "conversation_id": job["conversation_id"],
+            "event_id": job["event_id"],
+            "sources": frozen,
+            "payload_sha256": paid_budget.sha(model_payload(settings, messages, "chat")),
+        }
+        if approval.image_scope == "owner_image_v1":
+            body = json.loads(
+                store.one("SELECT body_json FROM events WHERE event_id=?", (job["event_id"],))[
+                    "body_json"
+                ]
+            )
+            value["image_sources"] = (
+                [qq_images.result(store, settings, approval, job)]
+                if qq_images.manifest(body)
+                else []
+            )
         if approval.memory_scope == "approved_facts":
             memory = _check_memory(store, settings, clock, job, approval)
             selected = _checked_memory_rows(store, settings, clock, approval, memories)
-            if (not memory or memory["selected"] is None
-                or any(item not in memory["selected"] for item in selected)):
+            if (
+                not memory
+                or memory["selected"] is None
+                or any(item not in memory["selected"] for item in selected)
+            ):
                 raise CoreError("LIVE_TEXT_MEMORY_REVIEW_REQUIRED", 503)
             value["memory_sources"] = selected
             if approval.history_scope == "approved_window" and (
@@ -835,7 +915,7 @@ def _check_context(store, settings, clock, job, approval, *, required=False):
         # Early job checks precede context construction. Once an attempt has been
         # reserved, missing evidence must also fence response acceptance/delivery.
         usage_sql = "SELECT 1 FROM model_usage WHERE job_id=?"
-        if approval.memory_scope == "approved_facts":
+        if approval.memory_scope == "approved_facts" or approval.image_scope == "owner_image_v1":
             usage_sql += " AND scenario='chat'"
         if required or store.one(usage_sql, (job["job_id"],)):
             raise CoreError("LIVE_TEXT_CONTEXT_REQUIRED", 503)
@@ -843,26 +923,44 @@ def _check_context(store, settings, clock, job, approval, *, required=False):
     value = json.loads(row["value"])
     event = store.one("SELECT conversation_id FROM events WHERE event_id=?", (job["event_id"],))
     if (
-        value["plan_sha256"] != approval.plan_sha256 or value["privacy_epoch"] != epoch(store)
+        value["plan_sha256"] != approval.plan_sha256
+        or value["privacy_epoch"] != epoch(store)
         or value["event_id"] != job["event_id"]
-        or not event or value["conversation_id"] != event["conversation_id"]
+        or not event
+        or value["conversation_id"] != event["conversation_id"]
     ):
         raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
     expected = value["sources"]
     _check_history(store, settings, clock, job, approval, expected)
+    if approval.image_scope == "owner_image_v1":
+        body = json.loads(
+            store.one("SELECT body_json FROM events WHERE event_id=?", (job["event_id"],))[
+                "body_json"
+            ]
+        )
+        expected_images = (
+            [qq_images.result(store, settings, approval, job)] if qq_images.manifest(body) else []
+        )
+        if value.get("image_sources") != expected_images:
+            raise CoreError("LIVE_IMAGE_RESULT_CHANGED", 403)
     if approval.memory_scope == "approved_facts":
         memory = _meta(store, MEMORY + job["job_id"])
-        if (not memory or memory["selected"] is None or any(
-            item not in memory["selected"] for item in value.get("memory_sources", [])
-        ) or "memory_sources" not in value):
+        if (
+            not memory
+            or memory["selected"] is None
+            or any(item not in memory["selected"] for item in value.get("memory_sources", []))
+            or "memory_sources" not in value
+        ):
             raise CoreError("LIVE_TEXT_MEMORY_SOURCE_CHANGED", 503)
         if approval.history_scope == "approved_window" and (
             expected != memory["history_sources"] or value["memory_sources"] != memory["selected"]
         ):
             raise CoreError("LIVE_TEXT_CONTEXT_SOURCES_CHANGED", 503)
+    if approval.memory_scope == "approved_facts" or approval.image_scope == "owner_image_v1":
         admission = store.one(
             "SELECT a.payload_sha256 FROM model_admissions a JOIN model_usage m USING(request_id) "
-            "WHERE m.job_id=? AND m.scenario='chat'", (job["job_id"],),
+            "WHERE m.job_id=? AND m.scenario='chat'",
+            (job["job_id"],),
         )
         if admission and admission["payload_sha256"] != value["payload_sha256"]:
             raise CoreError("LIVE_TEXT_CONTEXT_PAYLOAD_CHANGED", 503)
@@ -879,7 +977,28 @@ def reserve_model(store, settings, clock, job_id, scenario):
     usage = store.rows("SELECT * FROM model_usage WHERE job_id=? ORDER BY rowid", (job_id,))
     if attempts >= approval.max_model_attempts:
         raise CoreError("LIVE_TEXT_MODEL_ATTEMPT_CAP", 429)
-    if approval.memory_scope == "approved_facts":
+    body = json.loads(
+        store.one("SELECT body_json FROM events WHERE event_id=?", (job["event_id"],))["body_json"]
+    )
+    if approval.image_scope == "owner_image_v1" and qq_images.manifest(body):
+        if scenario == "content_vision":
+            value, row = qq_images.frozen(store, settings, approval, job)
+            qq_images.lease(
+                store, settings, approval, clock, job["event_id"], request_id=value["request_id"]
+            )
+            if usage or row["state"] != "RUNNING":
+                raise CoreError("LIVE_IMAGE_ALREADY_ATTEMPTED", 409)
+        elif scenario == "chat":
+            _check_context(store, settings, clock, job, approval, required=True)
+            if (
+                len(usage) != 1
+                or usage[0]["scenario"] != "content_vision"
+                or usage[0]["state"] != "SETTLED"
+            ):
+                raise CoreError("LIVE_IMAGE_RESULT_REQUIRED", 403)
+        else:
+            raise CoreError("LIVE_IMAGE_STAGE_REQUIRED", 403)
+    elif approval.memory_scope == "approved_facts":
         memory = _check_memory(store, settings, clock, job, approval)
         if not memory:
             raise CoreError("LIVE_TEXT_MEMORY_CONTEXT_REQUIRED", 503)
@@ -888,10 +1007,12 @@ def reserve_model(store, settings, clock, job_id, scenario):
         elif scenario == "chat":
             _check_context(store, settings, clock, job, approval, required=True)
             expected = ["memory_review"] if memory["candidates"] else []
-            valid = (memory["selected"] is not None
-                     and [row["scenario"] for row in usage] == expected
-                     and all(row["state"] == "SETTLED" for row in usage)
-                     and (not expected or memory["review_request_id"] == usage[0]["request_id"]))
+            valid = (
+                memory["selected"] is not None
+                and [row["scenario"] for row in usage] == expected
+                and all(row["state"] == "SETTLED" for row in usage)
+                and (not expected or memory["review_request_id"] == usage[0]["request_id"])
+            )
         else:
             valid = False
         if not valid:
@@ -907,13 +1028,21 @@ def check_model(store, settings, clock, request_id):
         "SELECT j.* FROM jobs j JOIN model_usage m USING(job_id) WHERE m.request_id=?",
         (request_id,),
     )
-    if not job or job["state"] != "RUNNING" or job["lease_until"] <= clock():
+    usage_row = store.one("SELECT scenario FROM model_usage WHERE request_id=?", (request_id,))
+    vision = bool(usage_row and usage_row["scenario"] == "content_vision")
+    if not job or (not vision and (job["state"] != "RUNNING" or job["lease_until"] <= clock())):
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
     approval, _ = check_job(store, settings, clock, job, current_request=request_id)
     usage = store.rows("SELECT * FROM model_usage WHERE job_id=? ORDER BY rowid", (job["job_id"],))
     if not usage or usage[-1]["request_id"] != request_id or usage[-1]["state"] != "RESERVED":
         raise CoreError("LIVE_TEXT_MEMORY_STAGE_REQUIRED", 403)
-    if approval.memory_scope == "approved_facts" and usage[-1]["scenario"] == "memory_review":
+    if vision:
+        value, _ = qq_images.frozen(store, settings, approval, job)
+        qq_images.lease(store, settings, approval, clock, job["event_id"], request_id=request_id)
+        if len(usage) != 1:
+            raise CoreError("LIVE_IMAGE_STAGE_REQUIRED", 403)
+        payload = value["payload_sha256"]
+    elif approval.memory_scope == "approved_facts" and usage[-1]["scenario"] == "memory_review":
         memory = _check_memory(store, settings, clock, job, approval)
         if not memory or len(usage) != 1 or memory["selected"] is not None:
             raise CoreError("LIVE_TEXT_MEMORY_STAGE_REQUIRED", 403)
@@ -921,12 +1050,18 @@ def check_model(store, settings, clock, request_id):
     else:
         context = _check_context(store, settings, clock, job, approval, required=True)
         payload = context["payload_sha256"]
-        if approval.memory_scope == "approved_facts":
+        if approval.memory_scope == "approved_facts" or approval.image_scope == "owner_image_v1":
             _reply_usage(store, settings, clock, job, approval, pending=True)
-    admission = store.one("SELECT payload_sha256 FROM model_admissions WHERE request_id=?",
-                          (request_id,))
+    admission = store.one(
+        "SELECT payload_sha256 FROM model_admissions WHERE request_id=?", (request_id,)
+    )
     if not admission or admission["payload_sha256"] != payload:
         raise CoreError("LIVE_TEXT_CONTEXT_PAYLOAD_CHANGED", 503)
+    if vision:
+        row, _, _ = qq_images.lease(
+            store, settings, approval, clock, job["event_id"], request_id=request_id
+        )
+        return {**job, "lease_until": row["lease_until"], "lease_token": row["lease_token"]}
     current = store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
     if not current or current["state"] != "RUNNING" or current["lease_token"] != job["lease_token"]:
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
@@ -956,6 +1091,15 @@ def dispatch_fence(settings, clock, job_lease_until, admission_lease_until):
 def _reply_usage(store, settings, clock, job, approval, *, pending=False):
     usage = store.rows("SELECT * FROM model_usage WHERE job_id=? ORDER BY rowid", (job["job_id"],))
     expected = ["chat"]
+    if approval.image_scope == "owner_image_v1":
+        body = json.loads(
+            store.one("SELECT body_json FROM events WHERE event_id=?", (job["event_id"],))[
+                "body_json"
+            ]
+        )
+        if qq_images.manifest(body):
+            qq_images.result(store, settings, approval, job)
+            expected = ["content_vision", "chat"]
     if approval.memory_scope == "approved_facts":
         memory = _check_memory(store, settings, clock, job, approval)
         if not memory or memory["selected"] is None:
@@ -973,12 +1117,20 @@ def _reply_usage(store, settings, clock, job, approval, *, pending=False):
 
 
 def _reply_receipt(approval, job, message_id, reply, usage, privacy_epoch):
-    requests = {"request_ids": [r["request_id"] for r in usage]} if (
-        approval.memory_scope == "approved_facts"
-    ) else {"request_id": usage[0]["request_id"]}
-    return {"message_id": message_id, "event_id": job["event_id"], "job_id": job["job_id"],
-            **requests, "reply_sha256": paid_budget.sha(reply),
-            "plan_sha256": approval.plan_sha256, "privacy_epoch": privacy_epoch}
+    requests = (
+        {"request_ids": [r["request_id"] for r in usage]}
+        if (approval.memory_scope == "approved_facts" or len(usage) > 1)
+        else {"request_id": usage[0]["request_id"]}
+    )
+    return {
+        "message_id": message_id,
+        "event_id": job["event_id"],
+        "job_id": job["job_id"],
+        **requests,
+        "reply_sha256": paid_budget.sha(reply),
+        "plan_sha256": approval.plan_sha256,
+        "privacy_epoch": privacy_epoch,
+    }
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):

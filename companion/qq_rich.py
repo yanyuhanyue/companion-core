@@ -68,8 +68,8 @@ def validate(value):
     # No arbitrary extensions/inline forward nodes can bypass this fixed projection.
     if (
         not isinstance(value, dict)
-        or set(value) != {"version", "coverage", "segments", "segment_count",
-                          "owner_text_positions"}
+        or set(value)
+        != {"version", "coverage", "segments", "segment_count", "owner_text_positions"}
         or value["version"] != "references_v1"
         or value["coverage"] != "PARTIAL"
         or not isinstance(value["segments"], list)
@@ -78,10 +78,14 @@ def validate(value):
     ):
         raise ValueError("INVALID_RICH_INPUT")
     count, positions = value["segment_count"], value["owner_text_positions"]
-    if (type(count) is not int or not 1 <= count <= 64
-        or not isinstance(positions, list) or len(positions) > 64
+    if (
+        type(count) is not int
+        or not 1 <= count <= 64
+        or not isinstance(positions, list)
+        or len(positions) > 64
         or any(type(index) is not int for index in positions)
-        or positions != sorted(set(positions))):
+        or positions != sorted(set(positions))
+    ):
         raise ValueError("INVALID_RICH_LAYOUT")
     previous = -1
     for item in value["segments"]:
@@ -143,6 +147,15 @@ def validate(value):
                         raise ValueError("INVALID_RICH_URL")
                 elif len(field["value"]) > (128 if field["kind"] == "title" else 512):
                     raise ValueError("INVALID_RICH_CARD_FIELD")
+        elif kind == "image" and item.get("coverage") == "UNREAD":
+            if (
+                set(item) != common | {"slot", "source_sha256"}
+                or type(item["slot"]) is not int
+                or item["slot"] != 0
+                or not isinstance(item["source_sha256"], str)
+                or not re.fullmatch(r"[a-f0-9]{64}", item["source_sha256"])
+            ):
+                raise ValueError("INVALID_RICH_IMAGE")
         elif (
             kind not in {"node", "image", "record", "video", "file", "other"}
             or set(item) != common

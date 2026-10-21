@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from companion import budget
+from companion import budget, live_text, qq_images
 from companion.contracts import CoreError
 from companion.media_provider import HTTPMediaProvider, MediaEndpoint
 from companion.observation import ObservationEvent, ObservationPayload
@@ -136,8 +136,17 @@ def erase_content(store, event_ids):
 
 class ContentService:
     def __init__(
-        self, store, settings, observations, create_read=None, clock=utcnow,
-        *, options=None, provider=None, image_transport=None,
+        self,
+        store,
+        settings,
+        observations,
+        create_read=None,
+        clock=utcnow,
+        *,
+        options=None,
+        provider=None,
+        image_transport=None,
+        model=None,
     ):
         self.store, self.settings, self.clock = store, settings, clock
         self.observations, self.create_read = observations, create_read
@@ -152,6 +161,7 @@ class ContentService:
             self.options = self.options.model_copy(update={"vision": endpoint})
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
+        self.model = model
 
     def _source(self, event_id, upload=False):
         if not self.settings.content_enabled:
@@ -169,6 +179,12 @@ class ContentService:
         ) != ("qq.onebot", "owner", "private", "owner"):
             raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
         body = json.loads(event["body_json"])
+        if live_text.active(self.store, self.settings):
+            approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
+            if qq_images.manifest(body):
+                qq_images.source(self.store, self.settings, approval, event_id)
+            elif body.get("shared_content"):
+                raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
         if body.get("diary_command") or body.get("control_command"):
             raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
         if (
@@ -182,10 +198,13 @@ class ContentService:
         if not self.settings.content_enabled:
             return []
         event, body = self._source(event_id)
-        links = shared_links(body.get("text", ""))
+        bounded = live_text.active(self.store, self.settings)
+        if bounded and not qq_images.manifest(body):
+            return []
+        links = [] if bounded else shared_links(body.get("text", ""))
         images = set()
         for item in body.get("shared_content", [])[:4]:
-            if item.get("kind") == "link":
+            if item.get("kind") == "link" and not bounded:
                 _, canonical = content_target(item.get("url", ""))
                 if canonical not in links:
                     links.append(canonical)
@@ -229,9 +248,15 @@ class ContentService:
                             )
                         except CoreError as exc:
                             error = exc.code
-                elif not self.options.vision.url or not self.options.vision.max_request_micro_usd:
+                elif not bounded and (
+                    not self.options.vision.url or not self.options.vision.max_request_micro_usd
+                ):
                     error = "CONTENT_VISION_NOT_CONFIGURED"
-                elif self.options.image_daily_micro_usd < self.options.vision.max_request_micro_usd:
+                elif (
+                    not bounded
+                    and self.options.image_daily_micro_usd
+                    < self.options.vision.max_request_micro_usd
+                ):
                     error = "CONTENT_VISION_BUDGET_EXHAUSTED"
                 elif kind == "qq_image":
                     day, _ = self._periods()
@@ -331,6 +356,8 @@ class ContentService:
             "ORDER BY e.rowid DESC LIMIT 3",
             (event["conversation_id"], event_id),
         )
+        if qq_images.enabled(self.settings):
+            roots = [{"event_id": event_id}]
         result = []
         for root in reversed(roots):
             statuses = {
@@ -787,7 +814,9 @@ class ContentService:
                 raise CoreError("CONTENT_VISION_UNCERTAIN", 502) from error
             raise
 
-    async def analyze_image(self, owner_event_id, request_key, data, mime_type):
+    async def analyze_image(
+        self, owner_event_id, request_key, data, mime_type, lease_token="", image_proof=None,
+    ):
         self._source(owner_event_id, upload=True)
         matched = re.fullmatch(r"image:([01])", request_key)
         if not matched:
@@ -799,9 +828,13 @@ class ContentService:
         )
         if not row:
             raise CoreError("CONTENT_IMAGE_NOT_SHARED", 403)
+        if live_text.active(self.store, self.settings):
+            from companion.paid_content import analyze
+
+            return await analyze(self, row, data, mime_type, lease_token, image_proof)
         return await self._analyze(row, data, mime_type)
 
-    def claim_upload(self, owner_event_id, request_key):
+    def claim_upload(self, owner_event_id, request_key, source_sha256=None):
         """Reserve the one permitted CDN download before the bridge performs GET."""
         self._source(owner_event_id, upload=True)
         matched = re.fullmatch(r"image:([01])", request_key)
@@ -816,26 +849,64 @@ class ContentService:
             )
             if not row or row["redacted"] or row["captured_privacy_epoch"] != epoch(self.store):
                 raise CoreError("CONTENT_IMAGE_NOT_SHARED", 403)
+            if qq_images.enabled(self.settings):
+                approval, _, attempts = live_text.guard(self.store, self.settings, self.clock)
+                if attempts + 2 > min(approval.max_model_attempts,
+                                      self.settings.paid_model.window_calls):
+                    raise CoreError("LIVE_IMAGE_TWO_CALLS_REQUIRED", 429)
+                _, _, image, _ = qq_images.source(
+                    self.store, self.settings, approval, owner_event_id
+                )
+                if source_sha256 != image["source_sha256"]:
+                    raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
             if row["state"] != "WAITING" or not row["reserved_bytes"]:
                 raise CoreError("CONTENT_IMAGE_ALREADY_" + row["state"], 409)
             self.store.execute(
-                "UPDATE content_items SET state='FETCHING',lease_until=?,updated_at=? "
+                "UPDATE content_items SET state='FETCHING',lease_until=?,lease_token=?,"
+                "updated_at=? "
                 "WHERE item_id=?",
-                (after(self.clock(), 15), self.clock(), row["item_id"]),
+                (
+                    min(row["deadline"], after(self.clock(), 15)),
+                    uid("content_lease"),
+                    self.clock(),
+                    row["item_id"],
+                ),
             )
-        return {
-            "state": "FETCHING",
-            "max_bytes": min(row["reserved_bytes"], self.options.max_image_bytes),
-        }
+        claimed = self.store.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
+        maximum = min(row["reserved_bytes"], self.options.max_image_bytes)
+        if qq_images.enabled(self.settings):
+            maximum = min(maximum, self.settings.paid_model.image_input.max_bytes_per_image)
+        result = {"state": "FETCHING", "max_bytes": maximum}
+        if qq_images.enabled(self.settings):
+            result.update(lease_token=claimed["lease_token"], lease_until=claimed["lease_until"])
+        return result
+
+    def check_upload(self, owner_event_id, lease_token, source_sha256):
+        with self.store.transaction():
+            approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
+            row, _, image = qq_images.lease(
+                self.store, self.settings, approval, self.clock, owner_event_id
+            )
+            if row["lease_token"] != lease_token or image["source_sha256"] != source_sha256:
+                raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
+            return {"approved": True, "lease_until": row["lease_until"]}
 
     async def run_once(self):
         if not self.settings.content_enabled:
             return False
         s, now = self.store, self.clock()
         day, _ = self._periods()
+        for lost in s.rows(
+            "SELECT m.request_id FROM model_usage m JOIN content_items c "
+            "ON c.usage_request_id=m.request_id WHERE c.state IN ('FETCHING','RUNNING') "
+            "AND c.lease_until<=? AND m.state='RESERVED'",
+            (now,),
+        ):
+            budget.settle(s, self.settings, lost["request_id"], None)
         with s.transaction():
             s.execute(
-                "UPDATE model_usage SET state='UNKNOWN' WHERE request_id IN (SELECT "
+                "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' "
+                "AND request_id IN (SELECT "
                 "usage_request_id FROM content_items WHERE state IN ('FETCHING','RUNNING') "
                 "AND lease_until<=?)",
                 (now,),
