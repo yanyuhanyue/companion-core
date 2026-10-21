@@ -167,7 +167,9 @@ def snapshot(settings, *, integrity=False):
     path = Path(settings.database).resolve()
     result = {"schema_version": 1, "version": __version__, "mode": settings.mode,
               "observed_at": now.isoformat(), "read_only": True, "blockers": [],
-              "worker_progress": {"state": "UNOBSERVED", "reason": "NO_WORKER_HEARTBEAT"},
+              "worker_progress": {"state": "UNOBSERVED",
+                                  "reason": "BUSINESS_PROGRESS_NOT_INFERRED"},
+              "worker_loop": {"state": "UNOBSERVED"},
               "database": _resource(path), "resources": {}}
     result["database"]["wal_bytes"] = _resource(str(path) + "-wal")["bytes"]
     try:
@@ -210,6 +212,9 @@ def snapshot(settings, *, integrity=False):
             if not version or not capable:
                 result["blockers"].append("MIGRATION_REQUIRED")
                 return result
+            from companion.worker_loop import snapshot as loop_snapshot
+
+            result["worker_loop"] = loop_snapshot(view, now)
             result["database"]["integrity"] = "NOT_CHECKED"
             if integrity:
                 ok = db.execute("PRAGMA quick_check(1)").fetchone()[0] == "ok"

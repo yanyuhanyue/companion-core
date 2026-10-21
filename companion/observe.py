@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from companion import worker_loop
 from companion.store import encode
 
 HTTP_TOTAL_SECONDS = 5
@@ -87,11 +88,13 @@ def _safe_operations(raw, observed):
         or not isinstance(codes, list) or len(codes) > 64
         or any(type(code) is not str or code not in BLOCKER_CODES for code in codes)
         or raw["worker_progress"].get("state") != "UNOBSERVED"
-        or raw["worker_progress"].get("reason") != "NO_WORKER_HEARTBEAT"):
+        or raw["worker_progress"].get("reason") != "BUSINESS_PROGRESS_NOT_INFERRED"):
         raise ValueError("OBSERVATION_RESPONSE_INVALID")
     result = {"schema_version": 1, "read_only": True, "mode": raw["mode"],
               "observed_at": observed.astimezone(UTC).isoformat(), "blockers": list(codes),
-              "worker_progress": {"state": "UNOBSERVED", "reason": "NO_WORKER_HEARTBEAT"}}
+              "worker_progress": {"state": "UNOBSERVED",
+                                  "reason": "BUSINESS_PROGRESS_NOT_INFERRED"}}
+    result["worker_loop"] = worker_loop.project_public(raw["worker_loop"], observed)
     database = raw["database"]
     if not {"exists", "bytes"} <= database.keys():
         raise ValueError("OBSERVATION_RESPONSE_INVALID")
@@ -214,6 +217,67 @@ def http_collector(settings, url, *, allow_external=False, authorization_sha256=
     return collect
 
 
+class _LoopActivity:
+    def __init__(self):
+        self.prior = self.start = None
+        self.segment = self.intervals = 0
+        self.seconds = self.last_segment_seconds = 0
+
+    def sample(self, snapshot, mono, discontinuities):
+        reasons = [code for code in discontinuities if code != "OBSERVED_BLOCKERS"]
+        current = None
+        if not reasons:
+            try:
+                value = snapshot.get("worker_loop", {"state": "UNOBSERVED"})
+                if value["state"] == "UNOBSERVED":
+                    reasons.append("NO_LOOP_RECORD")
+                elif value["state"] == "INVALID":
+                    reasons.append("LOOP_RECORD_INVALID")
+                else:
+                    current = worker_loop.project_public(
+                        value, datetime.fromisoformat(snapshot["observed_at"]),
+                    )
+                    if current["state"] == "STALE":
+                        reasons.append("LOOP_RECORD_STALE")
+                        current = None
+            except (ValueError, TypeError, KeyError, OverflowError):
+                reasons.append("LOOP_RECORD_INVALID")
+        if current is not None:
+            if self.prior is None:
+                reasons.append("LOOP_BASELINE_REQUIRED")
+            else:
+                prior = self.prior[0]
+                if current["session"] != prior["session"]:
+                    reasons.append("LOOP_SESSION_CHANGED")
+                elif current["sequence"] < prior["sequence"]:
+                    reasons.append("LOOP_SEQUENCE_REGRESSED")
+                elif current["sequence"] == prior["sequence"]:
+                    reasons.append("LOOP_SEQUENCE_UNCHANGED")
+                elif current["completed_at"] <= prior["completed_at"]:
+                    reasons.append("LOOP_COMPLETION_TIME_NOT_ADVANCED")
+        interval = 0
+        if reasons:
+            self.start = None
+            self.last_segment_seconds = 0
+        else:
+            if self.start is None:
+                self.segment += 1
+                self.start = self.prior[1]
+            interval = (mono - self.prior[1]) / 1e9
+            self.intervals += 1
+            self.seconds += interval
+            self.last_segment_seconds = (mono - self.start) / 1e9
+        self.prior = (current, mono) if current is not None else None
+        return {"state": "UNPROVEN" if reasons else "ADVANCED",
+                "segment": None if reasons else self.segment,
+                "reasons": reasons, "interval_seconds": interval}
+
+    def summary(self):
+        return {"advancing_intervals": self.intervals,
+                "advancing_interval_seconds": self.seconds,
+                "last_segment_observed_seconds": self.last_segment_seconds}
+
+
 def observe(collect, output, *, samples=3, interval_seconds=5, max_gap_seconds=None,
             evidence_type="local_synthetic", authorization_sha256=None, source="local_database"):
     if (type(samples) is not int or not 1 <= samples <= 100000
@@ -234,6 +298,7 @@ def observe(collect, output, *, samples=3, interval_seconds=5, max_gap_seconds=N
         raise ValueError("OBSERVATION_AUTHORIZATION_REFERENCE_INVALID")
     run_id, segment, prior, segment_start = uuid.uuid4().hex, 0, None, None
     completed, failures, discontinuities = 0, 0, 0
+    loop_activity = _LoopActivity()
     path = Path(output)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
@@ -288,7 +353,8 @@ def observe(collect, output, *, samples=3, interval_seconds=5, max_gap_seconds=N
                    "interval_seconds": gap, "api_instance": instance,
                    "restart_detection": "AVAILABLE" if instance else "UNAVAILABLE",
                    "segment": segment if segment_start is not None else None,
-                   "discontinuities": reasons, "error": error, "snapshot": snapshot})
+                   "discontinuities": reasons, "error": error, "snapshot": snapshot,
+                   "worker_loop_activity": loop_activity.sample(snapshot, mono, reasons)})
             completed += 1
             prior = wall, mono, instance
             if sequence + 1 < samples:
@@ -299,6 +365,7 @@ def observe(collect, output, *, samples=3, interval_seconds=5, max_gap_seconds=N
                    "clear_segment_observed_seconds": (
                        (prior[1] - segment_start) / 1e9 if segment_start is not None else 0
                    ), "worker_health_proven": False,
+                   "worker_loop_activity": loop_activity.summary(),
                    "ended_at": datetime.now(UTC).isoformat(),
                    "file_sha256_before_summary": hasher.hexdigest()}
         write(summary)

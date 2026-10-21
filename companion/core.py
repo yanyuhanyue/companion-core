@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from companion import __version__, budget, dialogue_history, live_text
 from companion.affect import AffectEngine
-from companion.commands import command_parts
+from companion.commands import command_parts, is_memory_command
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES, ContentService
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
@@ -137,7 +137,9 @@ class Core(Runtime):
                 body["text"] = redact(body["text"], cfg)
                 command, arguments = command_parts(body["text"])
                 diary_command = not bounded_text and is_diary_command(body["text"])
-                control_command = not bounded_text and is_life_command(body["text"])
+                control_command = not bounded_text and (
+                    is_life_command(body["text"]) or is_memory_command(body["text"])
+                )
                 if control_command:
                     body["control_command"] = True
                     body["goal_request"] = command == "安排任务" and arguments.startswith("https://")
@@ -632,7 +634,9 @@ class Core(Runtime):
             decision = {"确认这一条": "confirm", "忘记这一条": "forget", "纠正这一条": "correct"}[
                 match[1]
             ]
-            result = self.memory.decide(match[2], decision, now, match[3])
+            result = self.memory.decide(
+                match[2], decision, now, match[3], evidence_event_id=job["event_id"],
+            )
             return f"已处理：{result['memory_id']} · {result['state']}"
         return None
 

@@ -15,6 +15,7 @@ from companion.model import ModelClient
 from companion.runtime import Runtime
 from companion.store import encode, migrate, uid
 from companion.worker_lock import single_worker
+from companion.worker_loop import Recorder
 
 
 async def worker(settings):
@@ -27,16 +28,20 @@ async def worker(settings):
             "WHERE scenario IN ('memory_extract','memory_review') AND state='RESERVED'"
         )
         worker_id = uid("worker")
+        loop = Recorder(core.store)
         try:
             ticks = 0
             while True:
                 worked = await core.run_once(worker_id)
+                maintenance = not worked and ticks % 60 == 0
                 if not worked:
-                    if ticks % 60 == 0:
+                    if maintenance:
                         core.expire_raw_events()
                         core.schedule_proactive()
                         await core.extract_once()
                     ticks += 1
+                loop.completed(maintenance=maintenance)
+                if not worked:
                     await asyncio.sleep(1)
         finally:
             core.store.close()
