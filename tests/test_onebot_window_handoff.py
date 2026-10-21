@@ -60,6 +60,9 @@ def plan_for(tmp_path, number=1, *, predecessor=None, approved=False):
         "history_scope": "none",
         "max_history_turns": 0,
         "max_history_utf8_bytes": 0,
+        "memory_scope": "none",
+        "memory_facts": [],
+        "memory_approval_sha256": None,
         "handoff": None,
     }
     if predecessor:
