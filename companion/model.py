@@ -51,6 +51,14 @@ class ModelResponse:
     cached_tokens: int = 0
 
 
+class ModelResponseError(CoreError):
+    """An unusable provider response whose received usage still needs accounting."""
+
+    def __init__(self, code: str, status: int, response: ModelResponse):
+        super().__init__(code, status)
+        self.response = response
+
+
 class ModelAdmission:
     """Single-use payload capability. Accounting and authorization stay in budget."""
 
@@ -152,15 +160,12 @@ class ModelClient:
                 )
                 content = request.content
                 response = await scoped.send(request)
-            if response.status_code == 429 or response.status_code >= 500:
-                raise CoreError("MODEL_RETRYABLE", 503)
-            if response.status_code >= 400:
-                raise CoreError("MODEL_REJECTED", 502)
-            body = response.json()
-            text = body["choices"][0]["message"]["content"]
-            if not isinstance(text, str) or not text.strip() or len(text) > 32000:
-                raise ValueError("invalid model response")
-            usage = body.get("usage") or {}
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            usage_present = isinstance(body, dict) and "usage" in body
+            usage = body["usage"] if usage_present else {}
             if not isinstance(usage, dict):
                 usage = {}
             prompt = usage.get("prompt_tokens")
@@ -168,8 +173,25 @@ class ModelClient:
             cached = usage.get("prompt_cache_hit_tokens", 0)
             if not all(type(x) is int and x >= 0 for x in (prompt, output, cached)):
                 prompt, output, cached = None, None, 0
-            return ModelResponse(text, prompt, output, cached)
+            received = ModelResponse("", prompt, output, cached)
+            if response.status_code >= 400:
+                code, status = (
+                    ("MODEL_RETRYABLE", 503)
+                    if response.status_code == 429 or response.status_code >= 500
+                    else ("MODEL_REJECTED", 502)
+                )
+                # Error HTTP without usage retains bounded transport retry semantics.
+                # Explicit usage, even invalid usage, belongs to budget's settlement.
+                if usage_present:
+                    raise ModelResponseError(code, status, received)
+                raise CoreError(code, status)
+            try:
+                text = body["choices"][0]["message"]["content"]
+                if not isinstance(text, str) or not text.strip() or len(text) > 32000:
+                    raise ValueError("invalid model response")
+            except (ValueError, KeyError, IndexError, TypeError) as error:
+                raise ModelResponseError("MODEL_INVALID_RESPONSE", 502, received) from error
+            received.text = text
+            return received
         except (httpx.TimeoutException, httpx.TransportError) as error:
             raise CoreError("MODEL_RETRYABLE", 503) from error
-        except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
-            raise CoreError("MODEL_INVALID_RESPONSE", 502) from error

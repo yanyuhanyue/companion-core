@@ -524,7 +524,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
     now = clock()
-    from companion.model import ModelAdmission, ModelClient, model_payload
+    from companion.model import ModelAdmission, ModelClient, ModelResponseError, model_payload
 
     if live_text.active(store, settings):
         if not isinstance(model, ModelClient):
@@ -639,10 +639,16 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-        return await model.complete(
-            messages, scenario, admission=ModelAdmission(row["payload_sha256"], before_dispatch),
-        )
-    return await model.complete(messages, scenario)
+        admission = ModelAdmission(row["payload_sha256"], before_dispatch)
+    try:
+        if isinstance(model, ModelClient):
+            return await model.complete(messages, scenario, admission=admission)
+        return await model.complete(messages, scenario)
+    except ModelResponseError as error:
+        # A rejected reply can still carry actual usage. Settle here before the
+        # existing callers handle the error; repeated settlement stays monotonic.
+        settle(store, settings, request_id, error.response)
+        raise
 
 
 def record_provider_discrepancy(
