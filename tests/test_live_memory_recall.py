@@ -61,6 +61,7 @@ async def readonly_window(
     core_options=None,
     query="本次临时项目的验收代号是什么？",
     queries=None,
+    raw_messages=None,
 ):
     memory_id, outsider, pins = scope_facts(core)
     calls, sends, scores = [], [], []
@@ -86,7 +87,10 @@ async def readonly_window(
         number += 1
         for frame in bootstrap_frames():
             await ws.send(json.dumps(frame))
-        await ws.send(json.dumps(raw_event(number, text=queries[number - 1] if queries else query)))
+        event = raw_event(number, text=queries[number - 1] if queries else query)
+        if raw_messages:
+            event["message"] = raw_messages[number - 1]
+        await ws.send(json.dumps(event))
         await ws.wait_closed()
 
     def model_response(request):

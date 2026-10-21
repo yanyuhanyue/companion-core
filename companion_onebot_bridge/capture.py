@@ -141,8 +141,9 @@ def input_event(window, frame, received_at):
         raise ValueError("WINDOW_OWNER_TEXT_INPUT_REQUIRED")
     occurred_at = datetime.fromisoformat(event["occurred_at"])
     text = event["payload"]["text"]
+    references_only = scope == "references_v1" and bool(event["payload"].get("rich"))
     if (
-        not text.strip() or text.strip().startswith("/")
+        (not text.strip() and not references_only) or text.strip().startswith("/")
         or len(text) > window.plan.value["max_input_chars"]
         or not window.plan.start <= occurred_at <= received_at < window.plan.end
         or (received_at - occurred_at).total_seconds() > MAX_AGE_SECONDS

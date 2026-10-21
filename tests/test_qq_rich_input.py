@@ -38,6 +38,7 @@ def test_pinned_reply_and_forward_are_references_without_invented_owner_text():
     assert value["payload"]["text"] == "请解释这段引用"
     rich = value["payload"]["rich"]
     assert rich["version"] == "references_v1" and rich["coverage"] == "PARTIAL"
+    assert rich["segment_count"] == 3 and rich["owner_text_positions"] == [1]
     assert rich["segments"] == [
         {
             "index": 0,
@@ -55,6 +56,34 @@ def test_pinned_reply_and_forward_are_references_without_invented_owner_text():
         },
     ]
     assert "owner_text" not in rich
+
+
+@pytest.mark.parametrize("count,positions", [
+    (True, [0]), (2, [True]), (0, [0]), (65, [0]),
+    (2, []), (2, [0, 0]), (2, [1]), (3, [0]), (2, [1, 0]),
+])
+def test_mixed_layout_is_a_strict_partition_without_alternate_owner_text(count, positions):
+    value = sample()
+    value["payload"]["rich"].update(segment_count=count, owner_text_positions=positions)
+    with pytest.raises(ValidationError):
+        InboundEvent.model_validate(value)
+    with pytest.raises(ValueError, match="INVALID_RICH_LAYOUT"):
+        input_digest(value["payload"])
+
+
+def test_multiple_text_positions_preserve_original_layout_but_plain_hash_stays_old():
+    value = rich_event([
+        {"type": "text", "data": {"text": "前半句"}}, card(),
+        {"type": "text", "data": {"text": "后半句"}},
+    ])
+    assert value["payload"]["text"] == "前半句后半句"
+    assert value["payload"]["rich"]["owner_text_positions"] == [0, 2]
+    assert value["payload"]["rich"]["segment_count"] == 3
+    assert InboundEvent.model_validate(value)
+    plain = rich_event([{"type": "text", "data": {"text": "前半句"}},
+                        {"type": "text", "data": {"text": "后半句"}}])
+    assert "rich" not in plain["payload"]
+    assert input_digest(plain["payload"]) == digest("前半句后半句")
 
 
 def card(text="引用自述", url="https://m.bilibili.com/video/BV1234567890"):

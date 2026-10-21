@@ -497,11 +497,12 @@ def check_input(store, settings, clock, event):
         return False
     approval, _, _ = guard(store, settings, clock)
     text = event.payload.text
+    references_only = approval.rich_input_scope == "references_v1" and bool(event.payload.rich)
     if (
         event.event_type != "message.received"
         or event.payload.media or event.payload.shared_content
         or (event.payload.rich and approval.rich_input_scope != "references_v1")
-        or not text.strip() or text.strip().startswith("/")
+        or (not text.strip() and not references_only) or text.strip().startswith("/")
         or len(text) > approval.max_input_chars
         or not approval.starts_at <= event.occurred_at < approval.ends_at
     ):

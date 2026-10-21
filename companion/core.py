@@ -398,7 +398,9 @@ class Core(Runtime):
             query, *(text for source in history
                      for text in (source["user_text"], source["reply_text"])),
         ]) if history else query
-        hits = self.memory.search(retrieval_query or "*", limit=6, memory_ids=allowed)
+        hits = self.memory.search(retrieval_query, limit=6, memory_ids=allowed) if (
+            retrieval_query.strip()
+        ) else []
         if not hits:
             if bounded_text:
                 live_text.freeze_memory_review(
@@ -750,6 +752,7 @@ class Core(Runtime):
                 if (
                     job["kind"] == "chat"
                     and not body.get("text")
+                    and not body.get("rich")
                     and not (self.settings.content_enabled and self.content._rows(job["event_id"]))
                 ):
                     reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"

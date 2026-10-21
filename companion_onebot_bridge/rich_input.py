@@ -25,8 +25,27 @@ CARD_PATHS = (
 
 def input_digest(payload):
     # Historical plain-text receipts retain their exact original digest.
+    if payload.get("rich"):
+        validate_layout(payload["rich"])
     value = {k: payload[k] for k in ("text", "rich")} if payload.get("rich") else payload["text"]
     return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def validate_layout(value):
+    """Independent transport-side partition check; no additional owner text is stored."""
+    count, positions = value.get("segment_count"), value.get("owner_text_positions")
+    segments = value.get("segments")
+    if (type(count) is not int or not 1 <= count <= 64
+        or not isinstance(positions, list) or len(positions) > 64
+        or any(type(index) is not int for index in positions)
+        or positions != sorted(set(positions)) or not isinstance(segments, list)
+        or not 1 <= len(segments) <= 64
+        or any(not isinstance(item, dict) or type(item.get("index")) is not int
+               for item in segments)):
+        raise ValueError("INVALID_RICH_LAYOUT")
+    indices = [item["index"] for item in segments]
+    if indices != sorted(set(indices)) or sorted([*positions, *indices]) != list(range(count)):
+        raise ValueError("INVALID_RICH_LAYOUT")
 
 
 def discovered_url(value):
@@ -125,9 +144,9 @@ def project(message, redact):
     """Only text segments form owner text. Other fields never become commands/evidence quotes."""
     if isinstance(message, str):
         # CQ-looking text is literal, not a second parser for forged references.
-        text, segments = redact(message), []
+        text, segments, positions = redact(message), [], []
     elif isinstance(message, list) and 1 <= len(message) <= 64:
-        texts, segments = [], []
+        texts, segments, positions = [], [], []
         for index, segment in enumerate(message):
             if (
                 not isinstance(segment, dict)
@@ -141,6 +160,7 @@ def project(message, redact):
                 if set(data) != {"text"} or not isinstance(data["text"], str):
                     raise ValueError("INVALID_TEXT")
                 texts.append(data["text"])
+                positions.append(index)
                 continue
             entry = {"index": index, "type": kind, "actor": "UNVERIFIED"}
             if kind in {"reply", "forward"}:
@@ -169,7 +189,10 @@ def project(message, redact):
         raise ValueError("INVALID_MESSAGE")
     if len(text) > 20000 or "\x00" in text:
         raise ValueError("INVALID_TEXT_LENGTH")
-    rich = {"version": "references_v1", "coverage": "PARTIAL", "segments": segments}
+    rich = {"version": "references_v1", "coverage": "PARTIAL", "segments": segments,
+            "segment_count": len(message), "owner_text_positions": positions}
+    if segments:
+        validate_layout(rich)
     if len(encode(rich).encode()) > MAX_RICH_BYTES:
         raise ValueError("RICH_INPUT_TOO_LARGE")
     return text, rich if segments else None
