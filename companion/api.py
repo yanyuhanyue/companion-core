@@ -413,6 +413,8 @@ def create_app(settings=None):
 
     @app.post(prefix + "/memories/search", dependencies=auth)
     async def search(body: SearchRequest):
+        if live_text.active(app.state.core.store, settings):
+            raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
         return {
             "items": app.state.core.memory.search(
                 body.query, body.requester_actor_id, body.subject_filter, body.limit
@@ -422,6 +424,8 @@ def create_app(settings=None):
     @app.post(prefix + "/memories/{memory_id}/decisions", dependencies=auth)
     async def decide(memory_id: str, body: MemoryDecision):
         core = app.state.core
+        if live_text.active(core.store, settings):
+            raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
         return core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content)
 
     @app.get(prefix + "/ops/status", dependencies=auth)

@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from companion.contracts import CoreError
+from companion.store import encode
 
 MODEL = "BAAI/bge-small-zh-v1.5"
 REPOSITORY = "Qdrant/bge-small-zh-v1.5"
@@ -60,7 +61,9 @@ class SemanticIndex:
         cached = {
             row["memory_id"]: row
             for row in self.store.rows(
-                "SELECT * FROM memory_vectors WHERE model_version=?", (INDEX_VERSION,)
+                "SELECT * FROM memory_vectors WHERE model_version=? "
+                "AND memory_id IN (SELECT value FROM json_each(?))",
+                (INDEX_VERSION, encode([row["memory_id"] for row in rows])),
             )
         }
         vectors, missing = {}, []
