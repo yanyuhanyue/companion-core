@@ -98,6 +98,8 @@ Core HTTP v1 Delivery item 直接携带真实 lease_until，Demo 和 live_text �
 租约。live_text 在最终发送前 await 原 Core send-check；响应包含已批准消息的 lease_until。
 之后完成本地 Journal/DB 读取，再做纯 approval/config/fence/deadline/lease 检查；最后
 采样时间之后无文件/DB I/O 或 await。外部 I/O 前仍先持久记账，拦截也保留已花尝试额度。
+最终实际正文摘要和完整 item 摘要还须匹配原持久 reservation；正文、message id、
+source event 和 lease 的可变副本不能相互比较后代替原逐条批准。
 
 `window-stop` 首先 fsync 原 Spool 目录中的 `window.stop` 停止请求，即使接收器持锁也能
 打断等待。持锁时 CLI 报 `STOP_REQUESTED / WINDOW_STOP_PENDING`，不声称 Core 已停。

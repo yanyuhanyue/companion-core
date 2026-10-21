@@ -25,7 +25,7 @@ from companion.model import ModelClient
 from companion_onebot_bridge import app, capture, network
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
+from companion_onebot_bridge.window import SendOperation, TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.test_live_text_window import live_fixture
 from tests.test_onebot_delivery import provider
@@ -1180,5 +1180,73 @@ def test_actual_send_request_is_revalidated_after_core_send_check(
                 status = await window.send_once(client, protocol, approval)
                 assert len(pending) == 1 and sends == []
                 assert status["attempt_states"] == {"UNKNOWN": 1}
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("change", ["text", "message_id", "lease_token", "delivery_key"])
+def test_final_send_matches_persisted_reservation_despite_mutable_item_and_body(
+    core,
+    tmp_path,
+    monkeypatch,
+    live,
+    change,
+):
+    operations = []
+    original_reserve = SendOperation.reserve
+
+    def remember(operation, item):
+        original_reserve(operation, item)
+        operations.append(operation)
+
+    monkeypatch.setattr(SendOperation, "reserve", remember)
+
+    async def source(ws):
+        pytest.fail("send-once must not start another receiver")
+
+    async def scenario():
+        async with source_window(core, tmp_path, source, live=live) as (
+            window,
+            client,
+            protocol,
+            _,
+            sends,
+        ):
+            from tests.test_live_text_window import live_clients
+
+            async with live_clients(core, window.plan.config) if live else nullcontext():
+                approval = await stage(window, client, core)
+                original_message_id = approval["message_id"]
+
+                async def mutate(request):
+                    if request.url.path != "/send_private_msg":
+                        return
+                    item = operations[0].current_item
+                    if change == "text":
+                        text = "synthetic text outside the frozen individual reply approval"
+                        item["content"]["text"] = text
+                        body = json.loads(request.content)
+                        body["message"][0]["data"]["text"] = text
+                        request._content = json.dumps(body).encode()
+                        request.headers["Content-Length"] = str(len(request.content))
+                        request.stream = httpx.ByteStream(request.content)
+                    elif change == "message_id":
+                        item["message_id"] = "msg_" + "e" * 32
+                    elif change == "lease_token":
+                        item["lease_token"] = "lease_" + "e" * 32
+                    else:
+                        item["delivery_key"] = "reply:evt_" + "e" * 64 + ":v1"
+
+                protocol.event_hooks["request"].append(mutate)
+                status = await window.send_once(client, protocol, approval)
+                assert sends == []
+                assert status["attempts_reserved"] == 1
+                assert status["attempt_states"] == {"UNKNOWN": 1}
+                assert status["state"] == "STOPPED"
+                attempt = window.db.execute("SELECT * FROM window_attempts").fetchone()
+                assert attempt["message_id"] == original_message_id
+                assert attempt["text_hash"] == approval["reply_sha256"]
+                assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
 
     run(scenario())

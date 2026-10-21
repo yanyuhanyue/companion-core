@@ -513,7 +513,7 @@ class TestWindow:
             "CREATE TABLE window_attempts(message_id TEXT PRIMARY KEY,"
             "event_id TEXT NOT NULL UNIQUE,"
             "fence INTEGER NOT NULL,state TEXT NOT NULL,text_hash TEXT NOT NULL,"
-            "approval_hash TEXT NOT NULL,provider_ack_hash TEXT);"
+            "approval_hash TEXT NOT NULL,provider_ack_hash TEXT,item_hash TEXT NOT NULL);"
         )
         with self.db:
             self.db.execute(
@@ -786,18 +786,21 @@ class SendOperation:
         ):
             raise ValueError("WINDOW_ATTEMPT_CAP")
         fence = self.window.row()["fence"] + 1
+        item_hash = digest(item)
         head = self.window.append(
             "RESERVED",
             {
                 "message_hash": digest(item["message_id"]),
                 "event_hash": digest(event_id),
                 "fence": fence,
+                "item_sha256": item_hash,
             },
         )
         with self.db:
             self.db.execute(
-                "INSERT INTO window_attempts VALUES(?,?,?,'RESERVED',?,?,NULL)",
-                (item["message_id"], event_id, fence, expected["reply_sha256"], digest(approval)),
+                "INSERT INTO window_attempts VALUES(?,?,?,'RESERVED',?,?,NULL,?)",
+                (item["message_id"], event_id, fence, expected["reply_sha256"], digest(approval),
+                 item_hash),
             )
             self.db.execute("UPDATE test_window SET fence=?,journal_head=?", (fence, head))
         self.current = (item["message_id"], fence)
@@ -830,7 +833,7 @@ class SendOperation:
         if not self.window.plan.start <= self.clock() < self.window.plan.end:
             raise ValueError("WINDOW_SEND_FENCED")
 
-    def before_dispatch(self, *, state="IO_STARTED"):
+    def before_dispatch(self, *, state="IO_STARTED", request=None):
         # HTTP request hooks can await DNS pinning after before_io(). Check again
         # after those hooks, at the transport boundary; keep the spent reservation.
         self.window.verify(active=False, dispatch=True)
@@ -838,13 +841,31 @@ class SendOperation:
         attempt = self.db.execute(
             "SELECT * FROM window_attempts WHERE message_id=? AND fence=?", self.current
         ).fetchone()
-        lease_until = self.lease_until
+        item = self.current_item
+        lease_until = min(self.lease_until, datetime.fromisoformat(item["lease_until"]))
         stop_requested = self.window.stop_path.exists()
         # All disk/DB reads are complete. Approval/config/lease/deadline below are
         # pure checks with no lock, await, or file I/O after the last clock sample.
+        if request is not None:
+            check_protocol_request(self.window, request)
+            expected = {"user_id": int(self.window.plan.config.owner_qq_id),
+                        "message": [{"type": "text", "data": {"text": item["content"]["text"]}}],
+                        "auto_escape": True}
+            body = decode(request.content, 65536)
+            if (
+                body != expected or not attempt
+                or digest(body["message"][0]["data"]["text"]) != attempt["text_hash"]
+            ):
+                raise ValueError("WINDOW_SEND_FENCED")
         if (
             stop_requested or not attempt
             or digest(self.approval) != attempt["approval_hash"]
+            or digest(item) != attempt["item_hash"]
+            or item["message_id"] != self.current[0]
+            or self.approval["message_id"] != self.current[0]
+            or item["delivery_key"] != f"reply:{attempt['event_id']}:v1"
+            or self.approval["event_id"] != attempt["event_id"]
+            or self.approval["reply_sha256"] != attempt["text_hash"]
             or digest(self.window.plan.value) != self.window.plan.sha256
             or digest(asdict(self.window.plan.config)) != self.window.plan.value["config_sha256"]
             or row["state"] != "OPEN"
@@ -861,13 +882,13 @@ class SendOperation:
         with self.db:
             self.db.execute(
                 "UPDATE window_attempts SET state=?,provider_ack_hash=? WHERE message_id=?",
-                (state, digest(provider_id) if provider_id else None, item["message_id"]),
+                (state, digest(provider_id) if provider_id else None, self.current[0]),
             )
             if provider_id:
                 self.db.execute(
                     "UPDATE window_inputs SET state='ACK' WHERE event_id="
                     "(SELECT event_id FROM window_attempts WHERE message_id=?)",
-                    (item["message_id"],),
+                    (self.current[0],),
                 )
             self.db.execute("UPDATE test_window SET journal_head=?", (head,))
         if not provider_id:
@@ -902,7 +923,6 @@ class WindowOneBot:
             self.operation.before_dispatch(state="RESERVED")
             return
         item, approval = self.operation.current_item, self.operation.approval
-        self.check_send_request(request, item)
         if live:
             receipt = await self.window.core_post(
                 self.operation.client, "/internal/v1/live-text/send-check",
@@ -915,16 +935,7 @@ class WindowOneBot:
             self.operation.lease_until = datetime.fromisoformat(receipt["lease_until"])
             # Core's await is the final asynchronous approval boundary. Rebind
             # the actual pending request as well as the local operation after it.
-            check_protocol_request(self.window, request)
-            self.check_send_request(request, item)
-        self.operation.before_dispatch()
-
-    def check_send_request(self, request, item):
-        expected = {"user_id": int(self.config.owner_qq_id),
-                    "message": [{"type": "text", "data": {"text": item["content"]["text"]}}],
-                    "auto_escape": True}
-        if json.loads(request.content) != expected:
-            raise ValueError("LIVE_TEXT_ONEBOT_REQUEST_CHANGED")
+        self.operation.before_dispatch(request=request)
 
     async def probe(self):
         return await self.delegate.probe()
