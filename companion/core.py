@@ -306,9 +306,15 @@ class Core(Runtime):
             hits = self.memory.search(text or "*", limit=6, memory_ids=allowed) if (
                 memories is None
             ) else memories
-            traits = [] if bounded_text else s.rows(
-                "SELECT topic,status,confidence FROM traits WHERE confidence>0 "
-                "ORDER BY confidence DESC LIMIT 5"
+            from companion.interest import profile
+
+            traits = (
+                []
+                if bounded_text
+                else [
+                    {k: item[k] for k in ("namespace", "topic", "status", "confidence")}
+                    for item in profile(s, cfg, self.clock(), cfg.owner_qq_id)["self.interest"][:5]
+                ]
             )
             if hits or traits or memory_paused:
                 memories = [

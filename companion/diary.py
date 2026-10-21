@@ -156,7 +156,13 @@ class DiaryCorrection(StrictModel):
 
 
 DIARY_COMMANDS = (
-    "今天写日记了吗", "读日记", "日记列表", "删除日记", "暂停写日记", "恢复写日记", "修改日记"
+    "今天写日记了吗",
+    "读日记",
+    "日记列表",
+    "删除日记",
+    "暂停写日记",
+    "恢复写日记",
+    "修改日记",
 )
 
 
@@ -592,7 +598,12 @@ class DiaryService:
         request_id = None
         try:
             count = sum(
-                source["kind"] in {"owner_message", "observed_content"} for source in run["sources"]
+                source["kind"] == "owner_message"
+                or (
+                    source["kind"] == "observed_content"
+                    and source["result_status"] in {"FETCHED", "WATCHED"}
+                )
+                for source in run["sources"]
             )
             if count < self.settings.diary_min_source_events:
                 self.repo.finish(run, "SKIPPED", "DIARY_INSUFFICIENT_SOURCES")
