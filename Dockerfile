@@ -8,7 +8,9 @@ COPY source_reader ./source_reader
 COPY companion_onebot_bridge ./companion_onebot_bridge
 COPY migrations ./migrations
 COPY db ./db
-RUN uv sync --frozen --no-dev && useradd -m -u 10001 companion && \
+# Public source archives may have owner-only directories after private extraction.
+RUN chmod -R a+rX companion source_reader companion_onebot_bridge migrations db && \
+    uv sync --frozen --no-dev && useradd -m -u 10001 companion && \
     mkdir -p /data /privacy && chown companion:companion /data /privacy
 USER companion
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "companion"]

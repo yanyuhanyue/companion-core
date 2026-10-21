@@ -139,6 +139,9 @@ def create_app(settings=None):
 
     @app.get(prefix + "/health/ready", dependencies=auth)
     async def ready():
+        from companion.ops_status import schema_head
+
+        schema_head()
         core = app.state.core
         version = core.store.one("SELECT version_num FROM alembic_version")
         if not core.store.schema_capabilities():

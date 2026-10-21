@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from companion import observe, ops_status
+from companion.contracts import CoreError
 from tests.conftest import ingest, run
 
 
@@ -103,6 +104,24 @@ def test_real_localhost_samples_use_wall_and_monotonic_time_without_worker_claim
     text = output.read_text("utf-8")
     assert url not in text and core.settings.bridge_token.get_secret_value() not in text
     assert core.settings.database not in text
+
+
+def test_remote_missing_schema_head_is_an_observed_blocker_not_a_clear_sample(
+    core, tmp_path, monkeypatch,
+):
+    def unavailable():
+        raise CoreError("SCHEMA_HEAD_UNAVAILABLE", 503)
+
+    monkeypatch.setattr(ops_status, "schema_head", unavailable)
+    output = tmp_path / "blocked-observation.jsonl"
+    with status_server(core) as (url, _, _):
+        result = observe.observe(observe.http_collector(core.settings, url), output,
+                                 samples=1, interval_seconds=0.01)
+    sample = records(output)[1]
+    assert sample["snapshot"]["blockers"] == ["SCHEMA_HEAD_UNAVAILABLE"]
+    assert result["failures"] == 0
+    assert result["clear_segment_observed_seconds"] == 0
+    assert sample["segment"] is None
 
 
 def test_failure_restart_and_long_gap_split_segments_not_continuous_health(tmp_path):
