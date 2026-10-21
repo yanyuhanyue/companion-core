@@ -32,6 +32,9 @@ Job/Outbox 状态、模型尝试及可确认的 Token。
 `configured_*` 仅表示查询时的本地配置；运行镜像未知时保持 null。
 冻结来源标记 `NOT_REVALIDATED`，epoch 漂移标记 `STALE_EPOCH`，
 不能替代 dispatch/delivery 的原生来源复核。
+单图范围提供当前图片的来源、内容项、观察结果和付费 admission 哈希；
+`content_vision` 与 `chat` 分别显示已记录用量。图片 URL、识别正文和原始图片不进入报告。
+这些仍是冻结记录的诊断投影，不代表图片已通过实际平台或真人验收。
 删除后的输入不输出旧上下文来源。Inspector 不生成新的持久派生库；已导出的私有报告需要纳入数据保留/删除范围。
 
 SETTLED 且记录了付费 dispatch 的调用才提供已记录 Token；UNKNOWN/RESERVED 或演示调用保持 null。

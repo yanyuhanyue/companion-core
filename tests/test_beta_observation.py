@@ -120,6 +120,45 @@ def test_context_projects_only_pins_and_marks_erasure_epoch_stale(core):
     }
 
 
+def test_image_inspection_preserves_unknown_cost_and_projects_only_frozen_hashes(core):
+    ingest(core, text="PRIVATE_IMAGE_CAPTION")
+    run(core.run_once("worker"))
+    paid_fixture(core)
+    core.store.execute("UPDATE model_usage SET scenario='content_vision'")
+    job = core.store.one("SELECT job_id FROM jobs")
+    image = {"privacy_epoch": epoch(core.store),
+             "event_id": "PRIVATE_IMAGE_EVENT", "item_id": "PRIVATE_IMAGE_ITEM",
+             "source": {"source_sha256": "c" * 64, "url": "PRIVATE_SIGNED_URL"},
+             "media_sha256": "d" * 64, "payload_sha256": "e" * 64,
+             "request_id": "PRIVATE_REQUEST", "text": "PRIVATE_VISION_OUTPUT"}
+    record = {"privacy_epoch": epoch(core.store), "sources": [], "memory_sources": [],
+              "image_sources": [{"image": image, "item_sha256": "f" * 64,
+                                 "observation_sha256": "a" * 64, "admission_sha256": "b" * 64}]}
+    core.store.insert("runtime_meta", key="live_text_context:" + job["job_id"],
+                      value=encode(record))
+    before = list(core.store.db.iterdump())
+    result = beta_observation.inspect_context(core.settings, "trace_test_1")
+    assert result["configured_scopes"]["image"] == "none"
+    inspected = result["trace"]["jobs"][0]
+    assert inspected["model_calls"][0]["scenario"] == "content_vision"
+    assert inspected["model_calls"][0]["prompt_tokens"] == 100
+    source = inspected["context"]["images"][0]
+    assert source["source_validity"] == "NOT_REVALIDATED"
+    assert source["media_sha256"] == "d" * 64 and source["observation_sha256"] == "a" * 64
+    assert "PRIVATE_" not in encode(result)
+    assert list(core.store.db.iterdump()) == before
+    core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
+    advance_epoch(core.store)
+    result = beta_observation.inspect_context(core.settings, "trace_test_1")
+    inspected = result["trace"]["jobs"][0]
+    assert inspected["context"]["state"] == "STALE_EPOCH"
+    assert inspected["model_calls"][0]["prompt_tokens"] is None
+    assert inspected["model_calls"][0]["accounted_or_reserved_micro_usd"] > 0
+    core.store.execute("UPDATE events SET redacted=1")
+    result = beta_observation.inspect_context(core.settings, "trace_test_1")
+    assert "images" not in result["trace"]["jobs"][0]["context"]
+
+
 def test_ambiguous_and_third_party_trace_not_mislabelled_owner(core):
     ingest(core)
     ingest(core, number=2)
