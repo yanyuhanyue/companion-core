@@ -48,6 +48,14 @@ status 必须恰有 online/good 两个键，且两值均为严格 true。disable
 [OneBot 元事件规范](https://github.com/botuniverse/onebot-11/blob/master/event/meta.md) 提供标准字段；
 enable 的 WS bootstrap 行为按上述固定 SnowLuma 版本单独覆盖。
 
+收到 `notice/notify/input_status` 时，只有字段恰为固定
+[FriendInputStatus 与 notice envelope](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/event-converter/to-notice.ts)
+的八项、bot/owner 匹配、时间处于窗口内且不超过 30 秒，才继续等待文字。
+`event_type` 必须为严格整数；`status_text` 必须为不含 NUL、最多 256 字符的字符串，
+不输出或保存该状态内容。该通知不签名、不入队、不消费新输入数，并与元事件共用原
+90 秒、16 帧及累计字节上限。其它 notice、额外字段、群字段、错误身份或畸形状态均停止；
+后续真正消息仍独立通过原 friend/private/text 校验。
+
 失败 CLI 保留原停止状态和主错误码，并可附带固定枚举的 capture_phase/capture_reason。
 诊断区分协议探测、解析地址、WS 握手、接收、校验及持久化等阶段；不输出异常原文、
 URL、Header、响应体或消息正文。Core stop 未确认时仍优先报告未确认状态。

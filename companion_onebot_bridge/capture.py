@@ -183,7 +183,7 @@ async def receive_frame(window, ws, capture_fence):
     stop = asyncio.create_task(stop_requested(window))
     try:
         received_bytes = 0
-        # One total deadline; meta events neither restart the timer nor input quota.
+        # Meta/input-status frames share the deadline, frame cap and byte cap.
         async with asyncio.timeout(
             min(CAPTURE_WAIT_SECONDS, (window.plan.end - window.clock()).total_seconds())
         ):
@@ -198,15 +198,39 @@ async def receive_frame(window, ws, capture_fence):
                     raise ValueError("CAPTURE_BYTE_CAP")
                 window.verify(capture_fence=capture_fence)
                 raw = decode(frame, window.plan.config.max_frame_bytes)
-                if raw.get("post_type") != "meta_event":
+                if raw.get("post_type") == "meta_event":
+                    validate_meta(window, raw)
+                elif raw.get("post_type") == "notice":
+                    validate_input_status(window, raw)
+                else:
                     return frame
-                validate_meta(window, raw)
             raise ValueError("CAPTURE_FRAME_CAP")
     finally:
         tasks = [task for task in (receive, stop) if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def validate_input_status(window, raw):
+    # Fixed SnowLuma notice envelope + convertFriendInputStatus fields only.
+    fields = {"time", "self_id", "post_type", "notice_type", "sub_type", "user_id",
+              "event_type", "status_text"}
+    stamp, received_at = raw.get("time"), window.clock()
+    status = raw.get("status_text")
+    if (
+        set(raw) != fields or raw.get("post_type") != "notice"
+        or raw.get("notice_type") != "notify" or raw.get("sub_type") != "input_status"
+        or identifier(raw.get("self_id")) != window.plan.config.bot_qq_id
+        or identifier(raw.get("user_id")) != window.plan.config.owner_qq_id
+        or type(stamp) is not int
+        or not window.plan.start.timestamp() <= stamp <= received_at.timestamp()
+        or received_at.timestamp() - stamp > MAX_AGE_SECONDS
+        # The producer forwards an integer event type; 1/3 are not an exhaustive enum.
+        or type(raw.get("event_type")) is not int
+        or not isinstance(status, str) or len(status) > 256 or "\x00" in status
+    ):
+        raise ValueError("INVALID_CAPTURE_INPUT_STATUS")
 
 
 def validate_meta(window, raw):
