@@ -13,8 +13,8 @@ PUBLIC_PATTERNS = (
     "docs/qq-beta/p8c*.md", "docs/qq-beta/p8c*.json", "contracts/p8c*.json",
     "docs/design-future/p8b1*.md", "docs/experiments/p8b1-context-v2/*",
     "tests/test_p8c*.py",
-    "docs/qq-beta/p10-contracts*.json", "docs/qq-beta/p10-provider*.md",
-    "docs/qq-beta/p10-r1-r2*.md", "tests/test_p10_contracts*.py",
+    "docs/qq-beta/p9*.md", "docs/qq-beta/p10*.md", "docs/qq-beta/p10*.json",
+    "tests/test_p10_contracts*.py",
 )
 EXAMPLE_NETWORKS = tuple(ipaddress.ip_network(value) for value in (
     "192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24",
