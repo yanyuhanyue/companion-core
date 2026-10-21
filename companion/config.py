@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model
 
 from companion.content import ContentConfig
 from companion.executive_protocol import ExecutiveConfig
+from companion.image_input import ImageInputPolicy
 from companion.media import MediaConfig
 from companion.sources import ObservationSource
 
@@ -56,6 +57,7 @@ class PaidModelApproval(BaseModel):
     window_calls: int = Field(strict=True, gt=0)
     concurrency: int = Field(strict=True, gt=0, le=32)
     journal_path: str = Field(min_length=1)
+    image_input: ImageInputPolicy | None = None
 
     @model_validator(mode="after")
     def validate_approval(self):
@@ -331,6 +333,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "content_vision":
+            return min(self.max_output_tokens, 300)
         if scenario == "reflection":
             return self.reflection_max_output_tokens
         return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
