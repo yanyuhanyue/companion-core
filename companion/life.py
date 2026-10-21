@@ -97,13 +97,16 @@ class LifeService:
                 + "。这些偏好会在到期后回到中性。"
             )
         if text == "为什么形成偏好":
-            rows = self.store.rows(
-                "SELECT t.topic,o.canonical_url,e.occurred_at FROM traits t JOIN "
-                "trait_evidence te USING(trait_id) JOIN observations o ON "
-                "o.event_id=te.event_id JOIN events e ON e.event_id=o.event_id WHERE "
-                "t.category='interest' AND e.redacted=0 AND o.redacted=0 ORDER BY "
-                "e.occurred_at DESC LIMIT 5"
-            )
+            from companion.interest import profile
+
+            interests = profile(self.store, self.settings, self.clock(), self.settings.owner_qq_id)[
+                "self.interest"
+            ]
+            rows = [
+                {"topic": item["topic"], **evidence}
+                for item in interests
+                for evidence in item["evidence"]
+            ][:5]
             return (
                 "\n".join(
                     f"持续探索的话题：{row['topic']}；依据 {row['occurred_at'][:10]} "

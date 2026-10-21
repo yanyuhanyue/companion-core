@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from pydantic import ConfigDict, Field, ValidationError
 
 from companion import budget
-from companion.commands import command_parts
+from companion.commands import command_parts, is_memory_command
 from companion.contracts import CoreError, StrictModel
 from companion.observation import expired_sources
 from companion.privacy import advance_epoch, diary_copies, epoch, redact, sensitive
@@ -156,12 +156,25 @@ class DiaryCorrection(StrictModel):
 
 
 DIARY_COMMANDS = (
-    "今天写日记了吗", "读日记", "日记列表", "删除日记", "暂停写日记", "恢复写日记", "修改日记"
+    "今天写日记了吗",
+    "读日记",
+    "日记列表",
+    "删除日记",
+    "暂停写日记",
+    "恢复写日记",
+    "修改日记",
 )
 
 
 def is_diary_command(text):
     return command_parts(text)[0] in DIARY_COMMANDS
+
+
+def is_management_command(text):
+    # Import lazily: Life reuses Goal and Reflection/Diary services at runtime.
+    from companion.life import is_life_command
+
+    return is_diary_command(text) or is_memory_command(text) or is_life_command(text)
 
 
 def day_bounds(day, timezone):
@@ -273,7 +286,7 @@ class DiaryRepository:
                 not text
                 or body.get("diary_command")
                 or body.get("control_command")
-                or is_diary_command(text)
+                or is_management_command(text)
                 or sensitive(text)
                 or redact(text, self.settings) != text
             ):
@@ -343,7 +356,7 @@ class DiaryRepository:
                     not text
                     or body.get("diary_command")
                     or body.get("control_command")
-                    or is_diary_command(text)
+                    or is_management_command(text)
                     or sensitive(text)
                     or redact(text, self.settings) != text
                 ):
@@ -592,7 +605,12 @@ class DiaryService:
         request_id = None
         try:
             count = sum(
-                source["kind"] in {"owner_message", "observed_content"} for source in run["sources"]
+                source["kind"] == "owner_message"
+                or (
+                    source["kind"] == "observed_content"
+                    and source["result_status"] in {"FETCHED", "WATCHED"}
+                )
+                for source in run["sources"]
             )
             if count < self.settings.diary_min_source_events:
                 self.repo.finish(run, "SKIPPED", "DIARY_INSUFFICIENT_SOURCES")

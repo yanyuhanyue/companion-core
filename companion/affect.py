@@ -64,42 +64,85 @@ class AffectEngine:
             (self.clock(), self.clock(), self.settings.affect_max_evidence),
         )
         seen = set()
+        valid = []
         for row in rows:
+            proposed = self.preview(row["event_id"])
+            if proposed is None or any(
+                row[key] != proposed[key]
+                for key in ("dimension", "new_state", "reason_code", "expires_at")
+            ):
+                continue
             if row["dimension"] in seen:
                 continue
+            valid.append(row)
             seen.add(row["dimension"])
             result["state"][row["dimension"]] = row["new_state"]
             result["evidence"].append(
                 {k: row[k] for k in ("event_id", "dimension", "reason_code", "expires_at")}
             )
-        if rows:
-            result["confidence"] = min(row["confidence"] for row in rows)
-            result["expires_at"] = min(row["expires_at"] for row in rows)
+        if valid:
+            result["confidence"] = 1.0
+            result["expires_at"] = min(row["expires_at"] for row in valid)
         return result
+
+    def preview(self, event_id):
+        """Read-only shadow: direct private owner feedback, never inferred emotion."""
+        event = self.store.one(
+            "SELECT e.body_json,e.ingested_at FROM events e "
+            "JOIN conversations c USING(conversation_id) WHERE e.event_id=? AND e.redacted=0 "
+            "AND e.actor_id='owner' AND e.source='qq.onebot' AND e.privacy_scope='private' "
+            "AND e.event_type='message.received' AND c.scope='private' "
+            "AND c.owner_actor_id='owner' AND length(e.body_json)<=16000",
+            (event_id,),
+        )
+        if not event:
+            return None
+        try:
+            body = json.loads(event["body_json"])
+        except ValueError:
+            return None
+        if not isinstance(body, dict) or body.get("diary_command") or body.get("control_command"):
+            return None
+        text = body.get("text", "")
+        if not isinstance(text, str):
+            return None
+        text = text.strip().rstrip("。！!？? ")
+        matched = next((rule for rule in RULES if re.fullmatch(rule[0], text)), None)
+        if not matched:
+            return None
+        expires = min(
+            after(event["ingested_at"], self.settings.affect_decay_minutes * 60),
+            after(event["ingested_at"], self.settings.raw_event_retention_days * 86400),
+        )
+        if not event["ingested_at"] <= self.clock() < expires:
+            return None
+        _, dimension, value, cause = matched
+        return {
+            "namespace": "owner.feedback",
+            "mode": "SHADOW",
+            "event_id": event_id,
+            "dimension": dimension,
+            "new_state": value,
+            "reason_code": cause,
+            "created_at": event["ingested_at"],
+            "expires_at": expires,
+        }
 
     def observe(self, event_id):
         if not self.settings.affect_enabled:
             return False
         s = self.store
         with nullcontext() if s.db.in_transaction else s.transaction():
-            event = s.one("SELECT * FROM events WHERE event_id=? AND redacted=0", (event_id,))
-            if not event or event["actor_id"] != "owner" or event["source"] != "qq.onebot":
+            proposal = self.preview(event_id)
+            if proposal is None:
                 return False
-            body = json.loads(event["body_json"])
-            if body.get("diary_command"):
-                return False
-            text = body.get("text", "").strip().rstrip("。！!？? ")
-            matched = next((rule for rule in RULES if re.fullmatch(rule[0], text)), None)
-            if not matched:
-                return False
-            _, dimension, value, cause = matched
-            expires = after(event["ingested_at"], self.settings.affect_decay_minutes * 60)
-            if expires <= self.clock():
-                return False
+            dimension, value, cause, expires = (
+                proposal[key] for key in ("dimension", "new_state", "reason_code", "expires_at")
+            )
             prior = self.snapshot()["state"][dimension]
             changed = s.execute(
                 "INSERT OR IGNORE INTO affect_evidence VALUES ('companion',?,?,?,?,?,?,?,?)",
-                (event_id, dimension, prior, value, cause, 1.0, event["ingested_at"], expires),
+                (event_id, dimension, prior, value, cause, 1.0, proposal["created_at"], expires),
             ).rowcount
             if not changed:
                 return False
@@ -122,5 +165,5 @@ class AffectEngine:
                     current["expires_at"],
                 ),
             )
-            s.audit("affect.observed", event_id, event["trace_id"], self.clock(), reason=cause)
+            s.audit("affect.observed", event_id, event_id, self.clock(), reason=cause)
             return True

@@ -8,7 +8,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from companion.contracts import CoreError
-from companion.privacy import epoch
+from companion.observation import expired_sources
+from companion.privacy import epoch, redact, sensitive
 from companion.sources import content_target, observation_sources, source_definition, supports
 from companion.store import after, uid, utcnow
 from companion.transport import enqueue
@@ -116,8 +117,10 @@ def share_source(event):
         if canonical is None:
             return None
         evidence = json.loads(event["evidence_json"])
-        if any(evidence.get(kind) is not None and not supports(definition.name, kind)
-               for kind in ("reading", "article")):
+        if any(
+            evidence.get(kind) is not None and not supports(definition.name, kind)
+            for kind in ("reading", "article")
+        ):
             return None
         return definition, body, canonical
     except (AttributeError, CoreError, KeyError, TypeError, ValueError):
@@ -127,6 +130,60 @@ def share_source(event):
 class SocialPlanner:
     def __init__(self, store, settings, clock=utcnow):
         self.store, self.settings, self.clock = store, settings, clock
+
+    def preview(self, event_id, requester):
+        """An owner-only shadow draft. Does not create a candidate or reserve a send."""
+        if requester != self.settings.owner_qq_id:
+            raise CoreError("OWNER_REQUIRED", 403)
+        s, now = self.store, self.clock()
+        captured = epoch(s)
+        cutoff = after(now, -86400 * self.settings.raw_event_retention_days)
+        event = s.one(
+            "SELECT o.*,e.body_json,e.source,e.ingested_at FROM observations o "
+            "JOIN events e USING(event_id) WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 "
+            "AND e.privacy_scope='private' AND e.ingested_at>=? AND e.occurred_at<=? "
+            "AND length(e.body_json)<=16000",
+            (event_id, cutoff, now),
+        )
+        if not event or expired_sources(s, [event_id], cutoff):
+            return None
+        resolved = share_source(event)
+        if resolved is None:
+            return None
+        definition, body, canonical = resolved
+        if sensitive(body["title"] + body["text"]) or any(
+            redact(body[key], self.settings) != body[key] for key in ("title", "text")
+        ):
+            return None
+        comparison = body["title"] + "\n" + body["text"][:1500]
+        key = hashlib.sha256(text_key(comparison).encode()).hexdigest()
+        duplicate = s.one(
+            "SELECT 1 FROM social_candidates WHERE state<>'ERASED' "
+            "AND (canonical_url=? OR content_sha256=?)",
+            (canonical, key),
+        )
+        reason = "DUPLICATE_CONTENT" if duplicate else "SHADOW_ONLY"
+        if not proactive_allowed(s, self.settings, now):
+            reason = "OUTBOUND_DISABLED_OR_PAUSED"
+        if captured != epoch(s):
+            raise CoreError("PRIVACY_CHANGED", 409)
+        return {
+            "mode": "SHADOW",
+            "privacy_epoch": captured,
+            "event_id": event_id,
+            "evidence_level": "FETCHED",
+            "source": definition.name,
+            "title": body["title"],
+            "excerpt": body["text"][:500],
+            "url": canonical,
+            "expires_at": after(
+                event["ingested_at"], 86400 * self.settings.raw_event_retention_days
+            ),
+            "reason_code": reason,
+            "duplicate": bool(duplicate),
+            "requires_semantic_review": True,
+            "auto_share": False,
+        }
 
     def consider(self, event_id):
         if not self.settings.social_enabled:
