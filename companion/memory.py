@@ -3,6 +3,7 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from companion.commands import command_parts
 from companion.contracts import CoreError
 from companion.privacy import advance_epoch, redact, sensitive
 from companion.retrieval import SemanticIndex, fuse
@@ -266,13 +267,43 @@ class Memory:
             ),
         )
 
-    def decide(self, memory_id, decision, now, corrected=None):
+    def decide(self, memory_id, decision, now, corrected=None, *, evidence_event_id=None):
         self.require_owner("owner")
         s = self.store
         with s.transaction():
             old = s.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
             if not old:
                 raise CoreError("MEMORY_NOT_FOUND", 404)
+            if evidence_event_id is not None:
+                source = s.one("SELECT * FROM events WHERE event_id=?", (evidence_event_id,))
+                operation = {
+                    "confirm": "确认这一条",
+                    "correct": "纠正这一条",
+                    "forget": "忘记这一条",
+                }
+                command, arguments = command_parts(
+                    json.loads(source["body_json"]).get("text", "") if source else ""
+                )
+                expected = [memory_id, corrected] if decision == "correct" else [memory_id]
+                if (
+                    not source
+                    or source["redacted"]
+                    or source["actor_id"] != "owner"
+                    or source["privacy_scope"] != "private"
+                    or source["source"] != "qq.onebot"
+                    or source["event_type"] != "message.received"
+                    or command != operation.get(decision)
+                    or arguments.split(maxsplit=1) != expected
+                ):
+                    raise CoreError("MEMORY_DECISION_SOURCE_INVALID", 403)
+                s.audit(
+                    "memory.owner_decision",
+                    memory_id,
+                    source["trace_id"],
+                    now,
+                    decision=decision,
+                    source_event_id=evidence_event_id,
+                )
             if decision == "forget":
                 if old["status"] != "FORGOTTEN":
                     self.ledger.append(s, memory_id, now)
@@ -345,6 +376,16 @@ class Memory:
             s.insert(
                 "memory_evidence", memory_id=new_id, event_id=event_id, polarity=1, created_at=now
             )
+            if evidence_event_id is not None:
+                # The QQ correction contains the new fact too. The same Ledger family must
+                # erase that original, as well as the derived owner.decision event.
+                s.insert(
+                    "memory_evidence",
+                    memory_id=new_id,
+                    event_id=evidence_event_id,
+                    polarity=1,
+                    created_at=now,
+                )
             s.execute("DELETE FROM conversation_summaries")
             s.execute("UPDATE episodes SET summary='',status='REDACTED'")
             s.execute(
