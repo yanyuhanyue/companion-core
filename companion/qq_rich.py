@@ -68,7 +68,8 @@ def validate(value):
     # No arbitrary extensions/inline forward nodes can bypass this fixed projection.
     if (
         not isinstance(value, dict)
-        or set(value) != {"version", "coverage", "segments"}
+        or set(value) != {"version", "coverage", "segments", "segment_count",
+                          "owner_text_positions"}
         or value["version"] != "references_v1"
         or value["coverage"] != "PARTIAL"
         or not isinstance(value["segments"], list)
@@ -76,6 +77,12 @@ def validate(value):
         or len(encoded(value).encode("utf-8")) > MAX_RICH_BYTES
     ):
         raise ValueError("INVALID_RICH_INPUT")
+    count, positions = value["segment_count"], value["owner_text_positions"]
+    if (type(count) is not int or not 1 <= count <= 64
+        or not isinstance(positions, list) or len(positions) > 64
+        or any(type(index) is not int for index in positions)
+        or positions != sorted(set(positions))):
+        raise ValueError("INVALID_RICH_LAYOUT")
     previous = -1
     for item in value["segments"]:
         if (
@@ -142,6 +149,8 @@ def validate(value):
             or item["coverage"] != "UNSUPPORTED"
         ):
             raise ValueError("INVALID_RICH_SEGMENT")
+    if sorted([*positions, *(item["index"] for item in value["segments"])]) != list(range(count)):
+        raise ValueError("INVALID_RICH_LAYOUT")
     return value
 
 

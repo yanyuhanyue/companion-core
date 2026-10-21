@@ -60,6 +60,8 @@ async def readonly_window(
     request_hook=None,
     core_options=None,
     query="本次临时项目的验收代号是什么？",
+    queries=None,
+    raw_messages=None,
 ):
     memory_id, outsider, pins = scope_facts(core)
     calls, sends, scores = [], [], []
@@ -85,7 +87,10 @@ async def readonly_window(
         number += 1
         for frame in bootstrap_frames():
             await ws.send(json.dumps(frame))
-        await ws.send(json.dumps(raw_event(number, text=query)))
+        event = raw_event(number, text=queries[number - 1] if queries else query)
+        if raw_messages:
+            event["message"] = raw_messages[number - 1]
+        await ws.send(json.dumps(event))
         await ws.wait_closed()
 
     def model_response(request):
@@ -263,7 +268,7 @@ def test_bound_memory_apis_and_idle_extraction_cannot_bypass_scope(core, tmp_pat
         },
     ],
 )
-def test_r5_scope_is_explicit_and_cannot_include_recent_history(core, tmp_path, change):
+def test_r5_scope_is_explicit_and_cannot_implicitly_include_recent_history(core, tmp_path, change):
     _, _, pins = scope_facts(core)
     cfg, plan = live_fixture(core, tmp_path)
     value = core.settings.live_text_window.model_dump()

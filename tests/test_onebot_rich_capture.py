@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from companion import qq_rich
+from companion.contracts import Candidate, CoreError
 from companion.model import ModelClient
 from companion.store import Store, encode
 from companion_onebot_bridge.rich_input import input_digest
@@ -164,6 +165,124 @@ def test_unapproved_rich_capture_stops_before_core_or_model(core, tmp_path):
             assert not core.store.one("SELECT 1 FROM events")
             assert core.model.calls == sends == []
             assert window.status()["state"] == "STOPPED"
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("kind", ["card", "forward"])
+def test_references_only_capture_has_no_owner_evidence_and_remains_in_sent_history(
+    core,
+    tmp_path,
+    kind,
+):
+    first = [
+        card(text="外部标题")
+        if kind == "card"
+        else {"type": "forward", "data": {"id": "synthetic-forward-id"}}
+    ]
+    number, calls = 0, []
+
+    async def source(ws):
+        nonlocal number
+        number += 1
+        message = first if number == 1 else [{"type": "text", "data": {"text": "刚才那条呢？"}}]
+        await ws.send(json.dumps(raw_event(number, message=message)))
+        await ws.wait_closed()
+
+    def respond(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "只收到引用资料，原文未取回。"}}],
+                "usage": {"prompt_tokens": 150, "completion_tokens": 30},
+            },
+        )
+
+    async def scenario():
+        async with (
+            source_window(
+                core,
+                tmp_path,
+                source,
+                live=True,
+                approved=True,
+                rich_input_scope="references_v1",
+                scope_options={
+                    "history_scope": "approved_window",
+                    "max_history_turns": 1,
+                    "max_history_utf8_bytes": 8000,
+                    "core_options": {"max_recent_messages": 2},
+                },
+            ) as (window, client, protocol, _, sends),
+            httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model,
+        ):
+            core.model = ModelClient(core.settings, model)
+            await window.capture_once(client, protocol)
+            await window.approve_captured(client, capture_approval(window))
+            original = core.store.one("SELECT * FROM events")
+            body = json.loads(original["body_json"])
+            assert body["text"] == "" and body["rich"]["owner_text_positions"] == []
+            assert body["rich"]["segment_count"] == 1
+            with pytest.raises(CoreError, match="UNSUPPORTED_MEMORY_EVIDENCE"):
+                core.memory.validate_candidate(
+                    Candidate(
+                        subject="user",
+                        kind="fact",
+                        fact_key="not-owner",
+                        content="不作主人的事实",
+                        evidence_event_id=original["event_id"],
+                        evidence_quote="外部标题" if kind == "card" else "synthetic-forward-id",
+                    ),
+                    confirmed=True,
+                )
+            assert await core.run_once()
+            assert len(calls) == 1 and "非主人话语" in calls[0]["messages"][-2]["content"]
+            assert calls[0]["messages"][-1]["content"] == "请看看我分享的内容。"
+            assert await window.send_once(client, protocol, reply_approval(window.plan, core))
+            await window.capture_once(client, protocol)
+            await window.approve_captured(client, capture_approval(window))
+            assert await core.run_once()
+            assert len(calls) == 2
+            messages = calls[-1]["messages"]
+            assert any("QQ引用资料" in row["content"] for row in messages)
+            assert {"role": "user", "content": ""} in messages
+            assert {"role": "assistant", "content": "只收到引用资料，原文未取回。"} in messages
+            assert core.store.rows("SELECT * FROM memories") == []
+            assert len(sends) == 1
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    "scope,message",
+    [
+        ("none", [card()]),
+        ("none", [{"type": "forward", "data": {"id": "synthetic-forward-id"}}]),
+        ("references_v1", [{"type": "text", "data": {"text": "  "}}]),
+        ("references_v1", []),
+        ("references_v1", [{"type": "text", "data": {"text": "/忘记这一条 mem_fake"}}, card()]),
+    ],
+)
+def test_references_only_requires_approved_scope_and_does_not_enable_empty_or_slash(
+    core,
+    tmp_path,
+    scope,
+    message,
+):
+    async def source(ws):
+        await ws.send(json.dumps(raw_event(message=message)))
+        await ws.wait_closed()
+
+    async def scenario():
+        async with source_window(
+            core, tmp_path, source, live=True, approved=True, rich_input_scope=scope
+        ) as (window, client, protocol, _, sends):
+            with pytest.raises(ValueError):
+                await window.capture_once(client, protocol)
+            assert core.store.rows("SELECT * FROM events") == []
+            assert core.model.calls == sends == []
+            assert window.status()["new_inputs"] == 0
 
     run(scenario())
 

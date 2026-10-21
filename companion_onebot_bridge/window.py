@@ -199,7 +199,8 @@ class WindowPlan:
                 expected_scope.add("rich_input_scope")
             if scope.get("rich_input_scope", "none") not in ("none", "references_v1"):
                 raise ValueError("INVALID_RICH_INPUT_SCOPE")
-            if set(scope) != expected_scope or any(
+            # Old history-only authority remains byte exact; no new grant is inferred.
+            if set(scope) - {"history_approval_sha256"} != expected_scope or any(
                 not isinstance(scope[k], str) or not SHA.fullmatch(scope[k])
                 for k in expected_scope if k.endswith("_sha256") and k != "memory_approval_sha256"
             ):
@@ -212,7 +213,7 @@ class WindowPlan:
                     facts or scope["memory_approval_sha256"] is not None
                 ))
                 or (scope["memory_scope"] == "approved_facts" and (
-                    not facts or scope["history_scope"] != "none"
+                    not facts
                     or not isinstance(scope["memory_approval_sha256"], str)
                     or not SHA.fullmatch(scope["memory_approval_sha256"])
                     or not scope["capture_public_key"]
@@ -232,6 +233,13 @@ class WindowPlan:
                 or len({fact["memory_id"] for fact in facts}) != len(facts)
             ):
                 raise ValueError("INVALID_READONLY_MEMORY_SCOPE")
+            history_approval = scope.get("history_approval_sha256")
+            if ((history_approval is not None and (
+                not isinstance(history_approval, str) or not SHA.fullmatch(history_approval)
+                or scope["history_scope"] == "none"
+            )) or (scope["history_scope"] == "approved_window"
+                   and scope["memory_scope"] == "approved_facts" and not history_approval)):
+                raise ValueError("SEPARATE_HISTORY_APPROVAL_REQUIRED")
             handoff = scope["handoff"]
             if handoff is not None and (
                 not isinstance(handoff, dict) or set(handoff) != {

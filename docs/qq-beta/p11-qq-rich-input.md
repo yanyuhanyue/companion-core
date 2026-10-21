@@ -10,8 +10,14 @@ the only input/accounting/delivery path. No extra OneBot HTTP query is made.
 
 `payload.text` is the only current-owner text. In a segment array it concatenates
 only `text.data.text`; a string is literal text, including CQ-looking syntax.
-Optional `payload.rich` has `version="references_v1"`, `coverage="PARTIAL"` and an
-ordered `segments` list. Each entry has the original zero-based `index`, `type`,
+Optional `payload.rich` has `version="references_v1"`, `coverage="PARTIAL"`,
+`segment_count`, `owner_text_positions` and an ordered `segments` list.
+`segment_count` is a strict integer from 1 to 64. `owner_text_positions` is the
+strictly increasing list of original text-segment indices. Its indices and the
+non-text indices partition the complete original segment range without gaps or
+overlap. Core and Bridge independently validate that partition. No second owner
+body is stored; text-only messages still omit `rich` and keep their original hash.
+Each non-text entry has the original zero-based `index`, `type`,
 `actor="UNVERIFIED"` and a coverage code:
 
 | Push segment | Retained projection | Coverage |
@@ -42,8 +48,11 @@ card depth 4 / 128 nodes, titles 128 characters and summaries 512 characters.
 Duplicate JSON keys, non-finite card numbers, NUL text, malformed references and
 over-limit values fail closed. Existing outer frame byte/depth/node limits and
 the HTTP v1 128 KiB body cap still apply; HTTP inbox JSON also rejects duplicate
-keys and depth/node excess before contract parsing. Bounded captures still require
-fresh ordinary owner text, the approved owner/bot pair and private/friend route.
+keys and depth/node excess before contract parsing. Bounded captures require the
+approved owner/bot pair, fresh private/friend messages and ordinary owner text or
+a validated references-only input under `references_v1`. In the latter case owner
+text stays empty; a model display hint does not become owner or Memory evidence.
+Empty plain messages and owner slash commands remain rejected.
 
 For a rich input, `input_sha256` is SHA-256 of canonical UTF-8 JSON
 `{"text": payload.text, "rich": payload.rich}` (sorted keys, no extra whitespace,
