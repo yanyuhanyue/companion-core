@@ -18,7 +18,9 @@ or owner-decision evidence, and have `needs_review=0`. Reader/source-grant evide
 is excluded. Evidence must remain within native raw retention throughout the
 window. Any changed fact/evidence/epoch invalidates the window.
 
-The first scope requires history `none`/zero limits. `Memory.search` restricts its
+The original memory-only scope keeps history `none`/zero limits. An explicit
+[B1 dual-scope contract](p11-history-memory-composition.md) additionally permits
+approved-window history with its separate approval reference. `Memory.search` restricts its
 SQL candidates and missing-evidence correction before FTS/BGE; vector-cache reads
 also restrict to the actual candidate IDs. Traits and unapproved facts are absent
 from both review and chat. Semantic retrieval writes the native vector index.
