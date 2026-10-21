@@ -1,0 +1,198 @@
+"""SnowLuma db142 push references; no original-message or media network access."""
+
+import hashlib
+import json
+import re
+from urllib.parse import urlsplit
+
+from .spool import encode
+
+MAX_RICH_BYTES = 16384
+CARD_PATHS = (
+    ("title",),
+    ("desc",),
+    ("summary",),
+    ("url",),
+    ("jumpUrl",),
+    ("meta", "detail_1", "title"),
+    ("meta", "detail_1", "desc"),
+    ("meta", "detail_1", "qqdocurl"),
+    ("meta", "news", "title"),
+    ("meta", "news", "desc"),
+    ("meta", "news", "jumpUrl"),
+)
+
+
+def input_digest(payload):
+    # Historical plain-text receipts retain their exact original digest.
+    if payload.get("rich"):
+        validate_layout(payload["rich"])
+    value = {k: payload[k] for k in ("text", "rich")} if payload.get("rich") else payload["text"]
+    return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def validate_layout(value):
+    """Independent transport-side partition check; no additional owner text is stored."""
+    count, positions = value.get("segment_count"), value.get("owner_text_positions")
+    segments = value.get("segments")
+    if (type(count) is not int or not 1 <= count <= 64
+        or not isinstance(positions, list) or len(positions) > 64
+        or any(type(index) is not int for index in positions)
+        or positions != sorted(set(positions)) or not isinstance(segments, list)
+        or not 1 <= len(segments) <= 64
+        or any(not isinstance(item, dict) or type(item.get("index")) is not int
+               for item in segments)):
+        raise ValueError("INVALID_RICH_LAYOUT")
+    indices = [item["index"] for item in segments]
+    if indices != sorted(set(indices)) or sorted([*positions, *indices]) != list(range(count)):
+        raise ValueError("INVALID_RICH_LAYOUT")
+
+
+def discovered_url(value):
+    """Closed Content platform URL projection, never a permission to fetch it."""
+    if (
+        not isinstance(value, str)
+        or len(value) > 2048
+        or any(ord(c) <= 32 or ord(c) == 127 for c in value)
+        or "\\" in value
+    ):
+        return None
+    try:
+        url = urlsplit(value)
+        if (
+            url.scheme != "https"
+            or url.port not in (None, 443)
+            or url.username is not None
+            or url.password is not None
+            or url.query
+            or url.fragment
+        ):
+            return None
+        if url.hostname in {"www.bilibili.com", "bilibili.com", "m.bilibili.com"}:
+            match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,20})/?", url.path)
+            if match:
+                return "https://www.bilibili.com/video/" + match[1]
+        if url.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
+            match = re.fullmatch(
+                r"/(?:(?:app/)?bbs/link|a)/([0-9]{1,32}|[0-9a-fA-F]{12})/?", url.path
+            )
+            if match:
+                return "https://www.xiaoheihe.cn/app/bbs/link/" + match[1].lower()
+    except ValueError:
+        pass
+    return None
+
+
+def _pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("DUPLICATE_CARD_FIELD")
+        result[key] = value
+    return result
+
+
+def _card(raw, redact):
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_RICH_BYTES:
+        raise ValueError("INVALID_CARD_SIZE")
+
+    def invalid_constant(_):
+        raise ValueError("INVALID_CARD")
+
+    try:
+        card = json.loads(raw, object_pairs_hook=_pairs, parse_constant=invalid_constant)
+    except (RecursionError, UnicodeError) as error:
+        raise ValueError("INVALID_CARD") from error
+    pending, count = [(card, 0)], 0
+    while pending:
+        value, depth = pending.pop()
+        count += 1
+        if depth > 4 or count > 128:
+            raise ValueError("CARD_TOO_COMPLEX")
+        if isinstance(value, str):
+            if "\x00" in value:
+                raise ValueError("INVALID_CARD_TEXT")
+            value.encode("utf-8", errors="strict")
+        children = (
+            value.values() if isinstance(value, dict) else value if isinstance(value, list) else []
+        )
+        pending.extend((child, depth + 1) for child in children)
+    fields = []
+    for path in CARD_PATHS:
+        value = card
+        for key in path:
+            value = value.get(key) if isinstance(value, dict) else None
+        if not isinstance(value, str) or not value.strip():
+            continue
+        kind = (
+            "url"
+            if path[-1] in {"url", "jumpUrl", "qqdocurl"}
+            else ("title" if path[-1] == "title" else "summary")
+        )
+        if kind == "url":
+            value = discovered_url(value)
+        else:
+            value = redact(value)
+            if len(value) > (128 if kind == "title" else 512):
+                raise ValueError("INVALID_CARD_TEXT_LENGTH")
+        if value:
+            fields.append({"path": "/" + "/".join(path), "kind": kind, "value": value})
+    return fields
+
+
+def project(message, redact):
+    """Only text segments form owner text. Other fields never become commands/evidence quotes."""
+    if isinstance(message, str):
+        # CQ-looking text is literal, not a second parser for forged references.
+        text, segments, positions = redact(message), [], []
+    elif isinstance(message, list) and 1 <= len(message) <= 64:
+        texts, segments, positions = [], [], []
+        for index, segment in enumerate(message):
+            if (
+                not isinstance(segment, dict)
+                or set(segment) != {"type", "data"}
+                or not isinstance(segment["data"], dict)
+                or not isinstance(segment["type"], str)
+            ):
+                raise ValueError("INVALID_SEGMENT")
+            kind, data = segment["type"], segment["data"]
+            if kind == "text":
+                if set(data) != {"text"} or not isinstance(data["text"], str):
+                    raise ValueError("INVALID_TEXT")
+                texts.append(data["text"])
+                positions.append(index)
+                continue
+            entry = {"index": index, "type": kind, "actor": "UNVERIFIED"}
+            if kind in {"reply", "forward"}:
+                ref = data.get("id")
+                if set(data) != {"id"} or not isinstance(ref, str) or not ref:
+                    raise ValueError("INVALID_REFERENCE")
+                pattern = (
+                    r"-?(?:0|[1-9][0-9]{0,19})" if kind == "reply" else r"[A-Za-z0-9_+/=-]{1,256}"
+                )
+                if not re.fullmatch(pattern, ref):
+                    raise ValueError("INVALID_REFERENCE")
+                entry.update(reference=ref, coverage="MISSING" if kind == "reply" else "UNFETCHED")
+            elif kind == "json":
+                if set(data) != {"data"}:
+                    raise ValueError("INVALID_CARD")
+                fields = _card(data["data"], redact)
+                entry.update(fields=fields, coverage="PARTIAL" if fields else "UNSUPPORTED")
+            else:
+                entry["type"] = (
+                    kind if kind in {"node", "image", "record", "video", "file"} else "other"
+                )
+                entry["coverage"] = "UNSUPPORTED"
+            segments.append(entry)
+        text = redact("".join(texts))
+    else:
+        raise ValueError("INVALID_MESSAGE")
+    if len(text) > 20000 or "\x00" in text:
+        raise ValueError("INVALID_TEXT_LENGTH")
+    rich = {"version": "references_v1", "coverage": "PARTIAL", "segments": segments,
+            "segment_count": len(message), "owner_text_positions": positions}
+    if segments:
+        validate_layout(rich)
+    if len(encode(rich).encode()) > MAX_RICH_BYTES:
+        raise ValueError("RICH_INPUT_TOO_LARGE")
+    return text, rich if segments else None

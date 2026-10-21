@@ -107,7 +107,7 @@ def text_only(message):
     return text
 
 
-def normalize(frame, config, *, now=None):
+def normalize(frame, config, *, now=None, rich_input_scope=None):
     raw = decode(frame, config.max_frame_bytes)
     if (
         raw.get("post_type") != "message"
@@ -133,11 +133,20 @@ def normalize(frame, config, *, now=None):
         raise ValueError("INVALID_EVENT_TIME")
     source = f"{config.bot_qq_id}:{config.origin}:epoch:{config.protocol_epoch}:{message_id}"
     key = hashlib.sha256(source.encode()).hexdigest()
-    text = redact(text_only(raw.get("message")), config)
+    scope = config.rich_input_scope if rich_input_scope is None else rich_input_scope
+    rich = None
+    if scope == "references_v1":
+        from .rich_input import project
+
+        text, rich = project(raw.get("message"), lambda text: redact(text, config))
+    elif scope == "none":
+        text = redact(text_only(raw.get("message")), config)
+    else:
+        raise ValueError("INVALID_RICH_INPUT_SCOPE")
     # Redaction can expand short credentials; never persist an event Core will reject.
     if len(text) > 20000:
         raise ValueError("INVALID_TEXT_LENGTH")
-    return {
+    event = {
         "schema_version": 1,
         "event_id": "evt_" + key,
         "source": "qq.onebot",
@@ -149,3 +158,6 @@ def normalize(frame, config, *, now=None):
         "payload": {"text": text, "media": [], "shared_content": []},
         "trace_id": "trace_" + key,
     }
+    if rich:
+        event["payload"]["rich"] = rich
+    return event

@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosed, InvalidHandshake
 from .event_normalizer import decode, identifier, normalize
 from .network import checked_http_client, websocket
 from .onebot_client import OneBotClient
+from .rich_input import input_digest
 from .spool import encode
 from .window import SHA, check_protocol_request, digest, private_json, seal_protocol_content
 
@@ -133,13 +134,16 @@ def input_event(window, frame, received_at):
             and set(segment["data"]) == {"text"} for segment in message
         )
     )
-    event = normalize(frame, window.plan.config, now=received_at.timestamp())
-    if not plain or event is None:
+    scope = (window.plan.value.get("live_text") or {}).get("rich_input_scope", "none")
+    event = normalize(frame, window.plan.config, now=received_at.timestamp(),
+                      rich_input_scope=scope)
+    if (not plain and scope == "none") or event is None:
         raise ValueError("WINDOW_OWNER_TEXT_INPUT_REQUIRED")
     occurred_at = datetime.fromisoformat(event["occurred_at"])
     text = event["payload"]["text"]
+    references_only = scope == "references_v1" and bool(event["payload"].get("rich"))
     if (
-        not text.strip() or text.strip().startswith("/")
+        (not text.strip() and not references_only) or text.strip().startswith("/")
         or len(text) > window.plan.value["max_input_chars"]
         or not window.plan.start <= occurred_at <= received_at < window.plan.end
         or (received_at - occurred_at).total_seconds() > MAX_AGE_SECONDS
@@ -376,7 +380,7 @@ async def capture_once(window, client, protocol):
             receipt = {
                 "kind": "authenticated_onebot_ws", "window_sha256": window.plan.sha256,
                 "event_id": event["event_id"], "source_event_id": event["source_event_id"],
-                "input_sha256": digest(event["payload"]["text"]),
+                "input_sha256": input_digest(event["payload"]),
                 "frame_sha256": hashlib.sha256(frame_bytes).hexdigest(),
                 "received_at": received_at.isoformat(), "occurred_at": event["occurred_at"],
                 "protocol_epoch": window.plan.config.protocol_epoch,
@@ -479,7 +483,7 @@ async def approve_captured(window, client, approval):
         if (
             encode(event) != row["body"] or receipt["event_id"] != event["event_id"]
             or receipt["source_event_id"] != event["source_event_id"]
-            or receipt["input_sha256"] != digest(event["payload"]["text"])
+            or receipt["input_sha256"] != input_digest(event["payload"])
             or row["fingerprint"] != digest({"message": raw["message"], "time": raw["time"]})
         ):
             raise ValueError("CAPTURE_INPUT_CHANGED")

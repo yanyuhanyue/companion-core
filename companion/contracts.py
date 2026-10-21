@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictModel(BaseModel):
@@ -39,6 +39,15 @@ class Payload(StrictModel):
     shared_content: list[Annotated[SharedLink | SharedImage, Field(discriminator="kind")]] = Field(
         default_factory=list, max_length=4
     )
+    # Absent plain input serializes exactly as before, including historical fingerprints.
+    rich: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_validator("rich")
+    @classmethod
+    def rich_projection(cls, value):
+        from companion.qq_rich import validate
+
+        return validate(value) if value is not None else None
 
 
 class InboundEvent(StrictModel):

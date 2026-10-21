@@ -5,6 +5,7 @@ engine still checks the complete final prompt under its own admission contract.
 """
 
 from companion.budget import token_upper_bound
+from companion.qq_rich import context
 
 
 def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
@@ -15,7 +16,10 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
 
 
 def turn_messages(source):
-    return [{"role": "user", "content": source["user_text"]},
+    import json
+
+    rich = context(json.loads(source["body_json"])) if source.get("body_json") else None
+    return [*([rich] if rich else []), {"role": "user", "content": source["user_text"]},
             {"role": "assistant", "content": source["reply_text"]}]
 
 
@@ -42,7 +46,8 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "AND e.event_type IN ('message.received','message.media_received') "
         "AND e.redacted=0 AND e.rowid<(SELECT rowid FROM events WHERE event_id=?) "
         "AND json_type(e.body_json,'$.text')='text' "
-        "AND length(json_extract(e.body_json,'$.text'))>0 "
+        "AND (length(json_extract(e.body_json,'$.text'))>0 "
+        "OR json_type(e.body_json,'$.rich')='object') "
         "AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
         "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "
         "AND NOT EXISTS (SELECT 1 FROM memory_evidence me "

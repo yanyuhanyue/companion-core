@@ -4,7 +4,7 @@ import sqlite3
 import time
 from datetime import UTC, datetime
 
-from companion import __version__, budget, dialogue_history, live_text
+from companion import __version__, budget, dialogue_history, live_text, qq_rich
 from companion.affect import AffectEngine
 from companion.commands import command_parts, is_memory_command
 from companion.consolidation import NightlyConsolidator
@@ -92,6 +92,9 @@ class Core(Runtime):
         try:
             with s.transaction():
                 bounded_text = live_text.check_input(s, cfg, self.clock, event)
+                if (event.payload.rich and not bounded_text
+                    and cfg.rich_input_scope != "references_v1"):
+                    raise CoreError("RICH_INPUT_SCOPE_REQUIRED", 403)
                 if s.one(
                     "SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)
                 ):
@@ -135,6 +138,15 @@ class Core(Runtime):
                 )
                 body = event.payload.model_dump()
                 body["text"] = redact(body["text"], cfg)
+                if body.get("rich"):
+                    for segment in body["rich"]["segments"]:
+                        for field in segment.get("fields", []):
+                            if field["kind"] != "url":
+                                field["value"] = redact(field["value"], cfg)
+                    try:
+                        qq_rich.validate(body["rich"])
+                    except ValueError:
+                        raise CoreError("INVALID_RICH_INPUT", 400) from None
                 command, arguments = command_parts(body["text"])
                 diary_command = not bounded_text and is_diary_command(body["text"])
                 control_command = not bounded_text and (
@@ -269,6 +281,9 @@ class Core(Runtime):
         rules = PRINCIPLES + self.expression.instruction()
         if cfg.content_enabled:
             rules += CONTEXT_RULES
+        if (body.get("rich") or cfg.rich_input_scope == "references_v1"
+            or (cfg.live_text_window and cfg.live_text_window.rich_input_scope == "references_v1")):
+            rules += qq_rich.RULES
         rules = {"role": "system", "content": rules}
         references = []
         bounded_text = live_text.active(s, cfg)
@@ -350,9 +365,13 @@ class Core(Runtime):
             turns = dialogue_history.recent_sent_turns(
                 s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2,
             )
+        if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
+            rules["content"] += qq_rich.RULES
         current_input = []
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
+        if rich_reference := qq_rich.context(body):
+            current_input.append(rich_reference)
         current_input.append(current)
         if combined:
             # History is capped before review. Do not silently discard reviewed
@@ -381,8 +400,13 @@ class Core(Runtime):
         ) else []
         recent = [message for source in history
                   for message in dialogue_history.turn_messages(source)]
-        retrieval_query = "\n".join([query, *(m["content"] for m in recent)]) if recent else query
-        hits = self.memory.search(retrieval_query or "*", limit=6, memory_ids=allowed)
+        retrieval_query = "\n".join([
+            query, *(text for source in history
+                     for text in (source["user_text"], source["reply_text"])),
+        ]) if history else query
+        hits = self.memory.search(retrieval_query, limit=6, memory_ids=allowed) if (
+            retrieval_query.strip()
+        ) else []
         if not hits:
             if bounded_text:
                 live_text.freeze_memory_review(
@@ -734,6 +758,7 @@ class Core(Runtime):
                 if (
                     job["kind"] == "chat"
                     and not body.get("text")
+                    and not body.get("rich")
                     and not (self.settings.content_enabled and self.content._rows(job["event_id"]))
                 ):
                     reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"

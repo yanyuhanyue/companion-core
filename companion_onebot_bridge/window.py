@@ -194,6 +194,11 @@ class WindowPlan:
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
                 raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
+            # Retired plain scopes retain their original bytes/hash; new scopes may opt in.
+            if "rich_input_scope" in scope:
+                expected_scope.add("rich_input_scope")
+            if scope.get("rich_input_scope", "none") not in ("none", "references_v1"):
+                raise ValueError("INVALID_RICH_INPUT_SCOPE")
             # Old history-only authority remains byte exact; no new grant is inferred.
             if set(scope) - {"history_approval_sha256"} != expected_scope or any(
                 not isinstance(scope[k], str) or not SHA.fullmatch(scope[k])
