@@ -58,6 +58,8 @@ def main():
     sub.add_parser("content-worker")
     diagnostic = sub.add_parser("status")
     diagnostic.add_argument("--integrity", action="store_true")
+    inspector = sub.add_parser("inspect-context")
+    inspector.add_argument("--trace-id", required=True)
     observation = sub.add_parser("observe")
     observation.add_argument("--output", required=True)
     observation.add_argument("--samples", type=int, default=3)
@@ -108,6 +110,10 @@ def main():
             from companion.ops_status import snapshot
 
             print(encode(snapshot(settings, integrity=args.integrity)))
+        elif args.command == "inspect-context":
+            from companion.beta_observation import inspect_context
+
+            print(encode(inspect_context(settings, args.trace_id)))
         elif args.command == "observe":
             from companion.observe import http_collector, observe
             from companion.ops_status import snapshot
