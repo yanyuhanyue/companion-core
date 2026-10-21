@@ -353,6 +353,7 @@ def test_nightly_calendar_dst_and_leap_day(core, now, expected):
 def test_observed_content_can_be_diary_evidence_without_pretending_it_was_watched(core):
     enable_observations(core)
     core.settings.diary_enabled = True
+    core.settings.diary_min_source_events = 1
     for i in range(3):
         text = f"独立游戏的开发记录{i}"
         core.observations.append(
@@ -367,6 +368,12 @@ def test_observed_content_can_be_diary_evidence_without_pretending_it_was_watche
                 payload={"title": text, "text": text},
             ),
         )
+
+    core.observations.append(
+        "reader", observation(
+            core, 99, text="实际取得的开发记录", occurred_at="2026-10-18T04:00:00Z",
+        ),
+    )
 
     class ObservedDiary:
         async def complete(self, messages, kind):
@@ -400,4 +407,4 @@ def test_observed_content_can_be_diary_evidence_without_pretending_it_was_watche
     assert generate(core)["state"] == "COMMITTED"
     body = core.diary.get_day(DAY, "10001")["body_md"]
     assert "发现的标题" in body and "我回复" not in body and "看完" not in body
-    assert len(core.store.rows("SELECT * FROM diary_evidence")) == 3
+    assert len(core.store.rows("SELECT * FROM diary_evidence")) == 4

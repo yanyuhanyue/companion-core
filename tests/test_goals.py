@@ -299,7 +299,7 @@ def test_self_interest_requires_actual_diverse_reads_over_days(core, diverse):
             else current["status"] == "STABLE"
         )
         core.clock.advance(86400)
-    assert current["independent_days"] == 7
+    assert current["independent_days"] == (7 if diverse else 1)
     assert core.store.rows("SELECT * FROM memories WHERE subject='user'") == []
 
 

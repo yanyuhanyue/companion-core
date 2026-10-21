@@ -262,6 +262,11 @@ def create_app(settings=None):
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
 
+    @app.get("/internal/v2/affect/{event_id}/preview", dependencies=control_auth)
+    async def affect_preview(event_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return {"proposal": app.state.core.affect.preview(event_id)}
+
     @app.get("/internal/v2/goals", dependencies=control_auth)
     async def goals():
         return {"items": app.state.core.goals.recent()}
@@ -284,14 +289,35 @@ def create_app(settings=None):
         return app.state.core.goals.pause_autonomy(not body.enabled)
 
     @app.get("/internal/v2/interests", dependencies=control_auth)
-    async def interests():
-        return {
-            "items": app.state.core.store.rows(
-                "SELECT t.trait_id,t.topic,t.status,t.confidence,e.event_id FROM traits t JOIN "
-                "trait_evidence e USING(trait_id) WHERE t.category='interest' ORDER BY "
-                "t.updated_at DESC LIMIT 30"
-            )
-        }
+    async def interests(response: Response):
+        from companion.interest import profile
+
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        result = profile(core.store, core.settings, core.clock(), core.settings.owner_qq_id)
+        return {"items": result["self.interest"], **result}
+
+    @app.get("/internal/v2/timeline", dependencies=control_auth)
+    async def timeline(response: Response, topic: str, days: int = 7, limit: int = 40):
+        from companion.timeline import recent_timeline
+
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return recent_timeline(
+            core.store,
+            core.settings,
+            core.clock(),
+            core.settings.owner_qq_id,
+            topic=topic,
+            days=days,
+            limit=limit,
+        )
+
+    @app.get("/internal/v2/social/{event_id}/preview", dependencies=control_auth)
+    async def social_preview(event_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return {"draft": core.social.preview(event_id, core.settings.owner_qq_id)}
 
     @app.get("/internal/v2/consolidation", dependencies=control_auth)
     async def consolidation_status():
