@@ -358,36 +358,6 @@ def test_price_change_retains_snapshot_and_permanently_blocks_next_admission(cor
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
 
-def reservation_process(database, settings_json, now):
-    """Spawn target: independent SQLite connection and process, then abrupt exit."""
-    import os
-
-    from companion import budget
-    from companion.config import Settings
-    from companion.store import Store
-
-    store = Store(database)
-    try:
-        request = budget.reserve(
-            store,
-            Settings.model_validate(
-                {
-                    **__import__("json").loads(settings_json),
-                    "bridge_token": "synthetic-bridge-" * 3,
-                    "model_key": "synthetic-key",
-                }
-            ),
-            None,
-            "chat",
-            [{"role": "user", "content": "hello"}],
-            now,
-        )
-        print(request, flush=True)
-    except CoreError as error:
-        print(error.code, flush=True)
-    os._exit(23)
-
-
 def test_multiprocess_concurrency_and_abrupt_exit_preserve_reservations(core, tmp_path):
     import subprocess
     import sys
@@ -397,7 +367,7 @@ def test_multiprocess_concurrency_and_abrupt_exit_preserve_reservations(core, tm
     approved_live(core, tmp_path, concurrency=1)
     script = tmp_path / "reserve.py"
     script.write_text(
-        "import sys\nfrom tests.test_paid_model_gate import reservation_process\n"
+        "import sys\nfrom tests.process_helpers import reservation_process\n"
         "reservation_process(*sys.argv[1:])\n",
         encoding="utf-8",
     )

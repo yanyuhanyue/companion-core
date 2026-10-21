@@ -14,36 +14,49 @@ concurrency:
 jobs:
   preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
     outputs:
       profile: ${{ steps.plan.outputs.profile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        run: python -B scripts/ci_policy.py plan
+  quality:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: plan
-        run: python scripts/ci_policy.py plan
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install uv==0.12.10
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.10'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: python-3.12
       - run: uv sync --frozen --extra onebot
-      - run: uv run --extra onebot ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts
-      - name: Validate CI policy, evidence and runtime contracts
-        env:
-          CI_PROFILE: ${{ steps.plan.outputs.profile }}
-        run: uv run --extra onebot python scripts/ci_policy.py test --profile "$CI_PROFILE"
+      - if: ${{ needs.preflight.outputs.profile == 'full' }}
+        run: uv run --extra onebot ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts
+      - name: Validate documentation privacy, references and evidence
+        if: ${{ needs.preflight.outputs.profile == 'docs' }}
+        run: uv run --extra onebot python scripts/ci_policy.py docs
   test:
     needs: preflight
     if: ${{ needs.preflight.outputs.profile == 'full' }}
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        shard: [0, 1]
     runs-on: ${{ matrix.os }}
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
@@ -56,17 +69,37 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install uv==0.12.10
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.10'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: python-3.12
       - run: uv sync --frozen --extra onebot
       - uses: actions/cache@v4
         with:
           path: data/embedding-cache
           key: bge-small-zh-${{ runner.os }}-46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59
-      - run: uv run --extra onebot pytest -q --durations=15 --basetemp=.local/test-temp
-      - run: uv run python scripts/replay.py
-      - run: uv run python scripts/smoke.py
-      - run: uv build
-      - run: uv run python scripts/verify_package.py
+      - name: Run a complete, disjoint suite shard
+        run: >-
+          uv run --extra onebot python -m pytest -p scripts.ci_shards
+          --ci-shard=${{ matrix.shard }} -q --durations=15
+          --basetemp=.local/test-temp --junitxml=.local/test-results/pytest.xml
+      - if: ${{ matrix.shard == 0 }}
+        run: uv run python scripts/replay.py
+      - if: ${{ matrix.shard == 0 }}
+        run: uv run python scripts/smoke.py
+      - if: ${{ matrix.shard == 0 }}
+        run: uv build
+      - if: ${{ matrix.shard == 0 }}
+        run: uv run python scripts/verify_package.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: pytest-${{ matrix.os }}-${{ matrix.shard }}
+          path: .local/test-results/pytest.xml
+          if-no-files-found: error
+          retention-days: 7
   container:
     needs: preflight
     if: ${{ needs.preflight.outputs.profile == 'full' }}
@@ -152,11 +185,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install uv==0.12.10
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.10'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: python-3.12
       - run: uv sync --frozen --group reader
       - run: uv run --group reader python -m playwright install chromium --only-shell
-      - shell: pwsh
-        run: ./scripts/check.ps1 -TestFiles tests/test_source_browser.py
+      - run: uv run --group reader python -m pytest -q tests/test_source_browser.py --basetemp=.local/test-temp
   plugin-native:
     needs: preflight
     if: ${{ needs.preflight.outputs.profile == 'full' }}
@@ -180,7 +217,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install uv==0.12.10
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.10'
+          enable-cache: true
+          cache-dependency-glob: docs/design-v0.6/upstream-native-p3.lock
+          cache-suffix: python-3.12-native
       - run: uv venv .local/p3/native-venv
       - run: >-
           uv pip sync --python .local/p3/native-venv/bin/python --require-hashes
@@ -198,7 +240,7 @@ jobs:
           -o cache_dir=${{ github.workspace }}/.local/p3/pytest-cache
   ci:
     if: ${{ always() }}
-    needs: [preflight, test, container, browser-reader, plugin-native]
+    needs: [preflight, quality, test, container, browser-reader, plugin-native]
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:

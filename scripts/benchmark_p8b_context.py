@@ -10,10 +10,12 @@ import asyncio
 import hashlib
 import json
 import math
+import sqlite3
 import statistics
 import sys
 import time
 import tracemalloc
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,7 +209,7 @@ def visible_ids(messages, rows):
     return [row["memory_id"] for row in rows if row["content"] in text]
 
 
-async def one_case(work, variant, case, catalog):
+async def one_case(work, variant, case, catalog, template):
     directory = work / variant / case["id"]
     directory.mkdir(parents=True, exist_ok=False)
     cfg = Settings(
@@ -220,7 +222,9 @@ async def one_case(work, variant, case, catalog):
         cached_input_rate=250_000,
         output_rate=2_000_000,
     )
-    migrate(cfg.database)
+    with closing(sqlite3.connect(template)) as source:
+        with closing(sqlite3.connect(cfg.database)) as destination:
+            source.backup(destination)
     model = SyntheticModel()
     model.case = {
         **case,
@@ -340,6 +344,10 @@ def aggregate(records):
 
 
 async def benchmark(work, dataset):
+    # Schema preparation is outside the measured context/recall boundary. Each
+    # case still owns its database, ledger, identities, reservations and events.
+    template = work / "schema.sqlite3"
+    migrate(str(template))
     catalog = {
         row["memory_id"]: {"subject": "user", "needs_review": False, **row}
         for row in dataset["memories"]
@@ -384,7 +392,8 @@ async def benchmark(work, dataset):
     }
     for variant in ("baseline", "experiment"):
         tracemalloc.start()
-        cases = [await one_case(work, variant, case, catalog) for case in dataset["cases"]]
+        cases = [await one_case(work, variant, case, catalog, template)
+                 for case in dataset["cases"]]
         _, peak = tracemalloc.get_traced_memory()
         tracemalloc.stop()
         background = await background_records()

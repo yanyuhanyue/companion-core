@@ -13,6 +13,7 @@ import pytest
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
+from tests.journal_assertions import assert_private_journal
 from tests.test_onebot_delivery import core_client, provider
 from tests.test_onebot_direct import config, normalized, raw_event
 
@@ -156,8 +157,9 @@ def test_actual_core_five_attempts_restart_duplicate_and_sixth_input_cap(core, t
     assert len(sends) == 5
     assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 5
     audit = (tmp_path / "window-audit.jsonl").read_text("utf-8")
-    for secret in ("10001", "10002", cfg.bridge_token, cfg.onebot_token, "你好", cfg.core_url):
-        assert secret not in audit
+    assert_private_journal(
+        audit, ("10001", "10002", cfg.bridge_token, cfg.onebot_token, "你好", cfg.core_url),
+    )
 
 
 @pytest.mark.parametrize(
@@ -620,68 +622,12 @@ def test_journal_survives_spool_reset_and_detects_rollback(core, tmp_path):
     run(scenario())
 
 
-def child_process():
-    """Synthetic subprocess fault fixture; receives no actual deployment credentials."""
-    from companion_onebot_bridge.config import BridgeConfig
-
-    request = json.loads(sys.stdin.readline())
-    cfg = BridgeConfig(**request["config"])
-    try:
-        with Spool(cfg) as spool:
-            if request["operation"] == "lock":
-                print("LOCKED", flush=True)
-                sys.stdin.readline()
-                return
-            plan = WindowPlan(request["plan"], cfg, request["inventory"])
-            window = TestWindow(spool, plan, clock=lambda: datetime.fromisoformat(request["now"]))
-
-            def fake_core(call):
-                if call.url.path.endswith("/ops/status"):
-                    return httpx.Response(
-                        200,
-                        json={
-                            "mode": "demo",
-                            "features": {},
-                            "jobs": [],
-                            "deliveries": [{"state": "PENDING", "count": 1}],
-                        },
-                    )
-                if call.url.path.endswith("/lease"):
-                    return httpx.Response(200, json={"items": [request["item"]]})
-                raise AssertionError("No Core begin or result expected before injected crash")
-
-            def die_after_reserve(call):
-                assert call.url.path == "/get_login_info"
-                os._exit(23)
-
-            async def crash():
-                async with (
-                    httpx.AsyncClient(
-                        base_url=cfg.core_url,
-                        transport=httpx.MockTransport(fake_core),
-                        headers={"Authorization": "Bearer " + cfg.bridge_token},
-                    ) as http,
-                    httpx.AsyncClient(
-                        base_url=cfg.onebot_http_url,
-                        headers={"Authorization": "Bearer " + cfg.onebot_token},
-                        transport=httpx.MockTransport(die_after_reserve),
-                    ) as protocol,
-                ):
-                    await window.send_once(http, protocol, request["approval"])
-
-            run(crash())
-    except RuntimeError as error:
-        assert str(error) == "BRIDGE_ALREADY_RUNNING"
-        print("LOCK_REJECTED", flush=True)
-        raise SystemExit(24) from None
-
-
 def spawn_child(payload):
     process = subprocess.Popen(
         [
             sys.executable,
             "-c",
-            "from tests.test_onebot_window import child_process;child_process()",
+            "from tests.process_helpers import window_child;window_child()",
         ],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,

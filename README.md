@@ -93,4 +93,10 @@ uv run python -m companion diary-worker
 
 Linux 检查：`uv run ruff check companion migrations astrbot_plugin_companion_bridge tests scripts` 与 `uv run pytest -q --basetemp=.local/test-temp`。CI 同时运行 Windows/Linux 测试和 Linux 容器构建。
 
+CI 在 Windows/Linux 上各运行两个互斥分片，按测试文件分配，新增测试自动纳入；本地
+`./scripts/check.ps1` 仍运行完整测试。各平台的回放、冒烟和打包检查执行一次，分片 JUnit
+记录保留 7 天。纯文档 PR 及其 main 合并运行隐私、引用和证据校验；已知证据 JSON 的
+白名单位于 `scripts/ci_policy.py`，未知文件、运行代码、依赖、迁移、标签和合并队列仍运行
+完整检查。uv 缓存按锁文件与平台复用，测试数据库和预算/遗忘账本始终独立创建。
+
 `companion/` 是核心包；`astrbot_plugin_companion_bridge/` 可单独打包安装；`migrations/` 维护版本化数据库；`tests/` 按 M0/M1 编号验收；`scripts/` 提供可复现回放和运行检查。运行数据、缓存与交付包不会被加入 Git。

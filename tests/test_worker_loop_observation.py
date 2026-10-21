@@ -36,6 +36,27 @@ def stored(core):
     return json.loads(row["value"]) if row else None
 
 
+@pytest.fixture
+def observation_clock(monkeypatch):
+    """Keep observation semantics independent of fsync and scheduler latency."""
+    nanos = 0
+    anchor = datetime.now(UTC)
+
+    class ObservationTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = anchor + timedelta(microseconds=nanos // 1000)
+            return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+    def sleep(seconds):
+        nonlocal nanos
+        nanos += round(seconds * 1e9)
+
+    monkeypatch.setattr(observe, "datetime", ObservationTime)
+    monkeypatch.setattr(observe.time, "monotonic_ns", lambda: nanos)
+    monkeypatch.setattr(observe.time, "sleep", sleep)
+
+
 def test_recorder_never_reuses_startup_record_and_throttles_completed_loops(core, monkeypatch):
     prior = encode(record(987))
     core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, prior))
@@ -262,22 +283,24 @@ def test_observation_discontinuity_requires_a_new_loop_baseline(gap):
     ]
 
 
-def test_observe_persists_activity_without_promoting_worker_health(tmp_path):
+def test_observe_persists_activity_without_promoting_worker_health(tmp_path, observation_clock):
     values = iter([sample(1), sample(2, at=5), sample(2, at=5)])
     output = tmp_path / "loop.jsonl"
     result = observe.observe(lambda: (next(values), None), output,
-                             samples=3, interval_seconds=0.001)
+                             samples=3, interval_seconds=5)
     rows = records(output)
     assert result["worker_health_proven"] is False
     assert result["worker_loop_activity"]["advancing_intervals"] == 1
     assert result["worker_loop_activity"]["last_segment_observed_seconds"] == 0
-    assert result["clear_segment_observed_seconds"] > 0
+    assert result["clear_segment_observed_seconds"] == 10
     assert [row["worker_loop_activity"]["state"] for row in rows[1:-1]] == [
         "UNPROVEN", "ADVANCED", "UNPROVEN",
     ]
 
 
-def test_native_restored_fresh_loop_record_never_proves_a_running_worker(core, tmp_path):
+def test_native_restored_fresh_loop_record_never_proves_a_running_worker(
+    core, tmp_path, observation_clock,
+):
     worker_loop.Recorder(core.store).completed()
     original = stored(core)
     source_before = list(core.store.db.iterdump())
@@ -292,7 +315,7 @@ def test_native_restored_fresh_loop_record_never_proves_a_running_worker(core, t
     assert first["worker_loop"]["sequence"] == original["sequence"]
     output = tmp_path / "restored-loop.jsonl"
     result = observe.observe(lambda: (ops_status.snapshot(settings), None), output,
-                             samples=2, interval_seconds=0.001)
+                             samples=2, interval_seconds=5)
     assert result["worker_loop_activity"]["advancing_intervals"] == 0
     assert result["worker_health_proven"] is False
     assert [row["worker_loop_activity"]["reasons"] for row in records(output)[1:-1]] == [
