@@ -50,6 +50,7 @@ def test_snapshot_points_to_existing_policy_and_original_approval_template():
     for name in (
         RECORD["provider"]["report"], RECORD["approvals"]["template"],
         RECORD["approvals"]["object_action_stop_rollback_signoff"],
+        RECORD["integration_report"],
     ):
         assert (directory / name).is_file()
     template = json.loads((directory / RECORD["approvals"]["template"]).read_text("utf-8"))

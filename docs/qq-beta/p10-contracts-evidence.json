@@ -2,7 +2,9 @@
   "record_version": 2,
   "evidence_level": "DEVELOPMENT_POLICY_AND_UNAPPROVED_RUNTIME_TEMPLATES",
   "checked_on": "2026-10-21",
-  "source_sha": "9eb673747ccdf05372426926370d018e05665e3d",
+  "baseline_sha": "9eb673747ccdf05372426926370d018e05665e3d",
+  "source_sha": "108059a90a1ac408d2e0522df0d4f683d39c7b34",
+  "integration_report": "p10-continuity-operations-integration.md",
   "authority": "Development policy and public runtime template. Specific real actions require their own authorization; this record grants none.",
   "development_blocked": false,
   "provider": {
@@ -61,7 +63,7 @@
   "actions_scope": "THIS_OFFLINE_CODE_BATCH_ONLY",
   "actions_this_batch": {
     "runtime_host_connections": 0,
-    "private_data_reads": 0,
+    "private_message_or_database_reads": 0,
     "private_data_copies": 0,
     "paid_requests": 0,
     "qq_sends": 0,
