@@ -42,11 +42,26 @@ API instance 改变、失败或已观察阻断都会断开 clear segment。不�
 0，摘要只给最后一段实际观察跨度，不累加缺失间隔或多段时长。
 命令正常退出只表示完成诊断或采样，仍须读取 blockers/failures，不能据退出码签收健康。
 
-API alive、schema 可读、空队列及按时采样都不能证明 worker 正在推进。现有系统没有
-独立 worker heartbeat，输出明确为 `worker_progress=UNOBSERVED` 和
-`worker_health_proven=false`；本地数据库路径也无法识别 worker 重启。HTTP instance
-变化只证明 API 实例变化。`clear_segment_observed_seconds` 表示采样检查未见阻断，
+Core 聊天 worker 在同一循环完成 poll 及本轮维护后，最多每两秒更新一条
+`runtime_meta.worker_loop`：匿名 session、递增 sequence、UTC 完成时间和固定完成阶段。
+没有独立后台 heartbeat；poll 或维护卡住时不会继续写。该记录不改变业务、租约或预算，
+`run_once=True` 也可能代表失败处理，不能据此计作成功。worker 自身仍会执行原有保留期
+清理等维护，启动它并非只读观察操作。
+
+`worker_loop` 只投影固定字段，缺失、非法或超过十秒的记录分别为 UNOBSERVED、INVALID、
+STALE。一次新鲜记录（包括启动前或恢复出的记录）只提供基线。观察器必须看到相邻有效
+采样中同 session 的 sequence 和完成时间均实际推进，才输出 `worker_loop_activity=ADVANCED`
+及独立活动区间。序号不变或回退、session 变化、过期、非法记录、采样失败或时间/采集缺口
+均断开区间；缺样之后需要新基线。默认五秒采样可覆盖两秒写入节流；更密的采样可能看到
+相同序号，不能将该间隔补成活动。活动时长只表示相邻采样看见推进，不证明采样间每一刻健康。
+
+API alive、schema 可读、空队列及按时采样都不能证明 worker 正在推进。循环活动也不证明
+业务成功、模型响应、Bridge 发送或手机收到。`worker_progress=UNOBSERVED` 的固定原因为
+`BUSINESS_PROGRESS_NOT_INFERRED`，`worker_health_proven=false`。HTTP instance
+变化只证明 API 实例变化。`clear_segment_observed_seconds` 保留原语义，表示采样检查未见阻断，
 不等于连续健康、端到端可达、正式部署或 production_ready。
+业务阻断仍中断 clear segment；若循环本身仍推进，其活动可独立记录。业务成功和发送签收
+须按对应范围核对既有 jobs、usage、outbox 与平台回执，不使用活动序号代替。
 
 本轮验证使用本地合成 SQLite/HTTP 和秒级实际等待。没有真实 QQ、供应商、付费模型、
 告警联系人或真实小时/天数运行证据。观察文件不是第二份收件、发送或预算账本，
