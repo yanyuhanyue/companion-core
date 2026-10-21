@@ -82,10 +82,10 @@ def test_real_localhost_samples_use_wall_and_monotonic_time_without_worker_claim
     output = tmp_path / "observation.jsonl"
     with status_server(core) as (url, requests, instance):
         collect = observe.http_collector(core.settings, url)
-        started = time.monotonic()
+        started = time.monotonic_ns()
         summary = observe.observe(collect, output, samples=3, interval_seconds=0.02,
                                   max_gap_seconds=5)
-        elapsed = time.monotonic() - started
+        elapsed = (time.monotonic_ns() - started) / 1e9
     data = records(output)
     samples = data[1:-1]
     assert summary["failures"] == summary["discontinuities"] == 0
