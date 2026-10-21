@@ -1,5 +1,7 @@
 # P8-C.1：默认关闭的有界文本聊天合同
 
+本页保存 P8-C.1 的实现与验证记录；当前预算使用 [用量估算与校准](p8b-budget.md)，显式批准的多轮能力见 [窗口内历史](p9-approved-window-continuity.md)。
+
 本实现的验收对象是离线兼容性。真实供应商合同、平台事件来源、恢复、部署、QQ 窗口和费用
 仍需各自批准；`production_ready=false`，真实严格场景保持 `0/5`、`0/20`，手机 E2E 和
 真实 token/cache/cost/latency 均为 `null`。合成用例不属于 QQ 或厂商实测。

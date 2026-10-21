@@ -279,7 +279,7 @@ def settle(store, settings, request_id, response=None):
                     request_id,
                 ),
             )
-        # Prices are configured upper bounds; monetary amounts remain estimates even with usage.
+        # Configured rates make monetary amounts estimates even with observed usage.
 
 
 def _settle_paid(store, settings, admission, response):
