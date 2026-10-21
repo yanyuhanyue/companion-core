@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "evidence_type": "NOT_RUN",
+  "trace_ref_sha256": null,
+  "inspector_sha256": null,
+  "candidate_sha": null,
+  "runtime_image_digest": null,
+  "authorization_refs": {"R1": null, "R2": null, "R3": null, "R4": null, "R5": null, "R6": null, "media": null, "diary": null, "autonomous_send": null},
+  "qq_types": [],
+  "ratings": {"naturalness": null, "relevance": null, "source_accuracy": null, "memory_correctness": null, "initiative_comfort": null},
+  "reason_private": null,
+  "incidents": null,
+  "phone": {"received": null, "sent_at_utc": null, "received_at_utc": null, "clock_basis": null, "pair_evidence_sha256": null},
+  "provider_invoice": {"micro_usd": null, "evidence_sha256": null},
+  "stop_receipts": {"core": "NOT_RUN", "bridge": "NOT_RUN"}
+}
