@@ -923,7 +923,7 @@ def test_meta_events_share_one_total_deadline_and_frame_byte_caps(
     async def scenario():
         async with source_window(core, tmp_path, source) as (window, client, protocol, _, _):
             if limit == "deadline":
-                monkeypatch.setattr(capture, "MAX_AGE_SECONDS", 0.15)
+                monkeypatch.setattr(capture, "CAPTURE_WAIT_SECONDS", 0.15)
                 with pytest.raises(TimeoutError):
                     await window.capture_once(client, protocol)
             else:

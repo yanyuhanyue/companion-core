@@ -183,6 +183,8 @@ def main():
         return
     except Exception as error:
         # Never print transport exceptions: URLs, response bodies and headers are private.
+        from .capture import diagnostic_fields
+
         unconfirmed = (isinstance(error, ValueError)
                        and error.args == ("LIVE_TEXT_CORE_STOP_UNCONFIRMED",))
         pending = isinstance(error, ValueError) and error.args == ("WINDOW_STOP_PENDING",)
@@ -193,5 +195,6 @@ def main():
             "error": "WINDOW_STOP_PENDING" if pending else (
                 "LIVE_TEXT_CORE_STOP_UNCONFIRMED" if unconfirmed else "BRIDGE_FAILED_CLOSED"
             ),
+            **diagnostic_fields(error),
         }), flush=True)
         raise SystemExit(1) from None

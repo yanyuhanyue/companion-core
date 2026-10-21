@@ -1,8 +1,9 @@
 # P8-C.2 认证 OneBot 接收合同
 
-本阶段提供离线可验证的接收实现。真实 QQ、部署、手机可见回执、收费模型、恢复和
-production_ready 仍未签收；真实平台 I/O 为 0。测试使用合成身份、临时密钥、真实
+本页描述接收实现及其离线验证合同。测试使用合成身份、临时密钥、真实
 localhost WS/Core HTTP/OneBot HTTP 和 Mock 模型，不能作为平台或付费实测。
+后续真实部署和协议操作见[运行记录](p10-runtime-observations.md)；手机可见回执、收费模型、
+恢复和 production_ready 仍未签收。
 
 ## 接收与批准
 
@@ -39,10 +40,17 @@ source message id 必须非零，原始消息/时间指纹用于同源去重与�
 固定 SnowLuma v2.0.3 源码会先发送 connect、enable、heartbeat 三帧，然后发送业务事件；
 参见 [固定 adapter 源码](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/network/adapter.ts)。
 接收器只跳过字段、bot 身份、新鲜时间正确的 connect/enable，以及 online/good 都为
-严格 true 的健康 heartbeat。disable、未知/恶意元事件与错误身份仍停止。单次接收共用
-最多 30 秒的总 deadline、16 帧及 `2 * max_frame_bytes` 累计字节上限；元事件不重置期限。
+严格 true 的健康 heartbeat。connect/enable 支持标准无 status 形状，以及
+[固定版本的 status 形状](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/instance.ts#L765-L778)：
+status 必须恰有 online/good 两个键，且两值均为严格 true。disable、未知顶层字段、
+错误身份和异常状态仍停止。单次接收共用最多 90 秒的总等待 deadline，且不得超过窗口结束；
+消息新鲜度仍为 30 秒。16 帧及 `2 * max_frame_bytes` 累计字节上限不变，元事件不重置期限。
 [OneBot 元事件规范](https://github.com/botuniverse/onebot-11/blob/master/event/meta.md) 提供标准字段；
 enable 的 WS bootstrap 行为按上述固定 SnowLuma 版本单独覆盖。
+
+失败 CLI 保留原停止状态和主错误码，并可附带固定枚举的 capture_phase/capture_reason。
+诊断区分协议探测、解析地址、WS 握手、接收、校验及持久化等阶段；不输出异常原文、
+URL、Header、响应体或消息正文。Core stop 未确认时仍优先报告未确认状态。
 
 ## 独立接收器证明
 
