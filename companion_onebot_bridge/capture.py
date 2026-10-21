@@ -9,10 +9,13 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
 
+import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from .event_normalizer import decode, identifier, normalize
 from .network import checked_http_client, websocket
@@ -21,9 +24,103 @@ from .spool import encode
 from .window import SHA, check_protocol_request, digest, private_json, seal_protocol_content
 
 MAX_AGE_SECONDS = 30
+CAPTURE_WAIT_SECONDS = 90
 MAX_CLOCK_DRIFT_SECONDS = 2
 MAX_CAPTURE_FRAMES = 16
 SIGNATURE_DOMAIN = b"companion-core/onebot-capture/v1\x00"
+
+CAPTURE_PHASES = frozenset(
+    {
+        "admission",
+        "core_check",
+        "protocol_probe",
+        "ws_resolve",
+        "ws_handshake",
+        "receive",
+        "validate",
+        "persist",
+        "final_check",
+        "ws_close",
+    }
+)
+CAPTURE_REASONS = frozenset(
+    {
+        "CAPTURE_TIMEOUT",
+        "CAPTURE_HTTP_STATUS_REJECTED",
+        "CAPTURE_HTTP_FAILURE",
+        "CAPTURE_CONNECTION_FAILED",
+        "CAPTURE_WS_HANDSHAKE_REJECTED",
+        "CAPTURE_WS_CLOSED",
+        "CAPTURE_NETWORK_BOUNDARY_REJECTED",
+        "CAPTURE_INPUT_REJECTED",
+        "CAPTURE_LIMIT_REACHED",
+        "CAPTURE_WINDOW_STOPPED",
+        "CAPTURE_PERSISTENCE_FAILED",
+        "CAPTURE_CHECK_REJECTED",
+        "CAPTURE_PROTOCOL_REJECTED",
+        "CAPTURE_INTERNAL_ERROR",
+    }
+)
+
+
+@dataclass(frozen=True)
+class CaptureDiagnostic:
+    phase: str
+    reason: str
+
+
+def diagnostic_fields(error):
+    value = getattr(error, "capture_diagnostic", None)
+    if (
+        isinstance(value, CaptureDiagnostic)
+        and isinstance(value.phase, str)
+        and isinstance(value.reason, str)
+        and value.phase in CAPTURE_PHASES
+        and value.reason in CAPTURE_REASONS
+    ):
+        return {"capture_phase": value.phase, "capture_reason": value.reason}
+    return {}
+
+
+def capture_diagnostic(error, phase):
+    """Classify locally; exception text, remote bodies and endpoints never cross the CLI."""
+    code = error.args[0] if isinstance(error, ValueError) and len(error.args) == 1 else None
+    code = code if isinstance(code, str) else None
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        reason = "CAPTURE_TIMEOUT"
+    elif isinstance(error, httpx.HTTPStatusError):
+        reason = "CAPTURE_HTTP_STATUS_REJECTED"
+    elif isinstance(error, InvalidHandshake):
+        reason = "CAPTURE_WS_HANDSHAKE_REJECTED"
+    elif isinstance(error, ConnectionClosed):
+        reason = "CAPTURE_WS_CLOSED"
+    elif phase == "persist":
+        reason = "CAPTURE_PERSISTENCE_FAILED"
+    elif isinstance(error, (httpx.ConnectError, OSError)):
+        reason = "CAPTURE_CONNECTION_FAILED"
+    elif isinstance(error, httpx.HTTPError):
+        reason = "CAPTURE_HTTP_FAILURE"
+    elif code in {
+        "PUBLIC_DNS_REFUSED",
+        "WEBSOCKET_DESTINATION_REFUSED",
+        "PRIVATE_HTTP_AUTHORITY_CHANGED",
+        "AUTHENTICATED_WS_BOUNDARY_CHANGED",
+        "CAPTURE_PROBE_CHANGED",
+    }:
+        reason = "CAPTURE_NETWORK_BOUNDARY_REJECTED"
+    elif code in {"CAPTURE_BYTE_CAP", "CAPTURE_FRAME_CAP", "WINDOW_INPUT_CAP"}:
+        reason = "CAPTURE_LIMIT_REACHED"
+    elif code in {"WINDOW_STOPPED", "WINDOW_OUTSIDE_INTERVAL"}:
+        reason = "CAPTURE_WINDOW_STOPPED"
+    elif isinstance(error, ValueError) and phase in {"receive", "validate"}:
+        reason = "CAPTURE_INPUT_REJECTED"
+    elif isinstance(error, ValueError) and phase == "protocol_probe":
+        reason = "CAPTURE_PROTOCOL_REJECTED"
+    elif isinstance(error, ValueError):
+        reason = "CAPTURE_CHECK_REJECTED"
+    else:
+        reason = "CAPTURE_INTERNAL_ERROR"
+    return CaptureDiagnostic(phase, reason)
 
 
 def input_event(window, frame, received_at):
@@ -87,9 +184,9 @@ async def receive_frame(window, ws, capture_fence):
     try:
         received_bytes = 0
         # One total deadline; meta events neither restart the timer nor input quota.
-        async with asyncio.timeout(min(
-            MAX_AGE_SECONDS, (window.plan.end - window.clock()).total_seconds()
-        )):
+        async with asyncio.timeout(
+            min(CAPTURE_WAIT_SECONDS, (window.plan.end - window.clock()).total_seconds())
+        ):
             for _ in range(MAX_CAPTURE_FRAMES):
                 receive = asyncio.create_task(ws.recv())
                 done, _ = await asyncio.wait({receive, stop}, return_when=asyncio.FIRST_COMPLETED)
@@ -124,7 +221,18 @@ def validate_meta(window, raw):
         raise ValueError("INVALID_CAPTURE_META_EVENT")
     if raw.get("meta_event_type") == "lifecycle":
         # SnowLuma 2.0.3 sends both connect and enable on forward-WS bootstrap.
-        valid = set(raw) == fields | {"sub_type"} and raw["sub_type"] in {"connect", "enable"}
+        valid = set(raw) in (fields | {"sub_type"}, fields | {"sub_type", "status"}) and raw[
+            "sub_type"
+        ] in {"connect", "enable"}
+        if "status" in raw:
+            status = raw["status"]
+            valid = (
+                valid
+                and isinstance(status, dict)
+                and set(status) == {"online", "good"}
+                and status["online"] is True
+                and status["good"] is True
+            )
     elif raw.get("meta_event_type") == "heartbeat":
         status, interval = raw.get("status"), raw.get("interval")
         valid = (
@@ -166,9 +274,12 @@ async def capture_once(window, client, protocol):
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
     window.busy = True
+    phase = "admission"
     try:
         capacity(window)
+        phase = "core_check"
         await window.core_counts(client)
+        phase = "admission"
         capacity(window)
         capture_fence = window.row()["fence"] + 1
         head = window.append("CAPTURE_STARTED", {"fence": capture_fence})
@@ -190,15 +301,18 @@ async def capture_once(window, client, protocol):
             verify_capture()
             seal_protocol_content(request, content)
 
+        phase = "protocol_probe"
         async with checked_http_client(protocol, probe_boundary) as scoped:
             if not (await OneBotClient(window.plan.config, scoped).probe())["connection_ready"]:
                 raise ValueError("ONEBOT_NOT_READY")
         capacity(window, capture_fence)
         wall_start, monotonic_start = window.clock(), time.monotonic()
+        phase = "ws_resolve"
         connector = await websocket(
             window.plan.config,
             synthetic=window.plan.value["execution"] == "local_synthetic", check=verify_capture,
         )
+        phase = "ws_handshake"
         async with connector as ws:
             verify_capture()
             parsed = urlsplit(window.plan.config.onebot_ws_url)
@@ -210,7 +324,9 @@ async def capture_once(window, client, protocol):
                 )
             ):
                 raise ValueError("AUTHENTICATED_WS_BOUNDARY_CHANGED")
+            phase = "receive"
             frame = await receive_frame(window, ws, capture_fence)
+            phase = "validate"
             received_at = window.clock()
             if abs((received_at - wall_start).total_seconds() - (
                 time.monotonic() - monotonic_start
@@ -230,6 +346,7 @@ async def capture_once(window, client, protocol):
                     window.db.execute(
                         "UPDATE test_window SET state='OPEN',journal_head=?", (head,)
                     )
+                phase = "ws_close"
                 return window.status()
             frame_bytes = frame.encode() if isinstance(frame, str) else frame
             receipt = {
@@ -254,6 +371,7 @@ async def capture_once(window, client, protocol):
                 SIGNATURE_DOMAIN + encode(receipt).encode()
             ).hex() if key else None)
             capacity(window, capture_fence)
+            phase = "persist"
             head = window.append("CAPTURED", {
                 "event_hash": digest(event["event_id"]), "capture_sha256": digest(receipt),
                 "frame_sha256": receipt["frame_sha256"],
@@ -268,14 +386,22 @@ async def capture_once(window, client, protocol):
                      window.plan.sha256),
                 )
                 window.db.execute("UPDATE test_window SET state='OPEN',journal_head=?", (head,))
+            phase = "final_check"
             window.verify()
+            phase = "ws_close"
             return window.status() | {"input_approval": {
                 "window_sha256": window.plan.sha256, "event_id": event["event_id"],
                 "input_sha256": receipt["input_sha256"], "capture_sha256": digest(receipt),
                 "evidence_sha256": None,
             }}
-    except BaseException:
-        await failed(window, client, "CAPTURE_FAILED_CLOSED")
+    except BaseException as error:
+        diagnostic = capture_diagnostic(error, phase)
+        error.capture_diagnostic = diagnostic
+        try:
+            await failed(window, client, "CAPTURE_FAILED_CLOSED")
+        except BaseException as stop_error:
+            stop_error.capture_diagnostic = diagnostic
+            raise
         raise
     finally:
         window.busy = False
