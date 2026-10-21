@@ -1,6 +1,7 @@
 """Inspect actual ASGI receive bytes after request hooks, without provider/socket I/O."""
 
 import json
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -158,3 +159,48 @@ def test_scoped_clients_do_not_close_the_callers_transport_or_accumulate_hooks(c
 
     run(scenario())
     assert len(hooks) == 2 and transport.closed == 1
+
+
+@pytest.mark.parametrize("boundary", ["paid", "lease"])
+def test_final_sample_rechecks_paid_expiry_as_well_as_the_admission_lease(
+    core, tmp_path, monkeypatch, boundary,
+):
+    from companion import paid_budget
+
+    changes = {"expires_at": core.clock.now + timedelta(seconds=5)} if boundary == "paid" else {}
+    approval = approved_live(core, tmp_path, **changes)
+    messages = [{"role": "user", "content": "synthetic final clock"}]
+    request_id = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    lease = datetime.fromisoformat(core.store.one("SELECT lease_until FROM model_admissions")[
+        "lease_until"
+    ])
+    original = paid_budget.contract
+    dispatched, hooked, checks = [], [], []
+
+    async def hook(request):
+        hooked.append(True)
+
+    def advance_after_final_contract(settings, now):
+        value = original(settings, now)
+        if hooked:
+            checks.append(now)
+            if len(checks) == 2:
+                core.clock.now = approval.expires_at if boundary == "paid" else lease
+        return value
+
+    monkeypatch.setattr(paid_budget, "contract", advance_after_final_contract)
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: dispatched.append(request)),
+            event_hooks={"request": [hook]},
+        ) as client:
+            code = "PAID_APPROVAL_EXPIRED" if boundary == "paid" else "ADMISSION_LEASE_EXPIRED"
+            with pytest.raises(CoreError, match=code):
+                await budget.complete(ModelClient(core.settings, client), core.store, core.settings,
+                                      request_id, messages, "chat", core.clock)
+            budget.settle(core.store, core.settings, request_id)
+
+    run(scenario())
+    assert len(checks) == 2 and dispatched == []
+    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
