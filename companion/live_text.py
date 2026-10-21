@@ -397,7 +397,9 @@ def _check_context(store, settings, job, approval, *, required=False):
 
     row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTEXT + job["job_id"],))
     if not row:
-        if required:
+        # Early job checks precede context construction. Once an attempt has been
+        # reserved, missing evidence must also fence response acceptance/delivery.
+        if required or store.one("SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],)):
             raise CoreError("LIVE_TEXT_CONTEXT_REQUIRED", 503)
         return None
     value = json.loads(row["value"])

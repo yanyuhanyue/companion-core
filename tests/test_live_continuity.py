@@ -16,7 +16,7 @@ from companion.contracts import Candidate
 from companion.core import Core
 from companion.model import ModelClient
 from companion.privacy import advance_epoch
-from companion.store import encode, uid
+from companion.store import after, encode, uid
 from companion_onebot_bridge import network
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
@@ -375,5 +375,85 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
                 assert reopened.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 2
                 assert not await reopened.run_once()
                 assert len(calls) == 2
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("change_reply", [False, True])
+def test_missing_context_after_model_receive_retains_cost_without_reply(
+    core, tmp_path, change_reply,
+):
+    async def scenario():
+        async with continuity_window(core, tmp_path) as (
+            _, _, calls, sends, capture_input, finish,
+        ):
+            await capture_input()
+            await finish()
+            await capture_input()
+            original = core.model.client._transport.handler
+
+            def receive_then_remove(request):
+                response = original(request)
+                frozen = core.store.one(
+                    "SELECT key FROM runtime_meta WHERE key LIKE ? ORDER BY rowid DESC LIMIT 1",
+                    (live_text.CONTEXT + "%",),
+                )
+                core.store.execute("DELETE FROM runtime_meta WHERE key=?", (frozen["key"],))
+                if change_reply:
+                    mutate_source(core, "reply_text")
+                return response
+
+            core.model.client._transport.handler = receive_then_remove
+            assert await core.run_once()
+            assert len(calls) == 2 and len(sends) == 1
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
+            result = core.store.one(
+                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1"
+            )
+            assert result == {
+                "state": "FAILED", "last_error_code": "LIVE_TEXT_CONTEXT_REQUIRED",
+            }
+            usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
+            assert len(usage) == 2 and all(
+                row["state"] == "SETTLED" and row["billed_micro_usd"] > 0 for row in usage
+            )
+
+    run(scenario())
+
+
+def test_send_check_refuses_missing_snapshot_after_completed_model(core, tmp_path):
+    async def scenario():
+        async with continuity_window(core, tmp_path) as (
+            window, client, calls, sends, capture_input, finish,
+        ):
+            await capture_input()
+            await finish()
+            await capture_input()
+            assert await core.run_once()
+            row = core.store.one("SELECT * FROM outbox ORDER BY rowid DESC LIMIT 1")
+            lease = "lease_" + "f" * 32
+            core.store.execute(
+                "UPDATE outbox SET state='SENDING',lease_token=?,lease_until=? WHERE message_id=?",
+                (lease, after(core.clock(), 60), row["message_id"]),
+            )
+            check = {
+                "window_sha256": window.plan.sha256, "event_id": row["origin_event_id"],
+                "message_id": row["message_id"], "reply_sha256": reply_approval(window.plan, core)[
+                    "reply_sha256"
+                ], "lease_token": lease,
+            }
+            assert (await client.post("/internal/v1/live-text/send-check", json=check)).json()[
+                "approved"
+            ] is True
+            core.store.execute("DELETE FROM runtime_meta WHERE key=?", (
+                live_text.CONTEXT + core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                                                  (row["origin_event_id"],))["job_id"],
+            ))
+            response = await client.post("/internal/v1/live-text/send-check", json=check)
+            assert response.status_code == 503
+            assert response.json()["error"] == "LIVE_TEXT_CONTEXT_REQUIRED"
+            assert len(calls) == 2 and len(sends) == 1
+            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+                                  (row["message_id"],))["state"] == "SENDING"
 
     run(scenario())
