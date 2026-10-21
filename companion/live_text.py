@@ -173,6 +173,7 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
             raise CoreError("LIVE_TEXT_PAID_CONTRACT_CHANGED", 503)
         if approval.memory_scope == "approved_facts":
             memory_sources(store, settings, clock, approval)
+            ledger_sha256 = _ledger_custody(store, settings)
         journal = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not journal or journal["value"] != approval.budget_journal_id:
             raise CoreError("LIVE_TEXT_BUDGET_JOURNAL_CHANGED", 503)
@@ -196,6 +197,8 @@ def guard(store, settings, clock, *, opening=False, current_request=None, curren
                     "window_id": approval.window_id,
                     "budget_journal_id": approval.budget_journal_id,
                     "budget_journal_path": str(Path(paid.journal_path).resolve())}
+        if approval.memory_scope == "approved_facts":
+            expected["erasure_ledger_sha256"] = ledger_sha256
         if approval.handoff:
             expected.update(identity_sha256=approval.handoff.identity_sha256,
                             protocol_epoch=approval.handoff.protocol_epoch,
@@ -300,22 +303,15 @@ def _idle(store):
         raise CoreError("LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO", 409)
 
 
-def _handoff_custody(store, settings, approval, old):
-    scope = approval.handoff
-    owner = store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
-    if (
-        not owner or owner["value"] != settings.owner_qq_id
-        or scope.identity_sha256 != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
-        or old.get("identity_sha256", scope.identity_sha256) != scope.identity_sha256
-        or old.get("protocol_epoch", scope.protocol_epoch) != scope.protocol_epoch
-        or scope.privacy_epoch != epoch(store) or old["privacy_epoch"] > scope.privacy_epoch
-        or old["budget_journal_id"] != approval.budget_journal_id
-        or old["budget_journal_path"] != str(Path(settings.paid_model.journal_path).resolve())
-    ):
-        raise CoreError("LIVE_TEXT_HANDOFF_CUSTODY_CHANGED", 409)
+def _ledger_custody(store, settings, expected_sha256=None):
+    """Compare latest external erasures with applied DB state; never replay or repair here."""
     ledger = ErasureLedger(settings.erasure_ledger)
-    raw = ledger.path.read_bytes()
-    if hashlib.sha256(raw).hexdigest() != scope.erasure_ledger_sha256:
+    try:
+        raw = ledger.path.read_bytes()
+    except OSError as error:
+        raise CoreError("ERASURE_LEDGER_INVALID", 503) from error
+    digest = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
         raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
     records = ledger.read()
     ledger_id = store.one("SELECT value FROM runtime_meta WHERE key='ledger_id'")
@@ -330,7 +326,24 @@ def _handoff_custody(store, settings, approval, old):
     ):
         raise CoreError("ERASURE_REPLAY_REQUIRED", 503)
     if ledger.path.read_bytes() != raw:
-        raise CoreError("LIVE_TEXT_HANDOFF_LEDGER_CHANGED", 409)
+        raise CoreError("ERASURE_LEDGER_CHANGED", 503)
+    return digest
+
+
+def _handoff_custody(store, settings, approval, old):
+    scope = approval.handoff
+    owner = store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+    if (
+        not owner or owner["value"] != settings.owner_qq_id
+        or scope.identity_sha256 != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
+        or old.get("identity_sha256", scope.identity_sha256) != scope.identity_sha256
+        or old.get("protocol_epoch", scope.protocol_epoch) != scope.protocol_epoch
+        or scope.privacy_epoch != epoch(store) or old["privacy_epoch"] > scope.privacy_epoch
+        or old["budget_journal_id"] != approval.budget_journal_id
+        or old["budget_journal_path"] != str(Path(settings.paid_model.journal_path).resolve())
+    ):
+        raise CoreError("LIVE_TEXT_HANDOFF_CUSTODY_CHANGED", 409)
+    _ledger_custody(store, settings, scope.erasure_ledger_sha256)
     for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?", (INPUT + "%",)):
         value = json.loads(row["value"])
         if value.get("window_sha256") != old["plan_sha256"]:
@@ -522,13 +535,13 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
         receipt["value"]
     )["input_sha256"]:
         raise CoreError("LIVE_TEXT_INPUT_CHANGED", 403)
-    _check_context(store, settings, job, approval)
+    _check_context(store, settings, clock, job, approval)
     if approval.memory_scope == "approved_facts":
         _check_memory(store, settings, clock, job, approval)
     return approval, attempts
 
 
-def _history_fingerprint(store, settings, approval, source):
+def _history_fingerprint(store, settings, clock, approval, source):
     """Validate original input/reply receipts without copying private text into metadata."""
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + source["event_id"],))
     reply = store.one("SELECT value FROM runtime_meta WHERE key=?",
@@ -550,20 +563,24 @@ def _history_fingerprint(store, settings, approval, source):
         )
     except (ValueError, InvalidSignature):
         return None
+    if (value.get("window_sha256") != approval.plan_sha256
+        or capture.window_sha256 != approval.plan_sha256):
+        return None
     body = json.loads(source["body_json"])
-    usage = store.rows(
-        "SELECT j.job_id,j.state AS job_state,m.request_id,m.state FROM jobs j "
-        "JOIN model_usage m USING(job_id) WHERE j.event_id=? AND j.kind='chat'",
-        (source["event_id"],),
-    )
+    jobs = store.rows("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (source["event_id"],))
+    if len(jobs) != 1 or jobs[0]["state"] != "SUCCEEDED":
+        return None
+    try:
+        usage = _reply_usage(store, settings, clock, jobs[0], approval)
+        _check_context(store, settings, clock, jobs[0], approval, required=True)
+    except CoreError:
+        return None
     source_prefix = (f"{settings.bot_qq_id}:onebot-direct:FriendMessage:{settings.owner_qq_id}:"
                      f"epoch:{capture.protocol_epoch}:")
     if (
-        value.get("window_sha256") != approval.plan_sha256
-        or value.get("privacy_epoch") != epoch(store)
+        value.get("privacy_epoch") != epoch(store)
         or value.get("event_id") != source["event_id"]
         or value.get("input_sha256") != paid_budget.sha(source["user_text"])
-        or capture.window_sha256 != approval.plan_sha256
         or capture.event_id != source["event_id"]
         or capture.source_event_id != source["source_event_id"]
         or capture.input_sha256 != value["input_sha256"]
@@ -574,16 +591,11 @@ def _history_fingerprint(store, settings, approval, source):
         or body.get("media") or body.get("shared_content")
         or source["user_text"].strip().startswith("/")
         or source["event_type"] != "message.received"
-        or len(usage) != 1 or usage[0]["state"] != "SETTLED" or usage[0]["job_state"] != "SUCCEEDED"
         or source["delivery_key"] != f"reply:{source['event_id']}:v1"
         or source["content_sha256"] != paid_budget.sha({"text": source["reply_text"]})
-        or reply_value != {
-            "message_id": source["message_id"], "event_id": source["event_id"],
-            "job_id": usage[0]["job_id"], "request_id": usage[0]["request_id"],
-            "reply_sha256": paid_budget.sha(source["reply_text"]),
-            "plan_sha256": approval.plan_sha256,
-            "privacy_epoch": epoch(store),
-        }
+        or reply_value != _reply_receipt(
+            approval, jobs[0], source["message_id"], source["reply_text"], usage, epoch(store),
+        )
     ):
         return None
     return {"event_id": source["event_id"], "message_id": source["message_id"],
@@ -603,7 +615,7 @@ def history_sources(store, settings, clock, job):
     )]
     sources = [source for source in dialogue_history.recent_sent_sources(
         store, job["conversation_id"], job["event_id"], approval.max_inputs, event_ids=allowed,
-    ) if _history_fingerprint(store, settings, approval, source)]
+    ) if _history_fingerprint(store, settings, clock, approval, source)]
     sources = sources[-approval.max_history_turns:]
     while sources and sum(len((s["user_text"] + s["reply_text"]).encode("utf-8"))
                           for s in sources) > approval.max_history_utf8_bytes:
@@ -679,14 +691,35 @@ def _checked_memory_rows(store, settings, clock, approval, rows):
     return sources
 
 
-def freeze_memory_review(store, settings, clock, job, rows, messages):
+def _check_history(store, settings, clock, job, approval, expected):
+    from companion import dialogue_history
+
+    sources = dialogue_history.recent_sent_sources(
+        store, store.one("SELECT conversation_id FROM events WHERE event_id=?",
+                         (job["event_id"],))["conversation_id"],
+        job["event_id"], approval.max_history_turns,
+        event_ids=[item["event_id"] for item in expected],
+    )
+    if (approval.history_scope == "none" and expected) or [
+        _history_fingerprint(store, settings, clock, approval, s) for s in sources
+    ] != expected:
+        raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+
+
+def freeze_memory_review(store, settings, clock, job, rows, messages, history=()):
     from companion.model import model_payload
 
     with store.transaction():
         approval, _ = check_job(store, settings, clock, job)
         sources = _checked_memory_rows(store, settings, clock, approval, rows)
+        historical = [_history_fingerprint(store, settings, clock, approval, s) for s in history]
+        if any(source is None for source in historical):
+            raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+        _check_history(store, settings, clock, job, approval, historical)
         value = {"plan_sha256": approval.plan_sha256, "privacy_epoch": epoch(store),
                  "event_id": job["event_id"], "candidates": sources,
+                 "history_sources": historical,
+                 "history_sources_sha256": paid_budget.sha(historical),
                  "candidates_sha256": paid_budget.sha(sources),
                  "review_payload_sha256": paid_budget.sha(model_payload(
                      settings, messages, "memory_review")) if sources else None,
@@ -704,6 +737,9 @@ def _check_memory(store, settings, clock, job, approval):
         if usage:
             raise CoreError("LIVE_TEXT_MEMORY_CONTEXT_REQUIRED", 503)
         return None
+    if paid_budget.sha(value["history_sources"]) != value["history_sources_sha256"]:
+        raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+    _check_history(store, settings, clock, job, approval, value["history_sources"])
     allowed = {item["memory_id"]: item for item in memory_sources(store, settings, clock, approval)}
     if (value["plan_sha256"] != approval.plan_sha256 or value["privacy_epoch"] != epoch(store)
         or value["event_id"] != job["event_id"]
@@ -759,7 +795,7 @@ def freeze_context(store, settings, clock, job, sources, messages, memories=()):
 
     with store.transaction():
         approval, _ = check_job(store, settings, clock, job)
-        frozen = [_history_fingerprint(store, settings, approval, source) for source in sources]
+        frozen = [_history_fingerprint(store, settings, clock, approval, s) for s in sources]
         if any(source is None for source in frozen):
             raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
         value = {"plan_sha256": approval.plan_sha256, "privacy_epoch": epoch(store),
@@ -773,6 +809,10 @@ def freeze_context(store, settings, clock, job, sources, messages, memories=()):
                 or any(item not in memory["selected"] for item in selected)):
                 raise CoreError("LIVE_TEXT_MEMORY_REVIEW_REQUIRED", 503)
             value["memory_sources"] = selected
+            if approval.history_scope == "approved_window" and (
+                frozen != memory["history_sources"] or selected != memory["selected"]
+            ):
+                raise CoreError("LIVE_TEXT_CONTEXT_SOURCES_CHANGED", 503)
         prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTEXT + job["job_id"],))
         if prior and json.loads(prior["value"]) != value:
             raise CoreError("LIVE_TEXT_CONTEXT_ALREADY_FROZEN", 409)
@@ -780,9 +820,7 @@ def freeze_context(store, settings, clock, job, sources, messages, memories=()):
             store.insert("runtime_meta", key=CONTEXT + job["job_id"], value=encode(value))
 
 
-def _check_context(store, settings, job, approval, *, required=False):
-    from companion import dialogue_history
-
+def _check_context(store, settings, clock, job, approval, *, required=False):
     row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTEXT + job["job_id"],))
     if not row:
         # Early job checks precede context construction. Once an attempt has been
@@ -802,18 +840,17 @@ def _check_context(store, settings, job, approval, *, required=False):
     ):
         raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
     expected = value["sources"]
-    sources = dialogue_history.recent_sent_sources(
-        store, event["conversation_id"], job["event_id"], approval.max_history_turns,
-        event_ids=[item["event_id"] for item in expected],
-    )
-    if [_history_fingerprint(store, settings, approval, s) for s in sources] != expected:
-        raise CoreError("LIVE_TEXT_HISTORY_CHANGED", 503)
+    _check_history(store, settings, clock, job, approval, expected)
     if approval.memory_scope == "approved_facts":
         memory = _meta(store, MEMORY + job["job_id"])
         if (not memory or memory["selected"] is None or any(
             item not in memory["selected"] for item in value.get("memory_sources", [])
         ) or "memory_sources" not in value):
             raise CoreError("LIVE_TEXT_MEMORY_SOURCE_CHANGED", 503)
+        if approval.history_scope == "approved_window" and (
+            expected != memory["history_sources"] or value["memory_sources"] != memory["selected"]
+        ):
+            raise CoreError("LIVE_TEXT_CONTEXT_SOURCES_CHANGED", 503)
         admission = store.one(
             "SELECT a.payload_sha256 FROM model_admissions a JOIN model_usage m USING(request_id) "
             "WHERE m.job_id=? AND m.scenario='chat'", (job["job_id"],),
@@ -840,7 +877,7 @@ def reserve_model(store, settings, clock, job_id, scenario):
         if scenario == "memory_review":
             valid = bool(memory["candidates"] and memory["selected"] is None and not usage)
         elif scenario == "chat":
-            _check_context(store, settings, job, approval, required=True)
+            _check_context(store, settings, clock, job, approval, required=True)
             expected = ["memory_review"] if memory["candidates"] else []
             valid = (memory["selected"] is not None
                      and [row["scenario"] for row in usage] == expected
@@ -873,7 +910,7 @@ def check_model(store, settings, clock, request_id):
             raise CoreError("LIVE_TEXT_MEMORY_STAGE_REQUIRED", 403)
         payload = memory["review_payload_sha256"]
     else:
-        context = _check_context(store, settings, job, approval, required=True)
+        context = _check_context(store, settings, clock, job, approval, required=True)
         payload = context["payload_sha256"]
         if approval.memory_scope == "approved_facts":
             _reply_usage(store, settings, clock, job, approval, pending=True)
