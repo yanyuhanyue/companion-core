@@ -10,12 +10,14 @@ these fields in the existing plan/scope digest; it does not infer approval.
 Only the same conversation's earlier complete SENT private replies can enter.
 Each input needs this window's original input approval and an independently
 approved receiver's valid Ed25519 capture attestation; each assistant reply needs
-the original settled one-attempt reply receipt. This attests a fixed receiver and
+the original settled reply receipt (one chat attempt, or the ordered stages in the
+explicit [B1 dual-scope contract](p11-history-memory-composition.md)). This attests a fixed receiver and
 key holder, not a platform signature. Local loopback tests are synthetic evidence.
 Window-before history, other identities/conversations/windows, unsigned captures,
 redacted/corrected/forgotten sources, unfinished replies and UNKNOWN or uncertain
-work never acquire eligibility. M1, Reader, devices and other closed features stay
-disabled. Global UNKNOWN/DELIVERY_UNCERTAIN still stops the original window.
+work never acquire eligibility. Reader, devices and other closed features stay
+disabled; readonly M1 needs its own explicit scope. Global UNKNOWN/DELIVERY_UNCERTAIN
+still stops the original window.
 
 Turn and UTF-8 content-byte caps remove oldest whole pairs. The existing context
 soft bound may remove more whole turns; fixed rules and the complete current input

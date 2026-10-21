@@ -287,6 +287,11 @@ class Core(Runtime):
         rules = {"role": "system", "content": rules}
         references = []
         bounded_text = live_text.active(s, cfg)
+        combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
+                    and cfg.live_text_window.memory_scope == "approved_facts")
+        if combined:
+            rules["content"] += ("\n近期对话与长期事实不一致时，说明来源差异和不确定并请主人澄清；"
+                                 "不得按相似度、重复次数或新旧顺序投票决定真假。")
         memory_reference, hits = None, []
         current = {"role": "user", "content": text or "请看看我分享的内容。"}
         content_reference = ""
@@ -362,9 +367,14 @@ class Core(Runtime):
         if rich_reference := qq_rich.context(body):
             current_input.append(rich_reference)
         current_input.append(current)
-        messages = dialogue_history.fit_context(
-            rules, references, turns, current_input, cfg.context_soft_tokens,
-        )
+        if combined:
+            # History is capped before review. Do not silently discard reviewed
+            # conflict evidence or selected facts here; full paid admission still applies.
+            messages = [rules, *references, *(m for turn in turns for m in turn), *current_input]
+        else:
+            messages = dialogue_history.fit_context(
+                rules, references, turns, current_input, cfg.context_soft_tokens,
+            )
         if bounded_text:
             selected = [source for source, turn in zip(sources, turns, strict=True)
                         if any(message is turn[0] for message in messages)]
@@ -379,10 +389,21 @@ class Core(Runtime):
         allowed = live_text.memory_ids(self.store, self.settings, self.clock, job) if (
             bounded_text
         ) else None
-        hits = self.memory.search(query or "*", limit=6, memory_ids=allowed)
+        history = live_text.history_sources(self.store, self.settings, self.clock, job) if (
+            bounded_text and self.settings.live_text_window.history_scope == "approved_window"
+        ) else []
+        recent = [message for source in history
+                  for message in dialogue_history.turn_messages(source)]
+        retrieval_query = "\n".join([
+            query, *(text for source in history
+                     for text in (source["user_text"], source["reply_text"])),
+        ]) if history else query
+        hits = self.memory.search(retrieval_query or "*", limit=6, memory_ids=allowed)
         if not hits:
             if bounded_text:
-                live_text.freeze_memory_review(self.store, self.settings, self.clock, job, [], [])
+                live_text.freeze_memory_review(
+                    self.store, self.settings, self.clock, job, [], [], history,
+                )
             return [], False
         catalog = {f"m{i}": row for i, row in enumerate(hits)}
         messages = [
@@ -393,6 +414,7 @@ class Core(Runtime):
                     {
                         "operation": "recall",
                         "query": query,
+                        **({"recent_dialogue": recent} if recent else {}),
                         "memories": [
                             {
                                 "ref": ref,
@@ -410,7 +432,7 @@ class Core(Runtime):
         request_id = None
         if bounded_text:
             live_text.freeze_memory_review(
-                self.store, self.settings, self.clock, job, hits, messages,
+                self.store, self.settings, self.clock, job, hits, messages, history,
             )
         try:
             request_id = budget.reserve(

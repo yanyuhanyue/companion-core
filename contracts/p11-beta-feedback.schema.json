@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Private Beta feedback; a record of observations, never authorization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_type", "trace_ref_sha256", "inspector_sha256", "candidate_sha", "runtime_image_digest", "authorization_refs", "qq_types", "ratings", "reason_private", "incidents", "phone", "provider_invoice", "stop_receipts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "evidence_type": {"enum": ["NOT_RUN", "local_synthetic", "authorized_runtime"]},
+    "trace_ref_sha256": {"$ref": "#/$defs/digest"},
+    "inspector_sha256": {"$ref": "#/$defs/digest"},
+    "candidate_sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{40}$"},
+    "runtime_image_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+    "authorization_refs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["R1", "R2", "R3", "R4", "R5", "R6", "media", "diary", "autonomous_send"],
+      "properties": {
+        "R1": {"$ref": "#/$defs/digest"}, "R2": {"$ref": "#/$defs/digest"},
+        "R3": {"$ref": "#/$defs/digest"}, "R4": {"$ref": "#/$defs/digest"},
+        "R5": {"$ref": "#/$defs/digest"}, "R6": {"$ref": "#/$defs/digest"},
+        "media": {"$ref": "#/$defs/digest"}, "diary": {"$ref": "#/$defs/digest"},
+        "autonomous_send": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "qq_types": {"type": "array", "uniqueItems": true, "maxItems": 5,
+                 "items": {"enum": ["text", "reply", "forward", "card", "image"]}},
+    "ratings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["naturalness", "relevance", "source_accuracy", "memory_correctness", "initiative_comfort"],
+      "properties": {
+        "naturalness": {"$ref": "#/$defs/rating"}, "relevance": {"$ref": "#/$defs/rating"},
+        "source_accuracy": {"$ref": "#/$defs/rating"}, "memory_correctness": {"$ref": "#/$defs/rating"},
+        "initiative_comfort": {"$ref": "#/$defs/rating"}
+      }
+    },
+    "reason_private": {"type": ["string", "null"], "maxLength": 500},
+    "incidents": {"type": ["array", "null"], "uniqueItems": true,
+      "items": {"enum": ["wrong_recipient", "unauthorized_third_party_memory", "authority_expansion", "forgotten_fact_returned", "unauthorized_cost", "duplicate_visible_reply", "unknown_auto_retry", "ledger_mismatch", "stop_unconfirmed", "private_data_leak", "missed_reference", "wrong_memory", "wrong_quote_actor", "claimed_unconfirmed_delivery"]}},
+    "phone": {
+      "type": "object", "additionalProperties": false,
+      "required": ["received", "sent_at_utc", "received_at_utc", "clock_basis", "pair_evidence_sha256"],
+      "properties": {
+        "received": {"type": ["boolean", "null"]},
+        "sent_at_utc": {"$ref": "#/$defs/utc"}, "received_at_utc": {"$ref": "#/$defs/utc"},
+        "clock_basis": {"enum": [null, "same_device_utc", "calibrated_pair"]},
+        "pair_evidence_sha256": {"$ref": "#/$defs/digest"}
+      },
+      "allOf": [{"if": {"anyOf": [
+        {"properties": {"sent_at_utc": {"type": "string"}}},
+        {"properties": {"received_at_utc": {"type": "string"}}}
+      ]}, "then": {"properties": {
+        "sent_at_utc": {"type": "string"}, "received_at_utc": {"type": "string"},
+        "clock_basis": {"enum": ["same_device_utc", "calibrated_pair"]},
+        "pair_evidence_sha256": {"type": "string"}, "received": {"const": true}
+      }}}]
+    },
+    "provider_invoice": {
+      "type": "object", "additionalProperties": false,
+      "required": ["micro_usd", "evidence_sha256"],
+      "properties": {"micro_usd": {"type": ["integer", "null"], "minimum": 0},
+                     "evidence_sha256": {"$ref": "#/$defs/digest"}},
+      "if": {"properties": {"micro_usd": {"type": "integer"}}},
+      "then": {"properties": {"evidence_sha256": {"type": "string"}}}
+    },
+    "stop_receipts": {
+      "type": "object", "additionalProperties": false, "required": ["core", "bridge"],
+      "properties": {"core": {"enum": ["NOT_RUN", "STOP_UNCONFIRMED", "CONFIRMED"]},
+                     "bridge": {"enum": ["NOT_RUN", "STOP_UNCONFIRMED", "CONFIRMED"]}}
+    }
+  },
+  "$defs": {
+    "digest": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "rating": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
+    "utc": {"type": ["string", "null"], "format": "date-time", "pattern": "Z$|\\+00:00$"}
+  }
+}
