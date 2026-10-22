@@ -12,8 +12,8 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
+from tests.support.onebot import provider
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_delivery import provider
 from tests.test_onebot_direct import config, normalized
 
 PARTS = ["第一条是可以独立阅读的完整句子。", "第二条继续这次回复并保留真实内容。"]
@@ -425,10 +425,9 @@ def test_segment_schema_preparation_preserves_legacy_rowids_and_unknowns(core, t
                     )
                 before = list(window.db.iterdump())
                 row = dict(window.db.execute("SELECT rowid,* FROM window_attempts").fetchone())
-                with pytest.raises(ValueError, match="SEGMENTED_WINDOW_PREPARATION_REQUIRED"):
-                    window.status()
+                assert window.status()["attempt_states"] == {"UNKNOWN": 1}
                 assert list(window.db.iterdump()) == before
-                window.ensure_schema(prepare_segments=True)
+                window.prepare_schema()
                 restored = window.db.execute("SELECT rowid,* FROM window_attempts").fetchone()
                 assert dict(restored) == row
                 assert window.count("window_attempts", "state='UNKNOWN'") == 1
@@ -514,6 +513,15 @@ def test_stopped_v1_handoff_prepares_segment_schema_without_rewriting_prior_atte
             async with contract.client() as client:
                 old = TestWindow(spool, plan, clock=lambda: now)
                 await old.open(client)
+                with spool.db:
+                    spool.db.execute("DROP TABLE window_attempts")
+                    spool.db.execute(
+                        "CREATE TABLE window_attempts(message_id TEXT PRIMARY KEY,"
+                        "event_id TEXT NOT NULL UNIQUE,fence INTEGER NOT NULL,state TEXT NOT NULL,"
+                        "text_hash TEXT NOT NULL,approval_hash TEXT NOT NULL,"
+                        "provider_ack_hash TEXT,"
+                        "item_hash TEXT NOT NULL,plan_hash TEXT NOT NULL)"
+                    )
                 raw = raw_event(1)
                 incoming = normalized(raw, cfg)
                 await old.ingest(client, raw, input_approval(plan, raw))

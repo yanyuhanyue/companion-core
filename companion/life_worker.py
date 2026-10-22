@@ -4,6 +4,7 @@ import asyncio
 
 import httpx
 
+from companion import budget
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import uid
@@ -24,7 +25,12 @@ async def life_worker(settings):
                         core.goals.expire_commitments()
                     core.exploration.schedule_goal()
                     core.social.flush()
-                worked = await core.consolidation.run_once(worker_id)
+                worked = False
+                if not budget.chat_pending(core.store, core.clock()):
+                    worked = await core.consolidation.run_once(worker_id)
+                    if (not worked and ticks % 60 == 0
+                        and not budget.chat_pending(core.store, core.clock())):
+                        worked = await core.extract_once()
                 ticks += 1
                 if not worked:
                     await asyncio.sleep(1)

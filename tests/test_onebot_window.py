@@ -14,7 +14,8 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.journal_assertions import assert_private_journal
-from tests.test_onebot_delivery import core_client, provider
+from tests.support.onebot import provider
+from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import config, normalized, raw_event
 
 

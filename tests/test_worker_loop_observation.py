@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -14,7 +16,7 @@ from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.store import encode
 from tests.conftest import ingest, run
-from tests.test_ops_observe import records, status_server
+from tests.support.observations import records, status_server
 
 BASE = datetime(2026, 10, 21, tzinfo=UTC)
 
@@ -130,8 +132,7 @@ def test_actual_worker_idle_loops_advance_only_after_native_maintenance(core, mo
     assert len({row["session"] for row in snapshots}) == 1
 
 
-@pytest.mark.parametrize("blocked", ["poll", "maintenance"])
-def test_actual_worker_blocked_poll_or_maintenance_never_advances(core, monkeypatch, blocked):
+def test_actual_worker_blocked_poll_never_advances(core, monkeypatch):
     ticks, original_sleep = worker_fixture(core, monkeypatch)
 
     async def scenario():
@@ -142,23 +143,17 @@ def test_actual_worker_blocked_poll_or_maintenance_never_advances(core, monkeypa
         async def poll(_):
             nonlocal polls
             polls += 1
-            if blocked == "poll" and polls == 2:
+            if polls == 2:
                 entered.set()
                 await never.wait()
             return False
 
-        async def maintenance():
-            if blocked == "maintenance":
-                entered.set()
-                await never.wait()
-
         monkeypatch.setattr(core, "run_once", poll)
-        monkeypatch.setattr(core, "extract_once", maintenance)
         task = asyncio.create_task(__main__.worker(core.settings))
         try:
             await asyncio.wait_for(entered.wait(), 2)
             before = stored(core)
-            assert (before is None) == (blocked == "maintenance")
+            assert before is not None and before["sequence"] == 1
             ticks[0] += 100
             core.clock.advance(100)
             await original_sleep(0)
@@ -169,6 +164,28 @@ def test_actual_worker_blocked_poll_or_maintenance_never_advances(core, monkeypa
                 await task
 
     run(scenario())
+
+
+@pytest.mark.parametrize("operation", ["expire_raw_events", "schedule_proactive"])
+def test_actual_worker_failed_maintenance_preserves_previous_loop_record(
+    core, monkeypatch, operation,
+):
+    worker_fixture(core, monkeypatch)
+    previous = encode(record(987))
+    core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, previous))
+
+    def fail():
+        raise RuntimeError("synthetic maintenance failure")
+
+    monkeypatch.setattr(core, operation, fail)
+    with pytest.raises(RuntimeError, match="synthetic maintenance failure"):
+        run(__main__.worker(core.settings))
+    # The worker closes its connection even when maintenance fails.
+    with closing(sqlite3.connect(core.settings.database)) as database:
+        persisted = database.execute(
+            "SELECT value FROM runtime_meta WHERE key=?", (worker_loop.KEY,),
+        ).fetchone()
+    assert persisted == (previous,)
 
 
 def test_native_failed_business_is_not_success_even_when_loop_completes(core, monkeypatch):

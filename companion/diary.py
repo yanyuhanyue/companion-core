@@ -610,7 +610,6 @@ class DiaryService:
         run = self.repo.claim(worker_id)
         if run is None:
             return False
-        request_id = None
         try:
             count = sum(
                 source["kind"] == "owner_message"
@@ -653,17 +652,19 @@ class DiaryService:
                 self.clock(),
                 logical_request_id="diary:" + run["run_id"],
             )
-            with self.store.transaction():
-                self.repo.validate_run(run)
-                self.store.execute(
-                    "UPDATE diary_runs SET model_request_id=? WHERE run_id=?",
-                    (request_id, run["run_id"]),
-                )
+            try:
+                with self.store.transaction():
+                    self.repo.validate_run(run)
+                    self.store.execute(
+                        "UPDATE diary_runs SET model_request_id=? WHERE run_id=?",
+                        (request_id, run["run_id"]),
+                    )
+            except BaseException:
+                budget.settle(self.store, self.settings, request_id)
+                raise
             response = await budget.complete(
                 self.model, self.store, self.settings, request_id, messages, "diary", self.clock
             )
-            budget.settle(self.store, self.settings, request_id, response)
-            request_id = None
             draft = DiaryDraft.model_validate_json(response.text)
             body = render_draft(draft, run["sources"], run["local_date"], self.settings)
             self.repo.finish(
@@ -674,8 +675,6 @@ class DiaryService:
                 body,
             )
         except Exception as error:
-            if request_id:
-                budget.settle(self.store, self.settings, request_id)
             code = (
                 error.code
                 if isinstance(error, CoreError)

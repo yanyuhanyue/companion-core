@@ -13,7 +13,8 @@ from companion.model import ModelClient
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
-from tests.test_onebot_delivery import core_client, provider
+from tests.support.onebot import provider
+from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
 from tests.test_onebot_window import input_approval, plan_fixture, reply_approval, stage
 from tests.test_paid_model_gate import approved_live

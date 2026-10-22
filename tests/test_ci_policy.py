@@ -221,6 +221,10 @@ def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
     assert set(jobs) == {"preflight", "quality", "ci", *FULL_JOBS}
     assert jobs["test"]["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
     assert jobs["test"]["strategy"]["matrix"]["shard"] == ["0", "1"]
+    assert jobs["test"]["strategy"]["matrix"]["include"] == [
+        {"os": "ubuntu-latest", "verify_shard": "0"},
+        {"os": "windows-latest", "verify_shard": "1"},
+    ]
     assert jobs["test"]["strategy"]["fail-fast"] == "false"
     for name in FULL_JOBS:
         assert jobs[name]["needs"] == "preflight"
@@ -232,9 +236,11 @@ def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
                for step in jobs["preflight"]["steps"])
     steps = jobs["test"]["steps"]
     assert any("-p scripts.ci_shards" in step.get("run", "") for step in steps)
-    for script in ("replay.py", "smoke.py", "verify_package.py"):
-        step = next(step for step in steps if script in step.get("run", ""))
-        assert step["if"] == "${{ matrix.shard == 0 }}"
+    for command in ("uv run python scripts/replay.py", "uv run python scripts/smoke.py",
+                    "uv build", "uv run python scripts/verify_package.py"):
+        matches = [step for step in steps if step.get("run") == command]
+        assert len(matches) == 1
+        assert matches[0]["if"] == "${{ matrix.shard == matrix.verify_shard }}"
     assert not any("ruff" in step.get("run", "")
                    for step in jobs["browser-reader"]["steps"])
     assert set(workflow["on"]) == {"push", "pull_request", "merge_group", "workflow_dispatch"}

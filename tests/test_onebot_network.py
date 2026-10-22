@@ -2,11 +2,9 @@ import asyncio
 import socket
 import ssl
 import threading
-from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import httpx
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -18,36 +16,8 @@ from websockets.exceptions import InvalidStatus
 from companion_onebot_bridge.network import private_http_client, resolve_private, websocket
 from companion_onebot_bridge.onebot_client import OneBotClient
 from tests.conftest import run
-from tests.test_onebot_delivery import provider
+from tests.support.onebot import onebot_http
 from tests.test_onebot_direct import config
-
-
-@contextmanager
-def onebot_http(sends, token):
-    class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def do_POST(self):
-            assert self.headers["Authorization"] == "Bearer " + token
-            body = self.rfile.read(int(self.headers["Content-Length"]))
-            response = provider(
-                httpx.Request("POST", "http://mock" + self.path, content=body), sends
-            )
-            self.send_response(response.status_code)
-            self.send_header("Content-Length", str(len(response.content)))
-            self.end_headers()
-            self.wfile.write(response.content)
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield server.server_address[1]
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=3)
 
 
 def test_real_loopback_http_probe_and_owner_send_are_bounded_and_authenticated():
@@ -149,7 +119,8 @@ def test_private_tcp_pinning_preserves_https_wss_hostname_sni_and_auth(tmp_path,
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.socket = server_context.wrap_socket(server.socket, server_side=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever,
+                              kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
 
     async def scenario():

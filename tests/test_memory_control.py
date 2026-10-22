@@ -40,8 +40,8 @@ from companion_onebot_bridge.memory_control import capture_once, execute_once
 from companion_onebot_bridge.rich_input import input_digest
 from companion_onebot_bridge.window import bridge_code_sha256
 from tests.conftest import ingest, run
+from tests.support.onebot import onebot_http
 from tests.test_onebot_direct import config, raw_event
-from tests.test_onebot_network import onebot_http
 
 
 def bridge(core, **changes):

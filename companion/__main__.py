@@ -23,10 +23,6 @@ async def worker(settings):
 
     async with httpx.AsyncClient(timeout=settings.timeout_seconds, trust_env=False) as client:
         core = Core(settings, ModelClient(settings, client))
-        core.store.execute(
-            "UPDATE model_usage SET state='UNKNOWN' "
-            "WHERE scenario IN ('memory_extract','memory_review') AND state='RESERVED'"
-        )
         worker_id = uid("worker")
         loop = Recorder(core.store)
         try:
@@ -38,7 +34,6 @@ async def worker(settings):
                     if maintenance:
                         core.expire_raw_events()
                         core.schedule_proactive()
-                        await core.extract_once()
                     ticks += 1
                 loop.completed(maintenance=maintenance)
                 if not worked:

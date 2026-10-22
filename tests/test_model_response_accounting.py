@@ -31,8 +31,8 @@ def rejected_response(core, response):
                 await budget.complete(ModelClient(core.settings, client), core.store, core.settings,
                                       request_id, MESSAGES, "chat", core.clock)
             before = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
-            # Existing callers do this after any adapter error. It cannot discard
-            # known usage or reduce the amount already held by the calling seam.
+            # A duplicate recovery callback cannot discard known usage or reduce
+            # the amount already settled by the calling seam.
             budget.settle(core.store, core.settings, request_id)
             after = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request_id,))
             assert after == before

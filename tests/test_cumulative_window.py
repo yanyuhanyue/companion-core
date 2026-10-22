@@ -116,9 +116,9 @@ def test_authenticated_ws_and_real_http_respect_cumulative_capture_boundary(core
 
     from companion.model import ModelClient
     from companion_onebot_bridge.network import private_http_client
+    from tests.support.onebot import onebot_http
     from tests.test_onebot_capture import capture_approval, pinned_plan, real_core_http
     from tests.test_onebot_direct import config, raw_event
-    from tests.test_onebot_network import onebot_http
     from tests.test_onebot_window import reply_approval
 
     connections, sends, models = [], [], []

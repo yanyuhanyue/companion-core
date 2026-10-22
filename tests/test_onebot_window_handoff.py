@@ -22,7 +22,7 @@ from companion_onebot_bridge.window import (
     request_stop,
 )
 from tests.conftest import run
-from tests.test_onebot_delivery import provider
+from tests.support.onebot import provider
 from tests.test_onebot_direct import normalized, raw_event
 from tests.test_onebot_window import input_approval, plan_fixture
 
@@ -443,10 +443,10 @@ def test_not_ready_protocol_refuses_before_core_open_or_any_window_write(tmp_pat
 
 
 @pytest.mark.parametrize("corrupt", [False, "chain", "captured"])
-def test_existing_zero_input_legacy_spool_is_verified_before_ownership_upgrade(tmp_path, corrupt):
+def test_missing_window_ownership_is_refused_without_implicit_upgrade(tmp_path, corrupt):
     cfg, plan, now = plan_for(tmp_path)
     # This is the pre-change persisted format, not an old window created through
-    # today's open/migration path. Its approval and code attestation stay intact.
+    # today's open path. Missing ownership is never guessed from the current plan.
     plan.value["live_text"].pop("handoff")
     plan.value["live_text"]["bridge_code_sha256"] = "f" * 64
     plan.sha256 = digest(plan.value)
@@ -485,7 +485,6 @@ def test_existing_zero_input_legacy_spool_is_verified_before_ownership_upgrade(t
                     )
             with spool.db:
                 spool.db.execute("UPDATE test_window SET fence=1,reason='CAPTURE_FAILED_CLOSED'")
-            old_json = old.row()["plan_json"]
             if corrupt == "chain":
                 with plan.journal.open("ab") as handle:
                     handle.write(b"{}\n")
@@ -496,23 +495,15 @@ def test_existing_zero_input_legacy_spool_is_verified_before_ownership_upgrade(t
                 )
             _, next_plan, _ = plan_for(tmp_path, 2, predecessor=old)
             contract.successor = next_plan
+            before = list(spool.db.iterdump())
+            journal = plan.journal.read_bytes()
             async with contract.client() as http:
                 successor = TestWindow(spool, next_plan, clock=lambda: now)
-                if corrupt:
-                    with pytest.raises(ValueError, match="JOURNAL"):
-                        await successor.handoff(http)
-                    assert "plan_hash" not in {
-                        row[1] for row in spool.db.execute("PRAGMA table_info(window_inputs)")
-                    }
-                    assert not contract.calls
-                else:
-                    assert (await successor.handoff(http))["state"] == "PREPARED"
-                    saved = json.loads(
-                        spool.db.execute("SELECT record_json FROM window_history").fetchone()[0]
-                    )
-                    assert saved["plan_json"] == old_json
-                    assert successor.count("window_inputs") == 0
-                    assert (await successor.open(http))["state"] == "OPEN"
+                with pytest.raises(ValueError, match="WINDOW_SCHEMA_PREPARATION_REQUIRED"):
+                    await successor.handoff(http)
+                assert list(spool.db.iterdump()) == before
+                assert plan.journal.read_bytes() == journal
+                assert not contract.calls
 
     run(scenario())
 

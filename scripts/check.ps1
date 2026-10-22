@@ -1,8 +1,23 @@
-param([string[]]$TestFiles = @())
+param(
+    [string[]]$TestFiles = @(),
+    [ValidateRange(0, 2147483647)][int]$Durations = 0,
+    [string]$JunitXml = ''
+)
 
 $ErrorActionPreference = 'Stop'
 $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $taskRoot
+$pytestArguments = @()
+if ($Durations -gt 0) { $pytestArguments += "--durations=$Durations" }
+if ($JunitXml) {
+    $report = if ([IO.Path]::IsPathRooted($JunitXml)) {
+        [IO.Path]::GetFullPath($JunitXml)
+    } else { [IO.Path]::GetFullPath((Join-Path $taskRoot $JunitXml)) }
+    if (-not $report.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'JUnit report must stay inside the workspace'
+    }
+    $pytestArguments += "--junitxml=$report"
+}
 $roundTemp = '.local/test-temp/check-' + [guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Force -Path "$roundTemp/tmp" | Out-Null
 $env:TEMP = (Resolve-Path "$roundTemp/tmp").Path
@@ -17,7 +32,7 @@ $env:PYTHONPATH = if ($env:PYTHONPATH) {
 try {
     & .venv/Scripts/python.exe -m ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
     if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
-    & .venv/Scripts/python.exe -m pytest -q @TestFiles "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
+    & .venv/Scripts/python.exe -m pytest -q @TestFiles @pytestArguments "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
 } finally {
     # Each verification owns one directory; unrelated or retained diagnostics are untouched.

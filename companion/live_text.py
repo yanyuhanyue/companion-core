@@ -600,9 +600,17 @@ def check_input(store, settings, clock, event):
 
 
 def check_job(store, settings, clock, job, *, current_request=None, current_delivery=None):
-    approval, _, attempts = guard(
-        store, settings, clock, current_request=current_request, current_delivery=current_delivery
-    )
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        approval, _, attempts = guard(
+            store, settings, clock, current_request=current_request,
+            current_delivery=current_delivery,
+        )
+        _check_job(store, settings, clock, job, approval)
+        return approval, attempts
+
+
+def _check_job(store, settings, clock, job, approval):
+    """Check job evidence after the caller's current runtime guard."""
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + job["event_id"],))
     event = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
     value = json.loads(receipt["value"]) if receipt else {}
@@ -627,7 +635,6 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
     _check_context(store, settings, clock, job, approval)
     if approval.memory_scope == "approved_facts":
         _check_memory(store, settings, clock, job, approval)
-    return approval, attempts
 
 
 def _history_fingerprint(store, settings, clock, approval, source):
@@ -1186,13 +1193,12 @@ def remaining_send_slots(store, approval):
 
 
 def _reply_material(store, approval, message_id):
-    from companion.transport import reply_group, segment_envelope
+    from companion.transport import reply_group, segment_envelopes
 
     group = reply_group(store, message_id)
     if not group or len(group["text"]) > approval.max_reply_chars:
         raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-    envelopes = {row["message_id"]: segment_envelope(store, row["message_id"])
-                 for row in group["rows"]}
+    envelopes = segment_envelopes(group)
     if group["segmented"] and (
         approval.segmented_reply is None
         or len(group["rows"]) > approval.segmented_reply.max_segments
@@ -1222,6 +1228,11 @@ def _reply_receipt(approval, job, message_id, reply, usage, privacy_epoch, segme
 
 
 def check_delivery(store, settings, clock, message_id, *, check=None):
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        return _check_delivery(store, settings, clock, message_id, check=check)
+
+
+def _check_delivery(store, settings, clock, message_id, *, check):
     approval, _, _ = guard(store, settings, clock, current_delivery=message_id)
     row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     if not row or row["action_type"] != "qq.private.reply":
@@ -1231,7 +1242,7 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     )
     if not job or job["state"] != "SUCCEEDED":
         raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-    check_job(store, settings, clock, job, current_delivery=message_id)
+    _check_job(store, settings, clock, job, approval)
     usage = _reply_usage(store, settings, clock, job, approval)
     group, envelopes = _reply_material(store, approval, message_id)
     for part in group["rows"]:
@@ -1262,22 +1273,30 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     return {"approved": True, "lease_until": row["lease_until"]} if check else {"approved": True}
 
 
-def record_reply(store, settings, clock, job, message_id, reply):
-    approval, _ = check_job(store, settings, clock, job)
-    usage = _reply_usage(store, settings, clock, job, approval)
-    group, envelopes = _reply_material(store, approval, message_id)
-    part = next(row for row in group["rows"] if row["message_id"] == message_id)
-    if (json.loads(part["content_json"])["text"] != reply
-        or part["origin_event_id"] != job["event_id"]
-        or part["conversation_id"] != job["conversation_id"]):
-        raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-    slots = remaining_send_slots(store, approval)
-    if slots is not None and slots < 0:
-        raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 429)
-    receipt = _reply_receipt(
-        approval, job, message_id, reply, usage, epoch(store), envelopes[message_id],
-    )
-    store.insert("runtime_meta", key="live_text_reply:" + message_id, value=encode(receipt))
+def record_replies(store, settings, clock, job, message_ids):
+    """Validate and record one complete frozen reply group in the same transaction."""
+    if not message_ids:
+        return
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        approval, _ = check_job(store, settings, clock, job)
+        usage = _reply_usage(store, settings, clock, job, approval)
+        group, envelopes = _reply_material(store, approval, message_ids[0])
+        if ([part["message_id"] for part in group["rows"]] != message_ids
+            or any(part["origin_event_id"] != job["event_id"]
+                   or part["conversation_id"] != job["conversation_id"]
+                   for part in group["rows"])):
+            raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
+        slots = remaining_send_slots(store, approval)
+        if slots is not None and slots < 0:
+            raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 429)
+        privacy_epoch = epoch(store)
+        for part in group["rows"]:
+            message_id = part["message_id"]
+            receipt = _reply_receipt(
+                approval, job, message_id, json.loads(part["content_json"])["text"],
+                usage, privacy_epoch, envelopes[message_id],
+            )
+            store.insert("runtime_meta", key="live_text_reply:" + message_id, value=encode(receipt))
 
 
 def send_check(store, settings, clock, body):

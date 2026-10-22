@@ -21,10 +21,11 @@ from companion_onebot_bridge import network
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
 from tests.conftest import run
+from tests.support.onebot import provider
 from tests.test_dialogue_context import sent_history
 from tests.test_live_text_window import live_fixture
 from tests.test_onebot_capture import bootstrap_frames, capture_approval
-from tests.test_onebot_delivery import core_client, provider
+from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
 from tests.test_onebot_window import reply_approval
 

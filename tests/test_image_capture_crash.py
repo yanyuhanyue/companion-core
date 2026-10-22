@@ -35,7 +35,7 @@ value=json.loads(Path(sys.argv[1]).read_text('utf8'))
 cfg=Settings.model_validate(value['settings'])
 store=Store(cfg.database)
 clock=lambda:value['clock']
-content=ContentService(store,cfg,ObservationService(store,cfg,clock),clock=clock)
+content=ContentService(store,cfg,ObservationService(store,cfg,clock),clock=clock,model=lambda:None)
 budget.reserve=lambda *args,**kwargs:os._exit(17)
 asyncio.run(content.analyze_image(value['event_id'],'image:0',
     Path(sys.argv[2]).read_bytes(),'image/png',value['lease'],value['proof']))

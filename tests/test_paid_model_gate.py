@@ -876,30 +876,8 @@ def test_known_cost_uses_reserved_accounting_custody_after_live_config_changes(
     request = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
     calls = []
 
-    async def exercise():
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda req: (
-                    calls.append(req)
-                    or httpx.Response(
-                        200,
-                        json={
-                            "choices": [{"message": {"content": "ok"}}],
-                            "usage": {"prompt_tokens": 900000, "completion_tokens": 2},
-                        },
-                    )
-                )
-            )
-        ) as client:
-            response = await budget.complete(
-                ModelClient(core.settings, client),
-                core.store,
-                core.settings,
-                request,
-                messages,
-                "chat",
-                core.clock,
-            )
+    def provider(req):
+        calls.append(req)
         if change == "disabled":
             core.settings.paid_model = None
         elif change == "path_changed":
@@ -915,7 +893,22 @@ def test_known_cost_uses_reserved_accounting_custody_after_live_config_changes(
                 return original(*args, **kwargs)
 
             monkeypatch.setattr(budget.paid_budget, "journal", fail_write)
-        budget.settle(core.store, core.settings, request, response)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}}],
+            "usage": {"prompt_tokens": 900000, "completion_tokens": 2},
+        })
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            await budget.complete(
+                ModelClient(core.settings, client),
+                core.store,
+                core.settings,
+                request,
+                messages,
+                "chat",
+                core.clock,
+            )
 
     asyncio.run(exercise())
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {

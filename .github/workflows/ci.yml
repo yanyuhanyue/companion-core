@@ -57,6 +57,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         shard: [0, 1]
+        include:
+          - os: ubuntu-latest
+            verify_shard: 0
+          - os: windows-latest
+            verify_shard: 1
     runs-on: ${{ matrix.os }}
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
@@ -85,13 +90,13 @@ jobs:
           uv run --extra onebot python -m pytest -p scripts.ci_shards
           --ci-shard=${{ matrix.shard }} -q --durations=15
           --basetemp=.local/test-temp --junitxml=.local/test-results/pytest.xml
-      - if: ${{ matrix.shard == 0 }}
+      - if: ${{ matrix.shard == matrix.verify_shard }}
         run: uv run python scripts/replay.py
-      - if: ${{ matrix.shard == 0 }}
+      - if: ${{ matrix.shard == matrix.verify_shard }}
         run: uv run python scripts/smoke.py
-      - if: ${{ matrix.shard == 0 }}
+      - if: ${{ matrix.shard == matrix.verify_shard }}
         run: uv build
-      - if: ${{ matrix.shard == 0 }}
+      - if: ${{ matrix.shard == matrix.verify_shard }}
         run: uv run python scripts/verify_package.py
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}

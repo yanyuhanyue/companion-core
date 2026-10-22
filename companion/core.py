@@ -168,15 +168,7 @@ class Core(Runtime):
                     self.diary.repo.cancel_pending("DIARY_PAUSED")
                 if not bounded_text and command == "暂停主动分享" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
-                    s.execute(
-                        "UPDATE jobs SET state='CANCELLED' WHERE kind='activity' "
-                        "AND state IN ('QUEUED','RETRY_WAIT')"
-                    )
-                    s.execute(
-                        "UPDATE outbox SET state='CANCELLED' WHERE "
-                        "action_type='qq.private.proactive' AND state IN "
-                        "('PENDING','LEASED','RETRY_WAIT')"
-                    )
+                    cancel_proactive_work(s, now)
                 # M0/M1 never fetch attachments; discard URL/ref content that may carry credentials.
                 body["media"] = [{"kind": m["kind"], "sha256": m["sha256"]} for m in body["media"]]
                 s.insert(
@@ -442,7 +434,6 @@ class Core(Runtime):
                 ),
             },
         ]
-        request_id = None
         if bounded_text:
             live_text.freeze_memory_review(
                 self.store, self.settings, self.clock, job, hits, messages, history,
@@ -462,8 +453,6 @@ class Core(Runtime):
                 self.clock,
             )
         except Exception as error:
-            if request_id:
-                budget.settle(self.store, self.settings, request_id)
             if not bounded_text and isinstance(error, CoreError) and error.code in {
                 "DAILY_BUDGET_EXHAUSTED",
                 "UNKNOWN_PRICING",
@@ -478,7 +467,6 @@ class Core(Runtime):
                 )
                 return [], True
             raise
-        budget.settle(self.store, self.settings, request_id, response)
         try:
             selected = MemorySelection.model_validate_json(response.text).relevant
             if len(selected) != len(set(selected)) or any(ref not in catalog for ref in selected):
@@ -540,21 +528,17 @@ class Core(Runtime):
             messages,
             self.clock(),
             logical_request_id=logical_request_id,
+            clock=self.clock,
         )
-        try:
-            response = await budget.complete(
-                self.model,
-                self.store,
-                self.settings,
-                request_id,
-                messages,
-                "memory_review",
-                self.clock,
-            )
-        except Exception:
-            budget.settle(s, cfg, request_id)
-            raise
-        budget.settle(s, cfg, request_id, response)
+        response = await budget.complete(
+            self.model,
+            self.store,
+            self.settings,
+            request_id,
+            messages,
+            "memory_review",
+            self.clock,
+        )
         validation_reason = "schema"
         try:
             review = MemoryReview.model_validate_json(response.text)
@@ -804,7 +788,6 @@ class Core(Runtime):
                         self.clock,
                     )
                     model_done_ns = time.perf_counter_ns()
-                    budget.settle(self.store, self.settings, request_id, response)
                     usage = self.store.one(
                         "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
                         (request_id,),
@@ -872,13 +855,9 @@ class Core(Runtime):
                             else "qq.private.reply",
                         )]
                     if bounded_text:
-                        for message_id in message_ids:
-                            text = json.loads(self.store.one(
-                                "SELECT content_json FROM outbox WHERE message_id=?", (message_id,),
-                            )["content_json"])["text"]
-                            live_text.record_reply(
-                                self.store, self.settings, self.clock, job, message_id, text,
-                            )
+                        live_text.record_replies(
+                            self.store, self.settings, self.clock, job, message_ids,
+                        )
                 self.store.execute(
                     "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
                     "WHERE job_id=?",
@@ -893,7 +872,6 @@ class Core(Runtime):
         except Exception as error:
             emit("job_failed", job["trace_id"])
             if request_id:
-                budget.settle(self.store, self.settings, request_id)
                 usage = self.store.one(
                     "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
                     (request_id,),
@@ -1060,15 +1038,19 @@ class Core(Runtime):
         attempt_key = "extract_attempts:" + events[0]["event_id"]
         attempts = s.one("SELECT value FROM runtime_meta WHERE key=?", (attempt_key,))
         attempts = int(attempts["value"]) if attempts else 0
-        request_id = None
         try:
             request_id = budget.reserve(
-                s, cfg, None, "memory_extract", messages, now, logical_request_id=attempt_key
+                s, cfg, None, "memory_extract", messages, now, logical_request_id=attempt_key,
+                clock=self.clock,
             )
-            attempts += 1
-            s.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (attempt_key, str(attempts))
-            )
+            try:
+                attempts += 1
+                s.execute(
+                    "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (attempt_key, str(attempts))
+                )
+            except BaseException:
+                budget.settle(s, cfg, request_id)
+                raise
             response = await budget.complete(
                 self.model,
                 self.store,
@@ -1078,8 +1060,6 @@ class Core(Runtime):
                 "memory_extract",
                 self.clock,
             )
-            budget.settle(s, cfg, request_id, response)
-            request_id = None
             extraction = Extraction.model_validate_json(response.text)
             if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
                 return False
@@ -1109,9 +1089,8 @@ class Core(Runtime):
                 s.execute("DELETE FROM runtime_meta WHERE key=?", (attempt_key,))
             return True
         except Exception as error:
-            if request_id:
-                budget.settle(s, cfg, request_id)
             if isinstance(error, CoreError) and error.code in {
+                "BACKGROUND_YIELD_TO_CHAT",
                 "DAILY_BUDGET_EXHAUSTED",
                 "MONTHLY_BUDGET_EXHAUSTED",
                 "UNKNOWN_PRICING",

@@ -14,11 +14,11 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 
 from companion.budget import total_monthly
 from companion.contracts import CoreError, StrictModel
-from companion.media_provider import HTTPMediaProvider, MediaEndpoint, MediaResult
+from companion.media_provider import HTTPMediaProvider, MediaResult
 from companion.observation import ObservationEvent
 from companion.policy import ConsentRequest
 from companion.privacy import epoch, redact
@@ -36,26 +36,6 @@ MIMES = {
     "android": {"application/xml"},
     "speech": {"text/plain"},
 }
-
-
-class MediaConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: bool = False
-    max_session_seconds: int = Field(default=180, ge=5, le=600)
-    max_session_bytes: int = Field(default=2_000_000, ge=1024, le=50_000_000)
-    max_daily_bytes: int = Field(default=10_000_000, ge=0, le=1_000_000_000)
-    max_chunk_bytes: int = Field(default=64_000, ge=1024, le=64_000)
-    max_output_bytes: int = Field(default=256_000, ge=1024, le=2_000_000)
-    max_active_sessions: int = Field(default=2, ge=1, le=5)
-    daily_micro_usd: int = Field(default=0, ge=0)
-    provider_timeout_seconds: int = Field(default=20, ge=1, le=60)
-    speech_voice: str = Field(default="alloy", min_length=1, max_length=128)
-    voice_adapter: str = "media_voice"
-    camera_adapter: str = "media_camera"
-    android_adapter: str = "media_android"
-    stt: MediaEndpoint = Field(default_factory=MediaEndpoint)
-    tts: MediaEndpoint = Field(default_factory=MediaEndpoint)
-    vision: MediaEndpoint = Field(default_factory=MediaEndpoint)
 
 
 class MediaSessionRequest(StrictModel):

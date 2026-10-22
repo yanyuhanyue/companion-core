@@ -9,9 +9,9 @@ from PIL import Image
 
 from companion import budget, live_text, paid_budget
 from companion.config import ObservationAdapterConfig
-from companion.content import ContentConfig
 from companion.contracts import CoreError
 from companion.image_input import ImageInputPolicy
+from companion.media_config import ContentConfig
 from companion.model import ModelClient
 from companion.store import encode
 from tests.conftest import run
@@ -303,6 +303,8 @@ def test_current_image_scope_has_no_hidden_share_history_or_extra_call_allowance
         "dns_stop",
         "unknown_usage",
         "epoch_after_vision",
+        "media_hash_after_vision",
+        "model_getter",
         "reserve",
         "signature",
         "ledger",
@@ -329,6 +331,8 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
 
     def model(request):
         calls.append(request)
+        if failure == "media_hash_after_vision":
+            core.store.execute("UPDATE content_items SET media_sha256=?", ("0" * 64,))
         if failure == "epoch_after_vision":
             with core.store.transaction():
                 core.ledger.expire_events(
@@ -388,6 +392,12 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
         ):
             core.model = ModelClient(core.settings, model_http)
             core.content.options = core.settings.content
+            if failure == "model_getter":
+
+                def unavailable_model():
+                    raise RuntimeError("synthetic model getter failure")
+
+                core.content.model = unavailable_model
             if failure == "lease_before_dispatch":
 
                 async def change_lease(request):
@@ -468,9 +478,18 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
             assert window.status()["state"] in {"STOPPED", "CORE_STOP_UNCONFIRMED"}
             if failure in {"dns_stop", "signature", "ledger"}:
                 assert downloads == calls == []
-            if failure in {"mime", "pixels", "reserve", "lease_before_dispatch",
+            if failure in {"mime", "pixels", "reserve", "model_getter", "lease_before_dispatch",
                            "upload_bytes", "upload_mime", "upload_lease"}:
                 assert calls == [] and len(downloads) == 1
+            if failure == "model_getter":
+                assert not core.store.one("SELECT 1 FROM model_usage")
+                assert not core.store.one("SELECT 1 FROM model_admissions")
+            if failure == "media_hash_after_vision":
+                assert len(calls) == 1
+                assert not core.store.one("SELECT 1 FROM observations")
+                usage = core.store.one("SELECT * FROM model_usage")
+                assert usage["state"] == "SETTLED"
+                assert usage["input_tokens"] == 100 and usage["output_tokens"] == 10
             if failure == "epoch_after_vision":
                 usage = core.store.one("SELECT * FROM model_usage")
                 assert usage["state"] == "UNKNOWN"

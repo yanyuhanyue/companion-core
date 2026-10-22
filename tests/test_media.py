@@ -21,14 +21,14 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.media import (
     MediaChunk,
-    MediaConfig,
     MediaService,
     MediaSessionRequest,
     android_text,
     erase_media_links,
 )
 from companion.media_api import register_media_routes
-from companion.media_provider import HTTPMediaProvider, MediaEndpoint, MediaResult
+from companion.media_config import MediaConfig, MediaEndpoint
+from companion.media_provider import HTTPMediaProvider, MediaResult
 from companion.store import Store
 from tests.conftest import ingest, run
 
