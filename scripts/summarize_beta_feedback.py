@@ -53,9 +53,22 @@ def snapshot(record, report, raw):
             and record["trace_ref_sha256"] is not None, "TRACE_MISMATCH")
     configured = report.get("configured_candidate_sha")
     require(configured is None or configured == record["candidate_sha"], "CANDIDATE_MISMATCH")
+    approval = report.get("configured_approval_sha256")
+    require(approval is None or approval == record["authorization_refs"]["R3"],
+            "APPROVAL_MISMATCH")
+    runtime = record["evidence_type"] == "authorized_runtime"
+    if runtime:
+        require(approval is not None and configured is not None, "RUNTIME_PINS_REQUIRED")
     require(report.get("blockers") == [], "INSPECTOR_BLOCKED")
     trace = report.get("trace", {})
     require(trace.get("state") in {"RECORDED", "REDACTED"}, "TRACE_UNAVAILABLE")
+    if runtime:
+        binding = trace.get("recorded_window", {})
+        require(binding.get("state") == "RECORDED"
+                and binding.get("execution") == "approved_live"
+                and binding.get("approval_sha256") == record["authorization_refs"]["R3"]
+                and binding.get("candidate_sha") == record["candidate_sha"],
+                "EVENT_APPROVAL_MISMATCH")
     require(isinstance(trace.get("jobs"), list) and len(trace["jobs"]) <= 20, "JOB_LIMIT")
     calls = []
     for job in trace["jobs"]:
@@ -72,6 +85,14 @@ def snapshot(record, report, raw):
                 require(all(call.get(key) is None for key in USAGE_FIELDS[:4]),
                         "UNKNOWN_IS_NOT_OBSERVED_USAGE")
             calls.append(call)
+        if runtime and (job.get("context", {}).get("memory")
+                        or any(call.get("scenario") == "memory_review" for call in items)):
+            require(record["authorization_refs"]["R5"] is not None, "MEMORY_APPROVAL_REQUIRED")
+        if runtime and (job.get("context", {}).get("images")
+                        or any(call.get("scenario") == "content_vision" for call in items)):
+            require(record["authorization_refs"]["media"] is not None, "MEDIA_APPROVAL_REQUIRED")
+    if runtime and any(call["paid_dispatch_recorded"] for call in calls):
+        require(record["authorization_refs"]["R4"] is not None, "PAID_APPROVAL_REQUIRED")
     require(isinstance(trace.get("outbox"), dict)
             and set(trace["outbox"]) <= OUTBOX_STATES
             and all(number(n) for n in trace["outbox"].values()), "OUTBOX_SHAPE")
@@ -211,10 +232,11 @@ def summarize(manifest_path):
             },
             "ratings": {key: {
                 "n": len(values := [r["ratings"][key] for r in records
-                                    if r["ratings"][key] is not None]),
+                                    if r["ratings"].get(key) is not None]),
                 "mean": sum(values) / len(values) if values else None,
             } for key in ("naturalness", "relevance", "source_accuracy", "memory_correctness",
-                          "initiative_comfort")},
+                          "initiative_comfort", "privacy_comfort", "duplication_disruption",
+                          "diary_authenticity", "interest_spontaneity")},
             "coverage_observations": dict(Counter(
                 f"{name}:{coverage}" for r in records
                 for name, coverage in r.get("coverage_observations", {}).items()

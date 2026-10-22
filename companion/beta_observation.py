@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from companion.ops_status import _ReadView, schema_head
+from companion.paid_budget import sha
 from companion.privacy import epoch
 
 
@@ -45,6 +46,9 @@ def _context(view, job_id, current_epoch):
         raise ValueError("CONTEXT_TOO_LARGE")
     value = json.loads(row["value"])
     epoch = _number(value.get("privacy_epoch"))
+    if epoch is None or epoch != current_epoch:
+        return {"state": "STALE_EPOCH", "source_validity": "NOT_REVALIDATED",
+                "privacy_epoch": epoch}
     sources, memories = value.get("sources", []), value.get("memory_sources", [])
     images = value.get("image_sources", [])
     if not isinstance(sources, list) or len(sources) > 10:
@@ -80,6 +84,124 @@ def _context(view, job_id, current_epoch):
             )},
         } for source in images],
     }
+
+
+def _memory_selection(view, job_id, event_id, current_epoch):
+    """Project persisted decisions only; never rerun retrieval or infer the model's reason."""
+    result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+    row = view.one("SELECT value FROM runtime_meta WHERE key=?", ("live_text_memory:" + job_id,))
+    if row is None:
+        return result
+    try:
+        if len(row["value"]) > 131072:
+            raise ValueError
+        value = json.loads(row["value"])
+        if _number(value.get("privacy_epoch")) != current_epoch:
+            return {**result, "state": "STALE_EPOCH"}
+        candidates, selected = value["candidates"], value["selected"]
+        history = value["history_sources"]
+        if (value["event_id"] != event_id or not _digest(value["plan_sha256"])
+            or not isinstance(candidates, list) or len(candidates) > 6
+            or not isinstance(history, list) or len(history) > 10
+            or sha(candidates) != value["candidates_sha256"]
+            or sha(history) != value["history_sources_sha256"]
+            or any(not isinstance(s["memory_id"], str) or not 1 <= len(s["memory_id"]) <= 256
+                   for s in candidates)
+            or len({s["memory_id"] for s in candidates}) != len(candidates)
+            or bool(candidates) != bool(_digest(value["review_payload_sha256"]))):
+            raise ValueError
+        request = value["review_request_id"]
+        if selected is None:
+            if not candidates or request is not None or value["selected_sha256"] is not None:
+                raise ValueError
+            state = "REVIEW_PENDING"
+        else:
+            if (not isinstance(selected, list) or len(selected) > len(candidates)
+                or sha(selected) != value["selected_sha256"]
+                or any(s not in candidates for s in selected)
+                or len({s["memory_id"] for s in selected}) != len(selected)):
+                raise ValueError
+            state = "SELECTION_RECORDED" if candidates else "NO_CANDIDATES"
+            if candidates:
+                if not isinstance(request, str) or not 1 <= len(request) <= 256:
+                    raise ValueError
+                usage = view.one(
+                    "SELECT m.state,m.scenario,a.payload_sha256 FROM model_usage m "
+                    "LEFT JOIN model_admissions a USING(request_id) "
+                    "WHERE m.request_id=? AND m.job_id=?", (request, job_id),
+                )
+                if (not usage or usage["state"] != "SETTLED"
+                    or usage["scenario"] != "memory_review"
+                    or usage["payload_sha256"] != value["review_payload_sha256"]):
+                    raise ValueError
+            elif request is not None:
+                raise ValueError
+        context = view.one("SELECT value FROM runtime_meta WHERE key=?",
+                           ("live_text_context:" + job_id,))
+        frozen = None
+        if context is not None:
+            if len(context["value"]) > 131072:
+                raise ValueError
+            context = json.loads(context["value"])
+            frozen = context["memory_sources"]
+            if (context["event_id"] != event_id or context["privacy_epoch"] != current_epoch
+                or context["plan_sha256"] != value["plan_sha256"] or selected is None
+                or not isinstance(frozen, list) or len(frozen) > len(selected)
+                or any(s not in selected for s in frozen)
+                or len({s["memory_id"] for s in frozen}) != len(frozen)):
+                raise ValueError
+        return {
+            **result, "state": state, "candidate_count": len(candidates),
+            "selected_count": len(selected) if selected is not None else None,
+            "frozen_context_count": len(frozen) if frozen is not None else None,
+            "selection_reason": "NOT_RECORDED", "discarded_history": "NOT_RECORDED",
+            "candidates": [{
+                "memory_ref_sha256": _hash(source["memory_id"]),
+                "disposition": (
+                    "REVIEW_PENDING" if selected is None else
+                    "NOT_SELECTED_BY_RECORDED_REVIEW" if source not in selected else
+                    "CHAT_CONTEXT_NOT_RECORDED" if frozen is None else
+                    "IN_FROZEN_CHAT_CONTEXT" if source in frozen else "NOT_IN_FROZEN_CHAT_CONTEXT"
+                ),
+            } for source in candidates],
+        }
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return {**result, "state": "INCONSISTENT"}
+
+
+def _recorded_window(view, event_id, current_epoch):
+    """Bind an event to its persisted window, independently of today's configuration."""
+    result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+    row = view.one("SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,))
+    if row is None:
+        return result
+    try:
+        if len(row["value"]) > 65536:
+            raise ValueError
+        value = json.loads(row["value"])
+        if _number(value.get("privacy_epoch")) != current_epoch:
+            return {**result, "state": "STALE_EPOCH"}
+        plan = _digest(value["window_sha256"])
+        if not plan or value["event_id"] != event_id:
+            raise ValueError
+        history = view.one("SELECT value FROM runtime_meta WHERE key=?",
+                           ("live_text_window:" + plan,))
+        if history is None or len(history["value"]) > 131072:
+            raise ValueError
+        history = json.loads(history["value"])
+        approval, binding = history["approval"], history["binding"]
+        if (history["state"] not in {"OPEN", "STOPPED", "RETIRED"}
+            or approval["plan_sha256"] != plan or binding["plan_sha256"] != plan
+            or binding["approval_sha256"] != sha(approval)
+            or binding["privacy_epoch"] != current_epoch
+            or not _digest(approval["approval_sha256"])
+            or not re.fullmatch(r"[a-f0-9]{40}", approval["candidate_sha"])
+            or approval["execution"] not in {"local_synthetic", "approved_live"}):
+            raise ValueError
+        return {**result, "state": "RECORDED", "plan_sha256": plan,
+                **{key: approval[key] for key in ("approval_sha256", "candidate_sha", "execution")}}
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return {**result, "state": "INCONSISTENT"}
 
 
 def _trace(view, trace_id):
@@ -142,6 +264,11 @@ def _trace(view, trace_id):
                                     if job["last_error_code"] else None),
             "context": ({"state": "REDACTED", "source_validity": "NOT_REVALIDATED"}
                         if event["redacted"] else _context(view, job["job_id"], current_epoch)),
+            "memory_selection": (
+                {"state": "REDACTED", "source_validity": "NOT_REVALIDATED"}
+                if event["redacted"] else
+                _memory_selection(view, job["job_id"], event["event_id"], current_epoch)
+            ),
             "model_attempt_count": len(calls), "model_calls": calls,
         })
     deliveries = view.rows(
@@ -153,6 +280,10 @@ def _trace(view, trace_id):
             "producer": "qq.onebot", "subject": "owner_private_input",
             "event_occurred_at_utc": None if event["redacted"] else _utc(event["occurred_at"]),
             "event_ref_sha256": _hash(event["event_id"]), "privacy_epoch": current_epoch,
+            "recorded_window": (
+                {"state": "REDACTED", "source_validity": "NOT_REVALIDATED"}
+                if event["redacted"] else _recorded_window(view, event["event_id"], current_epoch)
+            ),
             "jobs": inspected,
             "outbox": {state: states[state] for state in (
                 "PENDING", "LEASED", "SENDING", "RETRY_WAIT", "SENT", "DELIVERY_UNCERTAIN",

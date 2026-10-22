@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def feedback(kind="local_synthetic"):
     record = json.loads((ROOT / "docs/qq-beta/p12-beta-feedback.template.json").read_text("utf-8"))
     record["evidence_type"] = kind
+    # Fabricated references for schema tests, never an approval receipt.
+    record["authorization_refs"].update(R3="d" * 64, R4="e" * 64)
     record["reason_private"] = "PRIVATE_REASON_NEVER_PRINT"
     return record
 
@@ -60,8 +62,14 @@ def inspector(index, when="2026-10-21T16:01:00+00:00", state="SETTLED"):
             "accounted_or_reserved_micro_usd": 5 if settled else 10,
             "reservation_micro_usd": 10}
     return {"schema_version": 1, "read_only": True, "diagnostic_only": True,
+            "configured_approval_sha256": "d" * 64,
             "trace_ref_sha256": ref, "configured_candidate_sha": "c" * 40, "blockers": [],
             "trace": {"state": "RECORDED", "event_ref_sha256": ref,
+                      "recorded_window": {
+                          "state": "RECORDED", "plan_sha256": "a" * 64,
+                          "approval_sha256": "d" * 64, "candidate_sha": "c" * 40,
+                          "execution": "approved_live",
+                      },
                       "event_occurred_at_utc": when, "outbox": {"SENT": 1},
                       "jobs": [{"model_calls": [call], "model_attempt_count": 1}]}}
 
@@ -181,7 +189,7 @@ def test_manual_feedback_and_later_inspector_for_same_trace_cannot_double_count(
     report = inspector(1)
     # The real Inspector's event and trace hashes represent distinct identifiers.
     report["trace"]["event_ref_sha256"] = "f" * 64
-    manual, inspected = feedback("authorized_runtime"), feedback("authorized_runtime")
+    manual, inspected = feedback(), feedback()
     for record in (manual, inspected):
         record["trace_ref_sha256"] = report["trace_ref_sha256"]
         phone_pair(record, 1)

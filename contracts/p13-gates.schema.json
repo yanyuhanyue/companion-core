@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "scope", "baseline", "runtime", "packages", "private_beta_ready", "production_ready"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "scope": {"const": "P13_00_AND_A_THROUGH_F"},
+    "baseline": {"type": "object"},
+    "runtime": {"type": "object"},
+    "packages": {
+      "type": "object", "minProperties": 21, "maxProperties": 21,
+      "propertyNames": {"pattern": "^(A[01]|B[0-3]|C[1-4]|D[1-3]|E[1-4]|F[1-4])$"},
+      "additionalProperties": {"$ref": "#/$defs/package"}
+    },
+    "private_beta_ready": {"const": false},
+    "production_ready": {"const": false}
+  },
+  "$defs": {
+    "sha": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+    "offline": {"enum": ["NOT_RUN", "OFFLINE_PASS"]},
+    "live": {"enum": ["NOT_RUN", "LIMITED_LIVE_PASS"]},
+    "package": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "evidence", "runtime_samples", "runtime_approval_sha256", "runtime_evidence_sha256", "natural_days", "pr", "blockers"],
+      "properties": {
+        "status": {"enum": ["NOT_RUN", "DONE", "OFFLINE_PASS", "BLOCKED"]},
+        "evidence": {
+          "type": "object", "additionalProperties": false,
+          "required": ["implementation", "offline", "protocol", "provider", "phone", "cross_natural_days", "recovery", "release"],
+          "properties": {
+            "implementation": {"enum": ["NOT_RUN", "DONE"]},
+            "offline": {"$ref": "#/$defs/offline"},
+            "protocol": {
+              "type": "object", "additionalProperties": false, "required": ["local", "platform"],
+              "properties": {"local": {"$ref": "#/$defs/offline"}, "platform": {"$ref": "#/$defs/live"}}
+            },
+            "provider": {"$ref": "#/$defs/live"},
+            "phone": {"enum": ["NOT_RUN", "CONFIRMED"]},
+            "cross_natural_days": {"enum": ["NOT_RUN", "OBSERVED"]},
+            "recovery": {
+              "type": "object", "additionalProperties": false, "required": ["local", "business"],
+              "properties": {"local": {"$ref": "#/$defs/offline"}, "business": {"$ref": "#/$defs/live"}}
+            },
+            "release": {"const": "DISABLED"}
+          }
+        },
+        "runtime_samples": {"type": "integer", "minimum": 0},
+        "runtime_approval_sha256": {"$ref": "#/$defs/sha"},
+        "runtime_evidence_sha256": {"$ref": "#/$defs/sha"},
+        "natural_days": {"type": ["integer", "null"], "minimum": 1},
+        "pr": {"type": ["object", "null"]},
+        "blockers": {"type": "array", "items": {"type": "string"}}
+      },
+      "allOf": [
+        {
+          "if": {"anyOf": [
+            {"properties": {"runtime_samples": {"minimum": 1}}},
+            {"properties": {"evidence": {"properties": {"protocol": {"properties": {"platform": {"const": "LIMITED_LIVE_PASS"}}}}}}},
+            {"properties": {"evidence": {"properties": {"provider": {"const": "LIMITED_LIVE_PASS"}}}}},
+            {"properties": {"evidence": {"properties": {"phone": {"const": "CONFIRMED"}}}}},
+            {"properties": {"evidence": {"properties": {"cross_natural_days": {"const": "OBSERVED"}}}}},
+            {"properties": {"evidence": {"properties": {"recovery": {"properties": {"business": {"const": "LIMITED_LIVE_PASS"}}}}}}}
+          ]},
+          "then": {"properties": {"runtime_samples": {"minimum": 1}, "runtime_approval_sha256": {"type": "string"}, "runtime_evidence_sha256": {"type": "string"}}}
+        },
+        {
+          "if": {"properties": {"evidence": {"properties": {"cross_natural_days": {"const": "OBSERVED"}}}}},
+          "then": {"properties": {"natural_days": {"type": "integer", "minimum": 1}}},
+          "else": {"properties": {"natural_days": {"type": "null"}}}
+        }
+      ]
+    }
+  }
+}

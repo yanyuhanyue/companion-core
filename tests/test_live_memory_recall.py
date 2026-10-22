@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 from websockets.asyncio.server import serve
 
-from companion import budget, live_text
+from companion import beta_observation, budget, live_text
 from companion.config import LiveTextWindowApproval
 from companion.contracts import CoreError
 from companion.model import ModelClient
@@ -173,6 +173,19 @@ def test_real_bge_only_sees_approved_rows_and_two_settled_stages_share_one_reply
             await capture()
             assert await core.run_once()
             assert len(calls) == 2
+            trace = core.store.one(
+                "SELECT e.trace_id FROM events e JOIN jobs j USING(event_id) "
+                "JOIN model_usage m USING(job_id) WHERE m.scenario='memory_review' LIMIT 1",
+            )
+            diagnostic = beta_observation.inspect_context(core.settings, trace["trace_id"])
+            binding = diagnostic["trace"]["recorded_window"]
+            assert binding["state"] == "RECORDED"
+            assert binding["plan_sha256"] == core.settings.live_text_window.plan_sha256
+            assert binding["approval_sha256"] == core.settings.live_text_window.approval_sha256
+            selection = diagnostic["trace"]["jobs"][0]["memory_selection"]
+            assert selection["state"] == "SELECTION_RECORDED"
+            assert selection["candidate_count"] == selection["frozen_context_count"] == 1
+            assert selection["candidates"][0]["disposition"] == "IN_FROZEN_CHAT_CONTEXT"
             assert all(ids == [memory_id] for ids in scores)
             assert "紫云三号" not in encode(calls)
             assert "未批准私密特征" not in encode(calls)
