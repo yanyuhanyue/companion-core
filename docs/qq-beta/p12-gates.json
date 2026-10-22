@@ -1,0 +1,352 @@
+{
+  "record_version": 1,
+  "task_id": "CC-P12-CORE-BETA-20261022",
+  "scope": "P12-00_AND_A_THROUGH_E",
+  "checked_at_utc": "2026-10-22T02:30:19.898739+00:00",
+  "taskbook_sha256": "9d0ee9b597c35121987a40b40ec0704ca384ce14ba786bad82a6fe3acc103403",
+  "baseline": {
+    "main_sha": "c6493d481676e1e6684fb49564c2557224950d20",
+    "main_tree_sha": "c5af9d2b5e09f1c8b74d7a53285d77ce893b0b1d",
+    "open_prs_at_check": 0,
+    "main_ci": {
+      "run_id": 39707468712,
+      "conclusion": "SUCCESS",
+      "profile": "docs"
+    },
+    "last_full_product_sha": "549bc587e55647c39f796d4f92aaafbaaa789d2d",
+    "last_full_product_ci": {
+      "run_id": 39643703716,
+      "conclusion": "SUCCESS",
+      "profile": "full"
+    }
+  },
+  "historical_runtime": {
+    "observed_at": "2026-10-22T01:36:03.288229+00:00",
+    "current_state": "NOT_RECHECKED",
+    "server_connection_this_batch": false,
+    "candidate_sha": "273d1052faa7ed6f0d6b8a7522a1ac59ce558b71",
+    "image_ids": {
+      "bridge": "sha256:bdcbca12889725504b50a6549e55b1d91b198983f3a8b2d0f1ad7c01802fd6ca",
+      "core": "sha256:ccd0399c8ab91563a8941a2730255f224372d4f91d35351f70ca02274c2ae474",
+      "protocol": "sha256:d007db2802e9aa63849957206611153bc5307ec3f34f20fa78cb45e7a16b3bf2"
+    },
+    "registry_image_digests": {
+      "core": null,
+      "bridge": null,
+      "protocol": null
+    },
+    "config_file_sha256": {
+      "core": "60d6d46eb345727ef5271d8cdb64735f6901c3266b720532bb60c652b366c06f",
+      "bridge": "8379c2406bea66ac0648a0d22419919400a9e1921947ada61861ba41327afd3e"
+    },
+    "schema": "0017_paid_model_gate",
+    "privacy_epoch": 2,
+    "closed_receipt_sha256": "0d4715429f5d225f8e0874cc73ba3c27095081636b48036f1679a50174dc0a27",
+    "all_chat_containers_stopped_at_observation": true,
+    "latest_custody": {
+      "budget_identity_sha256": "1e71a1bf94536b0d7d78ffc6fa5d890488b9dea8fd735cfcafe517b39503166c",
+      "budget_head_sha256": "7332d936e8bd293591de74e0b6e9ec52da92e5ad2e861d3a8560d682f35a5940",
+      "budget_file_sha256": "ac136853ed97f8c936f4a0be25bfa4f0159b07f39729f40ed00c8aade55102d6",
+      "window_head_sha256": "f2a63050b7601ce33435b8509aaf48abfc9fa32e4262c578336f0450c174d205",
+      "window_file_sha256": "a02022bb9e633f3fe45b60e855931540a87ffce5dd0100b151fdac58a1e63008",
+      "erasure_ledger_sha256": "eb579cec25bd3f6ce8a089059fad815d2bc53115f0d9a4bace9e67f83d48e8f4"
+    }
+  },
+  "historical_acceptance": {
+    "report": "p11-qq-acceptance-20261022.md",
+    "level": "LIMITED_LIVE_PASS",
+    "inputs": 6,
+    "model_calls": 8,
+    "phone_confirmed_replies": 6,
+    "configured_cost_micro_usd": 1020,
+    "provider_invoice_micro_usd": null,
+    "phone_e2e_p50_ms": null,
+    "phone_e2e_p95_ms": null,
+    "quote_body": "MISSING",
+    "forward_body": "UNFETCHED",
+    "card_body": "NOT_FETCHED",
+    "image_live": "NOT_RUN",
+    "business_memory_full_lifecycle": "NOT_RUN"
+  },
+  "private_beta_required_settings": {
+    "proactive_enabled": false,
+    "memory_enabled": false,
+    "diary_enabled": false,
+    "affect_enabled": false,
+    "content_enabled": false,
+    "observation_enabled": false,
+    "consolidation_enabled": false,
+    "reflection_enabled": false,
+    "goals_enabled": false,
+    "wake_enabled": false,
+    "exploration_enabled": false,
+    "social_enabled": false,
+    "voice_enabled": false,
+    "camera_enabled": false,
+    "android_enabled": false
+  },
+  "new_runtime_authority": {
+    "R1_restore": null,
+    "R2_deployment": null,
+    "R3_qq": null,
+    "R4_paid_model": null,
+    "R5_memory_write": null,
+    "R5_readonly_facts": null,
+    "R6_reader": null,
+    "media_fetch": null,
+    "paid_vision": null,
+    "private_diary": null,
+    "affect_expression": null,
+    "autonomous_send": null
+  },
+  "packages": {
+    "A1": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "A2": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "B1": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "B2": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "B3": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "C1": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "C2": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "C3": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "D1": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "D2": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "D3": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "E1": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "E2": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "E3": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    },
+    "E4": {
+      "status": "NOT_RUN",
+      "evidence": {
+        "code": "NOT_RUN",
+        "offline": "NOT_RUN",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": null,
+      "ci_run": null,
+      "new_runtime_approval": null
+    }
+  },
+  "private_beta_ready": false,
+  "production_ready": false,
+  "limitations": [
+    "Historical closed receipts are not a current host inspection or new authority.",
+    "Registry manifest digests were not observed; local Docker image IDs are recorded separately.",
+    "QQ login volumes, original services and whole-host recovery remain outside prior application-set restore evidence.",
+    "Cross-day human quality cannot be filled from synthetic clocks or repeated short-window renewal."
+  ]
+}
