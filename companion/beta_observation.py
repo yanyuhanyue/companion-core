@@ -28,6 +28,14 @@ def _state(value, allowed):
     return value if value in allowed else "UNKNOWN"
 
 
+def _utc(value):
+    try:
+        when = datetime.fromisoformat(value)
+        return when.astimezone(UTC).isoformat() if when.tzinfo else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _context(view, job_id, current_epoch):
     row = view.one("SELECT value FROM runtime_meta WHERE key=?",
                    ("live_text_context:" + job_id,))
@@ -76,7 +84,8 @@ def _context(view, job_id, current_epoch):
 
 def _trace(view, trace_id):
     events = view.rows(
-        "SELECT e.event_id,e.redacted FROM events e JOIN conversations c USING(conversation_id) "
+        "SELECT e.event_id,e.redacted,e.occurred_at FROM events e "
+        "JOIN conversations c USING(conversation_id) "
         "WHERE e.trace_id=? AND e.actor_id='owner' AND e.privacy_scope='private' "
         "AND e.source='qq.onebot' AND c.scope='private' AND c.owner_actor_id='owner' LIMIT 2",
         (trace_id,),
@@ -92,7 +101,8 @@ def _trace(view, trace_id):
     inspected = []
     for job in jobs:
         usage = view.rows(
-            "SELECT m.state,m.scenario,m.input_tokens,m.cached_input_tokens,m.output_tokens,"
+            "SELECT m.request_id,m.state,m.scenario,m.input_tokens,m.cached_input_tokens,"
+            "m.output_tokens,a.logical_request_id,"
             "m.billed_micro_usd,m.pricing_known,a.io_started_at,a.attempt_number,"
             "a.reserved_micro_usd FROM model_usage m LEFT JOIN model_admissions a "
             "USING(request_id) WHERE m.job_id=? ORDER BY m.rowid LIMIT 101", (job["job_id"],),
@@ -104,6 +114,10 @@ def _trace(view, trace_id):
             # RESERVED/UNKNOWN tokens may be estimates. Demo calls are never real usage proof.
             actual = row["state"] == "SETTLED" and row["io_started_at"] is not None
             calls.append({
+                "request_ref_sha256": _hash(row["request_id"]),
+                "logical_request_ref_sha256": (
+                    _hash(row["logical_request_id"]) if row["logical_request_id"] else None
+                ),
                 "state": _state(row["state"], {"RESERVED", "SETTLED", "UNKNOWN"}),
                 "scenario": _state(row["scenario"], {"chat", "memory_review", "content_vision"}),
                 "paid_dispatch_recorded": row["io_started_at"] is not None,
@@ -137,6 +151,7 @@ def _trace(view, trace_id):
     states = {row["state"]: row["count"] for row in deliveries}
     return {"state": "REDACTED" if event["redacted"] else "RECORDED",
             "producer": "qq.onebot", "subject": "owner_private_input",
+            "event_occurred_at_utc": None if event["redacted"] else _utc(event["occurred_at"]),
             "event_ref_sha256": _hash(event["event_id"]), "privacy_epoch": current_epoch,
             "jobs": inspected,
             "outbox": {state: states[state] for state in (

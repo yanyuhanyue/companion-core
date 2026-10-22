@@ -1,0 +1,477 @@
+{
+  "record_version": 1,
+  "task_id": "CC-P12-CORE-BETA-20261022",
+  "scope": "P12-00_AND_A_THROUGH_E",
+  "checked_at_utc": "2026-10-22T02:30:19.898739+00:00",
+  "taskbook_sha256": "9d0ee9b597c35121987a40b40ec0704ca384ce14ba786bad82a6fe3acc103403",
+  "baseline": {
+    "main_sha": "c6493d481676e1e6684fb49564c2557224950d20",
+    "main_tree_sha": "c5af9d2b5e09f1c8b74d7a53285d77ce893b0b1d",
+    "open_prs_at_check": 0,
+    "main_ci": {
+      "run_id": 39707468712,
+      "conclusion": "SUCCESS",
+      "profile": "docs"
+    },
+    "last_full_product_sha": "549bc587e55647c39f796d4f92aaafbaaa789d2d",
+    "last_full_product_ci": {
+      "run_id": 39643703716,
+      "conclusion": "SUCCESS",
+      "profile": "full"
+    }
+  },
+  "historical_runtime": {
+    "observed_at": "2026-10-22T01:36:03.288229+00:00",
+    "current_state": "NOT_RECHECKED",
+    "server_connection_this_batch": false,
+    "candidate_sha": "273d1052faa7ed6f0d6b8a7522a1ac59ce558b71",
+    "image_ids": {
+      "bridge": "sha256:bdcbca12889725504b50a6549e55b1d91b198983f3a8b2d0f1ad7c01802fd6ca",
+      "core": "sha256:ccd0399c8ab91563a8941a2730255f224372d4f91d35351f70ca02274c2ae474",
+      "protocol": "sha256:d007db2802e9aa63849957206611153bc5307ec3f34f20fa78cb45e7a16b3bf2"
+    },
+    "registry_image_digests": {
+      "core": null,
+      "bridge": null,
+      "protocol": null
+    },
+    "config_file_sha256": {
+      "core": "60d6d46eb345727ef5271d8cdb64735f6901c3266b720532bb60c652b366c06f",
+      "bridge": "8379c2406bea66ac0648a0d22419919400a9e1921947ada61861ba41327afd3e"
+    },
+    "schema": "0017_paid_model_gate",
+    "privacy_epoch": 2,
+    "closed_receipt_sha256": "0d4715429f5d225f8e0874cc73ba3c27095081636b48036f1679a50174dc0a27",
+    "all_chat_containers_stopped_at_observation": true,
+    "latest_custody": {
+      "budget_identity_sha256": "1e71a1bf94536b0d7d78ffc6fa5d890488b9dea8fd735cfcafe517b39503166c",
+      "budget_head_sha256": "7332d936e8bd293591de74e0b6e9ec52da92e5ad2e861d3a8560d682f35a5940",
+      "budget_file_sha256": "ac136853ed97f8c936f4a0be25bfa4f0159b07f39729f40ed00c8aade55102d6",
+      "window_head_sha256": "f2a63050b7601ce33435b8509aaf48abfc9fa32e4262c578336f0450c174d205",
+      "window_file_sha256": "a02022bb9e633f3fe45b60e855931540a87ffce5dd0100b151fdac58a1e63008",
+      "erasure_ledger_sha256": "eb579cec25bd3f6ce8a089059fad815d2bc53115f0d9a4bace9e67f83d48e8f4"
+    }
+  },
+  "historical_acceptance": {
+    "report": "p11-qq-acceptance-20261022.md",
+    "level": "LIMITED_LIVE_PASS",
+    "inputs": 6,
+    "model_calls": 8,
+    "phone_confirmed_replies": 6,
+    "configured_cost_micro_usd": 1020,
+    "provider_invoice_micro_usd": null,
+    "phone_e2e_p50_ms": null,
+    "phone_e2e_p95_ms": null,
+    "quote_body": "MISSING",
+    "forward_body": "UNFETCHED",
+    "card_body": "NOT_FETCHED",
+    "image_live": "NOT_RUN",
+    "business_memory_full_lifecycle": "NOT_RUN"
+  },
+  "private_beta_required_settings": {
+    "proactive_enabled": false,
+    "memory_enabled": false,
+    "diary_enabled": false,
+    "affect_enabled": false,
+    "content_enabled": false,
+    "observation_enabled": false,
+    "consolidation_enabled": false,
+    "reflection_enabled": false,
+    "goals_enabled": false,
+    "wake_enabled": false,
+    "exploration_enabled": false,
+    "social_enabled": false,
+    "voice_enabled": false,
+    "camera_enabled": false,
+    "android_enabled": false
+  },
+  "new_runtime_authority": {
+    "R1_restore": null,
+    "R2_deployment": null,
+    "R3_qq": null,
+    "R4_paid_model": null,
+    "R5_memory_write": null,
+    "R5_readonly_facts": null,
+    "R6_reader": null,
+    "media_fetch": null,
+    "paid_vision": null,
+    "private_diary": null,
+    "affect_expression": null,
+    "autonomous_send": null
+  },
+  "packages": {
+    "A1": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "96f697b8e565534a2cefd78031674b7792f6e8ec",
+      "ci_run": 39714809883,
+      "new_runtime_approval": null,
+      "pr_number": 58,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/58",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-qq-media.md",
+      "scope_note": "Ordinary SnowLuma image fields and negative cases verified offline; real CDN, account Vision compatibility, invoice and phone acceptance NOT_RUN."
+    },
+    "A2": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "96f697b8e565534a2cefd78031674b7792f6e8ec",
+      "ci_run": 39714809883,
+      "new_runtime_approval": null,
+      "pr_number": 58,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/58",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-qq-media.md",
+      "scope_note": "Identifier/metadata semantics tested. Full quote/forward retrieval is a disabled proposal; card body requires a separate Reader scope."
+    },
+    "B1": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "OFFLINE_PASS",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "4c811d4978f533f19cd0f4ddf8eb13e827ab2a20",
+      "ci_run": 39716121427,
+      "new_runtime_approval": null,
+      "pr_number": 60,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/60",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-b-memory-lifecycle.md",
+      "scope_note": "Synthetic native lifecycle and old-backup/latest-ledger replay pass. Business-data R5 and phone acceptance NOT_RUN."
+    },
+    "B2": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "OFFLINE_PASS",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "4c811d4978f533f19cd0f4ddf8eb13e827ab2a20",
+      "ci_run": 39716121427,
+      "new_runtime_approval": null,
+      "pr_number": 60,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/60",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-b-memory-lifecycle.md",
+      "scope_note": "Authenticated local WS to Core HTTP v1 control verified; default disabled. Real admission requires business B1 and a fresh exact scope."
+    },
+    "B3": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "4c811d4978f533f19cd0f4ddf8eb13e827ab2a20",
+      "ci_run": 39716121427,
+      "new_runtime_approval": null,
+      "pr_number": 60,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/60",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-b-memory-lifecycle.md",
+      "scope_note": "Evaluation completed, not a retrieval-quality gate: 6/7 held-out necessary memories, one miss retained, no deleted-fact leak; original retrieval unchanged."
+    },
+    "C1": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "a400ae1bd5a4b43c4e0aa0384507670cbe724e42",
+      "ci_run": 39713815747,
+      "new_runtime_approval": null,
+      "pr_number": 57,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/57",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-growth-shadow.md",
+      "scope_note": "Explicit owner feedback remains SHADOW with TTL/source erasure; applying it to real expression remains disabled."
+    },
+    "C2": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "a400ae1bd5a4b43c4e0aa0384507670cbe724e42",
+      "ci_run": 39713815747,
+      "new_runtime_approval": null,
+      "pr_number": 57,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/57",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-growth-shadow.md",
+      "scope_note": "Independent retained sources and simulated/live separation verified; real natural-day interest evidence NOT_RUN."
+    },
+    "C3": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "OFFLINE_PASS",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "a400ae1bd5a4b43c4e0aa0384507670cbe724e42",
+      "ci_run": 39713815747,
+      "new_runtime_approval": null,
+      "pr_number": 57,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/57",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-growth-shadow.md",
+      "scope_note": "Source-backed vetoable reflection and transitive expiry/latest-ledger restore verified on synthetic fixtures."
+    },
+    "D1": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "OFFLINE_PASS",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "1af744c0db9e62aaa4fb2c75cf38a0e825ed4bea",
+      "ci_run": 39714820874,
+      "new_runtime_approval": null,
+      "pr_number": 59,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/59",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-diary-life.md",
+      "scope_note": "Synthetic native diary, correction, next-day continuity and deletion/restore pass; real natural-day diary acceptance NOT_RUN."
+    },
+    "D2": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "1af744c0db9e62aaa4fb2c75cf38a0e825ed4bea",
+      "ci_run": 39714820874,
+      "new_runtime_approval": null,
+      "pr_number": 59,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/59",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-diary-life.md",
+      "scope_note": "Read-only goal execution/result/delivery provenance and source expiry verified; phone confirmation stays null."
+    },
+    "D3": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "1af744c0db9e62aaa4fb2c75cf38a0e825ed4bea",
+      "ci_run": 39714820874,
+      "new_runtime_approval": null,
+      "pr_number": 59,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/59",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-diary-life.md",
+      "scope_note": "Source/TTL/candidate/text/private-target checks verified through final dispatch; no real Reader or proactive-send approval."
+    },
+    "E1": {
+      "status": "DONE",
+      "evidence": {
+        "code": "DONE",
+        "offline": "DONE",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
+      "ci_run": 39715593556,
+      "new_runtime_approval": null,
+      "pr_number": 61,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-beta-operations.md",
+      "scope_note": "Two-track verification matrix and explicitly disabled configuration prepared; actual deployed configuration NOT_RECHECKED."
+    },
+    "E2": {
+      "status": "DONE",
+      "evidence": {
+        "code": "DISABLED",
+        "offline": "DONE",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
+      "ci_run": 39715593556,
+      "new_runtime_approval": null,
+      "pr_number": 61,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-beta-operations.md",
+      "scope_note": "Design only. Cumulative limits and permanent beta are not implemented or authorized."
+    },
+    "E3": {
+      "status": "OFFLINE_PASS",
+      "evidence": {
+        "code": "DONE",
+        "offline": "OFFLINE_PASS",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
+      "ci_run": 39715593556,
+      "new_runtime_approval": null,
+      "pr_number": 61,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-beta-operations.md",
+      "scope_note": "Offline private feedback summary and backward-compatible validation pass; submitted evidence and invoices are not revalidated."
+    },
+    "E4": {
+      "status": "DONE",
+      "evidence": {
+        "code": "DONE",
+        "offline": "DONE",
+        "authenticated_local_protocol": "NOT_RUN",
+        "live_platform": "NOT_RUN",
+        "phone_confirmation": null,
+        "cross_natural_days": null,
+        "recovery": "NOT_RUN",
+        "release": "DISABLED"
+      },
+      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
+      "ci_run": 39715593556,
+      "new_runtime_approval": null,
+      "pr_number": 61,
+      "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
+      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "ci_conclusion": "SUCCESS",
+      "evidence_document": "p12-beta-operations.md",
+      "scope_note": "Per-object isolated recovery plan and unapproved template prepared; QQ login volumes, original services and whole-host recovery NOT_RUN."
+    }
+  },
+  "private_beta_ready": false,
+  "production_ready": false,
+  "limitations": [
+    "Historical closed receipts are not a current host inspection or new authority.",
+    "Registry manifest digests were not observed; local Docker image IDs are recorded separately.",
+    "QQ login volumes, original services and whole-host recovery remain outside prior application-set restore evidence.",
+    "Cross-day human quality cannot be filled from synthetic clocks or repeated short-window renewal."
+  ],
+  "delivery_recorded_at_utc": "2026-10-22T03:33:57.009107+00:00",
+  "combined_verification": {
+    "head_sha": "24423869d31c2a2aab670e3bc4847e33315702cb",
+    "command": "./scripts/check.ps1",
+    "state": "OFFLINE_PASS",
+    "passed": 2116,
+    "skipped": 6,
+    "elapsed_seconds": 748.09,
+    "log_sha256": "8cd80585f3a9c860f78cfe66347a4cc03f2b3d971949641799b1358f63c9a4f8",
+    "remote_merge": false,
+    "final_delivery_commits": "Documentation only; final PR HEAD still requires its own CI."
+  },
+  "delivery": {
+    "document": "p12-delivery.md",
+    "open_draft_prs": [
+      57,
+      58,
+      59,
+      60,
+      61
+    ],
+    "merged": false,
+    "taskbook_engineering_completion": "PENDING_EXPLICIT_MERGE_APPROVAL",
+    "actual_p12_image_ids": null,
+    "actual_p12_runtime_config_sha256": null,
+    "exact_final_head_receipt": "Final standalone P12 delivery receipt; self-referential repository HEAD is not prefilled."
+  },
+  "repaired_ci_failure": {
+    "package": "B",
+    "initial_run": 39715581335,
+    "fixed_run": 39716121427,
+    "reason": "Legacy restore assertion now checks the new control generation and all old rows.",
+    "focused_passed": 52,
+    "focused_elapsed_seconds": 55.74
+  }
+}
