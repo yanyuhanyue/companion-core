@@ -37,7 +37,8 @@ model request, schedule or message.
 Social source lifetime is checked while considering a draft, before queuing,
 before leasing the native Outbox and immediately before `begin-send`. The final
 checks also revalidate candidate state/expiry, the social switch, accepted source
-hash/target and the exact outbound text. Source or content changes cancel work
+hash/target, original event, current private owner conversation, action type and
+the exact outbound text. Source or content changes cancel work
 that has not begun I/O, preserving zero send attempts. Already `SENDING` or
 `DELIVERY_UNCERTAIN` records keep their uncertainty and are never treated as
 successfully recalled or made available for replay. Ordinary owner replies keep

@@ -157,7 +157,17 @@ def share_delivery_problem(store, settings, message_id, now):
         != candidate["content_sha256"]
     ):
         return "SOCIAL_SOURCE_CHANGED"
-    delivery = store.one("SELECT content_json FROM outbox WHERE message_id=?", (message_id,))
+    delivery = store.one(
+        "SELECT o.content_json,o.action_type,o.origin_event_id,c.scope,c.owner_actor_id "
+        "FROM outbox o JOIN conversations c USING(conversation_id) WHERE o.message_id=?",
+        (message_id,),
+    )
+    if (
+        not delivery or delivery["action_type"] != "qq.private.proactive"
+        or delivery["origin_event_id"] != candidate["event_id"]
+        or delivery["scope"] != "private" or delivery["owner_actor_id"] != "owner"
+    ):
+        return "SOCIAL_DELIVERY_CHANGED"
     try:
         expected = {"text": share_text(definition, body, canonical)}
         if json.loads(delivery["content_json"]) != expected:

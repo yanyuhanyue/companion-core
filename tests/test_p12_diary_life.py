@@ -204,7 +204,9 @@ def test_share_rechecks_transitive_expiry_at_every_boundary_without_background_w
     assert not core.model.calls
 
 
-@pytest.mark.parametrize("mutation", ["source", "candidate", "content", "disabled"])
+@pytest.mark.parametrize(
+    "mutation", ["source", "candidate", "content", "disabled", "action", "origin", "recipient"]
+)
 def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disabled_scope(
     core, mutation
 ):
@@ -218,8 +220,14 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
         core.store.execute("UPDATE social_candidates SET state='SKIPPED'")
     elif mutation == "content":
         core.store.execute("UPDATE outbox SET content_json=?", (encode({"text": "被替换的正文"}),))
-    else:
+    elif mutation == "disabled":
         core.settings.social_enabled = False
+    elif mutation == "action":
+        core.store.execute("UPDATE outbox SET action_type='qq.private.reply'")
+    elif mutation == "origin":
+        core.store.execute("UPDATE outbox SET origin_event_id='evt_test_1'")
+    else:
+        core.store.execute("UPDATE conversations SET scope='group'")
     with pytest.raises(CoreError, match="SOCIAL_"):
         begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
     result = core.store.one("SELECT * FROM outbox WHERE message_id=?", (queued["message_id"],))

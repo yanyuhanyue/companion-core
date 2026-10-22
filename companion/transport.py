@@ -136,10 +136,12 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             "AND lease_token=? AND lease_until>?",
             (message_id, token, now),
         )
-        if pending and pending["action_type"] == "qq.private.proactive":
+        if pending:
             from companion.social import proactive_allowed, share_delivery_problem
 
-            if not proactive_allowed(store, settings, now):
+            if pending["action_type"] == "qq.private.proactive" and not proactive_allowed(
+                store, settings, now
+            ):
                 raise CoreError("PROACTIVE_SEND_PAUSED", 409)
             problem = share_delivery_problem(store, settings, message_id, now)
         if problem:
