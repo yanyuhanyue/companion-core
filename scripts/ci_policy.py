@@ -150,8 +150,9 @@ def main():
                     from ci_reuse import find_verified_run
 
                 reuse = find_verified_run(name, ref, event)
-            except Exception:
+            except Exception as error:
                 # Reuse is optional; unavailable or malformed evidence runs full CI.
+                print(f"CI reuse unavailable ({type(error).__name__}); running full CI")
                 reuse = None
             if reuse:
                 profile, reason = "reuse", "verified-identical-pr-tree"
