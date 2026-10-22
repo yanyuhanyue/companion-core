@@ -13,7 +13,7 @@ def exploration_evidence(store, settings, trait_id, now):
     """Only completed self goals count; repeats never add another independent day."""
     cutoff = after(now, -86400 * settings.raw_event_retention_days)
     rows = store.rows(
-        "SELECT e.event_id,e.occurred_at,o.source_sha256,o.canonical_url,o.result_status "
+        "SELECT e.event_id,e.occurred_at,e.source,o.source_sha256,o.canonical_url,o.result_status "
         "FROM trait_evidence t JOIN observations o USING(event_id) "
         "JOIN events e USING(event_id) JOIN traits tr USING(trait_id) "
         "WHERE t.trait_id=? AND tr.category='interest' AND o.redacted=0 AND e.redacted=0 "
@@ -26,13 +26,18 @@ def exploration_evidence(store, settings, trait_id, now):
     )
     evidence, hashes, urls = [], set(), set()
     for row in rows:
+        simulated = row["source"] == "observation.simulation"
+        if simulated and settings.mode != "demo":
+            continue
         if row["source_sha256"] in hashes or row["canonical_url"] in urls:
             continue
         if expired_sources(store, [row["event_id"]], cutoff):
             continue
         hashes.add(row["source_sha256"])
         urls.add(row["canonical_url"])
-        evidence.append(row)
+        evidence.append(
+            {**row, "evidence_level": ("SIMULATED_" if simulated else "") + row["result_status"]}
+        )
     return evidence
 
 

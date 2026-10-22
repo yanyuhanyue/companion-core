@@ -10,6 +10,7 @@ from pydantic import Field
 from companion import budget
 from companion.contracts import CoreError, StrictModel
 from companion.diary import UNSUPPORTED_ACTIVITY, DiaryCitation, source_hash
+from companion.observation import expired_sources
 from companion.privacy import epoch, redact, sensitive
 from companion.store import after, encode, uid
 
@@ -294,16 +295,17 @@ class ReflectionService:
         )
 
     def expire_evidence(self):
-        rows = self.store.rows(
-            "SELECT DISTINCT e.event_id FROM reflection_evidence re JOIN events e USING(event_id) "
-            "WHERE e.redacted=1 OR e.ingested_at<?",
-            (after(self.clock(), -86400 * self.settings.raw_event_retention_days),),
-        )
-        if rows:
-            with self.store.transaction():
-                self.ledger.expire_events(
-                    self.store, [row["event_id"] for row in rows], self.clock()
-                )
+        # A recent observation can depend on an older owner/source event. Apply the
+        # same transitive lifetime check as Diary before displaying or deciding it.
+        with self.store.transaction():
+            rows = self.store.rows("SELECT DISTINCT event_id FROM reflection_evidence")
+            expired = expired_sources(
+                self.store,
+                [row["event_id"] for row in rows],
+                after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+            )
+            if expired:
+                self.ledger.expire_events(self.store, expired, self.clock())
 
     def decide(self, suggestion_id, decision):
         if decision not in {"ACCEPT_AS_HYPOTHESIS", "REJECT", "NEED_MORE_EVIDENCE"}:
