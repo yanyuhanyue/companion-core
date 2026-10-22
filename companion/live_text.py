@@ -146,7 +146,7 @@ def guard(
 ):
     # Read the clock after BEGIN IMMEDIATE, including any SQLite lock wait.
     with nullcontext() if store.db.in_transaction else store.transaction():
-        if not opening and not preparing:
+        if not opening and not preparing and callable(clock):
             cumulative.preflight(store, settings, clock)
         approval = settings.live_text_window
         if approval is None or approval.live_approved is not True or not callable(clock):
@@ -1087,7 +1087,9 @@ def check_model(store, settings, clock, request_id):
     return current
 
 
-def dispatch_fence(settings, clock, job_lease_until, admission_lease_until):
+def dispatch_fence(
+    settings, clock, job_lease_until, admission_lease_until, *, quota_state=None, request_id=None,
+):
     """Pure final check after ALL journal/file/DB work; no I/O follows this clock read."""
     approval, paid = settings.live_text_window, settings.paid_model
     if approval is None or paid is None or approval.live_approved is not True:
@@ -1105,6 +1107,8 @@ def dispatch_fence(settings, clock, job_lease_until, admission_lease_until):
         raise CoreError("PAID_APPROVAL_EXPIRED", 503)
     if any(lease <= now for lease in leases):
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)
+    if quota_state is not None:
+        cumulative.final_fence(settings, quota_state, now, request_id)
 
 
 def _reply_usage(store, settings, clock, job, approval, *, pending=False):

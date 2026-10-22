@@ -163,7 +163,7 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
-def journal(store, approval, record=None, *, allow_settlement=False):
+def journal(store, approval, record=None, *, allow_settlement=False, initialize=True):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
@@ -175,7 +175,8 @@ def journal(store, approval, record=None, *, allow_settlement=False):
     identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
     try:
         if not path.exists():
-            if identity or store.one("SELECT 1 FROM model_admissions LIMIT 1"):
+            if (not initialize or identity or store.one("SELECT 1 FROM model_admissions LIMIT 1")
+                or store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))):
                 raise ValueError("missing independent journal")
             path.parent.mkdir(parents=True, exist_ok=True)
             journal_id = uid("budget")
@@ -224,6 +225,11 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         witness = saved.pop("control_head_sha256", None) if saved else None
         if saved != expected or (expected and witness not in heads):
             raise ValueError("cumulative policy projection behind journal or DB")
+        for stop in store.rows("SELECT key,value FROM runtime_meta "
+                               "WHERE key LIKE 'model_budget_stop:%'"):
+            if (not identity or stop["value"] != identity["value"]
+                or stop["key"].removeprefix("model_budget_stop:") not in heads):
+                raise ValueError("durable cumulative stop missing from journal")
         stored_lifecycle = live_lifecycle(store)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
@@ -278,6 +284,8 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 stream.flush()
                 os.fsync(stream.fileno())
             previous = row["sha256"]
+            if record["kind"] == "quota_pause":
+                store.retain_budget_stop(identity["value"], previous)
             if lifecycle_record:
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (LIVE_LIFECYCLE, encode(next_lifecycle)))

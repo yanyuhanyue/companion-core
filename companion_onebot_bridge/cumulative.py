@@ -84,12 +84,16 @@ def fold(window, history):
             raise ValueError("CUMULATIVE_SCOPE_REQUIRED")
         return None
     items, clock = {}, None
+    adoption = current["legacy_adoption_evidence_sha256"] or any(
+        policy and policy["predecessor_policy_sha256"] is None
+        and policy["legacy_adoption_evidence_sha256"]
+        for policy in (scope(plan) for plan, _ in history))
     for plan, records in history:
         old = scope(plan)
         if old:
             if any(old[k] != current[k] for k in IDENTITY):
                 raise ValueError("CUMULATIVE_ACCOUNT_BINDING_CHANGED")
-        elif not current["legacy_adoption_evidence_sha256"]:
+        elif not adoption:
             raise ValueError("CUMULATIVE_LEGACY_ATTRIBUTION_REQUIRED")
         for record in records:
             at = timestamp(record["at"])

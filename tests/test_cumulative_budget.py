@@ -347,3 +347,70 @@ def test_vision_and_chat_consume_the_same_cumulative_model_attempts(core, tmp_pa
         budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
                        logical_request_id=job)
     assert len(view(core)["models"]) == 1 and core.model.calls == []
+
+
+@pytest.mark.parametrize("outer_transaction", [False, True])
+def test_automatic_pause_witness_survives_business_rollback_and_prefix_replay(
+    core, tmp_path, outer_transaction,
+):
+    enable(core, tmp_path)
+    path = Path(core.settings.paid_model.journal_path)
+    prefix = path.read_bytes()
+    core.clock.now = datetime.fromisoformat("2026-12-01T00:00:01+08:00")
+    with pytest.raises(CoreError, match="EXPIRED"):
+        if outer_transaction:
+            with core.store.transaction():
+                core.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                                   ("uncommitted_test", "business"))
+                cumulative.preflight(core.store, core.settings, core.clock)
+        else:
+            reserve(core)
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='uncommitted_test'")
+    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key LIKE 'model_budget_stop:%'")
+    assert view(core)["paused"]
+    path.write_bytes(prefix)
+    core.clock.now = datetime.fromisoformat("2026-10-20T04:00:00+00:00")
+    with pytest.raises(CoreError, match="RECONCILIATION"):
+        reserve(core)
+    assert core.store.rows("SELECT * FROM model_usage") == []
+
+
+def test_missing_journal_and_identity_status_does_not_bootstrap_or_modify_anything(core, tmp_path):
+    enable(core, tmp_path)
+    path = Path(core.settings.paid_model.journal_path)
+    path.unlink()
+    core.store.execute("DELETE FROM runtime_meta WHERE key='model_budget_journal_id'")
+    before = list(core.store.db.iterdump())
+    result = cumulative.status(core.store, core.settings, core.clock())
+    assert result == {"enrolled": True, "available": False,
+                      "code": "MODEL_BUDGET_RECONCILIATION_REQUIRED"}
+    assert list(core.store.db.iterdump()) == before
+    assert not path.exists()
+
+
+def test_pause_fsync_then_projection_failure_retains_only_the_stop_witness(
+    core, tmp_path, monkeypatch,
+):
+    enable(core, tmp_path)
+    path = Path(core.settings.paid_model.journal_path)
+    prefix = path.read_bytes()
+    execute = core.store.execute
+
+    def fail_projection(sql, params=()):
+        if sql.startswith("INSERT OR REPLACE INTO runtime_meta") and params[0] == (
+            cumulative.PROJECTION
+        ):
+            raise RuntimeError("synthetic pause projection failure after fsync")
+        return execute(sql, params)
+
+    monkeypatch.setattr(core.store, "execute", fail_projection)
+    with pytest.raises(RuntimeError, match="after fsync"):
+        with core.store.transaction():
+            core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", ("business", "rollback"))
+            cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    monkeypatch.setattr(core.store, "execute", execute)
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='business'")
+    assert view(core)["paused"]
+    path.write_bytes(prefix)
+    with pytest.raises(CoreError, match="RECONCILIATION"):
+        reserve(core)

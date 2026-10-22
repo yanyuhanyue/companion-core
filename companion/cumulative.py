@@ -627,7 +627,8 @@ def status(store, settings, now):
         return {"enrolled": False}
     custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
     try:
-        state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
+        state = paid_budget.journal(store, custody, allow_settlement=True,
+                                    initialize=False)["cumulative"]
     except CoreError as error:
         return {"enrolled": True, "available": False, "code": error.code}
     policy = state["policy"]

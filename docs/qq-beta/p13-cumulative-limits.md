@@ -77,7 +77,10 @@ Core 的影子计数不授权 Bridge 发信，也不替代任何原签名、单�
 原账本新记录包括 `quota_enroll`、`quota_renew`、`quota_pause`、`quota_operation`、
 `quota_send_result`，均 `version=1`。SQLite 只保留 policy/路径绑定与已提交控制 head 的见证，
 不保存另一套余额。恢复合法旧日志前缀若丢失已提交见证会停止；fsync 已发生而 SQLite 回滚时，
-较新的暂停/保守占用继续生效。跨账本中断不退还次数或估算上界。
+较新的暂停/保守占用继续生效。原 Store 会先完整回滚业务，再单独保存已 fsync 暂停的只增 head 见证，
+包括嵌套调用触发到期/时钟错误的情形，不提前提交外层业务。
+只读状态显式禁止初始化账本，缺文件/身份时仅报告缺失，不生成新 header。
+跨账本中断不退还次数或估算上界。
 
 UNKNOWN 保留金额、输入/输出 Token 和并发责任，不因廉价迟到 usage、Key 轮换、新窗口或新周期退款。
 确认的较大费用仍可在暂停后记录。超过累计 Token/金额上限的实际 usage 导致 UNKNOWN 和停止。

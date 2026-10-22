@@ -701,8 +701,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
                 live_text.dispatch_fence(
                     settings, clock, current_job["lease_until"], current["lease_until"],
+                    quota_state=quota_state, request_id=request_id,
                 )
-                cumulative.final_fence(settings, quota_state, clock(), request_id)
             else:
                 paid = paid_budget.contract(settings, clock())
                 lease_deadline = datetime.fromisoformat(current["lease_until"])

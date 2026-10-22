@@ -48,10 +48,10 @@ def fixture(core, tmp_path, **changes):
     return cfg, bind_policy(core, plan, **changes)
 
 
-def successor(core, old, tmp_path, **changes):
+def successor(core, old, tmp_path, *, number=2, **changes):
     value = deepcopy(old.plan.value)
-    value.update(window_id="win_" + "2" * 32,
-                 journal_path=str(tmp_path / "second-window.jsonl"))
+    value.update(window_id="win_" + str(number) * 32,
+                 journal_path=str(tmp_path / f"window-{number}.jsonl"))
     core.settings.paid_model = core.settings.paid_model.model_copy(update={
         "window_id": value["window_id"], "cumulative": None,
     })
@@ -413,5 +413,63 @@ def test_legacy_window_timestamp_cannot_be_changed_without_its_original_signatur
                     live_text.prepare_handoff(core.store, core.settings, core.clock,
                         live_text.WindowReference(window_sha256=new.sha256))
                 assert len(models) == len(sends) == 1
+
+    run(scenario())
+
+
+def test_third_window_inherits_original_legacy_adoption_without_repeating_inventory(core, tmp_path):
+    cfg, plan = live_fixture(core, tmp_path, bridge_options={"capture_signing_key": "12" * 32})
+
+    async def scenario():
+        async with live_clients(core, cfg) as (client, protocol, models, sends):
+            with Spool(cfg) as spool:
+                current = TestWindow(spool, plan, clock=lambda: core.clock.now)
+                await current.open(client)
+                for number in (1, 2):
+                    approval = await stage(current, client, core, number)
+                    await current.send_once(client, protocol, approval)
+                    await current.stop_live(client)
+                    options = ({"legacy_window_inventory": bridge_quota.legacy_inventory(current)}
+                               if number == 1 else {"legacy_adoption_evidence_sha256": None,
+                                                    "legacy_window_inventory": None})
+                    new_plan = successor(core, current, tmp_path, number=number + 1, **options)
+                    current = TestWindow(spool, new_plan, clock=lambda: core.clock.now)
+                    await current.handoff(client)
+                    await current.open(client)
+                approval = await stage(current, client, core, 3)
+                await current.send_once(client, protocol, approval)
+                assert len(bridge_quota.inspect(current)["items"]) == 6
+                assert len(view(core)["models"]) == 3
+                assert len(models) == len(sends) == 3
+
+    run(scenario())
+
+
+def test_final_live_and_cumulative_fence_share_one_clock_sample(core, tmp_path):
+    cfg, plan = fixture(core, tmp_path)
+
+    async def scenario():
+        async with live_clients(core, cfg) as (client, _, models, sends):
+            with Spool(cfg) as spool:
+                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
+                await window.open(client)
+                calls = []
+
+                def sample():
+                    calls.append(1)
+                    return core.clock() if len(calls) == 1 else plan.end.isoformat()
+
+                live_text.dispatch_fence(core.settings, sample, plan.end.isoformat(),
+                    plan.end.isoformat(), quota_state=view(core))
+                assert calls == [1]
+                with pytest.raises(CoreError, match="LIVE_TEXT_APPROVAL_EXPIRED"):
+                    live_text.dispatch_fence(core.settings, lambda: plan.end.isoformat(),
+                        plan.end.isoformat(), plan.end.isoformat(), quota_state=view(core))
+                state = view(core)
+                core.clock.advance(-1)
+                with pytest.raises(CoreError, match="CUMULATIVE_DISPATCH_FENCED"):
+                    live_text.dispatch_fence(core.settings, core.clock, plan.end.isoformat(),
+                        plan.end.isoformat(), quota_state=state)
+                assert models == sends == []
 
     run(scenario())

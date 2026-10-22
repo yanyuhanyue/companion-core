@@ -889,6 +889,8 @@ class TestWindow:
             or old.stop_path.read_bytes() != b"OWNER_STOP\n"
         ):
             raise ValueError("WINDOW_STOP_EVIDENCE_MISSING")
+        # Validate account continuity before preparing either side of the handoff.
+        cumulative.fold(self, old.verify_history(records))
         snapshot = dict(source)
         # Close locally BEFORE crossing HTTP. A lost acknowledgment is never an
         # invitation to retry another successor or refill the old allowance.
