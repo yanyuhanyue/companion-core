@@ -42,7 +42,7 @@ scope 不包含 plan_sha256；最终 Core 授权对象再绑定完整窗口计�
 | max_inputs | 获准捕获并接收的主人输入数 |
 | max_model_attempts | 模型尝试总数，图片理解、记忆复核与聊天分别计数 |
 | max_send_attempts | 外部消息发送尝试数；分条的每一条各占一次 |
-| max_visible_replies | 获准可见回复条数，不能超过发送尝试数 |
+| max_visible_replies | 获准可见回复条数上限，与发送尝试上限分别配置，执行时取最严者 |
 | max_input_chars / max_reply_chars | 单输入与整组回复的字符上限，缺省仍为 500 |
 
 次数相互独立，不按输入数推算模型次数。图片或记忆流程会使用多次模型调用，预算应

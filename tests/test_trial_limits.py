@@ -55,9 +55,9 @@ def test_profile_projects_independent_limits_without_creating_authority(tmp_path
 @pytest.mark.parametrize("field,value", [
     ("max_inputs", 0), ("max_inputs", True), ("max_model_attempts", 1.5),
     ("max_model_attempts", 2**31), ("max_send_attempts", -1),
-    ("max_visible_replies", 21), ("max_input_chars", 0), ("max_reply_chars", 20001),
+    ("max_visible_replies", 0), ("max_input_chars", 0), ("max_reply_chars", 20001),
 ])
-def test_profile_rejects_invalid_or_inconsistent_limits(field, value):
+def test_profile_rejects_invalid_limits(field, value):
     data = limits().model_dump()
     with pytest.raises(ValidationError):
         TrialLimits.model_validate({**data, field: value})
@@ -102,7 +102,8 @@ def test_sixteen_inputs_model_calls_and_sends_use_configured_caps(core, tmp_path
 @pytest.mark.parametrize("caps", [
     {"max_inputs": 2, "max_model_attempts": 6, "max_send_attempts": 6, "max_visible_replies": 6},
     {"max_inputs": 6, "max_model_attempts": 2, "max_send_attempts": 6, "max_visible_replies": 6},
-    {"max_inputs": 6, "max_model_attempts": 6, "max_send_attempts": 2, "max_visible_replies": 2},
+    {"max_inputs": 6, "max_model_attempts": 6, "max_send_attempts": 2, "max_visible_replies": 6},
+    {"max_inputs": 6, "max_model_attempts": 6, "max_send_attempts": 6, "max_visible_replies": 2},
 ])
 def test_each_quota_stops_additional_io_independently(core, tmp_path, caps):
     cfg, plan = configured(core, tmp_path, TrialLimits(**caps))

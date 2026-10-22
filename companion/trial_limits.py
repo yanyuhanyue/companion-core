@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 # Match the cumulative-journal counter range and the existing HTTP text contract.
 TrialCount = Annotated[int, Field(strict=True, ge=1, le=2**31 - 1)]
@@ -18,12 +18,6 @@ class TrialLimits(BaseModel):
     max_visible_replies: TrialCount
     max_input_chars: TrialText = 500
     max_reply_chars: TrialText = 500
-
-    @model_validator(mode="after")
-    def visible_requires_attempts(self):
-        if self.max_visible_replies > self.max_send_attempts:
-            raise ValueError("visible replies cannot exceed sending attempts")
-        return self
 
     def project(self):
         """Numeric draft fields only; no authority, identities or budget grants."""
