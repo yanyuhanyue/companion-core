@@ -267,5 +267,46 @@ def test_private_beta_configuration_and_baseline_never_approve_runtime():
         assert raw[name] is False and getattr(cfg, name) is False
     assert cfg.paid_model is cfg.live_text_window is None
     assert required["historical_runtime"]["current_state"] == "NOT_RECHECKED"
-    assert not any(required["new_runtime_authority"].values())
-    assert not required["private_beta_ready"] and not required["production_ready"]
+    assert all(value is False for value in required["private_beta_required_settings"].values())
+    assert all(value is None for value in required["new_runtime_authority"].values())
+    assert required["private_beta_ready"] is False and required["production_ready"] is False
+    for package in required["packages"].values():
+        assert package["status"] in {"NOT_RUN", "DONE", "OFFLINE_PASS", "BLOCKED"}
+        assert package["new_runtime_approval"] is None
+        evidence = package["evidence"]
+        assert evidence["live_platform"] == "NOT_RUN"
+        assert evidence["phone_confirmation"] is None
+        assert evidence["cross_natural_days"] is None
+        assert evidence["release"] == "DISABLED"
+        assert (path / package["evidence_document"]).is_file()
+
+
+@pytest.mark.parametrize("section,field,value", [
+    ("root", "private_beta_ready", True),
+    ("root", "production_ready", True),
+    ("package", "new_runtime_approval", "a" * 64),
+    ("evidence", "live_platform", "LIMITED_LIVE_PASS"),
+    ("evidence", "phone_confirmation", "CONFIRMED"),
+    ("evidence", "cross_natural_days", 1),
+    ("evidence", "release", "ENABLED"),
+])
+def test_p12_documentation_check_rejects_promoted_runtime(
+    tmp_path, monkeypatch, section, field, value,
+):
+    source = ROOT / "docs/qq-beta"
+    target = tmp_path / "docs/qq-beta"
+    target.mkdir(parents=True)
+    gates = json.loads((source / "p12-gates.json").read_text("utf-8"))
+    for package in gates["packages"].values():
+        (target / package["evidence_document"]).touch()
+    package = gates["packages"]["A1"]
+    changed = {"root": gates, "package": package, "evidence": package["evidence"]}[section]
+    changed[field] = value
+    write(target / "p12-gates.json", gates)
+    (target / "p12-private-beta.example.toml").write_bytes(
+        (source / "p12-private-beta.example.toml").read_bytes(),
+    )
+    monkeypatch.setitem(test_private_beta_configuration_and_baseline_never_approve_runtime.__globals__,
+                        "ROOT", tmp_path)
+    with pytest.raises(AssertionError):
+        test_private_beta_configuration_and_baseline_never_approve_runtime()

@@ -60,8 +60,9 @@ API key 只存在代理容器。每个任务获得独立、短期、可撤销的
 
 模型上游必须为 HTTPS。专用模型凭据应在供应商侧另设硬消费上限。Compose 的模型代理有
 出口，执行容器没有；不可给执行容器添加第二张联网网络。Core 若在 Docker，加入已创建的
-`companion-tool-private` 网络后，以 `http://172.30.91.10:8090` 访问网关；只共享网络，
-不共享数据卷。同一 Linux 宿主机上的 Core 可通过 `http://172.30.91.10:8090` 访问；该 Compose 不发布宿主机端口，内部网络没有公网出口。
+`companion-tool-private` 网络后，以 `http://<executor-private-ip>:8090` 访问网关；只共享网络，
+不共享数据卷。`<executor-private-ip>` 取自 `deploy/compose.executors.yaml` 的执行器内网地址。
+同一 Linux 宿主机上的 Core 可通过该地址访问；该 Compose 不发布宿主机端口，内部网络没有公网出口。
 
 ## 隐私与恢复
 

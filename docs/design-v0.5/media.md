@@ -106,6 +106,6 @@ modalities 为 `voice`、`camera`、`android`，分别绑定 `audio.transcribe`�
 
 Playwright 使用真实浏览器、内存合成的视频/音频 track 和 mock 供应商验证：音频与图像帧形成 10 条 Observation 后费用预算拒绝继续调用，全部 track 自动停止；点击“立即关闭”以及后台可见性事件都使全部 track 进入 ended；localStorage 与 sessionStorage 为空。整页截图已检查，无文字截断、重叠或不可见控件。此验证不涉及真实设备和付费服务。
 
-2026-10-19 本地只读预检：Windows 11 AMD64，32 逻辑核，adb 可用，但授权设备 0。远端 `45.207.221.83` 只读检查：Linux 5.15.0-187-generic x86_64，约 7.75 GiB RAM、5.58 GiB available；存在 `/dev/kvm`，没有 adb 和可见 binder/binder_linux 节点。这些事实不足以认定 Android 模拟环境已经就绪。未安装/启动模拟器，未采集真实摄像头/麦克风，未调用付费供应商，未发起 QQ 通话。
+2026-10-19 本地只读预检：Windows 11 AMD64，32 逻辑核，adb 可用，但授权设备 0。远端开发 VPS（私密目标引用）只读检查：Linux 5.15.0-187-generic x86_64，约 7.75 GiB RAM、5.58 GiB available；存在 `/dev/kvm`，没有 adb 和可见 binder/binder_linux 节点。这些事实不足以认定 Android 模拟环境已经就绪。未安装/启动模拟器，未采集真实摄像头/麦克风，未调用付费供应商，未发起 QQ 通话。
 
 API 参考：[MDN getUserMedia](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia)、[MediaRecorder stop](https://developer.mozilla.org/en-US/docs/Web/API/MediaRecorder/stop)、[Android adb](https://developer.android.com/tools/adb)。

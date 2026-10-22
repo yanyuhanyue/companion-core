@@ -183,12 +183,42 @@ def test_cli_event_failure_chooses_full_and_gate_failure_returns_nonzero(tmp_pat
 
 
 def test_documentation_checks_cover_public_materials_and_every_fast_path_evidence_file():
-    assert all((ROOT / node).is_file() for node in DOC_TESTS)
+    assert all((ROOT / node.split("::", 1)[0]).is_file() for node in DOC_TESTS)
     assert "tests/test_p8c_public_materials.py" in DOC_TESTS
     assert "tests/test_p10_contracts_evidence.py" in DOC_TESTS
-    for name in DOC_EVIDENCE:
+    assert "tests/test_p13_gates.py" in DOC_TESTS
+    assert any(node.startswith("tests/test_p12_beta_operations.py::") for node in DOC_TESTS)
+    assert len(DOC_TESTS) == len(set(DOC_TESTS))
+    for name, checks in DOC_EVIDENCE.items():
         assert (ROOT / name).is_file()
+        assert checks and set(checks) <= set(DOC_TESTS)
         assert choose_profile("push", "refs/heads/main", EVENT, [name])[0] == "docs"
+        assert choose_profile("pull_request", "refs/pull/1/merge", EVENT, [name])[0] == "docs"
+    assert choose_profile("push", "refs/heads/main", EVENT, ["docs/qq-beta/p14-gates.json"])[
+        0
+    ] == "full"
+
+
+@pytest.mark.parametrize("profile", ["full", "docs", "reuse"])
+def test_cli_receipt_records_actual_checkout_only_after_required_checks_pass(tmp_path, profile):
+    summary = tmp_path / "summary.md"
+    results = needs(profile)
+    results["quality"]["result"] = "failure"
+    env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary),
+           "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "synthetic/project",
+           "GITHUB_RUN_ID": "123", "NEEDS_JSON": json.dumps(results)}
+    command = [sys.executable, "scripts/ci_policy.py", "gate", "--profile", profile]
+    assert subprocess.run(command, cwd=ROOT, env=env, capture_output=True).returncode != 0
+    assert not summary.exists()
+    env["NEEDS_JSON"] = json.dumps(needs(profile))
+    result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True)
+    assert result.returncode == 0, result.stderr.decode()
+    receipt = summary.read_text("utf-8")
+    assert f"Profile: `{profile}`" in receipt
+    assert git(ROOT, "rev-parse", "HEAD") in receipt
+    assert git(ROOT, "rev-parse", "HEAD^{tree}") in receipt
+    assert "https://github.com/synthetic/project/actions/runs/123" in receipt
+    assert f"| container | {'success' if profile == 'full' else 'skipped'} |" in receipt
 
 
 @pytest.mark.parametrize("result", [0, 1])
