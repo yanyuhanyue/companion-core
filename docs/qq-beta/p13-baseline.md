@@ -13,7 +13,7 @@
 [CI 39718418701](https://github.com/yanyuhanyue/companion-core/actions/runs/39718418701) 同样通过。
 已验证集成本地 Ruff + 2116 passed / 6 skipped 属于 P12，不能计为新的真人样本。
 
-现有迁移头为 `0017_paid_model_gate`。本轮尚无新 P13 wheel 或部署镜像；
+开始核查时迁移头为 `0017_paid_model_gate`，尚无新 P13 wheel 或部署镜像；
 旧 CI 的打包和容器测试不提供当前真实运行镜像身份。新候选源码、构建产物及 CI 在各包完成时分别固定。
 代码、构建产物、主机当前状态、模型实际账户能力、手机确认和真实自然日分别记录。
 
@@ -55,4 +55,6 @@ CDN/Vision、日记、表达变更和主动分享批准均为 null。
 手机、跨自然日、恢复（本地/业务）和发布八个维度记录。
 [schema](../../contracts/p13-gates.schema.json) 与 `tests/test_p13_gates.py` 检查结构、
 真实等级所需引用及样本约束；它们不替代授权原件或证明引用材料真实。
-P12 记录保持历史状态。本轮独立 Draft PR 和最终 CI 在交付时补齐，PR 合并仍待新决定。
+P12 记录保持历史状态。开始基线不会被后续候选覆盖；新迁移、构建与五个独立 Draft PR
+见 [P13 交付](p13-delivery.md)，后续实际验收见 [下一阶段任务](p13-next-stage.md)。
+PR 合并仍待新决定。

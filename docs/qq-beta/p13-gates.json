@@ -60,12 +60,12 @@
   },
   "packages": {
     "A0": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
@@ -81,18 +81,29 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 62,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/62",
+        "reviewed_head_sha": "5c01eb8db84087a93c67ce11e52fcd12cbd97bd5",
+        "reviewed_tree_sha": "1d177d098d99c2d9b05f2f11cc916a817eb61822",
+        "full_ci_run": 39722692431,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39722692431",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "A1": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
@@ -108,18 +119,29 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 62,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/62",
+        "reviewed_head_sha": "5c01eb8db84087a93c67ce11e52fcd12cbd97bd5",
+        "reviewed_tree_sha": "1d177d098d99c2d9b05f2f11cc916a817eb61822",
+        "full_ci_run": 39722692431,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39722692431",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "B0": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
@@ -135,25 +157,36 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 65,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/65",
+        "reviewed_head_sha": "748896c8944a8ccdfa9a122199888294675dfbc5",
+        "reviewed_tree_sha": "bbe0da2541f575ea3df4ac050d2f2833fb985cdb",
+        "full_ci_run": 39724188838,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39724188838",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "B1": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -162,25 +195,36 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 65,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/65",
+        "reviewed_head_sha": "748896c8944a8ccdfa9a122199888294675dfbc5",
+        "reviewed_tree_sha": "bbe0da2541f575ea3df4ac050d2f2833fb985cdb",
+        "full_ci_run": 39724188838,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39724188838",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "B2": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -189,16 +233,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 65,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/65",
+        "reviewed_head_sha": "748896c8944a8ccdfa9a122199888294675dfbc5",
+        "reviewed_tree_sha": "bbe0da2541f575ea3df4ac050d2f2833fb985cdb",
+        "full_ci_run": 39724188838,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39724188838",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "B3": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -216,16 +271,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 65,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/65",
+        "reviewed_head_sha": "748896c8944a8ccdfa9a122199888294675dfbc5",
+        "reviewed_tree_sha": "bbe0da2541f575ea3df4ac050d2f2833fb985cdb",
+        "full_ci_run": 39724188838,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39724188838",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "C1": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -243,16 +309,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "C2": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -270,16 +347,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "C3": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -288,7 +376,7 @@
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -297,16 +385,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "C4": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -324,16 +423,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "D1": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -342,7 +452,7 @@
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -351,16 +461,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "D2": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -369,7 +490,7 @@
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -378,16 +499,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "D3": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -405,18 +537,29 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "E1": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
@@ -432,25 +575,36 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 63,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/63",
+        "reviewed_head_sha": "d0e6ca90879b70c24ca52c4016051e30e6640d7a",
+        "reviewed_tree_sha": "5ffd8ebb9c0c0270bb6780868d7c8c03331e15ac",
+        "full_ci_run": 39723528857,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723528857",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "E2": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -459,16 +613,28 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 66,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/66",
+        "reviewed_head_sha": "4768c3ccbd4ed22460c81c10cf92d95bafcbd6ee",
+        "reviewed_tree_sha": "0030c886f365f7af2889da215e9f9350022ffe41",
+        "full_ci_run": 39727774610,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39727774610",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
-        "OFFLINE_WORK_PENDING"
+        "CUMULATIVE_RUNTIME_APPROVAL_REQUIRED",
+        "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "E3": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -486,16 +652,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 63,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/63",
+        "reviewed_head_sha": "d0e6ca90879b70c24ca52c4016051e30e6640d7a",
+        "reviewed_tree_sha": "5ffd8ebb9c0c0270bb6780868d7c8c03331e15ac",
+        "full_ci_run": 39723528857,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723528857",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "E4": {
-      "status": "NOT_RUN",
+      "status": "DONE",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -513,16 +690,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 63,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/63",
+        "reviewed_head_sha": "d0e6ca90879b70c24ca52c4016051e30e6640d7a",
+        "reviewed_tree_sha": "5ffd8ebb9c0c0270bb6780868d7c8c03331e15ac",
+        "full_ci_run": 39723528857,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723528857",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
         "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "F1": {
-      "status": "NOT_RUN",
+      "status": "DONE",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -540,16 +728,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 62,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/62",
+        "reviewed_head_sha": "5c01eb8db84087a93c67ce11e52fcd12cbd97bd5",
+        "reviewed_tree_sha": "1d177d098d99c2d9b05f2f11cc916a817eb61822",
+        "full_ci_run": 39722692431,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39722692431",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
-        "OFFLINE_WORK_PENDING"
+        "RICH_BODY_RUNTIME_QUERY_NOT_APPROVED"
       ]
     },
     "F2": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -558,7 +757,7 @@
         "phone": "NOT_RUN",
         "cross_natural_days": "NOT_RUN",
         "recovery": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "business": "NOT_RUN"
         },
         "release": "DISABLED"
@@ -567,18 +766,29 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 65,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/65",
+        "reviewed_head_sha": "748896c8944a8ccdfa9a122199888294675dfbc5",
+        "reviewed_tree_sha": "bbe0da2541f575ea3df4ac050d2f2833fb985cdb",
+        "full_ci_run": 39724188838,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39724188838",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
-        "OFFLINE_WORK_PENDING"
+        "NO_NET_RETRIEVAL_BENEFIT_GRAPH_NOT_ADMITTED"
       ]
     },
     "F3": {
-      "status": "NOT_RUN",
+      "status": "OFFLINE_PASS",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
-          "local": "NOT_RUN",
+          "local": "OFFLINE_PASS",
           "platform": "NOT_RUN"
         },
         "provider": "NOT_RUN",
@@ -594,16 +804,27 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 63,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/63",
+        "reviewed_head_sha": "d0e6ca90879b70c24ca52c4016051e30e6640d7a",
+        "reviewed_tree_sha": "5ffd8ebb9c0c0270bb6780868d7c8c03331e15ac",
+        "full_ci_run": 39723528857,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723528857",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
-        "OFFLINE_WORK_PENDING"
+        "NEW_EXACT_RUNTIME_SCOPE_REQUIRED"
       ]
     },
     "F4": {
-      "status": "NOT_RUN",
+      "status": "DONE",
       "evidence": {
-        "implementation": "NOT_RUN",
-        "offline": "NOT_RUN",
+        "implementation": "DONE",
+        "offline": "OFFLINE_PASS",
         "protocol": {
           "local": "NOT_RUN",
           "platform": "NOT_RUN"
@@ -621,9 +842,20 @@
       "runtime_approval_sha256": null,
       "runtime_evidence_sha256": null,
       "natural_days": null,
-      "pr": null,
+      "pr": {
+        "number": 64,
+        "url": "https://github.com/yanyuhanyue/companion-core/pull/64",
+        "reviewed_head_sha": "24022ede7064d06002042fe0b10fdb498aa73b53",
+        "reviewed_tree_sha": "5b5bc23a1fdec44d1bc21e81cdb41cc726473244",
+        "full_ci_run": 39723742076,
+        "full_ci_url": "https://github.com/yanyuhanyue/companion-core/actions/runs/39723742076",
+        "full_ci_profile": "full",
+        "full_ci_conclusion": "SUCCESS",
+        "full_ci_passed_jobs": 10,
+        "merged": false
+      },
       "blockers": [
-        "OFFLINE_WORK_PENDING"
+        "PAD_RESEARCH_ONLY_EXPRESSION_NOT_APPROVED"
       ]
     }
   },
