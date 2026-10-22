@@ -169,6 +169,8 @@ def journal(store, approval, record=None, *, allow_settlement=False):
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
+    from companion import cumulative
+
     path = Path(approval.journal_path)
     identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
     try:
@@ -189,6 +191,7 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, False
         lifecycle, seen, managed = None, set(), False
+        account = cumulative.empty_state()
         for index, line in enumerate(lines):
             row = json.loads(line)
             digest = row.pop("sha256")
@@ -203,12 +206,20 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 ):
                     raise ValueError("journal identity")
             else:
+                cumulative.fold(account, row)
+                if row.get("kind") in cumulative.CONTROL_RECORDS:
+                    continue
                 if row.get("kind") in {"window_stop", "window_open", "window_handoff"}:
                     lifecycle = _live_record(row, digest, lifecycle, seen)
                     managed |= row["kind"] != "window_stop"
                     continue
                 latest[row["request_id"]] = row
                 blocked |= row["kind"] == "blocked"
+        projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                               (cumulative.PROJECTION,))
+        expected = cumulative.binding(account, path)
+        if (json.loads(projection["value"]) if projection else None) != expected:
+            raise ValueError("cumulative policy projection behind journal or DB")
         stored_lifecycle = live_lifecycle(store)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
@@ -254,6 +265,7 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         if record is not None:
             row = {**record, "previous": previous}
             row["sha256"] = sha(row)
+            cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
             next_lifecycle = _live_record(
                 {k: v for k, v in row.items() if k != "sha256"}, row["sha256"], lifecycle, seen
             )
@@ -266,6 +278,9 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (LIVE_LIFECYCLE, encode(next_lifecycle)))
                 lifecycle = next_lifecycle
-        return {"head_sha256": previous, "lifecycle": lifecycle}
+            if record["kind"] in cumulative.POLICY_RECORDS:
+                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                              (cumulative.PROJECTION, encode(cumulative.binding(account, path))))
+        return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error
