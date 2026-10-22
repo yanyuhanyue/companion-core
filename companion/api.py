@@ -8,8 +8,9 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from httpx import AsyncClient
 
-from companion import __version__, cumulative, live_text, qq_rich
+from companion import __version__, cumulative, live_text, qq_images, qq_rich
 from companion.config import Settings
 from companion.content_api import register_content_routes
 from companion.contracts import (
@@ -30,6 +31,7 @@ from companion.memory_control import (
     StoppedMemoryControl,
     stopped_workers,
 )
+from companion.model import ModelClient
 from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
@@ -81,11 +83,20 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @asynccontextmanager
     async def lifespan(app):
         with stopped_workers(settings.database) if memory_control_grant else nullcontext():
-            app.state.core = Core(settings)
-            try:
-                yield
-            finally:
-                app.state.core.store.close()
+            image_model = (
+                memory_control_grant is None and settings.mode == "live"
+                and settings.content_enabled and settings.content.use_chat_model_for_vision
+                and qq_images.enabled(settings)
+            )
+            async with (
+                AsyncClient(timeout=settings.timeout_seconds, trust_env=False)
+                if image_model else nullcontext()
+            ) as client:
+                app.state.core = Core(settings, ModelClient(settings, client) if client else None)
+                try:
+                    yield
+                finally:
+                    app.state.core.store.close()
 
     app = FastAPI(
         title="Companion Core",
