@@ -163,6 +163,7 @@ def main():
             "window-send-once",
             "window-status",
             "window-stop",
+            "memory-control-once",
         ),
     )
     parser.add_argument("--window", type=Path)
@@ -170,11 +171,16 @@ def main():
     parser.add_argument("--authorization", type=Path)
     parser.add_argument("--event", type=Path)
     parser.add_argument("--approval", type=Path)
+    parser.add_argument("--memory-control-sha256")
     args = parser.parse_args()
     try:
         config = BridgeConfig.load(args.config)
         if args.command == "daemon":
             asyncio.run(run(config))
+        elif args.command == "memory-control-once":
+            from .memory_control import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
         else:
             from .window import command
 

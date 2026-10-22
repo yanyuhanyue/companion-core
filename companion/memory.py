@@ -1,5 +1,6 @@
 import json
 import re
+from contextlib import nullcontext
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -281,7 +282,7 @@ class Memory:
     def decide(self, memory_id, decision, now, corrected=None, *, evidence_event_id=None):
         self.require_owner("owner")
         s = self.store
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
             old = s.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
             if not old:
                 raise CoreError("MEMORY_NOT_FOUND", 404)

@@ -73,6 +73,8 @@ def main():
     server = sub.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
+    server.add_argument("--memory-control-grant")
+    server.add_argument("--memory-control-sha256")
     archive = sub.add_parser("backup")
     archive.add_argument("destination")
     recovery = sub.add_parser("restore")
@@ -88,9 +90,15 @@ def main():
             print("Database migrated; identity and erasure ledger initialized.")
         elif args.command == "serve":
             from companion.api import create_app
+            from companion.memory_control import load_grant
 
+            if bool(args.memory_control_grant) != bool(args.memory_control_sha256):
+                raise ValueError("MEMORY_CONTROL_APPROVAL_REQUIRED")
+            grant = (load_grant(args.memory_control_grant, args.memory_control_sha256)
+                     if args.memory_control_grant else None)
             uvicorn.run(
-                create_app(settings),
+                create_app(settings, memory_control_grant=grant,
+                           memory_control_sha256=args.memory_control_sha256),
                 host=args.host,
                 port=args.port,
                 access_log=False,

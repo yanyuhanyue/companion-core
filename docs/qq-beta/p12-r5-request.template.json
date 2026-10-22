@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "kind": "UNAPPROVED_PRIVATE_REQUEST_TEMPLATE",
+  "state": "NOT_RUN",
+  "business_r5_accepted": false,
+  "source": {
+    "candidate_sha": null,
+    "image_digest": null,
+    "actual_image_id": null,
+    "core_config_sha256": null,
+    "private_database_identity_sha256": null,
+    "owner_source_event_id": null,
+    "owner_source_sha256": null,
+    "source_expires_at": null,
+    "privacy_epoch": null
+  },
+  "custody": {
+    "stopped_services_evidence_sha256": null,
+    "current_window_closed": null,
+    "ledger_id": null,
+    "latest_ledger_sha256": null,
+    "budget_journal_identities_and_heads": null,
+    "window_journal_history_heads": null,
+    "spool_and_protocol_epoch_sha256": null,
+    "unknown_model_requests": null,
+    "uncertain_deliveries": null
+  },
+  "operations_requiring_separate_approval": [
+    {
+      "operation": "native_create_and_confirm",
+      "fact_text_private": null,
+      "subject": null,
+      "fact_key": null,
+      "source_event_id": null,
+      "source_sha256": null,
+      "max_facts": 1,
+      "approved_sha256": null,
+      "starts_at": null,
+      "ends_at": null
+    },
+    {
+      "operation": "native_correct",
+      "memory_id": null,
+      "target_family_sha256": null,
+      "corrected_fact_private": null,
+      "correction_source_sha256": null,
+      "approved_sha256": null,
+      "starts_at": null,
+      "ends_at": null
+    },
+    {
+      "operation": "native_forget",
+      "memory_id": null,
+      "full_erasure_closure_private_sha256": null,
+      "unrelated_fact_to_preserve_sha256": null,
+      "approved_sha256": null,
+      "starts_at": null,
+      "ends_at": null
+    },
+    {
+      "operation": "isolated_restore_and_latest_ledger_replay",
+      "pre_forget_encrypted_backup_sha256": null,
+      "latest_independent_ledger_sha256": null,
+      "new_destination_private_sha256": null,
+      "technical_network_isolation_evidence_sha256": null,
+      "original_budget_and_window_journals_unchanged": null,
+      "approved_sha256": null,
+      "starts_at": null,
+      "ends_at": null
+    },
+    {
+      "operation": "new_bounded_qq_validation",
+      "recipient_sha256": null,
+      "new_window_plan_sha256": null,
+      "paid_model_approval_sha256": null,
+      "input_limit": null,
+      "model_attempt_limit": null,
+      "model_attempt_limit_must_not_exceed": 5,
+      "send_limit": null,
+      "micro_usd_limit": null,
+      "approved_sha256": null,
+      "starts_at": null,
+      "ends_at": null,
+      "phone_receipts": null
+    }
+  ],
+  "stop_on": [
+    "source_or_identity_drift",
+    "privacy_epoch_or_ledger_drift",
+    "unsettled_or_unknown_model_cost",
+    "uncertain_delivery",
+    "original_custody_chain_mismatch",
+    "unexpected_erasure_or_resurrection",
+    "unconfirmed_stop",
+    "any_failed_step"
+  ],
+  "recovery_rule": "Preserve original append-only records and stopped windows; replay newest Ledger into a new isolated destination; never resume authority or allowance from an old DB.",
+  "b2_live_admission": "DISABLED_UNTIL_BUSINESS_B1_ACCEPTED_AND_NEW_EXACT_SCOPE_APPROVED"
+}

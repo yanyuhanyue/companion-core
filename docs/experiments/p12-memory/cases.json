@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "data_class": "PUBLIC_SYNTHETIC",
+  "retrieval_algorithm_changed": false,
+  "facts": [
+    {"id":"tea","content":"主人最喜欢的饮料是绿茶。","day":"2026-10-19"},
+    {"id":"project","content":"主人给合成项目起的代号是纸船。","day":"2026-10-19"},
+    {"id":"cat","content":"主人养的猫叫团子。","day":"2026-10-19"},
+    {"id":"umbrella","content":"主人的折叠雨伞放在玄关的木柜里。","day":"2026-10-20"},
+    {"id":"cycling","content":"主人通常在周六上午去河边骑自行车。","day":"2026-10-20"},
+    {"id":"book","content":"主人正在读一本关于天文学的入门书。","day":"2026-10-20"},
+    {"id":"pencil","content":"主人喜欢用铅笔画速写。","day":"2026-10-20"},
+    {"id":"cover","content":"另一个独立项目的封面颜色是蓝色。","day":"2026-10-21"},
+    {"id":"progress_20","content":"10月20日纸船项目的工作停在整理提纲。","day":"2026-10-20"},
+    {"id":"progress_21","content":"10月21日纸船项目的工作停在校对目录。","day":"2026-10-21"}
+  ],
+  "queries": [
+    {"id":"frozen_explicit","split":"legacy_query_probe","query":"还记得我最喜欢的饮料吗？","required":["tea"],"allowed":["tea"]},
+    {"id":"frozen_indirect","split":"legacy_query_probe","query":"饮料还是老样子吗？","required":["tea"],"allowed":["tea"]},
+    {"id":"frozen_cross","split":"legacy_query_probe","query":"上回那个项目的代号是什么？","required":["project"],"allowed":["project","progress_20","progress_21"]},
+    {"id":"holdout_drink","split":"holdout","query":"给我准备平时喝的那种饮品吧。","required":["tea"],"allowed":["tea"]},
+    {"id":"holdout_cat","split":"holdout","query":"家里那只小猫名字叫什么？","required":["cat"],"allowed":["cat"]},
+    {"id":"holdout_umbrella","split":"holdout","query":"出门要下雨了，我的伞收在哪儿？","required":["umbrella"],"allowed":["umbrella"]},
+    {"id":"holdout_cycling","split":"holdout","query":"休息日早上我一般去哪锻炼？","required":["cycling"],"allowed":["cycling"]},
+    {"id":"holdout_book","split":"holdout","query":"最近我翻的那本入门读物讲什么？","required":["book"],"allowed":["book"]},
+    {"id":"holdout_latest_progress","split":"holdout","query":"纸船在10月21日停在哪一步？","required":["progress_21"],"allowed":["progress_21","progress_20","project"]},
+    {"id":"holdout_earlier_progress","split":"holdout","query":"10月20日纸船做到哪了？","required":["progress_20"],"allowed":["progress_20","progress_21","project"]},
+    {"id":"holdout_no_record","split":"holdout","query":"我的航班座位号是多少？","required":[],"allowed":[]},
+    {"id":"holdout_pronoun_unknown","split":"holdout","query":"今天还是之前那个？","required":[],"allowed":[]}
+  ]
+}

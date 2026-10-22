@@ -8,7 +8,7 @@ from cryptography.fernet import Fernet
 from companion.contracts import CoreError
 from companion.executive import restore_executive
 from companion.privacy import ErasureLedger, advance_epoch
-from companion.store import Store, migrate, utcnow
+from companion.store import Store, migrate, uid, utcnow
 
 
 def backup(database, destination, key):
@@ -60,6 +60,10 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                # A backup cannot re-authorize a consumed stopped memory-control grant.
+                # This marker is deliberately independent of model/window counters.
+                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                              ("memory_control_restore_generation", uid("restore")))
                 if store.one("SELECT 1 FROM model_admissions LIMIT 1") or store.one(
                     "SELECT 1 FROM runtime_meta WHERE key IN "
                     "('live_text_window','model_budget_live_lifecycle') LIMIT 1"
