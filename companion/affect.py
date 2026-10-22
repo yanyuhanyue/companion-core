@@ -14,13 +14,13 @@ NEUTRAL = {
 }
 RULES = (
     (
-        r"(?:请)?(?:回答)?(?:简短一点|简洁一点|说短一点)",
+        r"(?:请)?(?:回答)?(?:简短一点|简洁一点|说短一点|更简短)",
         "interaction_tone",
         "concise",
         "OWNER_REQUESTED_CONCISE",
     ),
     (
-        r"(?:请)?(?:详细解释|展开说说|说详细一点)",
+        r"(?:请)?(?:详细解释|展开说说|说详细一点|更详细)",
         "interaction_tone",
         "detailed",
         "OWNER_REQUESTED_DETAIL",
@@ -31,8 +31,14 @@ RULES = (
         "stepwise",
         "OWNER_REQUESTED_STEPS",
     ),
-    (r"(?:先不聊了|先别聊这个|暂停这个话题)", "engagement", "pause", "OWNER_REQUESTED_PAUSE"),
-    (r"(?:继续聊|继续这个话题|可以继续)", "engagement", "continue", "OWNER_REQUESTED_CONTINUE"),
+    (
+        r"(?:先不聊了|先别聊这个|暂停这个话题|目前不想聊)",
+        "engagement", "pause", "OWNER_REQUESTED_PAUSE",
+    ),
+    (
+        r"(?:继续聊|继续这个话题|可以继续|欢迎继续)",
+        "engagement", "continue", "OWNER_REQUESTED_CONTINUE",
+    ),
     (r"(?:想试试新的话题|换个新话题吧)", "novelty_interest", "open", "OWNER_REQUESTED_NOVELTY"),
 )
 
