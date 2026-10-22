@@ -229,6 +229,8 @@ def render_draft(draft, sources, day, settings):
                     "FETCHED": "获取的来源内容",
                     "WATCHED": "视频分析记录",
                 }[source["result_status"]]
+                if source.get("source") == "observation.simulation":
+                    attribution = "模拟" + attribution
             paragraphs.append(f"{attribution}：“{section.text}”")
         else:
             # Reflections are visibly tentative, never evidence for a new persistent fact.
@@ -382,6 +384,9 @@ class DiaryRepository:
                 (start, end, after(self.clock(), -86400 * self.settings.raw_event_retention_days)),
             )
             for row in observations:
+                simulated = row["source"] == "observation.simulation"
+                if simulated and self.settings.mode != "demo":
+                    continue
                 if expired_sources(
                     self.store,
                     [row["event_id"]],
@@ -400,6 +405,9 @@ class DiaryRepository:
                             "occurred_at": row["occurred_at"],
                             "result_status": row["result_status"],
                             "source_kind": row["source_kind"],
+                            "source": row["source"],
+                            "evidence_level": ("SIMULATED_" if simulated else "")
+                            + row["result_status"],
                         }
                     )
         return sorted(sources, key=lambda row: row["source_id"])

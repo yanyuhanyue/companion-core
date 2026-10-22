@@ -181,6 +181,8 @@ class ReflectionService:
                             if source["kind"] == "sent_reply"
                             else "来源记录（" + source["result_status"] + "）"
                         )
+                        if source.get("source") == "observation.simulation":
+                            label = "模拟" + label
                         content = label + "：“" + content + "”"
                     self.store.insert(
                         "reflection_suggestions",
@@ -319,6 +321,10 @@ class ReflectionService:
             ).rowcount
             if not changed:
                 raise CoreError("REFLECTION_NOT_FOUND", 404)
+            if decision in {"REJECT", "NEED_MORE_EVIDENCE"}:
+                from companion.goals import withdraw_reflection_goals
+
+                withdraw_reflection_goals(self.store, suggestion_id, self.clock())
             self.store.audit(
                 "reflection.decided", suggestion_id, suggestion_id, self.clock(), decision=decision
             )

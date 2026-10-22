@@ -278,7 +278,7 @@ class NightlyConsolidator:
                 from companion.goals import GoalProposal
 
                 proposals = self.store.rows(
-                    "SELECT s.content,r.run_id FROM reflection_suggestions s JOIN "
+                    "SELECT s.suggestion_id,s.content,r.run_id FROM reflection_suggestions s JOIN "
                     "reflection_runs r USING(run_id) WHERE r.local_date=? AND r.timezone=? AND "
                     "r.state='COMMITTED' AND s.kind='next_question' AND s.state IN ('PENDING',"
                     "'ACCEPT_AS_HYPOTHESIS')",
@@ -296,7 +296,7 @@ class NightlyConsolidator:
                         self.goals.propose(
                             GoalProposal(
                                 topic=proposal["content"][:300], source_event_ids=source_ids
-                            )
+                            ), reflection_suggestion_id=proposal["suggestion_id"],
                         )
                     except CoreError as error:
                         if error.code != "GOAL_CAPACITY_REACHED":

@@ -344,6 +344,9 @@ class ExplorationService:
             if captured != validation.source_grant:
                 raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
             self.observations.grants.require(adapter_id, captured)
+            step = json.loads(row["goal_step_json"])
+            if step:
+                self.goals.validate_lease(step)
         return {"valid": True}
 
     def complete(self, adapter_id, request_id, result):
