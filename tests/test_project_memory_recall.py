@@ -5,8 +5,11 @@ import json
 import httpx
 import pytest
 
+from companion import live_text
 from companion.store import encode
+from tests import test_live_memory_recall
 from tests.conftest import ingest, run
+from tests.test_live_image_input import options as image_options
 from tests.test_live_memory_recall import readonly_window
 from tests.test_memory_commands import fact
 
@@ -163,5 +166,59 @@ def test_live_fallback_still_consumes_the_paid_call_budget(core, tmp_path, monke
                 {"scenario": "memory_review", "state": "SETTLED"},
             ]
             assert core.store.rows("SELECT * FROM outbox") == []
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("input_limit", [16000, 1000])
+def test_selected_fact_reaches_chat_with_deployed_rich_content_configuration(
+    core, tmp_path, monkeypatch, input_limit,
+):
+    empty_semantic_search(core, monkeypatch)
+
+    def scoped_facts(instance):
+        # Real captured evidence IDs are 68 characters; short fixture IDs can hide
+        # the exact 3,200-byte soft-bound failure seen with these production rules.
+        memory_id = fact(instance, "a" * 59, "本次验收项目代号是青竹七号")
+        outsider = fact(instance, 901, "未批准的另一个项目代号是紫云三号。")
+        return memory_id, outsider, [live_text.memory_fact(
+            instance.store, instance.settings, instance.clock, memory_id,
+        )]
+
+    monkeypatch.setattr(test_live_memory_recall, "scope_facts", scoped_facts)
+    image = image_options()
+    scope = {key: value for key, value in image.items()
+             if key not in {"core_options", "paid_options"}}
+    scope.update(rich_input_scope="references_v1", link_scope="owner_links_v1")
+
+    async def scenario():
+        async with readonly_window(
+            core, tmp_path,
+            query="你还记得我之前明确确认过的那条项目事实吗？请说说。",
+            options=scope,
+            core_options={**image["core_options"], "context_soft_tokens": 3200,
+                          "max_output_tokens": 768},
+            paid={**image["paid_options"], "per_request_calls": 3,
+                  "max_input_tokens": input_limit, "max_output_tokens": 768},
+        ) as (_, _, capture, _, calls, sends, _, memory_id, _):
+            await capture()
+            assert await core.run_once()
+            frozen = json.loads(core.store.one(
+                "SELECT value FROM runtime_meta WHERE key LIKE 'live_text_memory:%'",
+            )["value"])
+            assert [row["memory_id"] for row in frozen["selected"]] == [memory_id]
+            if input_limit == 16000:
+                assert len(calls) == 2
+                assert "青竹七号" in encode(calls[-1]["messages"])
+                context = json.loads(core.store.one(
+                    "SELECT value FROM runtime_meta WHERE key LIKE 'live_text_context:%'",
+                )["value"])
+                assert [row["memory_id"] for row in context["memory_sources"]] == [memory_id]
+            else:
+                assert len(calls) == 1 and sends == []
+                assert core.store.rows("SELECT * FROM outbox") == []
+                assert core.store.one(
+                    "SELECT last_error_code FROM jobs WHERE event_id NOT LIKE 'evt_test_%'",
+                )["last_error_code"] == "MODEL_INPUT_LIMIT"
 
     run(scenario())

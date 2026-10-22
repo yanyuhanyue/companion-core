@@ -472,7 +472,9 @@ class Core(Runtime):
                 )
             current_input.append(rich_reference)
         current_input.append(current)
-        if combined or image_memory:
+        if combined or image_memory or (
+            bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
+        ):
             # History is capped before review. Do not silently discard reviewed
             # conflict evidence or selected facts here; full paid admission still applies.
             messages = [rules, *references, *(m for turn in turns for m in turn), *current_input]
