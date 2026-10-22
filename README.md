@@ -84,13 +84,13 @@ uv run python -m companion diary-worker
 
 ```powershell
 ./scripts/check.ps1                     # 检查并清理测试临时文件
-.venv/Scripts/python.exe scripts/replay.py
-.venv/Scripts/python.exe scripts/smoke.py
-.venv/Scripts/python.exe scripts/package_bridge.py
-# 真实 DeepSeek 合成场景验证；读取本地 .env 的模型 Key，单轮预算上限 0.05 USD
-.venv/Scripts/python.exe scripts/verify_memory_live.py
-.venv/Scripts/python.exe scripts/verify_diary_live.py
+./scripts/check.ps1 -TestFiles tests/test_api_image_lifespan.py  # 开发期定向验证
+./scripts/check.ps1 -Docs               # 文档隐私、引用与证据检查
 ```
+
+回放、进程冒烟、构建和打包验证由最终 CI 执行，开发期按变更选择相关检查。
+需要真实 DeepSeek 合成场景验证时，使用 `scripts/verify_memory_live.py` 或
+`scripts/verify_diary_live.py`；它们读取本地 `.env` 的模型 Key，单轮预算上限 0.05 USD。
 
 Linux 检查：`uv run ruff check companion migrations astrbot_plugin_companion_bridge tests scripts` 与 `uv run pytest -q --basetemp=.local/test-temp`。CI 同时运行 Windows/Linux 测试和 Linux 容器构建。
 
@@ -99,6 +99,10 @@ CI 在 Windows/Linux 上各运行两个互斥分片，按测试文件分配，�
 记录保留 7 天。纯文档 PR 及其 main 合并运行隐私、引用和证据校验；已知证据 JSON 的
 白名单位于 `scripts/ci_policy.py`，未知文件、运行代码、依赖、迁移、标签和合并队列仍运行
 完整检查。uv 缓存按锁文件与平台复用，测试数据库和预算/遗忘账本始终独立创建。
+证据白名单直接关联对应检查，包含 P12/P13；公开 Markdown/JSON 隐私扫描自动覆盖新增阶段。
+本地 `-Docs` 使用同一组检查；独立 worktree 可用 `-Python <已有解释器路径>` 复用依赖环境。
+开发、审查、集成与验收按[开发流程](docs/development.md)推进，最终 CI 摘要自动记录
+检查配置、实际提交、代码树和各项结果，交付材料直接链接该回执。
 
 代码 PR 仍运行完整 CI。合并到 main 后，若同仓库 PR 最新一次 CI 在 24 小时内完整成功，
 且其验证记录中的实际 Git tree 与合并结果完全一致，main 只运行记录核验与最终门禁，

@@ -11,17 +11,26 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL_JOBS = ("test", "container", "browser-reader", "plugin-native")
-DOC_TESTS = (
-    "tests/test_ci_policy.py", "tests/test_p4_gates.py", "tests/test_p8b_evidence.py",
-    "tests/test_p8c_readiness.py", "tests/test_p8c_public_materials.py",
-    "tests/test_p8c1_gates.py", "tests/test_p8c1_contracts_gates.py",
-    "tests/test_p10_contracts_evidence.py",
-)
+# Each fast-path evidence file names the checks that validate its actual contents.
+# Unknown JSON and changes to these checks still require full CI.
 DOC_EVIDENCE = {
-    "docs/design-v0.6/p4-gates.json", "docs/qq-beta/p8b-gates.json",
-    "docs/qq-beta/p8c-readiness.json", "docs/qq-beta/p8c1-gates.json",
-    "docs/qq-beta/p8c1-contracts-gates.json", "docs/qq-beta/p10-contracts-evidence.json",
+    "docs/design-v0.6/p4-gates.json": ("tests/test_p4_gates.py",),
+    "docs/qq-beta/p8b-gates.json": ("tests/test_p8b_evidence.py",),
+    "docs/qq-beta/p8c-readiness.json": ("tests/test_p8c_readiness.py",),
+    "docs/qq-beta/p8c1-gates.json": ("tests/test_p8c1_gates.py",),
+    "docs/qq-beta/p8c1-contracts-gates.json": ("tests/test_p8c1_contracts_gates.py",),
+    "docs/qq-beta/p10-contracts-evidence.json": ("tests/test_p10_contracts_evidence.py",),
+    "docs/qq-beta/p12-gates.json": (
+        "tests/test_p12_beta_operations.py::"
+        "test_private_beta_configuration_and_baseline_never_approve_runtime",
+    ),
+    "docs/qq-beta/p13-gates.json": ("tests/test_p13_gates.py",),
 }
+# Docs mode stops on privacy failure before later validators can echo document values.
+DOC_TESTS = tuple(dict.fromkeys((
+    "tests/test_p8c_public_materials.py", "tests/test_ci_policy.py",
+    *(check for checks in DOC_EVIDENCE.values() for check in checks),
+)))
 CRITICAL_FILES = {
     "Dockerfile", "pyproject.toml", "uv.lock", "compose.yaml", "config.example.toml",
     "scripts/ci_policy.py", "tests/test_ci_policy.py", "AGENTS.md",
@@ -122,7 +131,7 @@ def run_docs(root=ROOT):
         if temporary.resolve().parent != scratch.resolve():
             raise RuntimeError("CI temporary directory outside workspace scratch")
         return subprocess.call([
-            sys.executable, "-m", "pytest", "-q", *DOC_TESTS,
+            sys.executable, "-m", "pytest", "-q", "-x", *DOC_TESTS,
             "--basetemp=" + str(temporary / "pytest"),
             "-o", "cache_dir=" + str(temporary / "cache"),
         ], cwd=root)
@@ -165,6 +174,22 @@ def main():
         if not check_results(args.profile, needs):
             raise SystemExit("Required CI validation did not complete successfully")
         print(f"CI passed: {args.profile}")
+        if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+            # This receipt describes this run; full-tree reuse still requires its
+            # separately authenticated artifact and all successful job results.
+            commit, tree = subprocess.check_output(
+                ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=ROOT, text=True, timeout=10,
+            ).splitlines()
+            run = (f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+                   f"/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+            with Path(summary).open("a", encoding="utf-8") as receipt:
+                receipt.write(
+                    f"### Validation receipt\n\nProfile: `{args.profile}`\n\n"
+                    f"Commit: `{commit}`\n\nTree: `{tree}`\n\n[CI run]({run})\n\n"
+                    "| Check | Result |\n| --- | --- |\n"
+                )
+                for job in ("preflight", "quality", *FULL_JOBS):
+                    receipt.write(f"| {job} | {needs[job]['result']} |\n")
     else:
         raise SystemExit(run_docs())
 

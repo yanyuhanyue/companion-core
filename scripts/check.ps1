@@ -1,7 +1,12 @@
+[CmdletBinding(DefaultParameterSetName = 'Tests')]
 param(
+    [Parameter(ParameterSetName = 'Docs', Mandatory = $true)][switch]$Docs,
+    [Parameter(ParameterSetName = 'Tests')]
     [string[]]$TestFiles = @(),
+    [Parameter(ParameterSetName = 'Tests')]
     [ValidateRange(0, 2147483647)][int]$Durations = 0,
-    [string]$JunitXml = ''
+    [Parameter(ParameterSetName = 'Tests')][string]$JunitXml = '',
+    [string]$Python = '.venv/Scripts/python.exe'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +25,10 @@ if ($JunitXml) {
 }
 $roundTemp = '.local/test-temp/check-' + [guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Force -Path "$roundTemp/tmp" | Out-Null
+$previousEnvironment = @{}
+foreach ($name in @('TEMP', 'TMP', 'UV_CACHE_DIR', 'PYTHONDONTWRITEBYTECODE', 'PYTHONIOENCODING', 'PYTHONPATH')) {
+    $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
 $env:TEMP = (Resolve-Path "$roundTemp/tmp").Path
 $env:TMP = $env:TEMP
 $env:UV_CACHE_DIR = Join-Path $taskRoot '.local/uv-cache'
@@ -30,11 +39,23 @@ $env:PYTHONPATH = if ($env:PYTHONPATH) {
     $taskRoot + [IO.Path]::PathSeparator + $env:PYTHONPATH
 } else { $taskRoot }
 try {
-    & .venv/Scripts/python.exe -m ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
-    if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
-    & .venv/Scripts/python.exe -m pytest -q @TestFiles @pytestArguments "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
-    if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    if ($Docs) {
+        & $Python scripts/ci_policy.py docs
+        if ($LASTEXITCODE -ne 0) { throw 'Documentation checks failed' }
+    } else {
+        & $Python -m ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
+        if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
+        & $Python -m pytest -q @TestFiles @pytestArguments "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
+        if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
+    }
 } finally {
+    foreach ($name in $previousEnvironment.Keys) {
+        if ($null -eq $previousEnvironment[$name]) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        }
+    }
     # Each verification owns one directory; unrelated or retained diagnostics are untouched.
     foreach ($relative in @($roundTemp)) {
         $target = [System.IO.Path]::GetFullPath((Join-Path $taskRoot $relative))

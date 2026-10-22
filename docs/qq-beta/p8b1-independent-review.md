@@ -9,7 +9,7 @@
 
 - 记录起点：2026-10-20 12:26:09 UTC / 20:26:09 Asia/Shanghai（状态文件建立；此前读取任务书、技能和 Git 范围）。
 - 取证结束：2026-10-20 12:39:19 UTC / 20:39:19 Asia/Shanghai。
-- 工作树：`E:/Companion Core/.local/worktrees/p8b1-independent-review`；分支 `codex/p8b1-independent-review`。
+- 工作树：`<workspace>/.local/worktrees/p8b1-independent-review`；分支 `codex/p8b1-independent-review`。
 - 原 main：`a33d3cb77f348828b17e4bb48c621c53cfcdc017`。
 - 深审冻结组合：`0fadc971d0d06bd7c68e05ab1e65e46ecd493554`，比较 `a33d3cb...0fadc971` 的原始 diff 和调用路径；
   结构增量另比较 `3e5400d82ea58623118f6f97d84357e35d4135c6..0fadc971`。
