@@ -23,6 +23,15 @@ def validate_record(record):
             ".".join(map(str, error.absolute_path)) or "record" for error in errors
         ]}
     phone = record["phone"]
+    if any(value is not None and kind not in record["qq_types"]
+           for kind, value in record.get("coverage_observations", {}).items()):
+        return {"schema_valid": False, "invalid_fields": ["coverage_observations.qq_type"]}
+    visible = phone.get("visible_reply_count")
+    if visible is not None and (
+        phone["received"] is None or (visible > 0) != phone["received"]
+        or (visible > 1 and "duplicate_visible_reply" not in (record["incidents"] or []))
+    ):
+        return {"schema_valid": False, "invalid_fields": ["phone.visible_reply_count"]}
     elapsed = None
     if phone["sent_at_utc"] is not None:
         elapsed = (datetime.fromisoformat(phone["received_at_utc"])
