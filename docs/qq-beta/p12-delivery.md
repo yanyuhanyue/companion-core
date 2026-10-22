@@ -1,9 +1,10 @@
 # P12 A–E 离线交付与准入状态
 
-P12-00、A–E 的离线开发、验证方案和五份独立 Draft PR 已准备。
-本文记录通过完整 CI 的实现候选及组合全量检查；最终交付文档提交另核对其精确 HEAD。
-任务书把工程完成定义为代码合入且准确 CI 通过；当前 PR 未合并，
-因此不宣称工程阶段已正式关闭。真实首批验收、多自然日和持续运行均未执行。
+P12-00、A–E 的五份 PR 已按主人明确批准全部合并，分支清理已完成。
+合并后的完整产品 main 为 `7568a2377806f98f286efe0aeac4b69a0b7eae73`，
+文件树与已通过本地完整检查的集成候选完全一致。
+其 [main CI 39718418701](https://github.com/yanyuhanyue/companion-core/actions/runs/39718418701) 全部十项检查通过，工程合并验收完成。
+真实首批验收、多自然日和持续运行均未执行。
 
 `private_beta_ready=false`，`production_ready=false`。
 本轮未连接 VPS、读取或复制业务库、下载真实 QQ 图片、调用付费模型或发送 QQ。
@@ -11,20 +12,20 @@ P11 的 6 输入／8 调用／6 手机确认仍只属于原已结束窗口。
 
 ## 固定候选与变更范围
 
-基线与本轮结束前复核的 main 为 `c6493d481676e1e6684fb49564c2557224950d20`。
-其文档 CI 为 [39707468712](https://github.com/yanyuhanyue/companion-core/actions/runs/39707468712)；
-最后已合入的完整产品候选与 CI 仍见 [基线](p12-baseline.md)。
+开发基线 main 为 `c6493d481676e1e6684fb49564c2557224950d20`。
+该基线文档 CI 为 [39707468712](https://github.com/yanyuhanyue/companion-core/actions/runs/39707468712)；
+P11 已合入候选与历史 CI 仍见 [基线](p12-baseline.md)。
 
-| 包 | Draft PR／实现 HEAD | 行为与主要文件 | 本轮证据 |
+| 包 | 已合并 PR／最终 HEAD | 行为与主要文件 | 本轮证据 |
 |---|---|---|---|
 | A | [#58](https://github.com/yanyuhanyue/companion-core/pull/58) · `96f697b8e565534a2cefd78031674b7792f6e8ec` | Bridge `images.py` 限定普通原图字段；Core `qq_rich.py` 明确 ID/元数据语义；媒体测试与申请模板 | `OFFLINE_PASS`；图片真人 `NOT_RUN`，全文深读 `DISABLED` |
 | B | [#60](https://github.com/yanyuhanyue/companion-core/pull/60) · `4c811d4978f533f19cd0f4ddf8eb13e827ab2a20` | Core/Bridge CLI、`api.py`、`memory_control.py`；`memory.py` 原子事务；`backup.py` 恢复后重新批准；原生生命周期和检索评测 | `OFFLINE_PASS`；认证本地 WS/HTTP；业务 R5、QQ 控制 `NOT_RUN` |
 | C | [#57](https://github.com/yanyuhanyue/companion-core/pull/57) · `a400ae1bd5a4b43c4e0aa0384507670cbe724e42` | `affect.py` 明确反馈；`interest.py` 模拟来源；`reflection.py` 祖先来源 TTL 与 Ledger | `OFFLINE_PASS`；真人反馈与独立自然日 `NOT_RUN` |
 | D | [#59](https://github.com/yanyuhanyue/companion-core/pull/59) · `1af744c0db9e62aaa4fb2c75cf38a0e825ed4bea` | `api.py` 私有视图 no-store；`goals.py` 来源与执行/送达读视图；`social.py`、`transport.py` 最终分享重验 | `OFFLINE_PASS`；真实日记、Reader、主动分享 `NOT_RUN` |
-| E | [#61](https://github.com/yanyuhanyue/companion-core/pull/61) · `2da5131ff6d442fff133951098a302542f279bed` | `beta_observation.py`、原反馈 schema/validator、`summarize_beta_feedback.py`；门禁、配置、恢复与长期限额设计 | E3 `OFFLINE_PASS`；E1/E2/E4 文档 `DONE`；常驻代码与恢复实机 `NOT_RUN` |
+| E | [#61](https://github.com/yanyuhanyue/companion-core/pull/61) · `6c2b0098fd06c9ef48607d0f979faf5967188451` | `beta_observation.py`、原反馈 schema/validator、`summarize_beta_feedback.py`；门禁、配置、恢复与长期限额设计 | E3 `OFFLINE_PASS`；E1/E2/E4 文档 `DONE`；常驻代码与恢复实机 `NOT_RUN` |
 
-上表固定实现 HEAD。E 的交付文档提交会改变该 PR HEAD，但不改变上表实现。
-所有最终 PR HEAD 和 CI 必须以本轮最终独立交付回执及各 PR Checks 再核对，不能用本文的旧运行覆盖新提交。
+上表记录合并前最终 PR HEAD；对应 squash 提交和 main CI 分别记录。
+后续交付文档提交不改变已验证产品代码，其精确 HEAD/CI 见合并清理回执。
 完整逐项状态、实际历史镜像 ID、最新已知三类日志摘要和未批准项见 [p12-gates.json](p12-gates.json)。
 没有新部署镜像或运行配置，P12 实际镜像/配置为 `null`；历史 Docker image ID 不冒充 registry digest。
 
@@ -41,15 +42,15 @@ P11 的 6 输入／8 调用／6 手机确认仍只属于原已结束窗口。
 | 五份 PR 完整 CI | 上述实现 HEAD 全部 SUCCESS；Linux/Windows 两分片、quality、container、browser-reader、plugin-native、preflight、最终 ci 均通过 |
 
 B/D/E 未另行重复单分支本地全量；最终组合全量和各 PR 完整 CI 覆盖运行交互。
-没有把多轮相同测试相加。组合使用独立工作树；没有合并远端 PR 或改变 main。首轮组合检查在发现旧迁移断言遗漏后主动中止，未计为通过；上表为修正后的完整重跑。
+没有把多轮相同测试相加。该本地检查当时使用独立工作树；合并产品提交 `7568a23` 的文件树与该交付候选一致。首轮组合检查在发现旧迁移断言遗漏后主动中止，未计为通过；上表为修正后的完整重跑。
 
 
 实现候选完整 CI：[A 39714809883](https://github.com/yanyuhanyue/companion-core/actions/runs/39714809883)、
 [B 39716121427](https://github.com/yanyuhanyue/companion-core/actions/runs/39716121427)、
 [C 39713815747](https://github.com/yanyuhanyue/companion-core/actions/runs/39713815747)、
 [D 39714820874](https://github.com/yanyuhanyue/companion-core/actions/runs/39714820874)、
-[E 39715593556](https://github.com/yanyuhanyue/companion-core/actions/runs/39715593556)。
-E 交付文档提交后的精确 CI 见该 PR Checks 和最终独立回执。
+[E 39717587052](https://github.com/yanyuhanyue/companion-core/actions/runs/39717587052)。
+E 最终交付文档 HEAD 的完整 CI 已包含在上表；合并后的 main 单独检查。
 B 首轮 CI 39715581335 在两平台暴露旧备份断言遗漏：新恢复标记有意增加一行元数据，
 测试却仍要求整表不变。修正后明确验证新增标记并保留全部旧行、删除、预算和投递断言；
 没有为通过测试修改产品行为。
@@ -93,9 +94,15 @@ QQ 登录卷、原宿主服务、整机恢复和 3/7/14/30 天自然日体验仍
 保留最新 ErasureLedger、全部 Budget Journal、完整 Window Journal/Spool/epoch；
 旧 DB 或旧二进制不能恢复额度、权限或待发送消息。恢复使用技术隔离的新目标，不覆盖原业务卷。
 
+## 合并与分支清理
+
+五份 PR 均为 MERGED，开放 PR 为 0。本轮五个远端分支和六个本地分支（含集成分支）已删除。
+六份工作树已解除分支绑定，保留验收日志与此前因自动审批拒绝而留存的缓存/辅助文件。
+本次没有重试被拒绝的文件清理。各包合并提交和时间见机器门禁；没有新增运行授权。
+
 ## 下一阶段执行顺序
 
-1. 审阅并另行批准合并五份 Draft PR；按最终合并 main 重新核对 CI。合并不等于部署或真实使用批准。
+1. 以已合并的产品候选及对应 main CI 作为下一阶段工程起点；实际部署与使用仍绑定新的准确范围。
 2. 固定该候选的实际镜像、配置和 STOP/三类日志，补全 QQ 登录卷与原服务的准确恢复范围。
 3. 分开批准一次原图的两次模型尝试，以及停止聊天后的单事实 R5 生命周期；各自完成手机侧验收。
 4. 先采集真人反馈与一天私密日记，再逐步积累 3/7/14/30 个真实自然日；Reader 与第一次主动私聊分别批准。

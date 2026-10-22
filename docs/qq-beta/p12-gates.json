@@ -117,10 +117,12 @@
       "new_runtime_approval": null,
       "pr_number": 58,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/58",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-qq-media.md",
-      "scope_note": "Ordinary SnowLuma image fields and negative cases verified offline; real CDN, account Vision compatibility, invoice and phone acceptance NOT_RUN."
+      "scope_note": "Ordinary SnowLuma image fields and negative cases verified offline; real CDN, account Vision compatibility, invoice and phone acceptance NOT_RUN.",
+      "merge_commit_sha": "d4f92b251b8057481064cef6173105bfe3c77db9",
+      "merged_at_utc": "2026-10-22T03:42:50Z"
     },
     "A2": {
       "status": "OFFLINE_PASS",
@@ -139,10 +141,12 @@
       "new_runtime_approval": null,
       "pr_number": 58,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/58",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-qq-media.md",
-      "scope_note": "Identifier/metadata semantics tested. Full quote/forward retrieval is a disabled proposal; card body requires a separate Reader scope."
+      "scope_note": "Identifier/metadata semantics tested. Full quote/forward retrieval is a disabled proposal; card body requires a separate Reader scope.",
+      "merge_commit_sha": "d4f92b251b8057481064cef6173105bfe3c77db9",
+      "merged_at_utc": "2026-10-22T03:42:50Z"
     },
     "B1": {
       "status": "OFFLINE_PASS",
@@ -161,10 +165,12 @@
       "new_runtime_approval": null,
       "pr_number": 60,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/60",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-b-memory-lifecycle.md",
-      "scope_note": "Synthetic native lifecycle and old-backup/latest-ledger replay pass. Business-data R5 and phone acceptance NOT_RUN."
+      "scope_note": "Synthetic native lifecycle and old-backup/latest-ledger replay pass. Business-data R5 and phone acceptance NOT_RUN.",
+      "merge_commit_sha": "7568a2377806f98f286efe0aeac4b69a0b7eae73",
+      "merged_at_utc": "2026-10-22T03:43:32Z"
     },
     "B2": {
       "status": "OFFLINE_PASS",
@@ -183,10 +189,12 @@
       "new_runtime_approval": null,
       "pr_number": 60,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/60",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-b-memory-lifecycle.md",
-      "scope_note": "Authenticated local WS to Core HTTP v1 control verified; default disabled. Real admission requires business B1 and a fresh exact scope."
+      "scope_note": "Authenticated local WS to Core HTTP v1 control verified; default disabled. Real admission requires business B1 and a fresh exact scope.",
+      "merge_commit_sha": "7568a2377806f98f286efe0aeac4b69a0b7eae73",
+      "merged_at_utc": "2026-10-22T03:43:32Z"
     },
     "B3": {
       "status": "OFFLINE_PASS",
@@ -205,10 +213,12 @@
       "new_runtime_approval": null,
       "pr_number": 60,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/60",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-b-memory-lifecycle.md",
-      "scope_note": "Evaluation completed, not a retrieval-quality gate: 6/7 held-out necessary memories, one miss retained, no deleted-fact leak; original retrieval unchanged."
+      "scope_note": "Evaluation completed, not a retrieval-quality gate: 6/7 held-out necessary memories, one miss retained, no deleted-fact leak; original retrieval unchanged.",
+      "merge_commit_sha": "7568a2377806f98f286efe0aeac4b69a0b7eae73",
+      "merged_at_utc": "2026-10-22T03:43:32Z"
     },
     "C1": {
       "status": "OFFLINE_PASS",
@@ -227,10 +237,12 @@
       "new_runtime_approval": null,
       "pr_number": 57,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/57",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-growth-shadow.md",
-      "scope_note": "Explicit owner feedback remains SHADOW with TTL/source erasure; applying it to real expression remains disabled."
+      "scope_note": "Explicit owner feedback remains SHADOW with TTL/source erasure; applying it to real expression remains disabled.",
+      "merge_commit_sha": "cd6be33557d739c8a7c4957faa17bc92055102f1",
+      "merged_at_utc": "2026-10-22T03:43:01Z"
     },
     "C2": {
       "status": "OFFLINE_PASS",
@@ -249,10 +261,12 @@
       "new_runtime_approval": null,
       "pr_number": 57,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/57",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-growth-shadow.md",
-      "scope_note": "Independent retained sources and simulated/live separation verified; real natural-day interest evidence NOT_RUN."
+      "scope_note": "Independent retained sources and simulated/live separation verified; real natural-day interest evidence NOT_RUN.",
+      "merge_commit_sha": "cd6be33557d739c8a7c4957faa17bc92055102f1",
+      "merged_at_utc": "2026-10-22T03:43:01Z"
     },
     "C3": {
       "status": "OFFLINE_PASS",
@@ -271,10 +285,12 @@
       "new_runtime_approval": null,
       "pr_number": 57,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/57",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-growth-shadow.md",
-      "scope_note": "Source-backed vetoable reflection and transitive expiry/latest-ledger restore verified on synthetic fixtures."
+      "scope_note": "Source-backed vetoable reflection and transitive expiry/latest-ledger restore verified on synthetic fixtures.",
+      "merge_commit_sha": "cd6be33557d739c8a7c4957faa17bc92055102f1",
+      "merged_at_utc": "2026-10-22T03:43:01Z"
     },
     "D1": {
       "status": "OFFLINE_PASS",
@@ -293,10 +309,12 @@
       "new_runtime_approval": null,
       "pr_number": 59,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/59",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-diary-life.md",
-      "scope_note": "Synthetic native diary, correction, next-day continuity and deletion/restore pass; real natural-day diary acceptance NOT_RUN."
+      "scope_note": "Synthetic native diary, correction, next-day continuity and deletion/restore pass; real natural-day diary acceptance NOT_RUN.",
+      "merge_commit_sha": "d899d7b909cc971fa8653c49fa3fd40a6a46aa51",
+      "merged_at_utc": "2026-10-22T03:43:10Z"
     },
     "D2": {
       "status": "OFFLINE_PASS",
@@ -315,10 +333,12 @@
       "new_runtime_approval": null,
       "pr_number": 59,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/59",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-diary-life.md",
-      "scope_note": "Read-only goal execution/result/delivery provenance and source expiry verified; phone confirmation stays null."
+      "scope_note": "Read-only goal execution/result/delivery provenance and source expiry verified; phone confirmation stays null.",
+      "merge_commit_sha": "d899d7b909cc971fa8653c49fa3fd40a6a46aa51",
+      "merged_at_utc": "2026-10-22T03:43:10Z"
     },
     "D3": {
       "status": "OFFLINE_PASS",
@@ -337,10 +357,12 @@
       "new_runtime_approval": null,
       "pr_number": 59,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/59",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-diary-life.md",
-      "scope_note": "Source/TTL/candidate/text/private-target checks verified through final dispatch; no real Reader or proactive-send approval."
+      "scope_note": "Source/TTL/candidate/text/private-target checks verified through final dispatch; no real Reader or proactive-send approval.",
+      "merge_commit_sha": "d899d7b909cc971fa8653c49fa3fd40a6a46aa51",
+      "merged_at_utc": "2026-10-22T03:43:10Z"
     },
     "E1": {
       "status": "DONE",
@@ -354,15 +376,17 @@
         "recovery": "NOT_RUN",
         "release": "DISABLED"
       },
-      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
-      "ci_run": 39715593556,
+      "pr_head_sha": "6c2b0098fd06c9ef48607d0f979faf5967188451",
+      "ci_run": 39717587052,
       "new_runtime_approval": null,
       "pr_number": 61,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-beta-operations.md",
-      "scope_note": "Two-track verification matrix and explicitly disabled configuration prepared; actual deployed configuration NOT_RECHECKED."
+      "scope_note": "Two-track verification matrix and explicitly disabled configuration prepared; actual deployed configuration NOT_RECHECKED.",
+      "merge_commit_sha": "0203916d34a973e8ca17145e3384e0b3678a9572",
+      "merged_at_utc": "2026-10-22T03:43:21Z"
     },
     "E2": {
       "status": "DONE",
@@ -376,15 +400,17 @@
         "recovery": "NOT_RUN",
         "release": "DISABLED"
       },
-      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
-      "ci_run": 39715593556,
+      "pr_head_sha": "6c2b0098fd06c9ef48607d0f979faf5967188451",
+      "ci_run": 39717587052,
       "new_runtime_approval": null,
       "pr_number": 61,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-beta-operations.md",
-      "scope_note": "Design only. Cumulative limits and permanent beta are not implemented or authorized."
+      "scope_note": "Design only. Cumulative limits and permanent beta are not implemented or authorized.",
+      "merge_commit_sha": "0203916d34a973e8ca17145e3384e0b3678a9572",
+      "merged_at_utc": "2026-10-22T03:43:21Z"
     },
     "E3": {
       "status": "OFFLINE_PASS",
@@ -398,15 +424,17 @@
         "recovery": "NOT_RUN",
         "release": "DISABLED"
       },
-      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
-      "ci_run": 39715593556,
+      "pr_head_sha": "6c2b0098fd06c9ef48607d0f979faf5967188451",
+      "ci_run": 39717587052,
       "new_runtime_approval": null,
       "pr_number": 61,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-beta-operations.md",
-      "scope_note": "Offline private feedback summary and backward-compatible validation pass; submitted evidence and invoices are not revalidated."
+      "scope_note": "Offline private feedback summary and backward-compatible validation pass; submitted evidence and invoices are not revalidated.",
+      "merge_commit_sha": "0203916d34a973e8ca17145e3384e0b3678a9572",
+      "merged_at_utc": "2026-10-22T03:43:21Z"
     },
     "E4": {
       "status": "DONE",
@@ -420,15 +448,17 @@
         "recovery": "NOT_RUN",
         "release": "DISABLED"
       },
-      "pr_head_sha": "2da5131ff6d442fff133951098a302542f279bed",
-      "ci_run": 39715593556,
+      "pr_head_sha": "6c2b0098fd06c9ef48607d0f979faf5967188451",
+      "ci_run": 39717587052,
       "new_runtime_approval": null,
       "pr_number": 61,
       "pr_url": "https://github.com/yanyuhanyue/companion-core/pull/61",
-      "head_semantics": "Reviewed implementation HEAD at delivery-record creation; later delivery-document commits require their own exact-HEAD checks.",
+      "head_semantics": "Final reviewed PR HEAD at merge; squash commit recorded separately.",
       "ci_conclusion": "SUCCESS",
       "evidence_document": "p12-beta-operations.md",
-      "scope_note": "Per-object isolated recovery plan and unapproved template prepared; QQ login volumes, original services and whole-host recovery NOT_RUN."
+      "scope_note": "Per-object isolated recovery plan and unapproved template prepared; QQ login volumes, original services and whole-host recovery NOT_RUN.",
+      "merge_commit_sha": "0203916d34a973e8ca17145e3384e0b3678a9572",
+      "merged_at_utc": "2026-10-22T03:43:21Z"
     }
   },
   "private_beta_ready": false,
@@ -439,7 +469,7 @@
     "QQ login volumes, original services and whole-host recovery remain outside prior application-set restore evidence.",
     "Cross-day human quality cannot be filled from synthetic clocks or repeated short-window renewal."
   ],
-  "delivery_recorded_at_utc": "2026-10-22T03:33:57.009107+00:00",
+  "delivery_recorded_at_utc": "2026-10-22T03:50:45.259737+00:00",
   "combined_verification": {
     "head_sha": "24423869d31c2a2aab670e3bc4847e33315702cb",
     "command": "./scripts/check.ps1",
@@ -449,22 +479,25 @@
     "elapsed_seconds": 748.09,
     "log_sha256": "8cd80585f3a9c860f78cfe66347a4cc03f2b3d971949641799b1358f63c9a4f8",
     "remote_merge": false,
-    "final_delivery_commits": "Documentation only; final PR HEAD still requires its own CI."
+    "final_delivery_commits": "Documentation only after the full local check; final PR CI is recorded per package."
   },
   "delivery": {
     "document": "p12-delivery.md",
-    "open_draft_prs": [
-      57,
-      58,
-      59,
-      60,
-      61
-    ],
-    "merged": false,
-    "taskbook_engineering_completion": "PENDING_EXPLICIT_MERGE_APPROVAL",
+    "open_draft_prs": [],
+    "merged": true,
+    "taskbook_engineering_completion": "DONE",
     "actual_p12_image_ids": null,
     "actual_p12_runtime_config_sha256": null,
-    "exact_final_head_receipt": "Final standalone P12 delivery receipt; self-referential repository HEAD is not prefilled."
+    "exact_final_head_receipt": "Post-merge standalone receipt records the final documentation HEAD and its own CI.",
+    "merged_main_sha": "7568a2377806f98f286efe0aeac4b69a0b7eae73",
+    "main_ci_run": 39718418701,
+    "main_ci_conclusion": "SUCCESS",
+    "owner_merge_authorization": "Explicit owner instruction to merge and clean the branches.",
+    "branch_cleanup": {
+      "remote_branches_deleted": 5,
+      "local_branches_deleted": 6,
+      "worktrees": "DETACHED_AND_PRESERVED"
+    }
   },
   "repaired_ci_failure": {
     "package": "B",
