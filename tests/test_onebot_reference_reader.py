@@ -277,7 +277,7 @@ def test_card_type_fields_project_without_promoting_unsupported_links():
     ("https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=https%3A%2F%2Fevil.invalid", None),
     ("https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=", None),
     ("https://evil.invalid/v3/bbs/app/api/web/share?link_id=123", None),
-    ("https://b23.tv/synthetic", None),
+    ("https://b23.tv/synthetic?share_source=qq&bbid=private", "https://b23.tv/synthetic"),
 ])
 def test_card_tracking_queries_only_yield_fixed_platform_targets(url, canonical):
     event, _ = enriched([{"type": "json", "data": {"data": json.dumps({"url": url})}}])

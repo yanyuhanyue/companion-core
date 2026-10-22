@@ -49,6 +49,28 @@ def video_url(value):
     return "https://www.bilibili.com/video/" + match[1]
 
 
+def short_video_url(value):
+    url = urlsplit(value)
+    if (url.scheme != "https" or url.netloc != "b23.tv"
+        or not re.fullmatch(r"/[A-Za-z0-9]{1,64}", url.path) or url.query or url.fragment
+        or value != "https://b23.tv" + url.path):
+        raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
+    return "https://b23.tv" + url.path
+
+
+def redirect_video_url(value):
+    if (not isinstance(value, str) or len(value) > 2048 or "\\" in value or "," in value
+        or any(ord(char) <= 32 or ord(char) == 127 for char in value)):
+        raise ReadFailure("READER_REDIRECT_NOT_ALLOWED")
+    url = urlsplit(value)
+    if (url.scheme != "https" or url.hostname not in {
+        "www.bilibili.com", "m.bilibili.com", "bilibili.com",
+    } or url.username is not None or url.password is not None
+        or url.port not in {None, 443} or url.fragment):
+        raise ReadFailure("READER_REDIRECT_NOT_ALLOWED")
+    return video_url("https://www.bilibili.com" + url.path)
+
+
 def permitted_url(value):
     url = urlsplit(value)
     if (
@@ -198,6 +220,30 @@ class PublicHTTP:
 
     async def __aexit__(self, *args):
         await self.pool.aclose()
+
+    async def resolve_bilibili_short(self, url, budget, *, check=None):
+        """One public redirect, under the same lease and budget as the ensuing read."""
+        url = short_video_url(url)
+        budget.reserve()
+        async with self.pool.stream(
+            "GET", url,
+            headers={"Accept-Encoding": "identity", "User-Agent": "CompanionSourceReader/0.6"},
+            extensions=budget.request_extensions(check),
+        ) as response:
+            header_bytes = sum(len(key) + len(value) + 4 for key, value in response.headers)
+            budget.used_bytes += header_bytes
+            if header_bytes > 8192 or budget.used_bytes > budget.max_bytes:
+                raise ReadFailure("READER_BYTE_LIMIT")
+            if response.status in {401, 403, 412, 429}:
+                raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
+            locations = [value for key, value in response.headers if key.lower() == b"location"]
+            if response.status not in {301, 302, 303, 307, 308} or len(locations) != 1:
+                raise ReadFailure("READER_REDIRECT_NOT_ALLOWED")
+            location = locations[0]
+            target = redirect_video_url(location.decode("ascii"))
+            receipt = {"source_url": url, "target_url": target, "status": response.status,
+                       "location_sha256": hashlib.sha256(location).hexdigest()}
+        return target, receipt
 
     async def get(self, url, budget, role, *, headers=None, check=None):
         permitted_url(url)

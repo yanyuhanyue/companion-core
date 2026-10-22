@@ -54,6 +54,28 @@ class SubtitleSpan(StrictModel):
         return self
 
 
+class ShortLinkResolution(StrictModel):
+    source_url: str = Field(max_length=2048)
+    target_url: str = Field(max_length=2048)
+    status: Literal[301, 302, 303, 307, 308]
+    location_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def bounded_video_redirect(self):
+        try:
+            source, target = content_target(self.source_url), content_target(self.target_url)
+        except CoreError as error:
+            raise ValueError("Invalid short-link resolution") from error
+        if (
+            source != ("bilibili", self.source_url)
+            or not self.source_url.startswith("https://b23.tv/")
+            or target != ("bilibili", self.target_url)
+            or not self.target_url.startswith("https://www.bilibili.com/video/")
+        ):
+            raise ValueError("Invalid short-link resolution")
+        return self
+
+
 class ReadingEvidence(StrictModel):
     level: Literal["L1", "L2"]
     method: Literal["public_api", "account_api", "static_page", "browser_render"]
@@ -64,6 +86,9 @@ class ReadingEvidence(StrictModel):
     spans: list[SubtitleSpan] = Field(default_factory=list, max_length=120)
     sources: list[ReadingSource] = Field(min_length=1, max_length=4)
     truncated: bool = False
+    resolution: ShortLinkResolution | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def consistent(self):
@@ -265,6 +290,11 @@ class ObservationService:
                 <= after(self.clock(), 300)
             ):
                 raise CoreError("READING_EVIDENCE_MISMATCH", 400)
+        if status == "FETCHED" and observation.source == "bilibili":
+            resolution = payload.reading.resolution if payload.reading else None
+            short = payload.url.startswith("https://b23.tv/")
+            if short != bool(resolution) or resolution and resolution.source_url != payload.url:
+                raise CoreError("READING_RESOLUTION_MISMATCH", 400)
         kinds = {
             "qq_image": {"image_analysis"},
             "voice": {"audio_transcript"},

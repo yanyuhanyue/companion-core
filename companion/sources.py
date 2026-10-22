@@ -75,6 +75,8 @@ def content_target(value):
         parsed = _url(value)
         if parsed.scheme != "https" or parsed.port not in {None, 443}:
             raise ValueError()
+        if parsed.hostname == "b23.tv" and re.fullmatch(r"/[A-Za-z0-9]{1,64}", parsed.path):
+            return "bilibili", "https://b23.tv" + parsed.path
         for definition in _DEFINITIONS:
             if parsed.hostname not in definition.content_hosts:
                 continue

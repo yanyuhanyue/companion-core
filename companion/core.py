@@ -517,6 +517,8 @@ class Core(Runtime):
             retrieval_query.strip()
         ) else []
         if not hits:
+            hits = self.memory.project_recall_candidates(query, memory_ids=allowed, limit=6)
+        if not hits:
             if bounded_text:
                 live_text.freeze_memory_review(
                     self.store, self.settings, self.clock, job, [], [], history,

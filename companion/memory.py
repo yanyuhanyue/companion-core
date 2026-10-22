@@ -20,6 +20,54 @@ class Memory:
         if actor != "owner" or not self.settings.memory_enabled:
             raise CoreError("MEMORY_ACCESS_DENIED", 403)
 
+    def project_recall_candidates(self, query, *, memory_ids=None, limit=6):
+        """Nominate a bounded project catalog for an explicit retrospective request.
+
+        A generic request can name the subject without resembling any fact's content.
+        These are only candidates: Core must still pay for and apply relevance review.
+        """
+        clauses = re.split(r"[，,。！？!?；;\n]", query)
+        # Negation must target recall or memory use, not accuracy/format constraints.
+        if any(re.search(
+            r"(?:不要|不用|无需|不必|不想|不需要|不希望|别|停止|禁止).{0,6}(?:回忆|回顾)|"
+            r"(?:不|别|不要|不用|无需|不必).{0,4}(?:谈|提|聊|说出|检索|调用|使用)"
+            r".{0,8}(?:记忆|项目|事实|约定|设定)|"
+            r"\b(?:do not|don't|never|no need|stop|avoid)\b.{0,15}\b(?:recall|remember)\b|"
+            r"\b(?:do not|don't|never|no need|stop|avoid)\b.{0,15}\buse\b.{0,15}\bmemory\b",
+            clause, re.IGNORECASE,
+        ) for clause in clauses):
+            return []
+        # A project statement beside an unrelated question is not a recall request.
+        for clause in clauses:
+            if (not re.search(r"项目|\bproject\b", clause, re.IGNORECASE)
+                or re.search(r"(?:未|没|尚未|还没|未经)(?:有)?(?:确认|确定)", clause)):
+                continue
+            direct = re.search(
+                r"你.{0,4}记得|记得.{0,40}(?:什么|哪些|吗)|(?:回忆|回顾)一下|"
+                r"^(?:请|帮我|麻烦你)?(?:回忆|回顾)|记(?:住|下|录)(?:了)?(?:哪些|什么)|"
+                r"^(?:please )?(?:recall|recollect)\b|\b(?:do you|what.*)\s+remember\b",
+                clause, re.IGNORECASE,
+            )
+            recorded = re.search(
+                r"(?:之前|以前|先前|上次|曾经|已经|已).{0,12}"
+                r"(?:确认|确定|约定|记住|记下|记录|说过)|"
+                r"(?:我|我们).{0,4}让你.{0,4}(?:记住|记下|记录)(?:的|过)|"
+                r"\b(?:previously|already|earlier)\s+(?:confirmed|agreed|recorded)\b",
+                clause, re.IGNORECASE,
+            )
+            question = re.search(
+                r"什么|哪些|哪条|哪个|吗|(?:说说|列出|复述|讲讲|总结)|"
+                r"\b(?:what|which|list|tell|remind)\b", clause, re.IGNORECASE,
+            )
+            if direct or (recorded and question):
+                break
+        else:
+            return []
+        # Reuse native eligibility, subject filtering, evidence and approval limits.
+        return [row for row in self.search(
+            "*", subjects=("project",), limit=limit, memory_ids=memory_ids,
+        ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
+
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None):
         self.require_owner(actor)
         s = self.store

@@ -82,6 +82,8 @@ def discovered_url(value):
             match = re.fullmatch(r"/video/(BV[0-9A-Za-z]{10}|av[0-9]{1,20})/?", url.path)
             if match:
                 return "https://www.bilibili.com/video/" + match[1]
+        if url.hostname == "b23.tv" and re.fullmatch(r"/[A-Za-z0-9]{1,64}", url.path):
+            return "https://b23.tv" + url.path
         if url.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
             if url.path == "/v3/bbs/app/api/web/share":
                 identifiers = parse_qs(
