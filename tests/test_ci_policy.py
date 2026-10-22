@@ -82,7 +82,7 @@ def needs(profile):
     }}
 
 
-@pytest.mark.parametrize("profile", ["full", "docs"])
+@pytest.mark.parametrize("profile", ["full", "docs", "reuse"])
 def test_gate_accepts_only_the_expected_complete_result_set(profile):
     assert check_results(profile, needs(profile))
     assert not check_results("unknown", needs(profile))
@@ -175,7 +175,7 @@ def test_cli_event_failure_chooses_full_and_gate_failure_returns_nonzero(tmp_pat
     result = subprocess.run([sys.executable, "scripts/ci_policy.py", "plan"],
                             cwd=ROOT, env=env, capture_output=True, text=True)
     assert result.returncode == 0
-    assert output.read_text("utf-8") == "profile=full\n"
+    assert output.read_text("utf-8") == "profile=full\nreuse=null\n"
     env["NEEDS_JSON"] = json.dumps(needs("docs"))
     result = subprocess.run([sys.executable, "scripts/ci_policy.py", "gate", "--profile", "full"],
                             cwd=ROOT, env=env, capture_output=True, text=True)

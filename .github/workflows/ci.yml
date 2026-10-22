@@ -15,13 +15,20 @@ jobs:
   preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       profile: ${{ steps.plan.outputs.profile }}
+      reuse: ${{ steps.plan.outputs.reuse }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python -B scripts/ci_policy.py plan
   quality:
     needs: preflight
@@ -34,15 +41,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
+        if: ${{ needs.preflight.outputs.profile != 'reuse' }}
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        if: ${{ needs.preflight.outputs.profile != 'reuse' }}
         with:
           version: '0.12.10'
           enable-cache: true
           cache-dependency-glob: uv.lock
           cache-suffix: python-3.12
       - run: uv sync --frozen --extra onebot
+        if: ${{ needs.preflight.outputs.profile != 'reuse' }}
+      - name: Verify reused full CI still matches this checkout
+        if: ${{ needs.preflight.outputs.profile == 'reuse' }}
+        env:
+          CI_REUSE: ${{ needs.preflight.outputs.reuse }}
+        run: python scripts/ci_reuse.py validate
       - if: ${{ needs.preflight.outputs.profile == 'full' }}
         run: uv run --extra onebot ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts
       - name: Validate documentation privacy, references and evidence
@@ -255,3 +270,16 @@ jobs:
           CI_PROFILE: ${{ needs.preflight.outputs.profile }}
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: python scripts/ci_policy.py gate --profile "$CI_PROFILE"
+      - name: Record the tree after every full check succeeded
+        if: ${{ needs.preflight.outputs.profile == 'full' }}
+        env:
+          CI_PROFILE: ${{ needs.preflight.outputs.profile }}
+        run: python scripts/ci_reuse.py record
+      - uses: actions/upload-artifact@v4
+        if: ${{ needs.preflight.outputs.profile == 'full' }}
+        with:
+          name: ci-full-${{ github.run_attempt }}
+          path: .local/ci/verified-tree.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
