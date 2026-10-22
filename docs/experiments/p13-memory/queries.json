@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "split": "NEW_SYNTHETIC_HOLDOUT_AFTER_ALGORITHM_FREEZE",
+  "algorithm_freeze_commit": "df617a5b4dede29fcf1884717f5cc2a997a0960d",
+  "queries": [
+    {"id":"rain_route","query":"碰上下雨那天，我练的是哪项，器材从哪个入口领取？"},
+    {"id":"cup_drawer","query":"我要带随身杯出门，应该拉开哪个抽屉？"},
+    {"id":"project_next","query":"rq 的目录整理完后该做什么？"},
+    {"id":"project_fullwidth_alias","query":"ＲＱ这个简称指的是什么计划？"},
+    {"id":"progress_october","query":"10月21日苇桥的工作停到哪里？"},
+    {"id":"progress_september","query":"9月28日那次，苇桥做到哪个阶段？"},
+    {"id":"sketch_key","query":"想打开收速写工具的那个盒子，钥匙挂哪里？"},
+    {"id":"lamp_bulb","query":"修那盏台灯应该准备什么色温的灯泡？"},
+    {"id":"usual_lunch","query":"中午通常做什么饭？"},
+    {"id":"reading_topic","query":"我最近那本书是在讲哪种自然现象？"},
+    {"id":"archive_thread","query":"独立档案用什么颜色的线装订？"},
+    {"id":"missing_passport","query":"我常用护照的到期日是什么时候？"},
+    {"id":"missing_box_weight","query":"桦木盒有多重？"},
+    {"id":"missing_pronoun","query":"上次说的那个需要哪种？"},
+    {"id":"postcard_shelf","query":"那张画着桦木盒的明信片搁哪层？"}
+  ]
+}

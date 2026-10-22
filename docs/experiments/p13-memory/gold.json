@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "label_role": "SCORING_ONLY_LOADED_AFTER_ALL_RETRIEVAL",
+  "labels": [
+    {"id":"rain_route","required":["rain_activity","rain_equipment"],"allowed":["rain_activity","rain_equipment"]},
+    {"id":"cup_drawer","required":["cup_storage"],"allowed":["cup_name","cup_storage"]},
+    {"id":"project_next","required":["project_steps"],"allowed":["project_alias","project_steps"]},
+    {"id":"project_fullwidth_alias","required":["project_alias"],"allowed":["project_alias"]},
+    {"id":"progress_october","required":["project_october"],"allowed":["project_october"]},
+    {"id":"progress_september","required":["project_september"],"allowed":["project_september"]},
+    {"id":"sketch_key","required":["sketch_key"],"allowed":["sketch_storage","sketch_key"]},
+    {"id":"lamp_bulb","required":["lamp_part"],"allowed":["lamp_name","lamp_part"]},
+    {"id":"usual_lunch","required":["lunch"],"allowed":["lunch"]},
+    {"id":"reading_topic","required":["reading"],"allowed":["reading"]},
+    {"id":"archive_thread","required":["control"],"allowed":["control"]},
+    {"id":"missing_passport","required":[],"allowed":[]},
+    {"id":"missing_box_weight","required":[],"allowed":[]},
+    {"id":"missing_pronoun","required":[],"allowed":[]},
+    {"id":"postcard_shelf","required":["unrelated_box"],"allowed":["unrelated_box"]}
+  ]
+}

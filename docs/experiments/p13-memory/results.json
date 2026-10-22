@@ -1,0 +1,899 @@
+{
+  "schema_version": 1,
+  "evidence": "OFFLINE_SYNTHETIC_CANDIDATE_COMPARISON",
+  "source_baseline_sha": "eb5143500bed5395bb45f2a2cc20335da9988491",
+  "algorithm_corpus_freeze_commit": "df617a5b4dede29fcf1884717f5cc2a997a0960d",
+  "frozen_sha256": {
+    "scripts/p13_memory_research.py": "45ffdcf5544f62cf6252d172555f8aa3e980c2c79565f35b919c2ecadb15b070",
+    "docs/experiments/p13-memory/corpus.json": "0d18fc55147d25bb1375df33fa6c456992d4d22c3bd7dfeed783fff22b44686a",
+    "docs/experiments/p12-memory/cases.json": "a490bae7128f5480a1e8353511afbd36cec3fb2d881dc47410eaaa7837e39225",
+    "docs/experiments/p12-memory/results.json": "0a47eb303fca76750d8daca27dceb16ebdce1ab206958fa28b24ae4209d3b055"
+  },
+  "queries_sha256": "9351b2e4b94925b6ce89537ed7d0ab5a3352778fe391f9becb92aee8c57e652d",
+  "gold_sha256": "6844a43881bf5c686973422a657c3849418ff286990db16c551725eebc9de0e8",
+  "native_memory_sha256": "205489c3a4c74de77e3ea28795f7d758518512e158cc79fb35023f1c41efa952",
+  "native_retrieval_sha256": "9b522a69110f042848c0835ff3ba9d64843fff508f07b9149f1399c906739381",
+  "embedding": "BAAI/bge-small-zh-v1.5@46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59",
+  "semantic_min_score": 0.5,
+  "facts": 56,
+  "candidate_limit": 6,
+  "max_added_candidates": 2,
+  "max_hops": 1,
+  "annotation_semantics": "human_labelled_synthetic_quote_not_automatic_semantic_proof",
+  "gold_loaded_after_all_retrieval": true,
+  "previous_results_not_rerun": {
+    "P12_holdout": "6/7",
+    "P8_context": "7/8"
+  },
+  "summaries": {
+    "fts": {
+      "queries": 15,
+      "required_memories": 13,
+      "necessary_memories_recalled": 4,
+      "missing": 9,
+      "returned_candidates": 11,
+      "false_positive_candidates": 5,
+      "required_recall": 0.3076923076923077,
+      "candidate_precision": 0.5454545454545454,
+      "candidate_utf8_bytes": 463,
+      "mean_warm_local_retrieval_ms": 10.408606666666666
+    },
+    "fts_bge": {
+      "queries": 15,
+      "required_memories": 13,
+      "necessary_memories_recalled": 13,
+      "missing": 0,
+      "returned_candidates": 31,
+      "false_positive_candidates": 15,
+      "required_recall": 1.0,
+      "candidate_precision": 0.5161290322580645,
+      "candidate_utf8_bytes": 1367,
+      "mean_warm_local_retrieval_ms": 25.561193333333335
+    },
+    "bounded_tags_onehop": {
+      "queries": 15,
+      "required_memories": 13,
+      "necessary_memories_recalled": 13,
+      "missing": 0,
+      "returned_candidates": 37,
+      "false_positive_candidates": 21,
+      "required_recall": 1.0,
+      "candidate_precision": 0.43243243243243246,
+      "candidate_utf8_bytes": 1642,
+      "mean_warm_local_retrieval_ms": 26.52232
+    }
+  },
+  "cases": {
+    "fts": [
+      {
+        "id": "rain_route",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 15.1272,
+        "additions": [],
+        "required": [
+          "rain_activity",
+          "rain_equipment"
+        ],
+        "missing": [
+          "rain_activity",
+          "rain_equipment"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "cup_drawer",
+        "retrieved": [
+          "cup_name"
+        ],
+        "retrieved_utf8_bytes": 27,
+        "local_retrieval_ms": 11.3342,
+        "additions": [],
+        "required": [
+          "cup_storage"
+        ],
+        "missing": [
+          "cup_storage"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "project_next",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 10.5187,
+        "additions": [],
+        "required": [
+          "project_steps"
+        ],
+        "missing": [
+          "project_steps"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "project_fullwidth_alias",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 8.2966,
+        "additions": [],
+        "required": [
+          "project_alias"
+        ],
+        "missing": [
+          "project_alias"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "progress_october",
+        "retrieved": [
+          "project_october"
+        ],
+        "retrieved_utf8_bytes": 46,
+        "local_retrieval_ms": 8.5967,
+        "additions": [],
+        "required": [
+          "project_october"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "progress_september",
+        "retrieved": [
+          "project_september"
+        ],
+        "retrieved_utf8_bytes": 45,
+        "local_retrieval_ms": 14.7889,
+        "additions": [],
+        "required": [
+          "project_september"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "sketch_key",
+        "retrieved": [
+          "sketch_storage",
+          "sketch_key"
+        ],
+        "retrieved_utf8_bytes": 81,
+        "local_retrieval_ms": 9.0955,
+        "additions": [],
+        "required": [
+          "sketch_key"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "lamp_bulb",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 11.2861,
+        "additions": [],
+        "required": [
+          "lamp_part"
+        ],
+        "missing": [
+          "lamp_part"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "usual_lunch",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 9.6114,
+        "additions": [],
+        "required": [
+          "lunch"
+        ],
+        "missing": [
+          "lunch"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "reading_topic",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 8.6943,
+        "additions": [],
+        "required": [
+          "reading"
+        ],
+        "missing": [
+          "reading"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "archive_thread",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 10.0931,
+        "additions": [],
+        "required": [
+          "control"
+        ],
+        "missing": [
+          "control"
+        ],
+        "false_positive": []
+      },
+      {
+        "id": "missing_passport",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 8.5435,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "missing_box_weight",
+        "retrieved": [
+          "sketch_storage",
+          "sketch_key",
+          "unrelated_box"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 10.4702,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage",
+          "unrelated_box"
+        ]
+      },
+      {
+        "id": "missing_pronoun",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 9.7807,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "postcard_shelf",
+        "retrieved": [
+          "unrelated_box",
+          "sketch_key",
+          "sketch_storage"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 9.892,
+        "additions": [],
+        "required": [
+          "unrelated_box"
+        ],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage"
+        ]
+      }
+    ],
+    "fts_bge": [
+      {
+        "id": "rain_route",
+        "retrieved": [
+          "rain_activity",
+          "sketch_storage",
+          "rain_equipment"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 29.8301,
+        "additions": [],
+        "required": [
+          "rain_activity",
+          "rain_equipment"
+        ],
+        "missing": [],
+        "false_positive": [
+          "sketch_storage"
+        ]
+      },
+      {
+        "id": "cup_drawer",
+        "retrieved": [
+          "cup_name",
+          "cup_storage"
+        ],
+        "retrieved_utf8_bytes": 69,
+        "local_retrieval_ms": 28.8855,
+        "additions": [],
+        "required": [
+          "cup_storage"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "project_next",
+        "retrieved": [
+          "project_steps"
+        ],
+        "retrieved_utf8_bytes": 57,
+        "local_retrieval_ms": 24.8148,
+        "additions": [],
+        "required": [
+          "project_steps"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "project_fullwidth_alias",
+        "retrieved": [
+          "project_alias",
+          "project_steps"
+        ],
+        "retrieved_utf8_bytes": 95,
+        "local_retrieval_ms": 20.8531,
+        "additions": [],
+        "required": [
+          "project_alias"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_steps"
+        ]
+      },
+      {
+        "id": "progress_october",
+        "retrieved": [
+          "project_october",
+          "project_september",
+          "project_steps",
+          "project_alias"
+        ],
+        "retrieved_utf8_bytes": 186,
+        "local_retrieval_ms": 21.102,
+        "additions": [],
+        "required": [
+          "project_october"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_alias",
+          "project_september",
+          "project_steps"
+        ]
+      },
+      {
+        "id": "progress_september",
+        "retrieved": [
+          "project_september",
+          "project_steps",
+          "project_october",
+          "project_alias"
+        ],
+        "retrieved_utf8_bytes": 186,
+        "local_retrieval_ms": 28.1779,
+        "additions": [],
+        "required": [
+          "project_september"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_alias",
+          "project_october",
+          "project_steps"
+        ]
+      },
+      {
+        "id": "sketch_key",
+        "retrieved": [
+          "sketch_storage",
+          "sketch_key",
+          "rain_equipment",
+          "unrelated_box"
+        ],
+        "retrieved_utf8_bytes": 180,
+        "local_retrieval_ms": 25.1893,
+        "additions": [],
+        "required": [
+          "sketch_key"
+        ],
+        "missing": [],
+        "false_positive": [
+          "rain_equipment",
+          "unrelated_box"
+        ]
+      },
+      {
+        "id": "lamp_bulb",
+        "retrieved": [
+          "lamp_part",
+          "lamp_name"
+        ],
+        "retrieved_utf8_bytes": 72,
+        "local_retrieval_ms": 28.1551,
+        "additions": [],
+        "required": [
+          "lamp_part"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "usual_lunch",
+        "retrieved": [
+          "lunch"
+        ],
+        "retrieved_utf8_bytes": 33,
+        "local_retrieval_ms": 21.6305,
+        "additions": [],
+        "required": [
+          "lunch"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "reading_topic",
+        "retrieved": [
+          "reading"
+        ],
+        "retrieved_utf8_bytes": 45,
+        "local_retrieval_ms": 24.1507,
+        "additions": [],
+        "required": [
+          "reading"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "archive_thread",
+        "retrieved": [
+          "control"
+        ],
+        "retrieved_utf8_bytes": 48,
+        "local_retrieval_ms": 23.8915,
+        "additions": [],
+        "required": [
+          "control"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "missing_passport",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 26.2784,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "missing_box_weight",
+        "retrieved": [
+          "sketch_storage",
+          "unrelated_box",
+          "sketch_key"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 21.9227,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage",
+          "unrelated_box"
+        ]
+      },
+      {
+        "id": "missing_pronoun",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 24.8924,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "postcard_shelf",
+        "retrieved": [
+          "unrelated_box",
+          "sketch_storage",
+          "sketch_key"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 33.6439,
+        "additions": [],
+        "required": [
+          "unrelated_box"
+        ],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage"
+        ]
+      }
+    ],
+    "bounded_tags_onehop": [
+      {
+        "id": "rain_route",
+        "retrieved": [
+          "rain_activity",
+          "sketch_storage",
+          "rain_equipment",
+          "sketch_key"
+        ],
+        "retrieved_utf8_bytes": 177,
+        "local_retrieval_ms": 36.0267,
+        "additions": [
+          {
+            "memory_id": "sketch_key",
+            "kind": "one_hop_same_owner_source",
+            "annotation_source_sha256": "cf9bf9254a5c8aa87589bdb079b8eda5cbf1b39ca457f16754129ba5f0152ad0",
+            "edge_source_sha256": [
+              "cf9bf9254a5c8aa87589bdb079b8eda5cbf1b39ca457f16754129ba5f0152ad0"
+            ]
+          }
+        ],
+        "required": [
+          "rain_activity",
+          "rain_equipment"
+        ],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage"
+        ]
+      },
+      {
+        "id": "cup_drawer",
+        "retrieved": [
+          "cup_name",
+          "cup_storage"
+        ],
+        "retrieved_utf8_bytes": 69,
+        "local_retrieval_ms": 27.0016,
+        "additions": [],
+        "required": [
+          "cup_storage"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "project_next",
+        "retrieved": [
+          "project_steps",
+          "project_october",
+          "project_september"
+        ],
+        "retrieved_utf8_bytes": 148,
+        "local_retrieval_ms": 24.6703,
+        "additions": [
+          {
+            "memory_id": "project_october",
+            "kind": "explicit_alias",
+            "annotation_source_sha256": "b83e43957f73ed68866bd9ea00521d3fc5c821300c2591f131fbcf4e31ef6ac8",
+            "edge_source_sha256": []
+          },
+          {
+            "memory_id": "project_september",
+            "kind": "explicit_alias",
+            "annotation_source_sha256": "b83e43957f73ed68866bd9ea00521d3fc5c821300c2591f131fbcf4e31ef6ac8",
+            "edge_source_sha256": []
+          }
+        ],
+        "required": [
+          "project_steps"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_october",
+          "project_september"
+        ]
+      },
+      {
+        "id": "project_fullwidth_alias",
+        "retrieved": [
+          "project_alias",
+          "project_steps",
+          "project_october",
+          "project_september"
+        ],
+        "retrieved_utf8_bytes": 186,
+        "local_retrieval_ms": 21.0862,
+        "additions": [
+          {
+            "memory_id": "project_october",
+            "kind": "explicit_alias",
+            "annotation_source_sha256": "b83e43957f73ed68866bd9ea00521d3fc5c821300c2591f131fbcf4e31ef6ac8",
+            "edge_source_sha256": []
+          },
+          {
+            "memory_id": "project_september",
+            "kind": "explicit_alias",
+            "annotation_source_sha256": "b83e43957f73ed68866bd9ea00521d3fc5c821300c2591f131fbcf4e31ef6ac8",
+            "edge_source_sha256": []
+          }
+        ],
+        "required": [
+          "project_alias"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_october",
+          "project_september",
+          "project_steps"
+        ]
+      },
+      {
+        "id": "progress_october",
+        "retrieved": [
+          "project_october",
+          "project_september",
+          "project_steps",
+          "project_alias"
+        ],
+        "retrieved_utf8_bytes": 186,
+        "local_retrieval_ms": 27.9675,
+        "additions": [],
+        "required": [
+          "project_october"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_alias",
+          "project_september",
+          "project_steps"
+        ]
+      },
+      {
+        "id": "progress_september",
+        "retrieved": [
+          "project_september",
+          "project_steps",
+          "project_october",
+          "project_alias"
+        ],
+        "retrieved_utf8_bytes": 186,
+        "local_retrieval_ms": 26.8354,
+        "additions": [],
+        "required": [
+          "project_september"
+        ],
+        "missing": [],
+        "false_positive": [
+          "project_alias",
+          "project_october",
+          "project_steps"
+        ]
+      },
+      {
+        "id": "sketch_key",
+        "retrieved": [
+          "sketch_storage",
+          "sketch_key",
+          "rain_equipment",
+          "unrelated_box",
+          "rain_activity"
+        ],
+        "retrieved_utf8_bytes": 228,
+        "local_retrieval_ms": 28.0336,
+        "additions": [
+          {
+            "memory_id": "rain_activity",
+            "kind": "one_hop_same_owner_source",
+            "annotation_source_sha256": "71349cb25f0c39118168ecd8850951bc6568701118a1e24d96f80acda1969306",
+            "edge_source_sha256": [
+              "71349cb25f0c39118168ecd8850951bc6568701118a1e24d96f80acda1969306"
+            ]
+          }
+        ],
+        "required": [
+          "sketch_key"
+        ],
+        "missing": [],
+        "false_positive": [
+          "rain_activity",
+          "rain_equipment",
+          "unrelated_box"
+        ]
+      },
+      {
+        "id": "lamp_bulb",
+        "retrieved": [
+          "lamp_part",
+          "lamp_name"
+        ],
+        "retrieved_utf8_bytes": 72,
+        "local_retrieval_ms": 29.7973,
+        "additions": [],
+        "required": [
+          "lamp_part"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "usual_lunch",
+        "retrieved": [
+          "lunch"
+        ],
+        "retrieved_utf8_bytes": 33,
+        "local_retrieval_ms": 20.9891,
+        "additions": [],
+        "required": [
+          "lunch"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "reading_topic",
+        "retrieved": [
+          "reading"
+        ],
+        "retrieved_utf8_bytes": 45,
+        "local_retrieval_ms": 24.8398,
+        "additions": [],
+        "required": [
+          "reading"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "archive_thread",
+        "retrieved": [
+          "control"
+        ],
+        "retrieved_utf8_bytes": 48,
+        "local_retrieval_ms": 25.8118,
+        "additions": [],
+        "required": [
+          "control"
+        ],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "missing_passport",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 26.3355,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "missing_box_weight",
+        "retrieved": [
+          "sketch_storage",
+          "unrelated_box",
+          "sketch_key"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 22.8052,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage",
+          "unrelated_box"
+        ]
+      },
+      {
+        "id": "missing_pronoun",
+        "retrieved": [],
+        "retrieved_utf8_bytes": 0,
+        "local_retrieval_ms": 27.0726,
+        "additions": [],
+        "required": [],
+        "missing": [],
+        "false_positive": []
+      },
+      {
+        "id": "postcard_shelf",
+        "retrieved": [
+          "unrelated_box",
+          "sketch_storage",
+          "sketch_key"
+        ],
+        "retrieved_utf8_bytes": 132,
+        "local_retrieval_ms": 28.5622,
+        "additions": [],
+        "required": [
+          "unrelated_box"
+        ],
+        "missing": [],
+        "false_positive": [
+          "sketch_key",
+          "sketch_storage"
+        ]
+      }
+    ]
+  },
+  "correction": {
+    "fts": {
+      "new_value_recalled": true,
+      "superseded_hits": 0
+    },
+    "fts_bge": {
+      "new_value_recalled": true,
+      "superseded_hits": 0
+    },
+    "bounded_tags_onehop": {
+      "new_value_recalled": true,
+      "superseded_hits": 0
+    }
+  },
+  "source_erasure_old_backup_and_index_rebuild": [
+    {
+      "state": "current",
+      "methods": {
+        "fts": {
+          "erased_memory_hits": 0,
+          "erased_content_hits": 0,
+          "independent_fact_recalled": true
+        },
+        "fts_bge": {
+          "erased_memory_hits": 0,
+          "erased_content_hits": 0,
+          "independent_fact_recalled": true
+        },
+        "bounded_tags_onehop": {
+          "erased_memory_hits": 0,
+          "erased_content_hits": 0,
+          "independent_fact_recalled": true
+        }
+      },
+      "erased_vector_rows": 0,
+      "erased_alias_source_still_active": false,
+      "independent_fact_exists": true
+    },
+    {
+      "state": "old_backup_latest_ledger",
+      "methods": {
+        "fts": {
+          "erased_memory_hits": 0,
+          "erased_content_hits": 0,
+          "independent_fact_recalled": true
+        },
+        "fts_bge": {
+          "erased_memory_hits": 0,
+          "erased_content_hits": 0,
+          "independent_fact_recalled": true
+        },
+        "bounded_tags_onehop": {
+          "erased_memory_hits": 0,
+          "erased_content_hits": 0,
+          "independent_fact_recalled": true
+        }
+      },
+      "erased_vector_rows": 0,
+      "erased_alias_source_still_active": false,
+      "independent_fact_exists": true
+    }
+  ],
+  "model_http_attempts": 0,
+  "real_model_tokens": null,
+  "real_model_cost": null,
+  "real_business_memory_samples": null,
+  "real_phone_samples": null,
+  "real_natural_days": null,
+  "production_retrieval_changed": false,
+  "decision": "KEEP_NATIVE_RETRIEVAL_NO_GRAPH_ADMISSION"
+}

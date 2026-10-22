@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "data_class": "PUBLIC_SYNTHETIC",
+  "sources": [
+    {"id":"rain","day":"2026-10-18","text":"下雨时，我改去星岚馆练习羽毛球。星岚馆的器材领取点在东门服务台。"},
+    {"id":"cup","day":"2026-10-18","text":"我的随身杯叫小雾。小雾杯放在办公室北侧的抽屉。"},
+    {"id":"project_alias","day":"2026-10-19","text":"我把合成计划苇桥简称为RQ。苇桥计划的顺序是先整理目录再校对页码。"},
+    {"id":"project_september","day":"2026-09-28","text":"9月28日，苇桥计划停在收集材料。"},
+    {"id":"project_october","day":"2026-10-21","text":"10月21日，苇桥计划停在校对页码。"},
+    {"id":"sketch","day":"2026-10-19","text":"我的速写工具收在桦木盒。桦木盒的钥匙挂在窗边的小钩上。"},
+    {"id":"repair","day":"2026-10-20","text":"我把要修的台灯称作松灯。松灯需要换成暖白色灯泡。"},
+    {"id":"control","day":"2026-10-21","text":"独立合成档案的装订线颜色是橙色。"},
+    {"id":"lunch","day":"2026-10-20","text":"主人午餐通常吃南瓜饭。"},
+    {"id":"unrelated_box","day":"2026-10-20","text":"桦木盒图案的明信片放在书架第三层。"},
+    {"id":"reading","day":"2026-10-21","text":"主人最近在看介绍海洋潮汐的书。"}
+  ],
+  "facts": [
+    {"id":"rain_activity","source":"rain","subject":"user","content":"下雨时，我改去星岚馆练习羽毛球。"},
+    {"id":"rain_equipment","source":"rain","subject":"user","content":"星岚馆的器材领取点在东门服务台。"},
+    {"id":"cup_name","source":"cup","subject":"user","content":"我的随身杯叫小雾。"},
+    {"id":"cup_storage","source":"cup","subject":"user","content":"小雾杯放在办公室北侧的抽屉。"},
+    {"id":"project_alias","source":"project_alias","subject":"project","content":"我把合成计划苇桥简称为RQ。"},
+    {"id":"project_steps","source":"project_alias","subject":"project","content":"苇桥计划的顺序是先整理目录再校对页码。"},
+    {"id":"project_september","source":"project_september","subject":"project","content":"9月28日，苇桥计划停在收集材料。"},
+    {"id":"project_october","source":"project_october","subject":"project","content":"10月21日，苇桥计划停在校对页码。"},
+    {"id":"sketch_storage","source":"sketch","subject":"user","content":"我的速写工具收在桦木盒。"},
+    {"id":"sketch_key","source":"sketch","subject":"user","content":"桦木盒的钥匙挂在窗边的小钩上。"},
+    {"id":"lamp_name","source":"repair","subject":"user","content":"我把要修的台灯称作松灯。"},
+    {"id":"lamp_part","source":"repair","subject":"user","content":"松灯需要换成暖白色灯泡。"},
+    {"id":"control","source":"control","subject":"project","content":"独立合成档案的装订线颜色是橙色。"},
+    {"id":"lunch","source":"lunch","subject":"user","content":"主人午餐通常吃南瓜饭。"},
+    {"id":"unrelated_box","source":"unrelated_box","subject":"user","content":"桦木盒图案的明信片放在书架第三层。"},
+    {"id":"reading","source":"reading","subject":"user","content":"主人最近在看介绍海洋潮汐的书。"}
+  ],
+  "alias_annotations": [
+    {"canonical":"星岚馆","aliases":["星岚馆"],"subject":"user","source":"rain","evidence_quote":"下雨时，我改去星岚馆练习羽毛球。星岚馆的器材领取点在东门服务台。"},
+    {"canonical":"小雾","aliases":["随身杯"],"subject":"user","source":"cup","evidence_quote":"我的随身杯叫小雾。"},
+    {"canonical":"苇桥","aliases":["RQ"],"subject":"project","source":"project_alias","evidence_quote":"我把合成计划苇桥简称为RQ。"},
+    {"canonical":"桦木盒","aliases":["桦木盒"],"subject":"user","source":"sketch","evidence_quote":"我的速写工具收在桦木盒。"},
+    {"canonical":"松灯","aliases":["台灯"],"subject":"user","source":"repair","evidence_quote":"我把要修的台灯称作松灯。"}
+  ]
+}
