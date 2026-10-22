@@ -41,6 +41,7 @@ def migrate(path, revision="head"):
 class Store:
     def __init__(self, path):
         self.path = path
+        self._budget_stops = None
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         for pragma in (
@@ -55,12 +56,32 @@ class Store:
     @contextmanager
     def transaction(self):
         self.db.execute("BEGIN IMMEDIATE")
+        self._budget_stops = set()
         try:
             yield self
             self.db.commit()
         except BaseException:
             self.db.rollback()
+            if self._budget_stops:
+                # A fsynced Budget pause must outlive an unrelated business
+                # rollback. Only append-only stop witnesses are replayed here.
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self.db.executemany("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
+                                        self._budget_stops)
+                    self.db.commit()
+                except BaseException:
+                    self.db.rollback()
+                    raise
             raise
+        finally:
+            self._budget_stops = None
+
+    def retain_budget_stop(self, journal_id, head_sha256):
+        value = ("model_budget_stop:" + head_sha256, journal_id)
+        if self._budget_stops is not None:
+            self._budget_stops.add(value)
+        self.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)", value)
 
     def execute(self, sql, params=()):
         return self.db.execute(sql, params)

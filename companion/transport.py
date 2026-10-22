@@ -188,6 +188,10 @@ def delivery_result(store, settings, message_id, result, now):
                 "DELIVERY_UNCERTAIN": "DELIVERY_UNCERTAIN",
                 "PERMANENT_FAILURE": "FAILED",
             }[result.result]
+        from companion import cumulative
+
+        if state in {"SENT", "FAILED", "DELIVERY_UNCERTAIN"}:
+            cumulative.send_result(store, message_id, state, now)
         store.execute(
             "UPDATE outbox SET state=?,provider_message_id=?,last_error_code=?,"
             "sent_at=?,updated_at=?,next_attempt_at=?,attempt_count=attempt_count+? "

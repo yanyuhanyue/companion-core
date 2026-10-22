@@ -163,17 +163,20 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
-def journal(store, approval, record=None, *, allow_settlement=False):
+def journal(store, approval, record=None, *, allow_settlement=False, initialize=True):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
+    from companion import cumulative
+
     path = Path(approval.journal_path)
     identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
     try:
         if not path.exists():
-            if identity or store.one("SELECT 1 FROM model_admissions LIMIT 1"):
+            if (not initialize or identity or store.one("SELECT 1 FROM model_admissions LIMIT 1")
+                or store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))):
                 raise ValueError("missing independent journal")
             path.parent.mkdir(parents=True, exist_ok=True)
             journal_id = uid("budget")
@@ -188,10 +191,13 @@ def journal(store, approval, record=None, *, allow_settlement=False):
             identity = {"value": journal_id}
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, False
+        heads = set()
         lifecycle, seen, managed = None, set(), False
+        account = cumulative.empty_state()
         for index, line in enumerate(lines):
             row = json.loads(line)
             digest = row.pop("sha256")
+            heads.add(digest)
             if row.get("previous") != previous or sha(row) != digest:
                 raise ValueError("journal chain")
             previous = digest
@@ -203,12 +209,27 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 ):
                     raise ValueError("journal identity")
             else:
+                cumulative.fold(account, row)
+                if row.get("kind") in cumulative.CONTROL_RECORDS:
+                    continue
                 if row.get("kind") in {"window_stop", "window_open", "window_handoff"}:
                     lifecycle = _live_record(row, digest, lifecycle, seen)
                     managed |= row["kind"] != "window_stop"
                     continue
                 latest[row["request_id"]] = row
                 blocked |= row["kind"] == "blocked"
+        projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                               (cumulative.PROJECTION,))
+        expected = cumulative.binding(account, path)
+        saved = json.loads(projection["value"]) if projection else None
+        witness = saved.pop("control_head_sha256", None) if saved else None
+        if saved != expected or (expected and witness not in heads):
+            raise ValueError("cumulative policy projection behind journal or DB")
+        for stop in store.rows("SELECT key,value FROM runtime_meta "
+                               "WHERE key LIKE 'model_budget_stop:%'"):
+            if (not identity or stop["value"] != identity["value"]
+                or stop["key"].removeprefix("model_budget_stop:") not in heads):
+                raise ValueError("durable cumulative stop missing from journal")
         stored_lifecycle = live_lifecycle(store)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
@@ -254,6 +275,7 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         if record is not None:
             row = {**record, "previous": previous}
             row["sha256"] = sha(row)
+            cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
             next_lifecycle = _live_record(
                 {k: v for k, v in row.items() if k != "sha256"}, row["sha256"], lifecycle, seen
             )
@@ -262,10 +284,16 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 stream.flush()
                 os.fsync(stream.fileno())
             previous = row["sha256"]
+            if record["kind"] == "quota_pause":
+                store.retain_budget_stop(identity["value"], previous)
             if lifecycle_record:
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (LIVE_LIFECYCLE, encode(next_lifecycle)))
                 lifecycle = next_lifecycle
-        return {"head_sha256": previous, "lifecycle": lifecycle}
+            if record["kind"] in cumulative.CONTROL_RECORDS:
+                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                              (cumulative.PROJECTION,
+                               encode(cumulative.binding(account, path, previous))))
+        return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error

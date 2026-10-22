@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from companion import paid_budget
+from companion import cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 
@@ -48,6 +48,7 @@ def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None,
 ):
+    cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     if scenario == "content_vision":
         from companion.image_input import contract as image_contract
@@ -74,6 +75,14 @@ def reserve(
     with store.transaction():
         from companion import live_text
 
+        if approval and (approval.cumulative or store.one(
+            "SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,),
+        )):
+            now = clock() if callable(clock) else now
+            local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
+            month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+            day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
+            cumulative.activate(store, settings, now)
         live_text.reserve_model(store, settings, clock, job_id, scenario)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
@@ -137,6 +146,8 @@ def reserve(
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
             _admit(store, settings, approval, logical_request_id, estimate, now, day, month)
+            quota = cumulative.admit_model(store, settings, request_id, logical_request_id, now,
+                                            estimate, estimated_input, output_tokens)
         store.insert(
             "model_usage",
             usage_id=uid("usage"),
@@ -191,6 +202,7 @@ def reserve(
                     "request_id": request_id,
                     "minimum_micro_usd": estimate,
                     "contract_sha256": contract_hash,
+                    **({"quota": quota} if quota else {}),
                 },
             )
         return request_id
@@ -345,6 +357,19 @@ def _settle_paid(store, settings, admission, response):
         # actual local amount limits and the requested output cap remain hard stops.
         amount, state, blocked = actual, "SETTLED", False
         limits = _actual_limit_violations(store, admission, snapshot, usage, actual)
+        if snapshot.get("cumulative") or store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                                                  (cumulative.PROJECTION,)):
+            try:
+                view = paid_budget.journal(store, SimpleNamespace(
+                    journal_path=admission["journal_path"]), allow_settlement=True)["cumulative"]
+                prior = view["models"][admission["request_id"]]
+                proposed = prior | {"micro_usd": actual, "state": "SETTLED",
+                                   "input_tokens": response.input_tokens,
+                                   "output_tokens": response.output_tokens}
+                limits.extend("CUMULATIVE_" + code for code in cumulative.violations(
+                    view, proposed, replacing="model:" + admission["request_id"]))
+            except (CoreError, KeyError):
+                limits.append("CUMULATIVE_CUSTODY_UNAVAILABLE")
         if response.output_tokens > admission["output_bound"]:
             limits.append("OUTPUT_CAP_EXCEEDED")
         spike = response.input_tokens > max(
@@ -379,7 +404,8 @@ def _settle_paid(store, settings, admission, response):
     if usage["state"] == "UNKNOWN":
         amount, state = max(amount, usage["billed_micro_usd"]), "UNKNOWN"
     # Mutable enabling approval is deliberately irrelevant to accounting custody.
-    _persist_accounting(store, admission, amount, state, blocked)
+    _persist_accounting(store, admission, amount, state, blocked,
+                        tokens=(response.input_tokens, response.output_tokens) if valid else None)
     if valid:
         store.execute(
             "UPDATE model_usage SET input_tokens=?,output_tokens=?,cached_input_tokens=? "
@@ -487,7 +513,9 @@ def usage_diagnostics(db):
     }
 
 
-def _persist_accounting(store, admission, amount, state, blocked, evidence_sha256=None):
+def _persist_accounting(
+    store, admission, amount, state, blocked, evidence_sha256=None, *, tokens=None,
+):
     """Record known costs even when approval is disabled or journal custody fails.
 
     No journal failure may roll back a known larger charge. The DB stop is committed;
@@ -495,11 +523,14 @@ def _persist_accounting(store, admission, amount, state, blocked, evidence_sha25
     """
     custody = SimpleNamespace(journal_path=admission["journal_path"])
     journal_failed = False
+    quota = None
     try:
         identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not identity or identity["value"] != admission["journal_id"]:
             raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
         paid_budget.journal(store, custody, allow_settlement=True)
+        quota = cumulative.admission_metadata(store, admission, amount=amount,
+                                              state=state, tokens=tokens)
     except CoreError:
         journal_failed = True
     if journal_failed:
@@ -516,6 +547,7 @@ def _persist_accounting(store, admission, amount, state, blocked, evidence_sha25
             "minimum_micro_usd": amount,
             "contract_sha256": admission["contract_sha256"],
             "io_started_at": admission["io_started_at"],
+            **({"quota": quota} if quota else {}),
         }
         if evidence_sha256:
             record["evidence_sha256"] = evidence_sha256
@@ -540,6 +572,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         return await model.complete(messages, scenario)
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
+    cumulative.preflight(store, settings, clock)
     now = clock()
     from companion.model import ModelAdmission, ModelClient, ModelResponseError, model_payload
 
@@ -556,8 +589,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
     approval = paid_budget.contract(settings, now)
     with store.transaction():
+        cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
-        paid_budget.journal(store, approval)
+        custody = paid_budget.journal(store, approval)
+        cumulative.check(store, settings, clock(), custody=custody)
         row = store.one(
             "SELECT a.*,m.state,m.scenario AS usage_scenario,m.job_id AS usage_job_id "
             "FROM model_admissions a JOIN model_usage m USING(request_id) "
@@ -586,6 +621,12 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             "('model_budget_blocked','model_budget_restore_required')"
         ):
             raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        quota = cumulative.admission_metadata(store, row)
+        if quota:
+            now = clock()
+            cumulative.check(store, settings, now)
+            if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
+                raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         store.execute(
             "UPDATE model_admissions SET io_started_at=? WHERE request_id=?", (now, request_id)
         )
@@ -599,11 +640,13 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                 "minimum_micro_usd": row["reserved_micro_usd"],
                 "contract_sha256": row["contract_sha256"],
                 "io_started_at": now,
+                **({"quota": quota} if quota else {}),
             },
         )
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     try:
+        cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
         live_text.check_model(store, settings, clock, request_id)
         if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
@@ -618,7 +661,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             # Every user hook has completed. Custody and current runtime checks
             # remain here; the adapter only binds the actual HTTP request bytes.
             with store.transaction():
-                paid_budget.journal(store, approval)
+                custody = paid_budget.journal(store, approval)
+                quota_state = cumulative.check(store, settings, clock(), custody=custody)
                 current_job = live_text.check_model(store, settings, clock, request_id)
                 current = store.one(
                     "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
@@ -657,6 +701,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
                 live_text.dispatch_fence(
                     settings, clock, current_job["lease_until"], current["lease_until"],
+                    quota_state=quota_state, request_id=request_id,
                 )
             else:
                 paid = paid_budget.contract(settings, clock())
@@ -670,6 +715,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+                cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
         admission = ModelAdmission(row["payload_sha256"], before_dispatch)
     try:
         if isinstance(model, ModelClient):

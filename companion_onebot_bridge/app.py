@@ -163,6 +163,7 @@ def main():
             "window-send-once",
             "window-status",
             "window-stop",
+            "window-quota-inventory",
             "memory-control-once",
         ),
     )

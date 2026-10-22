@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "account_ref": null,
+  "policy_id": null,
+  "approval_sha256": null,
+  "account_evidence_sha256": null,
+  "credential_sha256": null,
+  "key_ownership_sha256": null,
+  "provider": null,
+  "currency": "USD",
+  "timezone": "Asia/Shanghai",
+  "owner_identity_sha256": null,
+  "starts_at": null,
+  "expires_at": null,
+  "expected_journal_head_sha256": null,
+  "predecessor_policy_sha256": null,
+  "legacy_liabilities_sha256": null,
+  "legacy_adoption_evidence_sha256": null,
+  "legacy_window_inventory": null,
+  "request": {
+    "micro_usd": 0,
+    "model_attempts": 0,
+    "input_tokens": 0,
+    "output_tokens": 0
+  },
+  "window": {
+    "micro_usd": 0,
+    "model_attempts": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "owner_inputs": 0,
+    "send_attempts": 0
+  },
+  "day": {
+    "micro_usd": 0,
+    "model_attempts": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "owner_inputs": 0,
+    "send_attempts": 0
+  },
+  "month": {
+    "micro_usd": 0,
+    "model_attempts": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "owner_inputs": 0,
+    "send_attempts": 0
+  },
+  "account": {
+    "micro_usd": 0,
+    "model_attempts": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "owner_inputs": 0,
+    "send_attempts": 0
+  },
+  "concurrency": 1
+}

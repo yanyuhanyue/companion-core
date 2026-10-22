@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
 
 from companion.content import ContentConfig
+from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.image_input import ImageInputPolicy
 from companion.media import MediaConfig
@@ -58,6 +59,9 @@ class PaidModelApproval(BaseModel):
     concurrency: int = Field(strict=True, gt=0, le=32)
     journal_path: str = Field(min_length=1)
     image_input: ImageInputPolicy | None = None
+    cumulative: CumulativeApproval | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_approval(self):
@@ -69,6 +73,13 @@ class PaidModelApproval(BaseModel):
             raise ValueError("approval interval exceeds configured rate validity")
         if self.cached_input_rate > self.input_rate:
             raise ValueError("cached rate must not exceed uncached admission price")
+        if self.cumulative and (
+            (self.provider, self.currency, self.timezone) != (
+                self.cumulative.provider, self.cumulative.currency, self.cumulative.timezone
+            ) or self.starts_at < self.cumulative.starts_at
+            or self.expires_at > self.cumulative.expires_at
+        ):
+            raise ValueError("paid window must remain inside the cumulative account scope")
         parsed = urlparse(self.endpoint)
         if (
             parsed.scheme != "https"
@@ -141,6 +152,9 @@ class LiveTextWindowApproval(BaseModel):
     memory_facts: list[LiveTextMemoryFact] = Field(default_factory=list, max_length=6)
     memory_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     handoff: LiveTextHandoff | None = None
+    cumulative: CumulativeApproval | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def valid_interval(self):
