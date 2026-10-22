@@ -33,6 +33,7 @@ from tests.test_onebot_window import reply_approval
 @asynccontextmanager
 async def continuity_window(
     core, tmp_path, *, turns=4, byte_limit=16000, texts=None, soft_limit=3200,
+    scope_options=None,
 ):
     texts = texts or ["选了茉莉绿茶", "现在说的这个呢？", "刚才聊到哪了？", "还是那个吗？", "继续"]
     calls, sends = [], []
@@ -63,6 +64,7 @@ async def continuity_window(
             },
             history_scope="approved_window" if turns else "none", max_history_turns=turns,
             max_history_utf8_bytes=byte_limit if turns else 0,
+            **(scope_options or {}),
         )
         async with (
             core_client(core) as client,
@@ -305,7 +307,7 @@ def test_sources_removed_by_soft_bound_are_not_frozen_or_reintroduced(core, tmp_
     {"history_scope": "none", "max_history_turns": 1},
     {"history_scope": "approved_window"},
     {"history_scope": "all_history", "max_history_turns": 1, "max_history_utf8_bytes": 500},
-    {"history_scope": "approved_window", "max_history_turns": 5, "max_history_utf8_bytes": 500},
+    {"history_scope": "approved_window", "max_history_turns": 16, "max_history_utf8_bytes": 500},
     {"history_scope": "approved_window", "max_history_turns": True, "max_history_utf8_bytes": 500},
     {"history_scope": "approved_window", "max_history_turns": 1, "max_history_utf8_bytes": 16001},
 ])

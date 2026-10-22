@@ -1,0 +1,9 @@
+# Numeric policy for a new draft; see docs/trial-limits.md.
+# This example does not authorize or change a running window.
+[trial_limits]
+max_inputs = 15
+max_model_attempts = 15
+max_send_attempts = 15
+max_visible_replies = 15
+max_input_chars = 500
+max_reply_chars = 500

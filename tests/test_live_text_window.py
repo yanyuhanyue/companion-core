@@ -43,12 +43,13 @@ def test_live_text_approval_has_closed_default_and_public_status(core):
 
 
 def live_fixture(
-    core, tmp_path, *, core_options=None, bridge_options=None, paid_options=None, **changes,
+    core, tmp_path, *, core_options=None, bridge_options=None, paid_options=None,
+    window_options=None, **changes,
 ):
     from companion import live_text, paid_budget
     from companion_onebot_bridge.window import bridge_code_sha256, digest
 
-    cfg, value, inventory, now = plan_fixture(tmp_path)
+    cfg, value, inventory, now = plan_fixture(tmp_path, **(window_options or {}))
     if bridge_options:
         cfg = replace(cfg, **bridge_options)
         inventory["config_sha256"] = digest(asdict(cfg))
@@ -136,10 +137,10 @@ def test_core_and_bridge_allow_fifteen_model_attempts_without_raising_input_or_r
 
     value = core.settings.live_text_window.model_dump()
     with pytest.raises(ValidationError):
-        LiveTextWindowApproval.model_validate({**value, "max_model_attempts": 16})
+        LiveTextWindowApproval.model_validate({**value, "max_model_attempts": 2**31})
     _, _, inventory, _ = plan_fixture(tmp_path)
     invalid = {**plan.value, "live_text": {
-        **plan.value["live_text"], "max_model_attempts": 16,
+        **plan.value["live_text"], "max_model_attempts": 2**31,
     }}
     with pytest.raises(ValueError, match="LIVE_TEXT_SCOPE_MISMATCH"):
         WindowPlan(invalid, cfg, inventory)

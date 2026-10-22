@@ -270,7 +270,7 @@ def test_same_source_id_changed_body_or_time_is_conflict(core, tmp_path, mutatio
         "image",
         "inventory",
         "time",
-        "six",
+        "invalid-count",
         "concurrency",
         "live-without-approval",
         "nonlocal",
@@ -288,8 +288,8 @@ def test_mutated_runtime_or_window_rejected_before_any_io(tmp_path, mutation):
         inventory = {**inventory, "config_version": "UNAPPROVED"}
     elif mutation == "time":
         value["ends_at"] = "2026-10-20T18:00:00"
-    elif mutation == "six":
-        value["max_attempts"] = 6
+    elif mutation == "invalid-count":
+        value["max_attempts"] = 0
     elif mutation == "concurrency":
         value["concurrency"] = 2
     elif mutation == "live-without-approval":

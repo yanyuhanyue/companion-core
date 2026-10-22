@@ -14,6 +14,7 @@ from companion.image_input import ImageInputPolicy
 from companion.media_config import ContentConfig, MediaConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.sources import ObservationSource
+from companion.trial_limits import TrialCount, TrialText
 
 
 class ObservationAdapterConfig(BaseModel):
@@ -136,16 +137,16 @@ class LiveTextWindowApproval(BaseModel):
     budget_journal_id: str = Field(pattern=r"^budget_[a-f0-9]{32}$")
     custodian_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     approval_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    max_inputs: int = Field(default=5, strict=True, ge=1, le=5)
+    max_inputs: TrialCount = 5
     capture_public_key: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    max_model_attempts: int = Field(default=5, strict=True, ge=1, le=15)
-    max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
-    max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
+    max_model_attempts: TrialCount = 5
+    max_input_chars: TrialText = 500
+    max_reply_chars: TrialText = 500
     segmented_reply: SegmentedReplyConfig | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
-    max_send_attempts: int | None = Field(
-        default=None, strict=True, ge=1, le=5, exclude_if=lambda value: value is None,
+    max_send_attempts: TrialCount | None = Field(
+        default=None, exclude_if=lambda value: value is None,
     )
     rich_input_scope: Literal["none", "references_v1"] = "none"
     link_scope: Literal["none", "owner_links_v1"] = Field(
@@ -155,7 +156,7 @@ class LiveTextWindowApproval(BaseModel):
     image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     history_scope: Literal["none", "approved_window"] = "none"
     history_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
+    max_history_turns: int = Field(default=0, strict=True, ge=0, le=15)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
     memory_scope: Literal["none", "approved_facts"] = "none"
     memory_facts: list[LiveTextMemoryFact] = Field(default_factory=list, max_length=6)
@@ -171,10 +172,8 @@ class LiveTextWindowApproval(BaseModel):
             self.rich_input_scope != "references_v1" or not self.capture_public_key
         ):
             raise ValueError("authenticated owner-card link scope required")
-        if (self.segmented_reply is None) != (self.max_send_attempts is None):
+        if self.segmented_reply is not None and self.max_send_attempts is None:
             raise ValueError("segmented replies require an explicit bounded send limit")
-        if self.segmented_reply is not None and self.image_scope == "owner_image_v1":
-            raise ValueError("segmented replies cannot share the owner image scope")
         if (self.image_scope == "none" and self.image_approval_sha256 is not None) or (
             self.image_scope == "owner_image_v1"
             and (
