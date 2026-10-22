@@ -114,8 +114,8 @@ def test_segmented_scope_requires_explicit_matching_send_limit(core, tmp_path):
     assert settings.segmented_reply == scoped.segmented_reply == SegmentedReplyConfig(**policy)
     with pytest.raises(ValidationError):
         LiveTextWindowApproval.model_validate(value | {"segmented_reply": policy})
-    with pytest.raises(ValidationError):
-        LiveTextWindowApproval.model_validate(value | {"max_send_attempts": 5})
+    plain = LiveTextWindowApproval.model_validate(value | {"max_send_attempts": 5})
+    assert plain.segmented_reply is None and plain.max_send_attempts == 5
 
 
 def test_owner_image_scope_cannot_enable_segmented_replies(core, tmp_path):

@@ -215,8 +215,20 @@ class WindowPlan:
                 expected_scope.add("cumulative")
                 cumulative.validate(scope["cumulative"], config, self.start, self.end)
             if "segmented_reply" in scope or "max_send_attempts" in scope:
-                reply_segments.validate_scope(scope, value)
-                expected_scope.update({"segmented_reply", "max_send_attempts"})
+                if "segmented_reply" in scope:
+                    reply_segments.validate_scope(scope, value)
+                    expected_scope.add("segmented_reply")
+                elif (
+                    type(scope.get("max_send_attempts")) is not int
+                    or not 1 <= scope["max_send_attempts"] <= 2**31 - 1
+                    or any(type(value[key]) is not int
+                           for key in ("max_attempts", "max_visible_replies"))
+                    or scope["max_send_attempts"] != min(
+                        value["max_attempts"], value["max_visible_replies"],
+                    )
+                ):
+                    raise ValueError("INVALID_WINDOW_SEND_LIMIT")
+                expected_scope.add("max_send_attempts")
             # Retired plain scopes retain their original bytes/hash; new scopes may opt in.
             if "rich_input_scope" in scope:
                 expected_scope.add("rich_input_scope")
@@ -372,7 +384,7 @@ class WindowPlan:
                 or not re.fullmatch(r"[a-f0-9]{40}", scope["candidate_sha"])
                 or not re.fullmatch(r"budget_[a-f0-9]{32}", scope["budget_journal_id"])
                 or type(scope["max_model_attempts"]) is not int
-                or not 1 <= scope["max_model_attempts"] <= 15
+                or not 1 <= scope["max_model_attempts"] <= 2**31 - 1
                 or any(
                     type(scope[key]) is not int or scope[key] != value[other]
                     for key, other in (
@@ -384,12 +396,12 @@ class WindowPlan:
             ):
                 raise ValueError("LIVE_TEXT_SCOPE_MISMATCH")
         for field in ("max_new_inputs", "max_attempts", "max_visible_replies"):
-            if type(value[field]) is not int or not 1 <= value[field] <= 5:
+            if type(value[field]) is not int or not 1 <= value[field] <= 2**31 - 1:
                 raise ValueError("INVALID_WINDOW_LIMIT")
         if type(value["concurrency"]) is not int or value["concurrency"] != 1:
             raise ValueError("INVALID_WINDOW_LIMIT")
         for field in ("max_input_chars", "max_reply_chars"):
-            if type(value[field]) is not int or not 1 <= value[field] <= 500:
+            if type(value[field]) is not int or not 1 <= value[field] <= 20000:
                 raise ValueError("INVALID_WINDOW_TEXT_LIMIT")
         for field in (
             "identity_sha256",

@@ -25,7 +25,7 @@ def validate_scope(value, outer):
                for name, low, high in (("max_segments", 2, 3), ("min_chars", 4, 100),
                                        ("interval_ms", 0, 3000)))
         or type(value.get("max_send_attempts")) is not int
-        or not 1 <= value["max_send_attempts"] <= 5
+        or not 1 <= value["max_send_attempts"] <= 2**31 - 1
         or value["max_send_attempts"] != min(outer["max_attempts"], outer["max_visible_replies"])
         or value.get("image_scope") == "owner_image_v1"):
         raise ValueError("INVALID_SEGMENTED_REPLY_SCOPE")
