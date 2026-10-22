@@ -15,7 +15,10 @@ POWERSHELL = shutil.which("pwsh")
 @pytest.mark.skipif(not POWERSHELL, reason="PowerShell is unavailable")
 @pytest.mark.parametrize("mode", ["Docs", "Tests"])
 @pytest.mark.parametrize("exit_code", [0, 7])
-def test_check_selects_work_and_restores_environment(tmp_path, mode, exit_code):
+@pytest.mark.parametrize("initial_environment", ["present", "absent"])
+def test_check_selects_work_and_restores_environment(
+    tmp_path, mode, exit_code, initial_environment,
+):
     calls = tmp_path / "calls.jsonl"
     stub = tmp_path / "python.ps1"
     stub.write_text(
@@ -29,6 +32,16 @@ param([string]$Check, [string]$PythonStub, [string]$Mode)
 $ErrorActionPreference = 'Stop'
 $names = @('TEMP', 'TMP', 'UV_CACHE_DIR', 'PYTHONDONTWRITEBYTECODE',
            'PYTHONIOENCODING', 'PYTHONPATH')
+if ($env:CHECK_STUB_ENVIRONMENT -eq 'absent') {
+    foreach ($name in $names) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+} else {
+    $env:TEMP = Split-Path -Parent $PythonStub
+    $env:TMP = $env:TEMP
+    $env:UV_CACHE_DIR = $env:TEMP
+    $env:PYTHONDONTWRITEBYTECODE = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
+    $env:PYTHONPATH = $env:TEMP
+}
 $before = @{}
 foreach ($name in $names) {
     $before[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -49,7 +62,8 @@ foreach ($name in $names) {
         [POWERSHELL, "-NoProfile", "-NonInteractive", "-File", str(runner),
          "-Check", str(ROOT / "scripts/check.ps1"), "-PythonStub", str(stub), "-Mode", mode],
         cwd=ROOT, env={**os.environ, "CHECK_STUB_CALLS": str(calls),
-                       "CHECK_STUB_EXIT": str(exit_code)},
+                       "CHECK_STUB_EXIT": str(exit_code),
+                       "CHECK_STUB_ENVIRONMENT": initial_environment},
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stdout + result.stderr

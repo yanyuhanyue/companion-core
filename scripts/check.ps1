@@ -50,7 +50,11 @@ try {
     }
 } finally {
     foreach ($name in $previousEnvironment.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        if ($null -eq $previousEnvironment[$name]) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], 'Process')
+        }
     }
     # Each verification owns one directory; unrelated or retained diagnostics are untouched.
     foreach ($relative in @($roundTemp)) {
