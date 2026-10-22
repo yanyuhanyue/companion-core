@@ -49,7 +49,10 @@ def test_real_httpcore_trace_does_not_log_signed_redirect_header(caplog):
 
 
 def image_segment(url=URL):
-    return {"type": "image", "data": {"url": url, "file": "synthetic-file", "summary": ""}}
+    return {
+        "type": "image",
+        "data": {"url": url, "file": "synthetic-file", "summary": "", "sub_type": 0},
+    }
 
 
 def test_only_one_top_level_image_and_source_hash_without_url_projection():

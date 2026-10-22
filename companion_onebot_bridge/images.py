@@ -90,6 +90,19 @@ def original_image(message):
     data = value.get("data")
     if set(value) != {"type", "data"} or not isinstance(data, dict):
         raise ValueError("INVALID_IMAGE_SEGMENT")
+    # The pinned SnowLuma receive codec emits these fields for an ordinary image.
+    # Sticker subtypes, flash pictures and market-face extensions are different
+    # media scopes even when they happen to point at an otherwise allowed CDN.
+    if (
+        not set(data) <= {"url", "file", "sub_type", "summary"}
+        or type(data.get("sub_type", 0)) is not int
+        or data.get("sub_type", 0) != 0
+        or any(
+            not isinstance(data[key], str) or (key != "url" and "\x00" in data[key])
+            for key in ("url", "file", "summary") if key in data
+        )
+    ):
+        raise ValueError("IMAGE_KIND_UNSUPPORTED")
     url = image_url(data.get("url") or data.get("file"))
     return OriginalImage(index, hashlib.sha256(encode(value).encode()).hexdigest(), url)
 
