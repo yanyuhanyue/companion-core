@@ -414,3 +414,18 @@ def test_pause_fsync_then_projection_failure_retains_only_the_stop_witness(
     path.write_bytes(prefix)
     with pytest.raises(CoreError, match="RECONCILIATION"):
         reserve(core)
+
+
+@pytest.mark.parametrize("projection", ["invalid", "{}", "[]", '{"journal_path":null}'])
+def test_damaged_projection_status_remains_read_only_and_reports_unavailable(
+    core, tmp_path, projection,
+):
+    enable(core, tmp_path)
+    core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                       (projection, cumulative.PROJECTION))
+    before = list(core.store.db.iterdump())
+    journal = Path(core.settings.paid_model.journal_path).read_bytes()
+    result = cumulative.status(core.store, core.settings, core.clock())
+    assert not result["available"] and result["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
+    assert list(core.store.db.iterdump()) == before
+    assert Path(core.settings.paid_model.journal_path).read_bytes() == journal

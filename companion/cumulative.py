@@ -625,12 +625,13 @@ def status(store, settings, now):
     projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
     if not projection:
         return {"enrolled": False}
-    custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
     try:
+        custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
         state = paid_budget.journal(store, custody, allow_settlement=True,
                                     initialize=False)["cumulative"]
-    except CoreError as error:
-        return {"enrolled": True, "available": False, "code": error.code}
+    except (CoreError, ValueError, TypeError, KeyError) as error:
+        return {"enrolled": True, "available": False,
+                "code": getattr(error, "code", "MODEL_BUDGET_RECONCILIATION_REQUIRED")}
     policy = state["policy"]
     values = [*state["models"].values(), *state["operations"].values()]
     day, month = periods(instant(now), policy["timezone"])
