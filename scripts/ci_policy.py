@@ -106,7 +106,7 @@ def changed_files(event_name, event, root=ROOT):
 def check_results(profile, needs):
     expected = "success" if profile == "full" else "skipped"
     return (
-        profile in {"full", "docs"}
+        profile in {"full", "docs", "reuse"}
         and needs.get("preflight", {}).get("result") == "success"
         and needs.get("quality", {}).get("result") == "success"
         and all(needs.get(name, {}).get("result") == expected for name in FULL_JOBS)
@@ -131,17 +131,33 @@ def run_docs(root=ROOT):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["plan", "docs", "gate"])
-    parser.add_argument("--profile", choices=["full", "docs"])
+    parser.add_argument("--profile", choices=["full", "docs", "reuse"])
     args = parser.parse_args()
     if args.operation == "plan":
+        reuse = None
+        name, ref, event = "", "", {}
         try:
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text("utf-8"))
             name, ref = os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"]
             profile, reason = choose_profile(name, ref, event, changed_files(name, event))
         except (KeyError, TypeError, ValueError, OSError, AttributeError):
             profile, reason = "full", "unreadable-event"
+        if profile == "full":
+            try:
+                if __package__:
+                    from .ci_reuse import find_verified_run
+                else:
+                    from ci_reuse import find_verified_run
+
+                reuse = find_verified_run(name, ref, event)
+            except Exception:
+                # Reuse is optional; unavailable or malformed evidence runs full CI.
+                reuse = None
+            if reuse:
+                profile, reason = "reuse", "verified-identical-pr-tree"
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write(f"profile={profile}\n")
+            output.write("reuse=" + json.dumps(reuse, separators=(",", ":")) + "\n")
         print(json.dumps({"profile": profile, "reason": reason}))
     elif args.operation == "gate":
         needs = json.loads(os.environ["NEEDS_JSON"])
