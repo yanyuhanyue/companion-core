@@ -1,10 +1,11 @@
 import hmac
 import re
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import date
+from ipaddress import ip_address
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -23,6 +24,12 @@ from companion.contracts import (
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
 from companion.media_api import register_media_routes
+from companion.memory_control import (
+    MemoryControlGrant,
+    MemoryControlInput,
+    StoppedMemoryControl,
+    stopped_workers,
+)
 from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
@@ -66,14 +73,19 @@ class BodyLimit:
         await self.app(scope, replay, send)
 
 
-def create_app(settings=None):
+def create_app(settings=None, *, memory_control_grant=None, memory_control_sha256=None):
     settings = settings or Settings.load()
+    if memory_control_grant is not None:
+        memory_control_grant = MemoryControlGrant.model_validate(memory_control_grant)
 
     @asynccontextmanager
     async def lifespan(app):
-        app.state.core = Core(settings)
-        yield
-        app.state.core.store.close()
+        with stopped_workers(settings.database) if memory_control_grant else nullcontext():
+            app.state.core = Core(settings)
+            try:
+                yield
+            finally:
+                app.state.core.store.close()
 
     app = FastAPI(
         title="Companion Core",
@@ -137,6 +149,27 @@ def create_app(settings=None):
     prefix = "/internal/v1"
     auth = [Depends(authenticate)]
     register_content_routes(app, auth)
+
+    @app.middleware("http")
+    async def memory_control_exclusive(request, call_next):
+        if memory_control_grant is not None and request.url.path not in {
+            "/internal/v1/health/live", "/internal/v1/memory-control",
+        }:
+            return JSONResponse({"error": "MEMORY_CONTROL_EXCLUSIVE"}, 403)
+        return await call_next(request)
+
+    @app.post(prefix + "/memory-control", dependencies=[Depends(control_admin)])
+    async def memory_control(body: MemoryControlInput, request: Request):
+        if memory_control_grant is None:
+            raise CoreError("MEMORY_CONTROL_SCOPE_REQUIRED", 403)
+        if memory_control_grant.execution == "local_synthetic" and (
+            not request.client or not ip_address(request.client.host).is_loopback
+        ):
+            raise CoreError("MEMORY_CONTROL_OFFLINE_ONLY", 403)
+        core = app.state.core
+        service = StoppedMemoryControl(core.store, settings, core.ledger, core.clock,
+                                       memory_control_grant, memory_control_sha256)
+        return service.apply(body)
 
     @app.get(prefix + "/health/live")
     async def live():
