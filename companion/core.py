@@ -273,6 +273,18 @@ class Core(Runtime):
                 and not body.get("diary_command")
                 and not body.get("control_command")
             ):
+                if qq_images.enabled(self.settings):
+                    inflight = s.one(
+                        "SELECT m.request_id FROM model_usage m JOIN model_admissions a "
+                        "USING(request_id) WHERE m.job_id=? AND m.scenario='content_vision' "
+                        "AND m.state='RESERVED' AND a.window_id=? AND a.lease_until>?",
+                        (row["job_id"], self.settings.live_text_window.window_id, self.clock()),
+                    )
+                    if inflight:
+                        # The API owns this image request. Validate its existing fences,
+                        # then wait without claiming the chat job or authorizing more I/O.
+                        live_text.check_model(s, self.settings, self.clock, inflight["request_id"])
+                        return None
                 if self.content.status(row["event_id"])["pending"]:
                     return None
             token = uid("lease")
