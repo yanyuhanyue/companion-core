@@ -29,6 +29,7 @@ QUESTION = "结合我以前的需求，这两张图里的哪一个更合适？"
 @asynccontextmanager
 async def image_memory_window(
     core, tmp_path, *, mutation=None, no_candidates=False, model_attempts=None,
+    scope_options=None, reply=None,
 ):
     memory_id = fact(core, 900, PREFERENCE)
     outsider = fact(core, 901, "未批准的秘密偏好：紫色键盘。")
@@ -43,6 +44,9 @@ async def image_memory_window(
     opts["paid_options"]["image_input"] = opts["paid_options"]["image_input"].model_copy(
         update={"max_images_per_request": 2},
     )
+    if scope_options:
+        opts["core_options"].update(scope_options.get("core_options", {}))
+        opts.update({key: value for key, value in scope_options.items() if key != "core_options"})
     calls, downloads, queries = [], [], []
     originals = []
     for color in ("red", "blue"):
@@ -97,7 +101,9 @@ async def image_memory_window(
                 with core.store.transaction():
                     core.ledger.expire_events(core.store, [event_id], core.clock())
         else:
-            content = "图1可见红色。按你以前明确提到的轻便需求，我更倾向图1；隔音仅凭图片无法确认。"
+            content = reply or (
+                "图1可见红色。按你以前明确提到的轻便需求，我更倾向图1；隔音仅凭图片无法确认。"
+            )
         return httpx.Response(200, json={
             "choices": [{"message": {"content": content}}],
             "usage": {"prompt_tokens": 200, "completion_tokens": 30},

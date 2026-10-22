@@ -361,7 +361,7 @@ class WindowPlan:
                 scope["history_scope"] not in ("none", "approved_window")
                 or type(scope["max_history_turns"]) is not int
                 or type(scope["max_history_utf8_bytes"]) is not int
-                or not 0 <= scope["max_history_turns"] <= 4
+                or not 0 <= scope["max_history_turns"] <= 15
                 or not 0 <= scope["max_history_utf8_bytes"] <= 16000
                 or (
                     scope["history_scope"] == "none"

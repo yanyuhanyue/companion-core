@@ -118,15 +118,15 @@ def test_segmented_scope_requires_explicit_matching_send_limit(core, tmp_path):
     assert plain.segmented_reply is None and plain.max_send_attempts == 5
 
 
-def test_owner_image_scope_cannot_enable_segmented_replies(core, tmp_path):
+def test_owner_image_scope_can_explicitly_enable_segmented_replies(core, tmp_path):
     value = configure(core, tmp_path).model_dump(mode="json")
-    with pytest.raises(ValidationError, match="segmented"):
-        LiveTextWindowApproval.model_validate(value | {
-            "image_scope": "owner_image_v1", "rich_input_scope": "references_v1",
-            "image_approval_sha256": "a" * 64,
-            "segmented_reply": {"max_segments": 3, "min_chars": 12, "interval_ms": 500},
-            "max_send_attempts": 5,
-        })
+    scoped = LiveTextWindowApproval.model_validate(value | {
+        "image_scope": "owner_image_v1", "rich_input_scope": "references_v1",
+        "image_approval_sha256": "a" * 64,
+        "segmented_reply": {"max_segments": 3, "min_chars": 12, "interval_ms": 500},
+        "max_send_attempts": 5,
+    })
+    assert scoped.segmented_reply.max_segments == 3
 
 
 def test_live_guard_refuses_segmentation_not_present_in_the_approved_scope(core, tmp_path):

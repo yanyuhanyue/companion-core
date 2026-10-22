@@ -156,7 +156,7 @@ class LiveTextWindowApproval(BaseModel):
     image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     history_scope: Literal["none", "approved_window"] = "none"
     history_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    max_history_turns: int = Field(default=0, strict=True, ge=0, le=4)
+    max_history_turns: int = Field(default=0, strict=True, ge=0, le=15)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
     memory_scope: Literal["none", "approved_facts"] = "none"
     memory_facts: list[LiveTextMemoryFact] = Field(default_factory=list, max_length=6)
@@ -174,8 +174,6 @@ class LiveTextWindowApproval(BaseModel):
             raise ValueError("authenticated owner-card link scope required")
         if self.segmented_reply is not None and self.max_send_attempts is None:
             raise ValueError("segmented replies require an explicit bounded send limit")
-        if self.segmented_reply is not None and self.image_scope == "owner_image_v1":
-            raise ValueError("segmented replies cannot share the owner image scope")
         if (self.image_scope == "none" and self.image_approval_sha256 is not None) or (
             self.image_scope == "owner_image_v1"
             and (

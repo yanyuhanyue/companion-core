@@ -16,6 +16,7 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan
 from scripts.trial_limits import load_limits
 from tests.conftest import run
+from tests.test_live_continuity import continuity_window
 from tests.test_live_text_window import live_clients, live_fixture
 from tests.test_onebot_window import plan_fixture, stage
 
@@ -167,5 +168,38 @@ def test_text_limits_above_old_trial_cap_work_through_core_and_bridge(core, tmp_
                 await window.send_once(client, protocol, approval)
                 assert len(calls) == len(sends) == 1
                 assert sends[0]["message"][0]["data"]["text"] == reply
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("turns", [5, 15])
+def test_history_capacity_matches_existing_recent_message_configuration(core, tmp_path, turns):
+    async def scenario():
+        async with continuity_window(core, tmp_path, turns=turns) as values:
+            window, *_ = values
+            assert core.settings.max_recent_messages == turns * 2
+            assert window.plan.value["live_text"]["max_history_turns"] == turns
+
+    run(scenario())
+
+
+def test_sixth_captured_reply_can_use_five_complete_history_turns(core, tmp_path):
+    profile = TrialLimits(max_inputs=6, max_model_attempts=6, max_send_attempts=6,
+                          max_visible_replies=6).project()
+    texts = [f"第{index}个已批准的合成输入" for index in range(1, 7)]
+
+    async def scenario():
+        async with continuity_window(core, tmp_path, turns=5, texts=texts, scope_options={
+            "window_options": profile["bridge_plan"], "paid_options": profile["paid_model"],
+            **profile["live_text_window"],
+        }) as values:
+            _, _, calls, sends, capture, finish = values
+            for _ in texts:
+                await capture()
+                await finish()
+            assert len(calls) == len(sends) == 6
+            final = calls[-1]["messages"]
+            assert len(final) == 12
+            assert [message["content"] for message in final if message["role"] == "user"] == texts
 
     run(scenario())
