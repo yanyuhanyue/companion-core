@@ -1,6 +1,6 @@
 import os
 import tomllib
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
@@ -52,13 +52,16 @@ class PaidModelApproval(BaseModel):
     per_attempt_micro_usd: int = Field(strict=True, gt=0)
     per_request_micro_usd: int = Field(strict=True, gt=0)
     per_request_calls: int = Field(strict=True, gt=0, le=10)
-    daily_micro_usd: int = Field(strict=True, gt=0)
+    daily_micro_usd: int | None = Field(default=None, strict=True, gt=0)
     daily_calls: int = Field(strict=True, gt=0)
-    monthly_micro_usd: int = Field(strict=True, gt=0)
-    window_micro_usd: int = Field(strict=True, gt=0)
+    monthly_micro_usd: int | None = Field(default=None, strict=True, gt=0)
+    window_micro_usd: int | None = Field(default=None, strict=True, gt=0)
     window_calls: int = Field(strict=True, gt=0)
     concurrency: int = Field(strict=True, gt=0, le=32)
     journal_path: str = Field(min_length=1)
+    unlimited_period_spend: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: value is False,
+    )
     image_input: ImageInputPolicy | None = None
     cumulative: CumulativeApproval | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -74,6 +77,13 @@ class PaidModelApproval(BaseModel):
             raise ValueError("approval interval exceeds configured rate validity")
         if self.cached_input_rate > self.input_rate:
             raise ValueError("cached rate must not exceed uncached admission price")
+        if self.unlimited_period_spend and self.cumulative is not None:
+            raise ValueError("unlimited period spend cannot override a cumulative account ceiling")
+        periods = (self.daily_micro_usd, self.monthly_micro_usd, self.window_micro_usd)
+        if (self.unlimited_period_spend and any(value is not None for value in periods)) or (
+            not self.unlimited_period_spend and any(value is None for value in periods)
+        ):
+            raise ValueError("choose explicit bounded period amounts or unlimited period spend")
         if self.cumulative and (
             (self.provider, self.currency, self.timezone) != (
                 self.cumulative.provider, self.cumulative.currency, self.cumulative.timezone
@@ -125,6 +135,9 @@ class LiveTextWindowApproval(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     live_approved: bool = Field(default=False, strict=True)
     execution: Literal["local_synthetic", "approved_live"] = "local_synthetic"
+    automatic_reply: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: value is False,
+    )
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
     starts_at: datetime
@@ -227,6 +240,11 @@ class LiveTextWindowApproval(BaseModel):
             or self.starts_at >= self.ends_at
         ):
             raise ValueError("absolute live text approval interval required")
+        if self.automatic_reply and (
+            self.capture_public_key is None
+            or self.ends_at - self.starts_at > timedelta(hours=72)
+        ):
+            raise ValueError("automatic private replies need authenticated capture and at most 72h")
         return self
 
 

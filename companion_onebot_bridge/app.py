@@ -182,6 +182,7 @@ def main():
             "window-capture-once",
             "window-approve-input",
             "window-send-once",
+            "window-run",
             "window-status",
             "window-stop",
             "window-quota-inventory",
