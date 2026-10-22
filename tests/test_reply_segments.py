@@ -4,6 +4,26 @@ from pydantic import ValidationError
 from companion.reply_segments import SegmentedReplyConfig, split_text
 
 
+@pytest.mark.parametrize("source", ["toml", "environment"])
+def test_segmented_reply_configuration_loads_through_normal_settings_entrypoint(
+    tmp_path, monkeypatch, source,
+):
+    from companion.config import Settings
+
+    for field in Settings.model_fields:
+        monkeypatch.delenv("COMPANION_" + field.upper(), raising=False)
+    path = tmp_path / "config.toml"
+    contents = 'owner_qq_id="10001"\nbot_qq_id="10002"\nbridge_token="synthetic-config-token-32"\n'
+    policy = SegmentedReplyConfig(max_segments=2, min_chars=8, interval_ms=500)
+    if source == "toml":
+        contents += "[segmented_reply]\nmax_segments=2\nmin_chars=8\ninterval_ms=500\n"
+    else:
+        monkeypatch.setenv("COMPANION_SEGMENTED_REPLY", policy.model_dump_json())
+    path.write_text(contents, encoding="utf-8")
+    monkeypatch.setenv("COMPANION_CONFIG", str(path))
+    assert Settings.load().segmented_reply == policy
+
+
 def test_policy_defaults_are_bounded_strict_and_immutable():
     policy = SegmentedReplyConfig()
     assert policy.model_dump() == {"max_segments": 3, "min_chars": 12, "interval_ms": 1500}

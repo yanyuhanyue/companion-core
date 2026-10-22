@@ -175,6 +175,9 @@ def check_segment_ready(store, message_id, now):
 
 def cancel_interrupted_replies(store, conversation_id, now):
     """Only an already authenticated, newly accepted owner input interrupts pending parts."""
+    # Historical databases can accept inputs while being prepared for migration.
+    if not store.one("SELECT 1 FROM pragma_table_info('outbox') WHERE name='reply_group_id'"):
+        return
     store.execute(
         "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
         "last_error_code='REPLY_INTERRUPTED_BY_OWNER' WHERE conversation_id=? "

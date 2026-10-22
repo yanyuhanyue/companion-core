@@ -417,6 +417,8 @@ class Settings(BaseModel):
                     data[field] = PaidModelApproval.model_validate_json(value)
                 elif field == "live_text_window":
                     data[field] = LiveTextWindowApproval.model_validate_json(value)
+                elif field == "segmented_reply":
+                    data[field] = SegmentedReplyConfig.model_validate_json(value)
                 else:
                     data[field] = value
         return cls.model_validate(data)
