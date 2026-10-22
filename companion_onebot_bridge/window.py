@@ -372,7 +372,7 @@ class WindowPlan:
                 or not re.fullmatch(r"[a-f0-9]{40}", scope["candidate_sha"])
                 or not re.fullmatch(r"budget_[a-f0-9]{32}", scope["budget_journal_id"])
                 or type(scope["max_model_attempts"]) is not int
-                or not 1 <= scope["max_model_attempts"] <= 5
+                or not 1 <= scope["max_model_attempts"] <= 15
                 or any(
                     type(scope[key]) is not int or scope[key] != value[other]
                     for key, other in (

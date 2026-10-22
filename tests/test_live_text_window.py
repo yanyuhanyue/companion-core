@@ -6,7 +6,7 @@ from dataclasses import asdict, replace
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 from companion.config import LiveTextWindowApproval
 from companion.model import ModelClient
@@ -119,6 +119,30 @@ def test_synthetic_live_model_and_existing_five_send_window_are_compatible(core,
     assert len(model_calls) == len(sends) == 5
     assert all(item["message"][0]["data"]["text"] == "合成文本回复" for item in sends)
     assert core.status()["live_text_window"]["model_attempts"] == 5
+
+
+def test_core_and_bridge_allow_fifteen_model_attempts_without_raising_input_or_reply_caps(
+    core, tmp_path,
+):
+    assert LiveTextWindowApproval.model_fields["max_model_attempts"].default == 5
+    cfg, plan = live_fixture(core, tmp_path, max_model_attempts=15,
+                             paid_options={"window_calls": 15})
+    assert core.settings.live_text_window.max_model_attempts == 15
+    assert plan.value["live_text"]["max_model_attempts"] == 15
+    assert core.settings.live_text_window.max_inputs == 5
+    assert all(plan.value[key] == 5 for key in (
+        "max_new_inputs", "max_attempts", "max_visible_replies",
+    ))
+
+    value = core.settings.live_text_window.model_dump()
+    with pytest.raises(ValidationError):
+        LiveTextWindowApproval.model_validate({**value, "max_model_attempts": 16})
+    _, _, inventory, _ = plan_fixture(tmp_path)
+    invalid = {**plan.value, "live_text": {
+        **plan.value["live_text"], "max_model_attempts": 16,
+    }}
+    with pytest.raises(ValueError, match="LIVE_TEXT_SCOPE_MISMATCH"):
+        WindowPlan(invalid, cfg, inventory)
 
 
 @asynccontextmanager
