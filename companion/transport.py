@@ -44,7 +44,7 @@ def _group_manifest(job_id, parts, interval_ms):
 def enqueue_reply_parts(store, job, parts, interval_ms, now):
     """Freeze all parts atomically; a retried job cannot recut or duplicate its reply."""
     if (
-        not isinstance(parts, list) or not 1 <= len(parts) <= 3
+        not isinstance(parts, list) or not 1 <= len(parts) <= 2**31 - 1
         or any(not isinstance(text, str) or not text.strip() for text in parts)
         or sum(map(len, parts)) > 20000
         or type(interval_ms) is not int or not 0 <= interval_ms <= 3000
@@ -112,7 +112,7 @@ def reply_group(store, message_id, *, require_sent=False):
         )
         if (
             not source or source["redacted"] or source["kind"] != "chat"
-            or not 2 <= len(rows) <= 3 or row["segment_count"] != len(rows)
+            or not 2 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
             or row["action_type"] != "qq.private.reply"
             or (source["event_id"], source["conversation_id"]) != (
                 row["origin_event_id"], row["conversation_id"])
@@ -298,6 +298,10 @@ def lease_deliveries(store, settings, request, now):
             )
             if row.get("reply_group_id"):
                 items[-1]["reply_segment"] = segment_envelope(store, row["message_id"])
+            from companion.private_life import enabled
+
+            if enabled(settings):
+                items[-1]["window_origin_event_id"] = row["origin_event_id"]
         return {"items": items}
 
 

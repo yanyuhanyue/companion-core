@@ -9,6 +9,7 @@ import warnings
 from pydantic import BaseModel, ConfigDict, Field
 
 from companion.contracts import CoreError
+from companion.trial_limits import CountLimit
 
 
 class ImageInputPolicy(BaseModel):
@@ -17,7 +18,7 @@ class ImageInputPolicy(BaseModel):
     estimated_tokens_per_image: int = Field(strict=True, gt=0, le=1000000)
     max_bytes_per_image: int = Field(strict=True, gt=0, le=4000000)
     max_pixels_per_image: int = Field(strict=True, gt=0, le=16000000)
-    max_images_per_request: int = Field(default=1, strict=True, ge=1, le=4)
+    max_images_per_request: CountLimit = 1
 
 
 def text_and_estimate(policy, messages):
@@ -39,7 +40,9 @@ def text_and_estimate(policy, messages):
         if set(message) != {"role", "content"} or message["role"] != "user":
             raise ValueError()
         parts = message["content"]
-        if not isinstance(parts, list) or not 2 <= len(parts) <= policy.max_images_per_request + 1:
+        if (not isinstance(parts, list) or len(parts) < 2
+            or (policy.max_images_per_request != "unlimited"
+                and len(parts) > policy.max_images_per_request + 1)):
             raise ValueError()
         text, *images = parts
         if (
@@ -130,6 +133,6 @@ def contract(settings, job_id, logical_request_id):
     if not job_id or logical_request_id != job_id:
         raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
     approval = settings.live_text_window
-    calls = 3 if approval and approval.memory_scope == "approved_facts" else 2
+    calls = 3 if approval and approval.memory_scope != "none" else 2
     if settings.paid_model.per_request_calls != calls:
         raise CoreError("MODEL_IMAGE_TWO_CALL_CONTRACT_REQUIRED", 503)

@@ -1,5 +1,6 @@
 """Keep each reply segment in the original Outbox with one immutable group."""
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "0019_segmented_replies"
@@ -28,6 +29,17 @@ def downgrade():
     ).first():
         raise RuntimeError("SEGMENTED_REPLIES_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW")
     op.get_bind().exec_driver_sql("DROP INDEX idx_outbox_reply_segment")
-    for name in ("segment_interval_ms", "reply_group_sha256", "segment_count", "segment_index",
-                 "reply_group_id"):
-        op.get_bind().exec_driver_sql("ALTER TABLE outbox DROP COLUMN " + name)
+    columns = {"segment_interval_ms", "reply_group_sha256", "segment_count", "segment_index",
+               "reply_group_id"}
+    # Later table rebuilds may reflect the original inline checks/FK as table
+    # constraints. Drop those together with their columns, preserving other data.
+    table = sa.Table("outbox", sa.MetaData(), autoload_with=op.get_bind())
+    for constraint in list(table.constraints):
+        if ((isinstance(constraint, sa.CheckConstraint)
+             and any(name in str(constraint.sqltext) for name in columns))
+            or (isinstance(constraint, sa.ForeignKeyConstraint)
+                and any(column.name in columns for column in constraint.columns))):
+            table.constraints.remove(constraint)
+    with op.batch_alter_table("outbox", copy_from=table, recreate="always") as batch:
+        for name in sorted(columns):
+            batch.drop_column(name)

@@ -1,11 +1,12 @@
 """Trial policy values and their existing HTTP/window-contract projections."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 # Match the cumulative-journal counter range and the existing HTTP text contract.
 TrialCount = Annotated[int, Field(strict=True, ge=1, le=2**31 - 1)]
+CountLimit = TrialCount | Literal["unlimited"]
 TrialText = Annotated[int, Field(strict=True, ge=1, le=20000)]
 
 

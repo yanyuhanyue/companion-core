@@ -229,6 +229,9 @@ def reserve(
                     **({"quota": quota} if quota else {}),
                 },
             )
+            from companion.private_life import freeze_model
+
+            freeze_model(store, settings, request_id)
         return request_id
 
 

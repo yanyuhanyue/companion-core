@@ -53,8 +53,14 @@ class BridgeConfig:
     poll_seconds: float = 0.1
     capture_signing_key: str | None = None
     rich_input_scope: str = "none"
+    meme_directory: str | None = None
 
     def __post_init__(self):
+        if self.meme_directory is not None and (
+            not isinstance(self.meme_directory, str) or not Path(self.meme_directory).is_absolute()
+            or ".." in Path(self.meme_directory).parts
+        ):
+            raise ValueError("ABSOLUTE_MEME_LIBRARY_REQUIRED")
         if self.rich_input_scope not in ("none", "references_v1"):
             raise ValueError("INVALID_RICH_INPUT_SCOPE")
         for identity in (self.owner_qq_id, self.bot_qq_id):

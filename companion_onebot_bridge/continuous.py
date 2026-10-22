@@ -228,7 +228,8 @@ class OwnerSource:
                         )
                         if event is None:
                             continue
-                        if event["payload"]["text"].strip().startswith("/"):
+                        if (event["payload"]["text"].strip().startswith("/")
+                            and scope.get("companion_scope") != "owner_private_v1"):
                             emit("automatic_command_not_in_scope")
                             continue
                         capture.input_event(window, frame, received_at)
@@ -248,13 +249,15 @@ class OwnerSource:
             if not self.pause.is_set():
                 raise ValueError("AUTOMATIC_SOURCE_STOPPED")
 
-    async def next(self):
+    async def next(self, idle=None):
         while True:
             self.check()
             if self.pause.is_set():
                 return None
             if observed := self.first():
                 return observed
+            if idle is not None:
+                await idle()
             self.available.clear()
             try:
                 await asyncio.wait_for(self.available.wait(), 1)
@@ -306,6 +309,16 @@ async def core_status(window, client):
                 if len(content) > 65536:
                     raise ValueError("INVALID_CORE_COUNTS")
     return decode(bytes(content), 65536)
+
+
+async def pump_private(window, client, protocol):
+    status = await core_status(window, client)
+    if any(row["state"] == "PENDING" and row["count"] for row in status["deliveries"]):
+        await window.core_counts(client)
+        operation = AutomaticSend(window, client)
+        sender = WindowOneBot(operation, protocol)
+        async with window.core_http(client) as scoped, sender.delegate.client:
+            await deliver_tick(scoped, sender, window.spool, guard=operation)
 
 
 async def finish_input(window, client, protocol, source, event_id):
@@ -367,7 +380,12 @@ async def run(window, client, protocol, *, pause=None):
                 if len(rows) > 1:
                     raise ValueError("AUTOMATIC_INPUT_RECONCILIATION_REQUIRED")
                 if not rows:
-                    observed = await source.next()
+                    async def idle():
+                        if (window.plan.value["live_text"].get("companion_scope")
+                            == "owner_private_v1"):
+                            await pump_private(window, client, protocol)
+
+                    observed = await source.next(idle)
                     if observed is None:
                         emit("automatic_service_paused")
                         return window.status()

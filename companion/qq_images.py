@@ -59,7 +59,7 @@ def manifest(body):
             raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
         return None
     if (
-        not 1 <= len(images) <= 4
+        not 1 <= len(images) <= 64
         or any(
             image.get("slot") != slot
             or not isinstance(image.get("source_sha256"), str)
@@ -82,7 +82,7 @@ def policy(settings, approval):
         or image is None
         or approval.image_approval_sha256 != image.approval_sha256
         or approval.rich_input_scope != "references_v1"
-        or approval.history_scope != "none"
+        or (approval.history_scope != "none" and approval.companion_scope == "none")
         or not approval.capture_public_key
         or not settings.content_enabled
         or not settings.observation_enabled
@@ -120,9 +120,10 @@ def source(store, settings, approval, event_id):
         )
         raise CoreError(code, error.status) from None
     image = manifest(body)
-    if image and len(image) > min(
+    limits = [limit for limit in (
         image_policy.max_images_per_request, settings.content.max_images_per_event,
-    ):
+    ) if limit != "unlimited"]
+    if image and limits and len(image) > min(limits):
         raise CoreError("LIVE_IMAGE_COUNT_EXCEEDED", 403)
     if not image:
         raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)

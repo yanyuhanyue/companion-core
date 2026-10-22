@@ -138,6 +138,12 @@ class LiveTextWindowApproval(BaseModel):
     automatic_reply: bool = Field(
         default=False, strict=True, exclude_if=lambda value: value is False,
     )
+    companion_scope: Literal["none", "owner_private_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
+    companion_approval_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
     starts_at: datetime
@@ -167,11 +173,11 @@ class LiveTextWindowApproval(BaseModel):
     )
     image_scope: Literal["none", "owner_image_v1"] = "none"
     image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    history_scope: Literal["none", "approved_window"] = "none"
+    history_scope: Literal["none", "approved_window", "owner_private"] = "none"
     history_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     max_history_turns: int = Field(default=0, strict=True, ge=0, le=15)
     max_history_utf8_bytes: int = Field(default=0, strict=True, ge=0, le=16000)
-    memory_scope: Literal["none", "approved_facts"] = "none"
+    memory_scope: Literal["none", "approved_facts", "owner_private"] = "none"
     memory_facts: list[LiveTextMemoryFact] = Field(default_factory=list, max_length=6)
     memory_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     handoff: LiveTextHandoff | None = None
@@ -181,6 +187,16 @@ class LiveTextWindowApproval(BaseModel):
 
     @model_validator(mode="after")
     def valid_interval(self):
+        companion = self.companion_scope == "owner_private_v1"
+        if companion:
+            if (not self.automatic_reply or not self.companion_approval_sha256
+                or self.memory_scope != "owner_private" or self.history_scope != "owner_private"
+                or not self.memory_approval_sha256 or not self.history_approval_sha256
+                or self.memory_facts):
+                raise ValueError("explicit owner-private companion approval required")
+        elif (self.companion_approval_sha256 is not None
+              or self.memory_scope == "owner_private" or self.history_scope == "owner_private"):
+            raise ValueError("owner-private data requires companion approval")
         if self.link_scope != "none" and (
             self.rich_input_scope != "references_v1" or not self.capture_public_key
         ):
@@ -192,7 +208,7 @@ class LiveTextWindowApproval(BaseModel):
             and (
                 not self.image_approval_sha256
                 or self.rich_input_scope != "references_v1"
-                or self.history_scope != "none"
+                or (self.history_scope != "none" and not companion)
                 or not self.capture_public_key
             )
         ):
@@ -226,7 +242,7 @@ class LiveTextWindowApproval(BaseModel):
         if (
             self.history_scope == "none" and (self.max_history_turns or self.max_history_utf8_bytes)
         ) or (
-            self.history_scope == "approved_window"
+            self.history_scope != "none"
             and not (
                 self.max_history_turns and self.max_history_utf8_bytes and self.capture_public_key
             )

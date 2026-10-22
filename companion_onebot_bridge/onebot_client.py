@@ -86,11 +86,16 @@ class OneBotClient:
         if not isinstance(text, str) or not 1 <= len(text) <= 20000:
             raise ValueError("INVALID_OUTBOUND_TEXT")
         # Arrays of text segments never interpret model-generated CQ as an action.
+        return await self.send_message([{"type": "text", "data": {"text": text}}])
+
+    async def send_message(self, message):
+        if not self.config.delivery_enabled:
+            raise ValueError("DELIVERY_DISABLED")
         result = await self.action(
             "send_private_msg",
             {
                 "user_id": int(self.config.owner_qq_id),
-                "message": [{"type": "text", "data": {"text": text}}],
+                "message": message,
                 "auto_escape": True,
             },
         )

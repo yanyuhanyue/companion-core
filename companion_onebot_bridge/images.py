@@ -14,7 +14,8 @@ import httpx
 from .spool import encode
 
 HOSTS = frozenset({"multimedia.nt.qq.com.cn", "gchat.qpic.cn", "c2cpicdw.qpic.cn"})
-MAX_OWNER_IMAGES = 4
+# The authenticated platform message envelope contains at most 64 segments.
+MAX_OWNER_IMAGES = 64
 _private_download = ContextVar("private_qq_image_download", default=False)
 
 
@@ -83,9 +84,6 @@ def original_images(message):
         for i, value in enumerate(message)
         if isinstance(value, dict) and value.get("type") == "image"
     ]
-    # Even duplicate images count: do not silently drop a second owner image.
-    if len(images) > MAX_OWNER_IMAGES:
-        raise ValueError("OWNER_IMAGE_LIMIT_EXCEEDED")
     return [_original_image(index, slot, value) for slot, (index, value) in enumerate(images)]
 
 

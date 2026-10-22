@@ -15,7 +15,7 @@ from companion.qq_rich import input_digest
 from companion.store import encode
 
 
-def source(store, settings, approval, event_id):
+def source(store, settings, approval, event_id, *, allow_commands=False):
     event = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id FROM events e "
         "JOIN conversations c USING(conversation_id) WHERE e.event_id=?", (event_id,),
@@ -32,11 +32,16 @@ def source(store, settings, approval, event_id):
             or (event["source"], event["actor_id"], event["scope"], event["owner_actor_id"])
             != ("qq.onebot", "owner", "private", "owner")
             or event["event_type"] != "message.received"
-            or body.get("control_command") or body.get("diary_command") or body.get("media")
-            or not isinstance(body.get("text"), str) or body["text"].strip().startswith("/")
+            or ((body.get("control_command") or body.get("diary_command")) and not allow_commands)
+            or body.get("media")
+            or not isinstance(body.get("text"), str)
+            or (body["text"].strip().startswith("/") and not allow_commands)
             or value.get("event_id") != event_id
             or value.get("window_sha256") != approval.plan_sha256
-            or value.get("privacy_epoch") != epoch(store)
+            or (value.get("privacy_epoch") != epoch(store) and not (
+                allow_commands and (body.get("control_command") or body.get("diary_command"))
+                and type(value.get("privacy_epoch")) is int
+                and value["privacy_epoch"] < epoch(store)))
             or value.get("input_sha256") != input_digest(body)
             or not isinstance(capture, dict)
             or capture.get("source_event_id") != event["source_event_id"]

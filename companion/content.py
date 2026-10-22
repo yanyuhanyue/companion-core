@@ -227,13 +227,14 @@ class ContentService:
                         if canonical not in links:
                             links.append(canonical)
         images = set()
-        for item in body.get("shared_content", [])[:4]:
+        for item in body.get("shared_content", []):
             if item.get("kind") == "link" and not bounded:
                 _, canonical = content_target(item.get("url", ""))
                 if canonical not in links:
                     links.append(canonical)
             elif item.get("kind") == "image" and type(item.get("slot")) is int:
-                if 0 <= item["slot"] < self.options.max_images_per_event:
+                if item["slot"] >= 0 and (self.options.max_images_per_event == "unlimited"
+                                         or item["slot"] < self.options.max_images_per_event):
                     images.add(item["slot"])
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
@@ -988,7 +989,7 @@ class ContentService:
         self, owner_event_id, request_key, data, mime_type, lease_token="", image_proof=None,
     ):
         self._source(owner_event_id, upload=True)
-        matched = re.fullmatch(r"image:([0-3])", request_key)
+        matched = re.fullmatch(r"image:(0|[1-9][0-9]{0,8})", request_key)
         if not matched:
             raise CoreError("CONTENT_IMAGE_SLOT_INVALID", 400)
         self.schedule(owner_event_id)
@@ -1005,7 +1006,7 @@ class ContentService:
     def claim_upload(self, owner_event_id, request_key, source_sha256=None):
         """Reserve the one permitted CDN download before the bridge performs GET."""
         self._source(owner_event_id, upload=True)
-        matched = re.fullmatch(r"image:([0-3])", request_key)
+        matched = re.fullmatch(r"image:(0|[1-9][0-9]{0,8})", request_key)
         if not matched:
             raise CoreError("CONTENT_IMAGE_SLOT_INVALID", 400)
         self.schedule(owner_event_id)
@@ -1019,7 +1020,7 @@ class ContentService:
                 raise CoreError("CONTENT_IMAGE_NOT_SHARED", 403)
             if qq_images.enabled(self.settings):
                 approval, _, attempts = live_text.guard(self.store, self.settings, self.clock)
-                needed = 3 if approval.memory_scope == "approved_facts" else 2
+                needed = 3 if approval.memory_scope != "none" else 2
                 if attempts + needed > min(
                     approval.max_model_attempts, self.settings.paid_model.window_calls,
                 ):

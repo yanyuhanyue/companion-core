@@ -5,6 +5,7 @@ an authorization signature: live operation trusts independently approved private
 files and deployment attestation. Losing/rolling back both is a recovery blocker.
 """
 
+import base64
 import hashlib
 import json
 import os
@@ -230,6 +231,15 @@ class WindowPlan:
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
                 raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
+            companion = scope.get("companion_scope") == "owner_private_v1"
+            if "companion_scope" in scope or "companion_approval_sha256" in scope:
+                expected_scope |= {"companion_scope", "companion_approval_sha256"}
+                if (not companion or scope.get("automatic_reply") is not True
+                    or scope.get("history_scope") != "owner_private"
+                    or scope.get("memory_scope") != "owner_private"
+                    or not scope.get("history_approval_sha256")
+                    or not scope.get("memory_approval_sha256") or scope.get("memory_facts")):
+                    raise ValueError("EXPLICIT_PRIVATE_COMPANION_SCOPE_REQUIRED")
             if "cumulative" in scope:
                 expected_scope.add("cumulative")
                 cumulative.validate(scope["cumulative"], config, self.start, self.end)
@@ -281,7 +291,7 @@ class WindowPlan:
                     scope.get("image_scope") == "owner_image_v1"
                     and (
                         scope.get("rich_input_scope") != "references_v1"
-                        or scope["history_scope"] != "none"
+                        or (scope["history_scope"] != "none" and not companion)
                         or not isinstance(scope.get("image_approval_sha256"), str)
                         or not SHA.fullmatch(scope["image_approval_sha256"])
                         or not scope["capture_public_key"]
@@ -299,7 +309,8 @@ class WindowPlan:
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
             facts = scope["memory_facts"]
             if (
-                scope["memory_scope"] not in {"none", "approved_facts"}
+                scope["memory_scope"] not in ({"none", "approved_facts", "owner_private"}
+                                               if companion else {"none", "approved_facts"})
                 or not isinstance(facts, list)
                 or len(facts) > 6
                 or (
@@ -382,7 +393,8 @@ class WindowPlan:
             ):
                 raise ValueError("INVALID_WINDOW_HANDOFF")
             if (
-                scope["history_scope"] not in ("none", "approved_window")
+                scope["history_scope"] not in (("none", "approved_window", "owner_private")
+                                                if companion else ("none", "approved_window"))
                 or type(scope["max_history_turns"]) is not int
                 or type(scope["max_history_utf8_bytes"]) is not int
                 or not 0 <= scope["max_history_turns"] <= 15
@@ -392,7 +404,7 @@ class WindowPlan:
                     and (scope["max_history_turns"] or scope["max_history_utf8_bytes"])
                 )
                 or (
-                    scope["history_scope"] == "approved_window"
+                    scope["history_scope"] != "none"
                     and not (
                         scope["max_history_turns"]
                         and scope["max_history_utf8_bytes"]
@@ -752,6 +764,14 @@ class TestWindow:
             and (not readonly_memory or status["features"].get("memory") is True)
             and (not owner_content or status["features"].get("content") is True)
         )
+        companion = (self.plan.value.get("live_text", {}).get("companion_scope")
+                     == "owner_private_v1")
+        if companion:
+            allowed_features = {"memory", "diary", "affect", "consolidation", "reflection",
+                                "goals", "wake", "content"}
+            closed = (isinstance(status.get("features"), dict) and all(
+                type(value) is bool and (key in allowed_features or value is False)
+                for key, value in status["features"].items()))
         if self.plan.mode == "live_text":
             live = status.get("live_text_window", {})
             if (
@@ -787,14 +807,18 @@ class TestWindow:
             baseline = json.loads(self.row()["initial_counts"])
             acked = self.count("window_attempts", "state='ACK'")
             for state in ("SENT", "FAILED", "CANCELLED"):
+                if companion and state != "SENT":
+                    continue
                 if deliveries.get(state, 0) != baseline.get(state, 0) + (
                     acked if state == "SENT" else 0
                 ):
                     raise ValueError("CORE_DELIVERY_COUNTS_CHANGED")
             segmented = reply_segments.scope(self.plan)
-            maximum = segmented["max_segments"] if segmented else 1
+            maximum = (self.plan.value["max_attempts"] if companion else
+                       (self.plan.value["max_attempts"] if segmented["max_segments"] == "unlimited"
+                        else segmented["max_segments"]) if segmented else 1)
             if deliveries.get("PENDING", 0) > maximum or (
-                segmented and deliveries.get("PENDING", 0)
+                segmented and not companion and deliveries.get("PENDING", 0)
                 and self.count("window_inputs", "state='APPROVED'") != 1
             ):
                 raise ValueError("UNATTENDED_CORE_DELIVERY")
@@ -1384,7 +1408,7 @@ class SendOperation:
         policy = self.segmented_scope
         if not policy:
             raise ValueError("SEGMENTED_REPLY_SCOPE_REQUIRED")
-        if (segment["count"] > policy["max_segments"]
+        if ((policy["max_segments"] != "unlimited" and segment["count"] > policy["max_segments"])
             or segment["interval_ms"] != policy["interval_ms"]
             or segment["total_chars"] > self.window.plan.value["max_reply_chars"]
             or len(rows) != segment["index"] + int(current)):
@@ -1472,7 +1496,10 @@ class SendOperation:
         if not self.db.execute(
             "SELECT 1 FROM window_inputs WHERE event_id=? AND state='APPROVED' AND plan_hash=?",
             (event_id, self.window.plan.sha256),
-        ).fetchone():
+        ).fetchone() and not (
+            self.window.plan.value.get("live_text", {}).get("companion_scope") == "owner_private_v1"
+            and item.get("action_type") == "qq.private.proactive"
+        ):
             raise ValueError("UNAPPROVED_DELIVERY_INPUT")
         attempts = self.window.count("window_attempts")
         remaining = segment["count"] if segment and segment["index"] == 0 else 1
@@ -1558,10 +1585,11 @@ class SendOperation:
         if request is not None:
             check_protocol_request(self.window, request)
             expected = {"user_id": int(self.window.plan.config.owner_qq_id),
-                        "message": [{"type": "text", "data": {"text": item["content"]["text"]}}],
+                        "message": getattr(self, "prepared_message", None) or [
+                            {"type": "text", "data": {"text": item["content"]["text"]}}],
                         "auto_escape": True}
             content = request.content
-            body = decode(content, 65536)
+            body = decode(content, 6000000 if getattr(self, "prepared_message", None) else 65536)
             if (
                 body != expected or not attempt
                 or digest(body["message"][0]["data"]["text"]) != attempt["text_hash"]
@@ -1619,6 +1647,8 @@ class WindowOneBot:
     def __init__(self, operation, protocol):
         self.operation, self.window = operation, operation.window
         self.config = self.window.plan.config
+        self.companion = (self.window.plan.value.get("live_text", {}).get("companion_scope")
+                          == "owner_private_v1")
         if (
             str(protocol.base_url).rstrip("/") != self.config.onebot_http_url.rstrip("/")
             or protocol.headers.get("Authorization") != "Bearer " + self.config.onebot_token
@@ -1659,6 +1689,24 @@ class WindowOneBot:
     async def send_text(self, text):
         self.operation.before_io(text)
         return await self.delegate.send_text(text)
+
+    async def send_content(self, content):
+        if "image" not in content:
+            return await self.send_text(content["text"])
+        if not self.companion:
+            raise ValueError("EXPRESSION_SCOPE_REQUIRED")
+        message = [{"type": "text", "data": {"text": content["text"]}}]
+        if self.config.meme_directory:
+            from .meme_library import MemeLibrary
+
+            library = MemeLibrary(self.config.meme_directory, enabled=True)
+            image = library.prepare(content["image"], self.operation.current_item["delivery_key"])
+            if image:
+                message.append({"type": "image", "data": {
+                    "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
+        self.operation.prepared_message = message
+        self.operation.before_io(content["text"])
+        return await self.delegate.send_message(message)
 
 
 def seal_protocol_content(request, content):

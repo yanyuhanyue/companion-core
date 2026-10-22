@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ConfigDict, Field, ValidationError
 
-from companion import budget
+from companion import budget, private_life
 from companion.commands import command_parts, is_memory_command
 from companion.contracts import CoreError, StrictModel
 from companion.observation import expired_sources
@@ -252,6 +252,10 @@ class DiaryRepository:
         self.store, self.settings, self.clock = store, settings, clock
 
     def enabled(self):
+        try:
+            private_life.ensure_active(self.store, self.settings, self.clock)
+        except CoreError:
+            return False
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='diary_paused'")
         owner = self.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
         return bool(
@@ -607,6 +611,8 @@ class DiaryService:
         return scheduled
 
     async def generate_once(self, worker_id):
+        if not private_life.ready(self.store, self.settings, self.clock):
+            return False
         run = self.repo.claim(worker_id)
         if run is None:
             return False
@@ -651,6 +657,7 @@ class DiaryService:
                 messages,
                 self.clock(),
                 logical_request_id="diary:" + run["run_id"],
+                clock=self.clock,
             )
             try:
                 with self.store.transaction():

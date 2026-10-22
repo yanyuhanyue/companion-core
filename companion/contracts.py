@@ -30,14 +30,14 @@ class SharedLink(StrictModel):
 
 class SharedImage(StrictModel):
     kind: Literal["image"]
-    slot: int = Field(ge=0, le=3, strict=True)
+    slot: int = Field(ge=0, le=63, strict=True)
 
 
 class Payload(StrictModel):
     text: str = Field(max_length=20000)
     media: list[Media] = Field(max_length=10)
     shared_content: list[Annotated[SharedLink | SharedImage, Field(discriminator="kind")]] = Field(
-        default_factory=list, max_length=4
+        default_factory=list, max_length=64
     )
     # Absent plain input serializes exactly as before, including historical fingerprints.
     rich: dict | None = Field(default=None, exclude_if=lambda value: value is None)

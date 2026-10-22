@@ -32,7 +32,7 @@ def test_policy_defaults_are_bounded_strict_and_immutable():
 
 
 @pytest.mark.parametrize("changes", [
-    {"max_segments": 1}, {"max_segments": 4}, {"max_segments": True},
+    {"max_segments": 1}, {"max_segments": 2**31}, {"max_segments": True},
     {"min_chars": 3}, {"min_chars": 101}, {"min_chars": "12"},
     {"interval_ms": -1}, {"interval_ms": 3001}, {"interval_ms": 1.5},
     {"interval_ms": False}, {"unknown": True},

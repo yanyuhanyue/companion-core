@@ -4,6 +4,7 @@ import json
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from companion import private_life
 from companion.contracts import CoreError
 from companion.diary import day_bounds, source_hash
 from companion.privacy import epoch
@@ -38,6 +39,10 @@ class NightlyConsolidator:
         self.extract_once = extract_once
 
     def enabled(self):
+        try:
+            private_life.ensure_active(self.store, self.settings, self.clock)
+        except CoreError:
+            return False
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
         return self.settings.consolidation_enabled and not (paused and paused["value"] == "1")
 

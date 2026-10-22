@@ -62,6 +62,7 @@ def pinned_plan(
     core, tmp_path, ws_port, *, http_port=3000, core_port=8765, live=False, approved=False,
     rich_input_scope="none",
     scope_options=None,
+    bridge_options=None,
 ):
     options = {
         "onebot_ws_url": f"ws://127.0.0.1:{ws_port}",
@@ -70,6 +71,7 @@ def pinned_plan(
     }
     if approved:
         options["capture_signing_key"] = Ed25519PrivateKey.generate().private_bytes_raw().hex()
+    options.update(bridge_options or {})
     if live:
         cfg, plan = live_fixture(core, tmp_path, bridge_options=options,
                                  rich_input_scope=rich_input_scope, **(scope_options or {}))
@@ -118,6 +120,8 @@ async def source_window(
     core, tmp_path, source, *, live=False, approved=False, reject_auth=False, protocol_reply=None,
     rich_input_scope="none",
     scope_options=None,
+    bridge_options=None,
+    independent_api=False,
 ):
     handshakes, sends = [], []
 
@@ -131,6 +135,7 @@ async def source_window(
             core, tmp_path, server.sockets[0].getsockname()[1], live=live, approved=approved,
             rich_input_scope=rich_input_scope,
             scope_options=scope_options,
+            bridge_options=bridge_options,
         )
 
         def respond(request):
@@ -141,8 +146,10 @@ async def source_window(
             return provider(request, sends)
 
         api = create_app(core.settings)
-        api.state.core = core
+        if not independent_api:
+            api.state.core = core
         async with (
+            api.router.lifespan_context(api) if independent_api else nullcontext(),
             network.private_http_client(
                 cfg.core_url, cfg.bridge_token, transport=httpx.ASGITransport(app=api)
             ) as client,

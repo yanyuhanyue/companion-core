@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Iterator
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class SegmentedReplyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    max_segments: int = Field(default=3, strict=True, ge=2, le=3)
+    max_segments: Annotated[int, Field(strict=True, ge=2, le=2**31 - 1)] | Literal["unlimited"] = 3
     min_chars: int = Field(default=12, strict=True, ge=4, le=100)
     interval_ms: int = Field(default=1500, strict=True, ge=0, le=3000)
 
@@ -97,7 +98,7 @@ def split_text(text: str, policy: SegmentedReplyConfig) -> list[str]:
         ends.append(len(text))
     else:
         ends[-1] = len(text)
-    if len(ends) > policy.max_segments:
+    if policy.max_segments != "unlimited" and len(ends) > policy.max_segments:
         ends = ends[:policy.max_segments - 1] + [len(text)]
     parts, start = [], 0
     for end in ends:

@@ -18,11 +18,11 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, Field
 
-from companion import cumulative, image_spool, paid_budget, qq_images
+from companion import cumulative, image_spool, paid_budget, private_life, qq_images
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger, epoch
 from companion.qq_rich import input_digest as _input_digest
-from companion.store import after, encode
+from companion.store import after, encode, utcnow
 
 BINDING = "live_text_window"
 INPUT = "live_text_input:"
@@ -75,7 +75,7 @@ class InputApproval(WindowReference):
 
 
 class SendCheck(WindowReference):
-    event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
+    event_id: str = Field(pattern=r"^[A-Za-z0-9_:-]{8,128}$")
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     reply_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
@@ -186,9 +186,12 @@ def guard(
             for name, item in settings.observation_adapters.items()
         )
         if (
-            any(getattr(settings, name) for name in disabled)
+            (any(getattr(settings, name) for name in disabled) if not private_life.enabled(settings)
+             else (any(not getattr(settings, name + "_enabled") for name in private_life.FEATURES)
+                   or any(getattr(settings, name) for name in
+                          ("voice_enabled", "camera_enabled", "android_enabled"))))
             or settings.content_enabled != (images or links)
-            or settings.memory_enabled != (approval.memory_scope == "approved_facts")
+            or settings.memory_enabled != (approval.memory_scope != "none")
             or settings.executive.enabled
             or settings.media.enabled
             or invalid_adapters
@@ -206,7 +209,8 @@ def guard(
             paid.window_id != approval.window_id
             or paid.concurrency != 1
             or paid.per_request_calls
-            != (1 + int(approval.memory_scope == "approved_facts") + int(images))
+            != (3 if private_life.enabled(settings) else
+                1 + int(approval.memory_scope == "approved_facts") + int(images))
             or paid.window_calls > approval.max_model_attempts
             or paid.starts_at > approval.starts_at
             or paid.expires_at < approval.ends_at
@@ -216,7 +220,7 @@ def guard(
             raise CoreError("LIVE_TEXT_PAID_CONTRACT_CHANGED", 503)
         if approval.memory_scope == "approved_facts":
             memory_sources(store, settings, clock, approval)
-        if approval.memory_scope == "approved_facts" or images or links:
+        if approval.memory_scope != "none" or images or links:
             ledger_sha256 = _ledger_custody(store, settings)
         journal = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not journal or journal["value"] != approval.budget_journal_id:
@@ -230,9 +234,10 @@ def guard(
         ) or (not preparing and stopped(store, approval.plan_sha256)):
             raise CoreError("LIVE_TEXT_RECONCILIATION_REQUIRED", 503)
         if store.one(
-            "SELECT 1 FROM model_usage WHERE state IN ('UNKNOWN','RESERVED') "
-            "AND request_id!=? LIMIT 1",
-            (current_request or "",),
+            "SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
+            "WHERE m.state IN ('UNKNOWN','RESERVED') AND m.request_id!=? "
+            "AND NOT (? AND m.state='RESERVED' AND a.lease_until>?) LIMIT 1",
+            (current_request or "", int(private_life.enabled(settings)), clock()),
         ) or store.one(
             "SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN' "
             "OR (state='SENDING' AND message_id!=?) LIMIT 1",
@@ -248,7 +253,7 @@ def guard(
             "budget_journal_id": approval.budget_journal_id,
             "budget_journal_path": str(Path(paid.journal_path).resolve()),
         }
-        if approval.memory_scope == "approved_facts" or images or links:
+        if approval.memory_scope != "none" or images or links:
             expected["erasure_ledger_sha256"] = ledger_sha256
         if approval.handoff:
             expected.update(
@@ -256,6 +261,17 @@ def guard(
                 protocol_epoch=approval.handoff.protocol_epoch,
                 handoff_sha256=paid_budget.sha(approval.handoff.model_dump(mode="json")),
             )
+        if binding and private_life.enabled(settings) and not preparing:
+            saved = json.loads(binding["value"])
+            stable = set(expected) - {"privacy_epoch", "erasure_ledger_sha256"}
+            if (all(saved.get(key) == expected[key] for key in stable)
+                and saved.get("privacy_epoch", -1) < expected["privacy_epoch"]):
+                _put(store, BINDING, expected)
+                history = _meta(store, HISTORY + approval.plan_sha256)
+                if history:
+                    history["binding"] = expected
+                    _put(store, HISTORY + approval.plan_sha256, history)
+                binding = {"value": encode(expected)}
         lifecycle = custody["lifecycle"]
         prepared = bool(
             lifecycle
@@ -559,7 +575,7 @@ def approve_input(store, settings, clock, body):
             )["n"]
             if count >= approval.max_inputs or attempts >= approval.max_model_attempts:
                 raise CoreError("LIVE_TEXT_INPUT_OR_MODEL_CAP", 429)
-            if store.one(
+            if not private_life.enabled(settings) and store.one(
                 "SELECT 1 FROM jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1"
             ):
                 raise CoreError("LIVE_TEXT_ONE_JOB_AT_A_TIME", 409)
@@ -581,7 +597,7 @@ def check_input(store, settings, clock, event):
         or (event.payload.shared_content and approval.image_scope == "none")
         or (event.payload.rich and approval.rich_input_scope != "references_v1")
         or (not text.strip() and not references_only)
-        or text.strip().startswith("/")
+        or (text.strip().startswith("/") and not private_life.enabled(settings))
         or len(text) > approval.max_input_chars
         or not approval.starts_at <= event.occurred_at < approval.ends_at
     ):
@@ -620,6 +636,9 @@ def check_job(store, settings, clock, job, *, current_request=None, current_deli
 
 def _check_job(store, settings, clock, job, approval):
     """Check job evidence after the caller's current runtime guard."""
+    if private_life.enabled(settings):
+        private_life.check_job(store, settings, approval, job)
+        return
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + job["event_id"],))
     event = store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
     value = json.loads(receipt["value"]) if receipt else {}
@@ -1114,6 +1133,8 @@ def _check_context(store, settings, clock, job, approval, *, required=False):
 def reserve_model(store, settings, clock, job_id, scenario):
     if not active(store, settings):
         return
+    if private_life.enabled(settings):
+        return private_life.admit_model(store, settings, clock, job_id, scenario)
     job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
     if not job:
         raise CoreError("LIVE_TEXT_CHAT_ONLY", 403)
@@ -1167,6 +1188,8 @@ def reserve_model(store, settings, clock, job_id, scenario):
 def check_model(store, settings, clock, request_id):
     if not active(store, settings):
         return
+    if private_life.enabled(settings):
+        return private_life.check_model(store, settings, clock, request_id)
     job = store.one(
         "SELECT j.* FROM jobs j JOIN model_usage m USING(job_id) WHERE m.request_id=?",
         (request_id,),
@@ -1271,6 +1294,15 @@ def remaining_send_slots(store, approval):
     """Count attempts and each queued future attempt against this exact window."""
     if approval.max_send_attempts is None:
         return None
+    if approval.companion_scope == "owner_private_v1":
+        occupied = store.one(
+            "SELECT COALESCE(SUM(o.attempt_count + CASE WHEN o.state IN "
+            "('PENDING','LEASED','RETRY_WAIT') THEN 1 ELSE 0 END),0) n "
+            "FROM outbox o JOIN runtime_meta r ON r.key=? || o.message_id "
+            "WHERE json_extract(r.value,'$.plan_sha256')=?",
+            (private_life.DELIVERY, approval.plan_sha256),
+        )["n"]
+        return approval.max_send_attempts - occupied
     occupied = store.one(
         "SELECT COALESCE(SUM(o.attempt_count + CASE WHEN o.state IN "
         "('PENDING','LEASED','RETRY_WAIT') THEN 1 ELSE 0 END),0) AS n "
@@ -1291,7 +1323,8 @@ def _reply_material(store, approval, message_id):
     envelopes = segment_envelopes(group)
     if group["segmented"] and (
         approval.segmented_reply is None
-        or len(group["rows"]) > approval.segmented_reply.max_segments
+        or (approval.segmented_reply.max_segments != "unlimited"
+            and len(group["rows"]) > approval.segmented_reply.max_segments)
         or any(value["interval_ms"] != approval.segmented_reply.interval_ms
                for value in envelopes.values())
     ):
@@ -1323,6 +1356,12 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 
 
 def _check_delivery(store, settings, clock, message_id, *, check):
+    if private_life.enabled(settings):
+        row = private_life.check_delivery(store, settings, clock, message_id, check)
+        if check and (row["state"] != "SENDING" or row["lease_until"] <= clock()):
+            raise CoreError("LIVE_TEXT_SEND_FENCED", 409)
+        return ({"approved": True, "lease_until": row["lease_until"]}
+                if check else {"approved": True})
     approval, _, _ = guard(store, settings, clock, current_delivery=message_id)
     row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     if not row or row["action_type"] != "qq.private.reply":
@@ -1367,6 +1406,8 @@ def record_replies(store, settings, clock, job, message_ids):
     """Validate and record one complete frozen reply group in the same transaction."""
     if not message_ids:
         return
+    if private_life.enabled(settings):
+        return private_life.record_replies(store, settings, clock, job, message_ids)
     with nullcontext() if store.db.in_transaction else store.transaction():
         approval, _ = check_job(store, settings, clock, job)
         usage = _reply_usage(store, settings, clock, job, approval)
@@ -1448,5 +1489,7 @@ def stop_window(store, reference, clock=None):
             "AND json_extract(r.value,'$.window_sha256')=?)",
             (INPUT, reference.window_sha256),
         )
+        if (history or {}).get("approval", {}).get("companion_scope") == "owner_private_v1":
+            private_life.stop_work(store, clock() if callable(clock) else utcnow())
         image_spool.discard_window(store, reference.window_sha256)
     return {"stopped": True}

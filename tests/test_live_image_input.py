@@ -410,8 +410,9 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
 
                 model_http.event_hooks["request"].append(change_lease)
             if failure == "too_many_images":
-                with pytest.raises(ValueError, match="OWNER_IMAGE_LIMIT_EXCEEDED"):
-                    await window.capture_once(client, protocol)
+                await window.capture_once(client, protocol)
+                with pytest.raises(httpx.HTTPStatusError):
+                    await window.approve_captured(client, capture_approval(window))
                 assert not core.store.one("SELECT 1 FROM events")
                 return
             await window.capture_once(client, protocol)

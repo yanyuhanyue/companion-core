@@ -78,6 +78,8 @@ class ExplorationService:
         if not live_text.active(self.store, self.settings):
             return
         approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
+        if approval.companion_scope == "owner_private_v1":
+            return  # Native goal/source/adapter and resource leases below still apply.
         if (
             getattr(approval, "link_scope", "none") != "owner_links_v1"
             or row["operation"] != "read" or row["goal_step_json"] != "{}"

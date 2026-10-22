@@ -4,7 +4,8 @@ import asyncio
 
 import httpx
 
-from companion import budget
+from companion import budget, live_text, private_life
+from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import uid
@@ -17,6 +18,15 @@ async def life_worker(settings):
         try:
             ticks = 0
             while True:
+                if private_life.enabled(settings):
+                    try:
+                        live_text.guard(core.store, settings, core.clock)
+                    except CoreError:
+                        await asyncio.sleep(1)
+                        continue
+                    if private_life.busy(core.store, core.clock()):
+                        await asyncio.sleep(1)
+                        continue
                 if ticks % 60 == 0:
                     core.expire_raw_events()
                     core.consolidation.schedule_due()
@@ -28,8 +38,11 @@ async def life_worker(settings):
                 worked = False
                 if not budget.chat_pending(core.store, core.clock()):
                     worked = await core.consolidation.run_once(worker_id)
-                    if (not worked and ticks % 60 == 0
-                        and not budget.chat_pending(core.store, core.clock())):
+                    if (
+                        not worked
+                        and ticks % 60 == 0
+                        and not budget.chat_pending(core.store, core.clock())
+                    ):
                         worked = await core.extract_once()
                 ticks += 1
                 if not worked:

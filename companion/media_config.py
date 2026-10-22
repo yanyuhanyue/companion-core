@@ -5,6 +5,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
+from companion.trial_limits import CountLimit
+
 
 class MediaEndpoint(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -53,7 +55,7 @@ class MediaConfig(BaseModel):
 class ContentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     max_links_per_event: int = Field(default=2, ge=1, le=2)
-    max_images_per_event: int = Field(default=4, ge=1, le=4)
+    max_images_per_event: CountLimit = 4
     max_images_per_article: int = Field(default=32, ge=1, le=32)
     article_image_micro_usd: int = Field(default=50_000, ge=0)
     use_chat_model_for_vision: bool = False
