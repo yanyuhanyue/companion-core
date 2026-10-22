@@ -174,6 +174,37 @@ def test_single_pair_and_unobserved_template_do_not_fabricate_percentiles(tmp_pa
     assert empty["model"]["supplier_invoice_micro_usd"]["reported_sum"] is None
 
 
+@pytest.mark.parametrize("manual_first", [True, False])
+def test_manual_feedback_and_later_inspector_for_same_trace_cannot_double_count(
+    tmp_path, manual_first
+):
+    report = inspector(1)
+    # The real Inspector's event and trace hashes represent distinct identifiers.
+    report["trace"]["event_ref_sha256"] = "f" * 64
+    manual, inspected = feedback("authorized_runtime"), feedback("authorized_runtime")
+    for record in (manual, inspected):
+        record["trace_ref_sha256"] = report["trace_ref_sha256"]
+        phone_pair(record, 1)
+    entries = [(manual, None), (inspected, report)]
+    if not manual_first:
+        entries.reverse()
+    with pytest.raises(ValueError, match="CONFLICTING_TRACE_FEEDBACK"):
+        summarize(bundle(tmp_path, entries))
+
+
+def test_stop_summary_keeps_missing_component_distinct_from_both_confirmed(tmp_path):
+    partial, complete, unobserved = feedback(), feedback(), feedback()
+    partial["stop_receipts"]["core"] = "CONFIRMED"
+    complete["stop_receipts"] = {"core": "CONFIRMED", "bridge": "CONFIRMED"}
+    result = summarize(bundle(tmp_path, [(partial, inspector(1)), (complete, inspector(2)),
+                                        (unobserved, inspector(3))]))
+    stops = result["groups"]["local_synthetic"]["stop_observations"]
+    assert stops["checked_samples"] == 2 and stops["both_confirmed_samples"] == 1
+    assert stops["partial_samples"] == 1 and stops["not_run_samples"] == 1
+    assert stops["unconfirmed_samples"] == 0
+    assert stops["component_states"]["bridge"] == {"NOT_RUN": 2, "CONFIRMED": 1}
+
+
 def test_optional_feedback_fields_require_consistent_phone_and_type_evidence():
     record = feedback()
     assert validate_record(record)["schema_valid"]

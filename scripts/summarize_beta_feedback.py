@@ -132,13 +132,17 @@ def summarize(manifest_path):
     seen, duplicates = {}, 0
     for sample in samples:
         record, _, inspection, file_hash = sample
-        key = (inspection["trace"].get("event_ref_sha256") if inspection else None)
-        key = key or record["trace_ref_sha256"] or file_hash
-        if key in seen:
-            require(seen[key] == file_hash, "CONFLICTING_TRACE_FEEDBACK")
+        aliases = [("trace", record["trace_ref_sha256"])] if record["trace_ref_sha256"] else []
+        if inspection and inspection["trace"].get("event_ref_sha256"):
+            aliases.append(("event", inspection["trace"]["event_ref_sha256"]))
+        aliases = aliases or [("file", file_hash)]
+        matches = [seen[key] for key in aliases if key in seen]
+        require(all(previous == file_hash for previous in matches), "CONFLICTING_TRACE_FEEDBACK")
+        for key in aliases:
+            seen[key] = file_hash
+        if matches:
             duplicates += 1
             continue
-        seen[key] = file_hash
         groups[record["evidence_type"]].append(sample)
     result = {"schema_version": 1, "state": "PRIVATE_REPORTED_OBSERVATIONS",
               "evidence_authenticated": False, "supplier_invoice_verified": False,
@@ -224,6 +228,15 @@ def summarize(manifest_path):
             if known_incidents else None,
             "stop_observations": {
                 "checked_samples": len(known_stops),
+                "both_confirmed_samples": sum(
+                    all(state == "CONFIRMED" for state in row.values()) for row in known_stops
+                ) if known_stops else None,
+                "partial_samples": sum("NOT_RUN" in row.values() for row in known_stops)
+                if known_stops else None,
+                "not_run_samples": len(records) - len(known_stops),
+                "component_states": {component: dict(Counter(
+                    row["stop_receipts"][component] for row in records
+                )) for component in ("core", "bridge")} if records else None,
                 "unconfirmed_samples": sum("STOP_UNCONFIRMED" in row.values()
                                            for row in known_stops) if known_stops else None,
             },
