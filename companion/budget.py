@@ -59,11 +59,19 @@ def reserve(
 ):
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
-    if scenario == "content_vision":
+    if scenario == "content_vision" or any(
+        isinstance(message, dict) and isinstance(message.get("content"), list)
+        for message in messages
+    ):
         from companion.image_input import contract as image_contract
 
         logical_request_id = logical_request_id or job_id
         image_contract(settings, job_id, logical_request_id)
+        if scenario != "content_vision" and (
+            scenario != "chat" or not settings.live_text_window
+            or settings.live_text_window.image_scope != "owner_image_v1"
+        ):
+            raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
     autonomous = scenario != "chat"
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)

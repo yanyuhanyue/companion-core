@@ -146,6 +146,21 @@ class ReadBudget:
             raise ReadFailure("READER_BYTE_LIMIT")
         self.used_requests += 1
 
+    def request_extensions(self, check=None):
+        async def trace(name, info):
+            if name.endswith("send_request_headers.started"):
+                # DNS/TLS may await. Revalidate the lease at the actual HTTP
+                # boundary, then recheck any local account fingerprint.
+                if self.validate_account_read:
+                    await self.validate_account_read()
+                if check:
+                    check()
+
+        return {
+            "timeout": {key: 8.0 for key in ("connect", "read", "write", "pool")},
+            "trace": trace,
+        }
+
 
 async def response_body(response, budget):
     """Read raw HTTPCore bytes; the public and configured-source clients share limits."""
@@ -184,7 +199,7 @@ class PublicHTTP:
     async def __aexit__(self, *args):
         await self.pool.aclose()
 
-    async def get(self, url, budget, role, *, headers=None):
+    async def get(self, url, budget, role, *, headers=None, check=None):
         permitted_url(url)
         budget.reserve()
         async with self.pool.stream(
@@ -195,7 +210,7 @@ class PublicHTTP:
                 "Accept-Encoding": "identity",
                 "User-Agent": "CompanionSourceReader/0.6",
             },
-            extensions={"timeout": {key: 8.0 for key in ("connect", "read", "write", "pool")}},
+            extensions=budget.request_extensions(check),
         ) as response:
             body = await response_body(response, budget)
         parsed = urlsplit(url)

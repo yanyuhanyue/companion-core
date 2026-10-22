@@ -1,20 +1,20 @@
-"""One authenticated current-owner image; source and result fences, never downloads."""
+"""Authenticated current-owner originals; source and result fences, never downloads."""
 
+import base64
 import hashlib
 import json
 import re
-from datetime import datetime
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from companion import paid_budget
+from companion import image_spool, paid_budget, qq_source
 from companion.contracts import CoreError
 from companion.privacy import epoch
-from companion.qq_rich import input_digest
 from companion.store import encode
 
 FROZEN = "live_text_image:"
+STAGED = "live_text_image_upload:"
 UPLOAD_DOMAIN = b"companion-core/onebot-owner-image/v1\x00"
 
 
@@ -59,14 +59,19 @@ def manifest(body):
             raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
         return None
     if (
-        len(images) != 1
-        or images[0].get("slot") != 0
-        or not isinstance(images[0].get("source_sha256"), str)
-        or not re.fullmatch(r"[a-f0-9]{64}", images[0]["source_sha256"])
-        or body.get("shared_content") != [{"kind": "image", "slot": 0}]
+        not 1 <= len(images) <= 4
+        or any(
+            image.get("slot") != slot
+            or not isinstance(image.get("source_sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", image["source_sha256"])
+            for slot, image in enumerate(images)
+        )
+        or body.get("shared_content") != [
+            {"kind": "image", "slot": slot} for slot in range(len(images))
+        ]
     ):
         raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
-    return images[0]
+    return images
 
 
 def policy(settings, approval):
@@ -78,7 +83,6 @@ def policy(settings, approval):
         or approval.image_approval_sha256 != image.approval_sha256
         or approval.rich_input_scope != "references_v1"
         or approval.history_scope != "none"
-        or approval.memory_scope != "none"
         or not approval.capture_public_key
         or not settings.content_enabled
         or not settings.observation_enabled
@@ -88,7 +92,7 @@ def policy(settings, approval):
     adapters = settings.observation_adapters
     adapter = adapters.get(settings.content.image_adapter)
     if (
-        len(adapters) != 1
+        (len(adapters) != 1 and getattr(approval, "link_scope", "none") != "owner_links_v1")
         or adapter is None
         or adapter.source != "qq_image"
         or not adapter.media_analysis
@@ -97,99 +101,76 @@ def policy(settings, approval):
     return image
 
 
+def original_deadline(store, job):
+    record = store.one("SELECT value FROM runtime_meta WHERE key=?", (FROZEN + job["job_id"],))
+    value = json.loads(record["value"]) if record else {}
+    if not isinstance(value.get("original_expires_at"), str):
+        raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
+    return value["original_expires_at"]
+
+
 def source(store, settings, approval, event_id):
     """Pure DB proof after the caller's live-window guard; no recursive guard calls."""
-    policy(settings, approval)
-    event = store.one(
-        "SELECT e.*,c.scope,c.owner_actor_id FROM events e "
-        "JOIN conversations c USING(conversation_id) WHERE e.event_id=?",
+    image_policy = policy(settings, approval)
+    try:
+        event, body, job = qq_source.source(store, settings, approval, event_id)
+    except CoreError as error:
+        code = "LIVE_IMAGE_SOURCE_CHANGED" if error.code == "LIVE_SOURCE_CHANGED" else (
+            error.code.replace("LIVE_SOURCE_", "LIVE_IMAGE_")
+        )
+        raise CoreError(code, error.status) from None
+    image = manifest(body)
+    if image and len(image) > min(
+        image_policy.max_images_per_request, settings.content.max_images_per_event,
+    ):
+        raise CoreError("LIVE_IMAGE_COUNT_EXCEEDED", 403)
+    if not image:
+        raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
+    return event, body, image, job
+
+
+def _rows(store, event_id):
+    return store.rows(
+        "SELECT * FROM content_items WHERE owner_event_id=? AND kind='qq_image' "
+        "AND redacted=0 ORDER BY slot",
         (event_id,),
     )
-    receipt = store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,)
-    )
-    value = json.loads(receipt["value"]) if receipt else {}
-    body = json.loads(event["body_json"]) if event else {}
-    image = manifest(body)
-    if (
-        not event
-        or event["redacted"]
-        or not image
-        or (event["source"], event["actor_id"], event["scope"], event["owner_actor_id"])
-        != ("qq.onebot", "owner", "private", "owner")
-        or body.get("control_command")
-        or body.get("diary_command")
-        or body.get("media")
-        or body.get("text", "").strip().startswith("/")
-        or value.get("window_sha256") != approval.plan_sha256
-        or value.get("privacy_epoch") != epoch(store)
-        or value.get("input_sha256") != input_digest(body)
-        or not value.get("capture")
-        or value["capture"]["source_event_id"] != event["source_event_id"]
-    ):
-        raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
-    capture = value["capture"]
-    try:
-        signed = {key: item for key, item in capture.items() if key != "signature"}
-        for key in ("received_at", "occurred_at"):
-            signed[key] = datetime.fromisoformat(capture[key]).isoformat()
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(approval.capture_public_key)).verify(
-            bytes.fromhex(capture["signature"]),
-            b"companion-core/onebot-capture/v1\x00" + encode(signed).encode(),
-        )
-        received, occurred = (
-            datetime.fromisoformat(capture[key]) for key in ("received_at", "occurred_at")
-        )
-        if (
-            capture["kind"] != "authenticated_onebot_ws"
-            or capture["window_sha256"] != approval.plan_sha256
-            or capture["event_id"] != event_id
-            or capture["input_sha256"] != input_digest(body)
-            or capture["identity_sha256"]
-            != paid_budget.sha([settings.owner_qq_id, settings.bot_qq_id])
-            or event_id != "evt_" + hashlib.sha256(capture["source_event_id"].encode()).hexdigest()
-            or occurred != datetime.fromisoformat(event["occurred_at"])
-            or not approval.starts_at <= occurred <= received < approval.ends_at
-            or not 0 <= (received - occurred).total_seconds() <= 30
-        ):
-            raise ValueError()
-    except (ValueError, KeyError, TypeError, InvalidSignature):
-        raise CoreError("LIVE_IMAGE_CAPTURE_CHANGED", 403) from None
-    jobs = store.rows("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
-    if len(jobs) != 1:
-        raise CoreError("LIVE_IMAGE_CHAT_JOB_REQUIRED", 403)
-    return event, body, image, jobs[0]
 
 
-def lease(store, settings, approval, clock, event_id, *, request_id=None):
-    event, body, image, job = source(store, settings, approval, event_id)
-    rows = store.rows(
-        "SELECT * FROM content_items WHERE owner_event_id=? AND redacted=0", (event_id,)
-    )
-    expected = "RUNNING" if request_id else "FETCHING"
+def lease(store, settings, approval, clock, event_id, *, request_id=None, lease_token=None):
+    _, _, images, job = source(store, settings, approval, event_id)
+    rows = _rows(store, event_id)
     if (
-        job["state"] != "QUEUED"
-        or len(rows) != 1
-        or rows[0]["kind"] != "qq_image"
-        or rows[0]["slot"] != 0
-        or rows[0]["state"] != expected
-        or rows[0]["captured_privacy_epoch"] != epoch(store)
-        or not rows[0]["lease_token"]
-        or not rows[0]["lease_until"]
-        or rows[0]["lease_until"] <= clock()
-        or rows[0]["deadline"] <= clock()
-        or (request_id and rows[0]["usage_request_id"] != request_id)
+        job["state"] != "QUEUED" or len(rows) != len(images)
+        or any(row["kind"] != "qq_image" or row["slot"] != index
+               for index, row in enumerate(rows))
     ):
         raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
-    return rows[0], job, image
+    selected = rows if request_id else [
+        row for row in rows if row["lease_token"] == lease_token
+    ] if lease_token else rows[:1]
+    expected = "RUNNING" if request_id else "FETCHING"
+    if not selected or any(
+        row["state"] != expected
+        or row["captured_privacy_epoch"] != epoch(store)
+        or not row["lease_token"] or not row["lease_until"]
+        or row["lease_until"] <= clock() or row["deadline"] <= clock()
+        or (request_id and row["usage_request_id"] != request_id)
+        for row in selected
+    ):
+        raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
+    row = selected[0]
+    return row, job, images[row["slot"]]
 
 
-def freeze(store, settings, approval, clock, row, messages, proof):
+def freeze(store, settings, approval, clock, row, messages, proofs):
     from companion.model import model_payload
 
-    _, job, image = lease(
+    _, job, _ = lease(
         store, settings, approval, clock, row["owner_event_id"], request_id=row["usage_request_id"]
     )
+    _, _, images, _ = source(store, settings, approval, row["owner_event_id"])
+    rows = _rows(store, row["owner_event_id"])
     key = FROZEN + job["job_id"]
     if store.one("SELECT 1 FROM runtime_meta WHERE key=?", (key,)):
         raise CoreError("LIVE_IMAGE_ALREADY_FROZEN", 409)
@@ -197,94 +178,135 @@ def freeze(store, settings, approval, clock, row, messages, proof):
         "plan_sha256": approval.plan_sha256,
         "privacy_epoch": epoch(store),
         "event_id": row["owner_event_id"],
-        "item_id": row["item_id"],
-        "source": image,
         "request_id": row["usage_request_id"],
-        "media_sha256": row["media_sha256"],
-        "fingerprint": row["fingerprint"],
         "payload_sha256": paid_budget.sha(model_payload(settings, messages, "content_vision")),
         "image_approval_sha256": approval.image_approval_sha256,
-        "upload_proof": proof,
+        "original_expires_at": min(image_spool.deadline(store, item) for item in rows),
+        "images": [
+            {
+                "item_id": item["item_id"], "source": source_image,
+                "media_sha256": item["media_sha256"], "fingerprint": item["fingerprint"],
+                "upload_proof": proof,
+            }
+            for item, source_image, proof in zip(rows, images, proofs, strict=True)
+        ],
     }
     store.insert("runtime_meta", key=key, value=encode(value))
+    for item in rows:
+        store.execute("DELETE FROM runtime_meta WHERE key=?", (STAGED + item["item_id"],))
     return job
 
 
 def frozen(store, settings, approval, job):
-    _, _, image, _ = source(store, settings, approval, job["event_id"])
+    _, _, images, _ = source(store, settings, approval, job["event_id"])
     record = store.one("SELECT value FROM runtime_meta WHERE key=?", (FROZEN + job["job_id"],))
     value = json.loads(record["value"]) if record else {}
-    row = store.one("SELECT * FROM content_items WHERE item_id=?", (value.get("item_id"),))
+    rows = _rows(store, job["event_id"])
     if (
-        not row
-        or row["redacted"]
-        or value.get("privacy_epoch") != epoch(store)
+        value.get("privacy_epoch") != epoch(store)
         or value.get("plan_sha256") != approval.plan_sha256
         or value.get("event_id") != job["event_id"]
-        or value.get("source") != image
         or value.get("image_approval_sha256") != approval.image_approval_sha256
-        or value.get("request_id") != row["usage_request_id"]
-        or value.get("media_sha256") != row["media_sha256"]
-        or value.get("fingerprint") != row["fingerprint"]
+        or len(value.get("images", [])) != len(images) or len(rows) != len(images)
     ):
         raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
-    proof = value.get("upload_proof") or {}
-    if row["state"] == "RUNNING" and proof.get("lease_token") != row["lease_token"]:
-        raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
-    upload_proof(
-        approval,
-        job["event_id"],
-        image,
-        proof.get("lease_token"),
-        row["media_sha256"],
-        proof.get("mime"),
-        proof,
-    )
-    return value, row
+    for item, row, image in zip(value["images"], rows, images, strict=True):
+        if (
+            row["kind"] != "qq_image" or row["slot"] != image["slot"]
+            or row["captured_privacy_epoch"] != epoch(store)
+            or item.get("item_id") != row["item_id"] or item.get("source") != image
+            or value.get("request_id") != row["usage_request_id"]
+            or item.get("media_sha256") != row["media_sha256"]
+            or item.get("fingerprint") != row["fingerprint"]
+        ):
+            raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
+        proof = item.get("upload_proof") or {}
+        if row["state"] == "RUNNING" and proof.get("lease_token") != row["lease_token"]:
+            raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
+        upload_proof(
+            approval, job["event_id"], image, proof.get("lease_token"),
+            row["media_sha256"], proof.get("mime"), proof,
+        )
+    return value, rows[0]
 
 
 def result(store, settings, approval, job):
-    """Complete native observation + original paid admission, rehashed at every boundary."""
-    value, row = frozen(store, settings, approval, job)
-    observation = store.one(
-        "SELECT o.*,e.body_json,e.redacted AS event_redacted "
-        "FROM observations o JOIN events e USING(event_id) WHERE o.event_id=?",
-        (row["output_event_id"],),
-    )
+    """Every native observation and the shared paid admission, rehashed at each boundary."""
+    value, _ = frozen(store, settings, approval, job)
     admission = store.one(
         "SELECT a.*,m.state FROM model_admissions a JOIN model_usage m "
-        "USING(request_id) WHERE a.request_id=?",
-        (value["request_id"],),
-    )
-    dependencies = store.rows(
-        "SELECT source_event_id FROM event_dependencies WHERE event_id=? ORDER BY source_event_id",
-        (row["output_event_id"],),
+        "USING(request_id) WHERE a.request_id=?", (value["request_id"],),
     )
     if (
-        row["state"] != "SUCCEEDED"
-        or not observation
-        or observation["redacted"]
-        or observation["event_redacted"]
-        or observation["source_kind"] != "image_analysis"
-        or observation["result_status"] != "FETCHED"
-        or not admission
-        or admission["state"] != "SETTLED"
+        not admission or admission["state"] != "SETTLED"
         or admission["logical_request_id"] != job["job_id"]
         or admission["payload_sha256"] != value["payload_sha256"]
-        or dependencies != [{"source_event_id": job["event_id"]}]
     ):
         raise CoreError("LIVE_IMAGE_RESULT_REQUIRED", 403)
-    body = json.loads(observation["body_json"])
-    evidence = json.loads(observation["evidence_json"])
-    if (
-        evidence.get("media_sha256") != value["media_sha256"]
-        or observation["captured_privacy_epoch"] != epoch(store)
-        or observation["source_sha256"] != hashlib.sha256(body.get("text", "").encode()).hexdigest()
-    ):
-        raise CoreError("LIVE_IMAGE_RESULT_CHANGED", 403)
-    return {
-        "image": value,
-        "item_sha256": paid_budget.sha(row),
-        "observation_sha256": paid_budget.sha(observation),
-        "admission_sha256": paid_budget.sha(admission),
-    }
+    evidence_rows = []
+    for item, row in zip(value["images"], _rows(store, job["event_id"]), strict=True):
+        observation = store.one(
+            "SELECT o.*,e.body_json,e.redacted AS event_redacted "
+            "FROM observations o JOIN events e USING(event_id) WHERE o.event_id=?",
+            (row["output_event_id"],),
+        )
+        dependencies = store.rows(
+            "SELECT source_event_id FROM event_dependencies WHERE event_id=? "
+            "ORDER BY source_event_id", (row["output_event_id"],),
+        )
+        if (
+            row["state"] != "SUCCEEDED" or not observation
+            or observation["redacted"] or observation["event_redacted"]
+            or observation["source_kind"] != "image_analysis"
+            or observation["result_status"] != "FETCHED"
+            or dependencies != [{"source_event_id": job["event_id"]}]
+        ):
+            raise CoreError("LIVE_IMAGE_RESULT_REQUIRED", 403)
+        body = json.loads(observation["body_json"])
+        evidence = json.loads(observation["evidence_json"])
+        if (
+            evidence.get("media_sha256") != item["media_sha256"]
+            or observation["captured_privacy_epoch"] != epoch(store)
+            or observation["source_sha256"]
+            != hashlib.sha256(body.get("text", "").encode()).hexdigest()
+        ):
+            raise CoreError("LIVE_IMAGE_RESULT_CHANGED", 403)
+        evidence_rows.append({
+            "slot": row["slot"], "item_sha256": paid_budget.sha(row),
+            "observation_sha256": paid_budget.sha(observation),
+        })
+    return {"image": value, "items": evidence_rows, "admission_sha256": paid_budget.sha(admission)}
+
+
+def retrieval_text(store, settings, clock, job):
+    """Verified observations are search clues; never substitute for approved memory evidence."""
+    result(store, settings, settings.live_text_window, job)
+    texts = []
+    for row in _rows(store, job["event_id"]):
+        observed = store.one(
+            "SELECT body_json FROM events WHERE event_id=?", (row["output_event_id"],),
+        )
+        text = json.loads(observed["body_json"]).get("text", "")
+        if text not in texts:
+            texts.append(text)
+    return "\n".join(texts)[:6000]
+
+
+def original_parts(store, settings, clock, job):
+    result(store, settings, settings.live_text_window, job)
+    parts = []
+    maximum = min(
+        settings.content.max_image_bytes, settings.paid_model.image_input.max_bytes_per_image,
+    )
+    for row in _rows(store, job["event_id"]):
+        data, mime = image_spool.get(store, row, clock(), maximum)
+        if (
+            hashlib.sha256(data).hexdigest() != row["media_sha256"]
+            or hashlib.sha256(mime.encode() + b"\0" + data).hexdigest() != row["fingerprint"]
+        ):
+            raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
+        parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")},
+        })
+    return parts

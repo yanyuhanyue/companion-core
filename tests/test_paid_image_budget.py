@@ -243,7 +243,7 @@ def test_unsupported_multimodal_shapes_cannot_create_admission(core, tmp_path, m
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("max_images_per_request", 2),
+        ("max_images_per_request", 5),
         ("max_images_per_request", True),
         ("approval_sha256", ""),
         ("estimated_tokens_per_image", 0),
@@ -429,7 +429,7 @@ def test_image_daily_budget_is_part_of_snapshot_and_admission(core, tmp_path):
 
 def test_image_payload_cannot_bypass_policy_as_text_chat(core, tmp_path):
     approved_live(core, tmp_path)
-    with pytest.raises(CoreError, match="MODEL_INPUT_ESTIMATE_INVALID"):
+    with pytest.raises(CoreError, match="PAID_IMAGE_APPROVAL_REQUIRED"):
         budget.reserve(core.store, core.settings, None, "chat", image_messages(), core.clock())
     assert core.store.rows("SELECT * FROM model_usage") == []
 

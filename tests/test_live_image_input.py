@@ -145,6 +145,9 @@ def test_original_image_vision_then_chat_and_source_fenced_before_send(core, tmp
             assert calls[0]["messages"][0]["content"][1]["image_url"]["url"].startswith(
                 "data:image/png;"
             )
+            assert calls[1]["messages"][-1]["content"][1] == (
+                calls[0]["messages"][0]["content"][1]
+            )
             assert any("图片中有蓝色区域" in item["content"] for item in calls[1]["messages"])
             assert [
                 r["scenario"]
@@ -297,7 +300,7 @@ def test_current_image_scope_has_no_hidden_share_history_or_extra_call_allowance
 @pytest.mark.parametrize(
     "failure",
     [
-        "two_images",
+        "too_many_images",
         "mime",
         "pixels",
         "dns_stop",
@@ -322,8 +325,8 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
             image_segment(),
         ]
     )
-    if failure == "two_images":
-        raw["message"].append(image_segment())
+    if failure == "too_many_images":
+        raw["message"].extend([image_segment()] * 4)
 
     async def source(ws):
         await ws.send(json.dumps(raw))
@@ -406,8 +409,8 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
                     )
 
                 model_http.event_hooks["request"].append(change_lease)
-            if failure == "two_images":
-                with pytest.raises(ValueError, match="ONE_OWNER_IMAGE_REQUIRED"):
+            if failure == "too_many_images":
+                with pytest.raises(ValueError, match="OWNER_IMAGE_LIMIT_EXCEEDED"):
                     await window.capture_once(client, protocol)
                 assert not core.store.one("SELECT 1 FROM events")
                 return

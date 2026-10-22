@@ -78,7 +78,7 @@ async def tick(core_client, reader, adapter_id):
         if grant_snapshot(required=True) != snapshot:
             raise ReadFailure("SOURCE_GRANT_REVISION_CHANGED")
 
-    result = await read_result(reader, item, validate_account_read if snapshot else None)
+    result = await read_result(reader, item, validate_account_read)
     # An uncertain receipt is never followed by replaying public I/O locally.
     response = await core_client.post(prefix + "/" + item["request_id"] + "/result", json=result)
     response.raise_for_status()

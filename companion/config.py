@@ -148,6 +148,9 @@ class LiveTextWindowApproval(BaseModel):
         default=None, strict=True, ge=1, le=5, exclude_if=lambda value: value is None,
     )
     rich_input_scope: Literal["none", "references_v1"] = "none"
+    link_scope: Literal["none", "owner_links_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
     image_scope: Literal["none", "owner_image_v1"] = "none"
     image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     history_scope: Literal["none", "approved_window"] = "none"
@@ -164,6 +167,10 @@ class LiveTextWindowApproval(BaseModel):
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if self.link_scope != "none" and (
+            self.rich_input_scope != "references_v1" or not self.capture_public_key
+        ):
+            raise ValueError("authenticated owner-card link scope required")
         if (self.segmented_reply is None) != (self.max_send_attempts is None):
             raise ValueError("segmented replies require an explicit bounded send limit")
         if self.segmented_reply is not None and self.image_scope == "owner_image_v1":
@@ -174,7 +181,6 @@ class LiveTextWindowApproval(BaseModel):
                 not self.image_approval_sha256
                 or self.rich_input_scope != "references_v1"
                 or self.history_scope != "none"
-                or self.memory_scope != "none"
                 or not self.capture_public_key
             )
         ):

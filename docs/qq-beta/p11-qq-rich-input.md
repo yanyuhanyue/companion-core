@@ -6,7 +6,9 @@ changes the plan and the approved configuration. The persistent Bridge and Core
 each have a separate `rich_input_scope` setting, defaulting to `none`. Enabling it
 does not grant model, delivery, Content, media download or memory-write authority.
 The original Spool, signed capture receipt, Budget, Outbox and Window Journal remain
-the only input/accounting/delivery path. No extra OneBot HTTP query is made.
+the only input/accounting/delivery path. The current implementation also reads
+quoted text through bounded `get_msg` / `get_forward_msg` calls for references in
+the authenticated owner's private input. It is not a general message-reading tool.
 
 `payload.text` is the only current-owner text. In a segment array it concatenates
 only `text.data.text`; a string is literal text, including CQ-looking syntax.
@@ -22,10 +24,11 @@ Each non-text entry has the original zero-based `index`, `type`,
 
 | Push segment | Retained projection | Coverage |
 | --- | --- | --- |
-| `reply` | Signed decimal message ID in `reference` | `MISSING`: original text unavailable |
-| `forward` | Bounded opaque ASCII ID in `reference` | `UNFETCHED`: forward body not retrieved |
+| `reply` | Signed decimal message ID in `reference`, optional bounded `body` | Baseline `MISSING`; `body.status` records the read result |
+| `forward` | Bounded opaque ASCII ID in `reference`, optional bounded `body` | Baseline `UNFETCHED`; `body.status` records the read result |
 | `json` | Small title/summary/URL field projection with original JSON pointers | `PARTIAL`, or `UNSUPPORTED` |
-| `node`, image/record/video/file, other | Type/index only; no body, sender claim or media URL | `UNSUPPORTED` |
+| `node` | Ordered text and unverified display names in bounded `body` | Baseline `UNSUPPORTED`; `body.status` records the read result |
+| image/record/video/file, other | Type/index only; no media URL | `UNSUPPORTED`, unless the separate current-owner image scope applies |
 
 The push-shape basis is SnowLuma commit
 [`db142db9e6398c779283eab9afc3552da1e2c361`](https://github.com/SnowLuma/SnowLuma/tree/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/event-converter).
@@ -34,14 +37,39 @@ Its ordinary `to-message` path calls `elementsToOneBotSegments` without
 codec emits an opaque `data.data` string. There is no ordinary node codec. This is
 public-source evidence, not proof of a particular deployed image's source hash.
 
-Card projection recognizes only explicit `/title`, `/desc`, `/summary`, `/url`,
-`/jumpUrl`, and title/desc/URL fields below `/meta/detail_1` or `/meta/news`.
+Card projection recognizes explicit `/title`, `/desc`, `/summary`, `/prompt`, `/url`,
+`/jumpUrl`, and supported title/desc/summary/URL fields below `/meta/detail_1`,
+`/meta/detail`, `/meta/news` and `/meta/music`.
 These are conservative extraction paths in opaque JSON, not a claim that every
 SnowLuma card uses this schema. Fields remain unverified card statements.
 URLs are only `DISCOVERED`: canonical HTTPS Bilibili video or Heybox article URLs,
-with no credentials, query, fragment or alternate port. Other URLs and unknown
+with no credentials, query, fragment or alternate port. Queries on supported
+content paths are discarded; Heybox's fixed share route extracts one valid
+`link_id`. Duplicate IDs, unsupported hosts and short links are rejected, and raw
+tracking or credential-like query values never enter the projection. Other URLs and unknown
 fields are discarded. Neither a card summary nor its URL proves content was read.
-Reading a discovered URL requires the existing, separately authorized Content path.
+The current card's supported URL can enter the existing Content Reader path when
+that path is enabled and authorized. Its observation, not the card itself, proves
+whether the link's content was read. Links inside quoted bodies do not trigger reads.
+
+Quoted bodies prefer embedded text. Missing or placeholder-only text falls back
+to `get_msg`; forwards expand `get_forward_msg.messages` in order, retaining
+unverified display names and node paths. Bounds apply across the whole event:
+4 requests, 5 seconds total wait, 3 nested reference levels, 32 projected text
+nodes, 6,000 text characters, and the original 16 KiB rich JSON envelope. UTF-8
+overflow truncates the body instead of rejecting the owner's question. Cycles,
+unavailable originals, unsupported media and each reached limit have fixed issue
+codes. `body.status` is `READ`, `PARTIAL`, `TRUNCATED`, `MISSING` or `UNSUPPORTED`;
+placeholders alone never count as read text. If the envelope cannot hold even a
+body status, the existing segment coverage continues to state missing/unsupported.
+
+The signed capture evidence stores the redacted projection with the original
+frame. Approval replays that exact projection and compares its layout/references
+against the original frame; it does not query mutable source messages again.
+Protocol responses and refreshed media URLs are not saved. The fixed SnowLuma
+implementation may refresh media metadata internally during these read actions;
+Bridge limits its own requests, response bytes and wait, not SnowLuma's internal
+work. See [the pinned-source compatibility notes](p12-qq-media.md#引用与转发正文有界读取实现).
 
 Bounds are 64 push segments, 16 KiB projected rich JSON, 16 KiB raw card JSON,
 card depth 4 / 128 nodes, titles 128 characters and summaries 512 characters.

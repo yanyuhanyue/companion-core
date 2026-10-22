@@ -30,7 +30,7 @@ class SharedLink(StrictModel):
 
 class SharedImage(StrictModel):
     kind: Literal["image"]
-    slot: int = Field(ge=0, le=1, strict=True)
+    slot: int = Field(ge=0, le=3, strict=True)
 
 
 class Payload(StrictModel):

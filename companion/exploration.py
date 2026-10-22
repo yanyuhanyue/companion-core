@@ -71,6 +71,51 @@ class ExplorationService:
         self.observations, self.goals, self.social = observations, goals, social
         self.register_link_images = register_link_images
 
+    def _read_scope(self, row):
+        """Recheck the current signed card before bounded Reader work can proceed."""
+        from companion import live_text, qq_source
+
+        if not live_text.active(self.store, self.settings):
+            return
+        approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
+        if (
+            getattr(approval, "link_scope", "none") != "owner_links_v1"
+            or row["operation"] != "read" or row["goal_step_json"] != "{}"
+        ):
+            raise CoreError("LIVE_LINK_SCOPE_REQUIRED", 403)
+        items = self.store.rows(
+            "SELECT * FROM content_items WHERE kind='link' AND read_request_id=? AND redacted=0",
+            (row["request_id"],),
+        )
+        if len(items) != 1:
+            raise CoreError("LIVE_LINK_SOURCE_REQUIRED", 403)
+        item = items[0]
+        _, body, job = qq_source.source(
+            self.store, self.settings, approval, item["owner_event_id"],
+        )
+        urls = {
+            field["value"]
+            for segment in (body.get("rich") or {}).get("segments", [])
+            if segment.get("type") == "json"
+            for field in segment.get("fields", []) if field.get("kind") == "url"
+        }
+        sources = self.store.rows(
+            "SELECT event_id FROM exploration_evidence WHERE request_id=?",
+            (row["request_id"],),
+        )
+        if (
+            job["state"] != "QUEUED" or item["state"] != "WAITING"
+            or item["deadline"] <= self.clock()
+            or item["captured_privacy_epoch"] != epoch(self.store)
+            or row["captured_privacy_epoch"] != epoch(self.store)
+            or item["target_url"] != row["url"] or row["url"] not in urls
+            or sources != [{"event_id": item["owner_event_id"]}]
+        ):
+            raise CoreError("LIVE_LINK_SOURCE_CHANGED", 403)
+        source, canonical = content_target(row["url"])
+        if canonical != row["url"] or source != self.adapter(row["adapter_id"]).source:
+            raise CoreError("LIVE_LINK_SOURCE_CHANGED", 403)
+
     def adapter(self, adapter_id):
         policy = self.observations.policy(adapter_id)
         content_enabled = self.settings.content_enabled
@@ -229,6 +274,8 @@ class ExplorationService:
         )
 
     def lease(self, adapter_id, source_grant=None):
+        from companion import live_text
+
         policy = self.adapter(adapter_id)
         cfg, s, now = self.settings, self.store, self.clock()
         day, month = self.periods()
@@ -288,6 +335,19 @@ class ExplorationService:
                             (row["request_id"],),
                         )
                         continue
+                # The same input's image analysis owns the single paid-call
+                # slot. Do not lease a card read that would lose validation
+                # when the image starts its reserved vision request.
+                if live_text.active(s, cfg) and s.one(
+                    "SELECT 1 FROM content_items link JOIN content_items image "
+                    "ON image.owner_event_id=link.owner_event_id "
+                    "WHERE link.kind='link' AND link.read_request_id=? "
+                    "AND image.kind='qq_image' AND image.redacted=0 "
+                    "AND image.state IN ('WAITING','QUEUED','FETCHING','RUNNING') LIMIT 1",
+                    (row["request_id"],),
+                ):
+                    continue
+                self._read_scope(row)
                 token, until = uid("reader_lease"), after(now, 30)
                 if step:
                     goal_until = s.one(
@@ -340,10 +400,12 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
+            self._read_scope(row)
             captured = self.observations.grants.captured(row)
             if captured != validation.source_grant:
                 raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
-            self.observations.grants.require(adapter_id, captured)
+            if captured or self.adapter(adapter_id).source_grant_required:
+                self.observations.grants.require(adapter_id, captured)
             step = json.loads(row["goal_step_json"])
             if step:
                 self.goals.validate_lease(step)
@@ -378,6 +440,7 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
+            self._read_scope(row)
             captured_grant = self.observations.grants.captured(row)
             if captured_grant != result.source_grant:
                 raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)

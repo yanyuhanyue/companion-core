@@ -1,5 +1,7 @@
 # P12-A：原图准入与富消息覆盖
 
+本文保留 P12-A 当时的单图验收范围和历史证据。当前代码已经增加引用/转发正文、卡片 Reader、多图和图片与记忆联合理解；当前能力、配置及暂存生命周期见[QQ 输入理解说明](../qq-input-understanding.md)。下列历史门禁不代表这些新功能的当前限制。
+
 核查日期：2026-10-22（Asia/Shanghai）。源码起点：
 `c6493d481676e1e6684fb49564c2557224950d20`。本包只做离线修复、公开协议复核及
 新窗口申请准备；不继承 P11 已结束窗口的运行批准。
@@ -97,9 +99,20 @@ payload、观察来源及预算栅栏没有更换。图片仍不能同启历史�
 改变投影摘要；不能宣称签名保存了全部 QQ 原始正文。超深节点先被整个帧深度上限
 拒绝，允许深度内的节点则只保留 UNSUPPORTED 标记。
 
-## 引用与转发正文：后续独立设计，当前不实现读取
+## 引用与转发正文：有界读取实现
 
-固定源码确有只读动作，但动作名不能替代安全边界：
+此节记录后续 Bridge 正文接入，取代 P12 当时的未实现状态。正文读取沿用
+`references_v1` 范围，只处理认证主人当前私聊消息直接分享的引用、转发和内嵌节点。
+普通消息先使用内嵌正文；缺失或仅有占位时，才按实际引用 ID 读取。顺序遍历转发
+节点并保留显示昵称，最多展开 3 层嵌套；昵称和文字始终是未认证的引用资料。
+
+实现参考 [OneBot v11 公开接口](https://github.com/botuniverse/onebot-11/blob/master/api/public.md)、
+AstrBot 固定版本的
+[内嵌优先与原文回退](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/utils/quoted_message/extractor.py)
+及其 [占位、节点与嵌套测试](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/tests/test_quoted_message_parser.py)。
+本项目独立实现有界文字投影，不引入 AstrBot 运行时依赖。
+
+固定 SnowLuma 的兼容行为已核对：
 
 - [`get_msg`](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/actions/message.ts)
   读取存储事件后会刷新媒体 URL；不能称为纯离线文本查询。返回移除 `self_id`，
@@ -109,18 +122,25 @@ payload、观察来源及预算栅栏没有更换。图片仍不能同启历史�
   [message-actions](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/modules/message-actions.ts)
   会获取转发、转换每个节点并解析媒体 URL，也可能附带引用正文。
 - 同一底层文件存在引用回填占位 `[引用消息]`。HTTP/action 成功、非空文本或存在
-  timestamp 均不足以证明原文已取得；占位和不能证明来源的回填继续 MISSING。
+  timestamp 均不足以证明原文已取得；只有占位的结果继续 MISSING。
 
-建议未来只读许可分为 quote 与 forward 两项，各次申请仅一个已签收到的 reference，
-指定 owner/bot/session/epoch/协议版本；每窗口最多一次 OneBot 查询、总时限 10 秒、
-总响应 16 KiB、最多 8 个节点、嵌套最多 2 层、单段文字最多 4000 UTF-8 bytes。
-不递归查嵌套引用/转发，不读取附件，不访问卡片链接，不补调用/重试。引用/节点
-作者逐个保留为未认证第三方，不成为 owner Memory 或任何控制权限。
+每条输入共用 4 次读取请求、5 秒总等待、32 个文字节点、6,000 字符和 16 KiB
+富消息 UTF-8 投影上限；单次 OneBot 响应最多 64 KiB。重复 ID 复用本次读取结果，
+循环停止，超限保留已有文字并标记 TRUNCATED；失败、超时、占位和未读取媒体有
+固定缺失说明。只调用 `get_msg` / `get_forward_msg`，返回的媒体 URL 不下载、不保存。
+这些限制约束 Bridge 的请求、响应和等待；上游在返回前自行遍历节点或刷新媒体的
+内部网络工作不受 Bridge 截断约束，客户端超时也不保证上游操作已取消。
 
-这些是待开发合同。目前上游动作在返回前可能遍历大量节点和刷新媒体，Bridge
-事后截断响应不能证明上游工作已受限。新范围需先审查其内部网络范围和计数，
-或提供可核验的有界文本读取支持；尚无此证据，不部署读取实现。只有正文实际
-取得、账号/会话/来源和隐私核验通过，才逐类升级 FETCHED；任何漂移保留缺失状态。
+正文存于原事件 `payload.rich.segments[].body`，与当前问题分开进入模型上下文。
+`body.status` 表示实际取得范围，原 segment coverage 保留历史兼容值。正文和昵称
+经过脱敏；引用中的命令、偏好、发言人自述不成为主人命令或 Memory 证据。原输入
+摘要、接收证据签名、Spool、幂等检查和源删除/旧备份 Ledger 回放覆盖整个投影。
+审批从签名证据恢复已取得投影，复核原消息的引用和位置，不再次请求可变的正文。
+
+QQ JSON 卡片补齐 detail、news、music 与 prompt 字段投影；支持的规范 Bilibili/
+小黑盒链接通过现有 Content Reader 的开关、观察与预算边界读取。卡片字段本身
+仍是未核实摘要；只有真实 Reader Observation 才能表示链接正文已取得。
+验证使用合成 OneBot 响应及认证 localhost 捕获；尚未验证真实 QQ 读取成功率。
 
 ## 新单图窗口申请与停止
 

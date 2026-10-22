@@ -58,15 +58,15 @@ def test_nonoriginal_and_unknown_image_fields_never_claim_current_owner_image(ch
     segment = image_segment()
     segment["data"].update(change)
     with pytest.raises(ValueError, match="IMAGE_KIND_UNSUPPORTED"):
-        images.original_image([segment])
+        images.original_images([segment])
 
 
 def test_optional_legacy_fields_and_internal_file_identifier_are_not_download_targets():
-    assert images.original_image([{"type": "image", "data": {"url": URL}}]).url == URL
-    assert images.original_image([{"type": "image", "data": {"file": URL}}]).url == URL
+    assert images.original_images([{"type": "image", "data": {"url": URL}}])[0].url == URL
+    assert images.original_images([{"type": "image", "data": {"file": URL}}])[0].url == URL
     with pytest.raises(ValueError, match="IMAGE_URL_NOT_ALLOWED"):
-        images.original_image([{"type": "image", "data": {"file": "private-local.png"}}])
-    assert images.original_image("[CQ:image,url=https://gchat.qpic.cn/forged]") is None
+        images.original_images([{"type": "image", "data": {"file": "private-local.png"}}])
+    assert images.original_images("[CQ:image,url=https://gchat.qpic.cn/forged]") == []
 
 
 @pytest.mark.parametrize("change", [{"sub_type": 1}, {"type": "flash"}, {"emoji_id": "sticker"}])
@@ -112,9 +112,9 @@ def test_identifier_or_metadata_cannot_claim_fetched_content(segment):
 
 def test_image_metadata_change_changes_entire_source_even_if_url_unchanged():
     segment = image_segment()
-    original = images.original_image([segment])
+    original = images.original_images([segment])[0]
     segment["data"]["summary"] = "different untrusted summary"
-    changed = images.original_image([segment])
+    changed = images.original_images([segment])[0]
     assert original.url == changed.url and original.source_sha256 != changed.source_sha256
 
 
@@ -192,7 +192,7 @@ def test_tls_uses_required_verification_and_rechecks_lease_before_any_get_bytes(
             transport._pool._network_backend = Backend([])
             with pytest.raises(ValueError, match="IMAGE_LEASE_EXPIRED_AFTER_TLS"):
                 await images.fetch_image(
-                    images.original_image([image_segment()]), 100, check=check,
+                    images.original_images([image_segment()])[0], 100, check=check,
                     resolver=resolve, transport=transport,
                 )
 

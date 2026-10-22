@@ -10,7 +10,8 @@ from companion.store import encode
 from tests.conftest import run
 from tests.test_live_history_memory import combined_options
 from tests.test_live_memory_recall import readonly_window
-from tests.test_qq_rich_input import card, rich_event
+from tests.test_onebot_reference_reader import enriched
+from tests.test_qq_rich_input import card
 
 OWNER_FIRST = "本次临时项目的验收代号改说白帆九号。"
 OWNER_NOW = "那这个临时项目的代号还是原来的？"
@@ -138,7 +139,8 @@ def test_rich_history_review_chat_and_delivery_preserve_source_and_owner_boundar
 
 @pytest.mark.parametrize("delta,kept", [(-1, False), (0, True)])
 def test_rich_history_byte_limit_counts_and_crops_all_three_messages(core, tmp_path, delta, kept):
-    reference = qq_rich.context(rich_event(mixed())["payload"])["content"]
+    first, _ = enriched(mixed())
+    reference = qq_rich.context(first["payload"])["content"]
     actual = len((reference + OWNER_FIRST + "青竹七号。").encode("utf-8"))
 
     async def scenario():
@@ -152,6 +154,11 @@ def test_rich_history_byte_limit_counts_and_crops_all_three_messages(core, tmp_p
             raw_messages=[mixed(), [{"type": "text", "data": {"text": OWNER_NOW}}]],
         ) as (_, _, capture, send, calls, _, _, _, _):
             await capture()
+            captured = json.loads(core.store.one(
+                "SELECT body_json FROM events WHERE source='qq.onebot' ORDER BY rowid DESC LIMIT 1",
+            )["body_json"])
+            # Count the actual signed reference, including its failed-read coverage.
+            assert qq_rich.context(captured)["content"] == reference
             assert await core.run_once()
             assert await send()
             await capture()

@@ -222,6 +222,16 @@ class WindowPlan:
                 expected_scope.add("rich_input_scope")
             if scope.get("rich_input_scope", "none") not in ("none", "references_v1"):
                 raise ValueError("INVALID_RICH_INPUT_SCOPE")
+            if "link_scope" in scope:
+                expected_scope.add("link_scope")
+            if (
+                scope.get("link_scope", "none") not in {"none", "owner_links_v1"}
+                or (scope.get("link_scope") == "owner_links_v1" and (
+                    scope.get("rich_input_scope") != "references_v1"
+                    or not scope["capture_public_key"]
+                ))
+            ):
+                raise ValueError("INVALID_LINK_SCOPE")
             for field in ("image_scope", "image_approval_sha256"):
                 if field in scope:
                     expected_scope.add(field)
@@ -236,7 +246,6 @@ class WindowPlan:
                     and (
                         scope.get("rich_input_scope") != "references_v1"
                         or scope["history_scope"] != "none"
-                        or scope["memory_scope"] != "none"
                         or not isinstance(scope.get("image_approval_sha256"), str)
                         or not SHA.fullmatch(scope["image_approval_sha256"])
                         or not scope["capture_public_key"]
@@ -688,19 +697,22 @@ class TestWindow:
             self.plan.mode == "live_text"
             and self.plan.value["live_text"]["memory_scope"] == "approved_facts"
         )
-        owner_image = (
+        owner_content = (
             self.plan.mode == "live_text"
-            and self.plan.value["live_text"].get("image_scope") == "owner_image_v1"
+            and (
+                self.plan.value["live_text"].get("image_scope") == "owner_image_v1"
+                or self.plan.value["live_text"].get("link_scope") == "owner_links_v1"
+            )
         )
         closed = (
             isinstance(status.get("features"), dict)
             and all(
-                value is (readonly_memory if key == "memory" else owner_image if key == "content"
+                value is (readonly_memory if key == "memory" else owner_content if key == "content"
                           else False)
                 for key, value in status["features"].items()
             )
             and (not readonly_memory or status["features"].get("memory") is True)
-            and (not owner_image or status["features"].get("content") is True)
+            and (not owner_content or status["features"].get("content") is True)
         )
         if self.plan.mode == "live_text":
             live = status.get("live_text_window", {})
@@ -1615,12 +1627,14 @@ def seal_protocol_content(request, content):
     request.headers["Content-Length"] = str(len(content))
 
 
-def check_protocol_request(window, request):
+def check_protocol_request(window, request, *, reference_read=False):
     config = window.plan.config
     if (
-        request.method != "POST" or request.url.path not in {
-            "/get_login_info", "/get_status", "/get_version_info", "/send_private_msg"
-        }
+        request.method != "POST" or request.url.path not in (
+            {"/get_msg", "/get_forward_msg"} if reference_read else {
+                "/get_login_info", "/get_status", "/get_version_info", "/send_private_msg"
+            }
+        )
         or not private_request_matches(
             request, config.onebot_http_url, request.url.path,
             synthetic=window.plan.value["execution"] == "local_synthetic",

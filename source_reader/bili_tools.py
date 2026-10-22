@@ -39,16 +39,14 @@ class BilibiliAccountHTTP(PublicHTTP):
 
     async def get(self, url, budget, role):
         grant = self.verify(budget)
-        if budget.validate_account_read:
-            await budget.validate_account_read()
-            grant = self.verify(budget)
         # CDN subtitles and page fallbacks never receive account cookies.
         headers = {}
         if urlsplit(url).hostname == "api.bilibili.com":
             headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in grant["cookies"].items())
             headers["Referer"] = "https://www.bilibili.com/"
         try:
-            raw = await super().get(url, budget, role, headers=headers)
+            raw = await super().get(url, budget, role, headers=headers,
+                                    check=lambda: self.verify(budget))
         except ReadFailure as error:
             if str(error) == "UPSTREAM_ACCESS_LIMIT":
                 self.blocked_grant = budget.authorization

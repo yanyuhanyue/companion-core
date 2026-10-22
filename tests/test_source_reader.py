@@ -365,6 +365,8 @@ def test_receipt_failure_does_not_repeat_external_read():
         def core_handler(request):
             if request.url.path.endswith("/lease"):
                 return httpx.Response(200, json={"item": {**ITEM, "request_id": "request_fixture"}})
+            if request.url.path.endswith("/validate"):
+                return httpx.Response(200, json={"valid": True})
             raise httpx.ReadTimeout("receipt unknown")
 
         async with PublicHTTP(

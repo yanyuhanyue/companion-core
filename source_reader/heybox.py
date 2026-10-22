@@ -202,7 +202,7 @@ class SourceAPI:
             "GET",
             self.origin + path + "?" + urlencode(params),
             headers={"Authorization": "Bearer " + self.token, "Accept-Encoding": "identity"},
-            extensions={"timeout": {key: 8.0 for key in ("connect", "read", "write", "pool")}},
+            extensions=budget.request_extensions(),
         ) as response:
             return await response_body(response, budget)
 
