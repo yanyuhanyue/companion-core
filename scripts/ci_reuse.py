@@ -33,9 +33,10 @@ def checkout(root=ROOT):
 def api(path, *, binary=False):
     # The runner's existing gh handles authenticated API calls and strips API
     # credentials when following the artifact's signed storage redirect.
+    print("Checking CI evidence: " + path.split("?", 1)[0])
     response = subprocess.run(
         ["gh", "api", "--hostname", "github.com", path],
-        capture_output=True, check=True, timeout=10,
+        capture_output=True, check=True, timeout=30,
     ).stdout
     if len(response) > 1_000_000:
         raise ValueError("CI API response too large")

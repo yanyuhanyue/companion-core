@@ -52,6 +52,8 @@ def evidence(repository, monkeypatch, tmp_path):
 
     def read(path, *, binary=False):
         state["calls"].append(path)
+        if state.get("timeout"):
+            raise subprocess.TimeoutExpired(["gh", "api", path], 30)
         if state.get("unavailable"):
             raise OSError("synthetic API failure")
         if "/commits/" in path:
@@ -128,7 +130,9 @@ def test_incomplete_or_untrusted_evidence_falls_back_to_full(evidence, section, 
     assert evidence["plan"]() == ("full", None)
 
 
-@pytest.mark.parametrize("fault", ["unavailable", "bad_zip", "filename", "jobs", "duplicate"])
+@pytest.mark.parametrize("fault", [
+    "unavailable", "timeout", "bad_zip", "filename", "jobs", "duplicate",
+])
 def test_lookup_faults_and_partial_jobs_do_not_greenwash_main(evidence, fault):
     if fault == "filename":
         evidence["filename"] = "../verified-tree.json"
@@ -236,4 +240,4 @@ def test_api_only_uses_read_only_cli_and_does_not_print_errors(monkeypatch):
     monkeypatch.setattr(ci_reuse.subprocess, "run", run)
     assert ci_reuse.api("repos/synthetic/repository/actions/runs") == {"ok": True}
     assert calls[0][0][:4] == ["gh", "api", "--hostname", "github.com"]
-    assert calls[0][1]["timeout"] == 10
+    assert calls[0][1]["timeout"] == 30
