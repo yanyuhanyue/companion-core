@@ -345,11 +345,104 @@ class CaptureReferences:
         return await self.read("get_forward_msg", {"id": reference})
 
 
+async def persist_capture(window, client, protocol, frame, received_at, peer, capture_fence,
+                          *, set_phase=lambda phase: None):
+    """Persist a frame from an already authenticated private WebSocket connection."""
+    def verify_capture():
+        return window.verify(capture_fence=capture_fence)
+
+    verify_capture()
+    raw, event = input_event(window, frame, received_at)
+    if cumulative.scope(window.plan):
+        # Re-read Core authority after the awaited receive and before
+        # any capture journal/evidence/Spool persistence.
+        await window.core_counts(client)
+        verify_capture()
+    fingerprint = digest({"message": raw["message"], "time": raw["time"]})
+    prior = window.db.execute(
+        "SELECT fingerprint FROM inbox WHERE key=?", (event["event_id"],)
+    ).fetchone()
+    if prior:
+        if prior[0] != fingerprint:
+            raise ValueError("SOURCE_EVENT_CONFLICT")
+        head = window.append("CAPTURE_DUPLICATE", {"fence": capture_fence})
+        with window.db:
+            window.db.execute(
+                "UPDATE test_window SET state='OPEN',journal_head=?", (head,)
+            )
+        set_phase("ws_close")
+        return window.status()
+    set_phase("reference_read")
+    await enrich(
+        event, raw["message"], CaptureReferences(window, protocol, verify_capture),
+        lambda text: redact(text, window.plan.config),
+    )
+    verify_capture()
+    frame_bytes = frame.encode() if isinstance(frame, str) else frame
+    receipt = {
+        "kind": "authenticated_onebot_ws", "window_sha256": window.plan.sha256,
+        "event_id": event["event_id"], "source_event_id": event["source_event_id"],
+        "input_sha256": input_digest(event["payload"]),
+        "frame_sha256": hashlib.sha256(frame_bytes).hexdigest(),
+        "received_at": received_at.isoformat(), "occurred_at": event["occurred_at"],
+        "protocol_epoch": window.plan.config.protocol_epoch,
+        "identity_sha256": window.plan.value["identity_sha256"],
+        "config_sha256": window.plan.value["config_sha256"],
+    }
+    evidence = {
+        "receipt": dict(receipt), "frame": frame_bytes.decode("utf-8"),
+        "peer": list(peer), "endpoint": window.plan.config.onebot_ws_url,
+        "protocol": "OneBot-v11/SnowLuma/2.0.3-node", "bearer_accepted": True,
+    }
+    if event["payload"].get("rich"):
+        evidence["reference_projection"] = event["payload"]["rich"]
+    evidence_hash = digest(evidence)
+    receipt["evidence_sha256"] = evidence_hash
+    key = window.plan.config.capture_signing_key
+    receipt["signature"] = (Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key)).sign(
+        SIGNATURE_DOMAIN + encode(receipt).encode()
+    ).hex() if key else None)
+    capacity(window, capture_fence)
+    quota = cumulative.scope(window.plan)
+    if quota and cumulative.periods(received_at, quota["timezone"]) != cumulative.periods(
+        window.clock(), quota["timezone"],
+    ):
+        raise ValueError("CUMULATIVE_CAPTURE_PERIOD_CHANGED")
+    set_phase("persist")
+    head = window.append("CAPTURED", {
+        "event_hash": digest(event["event_id"]), "capture_sha256": digest(receipt),
+        "frame_sha256": receipt["frame_sha256"],
+    })
+    if write_evidence(window, evidence) != evidence_hash:
+        raise ValueError("CAPTURE_EVIDENCE_CHANGED")
+    with window.db:
+        window.spool.put(event, fingerprint)
+        window.db.execute(
+            "INSERT INTO window_inputs VALUES(?,?,?,'CAPTURED',?,?)",
+            (event["event_id"], receipt["input_sha256"], "", encode(receipt),
+             window.plan.sha256),
+        )
+        window.db.execute("UPDATE test_window SET state='OPEN',journal_head=?", (head,))
+    set_phase("final_check")
+    window.verify()
+    set_phase("ws_close")
+    return window.status() | {"input_approval": {
+        "window_sha256": window.plan.sha256, "event_id": event["event_id"],
+        "input_sha256": receipt["input_sha256"], "capture_sha256": digest(receipt),
+        "evidence_sha256": None,
+    }}
+
+
 async def capture_once(window, client, protocol):
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
     window.busy = True
     phase = "admission"
+
+    def set_phase(value):
+        nonlocal phase
+        phase = value
+
     try:
         capacity(window)
         phase = "core_check"
@@ -408,85 +501,10 @@ async def capture_once(window, client, protocol):
             )) > MAX_CLOCK_DRIFT_SECONDS:
                 raise ValueError("CAPTURE_CLOCK_DRIFT")
             verify_capture()
-            raw, event = input_event(window, frame, received_at)
-            if cumulative.scope(window.plan):
-                # Re-read Core authority after the awaited receive and before
-                # any capture journal/evidence/Spool persistence.
-                await window.core_counts(client)
-                verify_capture()
-            fingerprint = digest({"message": raw["message"], "time": raw["time"]})
-            prior = window.db.execute(
-                "SELECT fingerprint FROM inbox WHERE key=?", (event["event_id"],)
-            ).fetchone()
-            if prior:
-                if prior[0] != fingerprint:
-                    raise ValueError("SOURCE_EVENT_CONFLICT")
-                head = window.append("CAPTURE_DUPLICATE", {"fence": capture_fence})
-                with window.db:
-                    window.db.execute(
-                        "UPDATE test_window SET state='OPEN',journal_head=?", (head,)
-                    )
-                phase = "ws_close"
-                return window.status()
-            phase = "reference_read"
-            await enrich(
-                event, raw["message"], CaptureReferences(window, protocol, verify_capture),
-                lambda text: redact(text, window.plan.config),
+            return await persist_capture(
+                window, client, protocol, frame, received_at, ws.remote_address, capture_fence,
+                set_phase=set_phase,
             )
-            verify_capture()
-            frame_bytes = frame.encode() if isinstance(frame, str) else frame
-            receipt = {
-                "kind": "authenticated_onebot_ws", "window_sha256": window.plan.sha256,
-                "event_id": event["event_id"], "source_event_id": event["source_event_id"],
-                "input_sha256": input_digest(event["payload"]),
-                "frame_sha256": hashlib.sha256(frame_bytes).hexdigest(),
-                "received_at": received_at.isoformat(), "occurred_at": event["occurred_at"],
-                "protocol_epoch": window.plan.config.protocol_epoch,
-                "identity_sha256": window.plan.value["identity_sha256"],
-                "config_sha256": window.plan.value["config_sha256"],
-            }
-            evidence = {
-                "receipt": dict(receipt), "frame": frame_bytes.decode("utf-8"),
-                "peer": list(ws.remote_address), "endpoint": window.plan.config.onebot_ws_url,
-                "protocol": "OneBot-v11/SnowLuma/2.0.3-node", "bearer_accepted": True,
-            }
-            if event["payload"].get("rich"):
-                evidence["reference_projection"] = event["payload"]["rich"]
-            evidence_hash = digest(evidence)
-            receipt["evidence_sha256"] = evidence_hash
-            key = window.plan.config.capture_signing_key
-            receipt["signature"] = (Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key)).sign(
-                SIGNATURE_DOMAIN + encode(receipt).encode()
-            ).hex() if key else None)
-            capacity(window, capture_fence)
-            quota = cumulative.scope(window.plan)
-            if quota and cumulative.periods(received_at, quota["timezone"]) != cumulative.periods(
-                window.clock(), quota["timezone"],
-            ):
-                raise ValueError("CUMULATIVE_CAPTURE_PERIOD_CHANGED")
-            phase = "persist"
-            head = window.append("CAPTURED", {
-                "event_hash": digest(event["event_id"]), "capture_sha256": digest(receipt),
-                "frame_sha256": receipt["frame_sha256"],
-            })
-            if write_evidence(window, evidence) != evidence_hash:
-                raise ValueError("CAPTURE_EVIDENCE_CHANGED")
-            with window.db:
-                window.spool.put(event, fingerprint)
-                window.db.execute(
-                    "INSERT INTO window_inputs VALUES(?,?,?,'CAPTURED',?,?)",
-                    (event["event_id"], receipt["input_sha256"], "", encode(receipt),
-                     window.plan.sha256),
-                )
-                window.db.execute("UPDATE test_window SET state='OPEN',journal_head=?", (head,))
-            phase = "final_check"
-            window.verify()
-            phase = "ws_close"
-            return window.status() | {"input_approval": {
-                "window_sha256": window.plan.sha256, "event_id": event["event_id"],
-                "input_sha256": receipt["input_sha256"], "capture_sha256": digest(receipt),
-                "evidence_sha256": None,
-            }}
     except BaseException as error:
         diagnostic = capture_diagnostic(error, phase)
         error.capture_diagnostic = diagnostic

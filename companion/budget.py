@@ -121,7 +121,9 @@ def reserve(
             if not proactive_allowed(store, settings, now):
                 raise CoreError("AUTONOMY_PAUSED", 409)
         total = total_monthly(store, month.isoformat(timespec="microseconds"))
-        if settings.pricing_known and total + estimate > settings.monthly_limit_micro_usd:
+        unlimited_period = bool(approval and approval.unlimited_period_spend)
+        if (settings.pricing_known and not unlimited_period
+            and total + estimate > settings.monthly_limit_micro_usd):
             raise CoreError("MONTHLY_BUDGET_EXHAUSTED", 429)
         if autonomous:
             if scenario in {"memory_extract", "memory_review"}:
@@ -151,7 +153,8 @@ def reserve(
                 )["n"]
                 if limit == 0 or settings.reflection_monthly_micro_usd == 0:
                     raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
-                if monthly + estimate > settings.reflection_monthly_micro_usd:
+                if (not unlimited_period
+                    and monthly + estimate > settings.reflection_monthly_micro_usd):
                     raise CoreError("SCENARIO_MONTHLY_BUDGET_EXHAUSTED", 429)
                 if calls >= settings.reflection_max_daily_calls:
                     raise CoreError("SCENARIO_CALL_LIMIT", 429)
@@ -162,7 +165,7 @@ def reserve(
                 "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in scenarios) + ")",
                 (day.isoformat(timespec="microseconds"), *scenarios),
             )["n"]
-            if spent + estimate > limit:
+            if not unlimited_period and spent + estimate > limit:
                 raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
@@ -261,11 +264,13 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
     )
     if (
         daily["calls"] >= approval.daily_calls
-        or daily["amount"] + estimate > approval.daily_micro_usd
+        or (not approval.unlimited_period_spend
+            and daily["amount"] + estimate > approval.daily_micro_usd)
     ):
         raise CoreError("MODEL_DAILY_BUDGET_EXHAUSTED", 429)
     if (
-        total_monthly(store, month.isoformat(timespec="microseconds")) + estimate
+        not approval.unlimited_period_spend
+        and total_monthly(store, month.isoformat(timespec="microseconds")) + estimate
         > approval.monthly_micro_usd
     ):
         raise CoreError("MODEL_MONTHLY_BUDGET_EXHAUSTED", 429)
@@ -290,7 +295,8 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
             "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a." + column + "=?",
             (value,),
         )
-        if usage["calls"] >= calls or usage["amount"] + estimate > amount:
+        limited = column != "window_id" or not approval.unlimited_period_spend
+        if usage["calls"] >= calls or (limited and usage["amount"] + estimate > amount):
             raise CoreError("MODEL_" + code + "_BUDGET_EXHAUSTED", 429)
     running = store.one(
         "SELECT COUNT(*) AS n FROM model_usage m JOIN model_admissions a USING(request_id) "
@@ -467,8 +473,11 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
             "SELECT SUM(m.billed_micro_usd) AS n FROM model_admissions a "
             "JOIN model_usage m USING(request_id) WHERE a." + column + "=?", (value,),
         )["n"]
-        if total + delta > cap:
+        limited = column != "window_id" or not snapshot.get("unlimited_period_spend", False)
+        if limited and total + delta > cap:
             limits.append(code)
+    if snapshot.get("unlimited_period_spend", False):
+        return limits
     daily = store.one(
         "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
         "WHERE occurred_at>=? AND occurred_at<?", (day, next_day),

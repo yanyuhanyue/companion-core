@@ -11,9 +11,11 @@ import os
 import re
 import sqlite3
 import stat
+from contextlib import closing
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import httpx
@@ -139,6 +141,23 @@ def stored_plan(encoded, config):
     return plan
 
 
+def read_status(config):
+    """Inspect an active receiver without taking its exclusive Spool lock."""
+    directory = Path(config.data_dir)
+    database = directory / "spool.sqlite3"
+    if (directory.is_symlink() or database.is_symlink() or not database.is_file()
+        or (os.name != "nt" and directory.stat().st_mode & 0o077)):
+        raise ValueError("PRIVATE_DATA_DIRECTORY_REQUIRED")
+    with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("BEGIN")
+        row = db.execute("SELECT plan_json FROM test_window WHERE singleton=1").fetchone()
+        if row is None:
+            raise ValueError("WINDOW_NOT_FOUND")
+        plan = stored_plan(row[0], config)
+        return TestWindow(SimpleNamespace(db=db, directory=directory), plan).status()
+
+
 class WindowPlan:
     def __init__(self, value, config, inventory, authorization=None):
         fields = {
@@ -214,6 +233,11 @@ class WindowPlan:
             if "cumulative" in scope:
                 expected_scope.add("cumulative")
                 cumulative.validate(scope["cumulative"], config, self.start, self.end)
+            if "automatic_reply" in scope:
+                expected_scope.add("automatic_reply")
+                if (scope["automatic_reply"] is not True or not scope["capture_public_key"]
+                    or self.end - self.start > timedelta(hours=72)):
+                    raise ValueError("INVALID_AUTOMATIC_REPLY_SCOPE")
             if "segmented_reply" in scope or "max_send_attempts" in scope:
                 if "segmented_reply" in scope:
                     reply_segments.validate_scope(scope, value)
@@ -646,10 +670,12 @@ class TestWindow:
     def read_journal(self):
         path = self.plan.journal
         info = path.lstat()
+        maximum = (32 * 1048576
+                   if self.plan.value.get("live_text", {}).get("automatic_reply") else 1048576)
         if (
             path.is_symlink()
             or not stat.S_ISREG(info.st_mode)
-            or info.st_size > 1048576
+            or info.st_size > maximum
             or (os.name != "nt" and info.st_mode & 0o077)
         ):
             raise ValueError("INVALID_WINDOW_JOURNAL")
@@ -1143,6 +1169,11 @@ class TestWindow:
                 "UPDATE test_window SET state='STOPPED',reason=?,journal_head=? WHERE singleton=1",
                 (reason, head),
             )
+            if self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='automatic_received'",
+            ).fetchone():
+                self.db.execute("DELETE FROM automatic_received WHERE window_sha256=?",
+                                (self.plan.sha256,))
         return self.status()
 
     def check_spool(self):
@@ -1657,7 +1688,9 @@ def check_protocol_request(window, request, *, reference_read=False):
 
 
 async def command(config, args):
-    if args.command in {"window-status", "window-stop", "window-quota-inventory"}:
+    if args.command == "window-status":
+        return read_status(config)
+    if args.command in {"window-stop", "window-quota-inventory"}:
         database = Path(config.data_dir) / "spool.sqlite3"
         if not database.is_file() or database.is_symlink():
             raise ValueError("WINDOW_NOT_FOUND")
@@ -1681,8 +1714,6 @@ async def command(config, args):
             window = TestWindow(spool, plan)
             if args.command == "window-quota-inventory":
                 return cumulative.legacy_inventory(window)
-            if args.command == "window-status":
-                return window.status()
             # Always persist the local stop; an unreachable Core is not a confirmed
             # global stop. Report that failure, never claim a paid call was revoked.
             if plan.mode == "live_text":
@@ -1700,6 +1731,13 @@ async def command(config, args):
     with Spool(config) as spool:
         window = TestWindow(spool, plan)
         async with private_http_client(config.core_url, config.bridge_token) as client:
+            if args.command == "window-run":
+                from .continuous import run
+
+                async with private_http_client(
+                    config.onebot_http_url, config.onebot_token,
+                ) as protocol:
+                    return await run(window, client, protocol)
             if args.command == "window-open":
                 async with private_http_client(
                     config.onebot_http_url, config.onebot_token
