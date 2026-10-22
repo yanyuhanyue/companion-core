@@ -110,6 +110,8 @@ max_chunk_bytes = 64000
 [content]
 max_links_per_event = 2
 max_images_per_event = 2
+# 当前 QQ 多图支持 1–4 张；需同时配置 paid_model.image_input.max_images_per_request。
+# 图片+已批准记忆使用 per_request_calls=3；具体窗口配置见 docs/qq-input-understanding.md。
 max_images_per_article = 32
 article_image_micro_usd = 50000
 use_chat_model_for_vision = false

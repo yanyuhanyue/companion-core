@@ -95,6 +95,14 @@ def estimate_input_tokens(approval, messages, scenario):
             text, image_estimate = text_and_estimate(approval.image_input, messages)
             messages = [{"role": "user", "content": text}]
             estimate += image_estimate
+        elif any(isinstance(message, dict) and isinstance(message.get("content"), list)
+                 for message in messages):
+            from companion.image_input import messages_and_estimate
+
+            if scenario != "chat":
+                raise ValueError("unsupported image scenario")
+            messages, image_estimate = messages_and_estimate(approval.image_input, messages)
+            estimate += image_estimate
         for message in messages:
             if (
                 set(message) != {"role", "content"}

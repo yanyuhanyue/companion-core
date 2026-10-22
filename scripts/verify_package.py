@@ -29,6 +29,8 @@ FORBIDDEN = {
 
 def verify_source(archive):
     assert not any(FORBIDDEN.intersection(Path(n).parts) for n in archive.getnames())
+    assert not any(part.endswith(".owner-images")
+                   for name in archive.getnames() for part in Path(name).parts)
     assert not any("output/playwright/" in n for n in archive.getnames())
     assert not any(Path(n).suffix.lower() in {".node", ".dll", ".so", ".enc"}
                    for n in archive.getnames())
@@ -48,6 +50,7 @@ def verify_export_rebuild(source, temporary):
             "data/canary.sqlite3",
             "privacy/canary.jsonl",
             "backups/canary.enc",
+            "custom.db.owner-images/canary.raw",
         ):
             target = exported / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +80,8 @@ def main():
     verify_export_rebuild(source, temporary)
     with zipfile.ZipFile(wheel) as archive:
         assert not any(FORBIDDEN.intersection(Path(n).parts) for n in archive.namelist())
+        assert not any(part.endswith(".owner-images")
+                       for name in archive.namelist() for part in Path(name).parts)
         assert not any(Path(n).suffix.lower() in {".node", ".dll", ".so", ".enc"}
                        for n in archive.namelist())
         assert {

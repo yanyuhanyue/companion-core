@@ -130,7 +130,6 @@ def test_card_fields_are_unverified_and_only_safe_urls_are_discovered():
         "https://user:password@www.bilibili.com/video/BV1234567890",
         "http://www.bilibili.com/video/BV1234567890",
         "https://www.bilibili.com:444/video/BV1234567890",
-        "https://www.bilibili.com/video/BV1234567890?token=private",
         "https://www.bilibili.com/video/BV1234567890#private",
         "file:///private",
         "javascript:alert(1)",
@@ -175,7 +174,7 @@ def test_node_and_attachments_never_promote_third_party_body_or_sender():
     "message",
     [
         [{"type": "reply", "data": {"id": True}}],
-        [{"type": "reply", "data": {"id": "-42", "message": "/forget quoted"}}],
+        [{"type": "reply", "data": {"id": "-42", "arbitrary": "/forget quoted"}}],
         [{"type": "forward", "data": {"id": "x" * 257}}],
         [{"type": "text", "data": {"text": "owner", "sender": "fake"}}],
         [{"type": "text", "data": {"text": "x" * 20001}}],

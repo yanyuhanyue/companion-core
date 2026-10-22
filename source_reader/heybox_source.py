@@ -86,11 +86,11 @@ class NativeHeyboxSource:
         grant, fingerprint = account_grant(self.account_file, self.clock())
         if fingerprint == self.blocked_grant:
             raise ReadFailure("SOURCE_DISABLED")
-        if budget.validate_account_read:
-            await budget.validate_account_read()
-            grant, current = account_grant(self.account_file, self.clock())
+        def check():
+            _, current = account_grant(self.account_file, self.clock())
             if current != fingerprint:
                 raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
+
         timestamp, nonce = int(self.clock().timestamp()), secrets.token_hex(16).upper()
         params = {
             **WEB_PARAMS,
@@ -112,7 +112,7 @@ class NativeHeyboxSource:
                     "User-Agent": "CompanionSourceReader/0.6",
                     "Cookie": "; ".join(f"{k}={v}" for k, v in grant["cookies"].items()),
                 },
-                extensions={"timeout": {key: 8.0 for key in ("connect", "read", "write", "pool")}},
+                extensions=budget.request_extensions(check),
             ) as response:
                 if response.status in {401, 403, 429}:
                     raise ReadFailure(
@@ -131,6 +131,9 @@ class NativeHeyboxSource:
         except ReadFailure as error:
             # A rejected grant/contract is latched until the operator changes the grant.
             # Network uncertainty is handled by the existing worker and is never retried.
-            if str(error) not in {"READER_BYTE_LIMIT", "READER_REQUEST_LIMIT"}:
+            if str(error) not in {
+                "READER_BYTE_LIMIT", "READER_REQUEST_LIMIT",
+                "SOURCE_GRANT_REVALIDATION_FAILED", "SOURCE_GRANT_REVISION_CHANGED",
+            }:
                 self.blocked_grant = fingerprint
             raise

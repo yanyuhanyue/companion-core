@@ -18,10 +18,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
 from . import cumulative
-from .event_normalizer import decode, identifier, normalize
+from .event_normalizer import decode, identifier, normalize, redact
 from .network import checked_http_client, websocket
 from .onebot_client import OneBotClient
-from .rich_input import input_digest
+from .reference_reader import enrich, restore
+from .rich_input import MAX_RICH_BYTES, input_digest
 from .spool import encode
 from .window import SHA, check_protocol_request, digest, private_json, seal_protocol_content
 
@@ -40,6 +41,7 @@ CAPTURE_PHASES = frozenset(
         "ws_handshake",
         "receive",
         "validate",
+        "reference_read",
         "persist",
         "final_check",
         "ws_close",
@@ -126,7 +128,9 @@ def capture_diagnostic(error, phase):
 
 
 def input_event(window, frame, received_at):
-    raw = decode(frame, window.plan.config.max_frame_bytes)
+    scope = (window.plan.value.get("live_text") or {}).get("rich_input_scope", "none")
+    raw = decode(frame, window.plan.config.max_frame_bytes,
+                 max_depth=20 if scope == "references_v1" else 8)
     message = raw.get("message")
     plain = (isinstance(message, str) and "[CQ:" not in message) or (
         isinstance(message, list)
@@ -140,7 +144,6 @@ def input_event(window, frame, received_at):
             for segment in message
         )
     )
-    scope = (window.plan.value.get("live_text") or {}).get("rich_input_scope", "none")
     image_scope = (window.plan.value.get("live_text") or {}).get("image_scope", "none")
     event = normalize(
         frame,
@@ -170,7 +173,7 @@ def input_event(window, frame, received_at):
 def capacity(window, capture_fence=None):
     window.verify(capture_fence=capture_fence)
     window.check_spool()
-    window.spool.capacity(window.plan.config.max_frame_bytes * 3)
+    window.spool.capacity(window.plan.config.max_frame_bytes * 3 + MAX_RICH_BYTES * 2)
     if window.count("window_inputs", "state!='ACK'"):
         raise ValueError("ONE_INPUT_AT_A_TIME")
     if window.count("window_inputs") >= (
@@ -215,7 +218,9 @@ async def receive_frame(window, ws, capture_fence):
                 if received_bytes > window.plan.config.max_frame_bytes * 2:
                     raise ValueError("CAPTURE_BYTE_CAP")
                 window.verify(capture_fence=capture_fence)
-                raw = decode(frame, window.plan.config.max_frame_bytes)
+                rich = window.plan.value.get("live_text", {}).get("rich_input_scope")
+                raw = decode(frame, window.plan.config.max_frame_bytes,
+                             max_depth=20 if rich == "references_v1" else 8)
                 if raw.get("post_type") == "meta_event":
                     validate_meta(window, raw)
                 elif raw.get("post_type") == "notice":
@@ -312,6 +317,34 @@ def write_evidence(window, evidence):
     return evidence_hash
 
 
+class CaptureReferences:
+    """Only a pending authenticated capture may dispatch these exact read requests."""
+
+    def __init__(self, window, protocol, check):
+        self.window, self.protocol, self.check = window, protocol, check
+
+    async def read(self, name, body):
+        async def boundary(request):
+            check_protocol_request(self.window, request, reference_read=True)
+            content = request.content
+            if request.url.path != "/" + name or decode(content, 1024) != body:
+                raise ValueError("CAPTURE_REFERENCE_REQUEST_CHANGED")
+            self.check()
+            seal_protocol_content(request, content)
+
+        async with checked_http_client(self.protocol, boundary) as scoped:
+            return await OneBotClient(self.window.plan.config, scoped).action(name, body)
+
+    async def get_msg(self, reference):
+        reference = identifier(reference, signed=True)
+        if reference == "0":
+            raise ValueError("INVALID_REFERENCE")
+        return await self.read("get_msg", {"message_id": int(reference)})
+
+    async def get_forward_msg(self, reference):
+        return await self.read("get_forward_msg", {"id": reference})
+
+
 async def capture_once(window, client, protocol):
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
@@ -395,6 +428,12 @@ async def capture_once(window, client, protocol):
                     )
                 phase = "ws_close"
                 return window.status()
+            phase = "reference_read"
+            await enrich(
+                event, raw["message"], CaptureReferences(window, protocol, verify_capture),
+                lambda text: redact(text, window.plan.config),
+            )
+            verify_capture()
             frame_bytes = frame.encode() if isinstance(frame, str) else frame
             receipt = {
                 "kind": "authenticated_onebot_ws", "window_sha256": window.plan.sha256,
@@ -411,6 +450,8 @@ async def capture_once(window, client, protocol):
                 "peer": list(ws.remote_address), "endpoint": window.plan.config.onebot_ws_url,
                 "protocol": "OneBot-v11/SnowLuma/2.0.3-node", "bearer_accepted": True,
             }
+            if event["payload"].get("rich"):
+                evidence["reference_projection"] = event["payload"]["rich"]
             evidence_hash = digest(evidence)
             receipt["evidence_sha256"] = evidence_hash
             key = window.plan.config.capture_signing_key
@@ -502,7 +543,7 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
             raise ValueError("INDIVIDUAL_CAPTURE_APPROVAL_REQUIRED")
         evidence = private_json(
             window.spool.directory / "captures" / (receipt["evidence_sha256"] + ".json"),
-            window.plan.config.max_frame_bytes * 3 + 8192,
+            window.plan.config.max_frame_bytes * 3 + MAX_RICH_BYTES + 8192,
         )
         if digest(evidence) != receipt["evidence_sha256"]:
             raise ValueError("CAPTURE_EVIDENCE_CHANGED")
@@ -519,6 +560,8 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
         ):
             raise ValueError("CAPTURE_EVIDENCE_CHANGED")
         raw, event = input_event(window, frame, datetime.fromisoformat(receipt["received_at"]))
+        if "reference_projection" in evidence:
+            restore(event, evidence["reference_projection"])
         if (
             encode(event) != row["body"]
             or receipt["event_id"] != event["event_id"]
@@ -548,62 +591,66 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
         async with window.core_http(client) as scoped:
             await window.spool.flush_one(scoped)
         window.verify()
-        if event["payload"].get("shared_content"):
-            from .images import fetch_image, original_image
+        if any(item.get("kind") == "image" for item in event["payload"].get("shared_content", [])):
+            from .images import fetch_image, original_images
 
-            image = original_image(raw["message"])
-            if image is None:
+            images = original_images(raw["message"])
+            if not images:
                 raise ValueError("ORIGINAL_OWNER_IMAGE_REQUIRED")
             prefix = "/internal/v2/content/" + event["event_id"] + "/image"
-            claim = await window.core_post(
-                client,
-                prefix + "/claim",
-                {
-                    "request_key": "image:0",
-                    "source_sha256": image.source_sha256,
-                },
-            )
-
-            async def check_image():
-                await window.core_post(
+            for image in images:
+                key = f"image:{image.slot}"
+                claim = await window.core_post(
                     client,
-                    prefix + "/check",
+                    prefix + "/claim",
                     {
-                        "lease_token": claim["lease_token"],
+                        "request_key": key,
                         "source_sha256": image.source_sha256,
                     },
                 )
-                window.verify()
-                if datetime.fromisoformat(claim["lease_until"]) <= window.clock():
-                    raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
 
-            options = {"resolver": image_resolver} if image_resolver is not None else {}
-            data, mime = await fetch_image(
-                image, claim["max_bytes"], check=check_image, transport=image_transport, **options
-            )
-            await check_image()
-            proof = {"plan_sha256": window.plan.sha256, "event_id": event["event_id"],
-                     "source_sha256": image.source_sha256, "lease_token": claim["lease_token"],
-                     "media_sha256": hashlib.sha256(data).hexdigest(), "mime": mime}
-            proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
-                window.plan.config.capture_signing_key)).sign(
-                    b"companion-core/onebot-owner-image/v1\x00" + encode(proof).encode()).hex()
-            async with window.core_http(client) as scoped:
-                response = await scoped.post(
-                    prefix,
-                    content=data,
-                    timeout=40,
-                    headers={
-                        "Content-Type": mime,
-                        "X-Content-Key": "image:0",
-                        "X-Content-Lease": claim["lease_token"],
-                        "X-Content-Proof": encode(proof),
-                    },
+                async def check_image(*, image=image, claim=claim):
+                    await window.core_post(
+                        client,
+                        prefix + "/check",
+                        {
+                            "lease_token": claim["lease_token"],
+                            "source_sha256": image.source_sha256,
+                        },
+                    )
+                    window.verify()
+                    if datetime.fromisoformat(claim["lease_until"]) <= window.clock():
+                        raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
+
+                options = {"resolver": image_resolver} if image_resolver is not None else {}
+                data, mime = await fetch_image(
+                    image, claim["max_bytes"], check=check_image,
+                    transport=image_transport, **options,
                 )
-                response.raise_for_status()
-                if response.json().get("state") != "SUCCEEDED":
-                    raise ValueError("IMAGE_ANALYSIS_FAILED_CLOSED")
-            window.verify()
+                await check_image()
+                proof = {"plan_sha256": window.plan.sha256, "event_id": event["event_id"],
+                         "source_sha256": image.source_sha256, "lease_token": claim["lease_token"],
+                         "media_sha256": hashlib.sha256(data).hexdigest(), "mime": mime}
+                proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+                    window.plan.config.capture_signing_key)).sign(
+                        b"companion-core/onebot-owner-image/v1\x00" + encode(proof).encode()).hex()
+                async with window.core_http(client) as scoped:
+                    response = await scoped.post(
+                        prefix,
+                        content=data,
+                        timeout=40,
+                        headers={
+                            "Content-Type": mime,
+                            "X-Content-Key": key,
+                            "X-Content-Lease": claim["lease_token"],
+                            "X-Content-Proof": encode(proof),
+                        },
+                    )
+                    response.raise_for_status()
+                    expected = "SUCCEEDED" if image.slot == len(images) - 1 else "STAGED"
+                    if response.json().get("state") != expected:
+                        raise ValueError("IMAGE_ANALYSIS_FAILED_CLOSED")
+                window.verify()
         return window.status()
     except BaseException:
         await failed(window, client, "CAPTURE_APPROVAL_FAILED_CLOSED")

@@ -10,11 +10,12 @@ import httpx
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from .config import BridgeConfig
-from .event_normalizer import decode, normalize
+from .event_normalizer import decode, normalize, redact
 from .metrics import Metrics
 from .network import private_http_client, websocket
 from .onebot_client import OneBotClient
 from .outbound import deliver_tick
+from .reference_reader import enrich
 from .spool import Spool, encode
 
 
@@ -25,7 +26,7 @@ async def pause(stop, seconds):
         pass
 
 
-async def receive(config, spool, wake, stop, metrics):
+async def receive(config, spool, wake, stop, metrics, onebot=None):
     if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
         raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
     delay = 0.25
@@ -37,7 +38,9 @@ async def receive(config, spool, wake, stop, metrics):
                     received_ns = time.perf_counter_ns()
                     try:
                         payload = normalize(frame, config)
-                        raw = decode(frame, config.max_frame_bytes) if payload else None
+                        raw = (decode(frame, config.max_frame_bytes, max_depth=(
+                            20 if config.rich_input_scope == "references_v1" else 8
+                        )) if payload else None)
                     except (ValueError, UnicodeError):
                         metrics.emit("event_rejected")
                         continue
@@ -50,6 +53,24 @@ async def receive(config, spool, wake, stop, metrics):
                                 }
                             ).encode()
                         ).hexdigest()
+                        prior = spool.db.execute(
+                            "SELECT fingerprint FROM inbox WHERE key=?", (payload["event_id"],),
+                        ).fetchone()
+                        if prior:
+                            if prior[0] != fingerprint:
+                                raise ValueError("SOURCE_EVENT_CONFLICT")
+                            metrics.emit("duplicate_suppressed")
+                            continue
+                        if payload["payload"].get("rich"):
+                            if onebot is None:
+                                async with private_http_client(
+                                    config.onebot_http_url, config.onebot_token,
+                                ) as protocol:
+                                    await enrich(payload, raw["message"], OneBotClient(
+                                        config, protocol), lambda text: redact(text, config))
+                            else:
+                                await enrich(payload, raw["message"], onebot,
+                                             lambda text: redact(text, config))
                         # Stop on storage/capacity/conflict errors; never silently lose the frame.
                         added = spool.put(payload, fingerprint)
                         if added:
@@ -128,7 +149,7 @@ async def run(config):
                 raise ValueError("ONEBOT_NOT_READY")
             async with asyncio.TaskGroup() as group:
                 tasks = [
-                    group.create_task(receive(config, spool, wake, stop, metrics)),
+                    group.create_task(receive(config, spool, wake, stop, metrics, onebot)),
                     group.create_task(upload(core, spool, wake, stop, metrics)),
                     group.create_task(deliver(core, onebot, spool, stop, metrics)),
                 ]

@@ -1,9 +1,13 @@
+import re
+
 import httpx
 
 from .event_normalizer import decode, identifier
 
 
-async def bounded_post(client, path, body, *, headers=None, statuses=(200,), with_status=False):
+async def bounded_post(
+    client, path, body, *, headers=None, statuses=(200,), with_status=False, max_depth=8,
+):
     async with client.stream("POST", path, json=body, headers=headers) as response:
         if response.status_code not in statuses:
             response.raise_for_status()
@@ -13,7 +17,7 @@ async def bounded_post(client, path, body, *, headers=None, statuses=(200,), wit
             content.extend(chunk)
             if len(content) > 65536:
                 raise ValueError("RESPONSE_TOO_LARGE")
-    result = decode(bytes(content), 65536)
+    result = decode(bytes(content), 65536, max_depth=max_depth)
     return (response.status_code, result) if with_status else result
 
 
@@ -22,9 +26,15 @@ class OneBotClient:
         self.config, self.client = config, client
 
     async def action(self, name, body):
-        if name not in {"get_login_info", "get_status", "get_version_info", "send_private_msg"}:
+        if name not in {
+            "get_login_info", "get_status", "get_version_info", "send_private_msg",
+            "get_msg", "get_forward_msg",
+        }:
             raise ValueError("ACTION_NOT_ALLOWED")
-        result = await bounded_post(self.client, "/" + name, body)
+        result = await bounded_post(
+            self.client, "/" + name, body,
+            max_depth=20 if name in {"get_msg", "get_forward_msg"} else 8,
+        )
         if (
             result.get("status") != "ok"
             or type(result.get("retcode")) is not int
@@ -33,6 +43,21 @@ class OneBotClient:
         ):
             raise ValueError("INVALID_ONEBOT_ACCEPTANCE")
         return result["data"]
+
+    async def get_msg(self, reference):
+        reference = identifier(reference, signed=True)
+        if reference == "0":
+            raise ValueError("INVALID_REFERENCE")
+        # SnowLuma refreshes media URLs internally. Callers project text only and
+        # must never download or persist those returned URLs.
+        return await self.action("get_msg", {"message_id": int(reference)})
+
+    async def get_forward_msg(self, reference):
+        if not isinstance(reference, str) or not re.fullmatch(
+            r"[A-Za-z0-9_+/=-]{1,256}", reference,
+        ):
+            raise ValueError("INVALID_REFERENCE")
+        return await self.action("get_forward_msg", {"id": reference})
 
     async def probe(self):
         identity = await self.action("get_login_info", {})

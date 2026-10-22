@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from companion import budget, live_text, qq_images
+from companion import budget, image_spool, live_text, qq_images
 from companion.contracts import CoreError
 from companion.media_config import MediaEndpoint
 from companion.media_provider import HTTPMediaProvider
@@ -106,6 +106,15 @@ def erase_content(store, event_ids):
     if not store.one("SELECT 1 FROM sqlite_master WHERE name='content_items' AND type='table'"):
         return
     for event_id in event_ids:
+        rows = store.rows(
+            "SELECT item_id FROM content_items WHERE owner_event_id=? "
+            "OR source_event_id=? OR output_event_id=?", (event_id, event_id, event_id),
+        )
+        image_spool.discard(store, [row["item_id"] for row in rows])
+        for row in rows:
+            store.execute(
+                "DELETE FROM runtime_meta WHERE key=?", (qq_images.STAGED + row["item_id"],),
+            )
         store.execute(
             "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND request_id IN "
             "(SELECT usage_request_id FROM content_items WHERE owner_event_id=? "
@@ -149,6 +158,18 @@ class ContentService:
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
         self.model = model
+        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes)
+
+    def discard_images(self, event_id):
+        rows = self.store.rows(
+            "SELECT item_id FROM content_items WHERE owner_event_id=? AND kind='qq_image'",
+            (event_id,),
+        )
+        image_spool.discard(self.store, [row["item_id"] for row in rows])
+        for row in rows:
+            self.store.execute(
+                "DELETE FROM runtime_meta WHERE key=?", (qq_images.STAGED + row["item_id"],),
+            )
 
     def _source(self, event_id, upload=False):
         if not self.settings.content_enabled:
@@ -170,6 +191,10 @@ class ContentService:
             approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
             if qq_images.manifest(body):
                 qq_images.source(self.store, self.settings, approval, event_id)
+            elif getattr(approval, "link_scope", "none") == "owner_links_v1":
+                from companion import qq_source
+
+                qq_source.source(self.store, self.settings, approval, event_id)
             elif body.get("shared_content"):
                 raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
         if body.get("diary_command") or body.get("control_command"):
@@ -186,9 +211,21 @@ class ContentService:
             return []
         event, body = self._source(event_id)
         bounded = live_text.active(self.store, self.settings)
-        if bounded and not qq_images.manifest(body):
+        link_scope = bounded and getattr(
+            self.settings.live_text_window, "link_scope", "none",
+        ) == "owner_links_v1"
+        if bounded and not qq_images.manifest(body) and not link_scope:
             return []
         links = [] if bounded else shared_links(body.get("text", ""))
+        if not bounded or link_scope:
+            for segment in (body.get("rich") or {}).get("segments", []):
+                if segment.get("type") != "json":
+                    continue
+                for field in segment.get("fields", []):
+                    if field.get("kind") == "url":
+                        _, canonical = content_target(field["value"])
+                        if canonical not in links:
+                            links.append(canonical)
         images = set()
         for item in body.get("shared_content", [])[:4]:
             if item.get("kind") == "link" and not bounded:
@@ -343,7 +380,7 @@ class ContentService:
             "ORDER BY e.rowid DESC LIMIT 3",
             (event["conversation_id"], event_id),
         )
-        if qq_images.enabled(self.settings):
+        if live_text.active(self.store, self.settings):
             roots = [{"event_id": event_id}]
         result = []
         for root in reversed(roots):
@@ -514,6 +551,8 @@ class ContentService:
 
     def register_link_images(self, owner_event_id, source_event_id, image_urls):
         self._source(owner_event_id)
+        if live_text.active(self.store, self.settings):
+            return
         source = self.store.one(
             "SELECT e.source,o.adapter_id FROM events e JOIN observations o USING(event_id) "
             "JOIN event_dependencies d ON d.event_id=e.event_id WHERE e.event_id=? "
@@ -757,109 +796,123 @@ class ContentService:
         try:
             self._source(original["owner_event_id"], upload=True)
             policy = qq_images.policy(cfg, cfg.live_text_window)
-            validate_image(
-                data, mime, min(self.options.max_image_bytes, policy.max_bytes_per_image)
-            )
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": VISION_PROMPT},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime};base64,"
-                                + base64.b64encode(data).decode("ascii")
-                            },
-                        },
-                    ],
-                }
-            ]
+            maximum = min(self.options.max_image_bytes, policy.max_bytes_per_image)
+            validate_image(data, mime, maximum)
             from companion.image_input import text_and_estimate
 
-            # Includes the independent pixel policy before reserving any paid attempt.
-            text_and_estimate(policy, messages)
+            part = {
+                "type": "image_url", "image_url": {
+                    "url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"),
+                },
+            }
+            text_and_estimate(policy, [{"role": "user", "content": [
+                {"type": "text", "text": VISION_PROMPT}, part,
+            ]}])
             with s.transaction():
                 approval, _, _ = live_text.guard(s, cfg, clock)
-                row, job, _ = qq_images.lease(s, cfg, approval, clock, original["owner_event_id"])
-                qq_images.upload_proof(
-                    approval,
-                    row["owner_event_id"],
-                    qq_images.manifest(
-                        json.loads(
-                            s.one(
-                                "SELECT body_json FROM events WHERE event_id=?",
-                                (row["owner_event_id"],),
-                            )["body_json"]
-                        )
-                    ),
-                    lease_token,
-                    hashlib.sha256(data).hexdigest(),
-                    mime,
-                    proof,
+                row, job, image = qq_images.lease(
+                    s, cfg, approval, clock, original["owner_event_id"], lease_token=lease_token,
                 )
-                if row["lease_token"] != lease_token:
+                if row["item_id"] != original["item_id"]:
                     raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
+                qq_images.upload_proof(
+                    approval, row["owner_event_id"], image, lease_token,
+                    hashlib.sha256(data).hexdigest(), mime, proof,
+                )
+                image_spool.put(
+                    s, row, data, mime, after(clock(), image_spool.RETENTION_SECONDS),
+                )
+                s.insert("runtime_meta", key=qq_images.STAGED + row["item_id"], value=encode(proof))
                 s.execute(
-                    "UPDATE content_items SET state='RUNNING',usage_request_id=?,"
-                    "fingerprint=?,media_sha256=?,lease_until=?,updated_at=? WHERE item_id=?",
-                    (
-                        request_id,
-                        hashlib.sha256(mime.encode() + b"\0" + data).hexdigest(),
-                        hashlib.sha256(data).hexdigest(),
-                        min(row["deadline"], after(clock(), cfg.timeout_seconds + 5)),
-                        clock(),
-                        row["item_id"],
-                    ),
+                    "UPDATE content_items SET state='QUEUED',fingerprint=?,media_sha256=?,"
+                    "updated_at=? WHERE item_id=?",
+                    (hashlib.sha256(mime.encode() + b"\0" + data).hexdigest(),
+                     hashlib.sha256(data).hexdigest(), clock(), row["item_id"]),
+                )
+                rows = [item for item in self._rows(row["owner_event_id"])
+                        if item["kind"] == "qq_image"]
+                if any(item["state"] != "QUEUED" for item in rows):
+                    return {"state": "STAGED", "slot": row["slot"], "duplicate": False}
+                if any(item["deadline"] <= clock() for item in rows):
+                    raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
+                _, _, sources, _ = qq_images.source(s, cfg, approval, row["owner_event_id"])
+                parts, proofs = [], []
+                for item, source_image in zip(rows, sources, strict=True):
+                    saved, saved_mime = image_spool.get(
+                        s, item, clock(), maximum,
+                    )
+                    staged = s.one(
+                        "SELECT value FROM runtime_meta WHERE key=?",
+                        (qq_images.STAGED + item["item_id"],),
+                    )
+                    staged_proof = json.loads(staged["value"]) if staged else None
+                    qq_images.upload_proof(
+                        approval, item["owner_event_id"], source_image, item["lease_token"],
+                        hashlib.sha256(saved).hexdigest(), saved_mime, staged_proof,
+                    )
+                    if (hashlib.sha256(saved).hexdigest() != item["media_sha256"]
+                        or hashlib.sha256(saved_mime.encode() + b"\0" + saved).hexdigest()
+                        != item["fingerprint"]):
+                        raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
+                    proofs.append(staged_proof)
+                    parts.append({"type": "image_url", "image_url": {
+                        "url": f"data:{saved_mime};base64,"
+                        + base64.b64encode(saved).decode("ascii"),
+                    }})
+                prompt = VISION_PROMPT + (
+                    " 图片按发送顺序编号为图片1至图片" + str(len(parts))
+                    + "，逐图描述可见对象、文字、差异及适合检索主人既往需求的主题线索。"
+                    "这些线索只描述当前图片，不能作为主人的历史偏好。"
+                )
+                messages = [{"role": "user", "content": [{"type": "text", "text": prompt}, *parts]}]
+                text_and_estimate(policy, messages)
+                s.execute(
+                    "UPDATE content_items SET state='RUNNING',usage_request_id=?,lease_until=?,"
+                    "updated_at=? WHERE owner_event_id=? AND kind='qq_image' AND state='QUEUED'",
+                    (request_id, min(row["deadline"], after(clock(), cfg.timeout_seconds + 5)),
+                     clock(), row["owner_event_id"]),
                 )
                 row = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
-                qq_images.freeze(s, cfg, approval, clock, row, messages, proof)
-            # Preparation is durable before reserve. A crash cannot return to WAITING.
+                qq_images.freeze(s, cfg, approval, clock, row, messages, proofs)
             model = self.model()
             budget.reserve(
-                s,
-                cfg,
-                job["job_id"],
-                "content_vision",
-                messages,
-                clock(),
-                request_id=request_id,
-                logical_request_id=job["job_id"],
-                clock=clock,
+                s, cfg, job["job_id"], "content_vision", messages, clock(), request_id=request_id,
+                logical_request_id=job["job_id"], clock=clock,
             )
             reserved = True
             async with asyncio.timeout(cfg.timeout_seconds + 2):
                 response = await budget.complete(
-                    model, s, cfg, request_id, messages, "content_vision", clock
+                    model, s, cfg, request_id, messages, "content_vision", clock,
                 )
-            # The calling seam settles liability before output checks can discard a result.
             text = redact(response.text, cfg).replace(
-                cfg.model_key.get_secret_value(), "[REDACTED]"
+                cfg.model_key.get_secret_value(), "[REDACTED]",
             )
             if not text.strip() or len(text) > 6000:
                 raise CoreError("CONTENT_IMAGE_RESULT_INVALID", 502)
             with s.transaction():
                 approval, _, _ = live_text.guard(s, cfg, clock)
-                current, _, _ = qq_images.lease(
-                    s, cfg, approval, clock, row["owner_event_id"], request_id=request_id
+                qq_images.lease(
+                    s, cfg, approval, clock, row["owner_event_id"], request_id=request_id,
                 )
-                if (
-                    current["lease_token"] != lease_token
-                    or current["fingerprint"] != row["fingerprint"]
-                    or current["media_sha256"] != row["media_sha256"]
-                ):
-                    raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
-                event_id = self._record_image(
-                    current, text, title="主人当前分享的图片", model=cfg.model_name,
-                    source_event_ids=[current["owner_event_id"]],
-                )
-            return {"state": "SUCCEEDED", "event_id": event_id, "duplicate": False}
+                qq_images.frozen(s, cfg, approval, job)
+                event_ids = []
+                for current in self._rows(row["owner_event_id"]):
+                    if current["kind"] != "qq_image":
+                        continue
+                    event_ids.append(self._record_image(
+                        current, text,
+                        title=f"主人当前分享的图片{current['slot'] + 1}（同批联合观察）",
+                        model=cfg.model_name, source_event_ids=[current["owner_event_id"]],
+                    ))
+            return {"state": "SUCCEEDED", "event_id": event_ids[0], "duplicate": False}
         except BaseException as error:
+            self.discard_images(original["owner_event_id"])
             with s.transaction():
                 s.execute(
                     "UPDATE content_items SET state=?,error_code='CONTENT_IMAGE_FAILED_CLOSED',"
-                    "updated_at=? WHERE item_id=? AND state IN ('FETCHING','RUNNING')",
-                    ("UNKNOWN" if reserved else "FAILED", clock(), original["item_id"]),
+                    "updated_at=? WHERE owner_event_id=? AND kind='qq_image' "
+                    "AND state IN ('WAITING','QUEUED','FETCHING','RUNNING')",
+                    ("UNKNOWN" if reserved else "FAILED", clock(), original["owner_event_id"]),
                 )
                 live_text.record_failure(s, cfg, "CONTENT_IMAGE_FAILED_CLOSED")
             if isinstance(error, CoreError):
@@ -935,7 +988,7 @@ class ContentService:
         self, owner_event_id, request_key, data, mime_type, lease_token="", image_proof=None,
     ):
         self._source(owner_event_id, upload=True)
-        matched = re.fullmatch(r"image:([01])", request_key)
+        matched = re.fullmatch(r"image:([0-3])", request_key)
         if not matched:
             raise CoreError("CONTENT_IMAGE_SLOT_INVALID", 400)
         self.schedule(owner_event_id)
@@ -952,7 +1005,7 @@ class ContentService:
     def claim_upload(self, owner_event_id, request_key, source_sha256=None):
         """Reserve the one permitted CDN download before the bridge performs GET."""
         self._source(owner_event_id, upload=True)
-        matched = re.fullmatch(r"image:([01])", request_key)
+        matched = re.fullmatch(r"image:([0-3])", request_key)
         if not matched:
             raise CoreError("CONTENT_IMAGE_SLOT_INVALID", 400)
         self.schedule(owner_event_id)
@@ -966,13 +1019,15 @@ class ContentService:
                 raise CoreError("CONTENT_IMAGE_NOT_SHARED", 403)
             if qq_images.enabled(self.settings):
                 approval, _, attempts = live_text.guard(self.store, self.settings, self.clock)
-                if attempts + 2 > min(approval.max_model_attempts,
-                                      self.settings.paid_model.window_calls):
+                needed = 3 if approval.memory_scope == "approved_facts" else 2
+                if attempts + needed > min(
+                    approval.max_model_attempts, self.settings.paid_model.window_calls,
+                ):
                     raise CoreError("LIVE_IMAGE_TWO_CALLS_REQUIRED", 429)
-                _, _, image, _ = qq_images.source(
+                _, _, images, _ = qq_images.source(
                     self.store, self.settings, approval, owner_event_id
                 )
-                if source_sha256 != image["source_sha256"]:
+                if source_sha256 != images[row["slot"]]["source_sha256"]:
                     raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
             if row["state"] != "WAITING" or not row["reserved_bytes"]:
                 raise CoreError("CONTENT_IMAGE_ALREADY_" + row["state"], 409)
@@ -1000,7 +1055,8 @@ class ContentService:
         with self.store.transaction():
             approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
             row, _, image = qq_images.lease(
-                self.store, self.settings, approval, self.clock, owner_event_id
+                self.store, self.settings, approval, self.clock, owner_event_id,
+                lease_token=lease_token,
             )
             if row["lease_token"] != lease_token or image["source_sha256"] != source_sha256:
                 raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
@@ -1010,6 +1066,7 @@ class ContentService:
         if not self.settings.content_enabled:
             return False
         s, now = self.store, self.clock()
+        image_spool.cleanup(s, now, self.options.max_image_bytes)
         day, _ = self._periods()
         for lost in s.rows(
             "SELECT m.request_id FROM model_usage m JOIN content_items c "

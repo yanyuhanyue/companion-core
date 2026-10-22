@@ -39,6 +39,7 @@ exclude = [
     ".env", "config.toml", "**/__pycache__/**", "**/*.py[cod]", "*.sqlite*", "*.log",
     ".pytest_cache/**", ".ruff_cache/**", ".codex-remote-attachments/**",
     ".playwright-cli/**", "output/playwright/**",
+    "**/*.owner-images/**",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]

@@ -15,7 +15,7 @@ def identifier(value, *, signed=False):
     return value
 
 
-def decode(frame, max_bytes):
+def decode(frame, max_bytes, *, max_depth=8):
     if not isinstance(frame, (str, bytes)) or len(frame) > max_bytes:
         raise ValueError("FRAME_TOO_LARGE")
     if isinstance(frame, bytes):
@@ -39,7 +39,7 @@ def decode(frame, max_bytes):
     while pending:
         value, depth = pending.pop()
         count += 1
-        if depth > 8 or count > 2048:
+        if depth > max_depth or count > 2048:
             raise ValueError("EVENT_TOO_COMPLEX")
         if isinstance(value, str):
             value.encode("utf-8", errors="strict")
@@ -108,7 +108,8 @@ def text_only(message):
 
 
 def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="none"):
-    raw = decode(frame, config.max_frame_bytes)
+    scope = config.rich_input_scope if rich_input_scope is None else rich_input_scope
+    raw = decode(frame, config.max_frame_bytes, max_depth=20 if scope == "references_v1" else 8)
     if (
         raw.get("post_type") != "message"
         or raw.get("message_type") != "private"
@@ -133,10 +134,10 @@ def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="no
         raise ValueError("INVALID_EVENT_TIME")
     source = f"{config.bot_qq_id}:{config.origin}:epoch:{config.protocol_epoch}:{message_id}"
     key = hashlib.sha256(source.encode()).hexdigest()
-    scope = config.rich_input_scope if rich_input_scope is None else rich_input_scope
     rich = None
     if scope == "references_v1":
-        from .rich_input import project
+        from .rich_input import MAX_RICH_BYTES, project
+        from .spool import encode
 
         text, rich = project(raw.get("message"), lambda text: redact(text, config))
     elif scope == "none":
@@ -161,15 +162,19 @@ def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="no
     if image_scope != "none":
         if image_scope != "owner_image_v1" or scope != "references_v1":
             raise ValueError("INVALID_IMAGE_SCOPE")
-        from .images import original_image
+        from .images import original_images
 
-        image = original_image(raw.get("message"))
-        if image is not None:
+        images = original_images(raw.get("message"))
+        if images:
+            projections = {image.index: image.projection() for image in images}
             rich["segments"] = [
-                image.projection() if item["index"] == image.index else item
-                for item in rich["segments"]
+                projections.get(item["index"], item) for item in rich["segments"]
             ]
-            event["payload"]["shared_content"] = [{"kind": "image", "slot": 0}]
+            event["payload"]["shared_content"] = [
+                {"kind": "image", "slot": image.slot} for image in images
+            ]
     if rich:
+        if len(encode(rich).encode()) > MAX_RICH_BYTES:
+            raise ValueError("RICH_INPUT_TOO_LARGE")
         event["payload"]["rich"] = rich
     return event

@@ -95,6 +95,8 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 ## 常见运行状态
 
+原生 OneBot Bridge 的引用、卡片正文及签名受控窗口的多图与记忆配置，见 [QQ 输入理解说明](qq-input-understanding.md)。
+
 - `MODEL_RETRYABLE`：最多 3 次指数退避，保留未知计费预留。
 - `MONTHLY_BUDGET_EXHAUSTED`：停止新模型请求，普通消息得到明确失败提示；提高预算需修改配置。
 - `DELIVERY_UNCERTAIN`：不自动重发；查看 QQ 后使用“/核对发送”指令。新普通聊天仍可继续。

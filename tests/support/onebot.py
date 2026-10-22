@@ -16,6 +16,8 @@ def provider(request, sends, receipt=None):
         data = {"online": True, "good": True}
     elif action == "/get_version_info":
         data = {"app_name": "SnowLuma", "app_version": "2.0.3-node"}
+    elif action in {"/get_msg", "/get_forward_msg"}:
+        return httpx.Response(200, json={"status": "failed", "retcode": 100, "data": None})
     elif action == "/send_private_msg":
         body = json.loads(request.content)
         assert body["user_id"] == 10001

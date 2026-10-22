@@ -33,7 +33,7 @@ def test_real_httpcore_trace_does_not_log_signed_redirect_header(caplog):
 
             with pytest.raises(ValueError, match="IMAGE_FETCH_REJECTED"):
                 await images.fetch_image(
-                    images.original_image([image_segment()]),
+                    images.original_images([image_segment()])[0],
                     100,
                     check=check,
                     resolver=resolve,
@@ -55,16 +55,19 @@ def image_segment(url=URL):
     }
 
 
-def test_only_one_top_level_image_and_source_hash_without_url_projection():
+def test_top_level_images_keep_source_order_and_hash_without_url_projection():
     raw = image_segment()
-    value = images.original_image(
+    values = images.original_images(
         [
             {"type": "reply", "data": {"id": "42"}},
             {"type": "text", "data": {"text": "owner text"}},
             raw,
             {"type": "node", "data": {"content": [image_segment()]}},
+            {"type": "text", "data": {"text": "compare with"}},
+            raw,
         ]
     )
+    value = values[0]
     assert value.index == 2 and value.source_sha256 == digest(raw)
     assert value.projection() == {
         "index": 2,
@@ -75,10 +78,13 @@ def test_only_one_top_level_image_and_source_hash_without_url_projection():
         "source_sha256": digest(raw),
     }
     assert URL not in repr(value) and URL not in repr(value.projection())
-    assert images.original_image([{"type": "node", "data": {"content": [raw]}}]) is None
-    assert images.original_image("[CQ:image,url=forged]") is None
-    with pytest.raises(ValueError, match="ONE_OWNER_IMAGE_REQUIRED"):
-        images.original_image([raw, raw])
+    assert [(image.index, image.slot) for image in values] == [(2, 0), (5, 1)]
+    assert values[1].projection()["source_sha256"] == digest(raw)
+    assert images.original_images([{"type": "node", "data": {"content": [raw]}}]) == []
+    assert images.original_images("[CQ:image,url=forged]") == []
+    assert len(images.original_images([raw] * images.MAX_OWNER_IMAGES)) == images.MAX_OWNER_IMAGES
+    with pytest.raises(ValueError, match="OWNER_IMAGE_LIMIT_EXCEEDED"):
+        images.original_images([raw] * (images.MAX_OWNER_IMAGES + 1))
 
 
 @pytest.mark.parametrize(
@@ -98,7 +104,7 @@ def test_only_one_top_level_image_and_source_hash_without_url_projection():
 )
 def test_unknown_or_confused_image_destinations_are_rejected_before_io(url):
     with pytest.raises(ValueError, match="IMAGE_URL_NOT_ALLOWED"):
-        images.original_image([image_segment(url)])
+        images.original_images([image_segment(url)])
 
 
 @pytest.mark.parametrize(
@@ -121,7 +127,7 @@ def test_dns_private_or_mixed_answers_never_get(addresses):
     with pytest.raises(ValueError, match="IMAGE_NONPUBLIC_ADDRESS"):
         run(
             images.fetch_image(
-                images.original_image([image_segment()]),
+                images.original_images([image_segment()])[0],
                 100,
                 check=check,
                 resolver=resolve,
@@ -168,7 +174,7 @@ def test_single_bounded_get_is_pinned_source_checked_and_never_logs_url(caplog, 
         )
 
     invocation = images.fetch_image(
-        images.original_image([image_segment()]),
+        images.original_images([image_segment()])[0],
         5,
         check=check,
         resolver=resolve,

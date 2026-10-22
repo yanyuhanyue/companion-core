@@ -1,4 +1,4 @@
-"""One current-owner image, transient URL, and one source-checked bounded GET."""
+"""Ordered current-owner images, transient URLs, and source-checked bounded GETs."""
 
 import asyncio
 import hashlib
@@ -14,6 +14,7 @@ import httpx
 from .spool import encode
 
 HOSTS = frozenset({"multimedia.nt.qq.com.cn", "gchat.qpic.cn", "c2cpicdw.qpic.cn"})
+MAX_OWNER_IMAGES = 4
 _private_download = ContextVar("private_qq_image_download", default=False)
 
 
@@ -31,6 +32,7 @@ for _name in ("connection", "connection_pool", "http11", "http2", "proxy", "sock
 @dataclass(frozen=True, repr=False)
 class OriginalImage:
     index: int
+    slot: int
     source_sha256: str
     url: str
 
@@ -40,7 +42,7 @@ class OriginalImage:
             "type": "image",
             "actor": "UNVERIFIED",
             "coverage": "UNREAD",
-            "slot": 0,
+            "slot": self.slot,
             "source_sha256": self.source_sha256,
         }
 
@@ -70,10 +72,10 @@ def image_url(value):
         raise ValueError("IMAGE_URL_NOT_ALLOWED") from None
 
 
-def original_image(message):
+def original_images(message):
     """Caller has authenticated the envelope; never walk node/reply/card descendants."""
     if isinstance(message, str):
-        return None
+        return []
     if not isinstance(message, list) or not 1 <= len(message) <= 64:
         raise ValueError("INVALID_IMAGE_MESSAGE")
     images = [
@@ -82,11 +84,12 @@ def original_image(message):
         if isinstance(value, dict) and value.get("type") == "image"
     ]
     # Even duplicate images count: do not silently drop a second owner image.
-    if len(images) > 1:
-        raise ValueError("ONE_OWNER_IMAGE_REQUIRED")
-    if not images:
-        return None
-    index, value = images[0]
+    if len(images) > MAX_OWNER_IMAGES:
+        raise ValueError("OWNER_IMAGE_LIMIT_EXCEEDED")
+    return [_original_image(index, slot, value) for slot, (index, value) in enumerate(images)]
+
+
+def _original_image(index, slot, value):
     data = value.get("data")
     if set(value) != {"type", "data"} or not isinstance(data, dict):
         raise ValueError("INVALID_IMAGE_SEGMENT")
@@ -104,7 +107,7 @@ def original_image(message):
     ):
         raise ValueError("IMAGE_KIND_UNSUPPORTED")
     url = image_url(data.get("url") or data.get("file"))
-    return OriginalImage(index, hashlib.sha256(encode(value).encode()).hexdigest(), url)
+    return OriginalImage(index, slot, hashlib.sha256(encode(value).encode()).hexdigest(), url)
 
 
 def global_address(value):

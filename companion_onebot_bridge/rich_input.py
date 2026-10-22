@@ -1,9 +1,9 @@
-"""SnowLuma db142 push references; no original-message or media network access."""
+"""Bounded untrusted QQ input projection; network reads live in reference_reader."""
 
 import hashlib
 import json
 import re
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .spool import encode
 
@@ -12,14 +12,25 @@ CARD_PATHS = (
     ("title",),
     ("desc",),
     ("summary",),
+    ("prompt",),
     ("url",),
     ("jumpUrl",),
     ("meta", "detail_1", "title"),
     ("meta", "detail_1", "desc"),
     ("meta", "detail_1", "qqdocurl"),
+    ("meta", "detail_1", "url"),
+    ("meta", "detail_1", "jumpUrl"),
+    ("meta", "detail", "title"),
+    ("meta", "detail", "desc"),
+    ("meta", "detail", "summary"),
+    ("meta", "detail", "url"),
     ("meta", "news", "title"),
     ("meta", "news", "desc"),
     ("meta", "news", "jumpUrl"),
+    ("meta", "news", "url"),
+    ("meta", "music", "title"),
+    ("meta", "music", "desc"),
+    ("meta", "music", "jumpUrl"),
 )
 
 
@@ -64,7 +75,6 @@ def discovered_url(value):
             or url.port not in (None, 443)
             or url.username is not None
             or url.password is not None
-            or url.query
             or url.fragment
         ):
             return None
@@ -73,6 +83,15 @@ def discovered_url(value):
             if match:
                 return "https://www.bilibili.com/video/" + match[1]
         if url.hostname in {"www.xiaoheihe.cn", "xiaoheihe.cn", "api.xiaoheihe.cn"}:
+            if url.path == "/v3/bbs/app/api/web/share":
+                identifiers = parse_qs(
+                    url.query, keep_blank_values=True, max_num_fields=64,
+                ).get("link_id", [])
+                if len(identifiers) == 1 and re.fullmatch(
+                    r"[0-9]{1,32}|[0-9a-fA-F]{12}", identifiers[0],
+                ):
+                    return "https://www.xiaoheihe.cn/app/bbs/link/" + identifiers[0].lower()
+                return None
             match = re.fullmatch(
                 r"/(?:(?:app/)?bbs/link|a)/([0-9]{1,32}|[0-9a-fA-F]{12})/?", url.path
             )
@@ -165,7 +184,12 @@ def project(message, redact):
             entry = {"index": index, "type": kind, "actor": "UNVERIFIED"}
             if kind in {"reply", "forward"}:
                 ref = data.get("id")
-                if set(data) != {"id"} or not isinstance(ref, str) or not ref:
+                # Fixed SnowLuma replies can carry embedded message + qq/time/seq.
+                # Other protocol implementations expose content or sender metadata.
+                allowed = {"id", "message", "content", "sender", "name", "qq", "time", "seq"}
+                if kind == "forward":
+                    allowed |= {"messages"}
+                if not set(data) <= allowed or not isinstance(ref, str) or not ref:
                     raise ValueError("INVALID_REFERENCE")
                 pattern = (
                     r"-?(?:0|[1-9][0-9]{0,19})" if kind == "reply" else r"[A-Za-z0-9_+/=-]{1,256}"
