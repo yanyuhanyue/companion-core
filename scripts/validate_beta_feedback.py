@@ -40,13 +40,18 @@ def validate_record(record):
         if missing:
             return {"schema_valid": False, "invalid_fields": missing}
     phone = record["phone"]
+    expected = phone.get("expected_reply_count", 1)
+    if expected > 1:
+        missing = [key for key in ("inspector_sha256", "trace_ref_sha256") if record[key] is None]
+        if missing:
+            return {"schema_valid": False, "invalid_fields": missing}
     if any(value is not None and kind not in record["qq_types"]
            for kind, value in record.get("coverage_observations", {}).items()):
         return {"schema_valid": False, "invalid_fields": ["coverage_observations.qq_type"]}
     visible = phone.get("visible_reply_count")
     if visible is not None and (
         phone["received"] is None or (visible > 0) != phone["received"]
-        or (visible > 1 and "duplicate_visible_reply" not in (record["incidents"] or []))
+        or (visible > expected and "duplicate_visible_reply" not in (record["incidents"] or []))
     ):
         return {"schema_valid": False, "invalid_fields": ["phone.visible_reply_count"]}
     elapsed = None

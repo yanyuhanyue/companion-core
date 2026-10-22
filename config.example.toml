@@ -123,3 +123,11 @@ wait_seconds = 30
 # deepseek-flash supports image input; both cost limits must be positive before calls.
 [content.vision]
 max_request_micro_usd = 0
+
+# Optional text bubbles for generated chat replies. Omitted by default (one reply).
+# Bounded live windows also need a matching segmented-reply scope and send cap.
+# See docs/qq-beta/segmented-replies.md.
+# [segmented_reply]
+# max_segments = 3
+# min_chars = 12
+# interval_ms = 1500

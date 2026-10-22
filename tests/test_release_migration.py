@@ -39,6 +39,7 @@ REVISION_CHAIN = (
     "0016_source_grants",
     "0017_paid_model_gate",
     "0018_reflection_goal_lineage",
+    "0019_segmented_replies",
 )
 LEGACY_TABLES = (
     "principals",
@@ -58,6 +59,8 @@ DIARY_TABLES = ("diary_runs", "diary_entries", "diary_evidence", "diary_revision
 TOKENS = {"erase": "菠萝航线", "keep": "银杉航线"}
 TIMES = {"erase": "2026-10-17T04:00:00.000000+00:00", "keep": "2026-10-18T04:00:00.000000+00:00"}
 DELIVERY_STATES = ("SENT", "PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN")
+SEGMENT_DEFAULTS = {"reply_group_id": None, "segment_index": 0, "segment_count": 1,
+                    "reply_group_sha256": None, "segment_interval_ms": 0}
 
 
 def table_snapshot(store, tables):
@@ -308,9 +311,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0018_reflection_goal_lineage"]
+    assert scripts.get_heads() == ["0019_segmented_replies"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0018_reflection_goal_lineage")
+    revisions, current = [], scripts.get_revision("0019_segmented_replies")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -331,11 +334,16 @@ def test_populated_historical_upgrade_preserves_every_old_column_and_repeats(tmp
         assert not store.schema_capabilities()
         first_upgrade = table_snapshot(store, before)
     migrate(str(database), "head")
-    migrate(str(database), "head")
     with closing(Store(str(database))) as store:
-        assert table_snapshot(store, before) == first_upgrade
+        assert_old_columns_unchanged(store, first_upgrade)
+        for row in store.rows("SELECT * FROM outbox"):
+            assert {key: row[key] for key in SEGMENT_DEFAULTS} == SEGMENT_DEFAULTS
+        final_upgrade = table_snapshot(store, before)
         assert_indexes_and_integrity(store)
         assert store.schema_capabilities()
+    migrate(str(database), "head")
+    with closing(Store(str(database))) as store:
+        assert table_snapshot(store, before) == final_upgrade
 
 
 @pytest.mark.parametrize("forget_one", [False, True])
@@ -363,7 +371,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0018_reflection_goal_lineage"}
+            {"version_num": "0019_segmented_replies"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
@@ -396,7 +404,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 assert actual["state"] == expected_state
                 assert actual["content_json"] == "{}" and actual["content_sha256"] == ""
             else:
-                expected = dict(old)
+                expected = {**old, **SEGMENT_DEFAULTS}
                 if active:
                     expected.update(
                         state="DELIVERY_UNCERTAIN",

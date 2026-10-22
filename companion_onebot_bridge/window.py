@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from . import cumulative
+from . import cumulative, reply_segments
 from .event_normalizer import decode, normalize
 from .network import checked_http_client, private_http_client, private_request_matches
 from .onebot_client import OneBotClient, bounded_post
@@ -214,6 +214,9 @@ class WindowPlan:
             if "cumulative" in scope:
                 expected_scope.add("cumulative")
                 cumulative.validate(scope["cumulative"], config, self.start, self.end)
+            if "segmented_reply" in scope or "max_send_attempts" in scope:
+                reply_segments.validate_scope(scope, value)
+                expected_scope.update({"segmented_reply", "max_send_attempts"})
             # Retired plain scopes retain their original bytes/hash; new scopes may opt in.
             if "rich_input_scope" in scope:
                 expected_scope.add("rich_input_scope")
@@ -477,9 +480,9 @@ class TestWindow:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
         return row
 
-    def ensure_schema(self):
+    def ensure_schema(self, *, prepare_segments=False):
         # Legacy ownership is assigned only after the current plan and journal match.
-        # New inserts are explicit; event/message uniqueness remains global.
+        # Input/message uniqueness remains global; opted-in fragments share an input.
         missing = []
         for table in ("window_inputs", "window_attempts"):
             columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
@@ -490,7 +493,16 @@ class TestWindow:
         history = self.db.execute(
             "SELECT 1 FROM sqlite_master WHERE name='window_history'"
         ).fetchone()
-        if not missing and history:
+        unique_event = False
+        if reply_segments.scope(self.plan):
+            for index in self.db.execute("PRAGMA index_list(window_attempts)").fetchall():
+                if index[2] and [r[2] for r in self.db.execute(
+                    "SELECT * FROM pragma_index_info(?)", (index[1],)
+                )] == ["event_id"]:
+                    unique_event = True
+        if unique_event and not prepare_segments:
+            raise ValueError("SEGMENTED_WINDOW_PREPARATION_REQUIRED")
+        if not missing and history and not unique_event:
             return
         if self.db.execute("SELECT COUNT(*) FROM test_window").fetchone()[0] != 1:
             raise ValueError("WINDOW_SCHEMA_AMBIGUOUS")
@@ -506,6 +518,25 @@ class TestWindow:
                 "record_json TEXT NOT NULL,retirement_head TEXT NOT NULL,"
                 "successor_hash TEXT NOT NULL)"
             )
+            if unique_event:
+                columns = [row[1] for row in self.db.execute("PRAGMA table_info(window_attempts)")]
+                expected = ["message_id", "event_id", "fence", "state", "text_hash",
+                            "approval_hash", "provider_ack_hash", "item_hash", "plan_hash"]
+                if columns != expected:
+                    raise ValueError("WINDOW_SCHEMA_AMBIGUOUS")
+                self.db.execute(
+                    "CREATE TABLE window_attempts_segments(message_id TEXT PRIMARY KEY,"
+                    "event_id TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL,"
+                    "text_hash TEXT NOT NULL,approval_hash TEXT NOT NULL,provider_ack_hash TEXT,"
+                    "item_hash TEXT NOT NULL,plan_hash TEXT NOT NULL)"
+                )
+                names = ",".join(expected)
+                self.db.execute(
+                    f"INSERT INTO window_attempts_segments(rowid,{names}) "
+                    f"SELECT rowid,{names} FROM window_attempts"
+                )
+                self.db.execute("DROP TABLE window_attempts")
+                self.db.execute("ALTER TABLE window_attempts_segments RENAME TO window_attempts")
         except BaseException:
             self.db.execute("ROLLBACK TO window_ownership")
             raise
@@ -709,7 +740,12 @@ class TestWindow:
                     acked if state == "SENT" else 0
                 ):
                     raise ValueError("CORE_DELIVERY_COUNTS_CHANGED")
-            if deliveries.get("PENDING", 0) > 1:
+            segmented = reply_segments.scope(self.plan)
+            maximum = segmented["max_segments"] if segmented else 1
+            if deliveries.get("PENDING", 0) > maximum or (
+                segmented and deliveries.get("PENDING", 0)
+                and self.count("window_inputs", "state='APPROVED'") != 1
+            ):
                 raise ValueError("UNATTENDED_CORE_DELIVERY")
         return deliveries
 
@@ -891,6 +927,7 @@ class TestWindow:
             raise ValueError("WINDOW_STOP_EVIDENCE_MISSING")
         # Validate account continuity before preparing either side of the handoff.
         cumulative.fold(self, old.verify_history(records))
+        self.ensure_schema(prepare_segments=True)
         snapshot = dict(source)
         # Close locally BEFORE crossing HTTP. A lost acknowledgment is never an
         # invitation to retry another successor or refill the old allowance.
@@ -1020,7 +1057,7 @@ class TestWindow:
             "approval_hash TEXT NOT NULL,state TEXT NOT NULL,capture_json TEXT,"
             "plan_hash TEXT NOT NULL);"
             "CREATE TABLE window_attempts(message_id TEXT PRIMARY KEY,"
-            "event_id TEXT NOT NULL UNIQUE,"
+            f"event_id TEXT NOT NULL{'' if reply_segments.scope(self.plan) else ' UNIQUE'},"
             "fence INTEGER NOT NULL,state TEXT NOT NULL,text_hash TEXT NOT NULL,"
             "approval_hash TEXT NOT NULL,provider_ack_hash TEXT,item_hash TEXT NOT NULL,"
             "plan_hash TEXT NOT NULL);"
@@ -1236,11 +1273,13 @@ class TestWindow:
         try:
             self.verify()
             self.check_spool()
-            await self.core_counts(client)
+            deliveries = await self.core_counts(client)
             self.verify()
             sender = WindowOneBot(operation, protocol)
             async with self.core_http(client) as scoped, sender.delegate.client:
                 if not await deliver_tick(scoped, sender, self.spool, guard=operation):
+                    if operation.waiting_for_segment(deliveries):
+                        return self.status() | {"delivery_wait": "SEGMENT_NOT_READY"}
                     raise ValueError("NO_APPROVED_DELIVERY_READY")
             if self.row()["state"] == "STOPPED":
                 await self.stop_core(client)
@@ -1274,15 +1313,90 @@ class SendOperation:
         self.clock = window.clock
         self.current = self.current_item = None
         self.lease_until = None
+        self.segmented_scope = reply_segments.scope(window.plan)
+
+    def segment_context(self, item, event_id, *, current=False):
+        segment = reply_segments.envelope(item)
+        rows = self.db.execute(
+            "SELECT * FROM window_attempts WHERE event_id=? AND plan_hash=? ORDER BY fence",
+            (event_id, self.window.plan.sha256),
+        ).fetchall()
+        if segment is None:
+            if rows and not current:
+                raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+            return None, None
+        policy = self.segmented_scope
+        if not policy:
+            raise ValueError("SEGMENTED_REPLY_SCOPE_REQUIRED")
+        if (segment["count"] > policy["max_segments"]
+            or segment["interval_ms"] != policy["interval_ms"]
+            or segment["total_chars"] > self.window.plan.value["max_reply_chars"]
+            or len(rows) != segment["index"] + int(current)):
+            raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+        records, _ = self.window.read_journal()
+        reservations = [record for record in records if record["kind"] == "RESERVED"
+                        and record["data"].get("event_hash") == digest(event_id)]
+        if len(reservations) != len(rows):
+            raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+        terminals = {record["data"]["fence"]: record for record in records
+                     if record["kind"] in {"IO_STARTED", "ACK", "UNKNOWN"}}
+        saved = reply_segments.journal_value(segment, item["content"]["text"])
+        common = {key: value for key, value in saved.items() if key not in {"index", "chars"}}
+        chars, not_before = 0, None
+        for index, (row, record) in enumerate(zip(rows, reservations, strict=True)):
+            prior = record["data"].get("reply_segment")
+            if (not isinstance(prior, dict) or set(prior) != set(saved)
+                or prior["index"] != index or type(prior["chars"]) is not int
+                or not 1 <= prior["chars"] <= segment["total_chars"]
+                or {key: value for key, value in prior.items()
+                    if key not in {"index", "chars"}} != common
+                or record["data"].get("fence") != row["fence"]
+                or record["data"].get("message_hash") != digest(row["message_id"])
+                or record["data"].get("item_sha256") != row["item_hash"]
+                or row["text_hash"] != segment["part_sha256s"][index]):
+                raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+            if index < segment["index"]:
+                terminal = terminals.get(row["fence"])
+                if row["state"] != "ACK" or not terminal or terminal["kind"] != "ACK":
+                    raise ValueError("REPLY_SEGMENT_PREDECESSOR_REQUIRED")
+                not_before = cumulative.timestamp(terminal["at"]) + timedelta(
+                    milliseconds=segment["interval_ms"])
+                chars += prior["chars"]
+            elif (row["message_id"] != item["message_id"] or prior != saved):
+                raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+        chars += len(item["content"]["text"])
+        if chars > segment["total_chars"] or (
+            segment["index"] == segment["count"] - 1 and chars != segment["total_chars"]
+        ):
+            raise ValueError("REPLY_SEGMENT_TOTAL_CHANGED")
+        return segment, not_before
+
+    def waiting_for_segment(self, deliveries):
+        if not self.segmented_scope or not deliveries.get("PENDING", 0):
+            return False
+        approval = self.approval
+        if (not isinstance(approval, dict)
+            or approval.get("window_sha256") != self.window.plan.sha256):
+            return False
+        row = self.db.execute(
+            "SELECT a.* FROM window_attempts a JOIN window_inputs i USING(event_id) "
+            "WHERE a.plan_hash=? AND i.plan_hash=? AND i.state='APPROVED' "
+            "AND a.event_id=? ORDER BY a.fence DESC LIMIT 1",
+            (self.window.plan.sha256, self.window.plan.sha256, approval.get("event_id")),
+        ).fetchone()
+        if not row or row["state"] != "ACK":
+            return False
+        records, _ = self.window.read_journal()
+        record = next((r for r in records if r["kind"] == "RESERVED"
+                       and r["data"].get("fence") == row["fence"]), None)
+        segment = record["data"].get("reply_segment") if record else None
+        return bool(segment and segment["index"] < segment["count"] - 1)
 
     def reserve(self, item):
         self.window.verify()
         approval = self.approval
-        key = item.get("delivery_key", "")
-        match = re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v1", key)
-        if not match:
-            raise ValueError("WINDOW_REPLY_KEY_REQUIRED")
-        event_id = match[1]
+        event_id = reply_segments.event_id(item)
+        segment, not_before = self.segment_context(item, event_id)
         expected = {
             "window_sha256": self.window.plan.sha256,
             "event_id": event_id,
@@ -1305,10 +1419,16 @@ class SendOperation:
         ).fetchone():
             raise ValueError("UNAPPROVED_DELIVERY_INPUT")
         attempts = self.window.count("window_attempts")
-        if attempts >= min(
+        remaining = segment["count"] if segment and segment["index"] == 0 else 1
+        if attempts + remaining > min(
             self.window.plan.value["max_attempts"], self.window.plan.value["max_visible_replies"]
         ):
             raise ValueError("WINDOW_ATTEMPT_CAP")
+        if not_before is not None and self.clock() < not_before:
+            raise ValueError("REPLY_SEGMENT_INTERVAL_REQUIRED")
+        if segment and segment["index"] == 0:
+            cumulative.admit(self.window, "send_attempts", digest(item["message_id"]),
+                             amount=segment["count"])
         fence = self.window.row()["fence"] + 1
         item_hash = digest(item)
         head = self.window.append(
@@ -1318,6 +1438,8 @@ class SendOperation:
                 "event_hash": digest(event_id),
                 "fence": fence,
                 "item_sha256": item_hash,
+                **({"reply_segment": reply_segments.journal_value(
+                    segment, item["content"]["text"])} if segment else {}),
             },
         )
         with self.db:
@@ -1371,6 +1493,10 @@ class SendOperation:
         lease_until = min(self.lease_until, datetime.fromisoformat(item["lease_until"]))
         stop_requested = self.window.stop_path.exists()
         quota = cumulative.inspect(self.window)
+        _, not_before = (
+            self.segment_context(item, attempt["event_id"], current=True)
+            if attempt else (None, None)
+        )
         # All disk/DB reads are complete. Approval/config/lease/deadline below are
         # pure checks with no lock, await, or file I/O after the last clock sample.
         if request is not None:
@@ -1391,7 +1517,7 @@ class SendOperation:
             or digest(item) != attempt["item_hash"]
             or item["message_id"] != self.current[0]
             or self.approval["message_id"] != self.current[0]
-            or item["delivery_key"] != f"reply:{attempt['event_id']}:v1"
+            or reply_segments.event_id(item) != attempt["event_id"]
             or self.approval["event_id"] != attempt["event_id"]
             or self.approval["reply_sha256"] != attempt["text_hash"]
             or digest(self.window.plan.value) != self.window.plan.sha256
@@ -1401,6 +1527,7 @@ class SendOperation:
             or attempt["state"] != state
             or not self.window.plan.start <= (now := self.clock()) < self.window.plan.end
             or now >= lease_until
+            or (not_before is not None and now < not_before)
         ):
             raise ValueError("WINDOW_SEND_FENCED")
         if request is not None:
@@ -1415,7 +1542,8 @@ class SendOperation:
                 "UPDATE window_attempts SET state=?,provider_ack_hash=? WHERE message_id=?",
                 (state, digest(provider_id) if provider_id else None, self.current[0]),
             )
-            if provider_id:
+            segment = reply_segments.envelope(item)
+            if provider_id and (segment is None or segment["index"] == segment["count"] - 1):
                 self.db.execute(
                     "UPDATE window_inputs SET state='ACK' WHERE event_id="
                     "(SELECT event_id FROM window_attempts WHERE message_id=?)",
@@ -1425,9 +1553,8 @@ class SendOperation:
         if not provider_id:
             self.window.stop("DELIVERY_UNCERTAIN")
         elif self.window.count("window_attempts") >= min(
-            self.window.plan.value["max_attempts"],
-            self.window.plan.value["max_visible_replies"],
-            self.window.plan.value["max_new_inputs"],
+            self.window.plan.value["max_attempts"], self.window.plan.value["max_visible_replies"],
+            *([] if self.segmented_scope else [self.window.plan.value["max_new_inputs"]]),
         ):
             self.window.stop("WINDOW_LIMIT_REACHED")
 

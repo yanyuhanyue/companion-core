@@ -1,0 +1,45 @@
+# 消息分条
+
+普通聊天可以把一次模型生成的文本拆成 2–3 条 QQ 消息。默认关闭；在 Core 配置文件末尾加入：
+
+```toml
+[segmented_reply]
+max_segments = 3
+min_chars = 12
+interval_ms = 1500
+```
+
+`max_segments` 可取 2–3；`min_chars` 为 4–100 个非空白字符；`interval_ms` 为 0–3000 毫秒。间隔从上一条成功回执开始计算，实际时间还受 Bridge 轮询影响。删除这张配置表即可恢复单条生成；已冻结的待发回复保留原分条结果。
+
+按句末标点或换行拆分，保留原文字、标点和空白，合并短开头、短尾句及超出数量上限的部分。链接、行内代码、代码块受到保护；表格保持整条。没有安全断点时仍发送一条，不额外调用模型。命令回复、主动消息和带图片的表达使用原发送方式。
+
+## 投递与打断
+
+同一回复的全部片段一次性写入原 Outbox；每片有独立幂等键，组摘要固定其顺序和内容。前片收到成功回执并经过间隔后，后片才可租用和发送。普通 Bridge 沿用原轮询流程。
+
+Core 接受同一会话内新的、通过主人身份验证的输入时，取消尚未开始发送的旧片段。重复输入不触发打断；已经开始的网络发送仍可能完成。模型生成过程中收到新输入，也不再创建旧的多条回复。
+
+任一片发送失败、投递不确定或发送租约过期后，其余片段停止。迟到的成功回执可以记入该片，但不会恢复已停止的后续片段。全部片段都为 `SENT` 才作为一个完整对话回合进入历史；`SENT` 表示投递回执，不等于手机已显示。
+
+## 有界真实文本窗口
+
+已有单条审批保持原含义。启用分条的窗口还需在 Core 审批和 Bridge `live_text` scope 中显式包含相同的 `segmented_reply` 配置，并包含 `max_send_attempts`（1–5）。Bridge 要求它等于窗口 `max_attempts` 与 `max_visible_replies` 的较小值；这不会增加外层批准额度。图片窗口不能同时启用分条。
+
+500 字限制仍针对一次完整回复；每片各占一次实际发送额度。冻结前若剩余额度不足以容纳整组，保留完整内容并回退为一条。每片继续使用原 `window-send-once` 审批流程；间隔未到时返回 `delivery_wait: SEGMENT_NOT_READY`，不消耗发送次数。旧窗口数据库只在显式准备新分条窗口时迁移，保留已有尝试记录与 UNKNOWN；只读状态检查不迁移。
+
+Inspector 为分条组提供不含正文的摘要。手机反馈可填写 `expected_reply_count` 和 `reply_group_sha256`；多条预期必须匹配同一 trace 的 Inspector 证据。超过预期数量才按重复发送处理，少于预期的实际观察保持原值。
+
+## 数据兼容与验证
+
+迁移 `0019_segmented_replies` 在 Outbox 增加组字段；旧记录仍是单条，原状态、幂等键和回执不变。存在分条记录时禁止自动降级到旧结构。删除源事件会清除全部片段正文；旧加密备份恢复时仍重放最新独立删除账本。组摘要没有另存正文副本。
+
+离线回归覆盖分句保护、原子冻结、并发租用、发送间隔、打断、迟到回执、额度、历史、旧窗口迁移、反馈证据及删除恢复。配置与测试不构成真实 QQ 发送或付费调用授权。
+
+## 参考实现
+
+参考以下固定版本的行为后在 Core 与独立 Bridge 内实现，未引入 AstrBot 运行依赖，也未复制插件代码：
+
+- [AstrBot result_decorate](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/pipeline/result_decorate/stage.py)：分句与分段处理。
+- [AstrBot respond](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/pipeline/respond/stage.py)：分条发送与间隔。
+- [astrbot_plugin_splitter](https://github.com/nuomicici/astrbot_plugin_splitter/blob/dffce04449922e510dd72fd494f99b150b908e6d/splitter/splitter.py)：代码片段保护、短段合并及数量上限。
+- [astrbot_plugin_pacer](https://github.com/Lansheen3096/astrbot_plugin_pacer/blob/74d5c45ef6b0702de8ef5765a614b86a90d86af4/main.py)：新输入到达时停止继续分条。

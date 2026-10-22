@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,38 @@ def read_json(path, limit):
         raw = stream.read(limit + 1)
     require(len(raw) <= limit, "FILE_TOO_LARGE")
     return json.loads(raw, object_pairs_hook=_unique), raw
+
+
+def check_reply_group(record, trace):
+    expected = record["phone"].get("expected_reply_count", 1)
+    if expected == 1:
+        return  # Historical single-reply feedback retains its original contract.
+    groups = trace.get("reply_groups")
+    require(trace.get("state") == "RECORDED" and isinstance(groups, list)
+            and 1 <= len(groups) <= 20, "REPLY_GROUP_REQUIRED")
+    jobs = {job.get("job_ref_sha256") for job in trace["jobs"]}
+    seen, matched = set(), None
+    for group in groups:
+        require(isinstance(group, dict) and group.get("state") == "RECORDED",
+                "REPLY_GROUP_SHAPE")
+        group_hash = group.get("reply_group_sha256")
+        count, states = group.get("expected_reply_count"), group.get("outbox")
+        require(isinstance(group_hash, str) and re.fullmatch(r"[a-f0-9]{64}", group_hash)
+                and group_hash not in seen and type(count) is int and 2 <= count <= 3
+                and group.get("job_ref_sha256") is not None
+                and group["job_ref_sha256"] in jobs, "REPLY_GROUP_BINDING_MISMATCH")
+        require(isinstance(states, dict) and set(states) <= OUTBOX_STATES
+                and all(number(value) for value in states.values())
+                and sum(states.values()) == count
+                and all(value <= trace["outbox"].get(state, 0) for state, value in states.items())
+                and type(group.get("all_parts_sent")) is bool
+                and group["all_parts_sent"] == (states.get("SENT", 0) == count),
+                "REPLY_GROUP_DELIVERY_STATE")
+        seen.add(group_hash)
+        if group_hash == record["phone"]["reply_group_sha256"]:
+            matched = group
+    require(matched is not None and matched["expected_reply_count"] == expected,
+            "REPLY_GROUP_BINDING_MISMATCH")
 
 
 def snapshot(record, report, raw):
@@ -96,6 +129,7 @@ def snapshot(record, report, raw):
     require(isinstance(trace.get("outbox"), dict)
             and set(trace["outbox"]) <= OUTBOX_STATES
             and all(number(n) for n in trace["outbox"].values()), "OUTBOX_SHAPE")
+    check_reply_group(record, trace)
     return {"trace": trace, "calls": calls}
 
 

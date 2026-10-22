@@ -140,7 +140,7 @@ def check(window, state, now):
         raise ValueError("CUMULATIVE_POLICY_EXPIRED")
 
 
-def admit(window, dimension, source=None):
+def admit(window, dimension, source=None, *, amount=1):
     state = inspect(window)
     if state is None:
         return
@@ -156,7 +156,7 @@ def admit(window, dimension, source=None):
                 window.plan.value["window_id"])
             or period == "day" and periods(v["at"], policy["timezone"])[0] == day
             or period == "month" and periods(v["at"], policy["timezone"])[1] == month))
-        if used + 1 > policy[period][dimension]:
+        if used + amount > policy[period][dimension]:
             raise ValueError("CUMULATIVE_" + period.upper() + "_" + dimension.upper() + "_CAP")
 
 

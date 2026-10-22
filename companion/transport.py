@@ -1,5 +1,7 @@
 import hashlib
 import json
+from contextlib import nullcontext
+from datetime import datetime
 
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
@@ -34,6 +36,163 @@ def enqueue(store, event_id, conversation_id, text, now, action="qq.private.repl
     return message_id
 
 
+def _group_manifest(job_id, parts, interval_ms):
+    return {"job_id": job_id, "parts_sha256": [digest(text) for text in parts],
+            "interval_ms": interval_ms, "total_chars": sum(map(len, parts))}
+
+
+def enqueue_reply_parts(store, job, parts, interval_ms, now):
+    """Freeze all parts atomically; a retried job cannot recut or duplicate its reply."""
+    if (
+        not isinstance(parts, list) or not 1 <= len(parts) <= 3
+        or any(not isinstance(text, str) or not text.strip() for text in parts)
+        or sum(map(len, parts)) > 20000
+        or type(interval_ms) is not int or not 0 <= interval_ms <= 3000
+    ):
+        raise CoreError("INVALID_REPLY_SEGMENTS", 400)
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        source = store.one(
+            "SELECT j.job_id,j.kind,e.event_id,e.conversation_id,e.redacted "
+            "FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=?", (job["job_id"],),
+        )
+        if not source or source["kind"] != "chat" or source["redacted"] or any(
+            source[key] != job[key] for key in ("event_id", "conversation_id")
+        ):
+            raise CoreError("REPLY_GROUP_SOURCE_CHANGED", 409)
+        existing = store.rows(
+            "SELECT * FROM outbox WHERE origin_event_id=? AND action_type='qq.private.reply' "
+            "ORDER BY rowid", (job["event_id"],),
+        )
+        if existing:
+            group = reply_group(store, existing[0]["message_id"])
+            if (
+                len(group["rows"]) != len(existing)
+                or [json.loads(row["content_json"])["text"] for row in group["rows"]] != parts
+                or (group["segmented"] and any(
+                    row["reply_group_id"] != job["job_id"]
+                    or row["segment_interval_ms"] != interval_ms for row in group["rows"]
+                ))
+            ):
+                raise CoreError("REPLY_GROUP_CHANGED", 409)
+            return [row["message_id"] for row in group["rows"]]
+        if len(parts) == 1:
+            return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now)]
+        group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms))
+        ids = []
+        for index, text in enumerate(parts):
+            message_id = enqueue(store, job["event_id"], job["conversation_id"], text, now,
+                                 key=f"reply:{job['event_id']}:v2:{index}")
+            store.execute(
+                "UPDATE outbox SET reply_group_id=?,segment_index=?,segment_count=?,"
+                "reply_group_sha256=?,segment_interval_ms=? WHERE message_id=?",
+                (job["job_id"], index, len(parts), group_hash, interval_ms, message_id),
+            )
+            ids.append(message_id)
+        return ids
+
+
+def reply_group(store, message_id, *, require_sent=False):
+    """Read one immutable reply; missing/tampered parts are never repaired from a prefix."""
+    row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
+    if not row:
+        raise CoreError("REPLY_GROUP_MISSING", 409)
+    try:
+        if not row.get("reply_group_id"):
+            if ":v2:" in row["delivery_key"]:
+                raise ValueError("missing group")
+            return None if require_sent and row["state"] != "SENT" else {
+                "rows": [row], "text": json.loads(row["content_json"])["text"],
+                "segmented": False,
+            }
+        rows = store.rows("SELECT * FROM outbox WHERE reply_group_id=? ORDER BY segment_index",
+                          (row["reply_group_id"],))
+        source = store.one(
+            "SELECT j.event_id,e.conversation_id,j.kind,e.redacted FROM jobs j "
+            "JOIN events e USING(event_id) WHERE j.job_id=?", (row["reply_group_id"],),
+        )
+        if (
+            not source or source["redacted"] or source["kind"] != "chat"
+            or not 2 <= len(rows) <= 3 or row["segment_count"] != len(rows)
+            or row["action_type"] != "qq.private.reply"
+            or (source["event_id"], source["conversation_id"]) != (
+                row["origin_event_id"], row["conversation_id"])
+            or type(row["segment_interval_ms"]) is not int
+            or not 0 <= row["segment_interval_ms"] <= 3000
+        ):
+            raise ValueError("invalid group")
+        parts = []
+        for index, part in enumerate(rows):
+            content = json.loads(part["content_json"])
+            if (
+                part["segment_index"] != index or part["segment_count"] != len(rows)
+                or any(part[key] != row[key] for key in (
+                    "origin_event_id", "conversation_id", "action_type", "reply_group_sha256",
+                    "segment_interval_ms"))
+                or part["delivery_key"] != f"reply:{row['origin_event_id']}:v2:{index}"
+                or set(content) != {"text"} or not isinstance(content["text"], str)
+                or not content["text"].strip() or part["content_sha256"] != digest(content)
+            ):
+                raise ValueError("invalid part")
+            parts.append(content["text"])
+        if sum(map(len, parts)) > 20000 or row["reply_group_sha256"] != digest(
+            _group_manifest(row["reply_group_id"], parts, row["segment_interval_ms"])
+        ):
+            raise ValueError("invalid manifest")
+        if require_sent and any(part["state"] != "SENT" for part in rows):
+            return None
+        return {"rows": rows, "text": "".join(parts), "segmented": True}
+    except (ValueError, TypeError, KeyError) as error:
+        raise CoreError("REPLY_GROUP_CHANGED", 409) from error
+
+
+def segment_envelope(store, message_id):
+    group = reply_group(store, message_id)
+    if not group["segmented"]:
+        return None
+    row = next(part for part in group["rows"] if part["message_id"] == message_id)
+    return {
+        "version": 1, "group_id": row["reply_group_id"], "index": row["segment_index"],
+        "count": len(group["rows"]), "group_sha256": row["reply_group_sha256"],
+        "total_chars": len(group["text"]), "interval_ms": row["segment_interval_ms"],
+        "part_sha256s": [digest(json.loads(part["content_json"])["text"])
+                         for part in group["rows"]],
+    }
+
+
+def check_segment_ready(store, message_id, now):
+    group = reply_group(store, message_id)
+    if not group["segmented"]:
+        return
+    row = next(part for part in group["rows"] if part["message_id"] == message_id)
+    previous = group["rows"][:row["segment_index"]]
+    if any(part["state"] != "SENT" or not part["sent_at"] for part in previous):
+        raise CoreError("REPLY_SEGMENT_NOT_READY", 409)
+    if previous and datetime.fromisoformat(now) < datetime.fromisoformat(after(
+        previous[-1]["sent_at"], row["segment_interval_ms"] / 1000,
+    )):
+        raise CoreError("REPLY_SEGMENT_NOT_READY", 409)
+
+
+def cancel_interrupted_replies(store, conversation_id, now):
+    """Only an already authenticated, newly accepted owner input interrupts pending parts."""
+    store.execute(
+        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "last_error_code='REPLY_INTERRUPTED_BY_OWNER' WHERE conversation_id=? "
+        "AND reply_group_id IS NOT NULL AND state IN ('PENDING','LEASED','RETRY_WAIT')",
+        (now, conversation_id),
+    )
+
+
+def _cancel_segment_tails(store, now):
+    store.execute(
+        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "last_error_code='REPLY_SEGMENT_CHAIN_STOPPED' WHERE reply_group_id IN "
+        "(SELECT reply_group_id FROM outbox WHERE reply_group_id IS NOT NULL "
+        "AND state IN ('FAILED','CANCELLED','DELIVERY_UNCERTAIN')) "
+        "AND state IN ('PENDING','LEASED','RETRY_WAIT')", (now,),
+    )
+
+
 def recover_deliveries(store, now):
     store.execute(
         "UPDATE outbox SET state='PENDING',lease_token=NULL,lease_until=NULL "
@@ -45,6 +204,7 @@ def recover_deliveries(store, now):
         "last_error_code='SEND_LEASE_EXPIRED' WHERE state='SENDING' AND lease_until<=?",
         (now, now),
     )
+    _cancel_segment_tails(store, now)
 
 
 def cancel_proactive_work(store, now):
@@ -89,6 +249,13 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
+            if row.get("reply_group_id"):
+                try:
+                    check_segment_ready(store, row["message_id"], now)
+                except CoreError as error:
+                    if error.code == "REPLY_SEGMENT_NOT_READY":
+                        continue
+                    raise
             problem = share_delivery_problem(store, settings, row["message_id"], now)
             if problem:
                 store.execute(
@@ -120,6 +287,8 @@ def lease_deliveries(store, settings, request, now):
                     "action_type": row["action_type"],
                 }
             )
+            if row.get("reply_group_id"):
+                items[-1]["reply_segment"] = segment_envelope(store, row["message_id"])
         return {"items": items}
 
 
@@ -132,13 +301,15 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             live_text.check_delivery(store, settings, clock, message_id)
             now = clock()
         pending = store.one(
-            "SELECT action_type FROM outbox WHERE message_id=? AND state='LEASED' "
+            "SELECT action_type,reply_group_id FROM outbox WHERE message_id=? AND state='LEASED' "
             "AND lease_token=? AND lease_until>?",
             (message_id, token, now),
         )
         if pending:
             from companion.social import proactive_allowed, share_delivery_problem
 
+            if pending["reply_group_id"]:
+                check_segment_ready(store, message_id, now)
             if pending["action_type"] == "qq.private.proactive" and not proactive_allowed(
                 store, settings, now
             ):
@@ -176,6 +347,14 @@ def delivery_result(store, settings, message_id, result, now):
             raise CoreError("INVALID_DELIVERY_TRANSITION")
         if result.result == "SENT" and row["state"] == "LEASED":
             raise CoreError("SEND_NOT_STARTED")
+        if (row.get("reply_group_id") and row["state"] == "SENDING"
+            and datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now)):
+            # A late ACK may establish this part's delivery, but cannot resume an expired chain.
+            store.execute(
+                "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                "last_error_code='REPLY_SEGMENT_ACK_LATE' WHERE reply_group_id=? "
+                "AND state IN ('PENDING','LEASED','RETRY_WAIT')", (now, row["reply_group_id"]),
+            )
         if result.result == "RETRYABLE_FAILURE":
             if row["state"] != "LEASED":
                 # Once I/O starts, a generic failure cannot establish non-delivery.
@@ -208,6 +387,15 @@ def delivery_result(store, settings, message_id, result, now):
             ),
         )
         store.audit("delivery.result", message_id, "delivery", now, state=state)
+        if row.get("reply_group_id"):
+            if state == "SENT":
+                store.execute(
+                    "UPDATE outbox SET next_attempt_at=? WHERE reply_group_id=? "
+                    "AND segment_index=? AND state IN ('PENDING','RETRY_WAIT')",
+                    (after(now, row["segment_interval_ms"] / 1000), row["reply_group_id"],
+                     row["segment_index"] + 1),
+                )
+            _cancel_segment_tails(store, now)
         from companion.goals import acknowledge_commitment_delivery
 
         acknowledge_commitment_delivery(store, message_id, state, now)

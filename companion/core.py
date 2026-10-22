@@ -22,14 +22,17 @@ from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULE
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
 from companion.reflection import ReflectionService
+from companion.reply_segments import split_text
 from companion.runtime import Runtime
 from companion.social import SocialPlanner, proactive_allowed, proactive_counts
 from companion.store import after, encode, uid, utcnow
 from companion.telemetry import emit
 from companion.transport import (
+    cancel_interrupted_replies,
     cancel_proactive_work,
     digest,
     enqueue,
+    enqueue_reply_parts,
     reconcile_delivery,
     recover_deliveries,
 )
@@ -196,6 +199,7 @@ class Core(Runtime):
                     fingerprint=fingerprint,
                     memory_processed=int(diary_command or control_command),
                 )
+                cancel_interrupted_replies(s, conversation_id, now)
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
                 if not diary_command and not control_command:
                     self.content.schedule(event.event_id)
@@ -730,6 +734,7 @@ class Core(Runtime):
         request_id = None
         try:
             bounded_text = live_text.active(self.store, self.settings)
+            generated_reply = False
             if bounded_text:
                 live_text.check_job(self.store, self.settings, self.clock, job)
             before_command = epoch(self.store)
@@ -814,6 +819,7 @@ class Core(Runtime):
                     )
                     request_id = None
                     reply = redact(response.text, self.settings)
+                    generated_reply = True
             with self.store.transaction():
                 if bounded_text:
                     live_text.check_job(self.store, self.settings, self.clock, job)
@@ -829,19 +835,50 @@ class Core(Runtime):
                     self.store, self.settings, now
                 )
                 if job["kind"] != "activity" or should_send:
-                    message_id = self.expression.enqueue(
-                        job["event_id"],
-                        job["conversation_id"],
-                        reply,
-                        now,
-                        action="qq.private.proactive"
-                        if job["kind"] == "activity"
-                        else "qq.private.reply",
+                    policy = self.settings.segmented_reply
+                    intent = (
+                        self.expression.intent(job["event_id"], reply, now)
+                        if policy and generated_reply and job["kind"] == "chat"
+                        and self.settings.expression_enabled else None
                     )
+                    if policy and generated_reply and job["kind"] == "chat" and (
+                        intent is None or intent.image is None
+                    ):
+                        parts = split_text(intent.text if intent else reply, policy)
+                        if bounded_text:
+                            approval, _ = live_text.check_job(
+                                self.store, self.settings, self.clock, job,
+                            )
+                            if len(reply) > approval.max_reply_chars:
+                                raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
+                            available = live_text.remaining_send_slots(self.store, approval)
+                            if available <= 0:
+                                raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 403)
+                            if len(parts) > available:
+                                parts = [reply]
+                        if len(parts) > 1 and self.store.one(
+                            "SELECT 1 FROM events WHERE conversation_id=? AND actor_id='owner' "
+                            "AND source='qq.onebot' AND rowid>(SELECT rowid FROM events "
+                            "WHERE event_id=?) LIMIT 1", (job["conversation_id"], job["event_id"]),
+                        ):
+                            parts = []  # The owner already moved on while the model was answering.
+                        message_ids = enqueue_reply_parts(
+                            self.store, job, parts, policy.interval_ms, now,
+                        ) if parts else []
+                    else:
+                        message_ids = [self.expression.enqueue(
+                            job["event_id"], job["conversation_id"], reply, now,
+                            action="qq.private.proactive" if job["kind"] == "activity"
+                            else "qq.private.reply",
+                        )]
                     if bounded_text:
-                        live_text.record_reply(
-                            self.store, self.settings, self.clock, job, message_id, reply
-                        )
+                        for message_id in message_ids:
+                            text = json.loads(self.store.one(
+                                "SELECT content_json FROM outbox WHERE message_id=?", (message_id,),
+                            )["content_json"])["text"]
+                            live_text.record_reply(
+                                self.store, self.settings, self.clock, job, message_id, text,
+                            )
                 self.store.execute(
                     "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
                     "WHERE job_id=?",

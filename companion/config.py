@@ -13,6 +13,7 @@ from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.image_input import ImageInputPolicy
 from companion.media import MediaConfig
+from companion.reply_segments import SegmentedReplyConfig
 from companion.sources import ObservationSource
 
 
@@ -141,6 +142,12 @@ class LiveTextWindowApproval(BaseModel):
     max_model_attempts: int = Field(default=5, strict=True, ge=1, le=5)
     max_input_chars: int = Field(default=500, strict=True, ge=1, le=500)
     max_reply_chars: int = Field(default=500, strict=True, ge=1, le=500)
+    segmented_reply: SegmentedReplyConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    max_send_attempts: int | None = Field(
+        default=None, strict=True, ge=1, le=5, exclude_if=lambda value: value is None,
+    )
     rich_input_scope: Literal["none", "references_v1"] = "none"
     image_scope: Literal["none", "owner_image_v1"] = "none"
     image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -158,6 +165,10 @@ class LiveTextWindowApproval(BaseModel):
 
     @model_validator(mode="after")
     def valid_interval(self):
+        if (self.segmented_reply is None) != (self.max_send_attempts is None):
+            raise ValueError("segmented replies require an explicit bounded send limit")
+        if self.segmented_reply is not None and self.image_scope == "owner_image_v1":
+            raise ValueError("segmented replies cannot share the owner image scope")
         if (self.image_scope == "none" and self.image_approval_sha256 is not None) or (
             self.image_scope == "owner_image_v1"
             and (
@@ -237,6 +248,9 @@ class Settings(BaseModel):
     output_rate: int | None = Field(default=None, ge=0)
     paid_model: PaidModelApproval | None = None
     live_text_window: LiveTextWindowApproval | None = None
+    segmented_reply: SegmentedReplyConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     rich_input_scope: Literal["none", "references_v1"] = "none"
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
