@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from companion import __version__, live_text, qq_rich
+from companion import __version__, cumulative, live_text, qq_rich
 from companion.config import Settings
 from companion.content_api import register_content_routes
 from companion.contracts import (
@@ -458,7 +458,17 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/live-text/stop", dependencies=auth)
     async def live_text_stop(body: live_text.WindowReference):
-        return live_text.stop_window(app.state.core.store, body)
+        return live_text.stop_window(app.state.core.store, body, app.state.core.clock)
+
+    @app.get(prefix + "/cumulative/status", dependencies=auth)
+    async def cumulative_status():
+        core = app.state.core
+        return cumulative.status(core.store, settings, core.clock())
+
+    @app.post(prefix + "/cumulative/pause", dependencies=auth)
+    async def cumulative_pause(body: cumulative.PauseRequest):
+        core = app.state.core
+        return cumulative.owner_pause(core.store, settings, core.clock, body)
 
     @app.post(prefix + "/deliveries/lease", dependencies=auth)
     async def lease(body: LeaseRequest):

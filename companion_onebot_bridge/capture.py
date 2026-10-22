@@ -17,6 +17,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
+from . import cumulative
 from .event_normalizer import decode, identifier, normalize
 from .network import checked_http_client, websocket
 from .onebot_client import OneBotClient
@@ -178,6 +179,7 @@ def capacity(window, capture_fence=None):
         raise ValueError("WINDOW_INPUT_CAP")
     if window.spool.pending_count >= window.plan.config.max_pending:
         raise ValueError("SPOOL_QUEUE_CAPACITY")
+    cumulative.admit(window, "owner_inputs")
 
 
 async def failed(window, client, reason):
@@ -374,6 +376,11 @@ async def capture_once(window, client, protocol):
                 raise ValueError("CAPTURE_CLOCK_DRIFT")
             verify_capture()
             raw, event = input_event(window, frame, received_at)
+            if cumulative.scope(window.plan):
+                # Re-read Core authority after the awaited receive and before
+                # any capture journal/evidence/Spool persistence.
+                await window.core_counts(client)
+                verify_capture()
             fingerprint = digest({"message": raw["message"], "time": raw["time"]})
             prior = window.db.execute(
                 "SELECT fingerprint FROM inbox WHERE key=?", (event["event_id"],)
@@ -411,6 +418,11 @@ async def capture_once(window, client, protocol):
                 SIGNATURE_DOMAIN + encode(receipt).encode()
             ).hex() if key else None)
             capacity(window, capture_fence)
+            quota = cumulative.scope(window.plan)
+            if quota and cumulative.periods(received_at, quota["timezone"]) != cumulative.periods(
+                window.clock(), quota["timezone"],
+            ):
+                raise ValueError("CUMULATIVE_CAPTURE_PERIOD_CHANGED")
             phase = "persist"
             head = window.append("CAPTURED", {
                 "event_hash": digest(event["event_id"]), "capture_sha256": digest(receipt),

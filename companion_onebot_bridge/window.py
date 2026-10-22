@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from . import cumulative
 from .event_normalizer import decode, normalize
 from .network import checked_http_client, private_http_client, private_request_matches
 from .onebot_client import OneBotClient, bounded_post
@@ -210,6 +211,9 @@ class WindowPlan:
             }
             if not isinstance(scope, dict) or scope.get("live_approved") is not True:
                 raise ValueError("LIVE_TEXT_APPROVAL_REQUIRED")
+            if "cumulative" in scope:
+                expected_scope.add("cumulative")
+                cumulative.validate(scope["cumulative"], config, self.start, self.end)
             # Retired plain scopes retain their original bytes/hash; new scopes may opt in.
             if "rich_input_scope" in scope:
                 expected_scope.add("rich_input_scope")
@@ -518,6 +522,7 @@ class TestWindow:
 
     def verify_history(self, records):
         plan, journal = self.plan, records
+        history = [(plan, journal)]
         seen = set()
         while scope := plan.value.get("live_text", {}).get("handoff"):
             predecessor = scope["predecessor_plan_sha256"]
@@ -548,6 +553,8 @@ class TestWindow:
                     or marker.read_bytes() != b"OWNER_STOP\n"):
                 raise ValueError("WINDOW_STOP_EVIDENCE_MISSING")
             plan, journal = old, old_records
+            history.append((plan, journal))
+        return history
 
     def verify(self, *, active=True, dispatch=False, capture_fence=None):
         if digest(self.plan.value) != self.plan.sha256:
@@ -566,7 +573,9 @@ class TestWindow:
         if not records or head != row["journal_head"]:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
         self.ensure_schema()
-        self.verify_history(records)
+        quota = cumulative.fold(self, self.verify_history(records))
+        if active or dispatch:
+            cumulative.check(self, quota, self.clock())
         if active:
             capturing = (capture_fence is not None and row["state"] == "CAPTURING"
                          and row["fence"] == capture_fence)
@@ -601,6 +610,9 @@ class TestWindow:
         return records, head
 
     def append(self, kind, data, *, create=False):
+        if not create and kind in {"CAPTURED", "INPUT", "RESERVED"}:
+            cumulative.admit(self, "send_attempts" if kind == "RESERVED" else "owner_inputs",
+                             data["message_hash"] if kind == "RESERVED" else data["event_hash"])
         records, previous = ([], "0" * 64) if create else self.read_journal()
         if not create and previous != self.row()["journal_head"]:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
@@ -1175,8 +1187,15 @@ class TestWindow:
             raise ValueError("HISTORICAL_INPUT_REFUSED")
         self.verify()
         if self.plan.mode == "live_text":
+            cumulative.admit(self, "owner_inputs", digest(event_id))
+            input_at = self.clock()
             await self.core_post(client, "/internal/v1/live-text/inputs/approve", approval)
             self.verify()
+            quota = cumulative.scope(self.plan)
+            if quota and cumulative.periods(input_at, quota["timezone"]) != cumulative.periods(
+                self.clock(), quota["timezone"],
+            ):
+                raise ValueError("CUMULATIVE_CAPTURE_PERIOD_CHANGED")
         head = self.append(
             "INPUT",
             {
@@ -1349,6 +1368,7 @@ class SendOperation:
         item = self.current_item
         lease_until = min(self.lease_until, datetime.fromisoformat(item["lease_until"]))
         stop_requested = self.window.stop_path.exists()
+        quota = cumulative.inspect(self.window)
         # All disk/DB reads are complete. Approval/config/lease/deadline below are
         # pure checks with no lock, await, or file I/O after the last clock sample.
         if request is not None:
@@ -1382,6 +1402,7 @@ class SendOperation:
         ):
             raise ValueError("WINDOW_SEND_FENCED")
         if request is not None:
+            cumulative.dispatch(self.window, quota, self.current[0], now)
             seal_protocol_content(request, content)
 
     def complete(self, item, provider_id):
@@ -1480,7 +1501,7 @@ def check_protocol_request(window, request):
 
 
 async def command(config, args):
-    if args.command in {"window-status", "window-stop"}:
+    if args.command in {"window-status", "window-stop", "window-quota-inventory"}:
         database = Path(config.data_dir) / "spool.sqlite3"
         if not database.is_file() or database.is_symlink():
             raise ValueError("WINDOW_NOT_FOUND")
@@ -1502,6 +1523,8 @@ async def command(config, args):
             # Stop/status performs no network I/O and does not require unexpired authorization.
             plan = stored_plan(encode(value), config)
             window = TestWindow(spool, plan)
+            if args.command == "window-quota-inventory":
+                return cumulative.legacy_inventory(window)
             if args.command == "window-status":
                 return window.status()
             # Always persist the local stop; an unreachable Core is not a confirmed

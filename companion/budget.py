@@ -48,6 +48,7 @@ def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None,
 ):
+    cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     if scenario == "content_vision":
         from companion.image_input import contract as image_contract
@@ -571,6 +572,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         return await model.complete(messages, scenario)
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
+    cumulative.preflight(store, settings, clock)
     now = clock()
     from companion.model import ModelAdmission, ModelClient, ModelResponseError, model_payload
 
@@ -587,6 +589,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
     approval = paid_budget.contract(settings, now)
     with store.transaction():
+        cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
         custody = paid_budget.journal(store, approval)
         cumulative.check(store, settings, clock(), custody=custody)
@@ -619,6 +622,11 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         ):
             raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
         quota = cumulative.admission_metadata(store, row)
+        if quota:
+            now = clock()
+            cumulative.check(store, settings, now)
+            if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
+                raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         store.execute(
             "UPDATE model_admissions SET io_started_at=? WHERE request_id=?", (now, request_id)
         )
@@ -638,6 +646,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     try:
+        cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
         live_text.check_model(store, settings, clock, request_id)
         if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
@@ -693,7 +702,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                 live_text.dispatch_fence(
                     settings, clock, current_job["lease_until"], current["lease_until"],
                 )
-                cumulative.final_fence(settings, quota_state, clock())
+                cumulative.final_fence(settings, quota_state, clock(), request_id)
             else:
                 paid = paid_budget.contract(settings, clock())
                 lease_deadline = datetime.fromisoformat(current["lease_until"])
@@ -706,7 +715,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-                cumulative.final_fence(settings, quota_state, dispatch_now)
+                cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
         admission = ModelAdmission(row["payload_sha256"], before_dispatch)
     try:
         if isinstance(model, ModelClient):

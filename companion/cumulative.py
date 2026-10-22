@@ -7,12 +7,16 @@ liability limits, not a verified provider account balance or external hard cap.
 import hashlib
 import hmac
 import json
+import re
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from companion.contracts import CoreError
@@ -24,6 +28,7 @@ DIMENSIONS = ("micro_usd", "model_attempts", "input_tokens", "output_tokens",
               "owner_inputs", "send_attempts")
 POLICY_RECORDS = {"quota_enroll", "quota_renew"}
 CONTROL_RECORDS = POLICY_RECORDS | {"quota_pause", "quota_operation", "quota_send_result"}
+LEGACY_DOMAIN = b"companion-core/cumulative-window-inventory/v1\x00"
 
 
 class ModelCaps(BaseModel):
@@ -37,6 +42,25 @@ class ModelCaps(BaseModel):
 class PeriodCaps(ModelCaps):
     owner_inputs: int = Field(strict=True, ge=0, le=2**31 - 1)
     send_attempts: int = Field(strict=True, ge=0, le=2**31 - 1)
+
+
+class LegacyWindowReservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["input", "send"]
+    source_sha256: str = Field(pattern=SHA)
+    window_id: str = Field(min_length=1, max_length=128)
+    at: AwareDatetime
+    record_sha256: str = Field(pattern=SHA)
+    journal_head_sha256: str = Field(pattern=SHA)
+
+
+class LegacyWindowInventory(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    kind: Literal["cumulative_window_inventory_v1"]
+    identity_sha256: str = Field(pattern=SHA)
+    budget_journal_id: str = Field(pattern=r"^budget_[a-f0-9]{32}$")
+    reservations: list[LegacyWindowReservation] = Field(max_length=20000)
+    signature: str = Field(pattern=r"^[a-f0-9]{128}$")
 
 
 class CumulativeApproval(BaseModel):
@@ -58,6 +82,7 @@ class CumulativeApproval(BaseModel):
     predecessor_policy_sha256: str | None = Field(default=None, pattern=SHA)
     legacy_liabilities_sha256: str | None = Field(default=None, pattern=SHA)
     legacy_adoption_evidence_sha256: str | None = Field(default=None, pattern=SHA)
+    legacy_window_inventory: LegacyWindowInventory | None = None
     request: ModelCaps
     window: PeriodCaps
     day: PeriodCaps
@@ -73,6 +98,13 @@ class CumulativeApproval(BaseModel):
         if self.predecessor_policy_sha256 is None and self.legacy_liabilities_sha256 is None:
             raise ValueError("EXACT_LEGACY_LIABILITIES_REQUIRED")
         return self
+
+
+class PauseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account_ref: str = Field(pattern=SHA)
+    policy_sha256: str = Field(pattern=SHA)
+    evidence_sha256: str = Field(pattern=SHA)
 
 
 def digest(value):
@@ -102,11 +134,12 @@ def empty_state():
             "operations": {}, "clock": None, "paused": False, "reason": None}
 
 
-def binding(state, path):
+def binding(state, path, head=None):
     if state["policy"] is None:
         return None
     return {"account_ref": state["policy"]["account_ref"],
-            "policy_sha256": state["policy_sha256"], "journal_path": str(Path(path).resolve())}
+            "policy_sha256": state["policy_sha256"], "journal_path": str(Path(path).resolve()),
+            **({"control_head_sha256": head} if head else {})}
 
 
 def _liability(value):
@@ -169,6 +202,10 @@ def fold(state, row):
                 "account_ref", "provider", "currency", "timezone", "owner_identity_sha256",
             )) or policy["policy_id"] in {p["policy_id"] for p in state["policies"].values()}:
                 raise ValueError("cumulative account rebind or policy reuse")
+            if policy["approval_sha256"] in {
+                p["approval_sha256"] for p in state["policies"].values()
+            }:
+                raise ValueError("new cumulative approval evidence required")
             if policy["credential_sha256"] != previous["credential_sha256"] and (
                 policy["key_ownership_sha256"] == previous["key_ownership_sha256"]
             ):
@@ -201,8 +238,16 @@ def fold(state, row):
             ] != state["policy_sha256"] or state["paused"]:
                 raise ValueError("invalid cumulative operation")
             liability = _liability(row["liability"])
-            if not row["key"].startswith(("input:", "send:")) or row["key"] in state["operations"]:
+            if (not re.fullmatch(r"(?:input|send):[a-f0-9]{64}", row["key"])
+                or not re.fullmatch(SHA, row["source_sha256"])
+                or liability["at"] > row["at"]
+                or row["key"] in state["operations"]):
                 raise ValueError("cumulative operation replay")
+            dimension = "owner_inputs" if row["key"].startswith("input:") else "send_attempts"
+            if (liability[dimension] != 1
+                or liability["state"] != ("ADMITTED" if dimension == "owner_inputs" else "RESERVED")
+                or any(liability[k] for k in DIMENSIONS if k != dimension)):
+                raise ValueError("invalid cumulative operation dimensions")
             state["operations"][row["key"]] = liability | {"source_sha256": row["source_sha256"]}
         else:
             if set(row) != {"kind", "version", "account_ref", "at", "key", "state", "previous"}:
@@ -261,7 +306,7 @@ def fold(state, row):
             state.update(paused=True, reason="UNKNOWN_MODEL_LIABILITY")
 
 
-def legacy_liabilities(store, provider):
+def legacy_liabilities(store, provider, inventory=None):
     """Exact, bounded import inventory. Nothing is silently assigned to another account."""
     models, operations = {}, {}
     rows = store.rows("SELECT m.*,a.window_id,a.logical_request_id FROM model_usage m "
@@ -276,29 +321,61 @@ def legacy_liabilities(store, provider):
             row["logical_request_id"] or row["request_id"], "SETTLED",
             micro_usd=row["billed_micro_usd"], model_attempts=1,
             input_tokens=row["input_tokens"], output_tokens=row["output_tokens"])
+    inventory_items, records = {}, set()
+    for item in inventory.reservations if inventory else []:
+        if item.record_sha256 in records:
+            raise CoreError("CUMULATIVE_LEGACY_WINDOW_ATTRIBUTION_REQUIRED", 409)
+        records.add(item.record_sha256)
+        inventory_items.setdefault((item.kind, item.source_sha256), []).append(item)
     approved = {}
     for row in store.rows("SELECT key,value FROM runtime_meta WHERE key LIKE 'live_text_input:%'"):
         item = json.loads(row["value"])
-        capture = item.get("capture")
-        source = store.one("SELECT occurred_at FROM events WHERE event_id=?", (item["event_id"],))
-        at = capture["received_at"] if capture else source["occurred_at"] if source else None
         history = store.one("SELECT value FROM runtime_meta WHERE key=?",
                             ("live_text_window:" + item["window_sha256"],))
-        if at is None or not history:
+        if not history:
             raise CoreError("CUMULATIVE_LEGACY_INPUT_ATTRIBUTION_REQUIRED", 409)
         window = json.loads(history["value"])["binding"]["window_id"]
+        attempts = inventory_items.pop(("input", digest(item["event_id"])), [])
+        if len(attempts) != 1 or attempts[0].window_id != window:
+            raise CoreError("CUMULATIVE_LEGACY_INPUT_TIMING_REQUIRED", 409)
         approved[item["event_id"]] = window
         operations["input:" + digest(item["event_id"])] = liability(
-            at, window, item["event_id"], "ADMITTED", owner_inputs=1)
+            attempts[0].at, window, item["event_id"], "ADMITTED", owner_inputs=1)
     for row in store.rows("SELECT * FROM outbox WHERE attempt_count>0 ORDER BY message_id"):
         if (row["state"] not in {"SENT", "FAILED", "CANCELLED"}
             or row["origin_event_id"] not in approved):
             raise CoreError("CUMULATIVE_LEGACY_SEND_ATTRIBUTION_REQUIRED", 409)
-        operations["send:" + digest(row["message_id"])] = liability(
-            row["sent_at"] or row["updated_at"], approved[row["origin_event_id"]],
-            row["origin_event_id"], "SENT" if row["state"] == "SENT" else "FAILED",
-            send_attempts=row["attempt_count"])
+        source = digest(row["message_id"])
+        attempts = inventory_items.pop(("send", source), [])
+        if len(attempts) != row["attempt_count"] or any(
+            item.window_id != approved[row["origin_event_id"]] for item in attempts
+        ):
+            raise CoreError("CUMULATIVE_LEGACY_SEND_TIMING_REQUIRED", 409)
+        for item in attempts:
+            operations["legacy_send:" + source + ":" + item.record_sha256] = liability(
+                item.at, item.window_id, row["origin_event_id"],
+                "SENT" if row["state"] == "SENT" else "FAILED", send_attempts=1)
+    if inventory_items:
+        raise CoreError("CUMULATIVE_LEGACY_WINDOW_ATTRIBUTION_REQUIRED", 409)
     return {"models": models, "operations": operations}
+
+
+def verify_legacy_inventory(store, settings, scope):
+    inventory = scope.legacy_window_inventory
+    if inventory is None:
+        return
+    live = settings.live_text_window
+    journal_id = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+    if (not live or not live.capture_public_key or not journal_id
+        or inventory.budget_journal_id != journal_id["value"]
+        or inventory.identity_sha256 != scope.owner_identity_sha256):
+        raise CoreError("CUMULATIVE_LEGACY_WINDOW_PROOF_REQUIRED", 403)
+    value = inventory.model_dump(mode="json", exclude={"signature"})
+    try:
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(live.capture_public_key)).verify(
+            bytes.fromhex(inventory.signature), LEGACY_DOMAIN + encode(value).encode())
+    except (ValueError, InvalidSignature):
+        raise CoreError("CUMULATIVE_LEGACY_WINDOW_PROOF_REQUIRED", 403) from None
 
 
 def liability(at, window, logical, state, **values):
@@ -345,7 +422,8 @@ def activate(store, settings, now):
     record = {"kind": "quota_renew" if state["policy"] else "quota_enroll", "version": 1,
               "at": at, "policy": value, "policy_sha256": policy_sha}
     if not state["policy"]:
-        legacy = legacy_liabilities(store, scope.provider)
+        verify_legacy_inventory(store, settings, scope)
+        legacy = legacy_liabilities(store, scope.provider, scope.legacy_window_inventory)
         if digest(legacy) != scope.legacy_liabilities_sha256:
             raise CoreError("CUMULATIVE_LEGACY_INVENTORY_CHANGED", 409)
         record["legacy"] = legacy
@@ -358,7 +436,7 @@ def pause(store, custody, now, reason="OWNER_PAUSE", evidence_sha256=None):
     state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
     if not state["policy"] or state["paused"]:
         return
-    observed = instant(now)
+    observed = instant(now) if now is not None else state["clock"]
     paid_budget.journal(store, custody, {"kind": "quota_pause", "version": 1,
         "account_ref": state["policy"]["account_ref"], "at": max(observed, state["clock"]),
         "observed_at": observed, "reason": reason, "evidence_sha256": evidence_sha256},
@@ -373,7 +451,11 @@ def check(store, settings, now, *, custody=None):
         "SELECT 1 FROM runtime_meta WHERE key=?", (PROJECTION,),
     ):
         return empty_state()
-    view = custody or paid_budget.journal(store, settings.paid_model, allow_settlement=True)
+    approval = settings.paid_model
+    if approval is None:
+        projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+        approval = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+    view = custody or paid_budget.journal(store, approval, allow_settlement=True)
     state = view["cumulative"]
     if scope is None and not state["policy"]:
         return state
@@ -394,6 +476,28 @@ def check(store, settings, now, *, custody=None):
     if state["paused"]:
         raise CoreError("CUMULATIVE_PAUSED", 403)
     return state
+
+
+def preflight(store, settings, clock):
+    """Record expiry/rollback before a narrower window validator can return early."""
+    from companion import paid_budget
+
+    if not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (PROJECTION,)):
+        return
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        now = clock() if callable(clock) else clock
+        projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+        custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+        view = paid_budget.journal(store, custody, allow_settlement=True)
+        scope = _scope(settings)
+        if scope and digest(scope.model_dump(mode="json")) != view["cumulative"]["policy_sha256"]:
+            # Explicit new approvals still pass activate() at the reviewed cutoff.
+            return
+        check(store, settings, now, custody=view)
+        paid = settings.paid_model
+        if paid and not instant(paid.starts_at) <= instant(now) < instant(paid.expires_at):
+            pause(store, custody, now, "EXPIRED")
+            raise CoreError("CUMULATIVE_WINDOW_EXPIRED", 403)
 
 
 def violations(state, item, *, replacing=None):
@@ -453,7 +557,7 @@ def admission_metadata(store, admission, *, amount=None, state=None, tokens=None
     return value
 
 
-def final_fence(settings, state, now):
+def final_fence(settings, state, now, request_id=None):
     scope = _scope(settings)
     if not state["policy"]:
         return
@@ -462,3 +566,99 @@ def final_fence(settings, state, now):
         or state["paused"] or at < state["clock"]
         or not instant(scope.starts_at) <= at < instant(scope.expires_at)):
         raise CoreError("CUMULATIVE_DISPATCH_FENCED", 403)
+    if request_id and periods(state["models"][request_id]["at"], scope.timezone) != periods(
+        at, scope.timezone,
+    ):
+        raise CoreError("CUMULATIVE_DISPATCH_PERIOD_CHANGED", 403)
+
+
+def admit_operation(store, settings, now, kind, source_id, source_sha256, *, at=None, logical=None):
+    """Conservative, idempotent shadow of the existing input/outbox responsibility."""
+    from companion import paid_budget
+
+    state = check(store, settings, now)
+    if not state["policy"]:
+        return
+    if kind not in {"input", "send"}:
+        raise ValueError("invalid cumulative operation")
+    key = kind + ":" + digest(source_id)
+    previous = state["operations"].get(key)
+    if previous:
+        if (previous.get("source_sha256") != source_sha256
+            or previous["window_id"] != settings.paid_model.window_id):
+            raise CoreError("CUMULATIVE_OPERATION_CONFLICT", 409)
+        return
+    item = liability(at or now, settings.paid_model.window_id, logical or source_id,
+        "ADMITTED" if kind == "input" else "RESERVED",
+        **{"owner_inputs" if kind == "input" else "send_attempts": 1})
+    if item["at"] > instant(now) or violations(state, item):
+        raise CoreError("CUMULATIVE_LIMIT_EXHAUSTED", 429)
+    paid_budget.journal(store, settings.paid_model, {
+        "kind": "quota_operation", "version": 1, "at": instant(now),
+        "account_ref": state["policy"]["account_ref"], "policy_sha256": state["policy_sha256"],
+        "key": key, "source_sha256": source_sha256, "liability": item,
+    })
+
+
+def send_result(store, message_id, result, now):
+    from companion import paid_budget
+
+    projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+    if not projection:
+        return
+    custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+    state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
+    key = "send:" + digest(message_id)
+    previous = state["operations"].get(key)
+    if not previous or previous["state"] == result:
+        return
+    paid_budget.journal(store, custody, {
+        "kind": "quota_send_result", "version": 1,
+        "account_ref": state["policy"]["account_ref"], "at": max(instant(now), state["clock"]),
+        "key": key, "state": result,
+    }, allow_settlement=True)
+
+
+def status(store, settings, now):
+    from companion import paid_budget
+
+    projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+    if not projection:
+        return {"enrolled": False}
+    custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+    try:
+        state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
+    except CoreError as error:
+        return {"enrolled": True, "available": False, "code": error.code}
+    policy = state["policy"]
+    values = [*state["models"].values(), *state["operations"].values()]
+    day, month = periods(instant(now), policy["timezone"])
+    window = settings.paid_model.window_id if settings.paid_model else None
+    totals = {}
+    for name in ("window", "day", "month", "account"):
+        selected = [v for v in values if (
+            name == "account" or name == "window" and v["window_id"] == window
+            or name == "day" and periods(v["at"], policy["timezone"])[0] == day
+            or name == "month" and periods(v["at"], policy["timezone"])[1] == month)]
+        totals[name] = {dimension: sum(v[dimension] for v in selected) for dimension in DIMENSIONS}
+    return {"enrolled": True, "available": True, "account_ref": policy["account_ref"],
+            "policy_sha256": state["policy_sha256"], "paused": state["paused"],
+            "reason": state["reason"], "expires_at": policy["expires_at"],
+            "timezone": policy["timezone"], "currency": policy["currency"], "used": totals,
+            "limits": {name: policy[name] for name in totals}}
+
+
+def owner_pause(store, settings, clock, request):
+    from companion import paid_budget
+
+    with store.transaction():
+        projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+        if not projection:
+            raise CoreError("CUMULATIVE_ACCOUNT_NOT_ENROLLED", 409)
+        custody = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+        state = paid_budget.journal(store, custody, allow_settlement=True)["cumulative"]
+        if (request.account_ref != state["policy"]["account_ref"]
+            or request.policy_sha256 != state["policy_sha256"]):
+            raise CoreError("CUMULATIVE_ACCOUNT_BINDING_CHANGED", 409)
+        pause(store, custody, clock(), evidence_sha256=request.evidence_sha256)
+    return status(store, settings, clock())

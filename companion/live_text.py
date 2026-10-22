@@ -18,7 +18,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, Field
 
-from companion import paid_budget, qq_images
+from companion import cumulative, paid_budget, qq_images
 from companion.contracts import CoreError, StrictModel
 from companion.privacy import ErasureLedger, epoch
 from companion.qq_rich import input_digest as _input_digest
@@ -146,6 +146,8 @@ def guard(
 ):
     # Read the clock after BEGIN IMMEDIATE, including any SQLite lock wait.
     with nullcontext() if store.db.in_transaction else store.transaction():
+        if not opening and not preparing:
+            cumulative.preflight(store, settings, clock)
         approval = settings.live_text_window
         if approval is None or approval.live_approved is not True or not callable(clock):
             raise CoreError("LIVE_TEXT_APPROVAL_REQUIRED", 503)
@@ -185,6 +187,8 @@ def guard(
             raise CoreError("LIVE_TEXT_CLOSED_FEATURES_REQUIRED", 503)
         now = datetime.fromisoformat(clock())
         if not approval.starts_at <= now < approval.ends_at:
+            if approval.cumulative:
+                cumulative.pause(store, settings.paid_model, now, "EXPIRED")
             raise CoreError("LIVE_TEXT_APPROVAL_EXPIRED", 503)
         paid = paid_budget.contract(settings, clock())
         if (
@@ -196,6 +200,7 @@ def guard(
             or paid.starts_at > approval.starts_at
             or paid.expires_at < approval.ends_at
             or paid_budget.sha(paid_budget.snapshot(settings)) != approval.paid_contract_sha256
+            or paid.cumulative != approval.cumulative
         ):
             raise CoreError("LIVE_TEXT_PAID_CONTRACT_CHANGED", 503)
         if approval.memory_scope == "approved_facts":
@@ -206,6 +211,8 @@ def guard(
         if not journal or journal["value"] != approval.budget_journal_id:
             raise CoreError("LIVE_TEXT_BUDGET_JOURNAL_CHANGED", 503)
         custody = paid_budget.journal(store, paid, allow_settlement=preparing)
+        if not opening and not preparing:
+            cumulative.check(store, settings, clock(), custody=custody)
         if store.one(
             "SELECT 1 FROM runtime_meta WHERE key IN "
             "('model_budget_blocked','model_budget_restore_required')"
@@ -324,6 +331,11 @@ def open_window(store, settings, clock, reference):
             _idle(store)
             if attempts:
                 raise CoreError("LIVE_TEXT_INITIAL_WORK_MUST_BE_ZERO", 409)
+            if approval.cumulative or store.one(
+                "SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,),
+            ):
+                cumulative.activate(store, settings, clock())
+                cumulative.check(store, settings, clock())
             paid_budget.journal(store, settings.paid_model, {
                 "kind": "window_open", "window_id": approval.window_id,
                 "plan_sha256": approval.plan_sha256,
@@ -434,6 +446,11 @@ def prepare_handoff(store, settings, clock, reference):
             or custody["head_sha256"] != scope.budget_journal_head_sha256
         ):
             raise CoreError("LIVE_TEXT_HANDOFF_STOP_REQUIRED", 409)
+        if approval.cumulative or store.one(
+            "SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,),
+        ):
+            cumulative.activate(store, settings, clock())
+            cumulative.check(store, settings, clock())
         head = paid_budget.journal(store, settings.paid_model, {
             "kind": "window_handoff", "window_id": approval.window_id,
             "plan_sha256": approval.plan_sha256, "handoff_sha256": binding["handoff_sha256"],
@@ -535,6 +552,8 @@ def approve_input(store, settings, clock, body):
                 "SELECT 1 FROM jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT') LIMIT 1"
             ):
                 raise CoreError("LIVE_TEXT_ONE_JOB_AT_A_TIME", 409)
+            cumulative.admit_operation(store, settings, clock(), "input", body.event_id,
+                paid_budget.sha(value), at=capture.received_at if capture else None)
             store.insert("runtime_meta", key=INPUT + body.event_id, value=encode(value))
     return {"approved": True}
 
@@ -1178,10 +1197,13 @@ def record_reply(store, settings, clock, job, message_id, reply):
 
 def send_check(store, settings, clock, body):
     with store.transaction():
-        return check_delivery(store, settings, clock, body.message_id, check=body)
+        result = check_delivery(store, settings, clock, body.message_id, check=body)
+        cumulative.admit_operation(store, settings, clock(), "send", body.message_id,
+            paid_budget.sha(body.model_dump(mode="json")), logical=body.event_id)
+        return result
 
 
-def stop_window(store, reference):
+def stop_window(store, reference, clock=None):
     # Revocation must remain possible after expiry, approval removal or code drift.
     with store.transaction():
         history = _meta(store, HISTORY + reference.window_sha256)
@@ -1213,6 +1235,8 @@ def stop_window(store, reference):
                 store, custody, {"kind": "window_stop", "window_id": frozen["window_id"],
                                  "plan_sha256": reference.window_sha256}, allow_settlement=True,
             )
+        if store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,)):
+            cumulative.pause(store, custody, clock() if callable(clock) else None, "WINDOW_STOP")
         store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
                       (STOP + reference.window_sha256, "OWNER_STOP"))
         store.execute(

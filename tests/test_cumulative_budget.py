@@ -3,6 +3,7 @@
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -23,8 +24,11 @@ def policy(core, **changes):
     prior = custody["cumulative"]
     caps = dict(micro_usd=10_000_000, model_attempts=100, input_tokens=1_000_000,
                 output_tokens=1_000_000, owner_inputs=100, send_attempts=100)
+    inventory = changes.get("legacy_window_inventory")
+    if inventory is not None:
+        inventory = cumulative.LegacyWindowInventory.model_validate(inventory)
     values = dict(version=1, account_ref="b" * 64, policy_id=uid("quota"),
-        approval_sha256="c" * 64, account_evidence_sha256="d" * 64,
+        approval_sha256=cumulative.digest(uid("approval")), account_evidence_sha256="d" * 64,
         credential_sha256=cumulative.credential(core.settings, "b" * 64),
         key_ownership_sha256="e" * 64, provider=paid.provider, currency=paid.currency,
         timezone=paid.timezone,
@@ -34,12 +38,13 @@ def policy(core, **changes):
         expected_journal_head_sha256=custody["head_sha256"],
         predecessor_policy_sha256=prior["policy_sha256"],
         legacy_liabilities_sha256=cumulative.digest(cumulative.legacy_liabilities(
-            core.store, paid.provider)) if not prior["policy"] else None,
+            core.store, paid.provider, inventory)) if not prior["policy"] else None,
         legacy_adoption_evidence_sha256="f" * 64,
         request={k: v for k, v in caps.items() if k not in {"owner_inputs", "send_attempts"}},
         window=caps, day=caps, month=caps, account=caps, concurrency=2)
     for key, value in changes.items():
-        values[key] = {**values[key], **value} if isinstance(value, dict) else value
+        values[key] = ({**values[key], **value} if isinstance(value, dict)
+                       and isinstance(values.get(key), dict) else value)
     scope = cumulative.CumulativeApproval.model_validate(values)
     core.settings.paid_model = paid.model_copy(update={"cumulative": scope})
     return scope
@@ -238,3 +243,107 @@ def test_two_processes_share_account_cap(core, tmp_path):
 def test_legacy_snapshots_do_not_gain_empty_policy(core, tmp_path):
     approval = approved_live(core, tmp_path)
     assert "cumulative" not in approval.model_dump(mode="json")
+
+
+def test_committed_pause_cannot_be_removed_by_a_valid_journal_prefix(core, tmp_path):
+    enable(core, tmp_path)
+    path = Path(core.settings.paid_model.journal_path)
+    prior = path.read_bytes()
+    cumulative.pause(core.store, core.settings.paid_model, core.clock())
+    path.write_bytes(prior)
+    with pytest.raises(CoreError, match="RECONCILIATION"):
+        reserve(core)
+    assert core.store.rows("SELECT * FROM model_usage") == []
+
+
+def test_expiry_is_durable_even_when_old_window_validator_would_fail_first(core, tmp_path):
+    enable(core, tmp_path)
+    core.clock.now = datetime.fromisoformat("2026-12-01T00:00:01+08:00")
+    with pytest.raises(CoreError, match="EXPIRED"):
+        reserve(core)
+    assert view(core)["reason"] == "EXPIRED"
+    core.clock.now = datetime.fromisoformat("2026-10-20T04:00:00+00:00")
+    with pytest.raises(CoreError):
+        reserve(core)
+    assert core.store.rows("SELECT * FROM model_usage") == []
+
+
+def test_reserved_model_cannot_dispatch_in_another_natural_day(core, tmp_path):
+    core.clock.now = datetime.fromisoformat("2026-10-31T15:59:59+00:00")
+    enable(core, tmp_path)
+    request = reserve(core)
+    calls = []
+
+    async def midnight(_):
+        core.clock.advance(2)
+
+    async def exercise():
+        async with httpx.AsyncClient(event_hooks={"request": [midnight]},
+            transport=httpx.MockTransport(lambda req: calls.append(req))) as client:
+            with pytest.raises(CoreError, match="CUMULATIVE_DISPATCH_PERIOD_CHANGED"):
+                await budget.complete(ModelClient(core.settings, client), core.store,
+                    core.settings, request, MESSAGES, "chat", core.clock)
+
+    asyncio.run(exercise())
+    assert calls == []
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_old_database_and_latest_or_missing_journal_never_replenish(core, tmp_path, missing):
+    import sqlite3
+    from contextlib import closing
+
+    from companion.store import Store
+
+    enable(core, tmp_path)
+    old = tmp_path / "old.db"
+    with closing(sqlite3.connect(old)) as destination:
+        core.store.db.backup(destination)
+    request = reserve(core)
+    budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
+    if missing:
+        Path(core.settings.paid_model.journal_path).unlink()
+    restored = Store(str(old))
+    try:
+        with pytest.raises(CoreError, match="RECONCILIATION"):
+            budget.reserve(restored, core.settings, None, "chat", MESSAGES, core.clock())
+    finally:
+        restored.close()
+    assert core.model.calls == []
+
+
+def test_disconnect_keeps_liability_and_cannot_trigger_a_second_paid_request(core, tmp_path):
+    enable(core, tmp_path)
+    request = reserve(core)
+    calls = []
+
+    def disconnect(request):
+        calls.append(request)
+        raise httpx.ReadError("synthetic disconnect")
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(disconnect)) as client:
+            with pytest.raises(CoreError, match="MODEL_RETRYABLE"):
+                await budget.complete(ModelClient(core.settings, client), core.store,
+                    core.settings, request, MESSAGES, "chat", core.clock)
+
+    asyncio.run(exercise())
+    # The existing worker owns settlement after transport exceptions.
+    budget.settle(core.store, core.settings, request)
+    assert view(core)["models"][request]["state"] == "UNKNOWN"
+    with pytest.raises(CoreError):
+        reserve(core)
+    assert len(calls) == 1
+
+
+def test_vision_and_chat_consume_the_same_cumulative_model_attempts(core, tmp_path):
+    from tests.test_paid_image_budget import image_approval, reserve_image
+
+    image_approval(core, tmp_path)
+    policy(core, account={"model_attempts": 1})
+    job, request = reserve_image(core)
+    budget.settle(core.store, core.settings, request, ModelResponse("ok", 1000, 20))
+    with pytest.raises(CoreError, match="CUMULATIVE_LIMIT_EXHAUSTED"):
+        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock(),
+                       logical_request_id=job)
+    assert len(view(core)["models"]) == 1 and core.model.calls == []

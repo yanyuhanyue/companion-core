@@ -190,11 +190,13 @@ def journal(store, approval, record=None, *, allow_settlement=False):
             identity = {"value": journal_id}
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, False
+        heads = set()
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
         for index, line in enumerate(lines):
             row = json.loads(line)
             digest = row.pop("sha256")
+            heads.add(digest)
             if row.get("previous") != previous or sha(row) != digest:
                 raise ValueError("journal chain")
             previous = digest
@@ -218,7 +220,9 @@ def journal(store, approval, record=None, *, allow_settlement=False):
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
         expected = cumulative.binding(account, path)
-        if (json.loads(projection["value"]) if projection else None) != expected:
+        saved = json.loads(projection["value"]) if projection else None
+        witness = saved.pop("control_head_sha256", None) if saved else None
+        if saved != expected or (expected and witness not in heads):
             raise ValueError("cumulative policy projection behind journal or DB")
         stored_lifecycle = live_lifecycle(store)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
@@ -278,9 +282,10 @@ def journal(store, approval, record=None, *, allow_settlement=False):
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (LIVE_LIFECYCLE, encode(next_lifecycle)))
                 lifecycle = next_lifecycle
-            if record["kind"] in cumulative.POLICY_RECORDS:
+            if record["kind"] in cumulative.CONTROL_RECORDS:
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
-                              (cumulative.PROJECTION, encode(cumulative.binding(account, path))))
+                              (cumulative.PROJECTION,
+                               encode(cumulative.binding(account, path, previous))))
         return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error
