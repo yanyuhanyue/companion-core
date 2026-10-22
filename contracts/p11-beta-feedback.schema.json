@@ -48,7 +48,11 @@
       "properties": {
         "naturalness": {"$ref": "#/$defs/rating"}, "relevance": {"$ref": "#/$defs/rating"},
         "source_accuracy": {"$ref": "#/$defs/rating"}, "memory_correctness": {"$ref": "#/$defs/rating"},
-        "initiative_comfort": {"$ref": "#/$defs/rating"}
+        "initiative_comfort": {"$ref": "#/$defs/rating"},
+        "privacy_comfort": {"$ref": "#/$defs/rating"},
+        "duplication_disruption": {"$ref": "#/$defs/rating"},
+        "diary_authenticity": {"$ref": "#/$defs/rating"},
+        "interest_spontaneity": {"$ref": "#/$defs/rating"}
       }
     },
     "reason_private": {"type": ["string", "null"], "maxLength": 500},

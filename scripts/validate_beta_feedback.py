@@ -22,6 +22,23 @@ def validate_record(record):
         return {"schema_valid": False, "invalid_fields": [
             ".".join(map(str, error.absolute_path)) or "record" for error in errors
         ]}
+    if record["evidence_type"] == "authorized_runtime":
+        missing = [key for key in ("trace_ref_sha256", "inspector_sha256", "candidate_sha")
+                   if record[key] is None]
+        refs = record["authorization_refs"]
+        required = {"R3"}
+        coverage = record.get("coverage_observations", {})
+        experience = record.get("experience_observations", {})
+        if any(coverage.get(key) in {"BODY_FETCHED", "CONTENT_FETCHED", "FETCHED", "ANALYZED"}
+               for key in ("reply", "forward", "card", "image")):
+            required.add("media")
+        if experience.get("diary") is not None or record["ratings"].get("diary_authenticity"):
+            required.add("diary")
+        if experience.get("sharing") in {"RECEIVED_WELCOME", "RECEIVED_UNWELCOME"}:
+            required.add("autonomous_send")
+        missing += ["authorization_refs." + key for key in sorted(required) if refs[key] is None]
+        if missing:
+            return {"schema_valid": False, "invalid_fields": missing}
     phone = record["phone"]
     if any(value is not None and kind not in record["qq_types"]
            for kind, value in record.get("coverage_observations", {}).items()):

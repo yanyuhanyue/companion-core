@@ -61,3 +61,10 @@ def test_offline_success_cannot_create_calendar_days_or_release_status():
     sample["production_ready"] = True
     with pytest.raises(ValidationError):
         validator.validate(sample)
+
+
+def test_nonzero_runtime_samples_require_approval_even_without_a_pass_claim():
+    validator, gates = materials()
+    gates["packages"]["A1"]["runtime_samples"] = 1
+    with pytest.raises(ValidationError):
+        validator.validate(gates)

@@ -55,6 +55,7 @@
       "allOf": [
         {
           "if": {"anyOf": [
+            {"properties": {"runtime_samples": {"minimum": 1}}},
             {"properties": {"evidence": {"properties": {"protocol": {"properties": {"platform": {"const": "LIMITED_LIVE_PASS"}}}}}}},
             {"properties": {"evidence": {"properties": {"provider": {"const": "LIMITED_LIVE_PASS"}}}}},
             {"properties": {"evidence": {"properties": {"phone": {"const": "CONFIRMED"}}}}},

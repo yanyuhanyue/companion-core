@@ -20,6 +20,10 @@ Memory review、Vision 和 chat 共用该总数。本文不启用常驻服务、
 
 ## E3：私人反馈与汇总
 
+后续 P13 对 `authorized_runtime` 增加了批准/trace/Inspector 关联要求，详见
+[P13 运营说明](p13-beta-operations.md)。以下保留 P12 交付时的能力记录；缺少关联的历史
+真人反馈需补齐真实材料后才能重新进入当前汇总器，原始历史文件不改写。
+
 继续使用 `companion inspect-context --trace-id` 和 `status/observe`，以及原反馈验证器。
 Inspector 增加原事件 UTC 时间、请求/逻辑请求哈希，仍只读 SQLite，仍为 `NOT_REVALIDATED` 诊断。
 日期取原事件发生时间，不把检查报告的导出日期当成新一天聊天。
