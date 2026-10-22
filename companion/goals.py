@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import AwareDatetime, Field, model_validator
 
 from companion.contracts import CoreError, StrictModel
+from companion.observation import expired_sources
 from companion.privacy import epoch, redact
 from companion.store import after, encode, uid
 from companion.transport import digest, enqueue
@@ -114,6 +115,12 @@ class GoalEngine:
         ]
 
     def validate_sources(self, event_ids):
+        if expired_sources(
+            self.store,
+            event_ids,
+            after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+        ):
+            raise CoreError("GOAL_SOURCE_UNAVAILABLE", 409)
         for event_id in set(event_ids):
             event = self.store.one(
                 "SELECT * FROM events WHERE event_id=? AND redacted=0", (event_id,)
@@ -273,22 +280,49 @@ class GoalEngine:
 
     def recent(self):
         self.expire_sources()
-        return self.store.rows(
+        captured = epoch(self.store)
+        goals = self.store.rows(
             "SELECT g.*,c.state AS commitment_state,c.deadline FROM goals g LEFT JOIN "
             "commitments c USING(goal_id) WHERE g.redacted=0 ORDER BY g.rowid DESC LIMIT 20"
         )
+        for goal in goals:
+            goal["mode"] = "SHADOW" if goal["state"] == "CANDIDATE" else "READ_ONLY"
+            goal["source_evidence"] = self.store.rows(
+                "SELECT e.event_id,e.source,e.occurred_at,o.result_status FROM goal_evidence ge "
+                "JOIN events e USING(event_id) LEFT JOIN observations o USING(event_id) "
+                "WHERE ge.goal_id=? ORDER BY e.occurred_at,e.event_id",
+                (goal["goal_id"],),
+            )
+            goal["execution"] = self.store.one(
+                "SELECT state,attempts,last_error_code,outcome_event_id,updated_at "
+                "FROM goal_steps WHERE goal_id=?", (goal["goal_id"],)
+            )
+            goal["result"] = self.store.one(
+                "SELECT e.event_id,e.source,e.occurred_at,o.result_status,o.source_sha256 "
+                "FROM observations o JOIN events e USING(event_id) WHERE e.event_id=? "
+                "AND e.redacted=0 AND o.redacted=0", (goal["result_event_id"],)
+            )
+            goal["delivery"] = self.store.one(
+                "SELECT o.message_id,o.state,o.sent_at FROM commitments c JOIN outbox o "
+                "ON o.message_id=c.feedback_message_id WHERE c.goal_id=?", (goal["goal_id"],)
+            )
+            goal["phone_confirmation"] = None
+        if captured != epoch(self.store):
+            raise CoreError("PRIVACY_CHANGED", 409)
+        return goals
 
     def expire_sources(self):
-        rows = self.store.rows(
-            "SELECT DISTINCT e.event_id FROM goal_evidence ge JOIN events e USING(event_id) "
-            "WHERE e.redacted=1 OR e.ingested_at<?",
-            (after(self.clock(), -86400 * self.settings.raw_event_retention_days),),
-        )
-        if rows:
-            with self.store.transaction():
-                self.ledger.expire_events(
-                    self.store, [row["event_id"] for row in rows], self.clock()
-                )
+        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+            rows = self.store.rows(
+                "SELECT event_id FROM goal_evidence UNION SELECT outcome_event_id AS event_id "
+                "FROM goal_steps WHERE outcome_event_id IS NOT NULL"
+            )
+            expired = expired_sources(
+                self.store, [row["event_id"] for row in rows],
+                after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+            )
+            if expired:
+                self.ledger.expire_events(self.store, expired, self.clock())
 
     def pause_autonomy(self, paused):
         with self.store.transaction():

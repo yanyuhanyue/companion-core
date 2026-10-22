@@ -68,7 +68,7 @@ def cancel_proactive_work(store, now):
 
 
 def lease_deliveries(store, settings, request, now):
-    from companion.social import proactive_allowed
+    from companion.social import proactive_allowed, share_delivery_problem
 
     with store.transaction():
         recover_deliveries(store, now)
@@ -89,6 +89,14 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
+            problem = share_delivery_problem(store, settings, row["message_id"], now)
+            if problem:
+                store.execute(
+                    "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                    "last_error_code=? WHERE message_id=?",
+                    (now, problem, row["message_id"]),
+                )
+                continue
             token = uid("lease")
             store.execute(
                 "UPDATE outbox SET state='LEASED',lease_owner=?,lease_token=?,"
@@ -116,6 +124,7 @@ def lease_deliveries(store, settings, request, now):
 
 
 def begin_send(store, message_id, token, now, settings=None, *, clock=None):
+    problem = None
     with store.transaction():
         from companion import live_text
 
@@ -128,18 +137,27 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
             (message_id, token, now),
         )
         if pending and pending["action_type"] == "qq.private.proactive":
-            from companion.social import proactive_allowed
+            from companion.social import proactive_allowed, share_delivery_problem
 
             if not proactive_allowed(store, settings, now):
                 raise CoreError("PROACTIVE_SEND_PAUSED", 409)
-        changed = store.execute(
-            "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
-            "WHERE message_id=? AND state='LEASED' AND lease_token=? AND lease_until>?",
-            (now, message_id, token, now),
-        ).rowcount
-        if changed != 1:
-            raise CoreError("STALE_DELIVERY_LEASE")
-        return {"state": "SENDING"}
+            problem = share_delivery_problem(store, settings, message_id, now)
+        if problem:
+            store.execute(
+                "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                "last_error_code=? WHERE message_id=?", (now, problem, message_id)
+            )
+        else:
+            changed = store.execute(
+                "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
+                "WHERE message_id=? AND state='LEASED' AND lease_token=? AND lease_until>?",
+                (now, message_id, token, now),
+            ).rowcount
+            if changed != 1:
+                raise CoreError("STALE_DELIVERY_LEASE")
+    if problem:
+        raise CoreError(problem, 409)
+    return {"state": "SENDING"}
 
 
 def delivery_result(store, settings, message_id, result, now):

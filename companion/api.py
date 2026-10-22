@@ -268,7 +268,8 @@ def create_app(settings=None):
         return {"proposal": app.state.core.affect.preview(event_id)}
 
     @app.get("/internal/v2/goals", dependencies=control_auth)
-    async def goals():
+    async def goals(response: Response):
+        response.headers["Cache-Control"] = "no-store"
         return {"items": app.state.core.goals.recent()}
 
     @app.post("/internal/v2/goals", dependencies=control_auth, status_code=202)
@@ -331,7 +332,8 @@ def create_app(settings=None):
         return {"run_id": run_id}
 
     @app.get("/internal/v2/reflections", dependencies=control_auth)
-    async def reflections():
+    async def reflections(response: Response):
+        response.headers["Cache-Control"] = "no-store"
         return {"items": app.state.core.reflections.recent()}
 
     @app.post("/internal/v2/reflections/{suggestion_id}/decision", dependencies=control_auth)
