@@ -2,6 +2,7 @@ import re
 import time
 from datetime import datetime
 
+from . import reply_segments
 from .onebot_client import bounded_post
 
 
@@ -32,6 +33,7 @@ def validate_item(item, config):
         or not 1 <= len(content["text"]) <= 20000
     ):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
+    reply_segments.envelope(item)
 
 
 async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):

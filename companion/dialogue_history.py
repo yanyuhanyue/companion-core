@@ -5,6 +5,7 @@ engine still checks the complete final prompt under its own admission contract.
 """
 
 from companion.budget import token_upper_bound
+from companion.contracts import CoreError
 from companion.qq_rich import context
 
 
@@ -25,6 +26,8 @@ def turn_messages(source):
 
 def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None):
     """Return source-bound turns; an optional small allowlist is applied before LIMIT."""
+    from companion.transport import reply_group, segment_envelope
+
     if max_turns <= 0:
         return []
     if event_ids is not None and not event_ids:
@@ -33,13 +36,20 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
     if event_ids is not None:
         allowed = "AND e.event_id IN (" + ",".join("?" for _ in event_ids) + ") "
     rows = store.rows(
-        "SELECT e.*,o.message_id,o.content_json,o.content_sha256,o.delivery_key,"
+        "SELECT e.*,o.message_id,o.content_json,o.content_sha256,o.delivery_key,o.reply_group_id,"
         "json_extract(e.body_json,'$.text') AS user_text,"
         "json_extract(o.content_json,'$.text') AS reply_text FROM events e "
         "JOIN outbox o ON o.origin_event_id=e.event_id AND o.rowid IN "
         "(SELECT MAX(reply.rowid) FROM outbox reply WHERE reply.conversation_id=? "
         "AND reply.action_type='qq.private.reply' AND reply.state='SENT' "
         "AND json_type(reply.content_json,'$.text')='text' "
+        "AND ((reply.reply_group_id IS NULL AND reply.segment_index=0 "
+        "AND reply.segment_count=1 AND reply.reply_group_sha256 IS NULL "
+        "AND reply.segment_interval_ms=0 AND reply.delivery_key NOT LIKE 'reply:%:v2:%') "
+        "OR (reply.reply_group_id IS NOT NULL AND "
+        "(SELECT COUNT(*) FROM outbox part WHERE part.reply_group_id=reply.reply_group_id) "
+        "=reply.segment_count AND NOT EXISTS (SELECT 1 FROM outbox part "
+        "WHERE part.reply_group_id=reply.reply_group_id AND part.state!='SENT'))) "
         "AND length(json_extract(reply.content_json,'$.text'))>0 GROUP BY reply.origin_event_id) "
         "WHERE e.conversation_id=? AND e.actor_id='owner' AND e.privacy_scope='private' "
         "AND e.source='qq.onebot' "
@@ -55,7 +65,23 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "AND m.status IN ('SUPERSEDED','FORGOTTEN')) " + allowed + "ORDER BY e.rowid DESC LIMIT ?",
         (conversation_id, conversation_id, current_event_id, *(event_ids or ()), max_turns),
     )
-    return list(reversed(rows))
+    sources = []
+    for row in rows:
+        if row.pop("reply_group_id") is not None:
+            try:
+                group = reply_group(store, row["message_id"], require_sent=True)
+                if not group:
+                    continue
+                row["reply_text"] = group["text"]
+                row["reply_segments"] = [
+                    {"message_id": part["message_id"],
+                     **segment_envelope(store, part["message_id"])}
+                    for part in group["rows"]
+                ]
+            except CoreError:
+                continue
+        sources.append(row)
+    return list(reversed(sources))
 
 
 def fit_context(rules, references, turns, current_input, soft_limit):

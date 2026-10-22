@@ -200,7 +200,7 @@ class Spool:
                 os.close(descriptor)
 
     def trace_for(self, delivery_key):
-        match = re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v1", delivery_key or "")
+        match = re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v(?:1|2:[0-2])", delivery_key or "")
         row = (
             self.db.execute("SELECT trace FROM inbox WHERE key=?", (match[1],)).fetchone()
             if match

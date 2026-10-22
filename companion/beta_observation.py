@@ -4,13 +4,16 @@ import hashlib
 import json
 import re
 import sqlite3
+from collections import Counter
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from companion.contracts import CoreError
 from companion.ops_status import _ReadView, schema_head
 from companion.paid_budget import sha
 from companion.privacy import epoch
+from companion.transport import reply_group
 
 
 def _hash(value):
@@ -204,6 +207,35 @@ def _recorded_window(view, event_id, current_epoch):
         return {**result, "state": "INCONSISTENT"}
 
 
+def _reply_groups(view, event_id, redacted):
+    if redacted:
+        return []
+    heads = view.rows(
+        "SELECT MIN(message_id) message_id FROM outbox WHERE origin_event_id=? "
+        "AND action_type='qq.private.reply' AND reply_group_id IS NOT NULL "
+        "GROUP BY reply_group_id ORDER BY reply_group_id LIMIT 21", (event_id,),
+    )
+    if len(heads) > 20:
+        raise ValueError("TRACE_REPLY_GROUP_LIMIT")
+    groups = []
+    for head in heads:
+        try:
+            group = reply_group(view, head["message_id"])
+        except CoreError:
+            continue  # A damaged or erased manifest cannot support a larger expected count.
+        if not group["segmented"]:
+            continue
+        rows = group["rows"]
+        states = dict(Counter(row["state"] for row in rows))
+        groups.append({
+            "state": "RECORDED", "job_ref_sha256": _hash(rows[0]["reply_group_id"]),
+            "reply_group_sha256": rows[0]["reply_group_sha256"],
+            "expected_reply_count": len(rows), "outbox": states,
+            "all_parts_sent": states.get("SENT", 0) == len(rows),
+        })
+    return groups
+
+
 def _trace(view, trace_id):
     events = view.rows(
         "SELECT e.event_id,e.redacted,e.occurred_at FROM events e "
@@ -285,6 +317,7 @@ def _trace(view, trace_id):
                 if event["redacted"] else _recorded_window(view, event["event_id"], current_epoch)
             ),
             "jobs": inspected,
+            "reply_groups": _reply_groups(view, event["event_id"], event["redacted"]),
             "outbox": {state: states[state] for state in (
                 "PENDING", "LEASED", "SENDING", "RETRY_WAIT", "SENT", "DELIVERY_UNCERTAIN",
                 "FAILED", "CANCELLED",

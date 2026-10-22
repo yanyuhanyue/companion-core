@@ -64,6 +64,8 @@
       "properties": {
         "received": {"type": ["boolean", "null"]},
         "visible_reply_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
+        "expected_reply_count": {"type": "integer", "minimum": 1, "maximum": 3},
+        "reply_group_sha256": {"$ref": "#/$defs/digest"},
         "duplicate_check_evidence_sha256": {"$ref": "#/$defs/digest"},
         "sent_at_utc": {"$ref": "#/$defs/utc"}, "received_at_utc": {"$ref": "#/$defs/utc"},
         "clock_basis": {"enum": [null, "same_device_utc", "calibrated_pair"]},
@@ -71,6 +73,8 @@
       },
       "allOf": [{"if": {"required": ["visible_reply_count"], "properties": {"visible_reply_count": {"type": "integer"}}},
         "then": {"required": ["duplicate_check_evidence_sha256"], "properties": {"duplicate_check_evidence_sha256": {"type": "string"}}}},
+        {"if": {"required": ["expected_reply_count"], "properties": {"expected_reply_count": {"minimum": 2}}},
+        "then": {"required": ["reply_group_sha256"], "properties": {"reply_group_sha256": {"type": "string"}}}},
         {"if": {"anyOf": [
         {"properties": {"sent_at_utc": {"type": "string"}}},
         {"properties": {"received_at_utc": {"type": "string"}}}

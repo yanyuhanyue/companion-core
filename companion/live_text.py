@@ -157,6 +157,8 @@ def guard(
             or approval.core_code_sha256 != code_sha256()
         ):
             raise CoreError("LIVE_TEXT_RUNTIME_CHANGED", 503)
+        if settings.segmented_reply != approval.segmented_reply:
+            raise CoreError("LIVE_TEXT_REPLY_SCOPE_CHANGED", 503)
         disabled = (
             "diary_enabled",
             "affect_enabled",
@@ -679,12 +681,41 @@ def _history_fingerprint(store, settings, clock, approval, source):
         or body.get("media") or body.get("shared_content")
         or source["user_text"].strip().startswith("/")
         or source["event_type"] != "message.received"
-        or source["delivery_key"] != f"reply:{source['event_id']}:v1"
+    ):
+        return None
+    if "reply_segments" in source:
+        try:
+            group, envelopes = _reply_material(store, approval, source["message_id"])
+        except CoreError:
+            return None
+        if not group["segmented"]:
+            return None
+        segments = [{"message_id": part["message_id"], **envelopes[part["message_id"]]}
+                    for part in group["rows"]]
+        if (group["text"] != source["reply_text"]
+            or source["reply_segments"] != segments
+            or any(part["state"] != "SENT" for part in group["rows"])):
+            return None
+        receipts = []
+        for part in group["rows"]:
+            actual = _meta(store, "live_text_reply:" + part["message_id"])
+            expected = _reply_receipt(
+                approval, jobs[0], part["message_id"], json.loads(part["content_json"])["text"],
+                usage, epoch(store), envelopes[part["message_id"]],
+            )
+            if actual != expected:
+                return None
+            receipts.append(actual)
+        return {"event_id": source["event_id"], "message_id": source["message_id"],
+                "message_ids": [part["message_id"] for part in group["rows"]],
+                "source_sha256": paid_budget.sha(dict(source)),
+                "input_receipt_sha256": paid_budget.sha(value),
+                "reply_receipts_sha256": paid_budget.sha(receipts)}
+    if (source["delivery_key"] != f"reply:{source['event_id']}:v1"
         or source["content_sha256"] != paid_budget.sha({"text": source["reply_text"]})
         or reply_value != _reply_receipt(
             approval, jobs[0], source["message_id"], source["reply_text"], usage, epoch(store),
-        )
-    ):
+        )):
         return None
     return {"event_id": source["event_id"], "message_id": source["message_id"],
             "source_sha256": paid_budget.sha(dict(source)),
@@ -1139,7 +1170,40 @@ def _reply_usage(store, settings, clock, job, approval, *, pending=False):
     return usage
 
 
-def _reply_receipt(approval, job, message_id, reply, usage, privacy_epoch):
+def remaining_send_slots(store, approval):
+    """Count attempts and each queued future attempt against this exact window."""
+    if approval.max_send_attempts is None:
+        return None
+    occupied = store.one(
+        "SELECT COALESCE(SUM(o.attempt_count + CASE WHEN o.state IN "
+        "('PENDING','LEASED','RETRY_WAIT') THEN 1 ELSE 0 END),0) AS n "
+        "FROM outbox o JOIN runtime_meta r ON r.key=? || o.origin_event_id "
+        "WHERE o.action_type='qq.private.reply' "
+        "AND json_extract(r.value,'$.window_sha256')=?",
+        (INPUT, approval.plan_sha256),
+    )["n"]
+    return approval.max_send_attempts - occupied
+
+
+def _reply_material(store, approval, message_id):
+    from companion.transport import reply_group, segment_envelope
+
+    group = reply_group(store, message_id)
+    if not group or len(group["text"]) > approval.max_reply_chars:
+        raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
+    envelopes = {row["message_id"]: segment_envelope(store, row["message_id"])
+                 for row in group["rows"]}
+    if group["segmented"] and (
+        approval.segmented_reply is None
+        or len(group["rows"]) > approval.segmented_reply.max_segments
+        or any(value["interval_ms"] != approval.segmented_reply.interval_ms
+               for value in envelopes.values())
+    ):
+        raise CoreError("LIVE_TEXT_REPLY_SCOPE_CHANGED", 403)
+    return group, envelopes
+
+
+def _reply_receipt(approval, job, message_id, reply, usage, privacy_epoch, segment=None):
     requests = (
         {"request_ids": [r["request_id"] for r in usage]}
         if (approval.memory_scope == "approved_facts" or len(usage) > 1)
@@ -1153,6 +1217,7 @@ def _reply_receipt(approval, job, message_id, reply, usage, privacy_epoch):
         "reply_sha256": paid_budget.sha(reply),
         "plan_sha256": approval.plan_sha256,
         "privacy_epoch": privacy_epoch,
+        **({"reply_segments": segment} if segment is not None else {}),
     }
 
 
@@ -1168,19 +1233,26 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
     check_job(store, settings, clock, job, current_delivery=message_id)
     usage = _reply_usage(store, settings, clock, job, approval)
+    group, envelopes = _reply_material(store, approval, message_id)
+    for part in group["rows"]:
+        text = json.loads(part["content_json"])["text"]
+        receipt = _meta(store, "live_text_reply:" + part["message_id"])
+        expected = _reply_receipt(
+            approval, job, part["message_id"], text, usage, epoch(store),
+            envelopes[part["message_id"]],
+        )
+        key = (f"reply:{part['origin_event_id']}:v2:{part['segment_index']}"
+               if group["segmented"] else f"reply:{part['origin_event_id']}:v1")
+        if (receipt != expected or part["delivery_key"] != key
+            or part["content_sha256"] != paid_budget.sha({"text": text})):
+            raise CoreError("LIVE_TEXT_REPLY_RECEIPT_CHANGED", 403)
+    slots = remaining_send_slots(store, approval)
+    if slots is not None and slots < 0:
+        raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 429)
+    from companion.transport import check_segment_ready
+
+    check_segment_ready(store, message_id, clock())
     text = json.loads(row["content_json"])["text"]
-    if len(text) > approval.max_reply_chars:
-        raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-    receipt = store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", ("live_text_reply:" + message_id,)
-    )
-    expected = _reply_receipt(approval, job, message_id, text, usage, epoch(store))
-    if (
-        not receipt or json.loads(receipt["value"]) != expected
-        or row["delivery_key"] != f"reply:{row['origin_event_id']}:v1"
-        or row["content_sha256"] != paid_budget.sha({"text": text})
-    ):
-        raise CoreError("LIVE_TEXT_REPLY_RECEIPT_CHANGED", 403)
     if check and (
         check.window_sha256 != approval.plan_sha256 or check.event_id != row["origin_event_id"]
         or check.reply_sha256 != paid_budget.sha(text) or check.lease_token != row["lease_token"]
@@ -1193,9 +1265,18 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 def record_reply(store, settings, clock, job, message_id, reply):
     approval, _ = check_job(store, settings, clock, job)
     usage = _reply_usage(store, settings, clock, job, approval)
-    if len(reply) > approval.max_reply_chars:
+    group, envelopes = _reply_material(store, approval, message_id)
+    part = next(row for row in group["rows"] if row["message_id"] == message_id)
+    if (json.loads(part["content_json"])["text"] != reply
+        or part["origin_event_id"] != job["event_id"]
+        or part["conversation_id"] != job["conversation_id"]):
         raise CoreError("LIVE_TEXT_SETTLED_REPLY_REQUIRED", 403)
-    receipt = _reply_receipt(approval, job, message_id, reply, usage, epoch(store))
+    slots = remaining_send_slots(store, approval)
+    if slots is not None and slots < 0:
+        raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 429)
+    receipt = _reply_receipt(
+        approval, job, message_id, reply, usage, epoch(store), envelopes[message_id],
+    )
     store.insert("runtime_meta", key="live_text_reply:" + message_id, value=encode(receipt))
 
 

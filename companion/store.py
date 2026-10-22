@@ -97,7 +97,8 @@ class Store:
         required = {
             "events": {"event_id", "redacted", "memory_processed", "fingerprint"},
             "jobs": {"lease_token", "state"},
-            "outbox": {"lease_token", "state", "content_json"},
+            "outbox": {"lease_token", "state", "content_json", "reply_group_id", "segment_index",
+                       "segment_count", "reply_group_sha256", "segment_interval_ms"},
             "memories": {"needs_review", "fact_key"},
             "memory_vectors": {"model_version", "content_hash", "vector"},
             "runtime_meta": {"key", "value"},
