@@ -73,9 +73,16 @@ class LifeService:
                 or "目前没有待跟进的目标。"
             )
         if text == "反思列表":
+            labels = {
+                "PENDING": "待核对的想法：",
+                "NEED_MORE_EVIDENCE": "待补充证据的想法：",
+                "ACCEPT_AS_HYPOTHESIS": "已采纳的暂时假设：",
+            }
+            rows = [row for row in self.reflections.recent() if row["state"] in labels][:5]
             return (
                 "\n".join(
-                    "待核对的想法：" + row["content"] for row in self.reflections.recent()[:5]
+                    labels[row["state"]] + row["content"]
+                    for row in rows
                 )
                 or "目前没有待核对的反思。"
             )

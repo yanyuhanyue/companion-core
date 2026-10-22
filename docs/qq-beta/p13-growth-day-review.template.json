@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "kind": "UNAPPROVED_PRIVATE_GROWTH_DAY_REVIEW_TEMPLATE",
+  "evidence_type": "NOT_RUN",
+  "local_date": null,
+  "timezone": null,
+  "candidate_sha": null,
+  "actual_image_id": null,
+  "runtime_image_digest": null,
+  "runtime_config_sha256": null,
+  "owner_identity_sha256": null,
+  "authorization_refs": {
+    "source_observation": null,
+    "affect_expression": null,
+    "reflection": null,
+    "diary": null,
+    "R6": null,
+    "autonomous_send": null
+  },
+  "source_manifest_sha256": null,
+  "source_rows": [],
+  "feedback_record_refs": [],
+  "inspector_refs": [],
+  "affect": {
+    "preview_refs": [],
+    "owner_intent_confirmed": null,
+    "ttl_checked_at_utc": null,
+    "revoked_or_expired_preview_absent": null,
+    "expression_changed": null
+  },
+  "interests": {
+    "owner_preference_refs": [],
+    "completed_self_read_refs": [],
+    "distinct_content_hash_count": null,
+    "distinct_canonical_target_count": null,
+    "independent_sessions": null,
+    "actual_natural_days": null,
+    "projected_status": null,
+    "owner_review_reason_private": null
+  },
+  "reflections": {
+    "suggestion_refs": [],
+    "owner_decision_refs": [],
+    "dependent_goal_refs": [],
+    "withdrawn_intent_blocked": null,
+    "started_io_accounting_preserved": null,
+    "independent_goals_preserved": null
+  },
+  "diary": {
+    "entry_ref_sha256": null,
+    "source_set_sha256": null,
+    "reviewed_at_utc": null,
+    "source_supported_sections": null,
+    "reviewed_sections": null,
+    "invented_experience_sections": null,
+    "omissions_private": null,
+    "privacy_findings_private": null,
+    "revision_receipt_sha256": null,
+    "deletion_receipt_sha256": null,
+    "next_actual_local_date": null,
+    "next_day_source_refs": [],
+    "continuity_confirmed": null,
+    "latest_ledger_restore_receipt_sha256": null,
+    "independent_day_preserved": null
+  },
+  "goals_and_sharing": {
+    "goal_view_refs": [],
+    "reader_receipt_refs": [],
+    "share_draft_refs": [],
+    "outbox_state": null,
+    "phone_confirmed": null,
+    "actual_share_count": null
+  },
+  "ratings_1_to_5": {
+    "naturalness": null,
+    "recall_accuracy": null,
+    "diary_faithfulness": null,
+    "interest_source_diversity": null,
+    "initiative_comfort": null
+  },
+  "owner_correction_count": null,
+  "rating_reason_private": null,
+  "operations_evidence": {
+    "observation_manifest_sha256": null,
+    "verified_sample_intervals": [],
+    "missing_intervals": [],
+    "continuous_health_seconds": null,
+    "model_http_attempts": null,
+    "model_usage_refs": [],
+    "configured_cost_micro_usd": null,
+    "provider_invoice_micro_usd": null,
+    "provider_invoice_evidence_sha256": null,
+    "core_stop_receipt_sha256": null,
+    "bridge_stop_receipt_sha256": null
+  },
+  "milestones": [
+    {"required_actual_natural_days": 1, "reviewed_actual_natural_days": null, "state": "NOT_RUN"},
+    {"required_actual_natural_days": 3, "reviewed_actual_natural_days": null, "state": "NOT_RUN"},
+    {"required_actual_natural_days": 7, "reviewed_actual_natural_days": null, "state": "NOT_RUN"},
+    {"required_actual_natural_days": 14, "reviewed_actual_natural_days": null, "state": "NOT_RUN"},
+    {"required_actual_natural_days": 30, "reviewed_actual_natural_days": null, "state": "NOT_RUN"}
+  ],
+  "private_beta_ready": false,
+  "production_ready": false
+}

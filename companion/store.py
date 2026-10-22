@@ -97,7 +97,7 @@ class Store:
             "reflection_suggestions": {"kind", "content", "state"},
             "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
             "consolidation_evidence": {"event_id", "run_id"},
-            "goals": {"scope_json", "state", "redacted"},
+            "goals": {"scope_json", "state", "redacted", "reflection_suggestion_id"},
             "goal_evidence": {"event_id", "goal_id"},
             "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts"},
             "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},

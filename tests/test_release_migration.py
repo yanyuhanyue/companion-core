@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
@@ -37,6 +38,7 @@ REVISION_CHAIN = (
     "0015_article_images",
     "0016_source_grants",
     "0017_paid_model_gate",
+    "0018_reflection_goal_lineage",
 )
 LEGACY_TABLES = (
     "principals",
@@ -306,9 +308,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0017_paid_model_gate"]
+    assert scripts.get_heads() == ["0018_reflection_goal_lineage"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0017_paid_model_gate")
+    revisions, current = [], scripts.get_revision("0018_reflection_goal_lineage")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -361,7 +363,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0017_paid_model_gate"}
+            {"version_num": "0018_reflection_goal_lineage"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
@@ -461,3 +463,57 @@ def test_encrypted_0004_diary_restore_deletes_only_requested_date(tmp_path):
             },
         )
         assert_indexes_and_integrity(restored)
+
+
+def test_0018_preserves_populated_goals_without_guessing_reflection_origins(tmp_path):
+    database, _, _ = seed_legacy(tmp_path, "0004_diary")
+    migrate(str(database), "0017_paid_model_gate")
+    with closing(Store(str(database))) as store:
+        store.insert(
+            "reflection_runs", run_id="reflection_legacy", identity_id="companion",
+            local_date="2026-10-18", timezone="Asia/Shanghai", state="COMMITTED",
+            source_set_sha256="a" * 64, captured_privacy_epoch=3,
+            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+        )
+        store.insert(
+            "reflection_suggestions", suggestion_id="suggestion_legacy", run_id="reflection_legacy",
+            kind="next_question", content="同样的历史主题", evidence_json="[]", state="PENDING",
+            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+        )
+        store.insert(
+            "goals", goal_id="goal_legacy", kind="self", topic="同样的历史主题",
+            scope_json=encode({"operation": "investigate", "url": ""}), proposal_key="legacy-key",
+            state="CANDIDATE", priority=1, next_due_at=TIMES["keep"],
+            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+        )
+        store.insert("goal_evidence", goal_id="goal_legacy", event_id="evt_keep")
+        before = table_snapshot(store, (
+            "goals", "goal_evidence", "reflection_runs", "reflection_suggestions",
+            "events", "memories", "model_usage", "outbox", "runtime_meta",
+        ))
+    migrate(str(database))
+    migrate(str(database))
+    with closing(Store(str(database))) as store:
+        assert_old_columns_unchanged(store, before)
+        assert store.one("SELECT reflection_suggestion_id FROM goals") == {
+            "reflection_suggestion_id": None
+        }
+        assert store.rows("PRAGMA foreign_key_check") == []
+        # An explicit attribution is retained; downgrading may not silently discard it.
+        store.execute(
+            "UPDATE goals SET reflection_suggestion_id='suggestion_legacy' "
+            "WHERE goal_id='goal_legacy'"
+        )
+    config = Config()
+    config.set_main_option(
+        "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
+    )
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + database.resolve().as_posix())
+    with pytest.raises(RuntimeError, match="REFLECTION_GOALS_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW"):
+        command.downgrade(config, "0017_paid_model_gate")
+    with closing(Store(str(database))) as store:
+        assert store.one("SELECT reflection_suggestion_id FROM goals") == {
+            "reflection_suggestion_id": "suggestion_legacy"
+        }
+        assert_old_columns_unchanged(store, before)
+        assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"

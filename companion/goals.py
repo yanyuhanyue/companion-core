@@ -17,6 +17,41 @@ from companion.transport import digest, enqueue
 TERMINAL = {"DONE", "FAILED", "CANCELLED"}
 
 
+def withdraw_reflection_goals(store, suggestion_id, now):
+    """Cancel only attributed future intent; started reads retain uncertain accounting."""
+    for goal in store.rows(
+        "SELECT goal_id FROM goals WHERE kind='self' AND reflection_suggestion_id=? "
+        "AND state NOT IN ('DONE','FAILED','CANCELLED')", (suggestion_id,)
+    ):
+        goal_id = goal["goal_id"]
+        step = store.one("SELECT state FROM goal_steps WHERE goal_id=?", (goal_id,))
+        reads = store.rows(
+            "SELECT started_at FROM exploration_requests "
+            "WHERE json_extract(goal_step_json,'$.goal_id')=?", (goal_id,)
+        )
+        uncertain = step and (
+            step["state"] == "EXECUTION_UNCERTAIN"
+            or (step["state"] == "RUNNING" and (not reads or any(r["started_at"] for r in reads)))
+        )
+        store.execute(
+            "UPDATE goals SET state='CANCELLED',last_error_code='REFLECTION_WITHDRAWN',"
+            "version=version+1,updated_at=? WHERE goal_id=?", (now, goal_id)
+        )
+        store.execute(
+            "UPDATE goal_steps SET state=?,lease_token=NULL,"
+            "last_error_code='REFLECTION_WITHDRAWN',updated_at=? WHERE goal_id=? "
+            "AND state NOT IN ('DONE','FAILED')",
+            ("EXECUTION_UNCERTAIN" if uncertain else "CANCELLED", now, goal_id),
+        )
+        store.execute(
+            "UPDATE exploration_requests SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
+            "ELSE 'CANCELLED' END,lease_token=NULL,last_error_code='REFLECTION_WITHDRAWN',"
+            "updated_at=? WHERE state IN ('QUEUED','RUNNING') "
+            "AND json_extract(goal_step_json,'$.goal_id')=?", (now, goal_id)
+        )
+        store.audit("goal.reflection_withdrawn", goal_id, suggestion_id, now)
+
+
 class GoalScope(StrictModel):
     operation: Literal["read_content", "investigate"] = "investigate"
     url: str = Field(default="", max_length=2048)
@@ -137,7 +172,22 @@ class GoalEngine:
             ):
                 raise CoreError("GOAL_SOURCE_UNAVAILABLE", 409)
 
-    def propose(self, proposal, kind="self"):
+    def validate_reflection(self, suggestion_id):
+        if suggestion_id is None:
+            return None
+        suggestion = self.store.one(
+            "SELECT s.*,r.state AS run_state FROM reflection_suggestions s "
+            "JOIN reflection_runs r USING(run_id) WHERE s.suggestion_id=?", (suggestion_id,)
+        )
+        if (
+            not suggestion or suggestion["run_state"] != "COMMITTED"
+            or suggestion["kind"] != "next_question"
+            or suggestion["state"] not in {"PENDING", "ACCEPT_AS_HYPOTHESIS"}
+        ):
+            raise CoreError("GOAL_REFLECTION_UNAVAILABLE", 409)
+        return suggestion
+
+    def propose(self, proposal, kind="self", *, reflection_suggestion_id=None):
         if not self.settings.goals_enabled:
             raise CoreError("GOALS_DISABLED", 403)
         if kind not in {"self", "commitment"}:
@@ -150,14 +200,24 @@ class GoalEngine:
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
             self.validate_sources(proposal.source_event_ids)
-            key = digest(
-                {
-                    "kind": kind,
-                    "topic": proposal.topic.strip(),
-                    "scope": proposal.scope.model_dump(),
-                    "sources": sorted(set(proposal.source_event_ids)),
-                }
-            )
+            origin = self.validate_reflection(reflection_suggestion_id)
+            identity = {
+                "kind": kind,
+                "topic": proposal.topic.strip(),
+                "scope": proposal.scope.model_dump(),
+                "sources": sorted(set(proposal.source_event_ids)),
+            }
+            if origin:
+                sources = {row["event_id"] for row in s.rows(
+                    "SELECT event_id FROM reflection_evidence WHERE run_id=?", (origin["run_id"],)
+                )}
+                if (
+                    kind != "self" or proposal.topic.strip() != origin["content"][:300].strip()
+                    or set(proposal.source_event_ids) != sources
+                ):
+                    raise CoreError("GOAL_REFLECTION_MISMATCH", 409)
+                identity["reflection_suggestion_id"] = reflection_suggestion_id
+            key = digest(identity)
             previous = s.one("SELECT * FROM goals WHERE proposal_key=?", (key,))
             if previous:
                 return previous["goal_id"]
@@ -179,6 +239,7 @@ class GoalEngine:
                 next_due_at=now,
                 created_at=now,
                 updated_at=now,
+                reflection_suggestion_id=reflection_suggestion_id,
             )
             for event_id in sorted(set(proposal.source_event_ids)):
                 s.insert("goal_evidence", goal_id=goal_id, event_id=event_id)
@@ -193,6 +254,9 @@ class GoalEngine:
             goal = self.get(goal_id)
             if autonomous and goal["kind"] != "self":
                 raise CoreError("OWNER_REQUIRED", 403)
+            if goal["state"] in TERMINAL:
+                return goal
+            self.validate_reflection(goal["reflection_suggestion_id"])
             self.validate_sources(self.source_ids(goal_id))
             if goal["state"] not in {
                 "CANDIDATE",
@@ -463,6 +527,7 @@ class GoalEngine:
             )
             if not row:
                 return None
+            self.validate_reflection(self.get(row["goal_id"])["reflection_suggestion_id"])
             self.validate_sources(self.source_ids(row["goal_id"]))
             token = uid("goal_lease")
             s.execute(
@@ -499,6 +564,7 @@ class GoalEngine:
             raise CoreError("PRIVACY_CHANGED", 409)
         if not self.settings.goals_enabled:
             raise CoreError("GOALS_DISABLED", 403)
+        self.validate_reflection(self.get(step["goal_id"])["reflection_suggestion_id"])
         self.validate_sources(self.source_ids(step["goal_id"]))
 
     def finish(self, step, result_event_id):
