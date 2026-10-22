@@ -127,6 +127,63 @@ def share_source(event):
         return None
 
 
+def share_delivery_problem(store, settings, message_id, now):
+    """Recheck native queued shares under the transport's write transaction."""
+    candidate = store.one(
+        "SELECT * FROM social_candidates WHERE message_id=?", (message_id,)
+    )
+    if not candidate:
+        return None  # Ordinary replies and other proactive work retain their own gates.
+    if settings is None or not settings.social_enabled:
+        return "SOCIAL_DISABLED"
+    if candidate["state"] != "QUEUED" or candidate["expires_at"] <= now:
+        return "SOCIAL_CANDIDATE_EXPIRED"
+    cutoff = after(now, -86400 * settings.raw_event_retention_days)
+    if expired_sources(store, [candidate["event_id"]], cutoff):
+        return "SOCIAL_SOURCE_EXPIRED"
+    event = store.one(
+        "SELECT o.*,e.body_json,e.source FROM observations o JOIN events e USING(event_id) "
+        "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 AND e.privacy_scope='private' "
+        "AND e.occurred_at<=?", (candidate["event_id"], now)
+    )
+    resolved = share_source(event) if event else None
+    if resolved is None:
+        return "SOCIAL_SOURCE_CHANGED"
+    definition, body, canonical = resolved
+    comparison = body["title"] + "\n" + body["text"][:1500]
+    if (
+        canonical != _share_url(candidate["canonical_url"], definition.name)
+        or hashlib.sha256(text_key(comparison).encode()).hexdigest()
+        != candidate["content_sha256"]
+    ):
+        return "SOCIAL_SOURCE_CHANGED"
+    delivery = store.one(
+        "SELECT o.content_json,o.action_type,o.origin_event_id,c.scope,c.owner_actor_id "
+        "FROM outbox o JOIN conversations c USING(conversation_id) WHERE o.message_id=?",
+        (message_id,),
+    )
+    if (
+        not delivery or delivery["action_type"] != "qq.private.proactive"
+        or delivery["origin_event_id"] != candidate["event_id"]
+        or delivery["scope"] != "private" or delivery["owner_actor_id"] != "owner"
+    ):
+        return "SOCIAL_DELIVERY_CHANGED"
+    try:
+        expected = {"text": share_text(definition, body, canonical)}
+        if json.loads(delivery["content_json"]) != expected:
+            return "SOCIAL_CONTENT_CHANGED"
+    except (KeyError, TypeError, ValueError):
+        return "SOCIAL_CONTENT_CHANGED"
+    return None
+
+
+def share_text(definition, body, canonical):
+    return (
+        "读到一段" + definition.share_label + "，想分享给你：\n"
+        + body["title"] + "\n" + body["text"][:500] + "\n" + canonical
+    )
+
+
 class SocialPlanner:
     def __init__(self, store, settings, clock=utcnow):
         self.store, self.settings, self.clock = store, settings, clock
@@ -189,6 +246,10 @@ class SocialPlanner:
         if not self.settings.social_enabled:
             return None
         s, now, captured = self.store, self.clock(), epoch(self.store)
+        if expired_sources(
+            s, [event_id], after(now, -86400 * self.settings.raw_event_retention_days)
+        ):
+            return None
         event = s.one(
             "SELECT o.*,e.body_json,e.source FROM observations o JOIN events e USING(event_id) "
             "WHERE o.event_id=? AND o.redacted=0 AND e.redacted=0 AND o.result_status='FETCHED' "
@@ -232,6 +293,11 @@ class SocialPlanner:
                     reason = "DEDUPE_UNAVAILABLE"
             with s.transaction():
                 if captured != epoch(s):
+                    return None
+                if expired_sources(
+                    s, [event_id],
+                    after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+                ):
                     return None
                 if s.one("SELECT 1 FROM social_candidates WHERE event_id=?", (event_id,)):
                     return None
@@ -295,6 +361,14 @@ class SocialPlanner:
             )
             if not candidate:
                 return False
+            if expired_sources(
+                s, [candidate["event_id"]], after(now, -86400 * cfg.raw_event_retention_days)
+            ):
+                s.execute(
+                    "UPDATE social_candidates SET state='EXPIRED',reason_code='SOURCE_EXPIRED',"
+                    "updated_at=? WHERE candidate_id=?", (now, candidate["candidate_id"])
+                )
+                return False
             resolved = share_source({**candidate, "canonical_url": candidate["source_url"]})
             if resolved is None or resolved[2] != _share_url(
                 candidate["canonical_url"], resolved[0].name
@@ -306,17 +380,7 @@ class SocialPlanner:
                 )
                 return False
             definition, body, canonical = resolved
-            label = definition.share_label
-            text = (
-                "读到一段"
-                + label
-                + "，想分享给你：\n"
-                + body["title"]
-                + "\n"
-                + body["text"][:500]
-                + "\n"
-                + canonical
-            )
+            text = share_text(definition, body, canonical)
             message_id = enqueue(
                 s,
                 candidate["event_id"],
