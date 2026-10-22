@@ -58,13 +58,15 @@ uv run python scripts/package_bridge.py
 先在真实 QQ 上测试正常消息、重复消息和故障恢复，确认仅一条主回复，再将 `memory_enabled=true`。停止 API/Worker 后运行迁移初始化，再启动服务：
 
 ```bash
-docker compose stop companion-worker companion-diary-worker companion-api
+docker compose --profile life stop companion-worker companion-life-worker companion-diary-worker companion-api
 docker compose build
 docker compose run --rm migrate
-docker compose up -d companion-api companion-worker companion-diary-worker
+docker compose --profile life up -d companion-api companion-worker companion-life-worker companion-diary-worker
 ```
 
-初始化会迁移至 `0013_content`；开启 M1 时还会准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
+聊天 Worker 只处理即时回复；自动记忆提取由 `companion-life-worker` 执行，因此开启记忆时需一并启动 `life` profile。常规提取不依赖夜间整理开关；有排队、执行中或到期重试的聊天时，后台记忆会让位。
+
+初始化会迁移至当前 schema；开启 M1 时还会准备固定版本的中文嵌入模型，首次需要下载约 90 MB 的公开模型文件。Compose 将缓存放在 `/data/embedding-cache`，后续离线启动可复用；本地默认目录为工作区 `data/embedding-cache`。模型无法加载时会报 `MEMORY_INDEX_UNAVAILABLE`，应修复缓存或下载问题后重启。该缓存只存公开模型权重，个人记忆向量仍在受备份与遗忘机制管理的 SQLite 内。
 
 使用“/记住这个：…”验证新会话的不同问法、冲突提示、确认、纠正和忘记。相似检索返回的是候选，最终回复前还会检查它是否直接对应问题。语义核对调用使用同一个模型适配器，记入每日记忆预算；预算不足时聊天会继续，并明确说明记忆核对暂不可用。
 

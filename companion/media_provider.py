@@ -3,37 +3,11 @@
 import base64
 import json
 from dataclasses import dataclass
-from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from companion.contracts import CoreError
-
-
-class MediaEndpoint(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    url: str = ""
-    key: SecretStr = SecretStr("")
-    model: str = Field(default="", max_length=128)
-    protocol: Literal["openai", "minimax"] = "openai"
-    # Operator-configured maximum cost for one bounded request; zero disables calls.
-    max_request_micro_usd: int = Field(default=0, ge=0)
-
-    @model_validator(mode="after")
-    def valid_url(self):
-        if self.url:
-            parts = urlsplit(self.url)
-            if (
-                parts.scheme != "https"
-                or not parts.hostname
-                or parts.username
-                or parts.query
-                or parts.fragment
-            ):
-                raise ValueError("media endpoint must be HTTPS without credentials/query/fragment")
-        return self
 
 
 @dataclass(frozen=True)

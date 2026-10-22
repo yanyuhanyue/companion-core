@@ -14,8 +14,8 @@ from companion.contracts import CoreError
 from companion.executive import HTTPExecutor
 from companion.executive_protocol import ExecutorEndpoint
 from companion.executor_budget_proxy import create_budget_proxy
-from companion.media import MediaConfig
-from companion.media_provider import HTTPMediaProvider, MediaEndpoint
+from companion.media_config import MediaConfig, MediaEndpoint
+from companion.media_provider import HTTPMediaProvider
 from tests.conftest import ingest, run
 from tests.test_content import POST, enable
 from tests.test_executive import TOKEN, envelope

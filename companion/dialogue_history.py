@@ -26,7 +26,7 @@ def turn_messages(source):
 
 def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None):
     """Return source-bound turns; an optional small allowlist is applied before LIMIT."""
-    from companion.transport import reply_group, segment_envelope
+    from companion.transport import reply_group, segment_envelopes
 
     if max_turns <= 0:
         return []
@@ -73,9 +73,10 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
                 if not group:
                     continue
                 row["reply_text"] = group["text"]
+                envelopes = segment_envelopes(group)
                 row["reply_segments"] = [
                     {"message_id": part["message_id"],
-                     **segment_envelope(store, part["message_id"])}
+                     **envelopes[part["message_id"]]}
                     for part in group["rows"]
                 ]
             except CoreError:

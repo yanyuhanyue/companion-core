@@ -146,16 +146,22 @@ def reply_group(store, message_id, *, require_sent=False):
 
 
 def segment_envelope(store, message_id):
-    group = reply_group(store, message_id)
+    return segment_envelopes(reply_group(store, message_id))[message_id]
+
+
+def segment_envelopes(group):
+    """Project envelopes from one freshly validated reply_group; performs no reads."""
     if not group["segmented"]:
-        return None
-    row = next(part for part in group["rows"] if part["message_id"] == message_id)
+        return {group["rows"][0]["message_id"]: None}
+    hashes = [digest(json.loads(part["content_json"])["text"]) for part in group["rows"]]
     return {
-        "version": 1, "group_id": row["reply_group_id"], "index": row["segment_index"],
-        "count": len(group["rows"]), "group_sha256": row["reply_group_sha256"],
-        "total_chars": len(group["text"]), "interval_ms": row["segment_interval_ms"],
-        "part_sha256s": [digest(json.loads(part["content_json"])["text"])
-                         for part in group["rows"]],
+        row["message_id"]: {
+            "version": 1, "group_id": row["reply_group_id"], "index": row["segment_index"],
+            "count": len(group["rows"]), "group_sha256": row["reply_group_sha256"],
+            "total_chars": len(group["text"]), "interval_ms": row["segment_interval_ms"],
+            "part_sha256s": hashes,
+        }
+        for row in group["rows"]
     }
 
 

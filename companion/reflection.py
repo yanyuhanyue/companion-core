@@ -201,7 +201,6 @@ class ReflectionService:
         run = self.claim(day)
         if not run:
             return self.status(day)
-        request_id = None
         try:
             if (
                 len({source["event_id"] for source in run["sources"]})
@@ -225,12 +224,16 @@ class ReflectionService:
                 self.clock(),
                 logical_request_id="reflection:" + run["run_id"],
             )
-            with self.store.transaction():
-                self.validate_lease(run)
-                self.store.execute(
-                    "UPDATE reflection_runs SET model_request_id=? WHERE run_id=?",
-                    (request_id, run["run_id"]),
-                )
+            try:
+                with self.store.transaction():
+                    self.validate_lease(run)
+                    self.store.execute(
+                        "UPDATE reflection_runs SET model_request_id=? WHERE run_id=?",
+                        (request_id, run["run_id"]),
+                    )
+            except BaseException:
+                budget.settle(self.store, self.settings, request_id)
+                raise
             response = await budget.complete(
                 self.model,
                 self.store,
@@ -240,8 +243,6 @@ class ReflectionService:
                 "reflection",
                 self.clock,
             )
-            budget.settle(self.store, self.settings, request_id, response)
-            request_id = None
             draft = ReflectionDraft.model_validate_json(response.text)
             if len(draft.suggestions) > self.settings.reflection_daily_max_suggestions:
                 raise CoreError("REFLECTION_TOO_MANY_SUGGESTIONS", 400)
@@ -270,8 +271,6 @@ class ReflectionService:
                 run, "COMMITTED" if draft.suggestions else "SKIPPED", suggestions=draft.suggestions
             )
         except Exception as error:
-            if request_id:
-                budget.settle(self.store, self.settings, request_id)
             code = error.code if isinstance(error, CoreError) else "REFLECTION_INVALID_OUTPUT"
             self.finish(
                 run,

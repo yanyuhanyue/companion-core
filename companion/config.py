@@ -8,11 +8,10 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
 
-from companion.content import ContentConfig
 from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.image_input import ImageInputPolicy
-from companion.media import MediaConfig
+from companion.media_config import ContentConfig, MediaConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.sources import ObservationSource
 

@@ -20,7 +20,6 @@ from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.content import (
     CONTEXT_RULES,
-    ContentConfig,
     ContentService,
     fetch_public_image,
     public_image_url,
@@ -29,7 +28,8 @@ from companion.content import (
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.exploration import ExplorationService, ReadItem, ReadResult
-from companion.media_provider import MediaEndpoint, MediaResult
+from companion.media_config import ContentConfig, MediaEndpoint
+from companion.media_provider import MediaResult
 from companion.observation import ObservationEvent, ObservationPayload
 from companion.privacy import epoch
 from companion.store import encode
@@ -597,6 +597,20 @@ def test_vision_result_cannot_commit_after_its_lease_has_expired(core):
         run(service.analyze_image(event_id, "image:0", png(), "image/png"))
     assert core.store.rows("SELECT * FROM observations") == []
     assert core.store.one("SELECT state FROM content_items")["state"] == "UNKNOWN"
+
+
+def test_image_hash_changed_during_vision_cannot_create_false_evidence(core):
+    service, vision = enable(core)
+    event_id = owner_share(core, manifest=[{"kind": "image", "slot": 0}])
+    vision.callback = lambda: core.store.execute(
+        "UPDATE content_items SET media_sha256=?", ("0" * 64,),
+    )
+    with pytest.raises(CoreError, match="CONTENT_IMAGE_LEASE_EXPIRED"):
+        run(service.analyze_image(event_id, "image:0", png(), "image/png"))
+    assert len(vision.calls) == 1
+    assert core.store.rows("SELECT * FROM observations") == []
+    assert core.store.one("SELECT state FROM content_items")["state"] == "UNKNOWN"
+    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
 
 def test_content_erasure_and_backup_replay_clear_every_derived_image(core, tmp_path):

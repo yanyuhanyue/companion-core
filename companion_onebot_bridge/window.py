@@ -480,68 +480,69 @@ class TestWindow:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
         return row
 
-    def ensure_schema(self, *, prepare_segments=False):
-        # Legacy ownership is assigned only after the current plan and journal match.
-        # Input/message uniqueness remains global; opted-in fragments share an input.
-        missing = []
-        for table in ("window_inputs", "window_attempts"):
-            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
-            if not columns:
-                raise ValueError("WINDOW_SCHEMA_MISSING")
-            if "plan_hash" not in columns:
-                missing.append(table)
-        history = self.db.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='window_history'"
-        ).fetchone()
-        unique_event = False
-        if reply_segments.scope(self.plan):
-            for index in self.db.execute("PRAGMA index_list(window_attempts)").fetchall():
-                if index[2] and [r[2] for r in self.db.execute(
-                    "SELECT * FROM pragma_index_info(?)", (index[1],)
-                )] == ["event_id"]:
-                    unique_event = True
-        if unique_event and not prepare_segments:
-            raise ValueError("SEGMENTED_WINDOW_PREPARATION_REQUIRED")
-        if not missing and history and not unique_event:
-            return
-        if self.db.execute("SELECT COUNT(*) FROM test_window").fetchone()[0] != 1:
-            raise ValueError("WINDOW_SCHEMA_AMBIGUOUS")
-        self.db.execute("SAVEPOINT window_ownership")
+    def check_schema(self):
+        """Runtime verification never assigns ownership or repairs a persisted schema."""
+        required = {
+            "test_window": "singleton,plan_hash,plan_json,journal_head,state,fence,"
+                           "initial_counts,initial_inbox_rowid,reason",
+            "window_inputs": "event_id,input_hash,approval_hash,state,capture_json,plan_hash",
+            "window_attempts": "message_id,event_id,fence,state,text_hash,approval_hash,"
+                               "provider_ack_hash,item_hash,plan_hash",
+            "window_history": "plan_hash,record_json,retirement_head,successor_hash",
+        }
         try:
-            for table in missing:
-                self.db.execute(
-                    f"ALTER TABLE {table} ADD COLUMN plan_hash TEXT NOT NULL "
-                    f"DEFAULT '{self.plan.sha256}'"
-                )
+            for table, columns in required.items():
+                self.db.execute(f"SELECT {columns} FROM {table} LIMIT 0")
+        except sqlite3.OperationalError as error:
+            if error.sqlite_errorcode != sqlite3.SQLITE_ERROR:
+                raise
+            raise ValueError("WINDOW_SCHEMA_PREPARATION_REQUIRED") from error
+
+    def prepare_schema(self):
+        """Explicit preparation removes the old input uniqueness, preserving every receipt."""
+        self.check_schema()
+        unique_event = False
+        unexpected_index = False
+        indexes = self.db.execute("PRAGMA index_list(window_attempts)").fetchall()
+        for index in indexes:
+            columns = [r[2] for r in self.db.execute(
+                "SELECT * FROM pragma_index_info(?)", (index[1],)
+            )]
+            if index[2] and index[3] == "u" and columns == ["event_id"]:
+                unique_event = True
+            elif not (index[2] and index[3] == "pk" and columns == ["message_id"]):
+                unexpected_index = True
+        if not unique_event:
+            return
+        columns = [row[1] for row in self.db.execute("PRAGMA table_info(window_attempts)")]
+        expected = ["message_id", "event_id", "fence", "state", "text_hash",
+                    "approval_hash", "provider_ack_hash", "item_hash", "plan_hash"]
+        if (columns != expected
+            or self.db.execute("SELECT COUNT(*) FROM test_window").fetchone()[0] != 1
+            or unexpected_index
+            or self.db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' "
+                               "AND tbl_name='window_attempts'").fetchone()):
+            raise ValueError("WINDOW_SCHEMA_AMBIGUOUS")
+        self.db.execute("SAVEPOINT window_preparation")
+        try:
             self.db.execute(
-                "CREATE TABLE IF NOT EXISTS window_history(plan_hash TEXT PRIMARY KEY,"
-                "record_json TEXT NOT NULL,retirement_head TEXT NOT NULL,"
-                "successor_hash TEXT NOT NULL)"
+                "CREATE TABLE window_attempts_segments(message_id TEXT PRIMARY KEY,"
+                "event_id TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL,"
+                "text_hash TEXT NOT NULL,approval_hash TEXT NOT NULL,provider_ack_hash TEXT,"
+                "item_hash TEXT NOT NULL,plan_hash TEXT NOT NULL)"
             )
-            if unique_event:
-                columns = [row[1] for row in self.db.execute("PRAGMA table_info(window_attempts)")]
-                expected = ["message_id", "event_id", "fence", "state", "text_hash",
-                            "approval_hash", "provider_ack_hash", "item_hash", "plan_hash"]
-                if columns != expected:
-                    raise ValueError("WINDOW_SCHEMA_AMBIGUOUS")
-                self.db.execute(
-                    "CREATE TABLE window_attempts_segments(message_id TEXT PRIMARY KEY,"
-                    "event_id TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL,"
-                    "text_hash TEXT NOT NULL,approval_hash TEXT NOT NULL,provider_ack_hash TEXT,"
-                    "item_hash TEXT NOT NULL,plan_hash TEXT NOT NULL)"
-                )
-                names = ",".join(expected)
-                self.db.execute(
-                    f"INSERT INTO window_attempts_segments(rowid,{names}) "
-                    f"SELECT rowid,{names} FROM window_attempts"
-                )
-                self.db.execute("DROP TABLE window_attempts")
-                self.db.execute("ALTER TABLE window_attempts_segments RENAME TO window_attempts")
+            names = ",".join(expected)
+            self.db.execute(
+                f"INSERT INTO window_attempts_segments(rowid,{names}) "
+                f"SELECT rowid,{names} FROM window_attempts"
+            )
+            self.db.execute("DROP TABLE window_attempts")
+            self.db.execute("ALTER TABLE window_attempts_segments RENAME TO window_attempts")
         except BaseException:
-            self.db.execute("ROLLBACK TO window_ownership")
+            self.db.execute("ROLLBACK TO window_preparation")
             raise
         finally:
-            self.db.execute("RELEASE window_ownership")
+            self.db.execute("RELEASE window_preparation")
 
     def count(self, table, condition="1=1"):
         if table not in {"window_inputs", "window_attempts"}:
@@ -599,11 +600,11 @@ class TestWindow:
             raise ValueError("LIVE_TEXT_RUNTIME_CHANGED")
         if (active or dispatch) and self.stop_path.exists():
             raise ValueError("WINDOW_STOPPED")
+        self.check_schema()
         row = self.row()
         records, head = self.read_journal()
         if not records or head != row["journal_head"]:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
-        self.ensure_schema()
         quota = cumulative.fold(self, self.verify_history(records))
         if active or dispatch:
             cumulative.check(self, quota, self.clock())
@@ -927,7 +928,7 @@ class TestWindow:
             raise ValueError("WINDOW_STOP_EVIDENCE_MISSING")
         # Validate account continuity before preparing either side of the handoff.
         cumulative.fold(self, old.verify_history(records))
-        self.ensure_schema(prepare_segments=True)
+        self.prepare_schema()
         snapshot = dict(source)
         # Close locally BEFORE crossing HTTP. A lost acknowledgment is never an
         # invitation to retry another successor or refill the old allowance.
@@ -1057,7 +1058,7 @@ class TestWindow:
             "approval_hash TEXT NOT NULL,state TEXT NOT NULL,capture_json TEXT,"
             "plan_hash TEXT NOT NULL);"
             "CREATE TABLE window_attempts(message_id TEXT PRIMARY KEY,"
-            f"event_id TEXT NOT NULL{'' if reply_segments.scope(self.plan) else ' UNIQUE'},"
+            "event_id TEXT NOT NULL,"
             "fence INTEGER NOT NULL,state TEXT NOT NULL,text_hash TEXT NOT NULL,"
             "approval_hash TEXT NOT NULL,provider_ack_hash TEXT,item_hash TEXT NOT NULL,"
             "plan_hash TEXT NOT NULL);"

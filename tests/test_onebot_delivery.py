@@ -1,4 +1,3 @@
-import json
 
 import httpx
 import pytest
@@ -9,6 +8,7 @@ from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.onebot import provider
 from tests.test_onebot_direct import config, normalized
 
 
@@ -24,30 +24,6 @@ def core_client(core, transport=None, *, bridge_config=None):
         transport=transport or httpx.ASGITransport(app=app),
         headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
     )
-
-
-def provider(request, sends, receipt=None):
-    action = request.url.path
-    if action == "/get_login_info":
-        data = {"user_id": 10002}
-    elif action == "/get_status":
-        data = {"online": True, "good": True}
-    elif action == "/get_version_info":
-        data = {"app_name": "SnowLuma", "app_version": "2.0.3-node"}
-    elif action == "/send_private_msg":
-        body = json.loads(request.content)
-        assert body["user_id"] == 10001
-        assert set(body) == {"user_id", "message", "auto_escape"}
-        assert body["message"][0]["type"] == "text"
-        sends.append(body)
-        if isinstance(receipt, Exception):
-            raise receipt
-        if receipt is not None:
-            return httpx.Response(200, json=receipt)
-        data = {"message_id": 123456}
-    else:
-        pytest.fail("unexpected OneBot action")
-    return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": data})
 
 
 @pytest.mark.parametrize(

@@ -44,6 +44,15 @@ def total_monthly(store, month, before=None):
     return total
 
 
+def chat_pending(store, now):
+    return bool(store.one(
+        "SELECT 1 FROM jobs j JOIN events e ON e.event_id=j.event_id "
+        "WHERE j.kind='chat' AND e.redacted=0 AND (j.state IN ('QUEUED','RUNNING') "
+        "OR (j.state='RETRY_WAIT' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?))) "
+        "LIMIT 1", (now,),
+    ))
+
+
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None,
@@ -75,6 +84,10 @@ def reserve(
     with store.transaction():
         from companion import live_text
 
+        if job_id is None and scenario in {"memory_extract", "memory_review"} and chat_pending(
+            store, clock() if callable(clock) else now,
+        ):
+            raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
         if approval and (approval.cumulative or store.one(
             "SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,),
         )):
@@ -564,7 +577,24 @@ def _persist_accounting(
 
 
 async def complete(model, store, settings, request_id, messages, scenario, clock):
-    """The one Core calling seam: persisted admission is fenced before adapter I/O."""
+    """Dispatch a reservation and settle every outcome before returning to its caller."""
+    from companion.model import ModelResponseError
+
+    response = None
+    try:
+        response = await _dispatch(model, store, settings, request_id, messages, scenario, clock)
+        return response
+    except ModelResponseError as error:
+        # An unusable reply can still carry observed usage.
+        response = error.response
+        raise
+    finally:
+        # Cancellation is an unknown outcome too; callers never refund a started attempt.
+        settle(store, settings, request_id, response)
+
+
+async def _dispatch(model, store, settings, request_id, messages, scenario, clock):
+    """Persisted admission is fenced before adapter I/O."""
     from companion import live_text
 
     live_text.check_model(store, settings, clock, request_id)
@@ -574,7 +604,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
     cumulative.preflight(store, settings, clock)
     now = clock()
-    from companion.model import ModelAdmission, ModelClient, ModelResponseError, model_payload
+    from companion.model import ModelAdmission, ModelClient, model_payload
 
     if live_text.active(store, settings) or scenario == "content_vision":
         if not isinstance(model, ModelClient):
@@ -645,17 +675,13 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         )
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
-    try:
-        cumulative.preflight(store, settings, clock)
-        paid_budget.contract(settings, clock())
-        live_text.check_model(store, settings, clock, request_id)
-        if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
-            raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-        if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
-            raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-    except CoreError:
-        settle(store, settings, request_id)
-        raise
+    cumulative.preflight(store, settings, clock)
+    paid_budget.contract(settings, clock())
+    live_text.check_model(store, settings, clock, request_id)
+    if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
+        raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
+    if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
+        raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
     if isinstance(model, ModelClient):
         async def before_dispatch(request):
             # Every user hook has completed. Custody and current runtime checks
@@ -717,15 +743,9 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
                 cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
         admission = ModelAdmission(row["payload_sha256"], before_dispatch)
-    try:
-        if isinstance(model, ModelClient):
-            return await model.complete(messages, scenario, admission=admission)
-        return await model.complete(messages, scenario)
-    except ModelResponseError as error:
-        # A rejected reply can still carry actual usage. Settle here before the
-        # existing callers handle the error; repeated settlement stays monotonic.
-        settle(store, settings, request_id, error.response)
-        raise
+    if isinstance(model, ModelClient):
+        return await model.complete(messages, scenario, admission=admission)
+    return await model.complete(messages, scenario)
 
 
 def record_provider_discrepancy(

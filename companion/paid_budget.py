@@ -247,27 +247,25 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"]
         ):
             raise ValueError("live window stopped or replaced")
+        admissions = {row["request_id"]: row for row in store.rows(
+            "SELECT a.request_id,a.contract_sha256,a.io_started_at,m.billed_micro_usd,m.state "
+            "FROM model_admissions a LEFT JOIN model_usage m USING(request_id)"
+        )}
         for request_id, row in latest.items():
             if record and request_id == record.get("request_id"):
                 continue
-            usage = store.one(
-                "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?", (request_id,)
-            )
-            admission = store.one(
-                "SELECT contract_sha256,io_started_at FROM model_admissions WHERE request_id=?",
-                (request_id,),
-            )
+            admission = admissions.get(request_id)
             if (
-                not usage
-                or not admission
-                or usage["billed_micro_usd"] < row["minimum_micro_usd"]
-                or usage["state"] != row["state"]
+                not admission
+                or admission["state"] is None
+                or admission["billed_micro_usd"] < row["minimum_micro_usd"]
+                or admission["state"] != row["state"]
                 or admission["contract_sha256"] != row["contract_sha256"]
                 or admission["io_started_at"] != row.get("io_started_at")
             ):
                 raise ValueError("DB behind journal")
         # A DB from a different journal cannot accept an older valid prefix.
-        ids = {r["request_id"] for r in store.rows("SELECT request_id FROM model_admissions")}
+        ids = set(admissions)
         if record:
             ids.discard(record.get("request_id"))
         if set(latest) - ({record.get("request_id")} if record else set()) != ids:

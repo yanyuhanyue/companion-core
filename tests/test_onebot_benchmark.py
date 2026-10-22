@@ -13,7 +13,8 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.spool import Spool
 from scripts.benchmark_qq_beta import summarize
 from tests.conftest import run
-from tests.test_onebot_delivery import core_client, provider
+from tests.support.onebot import provider
+from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import config, normalized, raw_event
 
 

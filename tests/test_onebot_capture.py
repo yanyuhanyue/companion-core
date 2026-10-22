@@ -9,7 +9,6 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import asdict, replace
-from datetime import datetime
 
 import httpx
 import pytest
@@ -23,15 +22,13 @@ from companion.api import create_app
 from companion.config import LiveTextWindowApproval
 from companion.model import ModelClient
 from companion_onebot_bridge import app, capture, network
-from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.journal_assertions import assert_private_journal
+from tests.support.onebot import onebot_http, provider
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_delivery import provider
 from tests.test_onebot_direct import config, raw_event
-from tests.test_onebot_network import onebot_http
 from tests.test_onebot_window import input_approval, plan_fixture, reply_approval, stage
 
 
@@ -920,7 +917,8 @@ def test_meta_events_share_one_total_deadline_and_frame_byte_caps(
         if limit == "bytes":
             frame["status"]["padding"] = "X" * 65000
         try:
-            for _ in range(17):
+            # Three large frames exceed the byte cap without queuing unread frames at close.
+            for _ in range(3 if limit == "bytes" else 17):
                 await ws.send(json.dumps(frame))
                 if limit == "deadline":
                     await asyncio.sleep(0.06)
@@ -938,52 +936,6 @@ def test_meta_events_share_one_total_deadline_and_frame_byte_caps(
                 with pytest.raises(ValueError, match=expected):
                     await window.capture_once(client, protocol)
             assert window.status()["state"] == "STOPPED" and window.status()["new_inputs"] == 0
-
-    run(scenario())
-
-
-def capture_fault_child():
-    """Hard-exit fixture; synthetic config only, no model or Core DB access."""
-    request = json.loads(sys.stdin.readline())
-    cfg = BridgeConfig(**request["config"])
-    plan = WindowPlan(request["plan"], cfg, request["inventory"])
-    if request["fault"] == "raw":
-        original = capture.write_evidence
-
-        def crash_after_raw(window, evidence):
-            original(window, evidence)
-            os._exit(23)
-
-        capture.write_evidence = crash_after_raw
-
-    async def scenario():
-        async with (
-            httpx.AsyncClient(
-                base_url=cfg.core_url,
-                headers={"Authorization": "Bearer " + cfg.bridge_token},
-                transport=httpx.MockTransport(
-                    lambda request: httpx.Response(
-                        200,
-                        json={
-                            "mode": "demo",
-                            "features": {},
-                            "jobs": [],
-                            "deliveries": [],
-                        },
-                    )
-                ),
-            ) as client,
-            httpx.AsyncClient(
-                base_url=cfg.onebot_http_url,
-                headers={"Authorization": "Bearer " + cfg.onebot_token},
-                transport=httpx.MockTransport(lambda request: provider(request, [])),
-            ) as protocol,
-        ):
-            with Spool(cfg) as spool:
-                window = TestWindow(
-                    spool, plan, clock=lambda: datetime.fromisoformat(request["now"])
-                )
-                await window.capture_once(client, protocol)
 
     run(scenario())
 
@@ -1022,8 +974,8 @@ def test_hard_exit_during_receive_or_raw_fsync_cannot_resume_or_restore_quota(
             window.spool.close()
             child = await asyncio.create_subprocess_exec(
                 sys.executable,
-                "-c",
-                "from tests.test_onebot_capture import capture_fault_child;capture_fault_child()",
+                "-m",
+                "tests.support.capture_child",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
