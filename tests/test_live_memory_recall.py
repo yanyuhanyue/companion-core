@@ -178,6 +178,10 @@ def test_real_bge_only_sees_approved_rows_and_two_settled_stages_share_one_reply
                 "JOIN model_usage m USING(job_id) WHERE m.scenario='memory_review' LIMIT 1",
             )
             diagnostic = beta_observation.inspect_context(core.settings, trace["trace_id"])
+            binding = diagnostic["trace"]["recorded_window"]
+            assert binding["state"] == "RECORDED"
+            assert binding["plan_sha256"] == core.settings.live_text_window.plan_sha256
+            assert binding["approval_sha256"] == core.settings.live_text_window.approval_sha256
             selection = diagnostic["trace"]["jobs"][0]["memory_selection"]
             assert selection["state"] == "SELECTION_RECORDED"
             assert selection["candidate_count"] == selection["frozen_context_count"] == 1

@@ -9,6 +9,11 @@ P13 新增每个聊天 job 的 `memory_selection`，使用原 `live_text_memory:
 核对事件、privacy epoch、候选/选择/历史摘要及对应已结算 memory_review/payload。
 最终 chat context 仍须与同事件、计划、epoch 和选中记忆一致；所有校验在一个只读事务中。
 
+`trace.recorded_window` 从事件原输入记录的 window 摘要找到原历史批准，核对保存的批准
+摘要、计划和 privacy epoch，仅投影候选/计划/批准摘要与执行模式。它与报告顶部明确标为
+`configured_*` 的当前配置分别展示；旧事件不能被当前窗口重新归属。缺失、损坏、过期或
+redacted 状态都不补猜历史批准，仍不验证外部授权原件。
+
 | 状态 | 准确含义 |
 | --- | --- |
 | NOT_RECORDED | 没有持久选择记录；不能推断没检索或没记忆 |

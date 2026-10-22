@@ -165,3 +165,55 @@ def test_incomplete_runtime_feedback_and_optional_ratings_remain_unknown(tmp_pat
     assert group["ratings"]["diary_authenticity"] == {"n": 1, "mean": 4}
     assert group["ratings"]["interest_spontaneity"] == {"n": 0, "mean": None}
     assert group["ratings"]["privacy_comfort"] == {"n": 0, "mean": None}
+
+
+def test_runtime_feedback_cannot_attribute_old_event_to_current_config(tmp_path):
+    record, report = feedback("authorized_runtime"), inspector(1)
+    report["trace"]["recorded_window"] = {
+        "state": "RECORDED", "plan_sha256": "a" * 64, "approval_sha256": "f" * 64,
+        "candidate_sha": "c" * 40, "execution": "approved_live",
+    }
+    # Current configuration matches feedback but the event belongs to a different approval.
+    with pytest.raises(ValueError, match="EVENT_APPROVAL_MISMATCH"):
+        summarize(bundle(tmp_path, [(record, report)]))
+
+
+def test_inspector_reads_original_input_window_and_hides_erased_bindings(core):
+    ingest(core)
+    run(core.run_once("worker"))
+    original = {"state": "OPEN", "approval": {
+        "plan_sha256": "a" * 64, "approval_sha256": "b" * 64,
+        "candidate_sha": "c" * 40, "execution": "local_synthetic",
+    }}
+    original["binding"] = {"plan_sha256": "a" * 64, "privacy_epoch": epoch(core.store),
+                           "approval_sha256": paid_budget.sha(original["approval"])}
+    core.store.insert("runtime_meta", key="live_text_window:" + "a" * 64, value=encode(original))
+    core.store.insert("runtime_meta", key="live_text_input:evt_test_1", value=encode({
+        "event_id": "evt_test_1", "window_sha256": "a" * 64, "privacy_epoch": epoch(core.store),
+        "capture": {"signature": "PRIVATE_SIGNATURE", "source_event_id": "PRIVATE_QQ_ID"},
+    }))
+    report = inspect(core)
+    binding = report["trace"]["recorded_window"]
+    assert binding["state"] == "RECORDED"
+    assert binding["plan_sha256"] == "a" * 64
+    assert binding["approval_sha256"] == "b" * 64 and binding["candidate_sha"] == "c" * 40
+    assert report["configured_approval_sha256"] is None
+    assert binding["source_validity"] == "NOT_REVALIDATED"
+    assert "PRIVATE_" not in encode(report)
+    advance_epoch(core.store)
+    binding = inspect(core)["trace"]["recorded_window"]
+    assert binding == {"state": "STALE_EPOCH", "source_validity": "NOT_REVALIDATED"}
+    core.store.execute("UPDATE events SET redacted=1")
+    assert inspect(core)["trace"]["recorded_window"]["state"] == "REDACTED"
+
+
+@pytest.mark.parametrize("state", ["NOT_RECORDED", "STALE_EPOCH", "REDACTED"])
+@pytest.mark.parametrize("scenario,error", [("memory_review", "MEMORY_APPROVAL_REQUIRED"),
+                                           ("content_vision", "MEDIA_APPROVAL_REQUIRED")])
+def test_hidden_context_does_not_remove_used_capability_approval(tmp_path, state, scenario, error):
+    record, report = feedback("authorized_runtime"), inspector(1)
+    job = report["trace"]["jobs"][0]
+    job["context"] = {"state": state}
+    job["model_calls"][0]["scenario"] = scenario
+    with pytest.raises(ValueError, match=error):
+        summarize(bundle(tmp_path, [(record, report)]))

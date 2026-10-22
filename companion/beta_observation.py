@@ -169,6 +169,41 @@ def _memory_selection(view, job_id, event_id, current_epoch):
         return {**result, "state": "INCONSISTENT"}
 
 
+def _recorded_window(view, event_id, current_epoch):
+    """Bind an event to its persisted window, independently of today's configuration."""
+    result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+    row = view.one("SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,))
+    if row is None:
+        return result
+    try:
+        if len(row["value"]) > 65536:
+            raise ValueError
+        value = json.loads(row["value"])
+        if _number(value.get("privacy_epoch")) != current_epoch:
+            return {**result, "state": "STALE_EPOCH"}
+        plan = _digest(value["window_sha256"])
+        if not plan or value["event_id"] != event_id:
+            raise ValueError
+        history = view.one("SELECT value FROM runtime_meta WHERE key=?",
+                           ("live_text_window:" + plan,))
+        if history is None or len(history["value"]) > 131072:
+            raise ValueError
+        history = json.loads(history["value"])
+        approval, binding = history["approval"], history["binding"]
+        if (history["state"] not in {"OPEN", "STOPPED", "RETIRED"}
+            or approval["plan_sha256"] != plan or binding["plan_sha256"] != plan
+            or binding["approval_sha256"] != sha(approval)
+            or binding["privacy_epoch"] != current_epoch
+            or not _digest(approval["approval_sha256"])
+            or not re.fullmatch(r"[a-f0-9]{40}", approval["candidate_sha"])
+            or approval["execution"] not in {"local_synthetic", "approved_live"}):
+            raise ValueError
+        return {**result, "state": "RECORDED", "plan_sha256": plan,
+                **{key: approval[key] for key in ("approval_sha256", "candidate_sha", "execution")}}
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return {**result, "state": "INCONSISTENT"}
+
+
 def _trace(view, trace_id):
     events = view.rows(
         "SELECT e.event_id,e.redacted,e.occurred_at FROM events e "
@@ -245,6 +280,10 @@ def _trace(view, trace_id):
             "producer": "qq.onebot", "subject": "owner_private_input",
             "event_occurred_at_utc": None if event["redacted"] else _utc(event["occurred_at"]),
             "event_ref_sha256": _hash(event["event_id"]), "privacy_epoch": current_epoch,
+            "recorded_window": (
+                {"state": "REDACTED", "source_validity": "NOT_REVALIDATED"}
+                if event["redacted"] else _recorded_window(view, event["event_id"], current_epoch)
+            ),
             "jobs": inspected,
             "outbox": {state: states[state] for state in (
                 "PENDING", "LEASED", "SENDING", "RETRY_WAIT", "SENT", "DELIVERY_UNCERTAIN",

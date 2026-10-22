@@ -65,6 +65,11 @@ def inspector(index, when="2026-10-21T16:01:00+00:00", state="SETTLED"):
             "configured_approval_sha256": "d" * 64,
             "trace_ref_sha256": ref, "configured_candidate_sha": "c" * 40, "blockers": [],
             "trace": {"state": "RECORDED", "event_ref_sha256": ref,
+                      "recorded_window": {
+                          "state": "RECORDED", "plan_sha256": "a" * 64,
+                          "approval_sha256": "d" * 64, "candidate_sha": "c" * 40,
+                          "execution": "approved_live",
+                      },
                       "event_occurred_at_utc": when, "outbox": {"SENT": 1},
                       "jobs": [{"model_calls": [call], "model_attempt_count": 1}]}}
 

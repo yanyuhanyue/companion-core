@@ -62,6 +62,13 @@ def snapshot(record, report, raw):
     require(report.get("blockers") == [], "INSPECTOR_BLOCKED")
     trace = report.get("trace", {})
     require(trace.get("state") in {"RECORDED", "REDACTED"}, "TRACE_UNAVAILABLE")
+    if runtime:
+        binding = trace.get("recorded_window", {})
+        require(binding.get("state") == "RECORDED"
+                and binding.get("execution") == "approved_live"
+                and binding.get("approval_sha256") == record["authorization_refs"]["R3"]
+                and binding.get("candidate_sha") == record["candidate_sha"],
+                "EVENT_APPROVAL_MISMATCH")
     require(isinstance(trace.get("jobs"), list) and len(trace["jobs"]) <= 20, "JOB_LIMIT")
     calls = []
     for job in trace["jobs"]:
@@ -78,9 +85,11 @@ def snapshot(record, report, raw):
                 require(all(call.get(key) is None for key in USAGE_FIELDS[:4]),
                         "UNKNOWN_IS_NOT_OBSERVED_USAGE")
             calls.append(call)
-        if runtime and job.get("context", {}).get("memory"):
+        if runtime and (job.get("context", {}).get("memory")
+                        or any(call.get("scenario") == "memory_review" for call in items)):
             require(record["authorization_refs"]["R5"] is not None, "MEMORY_APPROVAL_REQUIRED")
-        if runtime and job.get("context", {}).get("images"):
+        if runtime and (job.get("context", {}).get("images")
+                        or any(call.get("scenario") == "content_vision" for call in items)):
             require(record["authorization_refs"]["media"] is not None, "MEDIA_APPROVAL_REQUIRED")
     if runtime and any(call["paid_dispatch_recorded"] for call in calls):
         require(record["authorization_refs"]["R4"] is not None, "PAID_APPROVAL_REQUIRED")
