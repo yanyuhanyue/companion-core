@@ -579,7 +579,7 @@ def test_final_core_send_check_rechecks_both_stages_and_sources(core, tmp_path, 
     run(scenario())
 
 
-def test_only_actual_chat_references_survive_the_soft_bound(core, tmp_path, monkeypatch):
+def test_selected_approved_facts_survive_the_soft_bound(core, tmp_path, monkeypatch):
     async def scenario():
         async with readonly_window(
             core,
@@ -594,7 +594,7 @@ def test_only_actual_chat_references_survive_the_soft_bound(core, tmp_path, monk
             calls,
             _,
             _,
-            _,
+            memory_id,
             _,
         ):
             monkeypatch.setattr(
@@ -605,13 +605,14 @@ def test_only_actual_chat_references_survive_the_soft_bound(core, tmp_path, monk
             await capture()
             assert await core.run_once()
             assert len(calls) == 2
-            assert len(calls[-1]["messages"]) == 2
+            assert len(calls[-1]["messages"]) == 3
+            assert "青竹七号" in encode(calls[-1]["messages"])
             context = json.loads(
                 core.store.one(
                     "SELECT value FROM runtime_meta WHERE key LIKE ?", (live_text.CONTEXT + "%",)
                 )["value"]
             )
-            assert context["memory_sources"] == []
+            assert [row["memory_id"] for row in context["memory_sources"]] == [memory_id]
             await send()
 
     run(scenario())

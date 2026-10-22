@@ -37,6 +37,19 @@ class BilibiliAccountHTTP(PublicHTTP):
     def grant_snapshot(self, required=False):
         return source_grant(self.account_file, self.clock(), "bilibili", required)
 
+    async def resolve_bilibili_short(self, url, budget):
+        self.verify(budget)
+        try:
+            result = await super().resolve_bilibili_short(
+                url, budget, check=lambda: self.verify(budget),
+            )
+        except ReadFailure as error:
+            if str(error) == "UPSTREAM_ACCESS_LIMIT":
+                self.blocked_grant = budget.authorization
+            raise
+        self.verify(budget)
+        return result
+
     async def get(self, url, budget, role):
         grant = self.verify(budget)
         # CDN subtitles and page fallbacks never receive account cookies.

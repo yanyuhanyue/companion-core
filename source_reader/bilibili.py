@@ -5,7 +5,7 @@ import math
 import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlsplit
 
 from source_reader.network import ReadFailure, video_url
 
@@ -124,7 +124,11 @@ class BilibiliReader:
             return list(found.values())[: min(40, item["max_items"])]
         if item["operation"] != "read":
             raise ReadFailure("READER_OPERATION_INVALID")
-        url = video_url(item["url"])
+        requested_url, resolution = item["url"], None
+        if urlsplit(requested_url).hostname == "b23.tv":
+            url, resolution = await self.public.resolve_bilibili_short(requested_url, budget)
+        else:
+            url = video_url(requested_url)
         identifier = url.rsplit("/", 1)[1]
         params = {"bvid": identifier} if identifier.startswith("BV") else {"aid": identifier[2:]}
         method = getattr(self.public, "reading_method", "public_api")
@@ -184,6 +188,8 @@ class BilibiliReader:
             "sources": budget.sources,
             "truncated": False,
         }
+        if resolution:
+            evidence["resolution"] = resolution
         subtitle = ""
         cid = data.get("cid")
         if self.subtitles and isinstance(cid, int) and cid > 0:
@@ -278,7 +284,7 @@ class BilibiliReader:
         return [
             {
                 "title": title[:300],
-                "url": url,
+                "url": requested_url if resolution else url,
                 "text": scope + "\n" + intro + ("\n字幕：\n" + subtitle if subtitle else ""),
                 "reading": evidence,
             }

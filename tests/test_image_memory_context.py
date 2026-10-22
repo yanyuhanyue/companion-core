@@ -9,7 +9,8 @@ import httpx
 import pytest
 from PIL import Image
 
-from companion import image_spool, live_text, paid_budget, qq_images
+from companion import budget, image_spool, live_text, paid_budget, qq_images
+from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.store import Store, encode
 from tests.conftest import run
@@ -26,7 +27,9 @@ QUESTION = "结合我以前的需求，这两张图里的哪一个更合适？"
 
 
 @asynccontextmanager
-async def image_memory_window(core, tmp_path, *, mutation=None, no_candidates=False):
+async def image_memory_window(
+    core, tmp_path, *, mutation=None, no_candidates=False, model_attempts=None,
+):
     memory_id = fact(core, 900, PREFERENCE)
     outsider = fact(core, 901, "未批准的秘密偏好：紫色键盘。")
     pin = live_text.memory_fact(core.store, core.settings, core.clock, memory_id)
@@ -34,6 +37,9 @@ async def image_memory_window(core, tmp_path, *, mutation=None, no_candidates=Fa
     opts.update(memory_scope="approved_facts", memory_facts=[pin], memory_approval_sha256="f" * 64)
     opts["core_options"].update(memory_enabled=True)
     opts["paid_options"].update(per_request_calls=3)
+    if model_attempts is not None:
+        opts["max_model_attempts"] = model_attempts
+        opts["paid_options"].update(window_calls=model_attempts, daily_calls=model_attempts)
     opts["paid_options"]["image_input"] = opts["paid_options"]["image_input"].model_copy(
         update={"max_images_per_request": 2},
     )
@@ -53,8 +59,12 @@ async def image_memory_window(core, tmp_path, *, mutation=None, no_candidates=Fa
 
     core.memory.index.scores = scores
 
+    number = 0
+
     async def source(ws):
-        await ws.send(json.dumps(raw_event(message=[
+        nonlocal number
+        number += 1
+        await ws.send(json.dumps(raw_event(number, message=[
             {"type": "text", "data": {"text": QUESTION}},
             image_segment("https://gchat.qpic.cn/red.png"),
             image_segment("https://gchat.qpic.cn/blue.png"),
@@ -73,7 +83,7 @@ async def image_memory_window(core, tmp_path, *, mutation=None, no_candidates=Fa
     def model(request):
         payload = json.loads(request.content)
         calls.append(payload)
-        if len(calls) == 1:
+        if payload["messages"][0]["role"] == "user":
             content = CUES
         elif payload.get("response_format"):
             review = json.loads(payload["messages"][-1]["content"])
@@ -180,6 +190,59 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
                 core.store.rows("SELECT value FROM runtime_meta"),
             )
             assert all(base64.b64encode(raw).decode() not in durable for raw in originals)
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("limit", [14, 15])
+def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_path, limit):
+    async def resolve(host, port):
+        return ["1.1.1.1"]
+
+    async def scenario():
+        async with image_memory_window(core, tmp_path, model_attempts=limit) as values:
+            window, client, protocol, sends, calls, _, _, originals, _, _, _ = values
+
+            async def read_response(response):
+                await response.aread()
+
+            client.event_hooks["response"].append(read_response)
+
+            def cdn(request):
+                data = originals[0 if request.url.path.endswith("red.png") else 1]
+                return httpx.Response(200, content=data, headers={"Content-Type": "image/png"})
+
+            for number in range(1, 6):
+                if number > 1:
+                    await window.capture_once(client, protocol)
+                    if number == 5 and limit == 14:
+                        with pytest.raises(httpx.HTTPStatusError) as error:
+                            await window.approve_captured(
+                                client, capture_approval(window), image_resolver=resolve,
+                                image_transport=httpx.MockTransport(cdn),
+                            )
+                        assert error.value.response.status_code == 429
+                        assert "LIVE_IMAGE_TWO_CALLS_REQUIRED" in error.value.response.text
+                        assert len(calls) == 12
+                        break
+                    await window.approve_captured(
+                        client, capture_approval(window), image_resolver=resolve,
+                        image_transport=httpx.MockTransport(cdn),
+                    )
+                assert await core.run_once()
+                assert len(calls) == min(number * 3, limit)
+                if number == 5:
+                    job = core.store.one("SELECT * FROM jobs ORDER BY rowid DESC LIMIT 1")
+                    with pytest.raises(CoreError, match="LIVE_TEXT_MODEL_ATTEMPT_CAP"):
+                        budget.reserve(core.store, core.settings, job["job_id"], "chat",
+                                       [{"role": "user", "content": "sixteenth attempt"}],
+                                       core.clock(), clock=core.clock)
+                    assert len(calls) == limit
+                    assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == limit
+                await window.send_once(client, protocol, reply_approval(window.plan, core))
+            assert len(sends) == (5 if limit == 15 else 4)
+            assert window.status()["model_attempts"] == (15 if limit == 15 else 12)
+            assert window.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] == 5
 
     run(scenario())
 
