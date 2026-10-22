@@ -451,11 +451,13 @@ def check(store, settings, now, *, custody=None):
         "SELECT 1 FROM runtime_meta WHERE key=?", (PROJECTION,),
     ):
         return empty_state()
-    approval = settings.paid_model
-    if approval is None:
-        projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
-        approval = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
-    view = custody or paid_budget.journal(store, approval, allow_settlement=True)
+    view = custody
+    if view is None:
+        approval = settings.paid_model
+        if approval is None:
+            projection = store.one("SELECT value FROM runtime_meta WHERE key=?", (PROJECTION,))
+            approval = SimpleNamespace(journal_path=json.loads(projection["value"])["journal_path"])
+        view = paid_budget.journal(store, approval, allow_settlement=True)
     state = view["cumulative"]
     if scope is None and not state["policy"]:
         return state

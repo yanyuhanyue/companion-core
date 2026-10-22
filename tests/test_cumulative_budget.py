@@ -429,3 +429,29 @@ def test_damaged_projection_status_remains_read_only_and_reports_unavailable(
     assert not result["available"] and result["code"] == "MODEL_BUDGET_RECONCILIATION_REQUIRED"
     assert list(core.store.db.iterdump()) == before
     assert Path(core.settings.paid_model.journal_path).read_bytes() == journal
+
+
+@pytest.mark.parametrize("removed", ["paid_approval", "cumulative_scope"])
+def test_final_http_hook_cannot_remove_enrolled_cumulative_authority(core, tmp_path, removed):
+    enable(core, tmp_path)
+    approval = core.settings.paid_model
+    request = reserve(core)
+    calls = []
+
+    async def remove(_):
+        core.settings.paid_model = (None if removed == "paid_approval" else
+                                    approval.model_copy(update={"cumulative": None}))
+
+    async def exercise():
+        async with httpx.AsyncClient(event_hooks={"request": [remove]},
+            transport=httpx.MockTransport(lambda req: calls.append(req))) as client:
+            with pytest.raises(CoreError, match="CUMULATIVE_SCOPE_REQUIRED"):
+                await budget.complete(ModelClient(core.settings, client), core.store,
+                    core.settings, request, MESSAGES, "chat", core.clock)
+        budget.settle(core.store, core.settings, request)
+
+    asyncio.run(exercise())
+    assert calls == []
+    state = paid_budget.journal(core.store, approval, allow_settlement=True)["cumulative"]
+    assert state["models"][request]["state"] == "UNKNOWN"
+    assert state["paused"]
