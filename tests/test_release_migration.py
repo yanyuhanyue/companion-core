@@ -1,6 +1,7 @@
 """Upgrade populated historical schemas, without downgrading a current database."""
 
 import hashlib
+import re
 import struct
 from contextlib import closing
 from datetime import date
@@ -355,6 +356,10 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
             ErasureLedger(ledger).append(current, "mem_erase", Clock()())
     restore(archive, destination, key, ledger)
     with closing(Store(str(destination))) as restored:
+        generation = restored.one(
+            "SELECT * FROM runtime_meta WHERE key='memory_control_restore_generation'"
+        )
+        assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
         assert restored.rows("SELECT version_num FROM alembic_version") == [
             {"version_num": "0017_paid_model_gate"}
         ]
@@ -414,6 +419,9 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 table: rows
                 for table, rows in before.items()
                 if table not in {"outbox", "model_usage"}
+            }
+            unchanged["runtime_meta"] = {
+                **before["runtime_meta"], "rows": before["runtime_meta"]["rows"] + [generation]
             }
             assert_old_columns_unchanged(restored, unchanged)
 

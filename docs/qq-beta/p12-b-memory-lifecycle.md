@@ -65,4 +65,8 @@ Windows / Python 3.12，复用已有锁依赖和本地 pinned embedding 缓存�
 - 随后补上重连捕获幂等、完整 one-shot 桥接调用和私密批准文件 canonical 校验；对最终两个新增测试文件再跑 `./scripts/check.ps1`，全仓 lint 与 46 项通过。两轮有重叠，不相加。
 - `scripts/evaluate_p12_memory.py` 完整执行一次最终公开合成数据评测和隔离恢复，结果见链接；缓存只读，无下载。
 
+完整 CI 发现旧 schema 0003 备份测试仍要求 `runtime_meta` 全部行完全不变，
+与恢复时新增的控制 generation 冲突。测试现明确断言唯一新增 generation 的格式，
+然后继续逐列验证全部原有元数据及业务表；没有忽略整个表或放松删除、预算和投递断言。
+
 本分支未重复全量本地基线。最终组合的完整 `./scripts/check.ps1` 及各 Draft PR 精确 HEAD 的 CI 由 P12 集成验收分别记录；本页不预填结果。业务 R5、真实 QQ 控制、手机确认、实际镜像及跨自然日效果仍为 `NOT_RUN` / `null`。
