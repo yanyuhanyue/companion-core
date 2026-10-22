@@ -26,8 +26,9 @@ DOC_EVIDENCE = {
     ),
     "docs/qq-beta/p13-gates.json": ("tests/test_p13_gates.py",),
 }
+# Docs mode stops on privacy failure before later validators can echo document values.
 DOC_TESTS = tuple(dict.fromkeys((
-    "tests/test_ci_policy.py", "tests/test_p8c_public_materials.py",
+    "tests/test_p8c_public_materials.py", "tests/test_ci_policy.py",
     *(check for checks in DOC_EVIDENCE.values() for check in checks),
 )))
 CRITICAL_FILES = {
@@ -130,7 +131,7 @@ def run_docs(root=ROOT):
         if temporary.resolve().parent != scratch.resolve():
             raise RuntimeError("CI temporary directory outside workspace scratch")
         return subprocess.call([
-            sys.executable, "-m", "pytest", "-q", *DOC_TESTS,
+            sys.executable, "-m", "pytest", "-q", "-x", *DOC_TESTS,
             "--basetemp=" + str(temporary / "pytest"),
             "-o", "cache_dir=" + str(temporary / "cache"),
         ], cwd=root)

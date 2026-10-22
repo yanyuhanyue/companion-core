@@ -189,6 +189,7 @@ def test_documentation_checks_cover_public_materials_and_every_fast_path_evidenc
     assert "tests/test_p13_gates.py" in DOC_TESTS
     assert any(node.startswith("tests/test_p12_beta_operations.py::") for node in DOC_TESTS)
     assert len(DOC_TESTS) == len(set(DOC_TESTS))
+    assert DOC_TESTS[0] == "tests/test_p8c_public_materials.py"
     for name, checks in DOC_EVIDENCE.items():
         assert (ROOT / name).is_file()
         assert checks and set(checks) <= set(DOC_TESTS)
@@ -242,6 +243,20 @@ def test_docs_bootstrap_fresh_scratch_and_clean_only_their_own_round(
     assert run_docs(tmp_path) == result
     assert not rounds[0].exists()
     assert (scratch / "retained.txt").read_text("utf-8") == "synthetic diagnostic"
+
+
+def test_documentation_failure_stops_before_later_evidence_checks(tmp_path, monkeypatch, capfd):
+    (tmp_path / "test_documentation.py").write_text(
+        "import pytest\n"
+        "def test_privacy():\n    pytest.fail('privacy category only', pytrace=False)\n"
+        "def test_later_evidence():\n"
+        "    from pathlib import Path\n    Path('later-evidence-ran').touch()\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("scripts.ci_policy.DOC_TESTS", ("test_documentation.py",))
+    assert run_docs(tmp_path) == 1
+    assert "privacy category only" in capfd.readouterr().out
+    assert not (tmp_path / "later-evidence-ran").exists()
 
 
 def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
