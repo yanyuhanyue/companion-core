@@ -42,6 +42,23 @@ def test_demo_daily_sources_keep_simulated_coverage_explicit(core):
     assert source["evidence_level"] == "SIMULATED_FETCHED"
 
 
+def test_live_daily_source_limit_is_applied_after_excluding_simulations(core):
+    enable_observations(core)
+    for number in range(1, 11):
+        core.observations.append("reader", observation(
+            core, number, occurred_at="2026-10-18T04:00:00Z",
+        ))
+    enable_observations(core, source="heybox")
+    core.observations.append("reader", observation(
+        core, 11, source="heybox", occurred_at="2026-10-18T05:00:00Z",
+        payload={"text": "已获取的文章内容", "url": URL},
+    ))
+    core.settings.mode = "live"
+    sources = core.diary.repo.sources(DAY)
+    assert len(sources) == 1 and sources[0]["event_id"] == "obs_test_11"
+    assert sources[0]["source"] == "observation.heybox"
+
+
 @pytest.mark.parametrize("decision", ["REJECT", "NEED_MORE_EVIDENCE"])
 def test_withdrawing_reflection_retracts_its_unstarted_goal(core, decision):
     enable_nightly(core)

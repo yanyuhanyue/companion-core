@@ -379,14 +379,14 @@ class DiaryRepository:
                 "USING(event_id) "
                 "WHERE o.redacted=0 AND e.redacted=0 AND o.result_status IN ('DISCOVERED',"
                 "'FETCHED','WATCHED') "
-                "AND e.occurred_at>=? AND e.occurred_at<? AND e.ingested_at>=? ORDER BY "
+                "AND e.occurred_at>=? AND e.occurred_at<? AND e.ingested_at>=? "
+                "AND (? OR e.source<>'observation.simulation') ORDER BY "
                 "e.occurred_at,e.event_id LIMIT 10",
-                (start, end, after(self.clock(), -86400 * self.settings.raw_event_retention_days)),
+                (start, end, after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+                 self.settings.mode == "demo"),
             )
             for row in observations:
                 simulated = row["source"] == "observation.simulation"
-                if simulated and self.settings.mode != "demo":
-                    continue
                 if expired_sources(
                     self.store,
                     [row["event_id"]],
