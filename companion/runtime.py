@@ -45,12 +45,14 @@ class Runtime:
 
     def expire_raw_events(self):
         now = self.clock()
+        cutoff = after(now, -86400 * self.settings.raw_event_retention_days)
         with self.store.transaction():
             rows = self.store.rows(
                 "SELECT event_id FROM events WHERE redacted=0 AND ingested_at<? "
                 "ORDER BY rowid LIMIT 1000",
-                (after(now, -86400 * self.settings.raw_event_retention_days),),
+                (cutoff,),
             )
             if rows:
-                self.ledger.expire_events(self.store, [e["event_id"] for e in rows], now)
+                self.ledger.expire_events(self.store, [e["event_id"] for e in rows], now,
+                                          retention_cutoff=cutoff)
             return len(rows)

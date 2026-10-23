@@ -829,9 +829,18 @@ class Core(Runtime):
             decision = {"确认这一条": "confirm", "忘记这一条": "forget", "纠正这一条": "correct"}[
                 match[1]
             ]
-            result = self.memory.decide(
-                match[2], decision, now, match[3], evidence_event_id=job["event_id"],
-            )
+            with s.transaction():
+                if live_text.active(s, self.settings):
+                    live_text.check_job(s, self.settings, self.clock, job)
+                if not s.one(
+                    "SELECT 1 FROM jobs WHERE job_id=? AND state='RUNNING' "
+                    "AND lease_token=? AND lease_until>?",
+                    (job["job_id"], job["lease_token"], self.clock()),
+                ):
+                    raise CoreError("JOB_LEASE_EXPIRED", 409)
+                result = self.memory.decide(
+                    match[2], decision, self.clock(), match[3], evidence_event_id=job["event_id"],
+                )
             return f"已处理：{result['memory_id']} · {result['state']}"
         return None
 

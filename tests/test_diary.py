@@ -210,38 +210,43 @@ def test_d09_duplicate_schedules_and_two_workers_commit_once(core):
     assert len(core.store.rows("SELECT * FROM diary_entries")) == 1
 
 
-def test_d10_expired_lease_is_reclaimed_and_old_result_cannot_commit(core):
+@pytest.mark.parametrize("reserved", [False, True])
+def test_d10_only_unreserved_expired_lease_is_reclaimed_and_old_result_cannot_commit(
+    core, reserved,
+):
     model = seed_day(core)
     core.diary.schedule_day(DAY)
     old = core.diary.repo.claim("crashed")
-    request = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
-    core.store.execute("UPDATE diary_runs SET model_request_id=?", (request,))
+    if reserved:
+        request = budget.reserve(core.store, core.settings, None, "diary", [], core.clock())
+        core.store.execute("UPDATE diary_runs SET model_request_id=?", (request,))
     core.clock.advance(core.settings.lease_seconds + 1)
-    assert run(core.diary.generate_once("replacement"))
-    assert (
-        core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request,))["state"]
-        == "UNKNOWN"
-    )
+    assert run(core.diary.generate_once("replacement")) is not reserved
+    if reserved:
+        assert core.store.one(
+            "SELECT state FROM model_usage WHERE request_id=?", (request,),
+        )["state"] == "UNKNOWN"
+        assert core.store.one("SELECT state FROM diary_runs")["state"] == "FAILED"
     with pytest.raises(CoreError, match="DIARY_STALE_LEASE"):
         core.diary.repo.finish(
             old, "COMMITTED", draft=DiaryDraft(schema_version=1, worth_saving=False), body="stale"
         )
-    assert len(core.store.rows("SELECT * FROM diary_entries")) == 1
-    assert len(model.calls) == 1
+    assert len(core.store.rows("SELECT * FROM diary_entries")) == int(not reserved)
+    assert len(model.calls) == int(not reserved)
 
 
-def test_d11_retries_are_bounded_and_unknown_usage_keeps_reservation(core):
+def test_d11_unknown_usage_keeps_reservation_without_retry(core):
     model = seed_day(core)
     model.error = CoreError("MODEL_RETRYABLE", 503)
-    assert generate(core)["state"] == "RETRY_WAIT"
+    assert generate(core)["state"] == "FAILED"
     assert not run(core.diary.generate_once("too-early"))
     core.clock.advance(31)
-    assert run(core.diary.generate_once("retry"))
+    assert not run(core.diary.generate_once("retry"))
     assert core.store.one("SELECT state FROM diary_runs")["state"] == "FAILED"
     core.clock.advance(60)
     assert not run(core.diary.generate_once("no-more"))
     usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
-    assert len(usage) == 2 and all(
+    assert len(usage) == 1 and len(model.calls) == 1 and all(
         r["state"] == "UNKNOWN" and r["billed_micro_usd"] > 0 for r in usage
     )
 

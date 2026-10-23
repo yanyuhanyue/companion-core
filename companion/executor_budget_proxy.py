@@ -46,6 +46,28 @@ def create_budget_proxy(
         raise ValueError("model upstream requires HTTPS without credentials or query")
     app, lock, grants = FastAPI(), asyncio.Lock(), {}
 
+    class GrantTransport(httpx.AsyncBaseTransport):
+        def __init__(self, token, grant):
+            self.token, self.grant = token, grant
+            self.delegate = transport or httpx.AsyncHTTPTransport(trust_env=False)
+
+        async def handle_async_request(self, request):
+            async with lock:
+                grant = self.grant
+                if (grants.get(self.token) is not grant or grant["revoked"]
+                    or grant["expires"] <= clock()):
+                    raise HTTPException(403, "MODEL_GRANT_EXPIRED")
+                if grant["calls"] >= grant["request"].max_model_calls:
+                    raise HTTPException(429, "MODEL_CALL_LIMIT")
+                grant["calls"] += 1
+                grant["reserved_micro_usd"] += grant["per_call"]
+            # No await separates the final admission from transport dispatch.
+            # Revocation after this boundary retains the in-flight responsibility.
+            return await self.delegate.handle_async_request(request)
+
+        async def aclose(self):
+            await self.delegate.aclose()
+
     def admin(value):
         if not secrets.compare_digest(value or "", "Bearer " + admin_token):
             raise HTTPException(401, "UNAUTHORIZED")
@@ -72,6 +94,7 @@ def create_budget_proxy(
                 "reserved_micro_usd": 0,
                 "per_call": one_call,
                 "expires": clock() + body.timeout_seconds + 5,
+                "revoked": False,
             }
         return {"token": token, "model": model}
 
@@ -86,7 +109,10 @@ def create_budget_proxy(
     @app.delete("/internal/v1/reservations/{token}")
     async def revoke(token: str, authorization: str = Header(default="")):
         admin(authorization)
-        grants.pop(token, None)
+        async with lock:
+            if grant := grants.get(token):
+                # Keep counters readable until expiry, including late/unknown calls.
+                grant["revoked"] = True
         return {"revoked": True}
 
     @app.post("/v1/chat/completions")
@@ -94,30 +120,28 @@ def create_budget_proxy(
         token = authorization.removeprefix("Bearer ")
         async with lock:
             grant = grants.get(token)
-            if not grant or grant["expires"] <= clock():
+            if not grant or grant["revoked"] or grant["expires"] <= clock():
                 raise HTTPException(403, "MODEL_GRANT_EXPIRED")
             bound = grant["request"]
-            data = bytearray()
-            async with asyncio.timeout(max(0.1, grant["expires"] - clock())):
-                async for chunk in request.stream():
-                    data.extend(chunk)
-                    if len(data) > bound.max_input_bytes:
-                        raise HTTPException(413, "MODEL_INPUT_LIMIT")
-            body = json.loads(data)
-            if any(
-                isinstance(message.get("content"), list)
-                and any(
-                    not isinstance(part, dict) or part.get("type") != "text"
-                    for part in message["content"]
-                )
-                for message in body.get("messages", [])
-            ):
-                raise HTTPException(400, "MODEL_TEXT_ONLY")
-            if grant["calls"] >= bound.max_model_calls:
-                raise HTTPException(429, "MODEL_CALL_LIMIT")
-            grant["calls"] += 1
-            grant["reserved_micro_usd"] += grant["per_call"]
-            remaining = max(0.1, grant["expires"] - clock())
+        # Upload is untrusted and can stall. It must not block revocation or
+        # admissions for another task; it does not reserve a provider call yet.
+        data = bytearray()
+        async with asyncio.timeout(max(0.1, grant["expires"] - clock())):
+            async for chunk in request.stream():
+                data.extend(chunk)
+                if len(data) > bound.max_input_bytes:
+                    raise HTTPException(413, "MODEL_INPUT_LIMIT")
+        body = json.loads(data)
+        if any(
+            isinstance(message.get("content"), list)
+            and any(
+                not isinstance(part, dict) or part.get("type") != "text"
+                for part in message["content"]
+            )
+            for message in body.get("messages", [])
+        ):
+            raise HTTPException(400, "MODEL_TEXT_ONLY")
+        remaining = max(0.1, grant["expires"] - clock())
         body["model"], body["max_tokens"] = model, bound.max_output_tokens
         body["n"] = 1
         body.pop("best_of", None)
@@ -126,7 +150,8 @@ def create_budget_proxy(
         async with (
             asyncio.timeout(remaining),
             httpx.AsyncClient(
-                timeout=remaining, trust_env=False, follow_redirects=False, transport=transport
+                timeout=remaining, trust_env=False, follow_redirects=False,
+                transport=GrantTransport(token, grant),
             ) as client,
         ):
             async with client.stream(
