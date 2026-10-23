@@ -7,7 +7,7 @@ import re
 import socket
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import httpcore
 
@@ -85,11 +85,20 @@ def permitted_url(value):
     if url.hostname == "api.bilibili.com" and url.path in {
         "/x/web-interface/view",
         "/x/web-interface/popular",
-        "/x/player/v2",
+        "/x/player/wbi/v2",
         "/x/web-interface/search/type",
         "/x/v2/reply",
     }:
         return
+    if url.hostname == "api.bilibili.com" and url.path == "/x/v1/dm/list.so":
+        try:
+            fields = parse_qsl(url.query, keep_blank_values=True, max_num_fields=1)
+        except ValueError:
+            fields = []
+        if (len(fields) == 1 and fields[0][0] == "oid"
+                and re.fullmatch(r"[1-9][0-9]{0,19}", fields[0][1])):
+            return
+        raise ReadFailure("CONTENT_URL_NOT_ALLOWED")
     if url.hostname in {"aisubtitle.hdslb.com", "i0.hdslb.com"} and re.fullmatch(
         r"/bfs/subtitle/[A-Za-z0-9_.-]{1,240}\.json", url.path
     ):
@@ -185,14 +194,15 @@ class ReadBudget:
         }
 
 
-async def response_body(response, budget):
+async def response_body(response, budget, *, allow_deflate=False):
     """Read raw HTTPCore bytes; the public and configured-source clients share limits."""
     headers = {key.decode().lower(): value.decode() for key, value in response.headers}
     if response.status in {401, 403, 412, 429}:
         raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
     if response.status != 200:
         raise ReadFailure("UPSTREAM_HTTP_ERROR")
-    if headers.get("content-encoding", "identity").strip().lower() != "identity":
+    encodings = {"identity", "deflate"} if allow_deflate else {"identity"}
+    if headers.get("content-encoding", "identity").strip().lower() not in encodings:
         raise ReadFailure("READER_ENCODING_UNSUPPORTED")
     if int(headers.get("content-length", "0")) > budget.max_bytes - budget.used_bytes:
         raise ReadFailure("READER_BYTE_LIMIT")
@@ -259,7 +269,9 @@ class PublicHTTP:
             },
             extensions=budget.request_extensions(check),
         ) as response:
-            body = await response_body(response, budget)
+            body = await response_body(response, budget, allow_deflate=(
+                role == "danmaku" and urlsplit(url).path == "/x/v1/dm/list.so"
+            ))
         parsed = urlsplit(url)
         # Signed CDN query parameters are transient fetch inputs, never persisted evidence.
         budget.sources.append(

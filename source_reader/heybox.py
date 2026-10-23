@@ -6,7 +6,7 @@ import json
 import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpcore
 
@@ -15,6 +15,31 @@ from source_reader.network import ReadFailure, post_url, response_body
 
 IMAGE_HOSTS = source_definition("heybox").image_hosts
 POST_ID = r"(?:[0-9]{1,32}|[0-9a-fA-F]{12})"
+
+
+def post_matches(post, identifier):
+    actual = str(post.get("linkid", post.get("link_id", identifier))).lower()
+    if actual == identifier:
+        return True
+    # Short share IDs resolve to numeric post IDs. Accept that mapping only when
+    # this same response binds the requested alias in the official share locator.
+    share = post.get("share_url")
+    if (identifier.isdigit() or not re.fullmatch(r"[0-9a-f]{12}", identifier)
+            or not re.fullmatch(r"[0-9]{1,32}", actual)
+            or not isinstance(share, str) or len(share) > 2048
+            or "\\" in share or any(ord(char) <= 32 for char in share)):
+        return False
+    try:
+        locator = urlsplit(share)
+        ids = [value.lower() for key, value in parse_qsl(
+            locator.query, keep_blank_values=True, max_num_fields=20
+        ) if key == "link_id"]
+        return (locator.scheme == "https" and locator.hostname == "api.xiaoheihe.cn"
+                and not locator.username and not locator.password
+                and locator.port in {None, 443} and not locator.fragment
+                and locator.path == "/v3/bbs/app/api/web/share" and ids == [identifier])
+    except ValueError:
+        return False
 
 
 def image_url(value):
@@ -114,6 +139,64 @@ def article_parts(value):
     return parts
 
 
+def comment_snapshot(body, post):
+    groups = body.get("comments")
+    if not isinstance(groups, list):
+        return None
+    total = post.get("comment_num")
+    total = total if type(total) is int and 0 <= total <= 2147483647 else None
+    more = body.get("has_more_floors") in (True, 1, "1")
+    items, seen, remaining = [], set(), 6000
+    partial = more or total is None or len(groups) > 40
+    for group in groups[:40]:
+        if not isinstance(group, dict):
+            partial = True
+            continue
+        rows = group.get("comment", [group])
+        if not isinstance(rows, list):
+            partial = True
+            continue
+        root = None
+        partial |= len(rows) > 40
+        for row in rows[:40]:
+            if not isinstance(row, dict):
+                partial = True
+                continue
+            identifier = str(row.get("commentid", ""))
+            if not re.fullmatch(r"[0-9]{1,32}", identifier) or identifier in seen:
+                partial = True
+                continue
+            if len(items) == 40:
+                partial = True
+                break
+            parts = article_parts(row.get("text", ""))
+            text = "\n".join(value for kind, value in parts if kind == "text")
+            images = row.get("imgs", [])
+            image_count = len(images) if isinstance(images, list) else 0
+            image_count += sum(kind == "image" for kind, _ in parts)
+            allowance = min(1000, remaining)
+            truncated = len(text) > allowance
+            reply = str(row.get("replyid") or root or "")
+            if reply == identifier:
+                reply = ""
+                partial = True
+            user = row.get("user")
+            author = user.get("username", "") if isinstance(user, dict) else ""
+            floor = row.get("floor_num")
+            items.append({"comment_id": identifier,
+                "reply_to_id": reply if re.fullmatch(r"[0-9]{1,32}", reply) else None,
+                "floor": floor if type(floor) is int and 0 <= floor <= 2147483647 else None,
+                "author": author[:80] if isinstance(author, str) else "",
+                "text": text[:allowance], "image_count": min(1000, image_count),
+                "truncated": truncated})
+            seen.add(identifier)
+            root = root or identifier
+            remaining -= min(len(text), allowance)
+            partial |= truncated or row.get("has_more") in (True, 1, "1")
+    return {"items": items, "reported_total": total,
+            "partial": partial or total != len(items)}
+
+
 def render_article(parts, limit=11500):
     text, images, body_chars, truncated = "", [], 0, False
     prepared, urls = [], []
@@ -208,12 +291,15 @@ class SourceAPI:
 
 
 class HeyboxReader:
+    parser_version = "heybox/1"
+
     def grant_snapshot(self, required=False):
         snapshot = getattr(self.source, "grant_snapshot", None)
         return snapshot(required=required) if snapshot else None
 
     def __init__(self, public, source=None, clock=lambda: datetime.now(UTC).isoformat()):
         self.public, self.source, self.clock = public, source, clock
+        self.parser_version = "heybox/2"
 
     async def read(self, item, budget):
         discover = item["operation"] == "discover"
@@ -222,6 +308,7 @@ class HeyboxReader:
         if discover and not self.source:
             raise ReadFailure("DISCOVERY_SOURCE_REQUIRED")
         url = "https://www.xiaoheihe.cn/" if discover else post_url(item["url"])
+        comments = None
         if self.source:
             raw = await self.source.get(item, budget)
             payload = json.loads(raw)
@@ -254,7 +341,7 @@ class HeyboxReader:
             if not isinstance(post, dict):
                 raise ReadFailure("READ_BODY_UNAVAILABLE")
             identifier = url.rsplit("/", 1)[1]
-            if str(post.get("linkid", post.get("link_id", identifier))).lower() != identifier:
+            if not post_matches(post, identifier):
                 raise ReadFailure("READER_TARGET_MISMATCH")
             title = post.get("title", "")
             parts = article_parts(post.get("text", post.get("content", "")))
@@ -271,6 +358,7 @@ class HeyboxReader:
                 for value in extra_images
             )
             method = "source_api"
+            comments = comment_snapshot(payload["result"], post)
         else:
             raw = await self.public.get(url, budget, "page")
             page = ArticleHTML(article_only=True)
@@ -295,6 +383,7 @@ class HeyboxReader:
                     "response_bytes": len(raw),
                     "images": images,
                     "truncated": truncated,
+                    **({"comments": comments} if comments is not None else {}),
                 },
             }
         ]

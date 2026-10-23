@@ -1,6 +1,7 @@
 """Closed platform policies shared by content, receipts, grants and sharing.
 
-This is a fixed two-source allowlist, not an adapter registry. Observation protocol
+Platform hosts are fixed; generic web reads require an explicit configured host scope.
+Observation protocol
 types also retain their existing non-content sources; those confer no read/share
 capability. Transport-specific scraping and credential handling stay in adapters.
 """
@@ -64,7 +65,14 @@ def _url(value):
     return parsed
 
 
-def content_target(value):
+def web_hosts(settings):
+    if not settings.web_reading_enabled:
+        return frozenset()
+    return frozenset(host for adapter in settings.observation_adapters.values()
+                     if adapter.source == "web" for host in adapter.allowed_hosts)
+
+
+def content_target(value, *, web_hosts=()):
     """Extract only an allowed platform content identifier; never fetch the input URL.
 
     Preserve existing query handling: ordinary content URLs lose their query; the
@@ -91,6 +99,10 @@ def content_target(value):
                 if definition.lowercase_identifier:
                     identifier = identifier.lower()
                 return definition.name, definition.canonical_prefix + identifier
+        if (parsed.hostname in web_hosts and "\\" not in value
+            and not any(char.isspace() for char in value)):
+            return "web", urlunsplit(("https", parsed.hostname, parsed.path or "/",
+                                      parsed.query, ""))
     except (TypeError, ValueError):
         pass
     raise CoreError("CONTENT_URL_NOT_ALLOWED", 400)

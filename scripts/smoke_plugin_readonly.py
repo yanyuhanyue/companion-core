@@ -12,6 +12,8 @@ from source_reader.bili_tools import BilibiliToolReader, BilibiliTools
 from source_reader.heybox import HeyboxReader
 from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import PublicHTTP, PublicNetwork, ReadBudget, ReadFailure
+from source_reader.reading import ReadingContext, read_observation
+from source_reader.web import WebHTTP, WebReader
 from source_reader.worker import read_result
 
 
@@ -97,6 +99,41 @@ async def successful_fixture_read(item):
     return {"fixture_reads": 1, "fixture_requests": 2, "restricted_rejections": 3}
 
 
+async def successful_web_read(item):
+    body = (b"<html><title>Fixture stars</title><article><p>"
+            b"Stars have different colors because their surface temperatures differ. "
+            b"Astronomers measure spectra and brightness to understand the physical properties "
+            b"of distant stars. This is a synthetic offline article for parser verification. "
+            b"No external links or credentials are needed to read this text."
+            b"</p></article></html>")
+    backend = FixtureBackend(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: "
+        + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
+    )
+
+    async def resolve(host, port):
+        assert (host, port) == ("articles.example", 443)
+        return ["1.1.1.1"]
+
+    async def validate(context):
+        assert context.root_task_id == "synthetic_read"
+
+    pool = httpcore.AsyncConnectionPool(network_backend=PublicNetwork(resolve, backend))
+    async with WebHTTP({"articles.example"}, pool) as public:
+        result = await read_observation(
+            WebReader(public), {**item, "url": "https://articles.example/story"},
+            ReadingContext("synthetic_read", "web", ("synthetic_owner",), 1), validate,
+        )
+    assert result["status"] == "SUCCESS", result.get("error_code")
+    assert result["used_requests"] == 1 and len(backend.requests) == 1
+    observation = result["observations"][0]
+    assert observation["coverage"]["scope"] == "extracted_page_text"
+    assert observation["trust"] == "untrusted_external"
+    assert "Astronomers" in observation["text"] and observation["quotes"]
+    assert observation["content_sha256"] == hashlib.sha256(observation["text"].encode()).hexdigest()
+    return {"web_fixture_reads": 1, "web_parser_version": observation["parser_version"]}
+
+
 async def main():
     async with PublicHTTP() as public, NativeHeyboxSource() as source:
         tools = BilibiliTools(public)
@@ -122,11 +159,13 @@ async def main():
         assert result["error_code"] == "DISCOVERY_QUERY_REQUIRED"
         assert result["used_requests"] == 0
     fixture = await successful_fixture_read(item)
+    web_fixture = await successful_web_read(item)
     return {
         "status": "PASS",
         "tools": tools.list_tools(),
         "upstream_requests": 0,
         **fixture,
+        **web_fixture,
         "uid": os.getuid() if hasattr(os, "getuid") else None,
     }
 

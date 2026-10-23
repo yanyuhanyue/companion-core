@@ -178,6 +178,39 @@ def seed_history(core, case):
         )
 
 
+def seed_evidence(core, catalog):
+    """Keep fixture candidates in native fact/evidence rows for production source checks."""
+    store = core.store
+    store.insert("conversations", conversation_id="conv_b4_evidence", platform="qq.onebot",
+                 platform_session_key="evidence:FriendMessage:10001", scope="private",
+                 owner_actor_id="owner", last_event_at=NOW, created_at=NOW)
+    sources = {}
+    for row in catalog.values():
+        if eligible(row):
+            for event_id in row["evidence_ids"]:
+                sources.setdefault(event_id, []).append(row["content"])
+    for event_id, texts in sources.items():
+        store.insert("events", event_id=event_id, schema_version=1, source="qq.onebot",
+                     source_event_id="synthetic-evidence:" + event_id,
+                     conversation_id="conv_b4_evidence", actor_id="owner",
+                     event_type="message.received", occurred_at=NOW, ingested_at=NOW,
+                     privacy_scope="private", body_json=encode({"text": "\n".join(texts)}),
+                     trace_id="trace_" + event_id, memory_processed=1)
+    for row in catalog.values():
+        if not eligible(row):
+            continue
+        store.insert(
+            "memories", memory_id=row["memory_id"], subject=row["subject"], kind="fact",
+            content=row["content"], status=row["status"], needs_review=int(row["needs_review"]),
+            origin="user_confirmed" if row["status"] == "CONFIRMED" else "model_inferred",
+            confidence=1 if row["status"] == "CONFIRMED" else 0.5, importance=0.5,
+            privacy_scope="private", fact_key=row["memory_id"], created_at=NOW, updated_at=NOW,
+        )
+        for event_id in row["evidence_ids"]:
+            store.insert("memory_evidence", memory_id=row["memory_id"], event_id=event_id,
+                         polarity=1, created_at=NOW)
+
+
 def experiment_context(core, job, selected):
     # Call the unchanged production builder, then place bounded data before the
     # final current input and trim oldest turns first. Production is untouched.
@@ -236,6 +269,7 @@ async def one_case(work, variant, case, catalog, template):
         # Supplying fixture search makes this a context/call-flow benchmark,
         # NOT a measurement of FTS or BGE retrieval quality/latency.
         cfg.memory_enabled = True
+        seed_evidence(core, catalog)
         seed_history(core, case)
         result = ingest_fixture(
             core,
@@ -249,7 +283,12 @@ async def one_case(work, variant, case, catalog, template):
             (result["job_id"],),
         )
         hits = rows_for(case, catalog)
-        core.memory.search = lambda *args, **kwargs: hits
+        # Only candidate retrieval is synthetic. MemoryContext still validates
+        # native positive evidence and pins complete current fact rows before I/O.
+        retrieved = [{**core.store.one("SELECT * FROM memories WHERE memory_id=?",
+                                       (row["memory_id"],)),
+                      "evidence_ids": list(row["evidence_ids"])} for row in hits]
+        core.memory.search = lambda *args, **kwargs: retrieved
         start, cpu = time.perf_counter_ns(), time.process_time_ns()
         if variant == "baseline":
             selected, paused = await core.recall_for_reply(job)

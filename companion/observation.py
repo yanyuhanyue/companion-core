@@ -31,8 +31,37 @@ class MediaSpan(StrictModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class SourceComment(StrictModel):
+    comment_id: str = Field(pattern=r"^[0-9]{1,32}$", strict=True)
+    reply_to_id: str | None = Field(default=None, pattern=r"^[0-9]{1,32}$", strict=True)
+    floor: int | None = Field(default=None, ge=0, le=2147483647, strict=True)
+    author: str = Field(default="", max_length=80, strict=True)
+    text: str = Field(default="", max_length=1000, strict=True)
+    image_count: int = Field(default=0, ge=0, le=1000, strict=True)
+    truncated: bool = Field(default=False, strict=True)
+
+
+class CommentEvidence(StrictModel):
+    items: list[SourceComment] = Field(default_factory=list, max_length=40)
+    reported_total: int | None = Field(default=None, ge=0, le=2147483647, strict=True)
+    partial: bool = Field(default=True, strict=True)
+
+    @model_validator(mode="after")
+    def unique_comments(self):
+        if len({item.comment_id for item in self.items}) != len(self.items):
+            raise ValueError("Duplicate source comment")
+        if any(item.reply_to_id == item.comment_id for item in self.items):
+            raise ValueError("Self-referencing source comment")
+        if sum(len(item.text) for item in self.items) > 6000:
+            raise ValueError("Comment excerpt exceeds budget")
+        if not self.partial and (self.reported_total != len(self.items)
+                                 or any(item.truncated for item in self.items)):
+            raise ValueError("Complete comments require matching count and uncut text")
+        return self
+
+
 class ReadingSource(StrictModel):
-    role: Literal["metadata", "page", "player", "subtitle"]
+    role: Literal["metadata", "page", "player", "subtitle", "comments", "danmaku"]
     url: str = Field(max_length=2048)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     bytes: int = Field(gt=0, le=1048576)
@@ -51,6 +80,26 @@ class SubtitleSpan(StrictModel):
     def ordered(self):
         if self.end_seconds <= self.start_seconds:
             raise ValueError("Invalid subtitle span")
+        return self
+
+
+class DanmakuItem(StrictModel):
+    at_seconds: float = Field(ge=0, le=36000, allow_inf_nan=False, strict=True)
+    text: str = Field(min_length=1, max_length=300, strict=True)
+
+
+class DanmakuEvidence(StrictModel):
+    cid: int = Field(gt=0, le=9223372036854775807, strict=True)
+    scope: Literal["current_pool_sample"] = "current_pool_sample"
+    items: list[DanmakuItem] = Field(default_factory=list, max_length=120)
+    partial: bool = Field(default=True, strict=True)
+
+    @model_validator(mode="after")
+    def excerpt_budget(self):
+        if self.partial is not True:
+            raise ValueError("Danmaku is only a current-pool sample")
+        if sum(len(item.text) for item in self.items) > 6000:
+            raise ValueError("Danmaku excerpt exceeds budget")
         return self
 
 
@@ -84,8 +133,13 @@ class ReadingEvidence(StrictModel):
     subtitle_status: Literal["available", "missing", "restricted", "unavailable", "budget_limited"]
     language: str = Field(default="", max_length=32)
     spans: list[SubtitleSpan] = Field(default_factory=list, max_length=120)
-    sources: list[ReadingSource] = Field(min_length=1, max_length=4)
+    sources: list[ReadingSource] = Field(min_length=1, max_length=8)
     truncated: bool = False
+    comments: CommentEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
+    danmaku: DanmakuEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
+    discussion_status: dict[Literal["comments", "danmaku"], Literal[
+        "available", "unavailable", "restricted", "budget_limited"
+    ]] = Field(default_factory=dict, exclude_if=lambda value: not value)
     resolution: ShortLinkResolution | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -97,6 +151,12 @@ class ReadingEvidence(StrictModel):
             raise ValueError("Reading level requires matching subtitle evidence")
         if available and not any(row.role == "subtitle" for row in self.sources):
             raise ValueError("Missing subtitle source")
+        for name in ("comments", "danmaku"):
+            captured = getattr(self, name) is not None
+            if captured and not any(row.role == name for row in self.sources):
+                raise ValueError("Missing discussion source")
+            if (self.discussion_status.get(name) == "available") != captured:
+                raise ValueError("Discussion status does not match evidence")
         return self
 
 
@@ -117,6 +177,7 @@ class ArticleEvidence(StrictModel):
     response_bytes: int = Field(gt=0, le=1048576)
     images: list[ArticleImage] = Field(default_factory=list, max_length=32)
     truncated: bool = False
+    comments: CommentEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def image_order(self):
@@ -238,10 +299,14 @@ class ObservationService:
         payload = observation.payload
         if hashlib.sha256(payload.text.encode()).hexdigest() != observation.source_sha256:
             raise CoreError("OBSERVATION_DIGEST_MISMATCH", 400)
-        if any(
-            redact(value, self.settings) != value
-            for value in (payload.title, payload.text, payload.url, payload.requested_url)
-        ):
+        source_texts = [payload.title, payload.text, payload.url, payload.requested_url]
+        for evidence in (payload.reading, payload.article):
+            if evidence is not None and evidence.comments is not None:
+                source_texts.extend(value for comment in evidence.comments.items
+                                    for value in (comment.text, comment.author))
+        if payload.reading is not None and payload.reading.danmaku is not None:
+            source_texts.extend(item.text for item in payload.reading.danmaku.items)
+        if any(redact(value, self.settings) != value for value in source_texts):
             raise CoreError("OBSERVATION_CONTAINS_CREDENTIALS", 400)
         for value in (payload.url, payload.requested_url):
             if not value:
@@ -254,7 +319,10 @@ class ObservationService:
                 raise CoreError("INVALID_OBSERVATION_URL", 400)
             if observation.source in source_names("read"):
                 try:
-                    source, _ = content_target(value)
+                    source, _ = content_target(
+                        value, web_hosts=adapter.allowed_hosts
+                        if self.settings.web_reading_enabled else (),
+                    )
                 except CoreError:
                     raise CoreError("INVALID_OBSERVATION_URL", 400) from None
                 if source != observation.source:
@@ -367,8 +435,10 @@ class ObservationService:
             raise CoreError("TOOL_RECEIPT_REQUIRED", 403)
         return occurred
 
-    def append(self, adapter_id, observation):
+    def append(self, adapter_id, observation, *, reading=False):
         adapter = self.policy(adapter_id)
+        if adapter.source == "web" and not reading:
+            raise CoreError("READER_PROTOCOL_REQUIRED", 409)
         now, s = self.clock(), self.store
         receipt = observation.model_dump(
             mode="json", exclude={"event_id", "trace_id", "privacy_epoch"}

@@ -6,9 +6,9 @@ Standard library only: no Core validation, storage, authentication or I/O import
 from dataclasses import dataclass
 from typing import Literal
 
-ContentSource = Literal["bilibili", "heybox"]
+ContentSource = Literal["bilibili", "heybox", "web"]
 ObservationSource = Literal[
-    ContentSource, "web", "voice", "camera", "android", "dsh", "windows", "simulation", "qq_image"
+    ContentSource, "voice", "camera", "android", "dsh", "windows", "simulation", "qq_image"
 ]
 SourceCapability = Literal[
     "get", "read", "discover", "reading", "article", "share", "source_grant", "link_images"
@@ -59,6 +59,11 @@ DEFINITIONS = (
         lowercase_identifier=True,
         query_path="/v3/bbs/app/api/web/share",
         query_identifier="link_id",
+    ),
+    SourceDefinition(
+        name="web", capabilities=frozenset({"get", "read"}),
+        content_hosts=frozenset(), content_path="", identifier="", canonical_prefix="",
+        image_hosts=frozenset(), reading_evidence_hosts=frozenset(), share_label="网页正文",
     ),
 )
 

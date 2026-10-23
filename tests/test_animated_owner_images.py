@@ -17,7 +17,7 @@ from companion.core import Core
 from companion.image_input import ImageInputPolicy, text_and_estimate
 from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
-from companion_onebot_bridge import continuous, images
+from companion_onebot_bridge import continuous, pending_media
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
 from tests.test_image_connect_recovery import ConnectThenGet
@@ -180,7 +180,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
     async def resolve(*_):
         return ["1.1.1.1", "8.8.8.8"]
 
-    fetch = images.fetch_image
+    fetch = pending_media.fetch_image
     connection_attempts = []
 
     async def mocked_cdn(image, maximum, **kwargs):
@@ -190,7 +190,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
     async def scenario():
         monkeypatch.setattr(api, "Core", construct)
         monkeypatch.setattr(core_module, "Core", construct)
-        monkeypatch.setattr(images, "fetch_image", mocked_cdn)
+        monkeypatch.setattr(pending_media, "fetch_image", mocked_cdn)
         monkeypatch.setattr(api, "AsyncClient", lambda **kwargs: httpx.AsyncClient(
             **kwargs, transport=httpx.MockTransport(respond)), raising=False)
         options, image = companion_options(core), image_options()

@@ -34,6 +34,7 @@ SCENARIOS = {
     "reflection": "reflection",
     "content_vision": "content",
     "content_video": "content",
+    "meme_caption": "meme_semantics",
 }
 MODEL = "private_life_model:"
 DELIVERY = "private_life_delivery:"
@@ -94,10 +95,10 @@ def ready(store, settings, clock):
 
 
 def recent_history(store, settings, job):
-    from companion.dialogue_history import recent_sent_sources, turn_messages
+    from companion.dialogue_history import recent_context_sources, turn_messages
 
     approval = settings.live_text_window
-    sources = recent_sent_sources(
+    sources = recent_context_sources(
         store, job["conversation_id"], job["event_id"], approval.max_history_turns
     )
     while (
@@ -156,6 +157,13 @@ def event_digest(event):
 
 
 def check_job(store, settings, approval, job):
+    from companion.reply_revision import check_job as check_reply_job
+
+    check_reply_job(store, job)
+    if job["kind"] == "meme_caption":
+        from companion.meme_core import check_caption_job
+
+        return check_caption_job(store, settings, approval, job)
     event = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
         "USING(conversation_id) WHERE e.event_id=?",
@@ -197,11 +205,12 @@ def admit_model(store, settings, clock, job_id, scenario):
         if not job:
             raise CoreError("COMPANION_JOB_SCOPE_REQUIRED", 403)
         check_job(store, settings, approval, job)
-        if scenario not in (
-            {"chat", "memory_review", "content_vision", "content_video"}
-            if job["kind"] == "chat"
-            else {"activity", "memory_review"}
-        ):
+        allowed = {
+            "chat": {"chat", "memory_review", "content_vision", "content_video"},
+            "activity": {"activity", "memory_review"},
+            "meme_caption": {"meme_caption"},
+        }
+        if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     elif scenario not in {"memory_extract", "memory_review", "diary", "reflection"}:
         raise CoreError("COMPANION_BACKGROUND_SCOPE_REQUIRED", 403)
@@ -232,18 +241,27 @@ def freeze_model(store, settings, request_id):
 def check_model(store, settings, clock, request_id):
     from companion import live_text, qq_images
 
-    approval, _, _ = live_text.guard(store, settings, clock, current_request=request_id)
     row = store.one(
         "SELECT a.*,m.job_id,m.scenario,m.state FROM model_admissions a "
         "JOIN model_usage m USING(request_id) WHERE request_id=?",
         (request_id,),
     )
+    if row and row["job_id"]:
+        from companion.reply_revision import check_job as check_reply_job
+
+        check_reply_job(store, store.one("SELECT * FROM jobs WHERE job_id=?", (row["job_id"],)))
+    approval, _, _ = live_text.guard(store, settings, clock, current_request=request_id)
     record = live_text._meta(store, MODEL + request_id)
+    retained_sources = bool(row and row["job_id"] and store.one(
+        "SELECT 1 FROM jobs WHERE job_id=? AND context_tracked=1", (row["job_id"],),
+    ))
     if (
         not row
         or not record
         or row["state"] != "RESERVED"
-        or record["privacy_epoch"] != epoch(store)
+        or (record["privacy_epoch"] != epoch(store) and not (
+            retained_sources and type(record.get("privacy_epoch")) is int
+            and 0 <= record["privacy_epoch"] < epoch(store)))
         or record["plan_sha256"] != approval.plan_sha256
         or record["payload_sha256"] != row["payload_sha256"]
         or record["job_id"] != row["job_id"]
@@ -301,7 +319,10 @@ def record_replies(store, settings, clock, job, message_ids):
 
 
 def delivery_material(store, settings, row):
+    from companion import notices
+
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
+    notice = notices.delivery_job(store, row["message_id"])
     return {
         "plan_sha256": settings.live_text_window.plan_sha256,
         "privacy_epoch": epoch(store),
@@ -311,6 +332,8 @@ def delivery_material(store, settings, row):
         "content_sha256": row["content_sha256"],
         "delivery_key": row["delivery_key"],
         "action_type": row["action_type"],
+        **({"window_notice": "commitment"} if notice
+           and notices.required(store, notice["job_id"]) else {}),
     }
 
 

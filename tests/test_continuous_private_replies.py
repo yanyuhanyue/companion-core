@@ -11,7 +11,7 @@ import pytest
 from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig, split_text
 from companion_onebot_bridge import capture, continuous
-from companion_onebot_bridge.window import read_status, request_stop
+from companion_onebot_bridge.window import TestWindow, read_status, request_stop
 from tests.conftest import run
 from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
@@ -485,60 +485,117 @@ def test_reply_wait_and_send_no_progress_remain_bounded(core, tmp_path, monkeypa
     run(scenario())
 
 
-@pytest.mark.parametrize("resume", [False, True])
-def test_segment_waits_for_local_ack_after_core_result_response_delay(
-    core, tmp_path, monkeypatch, resume,
+@pytest.mark.parametrize("outcome", ["continue", "resume", "new_input", "recall", "stop"])
+def test_segment_waits_for_bridge_ack_interval_after_core_result_response_delay(
+    core, tmp_path, monkeypatch, outcome,
 ):
-    from companion_onebot_bridge.window import TestWindow
+    from tests.test_owner_recall_bridge import recall_frame
+    from tests.test_private_companion import companion_options
 
     policy = SegmentedReplyConfig(max_segments="unlimited", mode="semantic", interval_ms=600)
+    connections, calls = [], []
 
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(1)))
-        await ws.wait_closed()
+    def answer(_request):
+        calls.append(_request)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": (
+                "好呀\n接着说" if len(calls) == 1 else "新的话题")}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        })
 
     async def scenario():
+        async def source(ws):
+            connections.append(ws)
+            if len(connections) == 1:
+                await ws.send(json.dumps(raw_event(1)))
+            elif outcome == "new_input":
+                await ws.send(json.dumps(raw_event(2, text="等等，换个话题")))
+            elif outcome == "recall":
+                await ws.send(recall_frame())
+            elif outcome == "stop":
+                request_stop(window.spool.directory, plan=window.plan)
+            await ws.wait_closed()
+
+        options = (companion_options(core) if outcome in {"new_input", "recall", "stop"}
+                   else {"automatic_reply": True, "core_options": {}})
+        options.update(segmented_reply=policy, max_send_attempts=5)
+        options["core_options"]["segmented_reply"] = policy
         async with source_window(core, tmp_path, source, live=True, approved=True,
-            scope_options={"automatic_reply": True, "segmented_reply": policy,
-                           "max_send_attempts": 5, "core_options": {"segmented_reply": policy}},
-        ) as (window, client, protocol, _, sends):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
-                200, json={"choices": [{"message": {"content": "好呀\n接着说"}}],
-                           "usage": {"prompt_tokens": 100, "completion_tokens": 20}},
-            ))) as model:
-                core.model = ModelClient(core.settings, model)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
-                assert await core.run_once()
-                initial = core.clock.now
-                original = window.spool.flush_result
-                delayed = False
+                                 scope_options=options) as (
+            window, client, protocol, _, sends,
+        ), httpx.AsyncClient(transport=httpx.MockTransport(answer)) as model:
+            core.model = ModelClient(core.settings, model)
+            await window.capture_once(client, protocol)
+            await window.approve_captured(client, capture_approval(window))
+            assert await core.run_once()
+            initial = core.clock.now
+            original = window.spool.flush_result
+            delayed = False
 
-                async def delayed_result(http):
-                    nonlocal delayed
-                    flushed = await original(http)
-                    if flushed and not delayed:
-                        core.clock.advance(0.1)
-                        delayed = True
-                    return flushed
+            async def delayed_result(http):
+                nonlocal delayed
+                flushed = await original(http)
+                if flushed and not delayed:
+                    # Core has committed SENT, but its response has not reached Bridge yet.
+                    core.clock.advance(0.1)
+                    delayed = True
+                return flushed
 
-                monkeypatch.setattr(window.spool, "flush_result", delayed_result)
-                await continuous.pump_private(window, client, protocol)
-                assert len(sends) == 1
-                assert core.store.one("SELECT sent_at FROM outbox WHERE segment_index=0")[
-                    "sent_at"] == initial.isoformat(timespec="microseconds")
-                if resume:
-                    window = TestWindow(window.spool, window.plan, clock=window.clock)
-                core.clock.advance(0.5)
-                await continuous.pump_private(window, client, protocol)
-                assert len(sends) == 1 and window.status()["attempt_states"] == {"ACK": 1}
-                assert core.store.one("SELECT state FROM outbox WHERE segment_index=1")[
-                    "state"] == "PENDING"
+            monkeypatch.setattr(window.spool, "flush_result", delayed_result)
+            await continuous.pump_private(window, client, protocol)
+            assert len(sends) == 1
+            first = core.store.one("SELECT * FROM outbox WHERE segment_index=0")
+            assert first["sent_at"] == initial.isoformat(timespec="microseconds")
+            records, _ = window.read_journal()
+            first_ack = next(record for record in records if record["kind"] == "ACK")
+            assert first_ack["at"] == (initial + timedelta(seconds=0.1)).isoformat()
+            if outcome == "resume":
+                window = TestWindow(window.spool, window.plan, clock=window.clock)
+            core.clock.advance(0.5)
+            # The Core lease is ready, while the local ACK needs another 100 ms.
+            await continuous.pump_private(window, client, protocol)
+            assert len(sends) == 1
+            assert core.store.one(
+                "SELECT state FROM outbox WHERE segment_index=1",
+            )["state"] == "PENDING"
+            assert window.status()["attempt_states"] == {"ACK": 1}
+            if outcome in {"continue", "resume"}:
                 core.clock.advance(0.1)
                 await continuous.pump_private(window, client, protocol)
-                assert len(sends) == 2 and window.status()["attempt_states"] == {"ACK": 2}
+                assert len(sends) == 2
+                assert window.status()["attempt_states"] == {"ACK": 2}
                 assert not core.store.one(
                     "SELECT 1 FROM outbox WHERE state IN ('LEASED','SENDING')",
                 )
+                return
+
+            pause, stop_worker = asyncio.Event(), asyncio.Event()
+
+            def emitted(kind, **values):
+                if kind == "automatic_input_delivered" or (
+                    kind == "automatic_input_retired" and outcome == "recall"
+                ):
+                    pause.set()
+
+            monkeypatch.setattr(continuous, "emit", emitted)
+            task = asyncio.create_task(worker(core, stop_worker))
+            try:
+                result = await asyncio.wait_for(
+                    continuous.run(window, client, protocol, pause=pause), 5,
+                )
+            finally:
+                stop_worker.set()
+                await task
+            # The original local ACK interval has never elapsed during interruption handling.
+            assert core.clock.now < initial + timedelta(seconds=0.7)
+            if outcome == "stop":
+                assert result["state"] == "STOPPED" and result["core_stop_confirmed"]
+            else:
+                assert result["state"] == "OPEN"
+                assert window.db.execute("SELECT state FROM window_inputs ORDER BY rowid")\
+                    .fetchone()[0] == ("SUPERSEDED" if outcome == "new_input" else "RECALLED")
+            assert [item["message"][0]["data"]["text"] for item in sends] == (
+                ["好呀", "新的话题"] if outcome == "new_input" else ["好呀"])
+            assert not core.store.one("SELECT 1 FROM outbox WHERE state IN ('LEASED','SENDING')")
 
     run(scenario())

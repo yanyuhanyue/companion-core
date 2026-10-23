@@ -10,7 +10,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import AsyncClient
 
-from companion import __version__, cumulative, live_text, qq_images, qq_rich
+from companion import (
+    __version__,
+    cumulative,
+    input_protocol,
+    live_text,
+    meme_core,
+    meme_service,
+    qq_images,
+    qq_rich,
+)
 from companion.config import Settings
 from companion.content_api import register_content_routes
 from companion.contracts import (
@@ -24,6 +33,7 @@ from companion.contracts import (
 )
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
+from companion.exploration import METERED_READS_SQL
 from companion.media_api import register_media_routes
 from companion.memory_control import (
     MemoryControlGrant,
@@ -36,9 +46,10 @@ from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
 class BodyLimit:
-    def __init__(self, app, image_limit=131072):
+    def __init__(self, app, image_limit=131072, meme_limit=131072):
         self.app = app
         self.image_limit = image_limit
+        self.meme_limit = meme_limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -47,6 +58,8 @@ class BodyLimit:
         limit = (
             self.image_limit
             if re.fullmatch(r"/internal/v2/content/[^/]+/image", scope["path"])
+            else self.meme_limit
+            if scope["path"] == "/internal/v1/memes/captions"
             else 131072
         )
         while True:
@@ -110,6 +123,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
+        meme_limit=6 * 1024 * 1024 if settings.meme_semantics_enabled else 131072,
     )
 
     async def authenticate(authorization: str = Header(default="")):
@@ -224,6 +238,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
+    from companion.reading_protocol import ReadObservation
     from companion.reflection import ReflectionDecision
     from companion.source_grants import (
         ReaderLeaseRequest,
@@ -292,19 +307,38 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def reader_result(adapter_id: str, request_id: str, body: ReadResult):
         return app.state.core.exploration.complete(adapter_id, request_id, body)
 
+    @app.post("/internal/v3/readers/{adapter_id}/lease", dependencies=adapter_auth)
+    async def reading_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
+        grant = body.source_grant if body else None
+        return {"item": app.state.core.reading.lease(adapter_id, grant)}
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
+    async def reading_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
+        return app.state.core.reading.validate_read(adapter_id, request_id, body)
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
+    async def reading_result(adapter_id: str, request_id: str, body: ReadObservation):
+        return app.state.core.reading.complete(adapter_id, request_id, body)
+
     @app.get("/internal/v2/exploration", dependencies=control_auth)
     async def exploration_status():
         return {
             "items": app.state.core.store.rows(
                 "SELECT request_id,adapter_id,operation,state,used_bytes,reserved_bytes,"
-                "last_error_code,"
-                "created_at FROM exploration_requests ORDER BY rowid DESC LIMIT 30"
+                "used_requests,reserved_requests,observed_bytes,observed_requests,"
+                "accounted_bytes,accounted_requests,last_error_code,created_at "
+                f"FROM ({METERED_READS_SQL}) ORDER BY queue_order DESC LIMIT 30"
             )
         }
 
     @app.get("/internal/v2/affect", dependencies=control_auth)
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
+
+    @app.get("/internal/v2/expression-learning", dependencies=control_auth)
+    async def expression_learning(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return app.state.core.expression_learning.snapshot(settings.owner_qq_id)
 
     @app.get("/internal/v2/affect/{event_id}/preview", dependencies=control_auth)
     async def affect_preview(event_id: str, response: Response):
@@ -435,6 +469,15 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
             raise CoreError("DIARY_NOT_FOUND", 404)
         return result
 
+    @app.post(prefix + "/diary/{day}/recompute", dependencies=diary_auth, status_code=202)
+    async def diary_recompute(day: date):
+        core = app.state.core
+        run_id = core.diary.recompute_day(day, settings.owner_qq_id)
+        state = core.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))[
+            "state"
+        ] if run_id else "NOT_SCHEDULED"
+        return {"local_date": day.isoformat(), "run_id": run_id, "state": state}
+
     @app.post(prefix + "/diary/{day}/forget", dependencies=diary_auth)
     async def diary_forget(day: date):
         return app.state.core.diary.forget(day, settings.owner_qq_id)
@@ -467,10 +510,73 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return live_text.cancelled_input(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/live-text/inputs/recall", dependencies=auth)
+    async def live_text_recall(body: input_protocol.RecallReceipt):
+        core = app.state.core
+        return input_protocol.receive_recall(core.store, settings, core.ledger, core.clock, body)
+
+    @app.get(prefix + "/live-text/inputs/{event_id}/state", dependencies=auth)
+    async def live_text_input_state(event_id: str):
+        return input_protocol.input_state(app.state.core.store, settings, event_id)
+
+    @app.post(prefix + "/live-text/cancel-before-send", dependencies=auth)
+    async def live_text_not_sent(body: input_protocol.CancelBeforeSend):
+        core = app.state.core
+        return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/send-check", dependencies=auth)
     async def live_text_send(body: live_text.SendCheck):
         core = app.state.core
         return live_text.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/semantics/profile", dependencies=auth)
+    async def meme_profile():
+        return app.state.core.memes.profile()
+
+    @app.post(prefix + "/memes/captions", dependencies=auth)
+    async def meme_caption(body: meme_core.CaptionBody):
+        return app.state.core.memes.submit(body)
+
+    @app.post(prefix + "/memes/captions/{job_id}", dependencies=auth)
+    async def meme_caption_status(job_id: str):
+        return app.state.core.memes.outcome(job_id)
+
+    @app.post(prefix + "/memes/embeddings", dependencies=auth)
+    async def meme_embedding(body: meme_core.EmbedBody):
+        return await app.state.core.memes.embed(body)
+
+    @app.post(prefix + "/memes/query", dependencies=auth)
+    async def meme_query(body: meme_core.QueryBody):
+        return await app.state.core.memes.query(body)
+
+    @app.post(prefix + "/memes/offers", dependencies=auth)
+    async def meme_offer(body: meme_core.OfferBody):
+        return app.state.core.memes.offer(body)
+
+    @app.post(prefix + "/memes/discovery/submit", dependencies=auth)
+    async def meme_submit(body: meme_service.DiscoveryRequest):
+        core = app.state.core
+        return meme_service.submit(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/discovery/lease", dependencies=auth)
+    async def meme_lease(body: meme_service.DiscoveryLeaseRequest):
+        core = app.state.core
+        return meme_service.lease(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/discovery/{job_id}/check", dependencies=auth)
+    async def meme_check(job_id: str, body: meme_service.DiscoveryCheck):
+        core = app.state.core
+        return meme_service.check(core.store, settings, core.clock, job_id, body)
+
+    @app.post(prefix + "/memes/discovery/{job_id}/reserve", dependencies=auth)
+    async def meme_reserve(job_id: str, body: meme_service.DiscoveryReserve):
+        core = app.state.core
+        return meme_service.reserve(core.store, settings, core.clock, job_id, body)
+
+    @app.post(prefix + "/memes/discovery/{job_id}/result", dependencies=auth)
+    async def meme_result(job_id: str, body: meme_service.DiscoveryResult):
+        core = app.state.core
+        return meme_service.result(core.store, settings, core.clock, job_id, body)
 
     @app.post(prefix + "/live-text/stop", dependencies=auth)
     async def live_text_stop(body: live_text.WindowReference):
@@ -509,7 +615,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
             raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
         return {
             "items": app.state.core.memory.search(
-                body.query, body.requester_actor_id, body.subject_filter, body.limit
+                body.query, body.requester_actor_id, body.subject_filter, body.limit,
+                now=app.state.core.clock(),
             )
         }
 

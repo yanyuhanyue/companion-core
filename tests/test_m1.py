@@ -1,5 +1,7 @@
+import json
 from pathlib import Path
 
+import httpx
 import pytest
 from cryptography.fernet import Fernet
 
@@ -7,8 +9,9 @@ from companion import budget
 from companion.backup import backup, restore
 from companion.contracts import Candidate, CoreError
 from companion.core import Core
+from companion.model import ModelClient
 from companion.privacy import epoch
-from companion.store import encode, migrate
+from companion.store import after, encode, migrate
 from tests.conftest import event, ingest, run
 
 
@@ -245,7 +248,67 @@ def test_inflight_reply_is_discarded_after_forgetting(core):
         core.store.one("SELECT state FROM jobs WHERE event_id='evt_test_2'")["state"]
         == "RETRY_WAIT"
     )
+    assert core.store.one("SELECT last_error_code FROM jobs WHERE event_id='evt_test_2'")[
+        "last_error_code"
+    ] == "PRIVACY_CHANGED"
     assert (
         core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE origin_event_id='evt_test_2'")["n"]
         == 0
     )
+
+
+def test_forget_in_recall_request_hook_keeps_retry_contract_before_provider_dispatch(
+    core, tmp_path,
+):
+    from tests.test_paid_model_gate import approved_live
+
+    memory_id = remember(core, 1, "我喜欢茉莉绿茶", confirmed=True)
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    approved_live(core, tmp_path)
+    accepted = ingest(core, 2, "茉莉绿茶")
+    calls = []
+
+    async def forget(request):
+        assert json.loads(request.content)["messages"][-1]["role"] == "user"
+        core.memory.decide(memory_id, "forget", core.clock())
+
+    def provider(request):
+        calls.append(request)
+        return httpx.Response(200, json={})
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider),
+                                     event_hooks={"request": [forget]}) as client:
+            with Core(core.settings, ModelClient(core.settings, client), core.clock) as worker:
+                assert await worker.run_once()
+                assert worker.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                                        (accepted["job_id"],)) == {
+                    "state": "RETRY_WAIT", "last_error_code": "PRIVACY_CHANGED",
+                }
+    run(scenario())
+    assert not calls
+    assert not core.store.rows("SELECT * FROM outbox")
+    usage = core.store.one(
+        "SELECT u.state,u.billed_micro_usd,a.reserved_micro_usd FROM model_usage u "
+        "JOIN model_admissions a USING(request_id)",
+    )
+    assert usage["state"] == "UNKNOWN"
+    assert usage["billed_micro_usd"] == usage["reserved_micro_usd"] > 0
+
+
+@pytest.mark.parametrize("source", ["empty", "whitespace", "missing", "redacted", "expired"])
+def test_candidate_distinguishes_unsupported_text_from_unavailable_source(core, source):
+    ingest(core, 1, "  " if source == "whitespace" else "")
+    if source == "redacted":
+        core.store.execute("UPDATE events SET redacted=1")
+    elif source == "expired":
+        expired_at = after(core.clock(), -86400 * core.settings.raw_event_retention_days - 1)
+        core.store.execute("UPDATE events SET ingested_at=?", (expired_at,))
+    candidate = Candidate(subject="user", kind="fact", fact_key="not-owner",
+                          content="引用不是主人原话", evidence_quote="  ",
+                          evidence_event_id="missing" if source == "missing" else "evt_test_1")
+    error = ("UNSUPPORTED_MEMORY_EVIDENCE" if source in {"empty", "whitespace"}
+             else "MISSING_MEMORY_EVIDENCE")
+    with pytest.raises(CoreError, match=error):
+        core.memory.validate_candidate(candidate, confirmed=True, now=core.clock())
+    assert not core.store.rows("SELECT * FROM memories")

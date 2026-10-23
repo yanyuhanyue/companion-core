@@ -27,6 +27,13 @@ services:
               --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
               --adapter-id, "${COMPANION_HEYBOX_READER_ID:-heybox_source}"]
     env_file: ../privacy/heybox-reader.env
+  web-reader:
+    <<: *reader
+    profiles: [web-reader]
+    command: [--source, web, --protocol, reading-v1,
+              --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
+              --adapter-id, "${COMPANION_WEB_READER_ID:-web_source}"]
+    env_file: ../privacy/web-reader.env
   heybox-native-reader:
     <<: *reader
     profiles: [heybox-native]

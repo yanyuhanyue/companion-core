@@ -57,6 +57,7 @@ def test_profiles_keep_integration_refs_full_and_only_reduce_known_changes(
     "contracts/event.v1.schema.json", "migrations/versions/new.py",
     "deploy/source-reader.Dockerfile", "docs/design-v0.6/upstream-native-p3.lock",
     ".github/workflows/ci.yml", "companion_onebot_bridge/outbound.py",
+    "companion_meme_protocol/__init__.py",
 ])
 def test_critical_changes_cannot_use_development_or_docs_shortcut(name):
     assert choose_profile("push", "refs/heads/topic", EVENT, [name])[0] == "full"

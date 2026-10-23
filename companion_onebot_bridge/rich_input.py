@@ -204,6 +204,14 @@ def project(message, redact):
                     raise ValueError("INVALID_CARD")
                 fields = _card(data["data"], redact)
                 entry.update(fields=fields, coverage="PARTIAL" if fields else "UNSUPPORTED")
+            elif kind == "face":
+                face_id = data.get("id")
+                if type(face_id) is int:
+                    face_id = str(face_id)
+                if (set(data) != {"id"} or not isinstance(face_id, str)
+                    or not re.fullmatch(r"0|[1-9][0-9]{0,5}", face_id)):
+                    raise ValueError("INVALID_QQ_FACE")
+                entry.update(face_id=face_id, coverage="IDENTIFIED")
             else:
                 entry["type"] = (
                     kind if kind in {"node", "image", "record", "video", "file"} else "other"

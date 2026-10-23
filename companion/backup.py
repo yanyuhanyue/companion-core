@@ -60,6 +60,15 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                store.execute("UPDATE meme_discovery_reservations SET state='UNKNOWN',"
+                              "updated_at=? WHERE state='RESERVED'", (utcnow(),))
+                store.execute(
+                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
+                    "updated_at=?,last_error_code='RESTORED_DISCOVERY_REQUIRES_RECONCILIATION' "
+                    "WHERE kind IN ('meme_discovery','meme_caption') "
+                    "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+                    (utcnow(),),
+                )
                 # A backup cannot re-authorize a consumed stopped memory-control grant.
                 # This marker is deliberately independent of model/window counters.
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
@@ -88,6 +97,10 @@ def restore(source, destination, key, ledger_path):
                     "UPDATE exploration_requests SET state='UNKNOWN',lease_token=NULL,"
                     "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "
                     "WHERE state IN ('QUEUED','RUNNING')"
+                )
+                store.execute(
+                    "UPDATE reading_attempts SET state='UNKNOWN',updated_at=? "
+                    "WHERE state='RUNNING'", (utcnow(),),
                 )
                 if store.execute(
                     "UPDATE consents SET revoked_at=? WHERE revoked_at IS NULL", (utcnow(),)

@@ -20,6 +20,7 @@ from pydantic import AwareDatetime, Field
 
 from companion import cumulative, image_spool, paid_budget, private_life, qq_images
 from companion.contracts import CoreError, StrictModel
+from companion.expression import MemeOffer
 from companion.privacy import ErasureLedger, epoch
 from companion.qq_rich import input_digest as _input_digest
 from companion.store import after, encode, utcnow
@@ -72,6 +73,7 @@ class InputApproval(WindowReference):
     input_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     capture: CaptureReceipt | None = None
+    meme_offer: MemeOffer | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class CancelledInputReference(WindowReference):
@@ -83,14 +85,21 @@ class SendCheck(WindowReference):
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     reply_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
+    reply_revision: int | None = Field(default=None, ge=0, strict=True,
+                                       exclude_if=lambda value: value is None)
 
 
 def code_sha256():
+    import companion_meme_protocol
+
     package = Path(__file__).parent
+    protocol = Path(companion_meme_protocol.__file__).parent
     return paid_budget.sha([
         [p.relative_to(package).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest()]
         for p in sorted(package.rglob("*.py"))
-    ])
+    ] + [["companion_meme_protocol/" + p.relative_to(protocol).as_posix(),
+           hashlib.sha256(p.read_bytes()).hexdigest()]
+          for p in sorted(protocol.rglob("*.py"))])
 
 
 def config_sha256(settings):
@@ -151,6 +160,7 @@ def guard(
     current_request=None,
     current_delivery=None,
     preparing=False,
+    input_only=False,
 ):
     # Read the clock after BEGIN IMMEDIATE, including any SQLite lock wait.
     with nullcontext() if store.db.in_transaction else store.transaction():
@@ -177,6 +187,7 @@ def guard(
             "exploration_enabled",
             "social_enabled",
             "expression_enabled",
+            "meme_discovery_enabled",
             "proactive_enabled",
             "voice_enabled",
             "camera_enabled",
@@ -248,8 +259,8 @@ def guard(
             (current_request or "", int(private_life.enabled(settings)), clock()),
         ) or store.one(
             "SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN' "
-            "OR (state='SENDING' AND message_id!=?) LIMIT 1",
-            (current_delivery or "",),
+            "OR (state='SENDING' AND message_id!=? AND NOT ?) LIMIT 1",
+            (current_delivery or "", int(input_only and private_life.enabled(settings))),
         ):
             raise CoreError("LIVE_TEXT_RECONCILIATION_REQUIRED", 503)
         binding = store.one("SELECT value FROM runtime_meta WHERE key=?", (BINDING,))
@@ -270,10 +281,16 @@ def guard(
                 handoff_sha256=paid_budget.sha(approval.handoff.model_dump(mode="json")),
             )
         if binding and private_life.enabled(settings) and not preparing:
+            from companion.input_protocol import recall_ledger_extension
+
             saved = json.loads(binding["value"])
             stable = set(expected) - {"privacy_epoch", "erasure_ledger_sha256"}
             if (all(saved.get(key) == expected[key] for key in stable)
-                and saved.get("privacy_epoch", -1) < expected["privacy_epoch"]):
+                and (saved.get("privacy_epoch", -1) < expected["privacy_epoch"] or (
+                    saved.get("privacy_epoch") == expected["privacy_epoch"]
+                    and recall_ledger_extension(store, settings,
+                        saved.get("erasure_ledger_sha256"), expected.get("erasure_ledger_sha256"))
+                ))):
                 _put(store, BINDING, expected)
                 history = _meta(store, HISTORY + approval.plan_sha256)
                 if history:
@@ -328,7 +345,7 @@ def status(store, settings, clock):
     if not active(store, settings):
         return {"approved": False}
     try:
-        approval, binding, attempts = guard(store, settings, clock)
+        approval, binding, attempts = guard(store, settings, clock, input_only=True)
         return {"approved": True, "plan_sha256": approval.plan_sha256,
                 "scope_sha256": paid_budget.sha(approval.model_dump(
                     mode="json", exclude={"plan_sha256"})),
@@ -544,6 +561,51 @@ def _cancelled_model_usage(store, settings, approval, job, now):
             "billed_micro_usd": sum(row["billed_micro_usd"] for row in usage)}
 
 
+def _failed_memory_input(store, approval, event, job, now):
+    """Recognize the historical failed recall without changing its terminal record."""
+    usage = store.rows("SELECT * FROM model_usage WHERE job_id=?", (job["job_id"],))
+    evidence = store.rows(
+        "SELECT * FROM audit_log WHERE action='memory.recall_invalid' AND entity_id=?",
+        (job["job_id"],),
+    )
+    conversation = store.one("SELECT * FROM conversations WHERE conversation_id=?",
+                             (event["conversation_id"],))
+    body = json.loads(event["body_json"])
+    if (not approval or approval.companion_scope != "owner_private_v1"
+        or approval.automatic_reply is not True
+        or job["state"] != "FAILED" or job["last_error_code"] != "MEMORY_REVIEW_INVALID"
+        or job["lease_token"] is not None
+        or event["event_type"] not in {"message.received", "message.media_received"}
+        or body.get("control_command") or body.get("diary_command")
+        or not conversation or conversation["scope"] != "private"
+        or conversation["owner_actor_id"] != "owner"
+        or event["reply_revision"] != conversation["reply_revision"]
+        or len(usage) != 1 or usage[0]["scenario"] != "memory_review"
+        or usage[0]["state"] != "SETTLED"
+        or len(evidence) != 1 or evidence[0]["actor_id"] != "system"
+        or evidence[0]["trace_id"] != event["trace_id"]
+        or store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                     ("erased_event:" + event["event_id"],))
+        or store.one("SELECT 1 FROM content_items WHERE owner_event_id=?",
+                                     (event["event_id"],))):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409)
+    try:
+        times = [datetime.fromisoformat(value) for value in (
+            usage[0]["occurred_at"], evidence[0]["created_at"], job["updated_at"], now,
+        )]
+        lease = datetime.fromisoformat(job["lease_until"]) if job["lease_until"] else None
+        if (any(value.tzinfo is None for value in times)
+            or not times[0] <= times[1] <= times[2] <= times[3]
+            or lease and (lease.tzinfo is None or lease > times[-1])):
+            raise ValueError("FAILED_RECALL_TIMELINE_UNPROVEN")
+    except (ValueError, TypeError):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409) from None
+    return {"state": "FAILED", "resolution": "SETTLED_NO_DELIVERY",
+            "failure_code": "MEMORY_REVIEW_INVALID", "failure_phase": "memory_recall",
+            "failure_evidence_sha256": paid_budget.sha(evidence[0]),
+            "reply_revision": event["reply_revision"]}
+
+
 def cancelled_input(store, settings, clock, reference):
     """Prove stopped generation never sent; preserve every settled model attempt and fee."""
     with store.transaction():
@@ -555,24 +617,38 @@ def cancelled_input(store, settings, clock, reference):
         event = store.one("SELECT * FROM events WHERE event_id=?", (reference.event_id,))
         job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'",
                         (reference.event_id,))
+        failed = bool(job and job["state"] == "FAILED")
+        input_epoch = receipt.get("privacy_epoch") if receipt else None
+        # Upgrading COMPLETE erasure projections can advance the epoch for an
+        # unrelated source. Only this read-only failed-input proof may cross it;
+        # source digest, erasure tombstone and all delivery/admission fences remain.
+        epoch_matches = input_epoch == epoch(store) or (
+            failed and type(input_epoch) is int and 0 <= input_epoch < epoch(store)
+        )
         if (reference.window_sha256 not in allowed or not binding
             or binding["plan_sha256"] != reference.window_sha256
             or not stopped(store, reference.window_sha256) or not receipt or not event or not job
             or receipt.get("window_sha256") != reference.window_sha256
-            or receipt.get("privacy_epoch") != epoch(store) or not receipt.get("capture")
+            or not epoch_matches or not receipt.get("capture")
             or receipt["capture"].get("source_event_id") != event["source_event_id"]
             or event["source"] != "qq.onebot" or event["actor_id"] != "owner"
             or event["privacy_scope"] != "private" or event["redacted"]
-            or _input_digest(json.loads(event["body_json"])) != receipt.get("input_sha256")
-            or job["state"] != "CANCELLED"
-            or job["last_error_code"] != "LIVE_WINDOW_STOPPED"):
+            or _input_digest(json.loads(event["body_json"])) != receipt.get("input_sha256")):
+            raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
+        failed = _failed_memory_input(store, approval, event, job, clock()) if (
+            failed
+        ) else None
+        if failed:
+            failed["input_privacy_epoch"] = input_epoch
+        if not failed and (job["state"] != "CANCELLED"
+                           or job["last_error_code"] != "LIVE_WINDOW_STOPPED"):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
         if store.one("SELECT 1 FROM outbox WHERE origin_event_id=?", (reference.event_id,)):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_ATTEMPTED", 409)
         usage = _cancelled_model_usage(store, settings, approval, job, clock())
         _idle(store)
         return {"window_sha256": reference.window_sha256, "event_id": reference.event_id,
-                "input_sha256": receipt["input_sha256"], "state": "CANCELLED",
+                "input_sha256": receipt["input_sha256"], **(failed or {"state": "CANCELLED"}),
                 "event_sha256": paid_budget.sha(event), "job_sha256": paid_budget.sha(job),
                 "privacy_epoch": epoch(store), **usage, "send_attempts": 0}
 
@@ -596,9 +672,14 @@ def _verify_handoff_receipt(approval, history, receipt):
 
 def approve_input(store, settings, clock, body):
     with store.transaction():
-        approval, binding, attempts = guard(store, settings, clock)
+        approval, binding, attempts = guard(store, settings, clock, input_only=True)
         if body.window_sha256 != approval.plan_sha256:
             raise CoreError("LIVE_TEXT_WINDOW_MISMATCH", 403)
+        if body.meme_offer is not None and (
+            not private_life.enabled(settings) or not settings.expression_enabled
+            or body.meme_offer.offer_key != "meme:" + body.event_id
+        ):
+            raise CoreError("MEME_OFFER_SOURCE_CHANGED", 403)
         capture = body.capture
         if approval.execution == "approved_live" and capture is None:
             raise CoreError("LIVE_TEXT_AUTHENTICATED_CAPTURE_REQUIRED", 403)
@@ -640,7 +721,13 @@ def approve_input(store, settings, clock, body):
         value = {**body.model_dump(mode="json"), "privacy_epoch": binding["privacy_epoch"]}
         prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + body.event_id,))
         if prior:
-            if json.loads(prior["value"]) != value:
+            recorded = json.loads(prior["value"])
+            prior_epoch = recorded.get("privacy_epoch")
+            epoch_matches = prior_epoch == binding["privacy_epoch"] or (
+                private_life.enabled(settings) and capture is not None
+                and type(prior_epoch) is int and 0 <= prior_epoch < binding["privacy_epoch"]
+            )
+            if not epoch_matches or recorded != {**value, "privacy_epoch": prior_epoch}:
                 raise CoreError("LIVE_TEXT_INPUT_CONFLICT", 409)
         else:
             if store.one("SELECT 1 FROM events WHERE event_id=?", (body.event_id,)):
@@ -665,7 +752,7 @@ def approve_input(store, settings, clock, body):
 def check_input(store, settings, clock, event):
     if not active(store, settings):
         return False
-    approval, _, _ = guard(store, settings, clock)
+    approval, _, _ = guard(store, settings, clock, input_only=True)
     text = event.payload.text
     references_only = approval.rich_input_scope == "references_v1" and bool(event.payload.rich)
     if (
@@ -683,7 +770,9 @@ def check_input(store, settings, clock, event):
     value = json.loads(receipt["value"]) if receipt else {}
     if (
         value.get("window_sha256") != approval.plan_sha256
-        or value.get("privacy_epoch") != epoch(store)
+        or (value.get("privacy_epoch") != epoch(store) and not (
+            private_life.enabled(settings) and type(value.get("privacy_epoch")) is int
+            and 0 <= value["privacy_epoch"] < epoch(store) and value.get("capture")))
         or value.get("input_sha256") != _input_digest(event.payload.model_dump())
     ):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 403)
@@ -691,6 +780,14 @@ def check_input(store, settings, clock, event):
     if image and approval.image_scope != "owner_image_v1":
         raise CoreError("LIVE_IMAGE_APPROVAL_REQUIRED", 403)
     capture = json.loads(receipt["value"]).get("capture")
+    if capture and private_life.enabled(settings):
+        from companion.input_protocol import _signature
+
+        _signature(approval, capture, CAPTURE_SIGNATURE_DOMAIN)
+        if (capture.get("input_sha256") != value["input_sha256"]
+            or capture.get("event_id") != event.event_id
+            or capture.get("window_sha256") != approval.plan_sha256):
+            raise CoreError("LIVE_TEXT_CAPTURE_BINDING_CHANGED", 403)
     if image and not capture:
         raise CoreError("LIVE_TEXT_AUTHENTICATED_CAPTURE_REQUIRED", 403)
     if capture and (
@@ -703,6 +800,9 @@ def check_input(store, settings, clock, event):
 
 def check_job(store, settings, clock, job, *, current_request=None, current_delivery=None):
     with nullcontext() if store.db.in_transaction else store.transaction():
+        from companion.reply_revision import check_job as check_reply_job
+
+        check_reply_job(store, job)
         approval, _, attempts = guard(
             store, settings, clock, current_request=current_request,
             current_delivery=current_delivery,
@@ -1433,6 +1533,15 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 
 
 def _check_delivery(store, settings, clock, message_id, *, check):
+    from companion.reply_revision import check_delivery as check_reply_delivery
+    from companion.reply_revision import require_reply_source
+
+    check_reply_delivery(store, message_id)
+    if check and check.reply_revision is not None and store.one(
+        "SELECT 1 FROM outbox WHERE message_id=? AND action_type='qq.private.reply'",
+        (message_id,),
+    ):
+        require_reply_source(store, check.event_id, check.reply_revision)
     if private_life.enabled(settings):
         row = private_life.check_delivery(store, settings, clock, message_id, check)
         if check and (row["state"] != "SENDING" or row["lease_until"] <= clock()):

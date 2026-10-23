@@ -20,7 +20,7 @@ from companion.store import Store
 CONTRACT_KEY = "derived_erasure_contract"
 # Bump when an existing handler's cleanup meaning changes without a new name.
 # Names detect registration additions; they cannot detect arbitrary code edits.
-CONTRACT_REVISION = 1
+CONTRACT_REVISION = 2
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,9 @@ def cleanup_contracts():
     from companion.exploration import erase_exploration
     from companion.goals import erase_goals
     from companion.media import erase_media_links
+    from companion.meme_core import erase_captions
     from companion.observation import erase_observations
+    from companion.reading import erase_reading
     from companion.reflection import erase_reflections
 
     return (
@@ -63,9 +65,11 @@ def cleanup_contracts():
         ),
         event_cleanup("consolidation", erase_consolidation),
         event_cleanup("goals", erase_goals),
+        event_cleanup("reading", erase_reading),
         event_cleanup("exploration", erase_exploration),
         event_cleanup("executive", erase_executive),
         event_cleanup("media", erase_media_links),
+        event_cleanup("meme-captions", erase_captions),
         event_cleanup("content", erase_content),
     )
 

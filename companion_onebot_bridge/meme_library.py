@@ -1,28 +1,19 @@
 """Bounded read-only local meme library shared by the transport adapters."""
 
 import hashlib
-import io
 import os
 import re
 import stat
 import time
-import warnings
 from collections import deque
-from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 
+from companion_meme_protocol import PreparedImage as PreparedImage
+from companion_meme_protocol import validate_bytes
+
 DEFAULT_CATEGORIES = ("happy", "like", "surprised", "morning", "sleep")
 CATEGORY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
-
-
-@dataclass(frozen=True)
-class PreparedImage:
-    data: bytes
-    sha256: str
-    width: int
-    height: int
-    mime_type: str
 
 
 class MemeLibrary:
@@ -84,10 +75,6 @@ class MemeLibrary:
         if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".gif"} or path.is_symlink():
             return None
         try:
-            from PIL import Image
-        except ImportError:
-            return None
-        try:
             resolved = path.resolve(strict=True)
             if not resolved.is_relative_to(self.root):
                 return None
@@ -100,38 +87,18 @@ class MemeLibrary:
                 data = stream.read(self.max_bytes + 1)
             if len(data) > self.max_bytes:
                 return None
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", Image.DecompressionBombWarning)
-                with Image.open(io.BytesIO(data)) as image:
-                    mime = {"PNG": "image/png", "JPEG": "image/jpeg", "GIF": "image/gif"}.get(
-                        image.format
-                    )
-                    width, height = image.size
-                    frames = getattr(image, "n_frames", 1)
-                    if (
-                        mime is None
-                        or not 0 < width <= self.max_dimension
-                        or not 0 < height <= self.max_dimension
-                        or frames > self.max_frames
-                        or width * height * frames > self.max_total_pixels
-                    ):
-                        return None
-                    image.verify()
-                with Image.open(io.BytesIO(data)) as image:
-                    for index in range(frames):
-                        image.seek(index)
-                        image.load()
-            return PreparedImage(data, hashlib.sha256(data).hexdigest(), width, height, mime)
-        except (
-            OSError,
-            RuntimeError,
-            ValueError,
-            SyntaxError,
-            EOFError,
-            Image.DecompressionBombError,
-            Warning,
-        ):
+            return self.validate_bytes(data)
+        except (OSError, RuntimeError, ValueError):
             return None
+
+    def validate_bytes(self, data):
+        return validate_bytes(
+            data,
+            max_bytes=self.max_bytes,
+            max_dimension=self.max_dimension,
+            max_frames=self.max_frames,
+            max_total_pixels=self.max_total_pixels,
+        )
 
     def remember(self, image):
         self.recent.append((image.sha256, self.clock()))

@@ -42,6 +42,10 @@ REVISION_CHAIN = (
     "0019_segmented_replies",
     "0020_reply_segment_capacity",
     "0021_reflection_admission_retry",
+    "0022_input_reply_revision",
+    "0023_meme_discovery_reservations",
+    "0024_reading_attempts",
+    "0025_meme_captions",
 )
 LEGACY_TABLES = (
     "principals",
@@ -313,9 +317,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0021_reflection_admission_retry"]
+    assert scripts.get_heads() == ["0025_meme_captions"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0021_reflection_admission_retry")
+    revisions, current = [], scripts.get_revision("0025_meme_captions")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -373,16 +377,17 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0021_reflection_admission_retry"}
+            {"version_num": "0025_meme_captions"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
         for table in ("memories", "memory_evidence", "memory_revisions", "memory_vectors"):
             expected = [row for row in before[table]["rows"] if row["memory_id"] == "mem_keep"]
             assert restored.rows(f"SELECT * FROM {table} WHERE memory_id='mem_keep'") == expected
-        assert restored.one("SELECT * FROM events WHERE event_id='evt_keep'") == next(
-            row for row in before["events"]["rows"] if row["event_id"] == "evt_keep"
-        )
+        assert restored.one("SELECT * FROM events WHERE event_id='evt_keep'") == {
+            **next(row for row in before["events"]["rows"] if row["event_id"] == "evt_keep"),
+            "reply_revision": 0,
+        }
         for usage in before["model_usage"]["rows"]:
             expected = {
                 **usage,

@@ -93,3 +93,41 @@ def test_browser_cannot_send_webrtc_packets_to_a_private_address():
             transport.close()
 
     run(scenario())
+
+
+def test_runtime_policy_blocks_stun_even_without_javascript_guard(monkeypatch):
+    from source_reader import browser
+
+    # Isolate the native network-policy layer; the separate child-realm test
+    # requires the real JS guard before untrusted scripts and rejects replacements.
+    monkeypatch.setattr(browser, "_DISABLE_RTC", "")
+
+    async def scenario():
+        packets = []
+
+        class Receiver(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                packets.append(data)
+
+        transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            Receiver, local_addr=("127.0.0.1", 0),
+        )
+        port = transport.get_extra_info("sockname")[1]
+        document = f"""<script>
+          const pc = new RTCPeerConnection({{iceServers:[{{urls:'stun:127.0.0.1:{port}'}}]}});
+          pc.createDataChannel('probe');
+          window.probe = pc.createOffer().then(async offer => {{
+            await pc.setLocalDescription(offer);
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            return {{native:typeof RTCPeerConnection === 'function',
+                     localDescription:pc.localDescription.type}};
+          }});
+        </script>""".encode()
+        try:
+            result = await BrowserRenderer(timeout=8)._render(URL, document, "() => window.probe")
+            assert result == {"native": True, "localDescription": "offer"}
+            assert not packets
+        finally:
+            transport.close()
+
+    run(scenario())

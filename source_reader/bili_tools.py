@@ -52,9 +52,12 @@ class BilibiliAccountHTTP(PublicHTTP):
 
     async def get(self, url, budget, role):
         grant = self.verify(budget)
+        parsed = urlsplit(url)
+        api_json = (parsed.hostname == "api.bilibili.com"
+                    and parsed.path != "/x/v1/dm/list.so")
         # CDN subtitles and page fallbacks never receive account cookies.
         headers = {}
-        if urlsplit(url).hostname == "api.bilibili.com":
+        if api_json:
             headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in grant["cookies"].items())
             headers["Referer"] = "https://www.bilibili.com/"
         try:
@@ -65,7 +68,7 @@ class BilibiliAccountHTTP(PublicHTTP):
                 self.blocked_grant = budget.authorization
             raise
         self.verify(budget)
-        if urlsplit(url).hostname == "api.bilibili.com":
+        if api_json:
             code = json.loads(raw).get("code")
             if code in {-101, -111}:
                 self.blocked_grant = budget.authorization
@@ -200,8 +203,8 @@ class BilibiliTools:
 class BilibiliToolReader(BilibiliReader):
     """Lease-compatible reader; discovery uses only an operator-configured keyword."""
 
-    def __init__(self, public, keyword=None):
-        super().__init__(public)
+    def __init__(self, public, keyword=None, *, discussion=False):
+        super().__init__(public, discussion=discussion)
         self.tools, self.keyword = BilibiliTools(public), keyword
 
     async def read(self, item, budget):

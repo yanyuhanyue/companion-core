@@ -309,13 +309,16 @@ def test_memory_enabled_lease_covers_review_and_chat(core):
 
 
 def test_existing_m1_database_keeps_facts_across_index_upgrade_and_downgrade(core, tmp_path):
+    from contextlib import closing
     from pathlib import Path
 
     from alembic import command
     from alembic.config import Config
 
-    from companion.store import Store, migrate
-    from tests.test_m1 import remember
+    from companion.contracts import Candidate
+    from companion.memory import Memory
+    from companion.privacy import ErasureLedger
+    from companion.store import Store, encode, migrate
 
     path = tmp_path / "previous.db"
     migrate(str(path), "0002_m1")
@@ -326,10 +329,30 @@ def test_existing_m1_database_keeps_facts_across_index_upgrade_and_downgrade(cor
             "memory_enabled": False,
         }
     )
+    # Construct historical source/fact rows without invoking current Core job writes.
+    with closing(Store(str(path))) as legacy:
+        ledger = ErasureLedger(settings.erasure_ledger)
+        ledger.initialize(legacy)
+        now, content = core.clock(), "用户最喜欢的饮料是茉莉绿茶。"
+        with legacy.transaction():
+            legacy.insert("principals", actor_id="owner", kind="owner", created_at=now)
+            legacy.insert("conversations", conversation_id="conv_legacy", platform="qq.onebot",
+                          platform_session_key="qq:FriendMessage:10001", scope="private",
+                          owner_actor_id="owner", created_at=now, last_event_at=now)
+            legacy.insert("events", event_id="evt_legacy", schema_version=1, source="qq.onebot",
+                          source_event_id="10002:qq:FriendMessage:10001:1",
+                          conversation_id="conv_legacy", actor_id="owner",
+                          event_type="message.received", occurred_at=now, ingested_at=now,
+                          privacy_scope="private", body_json=encode({"text": content}),
+                          trace_id="trace_legacy")
+            mid = Memory(legacy, settings, ledger).add(Candidate(
+                subject="user", kind="preference", fact_key="drink", content=content,
+                evidence_event_id="evt_legacy", evidence_quote=content,
+            ), now, confirmed=True)
+    migrate(str(path))
+    settings.memory_enabled = True
     previous = Core(settings, core.model, core.clock)
     try:
-        mid = remember(previous, 1, "用户最喜欢的饮料是茉莉绿茶。", confirmed=True)
-        migrate(str(path))
         assert previous.memory.search("我平时最爱喝什么？")[0]["memory_id"] == mid
         assert previous.store.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 1
     finally:

@@ -1,4 +1,5 @@
 import os
+import re
 import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,22 @@ class ObservationAdapterConfig(BaseModel):
     media_analysis: bool = False
     reader_max_requests: int = Field(default=1, ge=1, le=8)
     source_grant_required: bool = False
+    allowed_hosts: tuple[str, ...] = Field(default=(), max_length=32,
+                                          exclude_if=lambda value: not value)
+
+    @model_validator(mode="after")
+    def explicit_web_hosts(self):
+        if self.allowed_hosts and self.source != "web":
+            raise ValueError("Explicit web hosts require a web adapter")
+        if len(set(self.allowed_hosts)) != len(self.allowed_hosts) or any(
+            len(host) > 253 or not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", host,
+            ) or host.endswith((".localhost", ".local", ".internal"))
+            for host in self.allowed_hosts
+        ):
+            raise ValueError("Web hosts must be unique exact public DNS names")
+        return self
 
 
 class PaidModelApproval(BaseModel):
@@ -64,6 +81,9 @@ class PaidModelApproval(BaseModel):
         default=False, strict=True, exclude_if=lambda value: value is False,
     )
     image_input: ImageInputPolicy | None = None
+    meme_input: ImageInputPolicy | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     video_input: VideoInputPolicy | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -81,6 +101,11 @@ class PaidModelApproval(BaseModel):
             raise ValueError("approval interval exceeds configured rate validity")
         if self.cached_input_rate > self.input_rate:
             raise ValueError("cached rate must not exceed uncached admission price")
+        if self.meme_input and (
+            self.meme_input.max_images_per_request == "unlimited"
+            or self.meme_input.max_images_per_request > 5
+        ):
+            raise ValueError("meme input permits at most five image samples")
         if self.unlimited_period_spend and self.cumulative is not None:
             raise ValueError("unlimited period spend cannot override a cumulative account ceiling")
         periods = (self.daily_micro_usd, self.monthly_micro_usd, self.window_micro_usd)
@@ -314,6 +339,7 @@ class Settings(BaseModel):
     executive: ExecutiveConfig = Field(default_factory=ExecutiveConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     content_enabled: bool = False
+    web_reading_enabled: bool = False
     content: ContentConfig = Field(default_factory=ContentConfig)
     observation_enabled: bool = False
     observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
@@ -349,7 +375,22 @@ class Settings(BaseModel):
     social_enabled: bool = False
     social_semantic_threshold: float = Field(default=0.9, ge=0.8, le=1)
     expression_enabled: bool = False
+    expression_learning_enabled: bool = False
     expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+    expression_selection_probability: float = Field(default=0.35, ge=0, le=1)
+    meme_discovery_enabled: bool = False
+    meme_semantics_enabled: bool = Field(
+        default=False, exclude_if=lambda value: value is False,
+    )
+    meme_caption_daily_micro_usd: int = Field(
+        default=0, ge=0, exclude_if=lambda value: value == 0,
+    )
+    meme_caption_max_output_tokens: int = Field(
+        default=2000, ge=128, le=4096, exclude_if=lambda value: value == 2000,
+    )
+    meme_discovery_daily_queries: int = Field(default=2, ge=0, le=100)
+    meme_discovery_daily_download_bytes: int = Field(default=16777216, ge=0, le=268435456)
+    meme_discovery_daily_storage_bytes: int = Field(default=4194304, ge=0, le=67108864)
     expression_meme_categories: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]] = (
         Field(
             default_factory=lambda: ["happy", "like", "surprised", "morning", "sleep"],
@@ -436,6 +477,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "meme_caption":
+            return self.meme_caption_max_output_tokens
         if scenario == "content_video" and self.paid_model and self.paid_model.video_input:
             return self.paid_model.video_input.max_output_tokens
         if scenario == "content_vision":

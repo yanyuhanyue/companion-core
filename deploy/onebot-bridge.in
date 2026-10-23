@@ -2,3 +2,9 @@ httpx==0.28.1
 websockets==15.0.1
 cryptography==47.0.0
 pillow==12.3.0
+pydantic==2.14.1
+# Keep the shared DTO runtime aligned with the Core lock.
+annotated-types==0.8.0
+pydantic-core==2.50.1
+typing-extensions==4.16.0
+typing-inspection==0.4.4

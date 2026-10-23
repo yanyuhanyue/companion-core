@@ -496,8 +496,9 @@ def test_image_intake_failure_never_falls_back_or_retries(core, tmp_path, monkey
                 assert usage["input_tokens"] == 100 and usage["output_tokens"] == 10
             if failure == "epoch_after_vision":
                 usage = core.store.one("SELECT * FROM model_usage")
-                assert usage["state"] == "UNKNOWN"
+                assert usage["state"] == "SETTLED"
                 assert usage["input_tokens"] == 100 and usage["output_tokens"] == 10
+                assert not core.store.one("SELECT 1 FROM observations")
             if failure == "unknown_usage":
                 assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
             # A second approval cannot recover the URL or refund the original attempt.

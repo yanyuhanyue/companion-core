@@ -450,7 +450,54 @@ def test_subtitle_matches_requested_video_part_and_duration(mismatch):
             assert result["error_code"] == "READER_SUBTITLE_TARGET_MISMATCH"
             assert not result["items"]
         assert b"aid=77&cid=1234" in backend.requests[1]
+        assert b"GET /x/player/wbi/v2?" in backend.requests[1]
         assert len(backend.requests) == (2 if mismatch in {"player", "track"} else 3)
+
+    run(scenario())
+
+
+def test_current_player_keeps_account_scope_and_chooses_available_chinese_track(tmp_path):
+    player = copy.deepcopy(PLAYER)
+    english = copy.deepcopy(player["data"]["subtitle"]["subtitles"][0])
+    english.update(lan="en", subtitle_url=english["subtitle_url"].replace("example", "english"))
+    chinese = copy.deepcopy(player["data"]["subtitle"]["subtitles"][0])
+    chinese["lan"] = "ai-zh"
+    player["data"]["subtitle"]["subtitles"] = [
+        {"lan": "zh-CN", "subtitle_url": ""}, None, english, chinese,
+    ]
+
+    async def scenario():
+        pool, backend = mock_pool(response(META), response(player), response(SUBTITLE))
+        async with BilibiliAccountHTTP(grant(tmp_path, "bilibili"), pool,
+                                       clock=lambda: NOW_DT) as public:
+            result = await read_result(BilibiliReader(public), BILI_ITEM)
+        evidence = result["items"][0]["reading"]
+        assert result["status"] == "SUCCESS" and result["used_requests"] == 3
+        assert evidence["level"] == "L2" and evidence["language"] == "ai-zh"
+        assert b"GET /x/player/wbi/v2?" in backend.requests[1]
+        assert SECRET.encode() in backend.requests[1]
+        assert b"/bfs/subtitle/example.json?" in backend.requests[2]
+        assert SECRET.encode() not in backend.requests[2]
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_empty_player_track_does_not_fetch_cdn_or_retry_old_endpoint(restricted):
+    player = {"code": 0, "data": {"need_login_subtitle": restricted, "subtitle": {
+        "subtitles": [{"lan": "ai-zh", "subtitle_url": ""},
+                      {"lan": "zh-CN", "subtitle_url": "   "}],
+    }}}
+
+    async def scenario():
+        pool, backend = mock_pool(response(META), response(player))
+        async with PublicHTTP(pool) as public:
+            result = await read_result(BilibiliReader(public), BILI_ITEM)
+        evidence = result["items"][0]["reading"]
+        assert result["status"] == "SUCCESS" and result["used_requests"] == 2
+        assert evidence["level"] == "L1" and not evidence["spans"]
+        assert evidence["subtitle_status"] == ("restricted" if restricted else "missing")
+        assert len(backend.requests) == 2
 
     run(scenario())
 

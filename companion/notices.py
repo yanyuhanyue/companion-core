@@ -83,7 +83,11 @@ def _material(store, settings, kind, ref, now):
         if (not settings.goals_enabled or not row or row["redacted"] or row["state"] == "ERASED"
             or row["feedback_outcome"] not in {"FULFILLED", "EXPLAINED_FAILURE"}):
             raise CoreError("NOTICE_SOURCE_UNAVAILABLE", 409)
-        sources = [row["accepted_event_id"]]
+        sources = [row["accepted_event_id"], *(
+            evidence["event_id"] for evidence in store.rows(
+                "SELECT event_id FROM goal_evidence WHERE goal_id=?", (row["goal_id"],),
+            )
+        )]
         data = {"kind": kind, "topic": row["topic"], "outcome": row["feedback_outcome"],
                 "failure_code": row["failure_code"], "text": "", "url": "",
                 "excerpt_truncated": False}
@@ -133,7 +137,9 @@ def schedule(store, settings, kind, ref, conversation_id, now):
                           (event_id, source_id))
         job_id = uid("job")
         store.insert("jobs", job_id=job_id, event_id=event_id, kind="activity", state="QUEUED",
-            idempotency_key=key, max_attempts=1, created_at=now, updated_at=now)
+            idempotency_key=key, max_attempts=1, context_tracked=1, created_at=now, updated_at=now)
+        for source_id in {event_id, *data["source_events"]}:
+            store.insert("job_sources", job_id=job_id, event_id=source_id)
         return job_id
 
 

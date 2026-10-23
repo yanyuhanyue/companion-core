@@ -2,8 +2,10 @@
 
 import hashlib
 import json
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic import Field
@@ -18,9 +20,18 @@ from companion.observation import (
 )
 from companion.privacy import epoch
 from companion.source_grants import SourceGrantSnapshot
-from companion.sources import content_target, observation_sources, supports
+from companion.sources import content_target, observation_sources, supports, web_hosts
 from companion.store import after, encode, uid, utcnow
 from companion.transport import digest
+
+METERED_READS_SQL = (
+    "SELECT x.*,x.rowid AS queue_order,a.observed_requests,a.observed_bytes,"
+    "MAX(COALESCE(x.used_requests,x.reserved_requests),COALESCE(a.observed_requests,0)) "
+    "AS accounted_requests,"
+    "MAX(COALESCE(x.used_bytes,x.reserved_bytes),COALESCE(a.observed_bytes,0)) "
+    "AS accounted_bytes FROM exploration_requests x "
+    "LEFT JOIN reading_attempts a USING(request_id)"
+)
 
 
 class ReadItem(StrictModel):
@@ -114,7 +125,7 @@ class ExplorationService:
             or sources != [{"event_id": item["owner_event_id"]}]
         ):
             raise CoreError("LIVE_LINK_SOURCE_CHANGED", 403)
-        source, canonical = content_target(row["url"])
+        source, canonical = content_target(row["url"], web_hosts=web_hosts(self.settings))
         if canonical != row["url"] or source != self.adapter(row["adapter_id"]).source:
             raise CoreError("LIVE_LINK_SOURCE_CHANGED", 403)
 
@@ -123,6 +134,10 @@ class ExplorationService:
         content_enabled = self.settings.content_enabled
         if (not self.settings.exploration_enabled and not content_enabled) or (
             not supports(policy.source, "get")
+        ) or (
+            policy.source == "web" and (
+                not self.settings.web_reading_enabled or not policy.allowed_hosts
+            )
         ):
             raise CoreError("EXPLORATION_DISABLED", 403)
         return policy
@@ -202,12 +217,14 @@ class ExplorationService:
             return False
         try:
             scope = GoalScope.model_validate_json(step["scope_json"])
-            source, url = content_target(scope.url)
+            source, url = content_target(scope.url, web_hosts=web_hosts(self.settings))
             adapter_id = next(
                 (
                     name
                     for name, adapter in self.settings.observation_adapters.items()
-                    if adapter.source == source
+                    if adapter.source == source and (
+                        source != "web" or urlsplit(url).hostname in adapter.allowed_hosts
+                    )
                 ),
                 None,
             )
@@ -258,13 +275,13 @@ class ExplorationService:
         cfg, s = self.settings, self.store
         day, month = self.periods()
         row = s.one(
-            "SELECT SUM(COALESCE(used_requests,reserved_requests)) AS monthly,"
-            "SUM(CASE WHEN started_at>=? THEN COALESCE(used_requests,reserved_requests) "
+            "SELECT SUM(accounted_requests) AS monthly,"
+            "SUM(CASE WHEN started_at>=? THEN accounted_requests "
             "ELSE 0 END) AS daily,"
-            "SUM(CASE WHEN started_at>=? THEN COALESCE(used_bytes,reserved_bytes) "
+            "SUM(CASE WHEN started_at>=? THEN accounted_bytes "
             "ELSE 0 END) bytes,"
             "SUM(CASE WHEN started_at>=? AND operation='read' THEN 1 ELSE 0 END) reads "
-            "FROM exploration_requests WHERE started_at>=?",
+            f"FROM ({METERED_READS_SQL}) WHERE started_at>=?",
             (day, day, day, month),
         )
         return (
@@ -275,13 +292,15 @@ class ExplorationService:
             and (not for_read or (row["reads"] or 0) < cfg.exploration_daily_deep_reads)
         )
 
-    def lease(self, adapter_id, source_grant=None):
+    def lease(self, adapter_id, source_grant=None, *, reading=False, source_check=None):
         from companion import live_text
 
         policy = self.adapter(adapter_id)
+        if policy.source == "web" and not reading:
+            raise CoreError("READER_PROTOCOL_REQUIRED", 409)
         cfg, s, now = self.settings, self.store, self.clock()
         day, month = self.periods()
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
             if source_grant or policy.source_grant_required:
                 self.observations.grants.require(adapter_id, source_grant)
             s.execute(
@@ -295,12 +314,12 @@ class ExplorationService:
                 (epoch(s),),
             )
             counts = s.one(
-                "SELECT SUM(CASE WHEN started_at>=? THEN COALESCE(used_requests,reserved_requests) "
-                "ELSE 0 END) AS daily,SUM(COALESCE(used_requests,reserved_requests)) AS monthly,"
-                "SUM(CASE WHEN started_at>=? THEN COALESCE(used_bytes,reserved_bytes) ELSE 0 END) "
+                "SELECT SUM(CASE WHEN started_at>=? THEN accounted_requests "
+                "ELSE 0 END) AS daily,SUM(accounted_requests) AS monthly,"
+                "SUM(CASE WHEN started_at>=? THEN accounted_bytes ELSE 0 END) "
                 "AS bytes,SUM(CASE WHEN started_at>=? AND operation='read' "
                 "THEN 1 ELSE 0 END) AS reads "
-                "FROM exploration_requests WHERE started_at>=?",
+                f"FROM ({METERED_READS_SQL}) WHERE started_at>=?",
                 (day, day, day, month),
             )
             if (
@@ -349,6 +368,16 @@ class ExplorationService:
                     (row["request_id"],),
                 ):
                     continue
+                if source_check is not None:
+                    try:
+                        source_check(row)
+                    except CoreError as error:
+                        s.execute(
+                            "UPDATE exploration_requests SET state='CANCELLED',last_error_code=?,"
+                            "updated_at=? WHERE request_id=?",
+                            (error.code, now, row["request_id"]),
+                        )
+                        continue
                 self._read_scope(row)
                 token, until = uid("reader_lease"), after(now, 30)
                 if step:
@@ -387,10 +416,11 @@ class ExplorationService:
                 return item
         return None
 
-    def validate_read(self, adapter_id, request_id, validation):
+    def validate_read(self, adapter_id, request_id, validation, *, reading=False):
         self.adapter(adapter_id)
         s = self.store
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            self._protocol(request_id, reading)
             row = s.one(
                 "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",
                 (request_id, adapter_id),
@@ -413,7 +443,13 @@ class ExplorationService:
                 self.goals.validate_lease(step)
         return {"valid": True}
 
-    def complete(self, adapter_id, request_id, result):
+    def _protocol(self, request_id, reading):
+        if not reading and self.store.one(
+            "SELECT 1 FROM reading_attempts WHERE request_id=?", (request_id,),
+        ):
+            raise CoreError("READER_PROTOCOL_MISMATCH", 409)
+
+    def complete(self, adapter_id, request_id, result, *, reading=False):
         policy = self.adapter(adapter_id)
         s, now = self.store, self.clock()
         receipt = result.model_dump(mode="json")
@@ -427,7 +463,8 @@ class ExplorationService:
                     item.pop(field)
         fingerprint = digest(receipt)
         result_ids, failed_step = [], None
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            self._protocol(request_id, reading)
             row = s.one(
                 "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",
                 (request_id, adapter_id),
@@ -483,8 +520,11 @@ class ExplorationService:
                     (encode(observation_sources("discover")), day),
                 )["n"]
                 for index, item in enumerate(result.items):
-                    source, canonical = content_target(item.url)
-                    if source != policy.source or (row["url"] and canonical != row["url"]):
+                    source, canonical = content_target(
+                        item.url, web_hosts=policy.allowed_hosts if reading else (),
+                    )
+                    if source != policy.source or (row["url"] and canonical != row["url"]
+                                                  and not (reading and source == "web")):
                         raise CoreError("READER_TARGET_MISMATCH", 400)
                     discovered = row["operation"] == "discover"
                     if discovered and count >= self.settings.exploration_daily_candidate_limit:
@@ -516,12 +556,15 @@ class ExplorationService:
                             title=item.title,
                             text=text,
                             url=canonical,
-                            requested_url=json.loads(step["scope_json"])["url"] if step else "",
+                            requested_url=json.loads(step["scope_json"])["url"] if step
+                            else row["url"] if reading else "",
                             reading=item.reading,
                             article=item.article,
                         ),
                     )
-                    event_id = self.observations.append(adapter_id, observation)["event_id"]
+                    event_id = self.observations.append(
+                        adapter_id, observation, reading=reading,
+                    )["event_id"]
                     s.insert("exploration_evidence", request_id=request_id, event_id=event_id)
                     result_ids.append(event_id)
                     if (
@@ -580,9 +623,9 @@ class ExplorationService:
                     request_id,
                 ),
             )
-        if failed_step:
+        if failed_step and not reading:
             self.goals.fail(failed_step, result.error_code or "READ_FAILED", retryable=True)
-        if step and step["kind"] == "self":
+        if step and step["kind"] == "self" and not reading:
             for event_id in result_ids:
                 self.social.consider(event_id)
         return {"state": state, "event_ids": result_ids, "duplicate": False}

@@ -111,6 +111,12 @@ def original_deadline(store, job):
 def source(store, settings, approval, event_id):
     """Pure DB proof after the caller's live-window guard; no recursive guard calls."""
     image_policy = policy(settings, approval)
+    from companion import private_life, reply_revision
+
+    if private_life.enabled(settings):
+        current = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+        if current:
+            reply_revision.check_job(store, current)
     try:
         event, body, job = qq_source.source(store, settings, approval, event_id)
     except CoreError as error:

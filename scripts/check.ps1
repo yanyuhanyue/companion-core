@@ -43,7 +43,7 @@ try {
         & $Python scripts/ci_policy.py docs
         if ($LASTEXITCODE -ne 0) { throw 'Documentation checks failed' }
     } else {
-        & $Python -m ruff check companion companion_onebot_bridge source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
+        & $Python -m ruff check companion companion_onebot_bridge companion_meme_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
         if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
         & $Python -m pytest -q @TestFiles @pytestArguments "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }

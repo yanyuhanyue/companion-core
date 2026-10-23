@@ -223,6 +223,7 @@ def test_independent_background_workers_finish_nightly_memory_diary_reflection_g
 
 def test_continuous_history_memory_restart_and_proactive_share(core, tmp_path, monkeypatch):
     calls = []
+    send_checks = []
 
     async def source(ws):
         await ws.send(json.dumps(raw_event(1, text="我喜欢龙井茶")))
@@ -273,6 +274,13 @@ def test_continuous_history_memory_restart_and_proactive_share(core, tmp_path, m
         ):
             pause, stop_worker = asyncio.Event(), asyncio.Event()
 
+            async def checked(response):
+                if response.request.url.path == "/internal/v1/live-text/send-check":
+                    await response.aread()
+                    send_checks.append((response.status_code, response.json()))
+
+            client.event_hooks["response"].append(checked)
+
             def emitted(kind, **values):
                 if kind == "automatic_input_delivered":
                     pause.set()
@@ -304,6 +312,7 @@ def test_continuous_history_memory_restart_and_proactive_share(core, tmp_path, m
                     == "PENDING"
                 )
                 await continuous.pump_private(window, client, protocol)
+                assert send_checks[-1][0] == 200, send_checks[-1]
                 assert len(sends) == 2 and window.status()["attempt_states"] == {"ACK": 2}
                 assert live_text.status(core.store, core.settings, core.clock)["approved"]
                 assert all(
@@ -622,7 +631,7 @@ def test_background_memory_cannot_commit_after_window_boundary(core, tmp_path, b
     run(scenario())
 
 
-def test_expression_sends_one_text_and_image_chain(core, tmp_path, monkeypatch):
+def test_current_companion_without_offer_uses_text_fallback(core, tmp_path, monkeypatch):
     library = tmp_path / "memes/happy"
     library.mkdir(parents=True)
     Image.new("RGB", (20, 20), "yellow").save(library / "happy.png")
@@ -676,8 +685,7 @@ def test_expression_sends_one_text_and_image_chain(core, tmp_path, monkeypatch):
                     stop_worker.set()
                     await task
             assert len(sends) == 1
-            assert [item["type"] for item in sends[0]["message"]] == ["text", "image"]
-            assert sends[0]["message"][1]["data"]["file"].startswith("base64://")
+            assert sends[0]["message"] == [{"type": "text", "data": {"text": "完成啦！"}}]
 
     run(scenario())
 

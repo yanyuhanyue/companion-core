@@ -92,7 +92,7 @@ def model_payload(settings, messages, scenario):
         "max_tokens": settings.output_tokens(scenario),
         "stream": False,
     }
-    if scenario in {"memory_extract", "memory_review", "diary", "reflection"}:
+    if scenario in {"memory_extract", "memory_review", "diary", "reflection", "meme_caption"}:
         payload["response_format"] = {"type": "json_object"}
     if settings.provider == "deepseek" and not video:
         payload["thinking"] = {"type": "disabled"}

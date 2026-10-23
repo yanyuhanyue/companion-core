@@ -177,8 +177,14 @@ def capacity(window, capture_fence=None):
     window.verify(capture_fence=capture_fence)
     window.check_spool()
     window.spool.capacity(window.plan.config.max_frame_bytes * 3 + MAX_RICH_BYTES * 2)
-    if window.count("window_inputs", "state!='ACK'"):
+    from .continuous import interruptible
+
+    unresolved = window.count("window_inputs", "state NOT IN "
+                              "('ACK','CANCELLED','SUPERSEDED','RECALLED')")
+    if unresolved and not interruptible(window):
         raise ValueError("ONE_INPUT_AT_A_TIME")
+    if unresolved >= window.plan.config.max_pending:
+        raise ValueError("AUTOMATIC_INPUT_QUEUE_FULL")
     if window.count("window_inputs") >= (
         window.plan.value["max_new_inputs"]
     ):
@@ -227,7 +233,15 @@ async def receive_frame(window, ws, capture_fence):
                 if raw.get("post_type") == "meta_event":
                     validate_meta(window, raw)
                 elif raw.get("post_type") == "notice":
-                    validate_input_status(window, raw)
+                    from .continuous import OwnerSource, interruptible
+
+                    if raw.get("notice_type") == "friend_recall" and interruptible(window):
+                        if identifier(raw.get("self_id")) != window.plan.config.bot_qq_id:
+                            raise ValueError("INVALID_CAPTURE_ACCOUNT")
+                        OwnerSource(window, None, asyncio.Event()).put_recall(
+                            frame, window.clock(), ws.remote_address)
+                    else:
+                        validate_input_status(window, raw)
                 else:
                     return frame
             raise ValueError("CAPTURE_FRAME_CAP")
@@ -376,10 +390,27 @@ async def persist_capture(window, client, protocol, frame, received_at, peer, ca
         set_phase("ws_close")
         return window.status()
     set_phase("reference_read")
-    await enrich(
-        event, raw["message"], CaptureReferences(window, protocol, verify_capture),
-        lambda text: redact(text, window.plan.config),
-    )
+    from .continuous import recalled_input
+
+    class RecalledReference(Exception):
+        pass
+
+    def verify_reference():
+        verify_capture()
+        if recalled_input(window, event):
+            raise RecalledReference()
+
+    try:
+        verify_reference()
+        await enrich(
+            event, raw["message"], CaptureReferences(window, protocol, verify_reference),
+            lambda text: redact(text, window.plan.config),
+        )
+        verify_reference()
+    except RecalledReference:
+        # Preserve and sign the authenticated original projection for Core's
+        # direction proof, but never retain a withdrawn reference read's text.
+        raw, event = input_event(window, frame, received_at)
     verify_capture()
     frame_bytes = frame.encode() if isinstance(frame, str) else frame
     receipt = {
@@ -521,7 +552,8 @@ async def capture_once(window, client, protocol):
         window.busy = False
 
 
-async def approve_captured(window, client, approval, *, image_transport=None, image_resolver=None):
+async def approve_captured(window, client, approval, *, image_transport=None, image_resolver=None,
+                           defer_media=False):
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
     window.busy = True
@@ -596,9 +628,21 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
         window.verify()
         core_approval = {key: value for key, value in approval.items() if key != "capture_sha256"}
         core_approval["capture"] = receipt
+        if (window.plan.config.meme_enabled
+            and window.plan.value.get("live_text", {}).get("companion_scope")
+                == "owner_private_v1"):
+            offer = window.memes.prepare_offer(event, receipt)
+            if offer is not None:
+                core_approval["meme_offer"] = offer
         if window.plan.mode == "live_text":
             await window.core_post(client, "/internal/v1/live-text/inputs/approve", core_approval)
         window.verify()
+        has_images = any(item.get("kind") == "image"
+                         for item in event["payload"].get("shared_content", []))
+        if has_images and defer_media:
+            from .pending_media import queue
+
+            queue(window, event, raw, receipt)
         head = window.append(
             "INPUT_APPROVED",
             {"event_hash": digest(event["event_id"]), "approval_sha256": digest(approval)},
@@ -610,86 +654,31 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
                 (digest(approval), event["event_id"], window.plan.sha256),
             )
             window.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        from .continuous import flush_recalls, interruptible
+
+        if interruptible(window):
+            await flush_recalls(window, client)
         async with window.core_http(client) as scoped:
             await window.spool.flush_one(scoped)
         window.verify()
-        if any(item.get("kind") == "image" for item in event["payload"].get("shared_content", [])):
-            from .images import fetch_image, original_images
+        if window.db.execute("SELECT state FROM inbox WHERE key=?", (event["event_id"],))\
+                .fetchone()[0] == "erased":
+            return window.status()
+        if has_images and not defer_media:
+            from .images import original_images
+            from .pending_media import upload
 
-            if window.plan.value["live_text"].get("companion_scope") == "owner_private_v1":
-                from .continuous import core_status
-
-                # The accepted chat job now yields background admission. Allow a
-                # known in-flight background call to settle before vision takes
-                # the same single paid-provider slot.
-                async with asyncio.timeout(60):
-                    while (await core_status(window, client))["operations"]["budget"][
-                        "unsettled_calls"
-                    ]:
-                        await window.core_counts(client)
-                        window.verify()
-                        await asyncio.sleep(0.25)
             images = original_images(raw["message"])
             if not images:
                 raise ValueError("ORIGINAL_OWNER_IMAGE_REQUIRED")
-            prefix = "/internal/v2/content/" + event["event_id"] + "/image"
-            for image in images:
-                key = f"image:{image.slot}"
-                claim = await window.core_post(
-                    client,
-                    prefix + "/claim",
-                    {
-                        "request_key": key,
-                        "source_sha256": image.source_sha256,
-                    },
-                )
 
-                async def check_image(*, image=image, claim=claim):
-                    await window.core_post(
-                        client,
-                        prefix + "/check",
-                        {
-                            "lease_token": claim["lease_token"],
-                            "source_sha256": image.source_sha256,
-                        },
-                    )
-                    window.verify()
-                    if datetime.fromisoformat(claim["lease_until"]) <= window.clock():
-                        raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
+            def set_media_phase(value):
+                nonlocal phase
+                phase = value
 
-                options = {"resolver": image_resolver} if image_resolver is not None else {}
-                phase = "image_download"
-                data, mime = await fetch_image(
-                    image, claim["max_bytes"], check=check_image,
-                    transport=image_transport, **options,
-                )
-                await check_image()
-                proof = {"plan_sha256": window.plan.sha256, "event_id": event["event_id"],
-                         "source_sha256": image.source_sha256, "lease_token": claim["lease_token"],
-                         "media_sha256": hashlib.sha256(data).hexdigest(), "mime": mime}
-                proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
-                    window.plan.config.capture_signing_key)).sign(
-                        b"companion-core/onebot-owner-image/v1\x00" + encode(proof).encode()).hex()
-                phase = "image_upload"
-                async with window.core_http(client) as scoped:
-                    response = await scoped.post(
-                        prefix,
-                        content=data,
-                        # Native analysis may include a primary-model decision and
-                        # a bounded video call. Core retains the source/window fences.
-                        timeout=300,
-                        headers={
-                            "Content-Type": mime,
-                            "X-Content-Key": key,
-                            "X-Content-Lease": claim["lease_token"],
-                            "X-Content-Proof": encode(proof),
-                        },
-                    )
-                    response.raise_for_status()
-                    expected = "SUCCEEDED" if image.slot == len(images) - 1 else "STAGED"
-                    if response.json().get("state") != expected:
-                        raise ValueError("IMAGE_ANALYSIS_FAILED_CLOSED")
-                window.verify()
+            await upload(window, client, event["event_id"], images,
+                         image_transport=image_transport, image_resolver=image_resolver,
+                         set_phase=set_media_phase)
         return window.status()
     except BaseException as error:
         diagnostic = capture_diagnostic(error, phase)
