@@ -33,6 +33,7 @@ from .window import (
 
 MAX_BUFFERED_INPUTS = 32
 REPLY_WAIT_SECONDS = 180
+SEND_PROGRESS_SECONDS = 180
 BUFFER_DOMAIN = b"companion-core/automatic-owner-buffer/v1\x00"
 
 
@@ -217,7 +218,10 @@ class OwnerSource:
                             capture.validate_meta(window, raw)
                             continue
                         if raw.get("post_type") == "notice":
-                            if identifier(raw.get("user_id")) == window.plan.config.owner_qq_id:
+                            if (raw.get("notice_type") == "notify"
+                                and raw.get("sub_type") == "input_status"
+                                and identifier(raw.get("user_id"))
+                                == window.plan.config.owner_qq_id):
                                 capture.validate_input_status(window, raw)
                             continue
                         scope = window.plan.value["live_text"]
@@ -323,6 +327,11 @@ async def pump_private(window, client, protocol):
 
 async def finish_input(window, client, protocol, source, event_id):
     deadline = time.monotonic() + REPLY_WAIT_SECONDS
+    sending = False
+    acknowledged = window.db.execute(
+        "SELECT COUNT(*) FROM window_attempts WHERE event_id=? AND state='ACK'", (event_id,),
+    ).fetchone()[0]
+    interval = (reply_segments.scope(window.plan) or {}).get("interval_ms", 0) / 1000
     while window.db.execute("SELECT state FROM window_inputs WHERE event_id=?",
                             (event_id,)).fetchone()[0] != "ACK":
         source.check()
@@ -335,6 +344,11 @@ async def finish_input(window, client, protocol, source, event_id):
         if not any(jobs.get(state, 0) for state in ("QUEUED", "RUNNING", "RETRY_WAIT")):
             if not deliveries.get("PENDING", 0):
                 raise ValueError("AUTOMATIC_REPLY_NOT_CREATED")
+            if not sending:
+                if time.monotonic() >= deadline:
+                    raise ValueError("AUTOMATIC_REPLY_TIMEOUT")
+                sending = True
+                deadline = time.monotonic() + SEND_PROGRESS_SECONDS + interval
             await window.core_counts(client)
             operation = AutomaticSend(window, client)
             sender = WindowOneBot(operation, protocol)
@@ -343,6 +357,13 @@ async def finish_input(window, client, protocol, source, event_id):
             if window.row()["state"] == "STOPPED":
                 await window.stop_core(client)
                 return
+            current = window.db.execute(
+                "SELECT COUNT(*) FROM window_attempts WHERE event_id=? AND state='ACK'",
+                (event_id,),
+            ).fetchone()[0]
+            if current > acknowledged:
+                acknowledged = current
+                deadline = time.monotonic() + SEND_PROGRESS_SECONDS + interval
         if time.monotonic() >= deadline:
             raise ValueError("AUTOMATIC_REPLY_TIMEOUT")
         await asyncio.sleep(max(0.1, window.plan.config.poll_seconds))
