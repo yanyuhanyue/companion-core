@@ -49,6 +49,7 @@ class ModelResponse:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_tokens: int = 0
+    tool_calls: tuple[dict, ...] = ()
 
 
 class ModelResponseError(CoreError):
@@ -83,16 +84,22 @@ class _AdmissionTransport(httpx.AsyncBaseTransport):
 
 
 def model_payload(settings, messages, scenario):
+    video = (settings.paid_model.video_input
+             if scenario == "content_video" and settings.paid_model else None)
     payload = {
-        "model": settings.model_name,
+        "model": video.model if video else settings.model_name,
         "messages": messages,
         "max_tokens": settings.output_tokens(scenario),
         "stream": False,
     }
     if scenario in {"memory_extract", "memory_review", "diary", "reflection"}:
         payload["response_format"] = {"type": "json_object"}
-    if settings.provider == "deepseek":
+    if settings.provider == "deepseek" and not video:
         payload["thinking"] = {"type": "disabled"}
+    if scenario == "content_vision" and settings.paid_model and settings.paid_model.video_input:
+        from companion.video_input import TOOL
+
+        payload.update(tools=[TOOL], tool_choice="auto")
     return payload
 
 
@@ -125,8 +132,12 @@ class ModelClient:
         ):
             raise CoreError("MODEL_ADMISSION_REQUIRED", 503)
         admission.consumed = True
-        endpoint = self.settings.model_url.rstrip("/") + "/chat/completions"
-        authorization = "Bearer " + self.settings.model_key.get_secret_value()
+        video = (self.settings.paid_model.video_input
+                 if scenario == "content_video" and self.settings.paid_model else None)
+        endpoint = (video.endpoint if video else self.settings.model_url).rstrip("/")
+        endpoint += "/chat/completions"
+        key = self.settings.video_model_key if video else self.settings.model_key
+        authorization = "Bearer " + key.get_secret_value()
 
         async def check(request):
             try:
@@ -150,7 +161,8 @@ class ModelClient:
 
         try:
             async with httpx.AsyncClient(
-                headers=self.client.headers, timeout=self.client.timeout,
+                headers=self.client.headers,
+                timeout=video.timeout_seconds if video else self.client.timeout,
                 follow_redirects=False, trust_env=False,
                 event_hooks={key: list(value) for key, value in self.client.event_hooks.items()},
                 transport=_AdmissionTransport(self.client, check),
@@ -186,12 +198,21 @@ class ModelClient:
                     raise ModelResponseError(code, status, received)
                 raise CoreError(code, status)
             try:
-                text = body["choices"][0]["message"]["content"]
-                if not isinstance(text, str) or not text.strip() or len(text) > 32000:
+                message = body["choices"][0]["message"]
+                calls = message.get("tool_calls") or []
+                if calls and (
+                    "tools" not in payload or not isinstance(calls, list) or len(calls) != 1
+                    or not isinstance(calls[0], dict) or len(json.dumps(calls)) > 4096
+                ):
+                    raise ValueError("invalid tool calls")
+                text = message.get("content") or ""
+                if (not isinstance(text, str) or len(text) > 32000
+                    or (not text.strip() and not calls)):
                     raise ValueError("invalid model response")
             except (ValueError, KeyError, IndexError, TypeError) as error:
                 raise ModelResponseError("MODEL_INVALID_RESPONSE", 502, received) from error
             received.text = text
+            received.tool_calls = tuple(calls)
             return received
         except (httpx.TimeoutException, httpx.TransportError) as error:
             raise CoreError("MODEL_RETRYABLE", 503) from error

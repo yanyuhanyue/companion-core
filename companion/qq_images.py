@@ -275,7 +275,13 @@ def result(store, settings, approval, job):
             "slot": row["slot"], "item_sha256": paid_budget.sha(row),
             "observation_sha256": paid_budget.sha(observation),
         })
-    return {"image": value, "items": evidence_rows, "admission_sha256": paid_budget.sha(admission)}
+    result = {"image": value, "items": evidence_rows,
+              "admission_sha256": paid_budget.sha(admission)}
+    if "video" in value:
+        from companion import qq_video
+
+        result["video"] = qq_video.result(store, settings, approval, job)
+    return result
 
 
 def retrieval_text(store, settings, clock, job):
@@ -307,5 +313,11 @@ def original_parts(store, settings, clock, job):
             or hashlib.sha256(mime.encode() + b"\0" + data).hexdigest() != row["fingerprint"]
         ):
             raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-        parts.append(prepare(data, mime, settings.paid_model.image_input).part())
+        if settings.paid_model.video_input:
+            from companion.video_input import preview
+
+            prepared, _ = preview(data, mime, settings.paid_model.image_input)
+        else:
+            prepared = prepare(data, mime, settings.paid_model.image_input)
+        parts.append(prepared.part())
     return parts

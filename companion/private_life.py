@@ -33,6 +33,7 @@ SCENARIOS = {
     "diary": "diary",
     "reflection": "reflection",
     "content_vision": "content",
+    "content_video": "content",
 }
 MODEL = "private_life_model:"
 DELIVERY = "private_life_delivery:"
@@ -196,7 +197,7 @@ def admit_model(store, settings, clock, job_id, scenario):
             raise CoreError("COMPANION_JOB_SCOPE_REQUIRED", 403)
         check_job(store, settings, approval, job)
         if scenario not in (
-            {"chat", "memory_review", "content_vision"}
+            {"chat", "memory_review", "content_vision", "content_video"}
             if job["kind"] == "chat"
             else {"activity", "memory_review"}
         ):
@@ -254,10 +255,18 @@ def check_model(store, settings, clock, request_id):
         event = check_job(store, settings, approval, job)
         if event_digest(event) != record["event_sha256"]:
             raise CoreError("COMPANION_MODEL_SOURCE_CHANGED", 503)
-        if row["scenario"] == "content_vision":
+        if row["scenario"] in {"content_vision", "content_video"}:
             qq_images.frozen(store, settings, approval, job)
+            source_request_id = request_id
+            if row["scenario"] == "content_video":
+                from companion import qq_video
+
+                video, _, source_request_id = qq_video.current(store, settings, approval, job)
+                if (video["request_id"] != request_id
+                    or video["payload_sha256"] != row["payload_sha256"]):
+                    raise CoreError("LIVE_VIDEO_SOURCE_CHANGED", 403)
             image, _, _ = qq_images.lease(
-                store, settings, approval, clock, job["event_id"], request_id=request_id
+                store, settings, approval, clock, job["event_id"], request_id=source_request_id
             )
             lease = min(lease, image["lease_until"])
         else:

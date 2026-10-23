@@ -45,6 +45,13 @@ def snapshot(settings):
         encode([approval.window_id, approval.provider, approval.endpoint]).encode(),
         hashlib.sha256,
     ).hexdigest()
+    if approval.video_input is not None:
+        video = approval.video_input
+        value["video_credential_tag"] = hmac.new(
+            settings.video_model_key.get_secret_value().encode(),
+            encode([approval.window_id, video.provider, video.endpoint]).encode(),
+            hashlib.sha256,
+        ).hexdigest()
     return value
 
 
@@ -89,12 +96,23 @@ def estimate_input_tokens(approval, messages, scenario):
     """
     try:
         estimate = 32
-        if scenario == "content_vision":
+        if scenario == "content_video":
+            from companion.video_input import text_and_estimate
+
+            text, video_estimate = text_and_estimate(approval.video_input, messages,
+                                                    approval.image_input)
+            messages = [{"role": "user", "content": text}]
+            estimate += video_estimate
+        elif scenario == "content_vision":
             from companion.image_input import text_and_estimate
 
             text, image_estimate = text_and_estimate(approval.image_input, messages)
             messages = [{"role": "user", "content": text}]
             estimate += image_estimate
+            if approval.video_input is not None:
+                from companion.video_input import TOOL
+
+                estimate += (len(encode(TOOL).encode("utf-8")) + 2) // 3
         elif any(isinstance(message, dict) and isinstance(message.get("content"), list)
                  for message in messages):
             from companion.image_input import messages_and_estimate

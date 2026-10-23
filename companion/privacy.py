@@ -21,6 +21,7 @@ def redact(text, settings):
     for secret in (
         settings.bridge_token.get_secret_value(),
         settings.model_key.get_secret_value(),
+        settings.video_model_key.get_secret_value(),
         settings.diary_admin_token.get_secret_value(),
         settings.control_token.get_secret_value(),
         settings.content.vision.key.get_secret_value(),
