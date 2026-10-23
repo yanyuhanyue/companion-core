@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import face_graphics
 from .spool import encode
 
 HOSTS = frozenset({"multimedia.nt.qq.com.cn", "gchat.qpic.cn", "c2cpicdw.qpic.cn"})
@@ -36,9 +37,10 @@ class OriginalImage:
     slot: int
     source_sha256: str
     url: str
+    face_id: str | None = None
 
     def projection(self):
-        return {
+        value = {
             "index": self.index,
             "type": "image",
             "actor": "UNVERIFIED",
@@ -46,6 +48,9 @@ class OriginalImage:
             "slot": self.slot,
             "source_sha256": self.source_sha256,
         }
+        if self.face_id is not None:
+            value.update(type="face", face_id=self.face_id)
+        return value
 
 
 def image_url(value):
@@ -82,12 +87,17 @@ def original_images(message):
     images = [
         (i, value)
         for i, value in enumerate(message)
-        if isinstance(value, dict) and value.get("type") == "image"
+        if isinstance(value, dict) and (value.get("type") == "image" or (
+            value.get("type") == "face" and _face_graphic(value) is not None))
     ]
     return [_original_image(index, slot, value) for slot, (index, value) in enumerate(images)]
 
 
 def _original_image(index, slot, value):
+    if value.get("type") == "face":
+        face_id, resource = _face_graphic(value)
+        return OriginalImage(index, slot, hashlib.sha256(encode(value).encode()).hexdigest(),
+                             resource["url"], face_id)
     data = value.get("data")
     if set(value) != {"type", "data"} or not isinstance(data, dict):
         raise ValueError("INVALID_IMAGE_SEGMENT")
@@ -105,6 +115,24 @@ def _original_image(index, slot, value):
         raise ValueError("IMAGE_KIND_UNSUPPORTED")
     url = image_url(data.get("url") or data.get("file"))
     return OriginalImage(index, slot, hashlib.sha256(encode(value).encode()).hexdigest(), url)
+
+
+def _face_graphic(value):
+    data = value.get("data")
+    if not isinstance(data, dict) or set(data) != {"id"}:
+        raise ValueError("INVALID_QQ_FACE")
+    identifier = str(data["id"]) if type(data["id"]) is int else data["id"]
+    resource = face_graphics.info(identifier)
+    return (identifier, resource) if resource else None
+
+
+def source_url(image):
+    if image.face_id is None:
+        return image_url(image.url)
+    resource = face_graphics.info(image.face_id)
+    if resource is None or image.url != resource["url"]:
+        raise ValueError("QQ_FACE_RESOURCE_CHANGED")
+    return image.url
 
 
 def global_address(value):
@@ -179,6 +207,14 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
     """
     if type(max_bytes) is not int or not 1 <= max_bytes <= 4_000_000 or not callable(check):
         raise ValueError("INVALID_IMAGE_DOWNLOAD_GRANT")
+    if image.face_id is not None:
+        await check()
+        source_url(image)
+        data = face_graphics.read(image.face_id)
+        if len(data) > max_bytes:
+            raise ValueError("IMAGE_TOO_LARGE")
+        await check()
+        return data, "image/png"
     url = image_url(image.url)
     target = httpx.URL(url)
     delegate = transport or httpx.AsyncHTTPTransport(trust_env=False, retries=0)

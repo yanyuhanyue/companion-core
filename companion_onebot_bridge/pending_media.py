@@ -10,7 +10,7 @@ import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from .images import OriginalImage, fetch_image, image_url, original_images
+from .images import OriginalImage, fetch_image, original_images, source_url
 from .spool import encode
 from .window import digest
 
@@ -39,7 +39,8 @@ def queue(window, event, raw, capture):
     prepare(window)
     value = {"window_sha256": window.plan.sha256, "event_id": event["event_id"],
              "capture_sha256": digest(capture), "input_sha256": capture["input_sha256"],
-             "images": [asdict(image) for image in images]}
+             "images": [{key: item for key, item in asdict(image).items()
+                         if key != "face_id" or item is not None} for image in images]}
     value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
         window.plan.config.capture_signing_key)).sign(DOMAIN + encode(value).encode()).hex()
     prior = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
@@ -82,7 +83,7 @@ def manifest(window, row):
             or len(value["images"]) != row["image_count"]):
             raise ValueError()
         images = [OriginalImage(**item) for item in value["images"]]
-        if any(image.slot != slot or image.url != image_url(image.url)
+        if any(image.slot != slot or image.url != source_url(image)
                for slot, image in enumerate(images)):
             raise ValueError()
     except (InvalidSignature, ValueError, TypeError, KeyError):
