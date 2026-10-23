@@ -310,6 +310,11 @@ def lease_deliveries(store, settings, request, now):
 
             if enabled(settings):
                 items[-1]["window_origin_event_id"] = row["origin_event_id"]
+                from companion import notices
+
+                notice = notices.delivery_job(store, row["message_id"])
+                if notice and notices.required(store, notice["job_id"]):
+                    items[-1]["window_notice"] = "commitment"
         return {"items": items}
 
 
