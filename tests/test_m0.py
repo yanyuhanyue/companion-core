@@ -109,12 +109,14 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
 
 
 @pytest.mark.parametrize("failure", [429, 503, "timeout"])
-def test_m0_04_retry_bounded_and_accounted(core, failure, tmp_path):
+def test_m0_04_uncertain_provider_usage_blocks_paid_retry(core, failure, tmp_path):
     from tests.test_paid_model_gate import approved_live
 
     approved_live(core, tmp_path, concurrency=3)
+    calls = []
 
     def handler(request):
+        calls.append(request.url.path)
         if failure == "timeout":
             raise httpx.ReadTimeout("do not log sensitive response", request=request)
         return httpx.Response(failure, json={"error": "private provider error"})
@@ -124,14 +126,22 @@ def test_m0_04_retry_bounded_and_accounted(core, failure, tmp_path):
             core.settings.mode = "live"
             core.model = ModelClient(core.settings, client)
             ingest(core)
-            for _attempt in range(3):
-                assert await core.run_once()
-                core.clock.advance(30)
+            assert await core.run_once()
+            core.clock.advance(30)
+            # A queued retry reaches admission, where the first call's unresolved
+            # charge blocks a second paid request for this same task.
+            assert await core.run_once()
+            core.clock.advance(30)
             assert not await core.run_once()
 
     run(exercise())
-    assert core.store.one("SELECT state,attempts FROM jobs") == {"state": "FAILED", "attempts": 3}
-    assert core.store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state='UNKNOWN'")["n"] == 3
+    assert core.store.one("SELECT state,attempts,last_error_code FROM jobs") == {
+        "state": "FAILED", "attempts": 2, "last_error_code": "CLOUD_TASK_USAGE_UNCERTAIN",
+    }
+    assert len(calls) == 1
+    assert core.store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state='UNKNOWN'")["n"] == 1
+    cost = core.store.one("SELECT state,amount_micro_cny FROM cloud_cost_snapshots")
+    assert cost["state"] == "UNKNOWN" and cost["amount_micro_cny"] > 0
     assert "private provider error" not in str(core.status())
 
 
