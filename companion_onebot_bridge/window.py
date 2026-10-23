@@ -543,6 +543,9 @@ class TestWindow:
         self.model_attempts = None
         self.core_stop_ack = False
         self.stop_path = stop_path(spool.directory, plan.value, plan.sha256)
+        # Revocation must survive damage to the mutable plan, Spool or journal.
+        self._stop_identity = (plan.mode, plan.sha256, plan.config,
+                               plan.value["execution"] == "local_synthetic")
 
     def row(self):
         self.db.row_factory = sqlite3.Row
@@ -922,32 +925,60 @@ class TestWindow:
             return await bounded_post(scoped, path, body)
 
     async def stop_core(self, client):
-        if self.plan.mode != "live_text":
+        mode, plan_hash, config, synthetic = self._stop_identity
+        if mode != "live_text":
             return
         try:
             self.verify(active=False)
             records, _ = self.read_journal()
-            self.core_stop_ack = any(r.get("kind") == "CORE_STOP_CONFIRMED" for r in records)
-            if self.core_stop_ack:
-                return
-            self.check_core_client(client)
-            result = await self.core_post(client, "/internal/v1/live-text/stop", {
-                "window_sha256": self.plan.sha256,
-            })
+            confirmed = (self.plan.sha256 == plan_hash
+                         and any(r.get("kind") == "CORE_STOP_CONFIRMED" for r in records))
+        except Exception:
+            # Unreadable local evidence cannot veto the independent STOP request.
+            confirmed = False
+        if confirmed:
+            self.core_stop_ack = True
+            return
+        path = "/internal/v1/live-text/stop"
+        body = {"window_sha256": plan_hash}
+
+        async def boundary(request):
+            if (request.method != "POST" or request.url.path != path
+                or request.headers.get("Authorization") != "Bearer " + config.bridge_token
+                or not private_request_matches(request, config.core_url, path,
+                                               synthetic=synthetic)
+                or decode(request.content, 65536) != body):
+                raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+            seal_protocol_content(request, request.content)
+
+        self.core_stop_ack = False
+        try:
+            if (str(client.base_url).rstrip("/") != config.core_url.rstrip("/")
+                or client.headers.get("Authorization") != "Bearer " + config.bridge_token):
+                raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+            async with checked_http_client(client, boundary) as scoped:
+                result = await bounded_post(scoped, path, body)
             if result != {"stopped": True}:
                 raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED")
+        except Exception:
+            raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED") from None
+        # The remote ACK is real even if local evidence cannot be recorded. Never
+        # repair/replace damaged evidence or mistake a persistence error for no ACK.
+        self.core_stop_ack = True
+        self.verify(active=False)
+        records, _ = self.read_journal()
+        if not any(r.get("kind") == "CORE_STOP_CONFIRMED" for r in records):
             head = self.append("CORE_STOP_CONFIRMED", {})
             with self.db:
                 self.db.execute("UPDATE test_window SET journal_head=?", (head,))
-            self.core_stop_ack = True
-        except Exception:
-            raise ValueError("LIVE_TEXT_CORE_STOP_UNCONFIRMED") from None
 
     async def stop_live(self, client, reason="OWNER_STOP"):
         if self.plan.mode != "live_text":
             raise ValueError("LIVE_TEXT_WINDOW_REQUIRED")
-        self.stop(reason)
-        await self.stop_core(client)
+        try:
+            self.stop(reason)
+        finally:
+            await self.stop_core(client)
         return self.status()
 
     def check_opening(self):
@@ -1246,8 +1277,8 @@ class TestWindow:
         return result
 
     def stop(self, reason="OWNER_STOP"):
-        self.verify(active=False)
         request_stop(self.spool.directory, plan=self.plan)
+        self.verify(active=False)
         head = self.append("STOP", {"reason": reason})
         with self.db:
             self.db.execute(
