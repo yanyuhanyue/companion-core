@@ -97,6 +97,10 @@ def restore(source, destination, key, ledger_path):
                     "last_error_code='RESTORED_READ_REQUIRES_RECONCILIATION' "
                     "WHERE state IN ('QUEUED','RUNNING')"
                 )
+                store.execute(
+                    "UPDATE reading_attempts SET state='UNKNOWN',updated_at=? "
+                    "WHERE state='RUNNING'", (utcnow(),),
+                )
                 if store.execute(
                     "UPDATE consents SET revoked_at=? WHERE revoked_at IS NULL", (utcnow(),)
                 ).rowcount:

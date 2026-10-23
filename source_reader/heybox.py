@@ -208,6 +208,8 @@ class SourceAPI:
 
 
 class HeyboxReader:
+    parser_version = "heybox/1"
+
     def grant_snapshot(self, required=False):
         snapshot = getattr(self.source, "grant_snapshot", None)
         return snapshot(required=required) if snapshot else None

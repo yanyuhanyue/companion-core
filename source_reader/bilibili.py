@@ -96,6 +96,8 @@ def subtitle_excerpt(raw, limit=8000, duration=None):
 
 
 class BilibiliReader:
+    parser_version = "bilibili/1"
+
     def grant_snapshot(self, required=False):
         snapshot = getattr(self.public, "grant_snapshot", None)
         return snapshot(required=required) if snapshot else None

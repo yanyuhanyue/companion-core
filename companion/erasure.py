@@ -50,6 +50,7 @@ def cleanup_contracts():
     from companion.goals import erase_goals
     from companion.media import erase_media_links
     from companion.observation import erase_observations
+    from companion.reading import erase_reading
     from companion.reflection import erase_reflections
 
     return (
@@ -63,6 +64,7 @@ def cleanup_contracts():
         ),
         event_cleanup("consolidation", erase_consolidation),
         event_cleanup("goals", erase_goals),
+        event_cleanup("reading", erase_reading),
         event_cleanup("exploration", erase_exploration),
         event_cleanup("executive", erase_executive),
         event_cleanup("media", erase_media_links),

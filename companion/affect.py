@@ -43,6 +43,45 @@ RULES = (
 )
 
 
+def owner_feedback(store, settings, event_id, now):
+    """Revalidate original, retained owner wording; no summaries or inferred mood."""
+    event = store.one(
+        "SELECT e.body_json,e.ingested_at,e.occurred_at FROM events e "
+        "JOIN conversations c USING(conversation_id) WHERE e.event_id=? AND e.redacted=0 "
+        "AND e.actor_id='owner' AND e.source='qq.onebot' AND e.privacy_scope='private' "
+        "AND e.event_type='message.received' AND c.scope='private' "
+        "AND c.owner_actor_id='owner' AND length(e.body_json)<=16000",
+        (event_id,),
+    )
+    if not event or not (
+        after(now, -settings.raw_event_retention_days * 86400) < event["ingested_at"] <= now
+        and event["occurred_at"] <= now
+    ):
+        return None
+    try:
+        body = json.loads(event["body_json"])
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("diary_command") or body.get("control_command"):
+        return None
+    text = body.get("text", "")
+    if not isinstance(text, str):
+        return None
+    text = text.strip().rstrip("。！!？? ")
+    matched = next((rule for rule in RULES if re.fullmatch(rule[0], text)), None)
+    if not matched:
+        return None
+    _, dimension, value, cause = matched
+    return {
+        "event_id": event_id,
+        "dimension": dimension,
+        "new_state": value,
+        "reason_code": cause,
+        "created_at": event["ingested_at"],
+        "occurred_at": event["occurred_at"],
+    }
+
+
 def erase_affect(store, event_ids):
     if not store.one("SELECT 1 FROM sqlite_master WHERE name='affect_evidence' AND type='table'"):
         return
@@ -93,44 +132,22 @@ class AffectEngine:
 
     def preview(self, event_id):
         """Read-only shadow: direct private owner feedback, never inferred emotion."""
-        event = self.store.one(
-            "SELECT e.body_json,e.ingested_at FROM events e "
-            "JOIN conversations c USING(conversation_id) WHERE e.event_id=? AND e.redacted=0 "
-            "AND e.actor_id='owner' AND e.source='qq.onebot' AND e.privacy_scope='private' "
-            "AND e.event_type='message.received' AND c.scope='private' "
-            "AND c.owner_actor_id='owner' AND length(e.body_json)<=16000",
-            (event_id,),
-        )
-        if not event:
-            return None
-        try:
-            body = json.loads(event["body_json"])
-        except ValueError:
-            return None
-        if not isinstance(body, dict) or body.get("diary_command") or body.get("control_command"):
-            return None
-        text = body.get("text", "")
-        if not isinstance(text, str):
-            return None
-        text = text.strip().rstrip("。！!？? ")
-        matched = next((rule for rule in RULES if re.fullmatch(rule[0], text)), None)
-        if not matched:
+        feedback = owner_feedback(self.store, self.settings, event_id, self.clock())
+        if feedback is None:
             return None
         expires = min(
-            after(event["ingested_at"], self.settings.affect_decay_minutes * 60),
-            after(event["ingested_at"], self.settings.raw_event_retention_days * 86400),
+            after(feedback["created_at"], self.settings.affect_decay_minutes * 60),
+            after(feedback["created_at"], self.settings.raw_event_retention_days * 86400),
         )
-        if not event["ingested_at"] <= self.clock() < expires:
+        if not feedback["created_at"] <= self.clock() < expires:
             return None
-        _, dimension, value, cause = matched
         return {
             "namespace": "owner.feedback",
             "mode": "SHADOW",
             "event_id": event_id,
-            "dimension": dimension,
-            "new_state": value,
-            "reason_code": cause,
-            "created_at": event["ingested_at"],
+            **{key: feedback[key] for key in (
+                "dimension", "new_state", "reason_code", "created_at",
+            )},
             "expires_at": expires,
         }
 

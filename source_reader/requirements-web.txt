@@ -1,0 +1,3 @@
+# Optional pure HTML parser; merge into the Reader dependency group/lock at integration.
+# No crawler or downloader API is used by source_reader.web.
+trafilatura==2.3.1

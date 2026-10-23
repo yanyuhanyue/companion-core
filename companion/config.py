@@ -1,4 +1,5 @@
 import os
+import re
 import tomllib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,22 @@ class ObservationAdapterConfig(BaseModel):
     media_analysis: bool = False
     reader_max_requests: int = Field(default=1, ge=1, le=8)
     source_grant_required: bool = False
+    allowed_hosts: tuple[str, ...] = Field(default=(), max_length=32,
+                                          exclude_if=lambda value: not value)
+
+    @model_validator(mode="after")
+    def explicit_web_hosts(self):
+        if self.allowed_hosts and self.source != "web":
+            raise ValueError("Explicit web hosts require a web adapter")
+        if len(set(self.allowed_hosts)) != len(self.allowed_hosts) or any(
+            len(host) > 253 or not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", host,
+            ) or host.endswith((".localhost", ".local", ".internal"))
+            for host in self.allowed_hosts
+        ):
+            raise ValueError("Web hosts must be unique exact public DNS names")
+        return self
 
 
 class PaidModelApproval(BaseModel):
@@ -314,6 +331,7 @@ class Settings(BaseModel):
     executive: ExecutiveConfig = Field(default_factory=ExecutiveConfig)
     media: MediaConfig = Field(default_factory=MediaConfig)
     content_enabled: bool = False
+    web_reading_enabled: bool = False
     content: ContentConfig = Field(default_factory=ContentConfig)
     observation_enabled: bool = False
     observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
@@ -349,6 +367,7 @@ class Settings(BaseModel):
     social_enabled: bool = False
     social_semantic_threshold: float = Field(default=0.9, ge=0.8, le=1)
     expression_enabled: bool = False
+    expression_learning_enabled: bool = False
     expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
     expression_selection_probability: float = Field(default=0.35, ge=0, le=1)
     meme_discovery_enabled: bool = False

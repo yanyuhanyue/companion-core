@@ -44,6 +44,7 @@ REVISION_CHAIN = (
     "0021_reflection_admission_retry",
     "0022_input_reply_revision",
     "0023_meme_discovery_reservations",
+    "0024_reading_attempts",
 )
 LEGACY_TABLES = (
     "principals",
@@ -315,9 +316,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0023_meme_discovery_reservations"]
+    assert scripts.get_heads() == ["0024_reading_attempts"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0023_meme_discovery_reservations")
+    revisions, current = [], scripts.get_revision("0024_reading_attempts")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -375,7 +376,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0023_meme_discovery_reservations"}
+            {"version_num": "0024_reading_attempts"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))

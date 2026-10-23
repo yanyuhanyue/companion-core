@@ -32,6 +32,7 @@ from companion.contracts import (
 )
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
+from companion.exploration import METERED_READS_SQL
 from companion.media_api import register_media_routes
 from companion.memory_control import (
     MemoryControlGrant,
@@ -232,6 +233,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
+    from companion.reading_protocol import ReadObservation
     from companion.reflection import ReflectionDecision
     from companion.source_grants import (
         ReaderLeaseRequest,
@@ -300,19 +302,38 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def reader_result(adapter_id: str, request_id: str, body: ReadResult):
         return app.state.core.exploration.complete(adapter_id, request_id, body)
 
+    @app.post("/internal/v3/readers/{adapter_id}/lease", dependencies=adapter_auth)
+    async def reading_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
+        grant = body.source_grant if body else None
+        return {"item": app.state.core.reading.lease(adapter_id, grant)}
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
+    async def reading_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
+        return app.state.core.reading.validate_read(adapter_id, request_id, body)
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
+    async def reading_result(adapter_id: str, request_id: str, body: ReadObservation):
+        return app.state.core.reading.complete(adapter_id, request_id, body)
+
     @app.get("/internal/v2/exploration", dependencies=control_auth)
     async def exploration_status():
         return {
             "items": app.state.core.store.rows(
                 "SELECT request_id,adapter_id,operation,state,used_bytes,reserved_bytes,"
-                "last_error_code,"
-                "created_at FROM exploration_requests ORDER BY rowid DESC LIMIT 30"
+                "used_requests,reserved_requests,observed_bytes,observed_requests,"
+                "accounted_bytes,accounted_requests,last_error_code,created_at "
+                f"FROM ({METERED_READS_SQL}) ORDER BY queue_order DESC LIMIT 30"
             )
         }
 
     @app.get("/internal/v2/affect", dependencies=control_auth)
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
+
+    @app.get("/internal/v2/expression-learning", dependencies=control_auth)
+    async def expression_learning(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return app.state.core.expression_learning.snapshot(settings.owner_qq_id)
 
     @app.get("/internal/v2/affect/{event_id}/preview", dependencies=control_auth)
     async def affect_preview(event_id: str, response: Response):
@@ -443,6 +464,15 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
             raise CoreError("DIARY_NOT_FOUND", 404)
         return result
 
+    @app.post(prefix + "/diary/{day}/recompute", dependencies=diary_auth, status_code=202)
+    async def diary_recompute(day: date):
+        core = app.state.core
+        run_id = core.diary.recompute_day(day, settings.owner_qq_id)
+        state = core.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))[
+            "state"
+        ] if run_id else "NOT_SCHEDULED"
+        return {"local_date": day.isoformat(), "run_id": run_id, "state": state}
+
     @app.post(prefix + "/diary/{day}/forget", dependencies=diary_auth)
     async def diary_forget(day: date):
         return app.state.core.diary.forget(day, settings.owner_qq_id)
@@ -556,7 +586,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
             raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
         return {
             "items": app.state.core.memory.search(
-                body.query, body.requester_actor_id, body.subject_filter, body.limit
+                body.query, body.requester_actor_id, body.subject_filter, body.limit,
+                now=app.state.core.clock(),
             )
         }
 

@@ -167,6 +167,7 @@ DIARY_COMMANDS = (
     "暂停写日记",
     "恢复写日记",
     "修改日记",
+    "重算日记",
 )
 
 
@@ -564,14 +565,8 @@ class DiaryRepository:
             if not changed:
                 return False
             if state == "COMMITTED":
-                entry_id = uid("diary")
-                s.insert(
-                    "diary_entries",
-                    entry_id=entry_id,
-                    run_id=run["run_id"],
-                    identity_id="companion",
-                    local_date=run["local_date"],
-                    timezone=run["timezone"],
+                prior = s.one("SELECT * FROM diary_entries WHERE run_id=?", (run["run_id"],))
+                values = dict(
                     title=draft.title,
                     body_md=body,
                     status="COMMITTED",
@@ -579,9 +574,28 @@ class DiaryRepository:
                     captured_privacy_epoch=run["captured_privacy_epoch"],
                     generator_version=GENERATOR_VERSION,
                     model_name=self.settings.model_name,
-                    created_at=now,
                     updated_at=now,
                 )
+                if prior:
+                    # A native source erasure already scrubbed the old text, revisions and
+                    # evidence. Rebuild only that invalidated projection, never a correction
+                    # or an explicitly deleted day. Keep its identity and advance version.
+                    if prior["status"] != "REDACTED":
+                        raise CoreError("DIARY_ENTRY_NOT_REPLACEABLE", 409)
+                    entry_id = prior["entry_id"]
+                    s.execute(
+                        "UPDATE diary_entries SET "
+                        + ",".join(key + "=?" for key in values)
+                        + ",version=version+1 WHERE entry_id=?",
+                        (*values.values(), entry_id),
+                    )
+                else:
+                    entry_id = uid("diary")
+                    s.insert(
+                        "diary_entries", entry_id=entry_id, run_id=run["run_id"],
+                        identity_id="companion", local_date=run["local_date"],
+                        timezone=run["timezone"], created_at=now, **values,
+                    )
                 for source in run["sources"]:
                     s.insert(
                         "diary_evidence",
@@ -603,6 +617,46 @@ class DiaryService:
 
     def schedule_day(self, day):
         return self.repo.schedule(day)
+
+    def recompute_day(self, day, requester):
+        """Requeue a source-erased projection; the native worker owns admission and I/O."""
+        self.authorize(requester)
+        self.expire_evidence()
+        local = datetime.fromisoformat(self.clock()).astimezone(ZoneInfo(self.settings.timezone))
+        if day >= local.date():
+            raise CoreError("DIARY_DAY_NOT_CLOSED", 400)
+        s = self.store
+        with s.transaction():
+            if not self.repo.enabled() or s.one(
+                "SELECT 1 FROM runtime_meta WHERE key=?",
+                ("diary_deleted:" + self.settings.timezone + ":" + day.isoformat(),),
+            ):
+                return None
+            entry = s.one(
+                "SELECT d.run_id,r.state,r.attempts,r.max_attempts,r.model_request_id "
+                "FROM diary_entries d JOIN diary_runs r USING(run_id) "
+                "WHERE d.identity_id='companion' AND d.local_date=? AND d.timezone=? "
+                "AND d.status='REDACTED'",
+                (day.isoformat(), self.settings.timezone),
+            )
+            if not entry:
+                return None
+            if entry["state"] in {"PENDING", "RUNNING", "RETRY_WAIT"}:
+                return entry["run_id"]
+            if entry["model_request_id"]:
+                usage = s.one("SELECT state FROM model_usage WHERE request_id=?",
+                              (entry["model_request_id"],))
+                if not usage or usage["state"] != "SETTLED":
+                    raise CoreError("DIARY_RECOMPUTE_USAGE_UNRESOLVED", 409)
+            if entry["attempts"] >= entry["max_attempts"]:
+                raise CoreError("DIARY_RECOMPUTE_ATTEMPTS_EXHAUSTED", 409)
+            s.execute(
+                "UPDATE diary_runs SET state='PENDING',lease_token=NULL,lease_owner=NULL,"
+                "lease_until=NULL,next_attempt_at=NULL,last_error_code='DIARY_RECOMPUTE_REQUESTED',"
+                "updated_at=? WHERE run_id=?", (self.clock(), entry["run_id"]),
+            )
+            s.audit("diary.recompute_requested", entry["run_id"], "diary", self.clock())
+            return entry["run_id"]
 
     def schedule_due(self):
         local = datetime.fromisoformat(self.clock()).astimezone(ZoneInfo(self.settings.timezone))
@@ -909,6 +963,21 @@ class DiaryService:
             if parts[0] == "修改日记" and len(parts) == 3:
                 self.correct(date.fromisoformat(parts[1]), parts[2], requester)
                 return "已保存你的修订。"
+            if parts[0] == "重算日记" and len(parts) == 2:
+                run_id = self.recompute_day(date.fromisoformat(parts[1]), requester)
+                if not run_id:
+                    return "这一天没有安排日记重算。"
+                row = self.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))
+                labels = {
+                    "PENDING": "已排队，等待整理",
+                    "RUNNING": "正在整理",
+                    "RETRY_WAIT": "正在等待重试",
+                    "COMMITTED": "已保存",
+                    "SKIPPED": "已跳过",
+                    "FAILED": "未能完成",
+                    "CANCELLED": "已取消",
+                }
+                return "这一天的日记重算" + labels[row["state"]] + "。"
         except ValueError:
             return "日期请使用 YYYY-MM-DD。"
         except CoreError as error:
@@ -919,8 +988,15 @@ class DiaryService:
             if error.code == "INVALID_DIARY_CORRECTION":
                 limit = self.settings.diary_max_body_chars - len("主人修订：\n\n")
                 return f"修订内容须为1–{limit}字，且不含敏感信息。"
+            if error.code == "DIARY_DAY_NOT_CLOSED":
+                return "这一天还未结束，暂时不能重算日记。"
+            if error.code == "DIARY_RECOMPUTE_USAGE_UNRESOLVED":
+                return "上次日记调用的用量尚未确认，暂时不能重算。"
+            if error.code == "DIARY_RECOMPUTE_ATTEMPTS_EXHAUSTED":
+                return "这一天的日记已达到尝试上限，未安排新的重算。"
             raise
         return (
             "可用指令：/今天写日记了吗、/读日记 [YYYY-MM-DD]、/日记列表、"
-            "/修改日记 YYYY-MM-DD 新正文、/删除日记 YYYY-MM-DD、/暂停写日记、/恢复写日记。"
+            "/修改日记 YYYY-MM-DD 新正文、/重算日记 YYYY-MM-DD、/删除日记 YYYY-MM-DD、"
+            "/暂停写日记、/恢复写日记。"
         )

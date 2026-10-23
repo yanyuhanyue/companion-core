@@ -138,6 +138,8 @@ class Store:
                 "source_grant_id",
                 "source_grant_epoch",
             },
+            "reading_attempts": {"request_id", "lease_token", "context_json", "state",
+                                 "observed_requests", "observed_bytes"},
             "social_candidates": {"event_id", "message_id", "comparison_text"},
             "tool_tasks": {"scope_sha256", "captured_privacy_epoch", "billed_micro_usd"},
             "tool_approvals": {"scope_sha256", "expires_at", "revoked_at"},

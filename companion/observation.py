@@ -254,7 +254,10 @@ class ObservationService:
                 raise CoreError("INVALID_OBSERVATION_URL", 400)
             if observation.source in source_names("read"):
                 try:
-                    source, _ = content_target(value)
+                    source, _ = content_target(
+                        value, web_hosts=adapter.allowed_hosts
+                        if self.settings.web_reading_enabled else (),
+                    )
                 except CoreError:
                     raise CoreError("INVALID_OBSERVATION_URL", 400) from None
                 if source != observation.source:
@@ -367,8 +370,10 @@ class ObservationService:
             raise CoreError("TOOL_RECEIPT_REQUIRED", 403)
         return occurred
 
-    def append(self, adapter_id, observation):
+    def append(self, adapter_id, observation, *, reading=False):
         adapter = self.policy(adapter_id)
+        if adapter.source == "web" and not reading:
+            raise CoreError("READER_PROTOCOL_REQUIRED", 409)
         now, s = self.clock(), self.store
         receipt = observation.model_dump(
             mode="json", exclude={"event_id", "trace_id", "privacy_epoch"}

@@ -499,6 +499,7 @@ class ErasureLedger:
             return
 
         if record.get("target_type") == "source_grant":
+            from companion.reading import erase_reading
             from companion.source_grants import cancel_grant_reads, grant_tombstone
 
             grant_id = record["source_grant_id"]
@@ -507,6 +508,7 @@ class ErasureLedger:
             store.execute("UPDATE source_grants SET revoked_at=COALESCE(revoked_at,?),"
                           "forgotten_at=? WHERE grant_id=?", (record["at"], record["at"], grant_id))
             cancel_grant_reads(store, grant_id, record["at"])
+            erase_reading(store, ())
             # Re-resolve the explicit relationship in the snapshot; never infer it from URLs.
             roots = set(record["event_ids"]) | {row["event_id"] for row in store.rows(
                 "SELECT event_id FROM source_grant_events WHERE grant_id=?", (grant_id,))}

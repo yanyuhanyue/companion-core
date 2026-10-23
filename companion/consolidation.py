@@ -256,13 +256,19 @@ class NightlyConsolidator:
                 if worked:
                     self.after_memory_commit(run)
                 start, end = day_bounds(day, self.settings.timezone)
+                now = self.clock()
                 remaining = self.store.one(
                     "SELECT COUNT(*) AS n FROM events e JOIN jobs j USING(event_id) WHERE "
                     "e.actor_id='owner' AND e.source='qq.onebot' AND e.redacted=0 AND "
-                    "e.memory_processed=0 AND j.kind='chat' AND j.state='SUCCEEDED' "
+                    "e.memory_processed=0 AND j.kind='chat' AND (j.state='SUCCEEDED' OR "
+                    "(j.state='CANCELLED' AND j.last_error_code='REPLY_SUPERSEDED')) "
+                    "AND NOT EXISTS (SELECT 1 FROM runtime_meta "
+                    "WHERE key='erased_event:'||e.event_id) "
+                    "AND e.ingested_at>=? AND e.ingested_at<=? AND e.occurred_at<=? "
                     "AND e.occurred_at>=? AND "
                     "e.occurred_at<?",
-                    (start, end),
+                    (after(now, -86400 * self.settings.raw_event_retention_days),
+                     after(now, -self.settings.extraction_idle_seconds), now, start, end),
                 )["n"]
                 steps["memory"] = (
                     "WAITING"

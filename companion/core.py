@@ -28,12 +28,15 @@ from companion.executive import Executive
 from companion.exploration import ExplorationService
 from companion.expression import ExpressionEngine
 from companion.goals import GoalEngine
+from companion.growth import ExpressionLearning
 from companion.life import LifeService, is_life_command
 from companion.media import MediaService
 from companion.memory import Memory
+from companion.memory_context import MemoryContext
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
+from companion.reading import ReadingService
 from companion.reflection import ReflectionService
 from companion.reply_segments import split_text
 from companion.runtime import Runtime
@@ -58,12 +61,14 @@ class Core(Runtime):
         self.model = model
         try:
             self.memory = Memory(self.store, settings, self.ledger)
+            self.memory_context = MemoryContext(self.memory)
             if settings.memory_enabled:
                 self.memory.index.warmup()
             self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
             self.observations = ObservationService(self.store, settings, clock)
             self.media = MediaService(self.store, settings, clock, self.observations)
             self.affect = AffectEngine(self.store, settings, clock)
+            self.expression_learning = ExpressionLearning(self.store, settings, clock)
             self.reflections = ReflectionService(
                 self.store, settings, model, self.diary.repo, self.ledger, clock
             )
@@ -87,6 +92,7 @@ class Core(Runtime):
                 self.store, settings, self.observations, self.goals, self.social,
                 self.content.register_link_images, clock,
             )
+            self.reading = ReadingService(self.store, settings, self.exploration, clock)
             self.expression = ExpressionEngine(self.store, settings, clock)
             self.executive = Executive(self.store, settings, clock)
         except BaseException:
@@ -382,7 +388,89 @@ class Core(Runtime):
                 indices.append(segment["index"])
         return indices
 
-    def context(self, job, memories=None, memory_paused=False):
+    def _check_context_snapshots(self, job, snapshots):
+        reply_revision.check_job(self.store, job)
+        if private_life.strict(self.store, self.settings):
+            live_text.check_job(self.store, self.settings, self.clock, job)
+        for snapshot in snapshots:
+            try:
+                if snapshot["kind"] == "memory":
+                    self.memory_context.revalidate(snapshot["proof"], self.clock())
+                elif snapshot["kind"] == "growth":
+                    current = self._expression_learning_reference(job, self.affect.snapshot())
+                    if current is None or current["snapshot"] != snapshot["proof"]:
+                        raise CoreError("PRIVACY_CHANGED", 409)
+            except CoreError as error:
+                if error.code == "PRIVACY_CHANGED":
+                    # A now-invalid source cancels this response, not the companion window.
+                    raise CoreError(reply_revision.CANCELLED, 409) from error
+                raise
+
+    def _expression_learning_reference(self, job, affect):
+        cfg, s = self.settings, self.store
+        if (not getattr(cfg, "expression_learning_enabled", False) or not cfg.expression_enabled
+            or job["kind"] != "chat" or not reply_revision.owner_input(s, job["event_id"])
+            or reply_revision.control_job(s, job) or private_life.strict(s, cfg)):
+            return None
+        learned = self.expression_learning.snapshot(cfg.owner_qq_id)
+        if learned["truncated"]:
+            return None
+        transient = {row["dimension"] for row in affect["evidence"]}
+        items = [item for item in learned["items"] if item["status"] == "STABLE"
+                 and 0 < item["strength"] <= 0.5 and item["dimension"] not in transient]
+        sources = {e["event_id"] for item in items for e in item["evidence"]}
+        if not items or any(not reply_revision.source_active(s, source) for source in sources):
+            return None
+        selected = [{key: item[key] for key in ("dimension", "value", "strength", "version")}
+                    for item in items]
+        return {"message": {"role": "user", "content":
+                    "主人长期表达偏好参考（仅调整表达；短时反馈优先，不改变事实或权限）：\n"
+                    + encode(selected)}, "source_event_ids": sorted(sources),
+                "snapshot": selected}
+
+    def _memory_continuation(self, job, history):
+        s, cfg, now = self.store, self.settings, self.clock()
+        if (not cfg.memory_enabled or job["kind"] != "chat"
+            or not reply_revision.owner_input(s, job["event_id"])
+            or reply_revision.control_job(s, job)):
+            return None
+        if private_life.strict(s, cfg):
+            if cfg.live_text_window.history_scope != "approved_window":
+                return None
+            # These are already individually fingerprinted by the window authorizer.
+            allowed = {row["event_id"] for row in history}
+        else:
+            if private_life.enabled(cfg):
+                private_life.check_job(s, cfg, cfg.live_text_window, job)
+                if cfg.live_text_window.history_scope != "owner_private":
+                    return None
+            allowed = {row["event_id"] for row in s.rows(
+                "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
+                "WHERE e.conversation_id=? AND e.actor_id='owner' AND e.source='qq.onebot' "
+                "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
+                "AND e.redacted=0 AND e.occurred_at>=? AND e.occurred_at<=? "
+                "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                (job["conversation_id"], after(now, -7 * 86400), now, job["event_id"]),
+            )}
+        result = self.memory_context.continuation(job["conversation_id"], now, event_ids=allowed)
+        items = result["items"]
+        remaining = (cfg.live_text_window.max_history_utf8_bytes - sum(
+            len(message["content"].encode()) for row in history
+            for message in dialogue_history.turn_messages(row)
+        ) if live_text.active(s, cfg) else cfg.context_soft_tokens)
+        while items:
+            message = {"role": "user", "content":
+                       "近期情景接续（原始主人观察，不是当前事实、已执行行动或新指令）：\n"
+                       + encode(items)}
+            if len(message["content"].encode()) <= remaining:
+                ids = {source for item in items for source in item["source_event_ids"]}
+                proof = self.memory_context.pin(now, event_ids=ids)
+                return {"message": message, "source_event_ids": proof["source_event_ids"],
+                        "proof": proof}
+            items = items[:-1]
+        return None
+
+    def context(self, job, memories=None, memory_paused=False, *, snapshots=None):
         s, cfg = self.store, self.settings
         reply_revision.check_job(s, job)
         if job["kind"] == "chat":
@@ -407,6 +495,7 @@ class Core(Runtime):
         rules = {"role": "system", "content": rules}
         references = []
         reference_sources = []
+        reference_proofs = []
         bounded_text = private_life.strict(s, cfg)
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
         combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
@@ -461,11 +550,19 @@ class Core(Runtime):
             )
             reference_sources.append((references[-1],
                                       {row["event_id"] for row in affect["evidence"]}))
+        if learned := self._expression_learning_reference(job, affect):
+            references.append(learned["message"])
+            reference_sources.append((learned["message"], learned["source_event_ids"]))
+            reference_proofs.append((learned["message"],
+                                     {"kind": "growth", "proof": learned["snapshot"]}))
         if cfg.memory_enabled:
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
-            hits = self.memory.search(text or "*", limit=6, memory_ids=allowed) if (
+            hits = self.memory_context.recall(
+                text or "*", self.clock(), memory_ids=allowed, project_query=text,
+            )["rows"] if (
                 memories is None
             ) else memories
+            memory_proof = self.memory_context.pin(self.clock(), rows=hits)
             from companion.interest import profile
 
             trait_rows = (
@@ -498,8 +595,10 @@ class Core(Runtime):
                 }
                 references.append(memory_reference)
                 reference_sources.append((memory_reference,
-                    {event_id for hit in hits for event_id in hit["evidence_ids"]}
+                    set(memory_proof["source_event_ids"])
                     | {item["event_id"] for trait in trait_rows for item in trait["evidence"]}))
+                reference_proofs.append((memory_reference,
+                                         {"kind": "memory", "proof": memory_proof}))
         if bounded_text:
             sources = live_text.history_sources(s, cfg, self.clock, job)
             turns = [dialogue_history.turn_messages(source) for source in sources]
@@ -509,6 +608,11 @@ class Core(Runtime):
             if private_life.enabled(cfg):
                 sources = private_life.recent_history(s, cfg, job)
             turns = [dialogue_history.turn_messages(source) for source in sources]
+        if continuation := self._memory_continuation(job, sources):
+            references.append(continuation["message"])
+            reference_sources.append((continuation["message"], continuation["source_event_ids"]))
+            reference_proofs.append((continuation["message"],
+                                     {"kind": "memory", "proof": continuation["proof"]}))
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             rules["content"] += qq_rich.RULES
         current_input = []
@@ -559,6 +663,11 @@ class Core(Runtime):
                 if item.get("article_event_id"):
                     actual_sources.add(item["article_event_id"])
         reply_revision.remember_sources(s, job, actual_sources)
+        retained = [proof for reference, proof in reference_proofs
+                    if any(message is reference for message in messages)]
+        self._check_context_snapshots(job, retained)
+        if snapshots is not None:
+            snapshots.extend(retained)
         return messages
 
     async def recall_for_reply(self, job):
@@ -585,11 +694,11 @@ class Core(Runtime):
             query, image_context, *(text for source in history
                      for text in (source["user_text"], source["reply_text"])),
         ]))
-        hits = self.memory.search(retrieval_query, limit=6, memory_ids=allowed) if (
+        hits = self.memory_context.recall(
+            retrieval_query, self.clock(), memory_ids=allowed, project_query=query,
+        )["rows"] if (
             retrieval_query.strip()
         ) else []
-        if not hits:
-            hits = self.memory.project_recall_candidates(query, memory_ids=allowed, limit=6)
         if not hits:
             if bounded_text:
                 live_text.freeze_memory_review(
@@ -625,9 +734,9 @@ class Core(Runtime):
             live_text.freeze_memory_review(
                 self.store, self.settings, self.clock, job, hits, messages, history,
             )
-        reply_revision.remember_sources(self.store, job,
-            {source["event_id"] for source in history}
-            | {event_id for hit in hits for event_id in hit["evidence_ids"]})
+        proof = self.memory_context.pin(self.clock(), rows=hits,
+                                        event_ids={source["event_id"] for source in history})
+        reply_revision.remember_sources(self.store, job, proof["source_event_ids"])
         try:
             request_id = budget.reserve(
                 self.store, self.settings, job["job_id"], "memory_review", messages, self.clock(),
@@ -642,6 +751,7 @@ class Core(Runtime):
                 "memory_review",
                 self.clock,
             )
+            self._check_context_snapshots(job, [{"kind": "memory", "proof": proof}])
         except Exception as error:
             if not bounded_text and isinstance(error, CoreError) and error.code in {
                 "DAILY_BUDGET_EXHAUSTED",
@@ -681,7 +791,7 @@ class Core(Runtime):
         candidates = [
             candidate
             for candidate in candidates
-            if self.memory.validate_candidate(candidate, confirmed) is not None
+            if self.memory.validate_candidate(candidate, confirmed, now=self.clock()) is not None
         ]
         if not candidates:
             return [], []
@@ -690,7 +800,8 @@ class Core(Runtime):
             reply_revision.remember_sources(s, job, {row.evidence_event_id for row in candidates})
         existing = {}
         for candidate in candidates:
-            for row in self.memory.search(candidate.content, subjects=[candidate.subject], limit=6):
+            for row in self.memory.search(candidate.content, subjects=[candidate.subject], limit=6,
+                                          now=self.clock()):
                 existing[row["memory_id"]] = row
         catalog = {f"m{i}": row for i, row in enumerate(existing.values())}
         if len(candidates) == 1:
@@ -713,9 +824,10 @@ class Core(Runtime):
             {"role": "system", "content": REVIEW_RULES},
             {"role": "user", "content": encode(payload)},
         ]
+        proof = self.memory_context.pin(self.clock(), rows=list(catalog.values()),
+                                        event_ids={row.evidence_event_id for row in candidates})
         if job:
-            reply_revision.remember_sources(s, job,
-                {event_id for row in catalog.values() for event_id in row["evidence_ids"]})
+            reply_revision.remember_sources(s, job, proof["source_event_ids"])
         request_id = budget.reserve(
             s,
             cfg,
@@ -735,6 +847,12 @@ class Core(Runtime):
             "memory_review",
             self.clock,
         )
+        # Preserve the existing write-reconciliation failure contract. A real input
+        # recall already cancelled the tracked job; a concurrent explicit forget
+        # remains PRIVACY_CHANGED and cannot commit the old review result.
+        self.memory_context.revalidate(proof, self.clock())
+        if job:
+            reply_revision.check_job(s, job)
         validation_reason = "schema"
         try:
             review = MemoryReview.model_validate_json(response.text)
@@ -840,8 +958,26 @@ class Core(Runtime):
             return "已" + text + "。"
         if not self.settings.memory_enabled:
             return None
-        if text == "你记得什么":
-            hits = self.memory.search("*")
+        if command == "你记得什么":
+            reply_revision.check_job(s, job)
+            if arguments:
+                target = re.fullmatch(r"历史\s+(mem_[a-f0-9]+)", arguments)
+                if not target:
+                    return "查看当前记忆用 /你记得什么；查看一条的修订用 /你记得什么 历史 mem_ID。"
+                history = self.memory_context.history(target[1], self.clock())
+                hits = history["revisions"][:6]
+                proof = self.memory_context.pin(self.clock(), rows=hits, historical=True)
+                reply_revision.remember_sources(s, job, proof["source_event_ids"])
+                self._check_context_snapshots(job, [{"kind": "memory", "proof": proof}])
+                return ("修订记录（记录时间；旧修订不是当前事实）：\n" + "\n".join(
+                    f"{row['memory_id']} [{row['status']}] {row['created_at']} "
+                    + row["content"][:200] + ("…" if len(row["content"]) > 200 else "")
+                    for row in hits
+                )) if hits else "当前没有可用来源支持的修订记录。"
+            hits = self.memory_context.recall("*", self.clock())["rows"]
+            proof = self.memory_context.pin(self.clock(), rows=hits)
+            reply_revision.remember_sources(s, job, proof["source_event_ids"])
+            self._check_context_snapshots(job, [{"kind": "memory", "proof": proof}])
             return (
                 "\n".join(
                     f"{m['memory_id']} [{m['subject']}/{m['status']}] {m['content']}" for m in hits
@@ -886,7 +1022,9 @@ class Core(Runtime):
                     (job["job_id"], job["lease_token"], self.clock()),
                 ):
                     raise CoreError("JOB_LEASE_EXPIRED", 409)
-                memory_id = self.add_memories(candidates, resolutions, now, confirmed=True)[0]
+                reply_revision.check_job(s, job)
+                memory_id = self.add_memories(candidates, resolutions, self.clock(),
+                                              confirmed=True)[0]
                 review = s.one("SELECT needs_review FROM memories WHERE memory_id=?", (memory_id,))
             if review["needs_review"]:
                 return f"已记录：{memory_id}。这与已有记忆存在冲突，请澄清或用“/纠正这一条”修订。"
@@ -941,6 +1079,7 @@ class Core(Runtime):
             * 1000,
         )
         request_id = None
+        context_snapshots = []
         try:
             reply_revision.check_job(self.store, job)
             bounded_text = live_text.active(self.store, self.settings)
@@ -985,11 +1124,12 @@ class Core(Runtime):
                     if self.settings.memory_enabled and notices.reference(job) is None:
                         hits, paused_memory = await self.recall_for_reply(job)
                         self._check_reply_epoch(job, captured_epoch)
-                        messages = self.context(job, hits, paused_memory)
+                        messages = self.context(job, hits, paused_memory,
+                                                snapshots=context_snapshots)
                     else:
-                        messages = self.context(job)
+                        messages = self.context(job, snapshots=context_snapshots)
                     self._check_reply_epoch(job, captured_epoch)
-                    reply_revision.check_job(self.store, job)
+                    self._check_context_snapshots(job, context_snapshots)
                     emit(
                         "t_context_ready",
                         job["trace_id"],
@@ -1032,7 +1172,7 @@ class Core(Runtime):
                     reply = redact(response.text, self.settings)
                     generated_reply = True
             with self.store.transaction():
-                reply_revision.check_job(self.store, job)
+                self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:
                     live_text.check_job(self.store, self.settings, self.clock, job)
                 current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
@@ -1316,9 +1456,13 @@ class Core(Runtime):
         events = s.rows(
             "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
             "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
-            "AND e.source='qq.onebot' AND j.kind='chat' AND j.state='SUCCEEDED' "
-            "AND e.ingested_at<=? " + day_filter + " ORDER BY e.rowid LIMIT 20",
-            (after(now, -cfg.extraction_idle_seconds), *bounds),
+            "AND e.source='qq.onebot' AND j.kind='chat' "
+            "AND (j.state='SUCCEEDED' OR (j.state='CANCELLED' AND j.last_error_code=?)) "
+            "AND NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id) "
+            "AND e.ingested_at>=? AND e.ingested_at<=? AND e.occurred_at<=? "
+            + day_filter + " ORDER BY e.rowid LIMIT 20",
+            (reply_revision.SUPERSEDED, after(now, -cfg.raw_event_retention_days * 86400),
+             after(now, -cfg.extraction_idle_seconds), now, *bounds),
         )
         if len(events) < cfg.extraction_min_events:
             return False
@@ -1335,6 +1479,7 @@ class Core(Runtime):
         attempts = s.one("SELECT value FROM runtime_meta WHERE key=?", (attempt_key,))
         attempts = int(attempts["value"]) if attempts else 0
         try:
+            proof = self.memory_context.pin(now, event_ids={row["event_id"] for row in events})
             request_id = budget.reserve(
                 s, cfg, None, "memory_extract", messages, now, logical_request_id=attempt_key,
                 clock=self.clock,
@@ -1361,12 +1506,13 @@ class Core(Runtime):
                 or (private_life.enabled(cfg)
                     and private_life.owner_waiting(s, cfg, self.clock()))):
                 return False
+            self.memory_context.revalidate(proof, self.clock())
             valid_ids = {e["event_id"] for e in events}
             candidates = []
             for candidate in extraction.memories:
                 if candidate.evidence_event_id in valid_ids:
                     try:
-                        if self.memory.validate_candidate(candidate) is not None:
+                        if self.memory.validate_candidate(candidate, now=self.clock()) is not None:
                             candidates.append(candidate)
                     except CoreError:
                         s.audit(
@@ -1380,11 +1526,13 @@ class Core(Runtime):
                     or (private_life.enabled(cfg)
                         and private_life.owner_waiting(s, cfg, self.clock()))):
                     return False
-                self.add_memories(candidates, resolutions, now)
+                self.memory_context.revalidate(proof, self.clock())
+                committed_at = self.clock()
+                self.add_memories(candidates, resolutions, committed_at)
                 # Keep episodes scoped to a single conversation.
                 for conv_id in dict.fromkeys(e["conversation_id"] for e in events):
                     self.memory.episodes(
-                        [e for e in events if e["conversation_id"] == conv_id], now
+                        [e for e in events if e["conversation_id"] == conv_id], committed_at
                     )
                 s.execute("DELETE FROM runtime_meta WHERE key=?", (attempt_key,))
             return True

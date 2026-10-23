@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from contextlib import nullcontext
@@ -6,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from companion.commands import command_parts
 from companion.contracts import CoreError
+from companion.memory_context import MemorySources, check_version, read_version
 from companion.privacy import advance_epoch, redact, sensitive
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
@@ -20,7 +22,7 @@ class Memory:
         if actor != "owner" or not self.settings.memory_enabled:
             raise CoreError("MEMORY_ACCESS_DENIED", 403)
 
-    def project_recall_candidates(self, query, *, memory_ids=None, limit=6):
+    def project_recall_candidates(self, query, *, memory_ids=None, limit=6, now=None):
         """Nominate a bounded project catalog for an explicit retrospective request.
 
         A generic request can name the subject without resembling any fact's content.
@@ -65,12 +67,14 @@ class Memory:
             return []
         # Reuse native eligibility, subject filtering, evidence and approval limits.
         return [row for row in self.search(
-            "*", subjects=("project",), limit=limit, memory_ids=memory_ids,
+            "*", subjects=("project",), limit=limit, memory_ids=memory_ids, now=now,
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
-    def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None):
+    def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None):
         self.require_owner(actor)
         s = self.store
+        version = read_version(self)
+        sources = MemorySources(self, now)
         if memory_ids is not None and not memory_ids:
             return []
         allowed_sql = ""
@@ -88,7 +92,8 @@ class Memory:
             "SELECT m.* FROM memories m WHERE m.status IN ('CONFIRMED','HYPOTHESIS') "
             "AND m.privacy_scope='private' AND m.confidence>0 AND EXISTS "
             "(SELECT 1 FROM memory_evidence v JOIN events e ON e.event_id=v.event_id "
-            "WHERE v.memory_id=m.memory_id AND e.redacted=0 AND e.actor_id='owner') "
+            "WHERE v.memory_id=m.memory_id AND v.polarity=1 "
+            "AND e.redacted=0 AND e.actor_id='owner' AND e.privacy_scope='private') "
         )
         params = []
         if memory_ids is not None:
@@ -98,7 +103,8 @@ class Memory:
             base += "AND m.subject IN (" + ",".join("?" for _ in subjects) + ") "
             params.extend(subjects)
         base += "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,m.updated_at DESC"
-        rows = s.rows(base, params)
+        rows = [row for row in s.rows(base, params)
+                if sources.current(row) and sources.evidence(row["memory_id"])]
         if query != "*" and rows:
             allowed = {row["memory_id"] for row in rows}
             if len(query) < 3:
@@ -156,30 +162,36 @@ class Memory:
                 reverse=True,
             )
         rows = rows[:limit]
+        check_version(self, version)
+        current = []
         for row in rows:
-            row["evidence_ids"] = [
-                e["event_id"]
-                for e in s.rows(
-                    "SELECT v.event_id FROM memory_evidence v "
-                    "JOIN events e ON e.event_id=v.event_id "
-                    "WHERE v.memory_id=? AND e.redacted=0",
-                    (row["memory_id"],),
-                )
-            ]
-        return rows
+            # Embedding may yield to a concurrent writer. Never publish its stale snapshot.
+            if s.one("SELECT * FROM memories WHERE memory_id=?", (row["memory_id"],)) != row:
+                raise CoreError("PRIVACY_CHANGED", 409)
+            row["evidence_ids"] = [e["event_id"] for e in sources.evidence(row["memory_id"])]
+            if row["evidence_ids"]:
+                current.append(row)
+        check_version(self, version)
+        return current
 
-    def validate_candidate(self, candidate, confirmed=False):
-        s = self.store
-        event = s.one(
-            "SELECT * FROM events WHERE event_id=? AND redacted=0 AND actor_id='owner'",
-            (candidate.evidence_event_id,),
-        )
+    def validate_candidate(self, candidate, confirmed=False, *, now=None):
+        event = MemorySources(self, now).event(candidate.evidence_event_id)
         if not event:
             raise CoreError("MISSING_MEMORY_EVIDENCE")
         body = json.loads(event["body_json"])
         text = body.get("text", "")
         if candidate.evidence_quote not in text:
             raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
+        if not confirmed and self.store.one(
+            "SELECT 1 FROM memories newer JOIN memories older "
+            "ON newer.supersedes_memory_id=older.memory_id "
+            "WHERE older.subject=? AND older.content=? AND newer.content<>? "
+            "AND newer.origin='user_confirmed' AND newer.status IN ('CONFIRMED','SUPERSEDED') "
+            "AND newer.created_at>=? LIMIT 1",
+            (candidate.subject, candidate.content, candidate.content, event["ingested_at"]),
+        ):
+            # A delayed extraction of an old value cannot undo the owner's later correction.
+            return None
         if not confirmed and sensitive(text + candidate.content):
             return None
         if candidate.subject == "self" and not re.search(r"你(?:最近|经常|总是|这几次|刚才)", text):
@@ -198,7 +210,7 @@ class Memory:
         advance_epoch(self.store)
 
     def add(self, candidate, now, confirmed=False, resolution=None):
-        validated = self.validate_candidate(candidate, confirmed)
+        validated = self.validate_candidate(candidate, confirmed, now=now)
         if validated is None:
             return None
         event, content = validated
@@ -253,7 +265,12 @@ class Memory:
                 needs_review=int(bool(conflicts)),
             )
         if conflicts:
-            for row in [*conflicts, {"memory_id": memory_id}]:
+            for row in [*conflicts, same or {"memory_id": memory_id}]:
+                if (not confirmed and row.get("supersedes_memory_id")
+                    and row.get("origin") == "user_confirmed"
+                    and row.get("status") == "CONFIRMED"):
+                    # Inference can raise a pending conflict; only the owner changes a correction.
+                    continue
                 s.execute(
                     "UPDATE memories SET needs_review=1 WHERE memory_id=?", (row["memory_id"],)
                 )
@@ -476,8 +493,49 @@ class Memory:
             return {"memory_id": new_id, "state": "CONFIRMED", "supersedes": memory_id}
 
     def episodes(self, events, now):
+        """Encode one bounded extraction batch atomically and idempotently."""
         s = self.store
-        episode_id = uid("episode")
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            return self._encode_episode(events, now)
+
+    def _encode_episode(self, events, now):
+        s = self.store
+        version = read_version(self)
+        if not 1 <= len(events) <= 20 or len({e["event_id"] for e in events}) != len(events):
+            raise CoreError("INVALID_EPISODE_SOURCES", 400)
+        sources = MemorySources(self, now)
+        refreshed = []
+        for event in events:
+            current = sources.event(event["event_id"], require_text=False)
+            if (not current or any(current[key] != event[key] for key in (
+                    "conversation_id", "source", "event_type", "occurred_at", "ingested_at",
+                ))
+                or any(json.loads(current["body_json"]).get(key)
+                       != json.loads(event["body_json"]).get(key) for key in ("text", "media"))
+                or current["source"] != "qq.onebot"
+                or current["event_type"] not in {"message.received", "message.media_received"}):
+                raise CoreError("EPISODE_SOURCE_CHANGED", 409)
+            refreshed.append(current)
+        events = sorted(refreshed, key=lambda e: (
+            e["occurred_at"], e["ingested_at"], e["event_id"],
+        ))
+        if len({e["conversation_id"] for e in events}) != 1:
+            raise CoreError("INVALID_EPISODE_SOURCES", 400)
+        # An authentic image/voice/file with no owner text has no extractive summary.
+        # Complete it in the same batch transaction; it must not roll back sibling facts
+        # or become a permanently retried extraction job. It is not positive text evidence.
+        for event in events:
+            s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (event["event_id"],))
+        events = [event for event in events if json.loads(event["body_json"])["text"].strip()]
+        if not events:
+            check_version(self, version)
+            return None
+        episode_id = "episode_" + hashlib.sha256(encode(
+            sorted(e["event_id"] for e in events),
+        ).encode()).hexdigest()[:32]
+        if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
+            check_version(self, version)
+            return episode_id
         excerpts = [json.loads(e["body_json"]).get("text", "")[:100] for e in events]
         summary = "资料摘录（不可信观察）：\n" + "\n".join(excerpts)
         s.insert(
@@ -490,12 +548,11 @@ class Memory:
             started_at=events[0]["occurred_at"],
             ended_at=events[-1]["occurred_at"],
             status="ACTIVE",
-            extractor_version="v1-extractive",
+            extractor_version="v2-extractive",
             created_at=now,
         )
         for event in events:
             s.insert("episode_events", episode_id=episode_id, event_id=event["event_id"])
-            s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (event["event_id"],))
         s.insert(
             "conversation_summaries",
             summary_id=uid("summary"),
@@ -503,6 +560,8 @@ class Memory:
             first_event_id=events[0]["event_id"],
             last_event_id=events[-1]["event_id"],
             summary_text=summary,
-            summarizer_version="v1-extractive",
+            summarizer_version="v2-extractive",
             created_at=now,
         )
+        check_version(self, version)
+        return episode_id
