@@ -483,3 +483,62 @@ def test_reply_wait_and_send_no_progress_remain_bounded(core, tmp_path, monkeypa
             assert window.status()["state"] == "STOPPED" and sends == []
 
     run(scenario())
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_segment_waits_for_local_ack_after_core_result_response_delay(
+    core, tmp_path, monkeypatch, resume,
+):
+    from companion_onebot_bridge.window import TestWindow
+
+    policy = SegmentedReplyConfig(max_segments="unlimited", mode="semantic", interval_ms=600)
+
+    async def source(ws):
+        await ws.send(json.dumps(raw_event(1)))
+        await ws.wait_closed()
+
+    async def scenario():
+        async with source_window(core, tmp_path, source, live=True, approved=True,
+            scope_options={"automatic_reply": True, "segmented_reply": policy,
+                           "max_send_attempts": 5, "core_options": {"segmented_reply": policy}},
+        ) as (window, client, protocol, _, sends):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(
+                200, json={"choices": [{"message": {"content": "好呀\n接着说"}}],
+                           "usage": {"prompt_tokens": 100, "completion_tokens": 20}},
+            ))) as model:
+                core.model = ModelClient(core.settings, model)
+                await window.capture_once(client, protocol)
+                await window.approve_captured(client, capture_approval(window))
+                assert await core.run_once()
+                initial = core.clock.now
+                original = window.spool.flush_result
+                delayed = False
+
+                async def delayed_result(http):
+                    nonlocal delayed
+                    flushed = await original(http)
+                    if flushed and not delayed:
+                        core.clock.advance(0.1)
+                        delayed = True
+                    return flushed
+
+                monkeypatch.setattr(window.spool, "flush_result", delayed_result)
+                await continuous.pump_private(window, client, protocol)
+                assert len(sends) == 1
+                assert core.store.one("SELECT sent_at FROM outbox WHERE segment_index=0")[
+                    "sent_at"] == initial.isoformat(timespec="microseconds")
+                if resume:
+                    window = TestWindow(window.spool, window.plan, clock=window.clock)
+                core.clock.advance(0.5)
+                await continuous.pump_private(window, client, protocol)
+                assert len(sends) == 1 and window.status()["attempt_states"] == {"ACK": 1}
+                assert core.store.one("SELECT state FROM outbox WHERE segment_index=1")[
+                    "state"] == "PENDING"
+                core.clock.advance(0.1)
+                await continuous.pump_private(window, client, protocol)
+                assert len(sends) == 2 and window.status()["attempt_states"] == {"ACK": 2}
+                assert not core.store.one(
+                    "SELECT 1 FROM outbox WHERE state IN ('LEASED','SENDING')",
+                )
+
+    run(scenario())
