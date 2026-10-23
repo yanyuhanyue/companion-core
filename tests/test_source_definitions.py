@@ -23,7 +23,7 @@ from companion.sources import (
     source_names,
     supports,
 )
-from tests.conftest import ingest
+from tests.conftest import ingest, run
 
 BILI = "https://www.bilibili.com/video/BV1xx411c7mD"
 HEYBOX = "https://www.xiaoheihe.cn/app/bbs/link/123456"
@@ -198,10 +198,10 @@ def enable_sharing(core):
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
 
 
-@pytest.mark.parametrize("source,label", [("bilibili", "视频简介"), ("heybox", "帖子正文")])
+@pytest.mark.parametrize("source", ["bilibili", "heybox"])
 @pytest.mark.parametrize("grant_end", ["revoke", "expire"])
 def test_successful_history_can_share_after_future_read_permission_ends(
-    core, source, label, grant_end
+    core, source, grant_end
 ):
     enable_sharing(core)
     event = accepted_text(core, source)
@@ -222,9 +222,15 @@ def test_successful_history_can_share_after_future_read_permission_ends(
         core.clock.advance(61)
     assert core.social.consider(event.event_id)
     assert core.social.flush()
-    body = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])["text"]
-    assert label in body and event.payload.text in body
-    assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    assert not core.store.rows("SELECT * FROM outbox")
+    assert run(core.run_once())
+    bodies = [json.loads(row["content_json"])["text"] for row in
+              core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
+    assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
+    assert json.loads(core.model.calls[0][0][-1]["content"])["text"] == event.payload.text
+    stored = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
+    assert json.loads(stored["body_json"])["text"] == event.payload.text
+    assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
 
 
 def test_owner_forget_invalidates_accepted_history_and_queued_share(core):
@@ -257,10 +263,11 @@ def test_accepted_text_history_without_url_needs_no_new_fetch_or_receipt(core, s
     core.observations.append("reader", event)
     assert core.social.consider(event.event_id)
     assert core.social.flush()
+    assert run(core.run_once())
     body = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])["text"]
-    assert event.payload.text in body
+    assert body == core.model.activity
     assert core.store.rows("SELECT * FROM exploration_requests") == []
-    assert core.model.calls == []
+    assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
 
 
 @pytest.mark.parametrize(
@@ -284,12 +291,12 @@ def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legac
     )
     assert core.social.consider(event.event_id) == candidate
     assert core.social.flush()
-    body = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])["text"]
-    assert event.payload.text in body
-    assert body.endswith(BILI if source == "bilibili" else HEYBOX)
-    assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    assert run(core.run_once())
+    bodies = [json.loads(row["content_json"])["text"] for row in
+              core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
+    assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
     assert core.store.rows("SELECT * FROM exploration_requests") == []
-    assert core.model.calls == []
+    assert len(core.model.calls) == 1 and core.model.calls[0][1] == "activity"
 
 
 @pytest.mark.parametrize(

@@ -108,16 +108,19 @@ def test_completed_commitment_is_not_delivered_until_outbox_ack_and_never_claims
     completed = core.goals.recent()[0]
     assert completed["state"] == "DONE" and completed["result"]["result_status"] == "FETCHED"
     assert completed["result"]["source"] == "observation.simulation"
-    assert completed["delivery"]["state"] == "PENDING"
+    assert completed["delivery"] is None
     assert completed["commitment_state"] == "IN_PROGRESS"
-    item = lease_deliveries(
-        core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
-    )["items"][0]
-    begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
-    delivery_result(
-        core.store, core.settings, item["message_id"],
-        DeliveryResult(lease_token=item["lease_token"], result="SENT"), core.clock(),
-    )
+    assert run(core.run_once())
+    for _ in range(2):
+        assert core.goals.recent()[0]["commitment_state"] == "IN_PROGRESS"
+        item = lease_deliveries(
+            core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
+        )["items"][0]
+        begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
+        delivery_result(
+            core.store, core.settings, item["message_id"],
+            DeliveryResult(lease_token=item["lease_token"], result="SENT"), core.clock(),
+        )
     sent = core.goals.recent()[0]
     assert sent["delivery"]["state"] == "SENT" and sent["delivery"]["sent_at"]
     assert sent["commitment_state"] == "FULFILLED" and sent["phone_confirmation"] is None
@@ -144,6 +147,7 @@ def queued_share(core):
     source = source_with_older_parent(core)
     core.social.consider(source)
     assert core.social.flush()
+    assert run(core.run_once("share-wording"))
     return core.store.one("SELECT * FROM outbox")
 
 
@@ -179,6 +183,7 @@ def test_share_rechecks_transitive_expiry_at_every_boundary_without_background_w
         core.social.consider(source)
     if stage in {"lease", "begin"}:
         assert core.social.flush()
+        assert run(core.run_once("share-wording"))
     if stage == "begin":
         item = lease_deliveries(
             core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
@@ -195,13 +200,13 @@ def test_share_rechecks_transitive_expiry_at_every_boundary_without_background_w
             core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()
         )["items"]
     else:
-        with pytest.raises(CoreError, match="SOCIAL_SOURCE_EXPIRED"):
+        with pytest.raises(CoreError, match="NOTICE_SOURCE_EXPIRED"):
             begin_send(
                 core.store, item["message_id"], item["lease_token"], core.clock(), core.settings
             )
     for row in core.store.rows("SELECT * FROM outbox"):
         assert row["state"] == "CANCELLED" and row["attempt_count"] == 0
-    assert not core.model.calls
+    assert len(core.model.calls) == (1 if stage in {"lease", "begin"} else 0)
 
 
 @pytest.mark.parametrize(
@@ -228,7 +233,7 @@ def test_share_final_dispatch_rejects_changed_source_candidate_content_and_disab
         core.store.execute("UPDATE outbox SET origin_event_id='evt_test_1'")
     else:
         core.store.execute("UPDATE conversations SET scope='group'")
-    with pytest.raises(CoreError, match="SOCIAL_"):
+    with pytest.raises(CoreError, match="NOTICE_"):
         begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
     result = core.store.one("SELECT * FROM outbox WHERE message_id=?", (queued["message_id"],))
     assert result["state"] == "CANCELLED" and result["attempt_count"] == 0

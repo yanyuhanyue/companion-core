@@ -242,10 +242,14 @@ def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
         ),
     )
     assert core.social.flush()
+    assert run(core.run_once("share-wording"))
     assert not core.social.flush()
     assert not core.schedule_proactive()
     outbox = core.store.one("SELECT * FROM outbox WHERE action_type='qq.private.proactive'")
-    assert "视频简介" in json.loads(outbox["content_json"])["text"]
+    assert json.loads(outbox["content_json"])["text"] == core.model.activity
+    assert [json.loads(row["content_json"])["text"] for row in core.store.rows(
+        "SELECT content_json FROM outbox WHERE action_type='qq.private.proactive' ORDER BY rowid"
+    )] == [core.model.activity, URL]
     assert "看完" not in outbox["content_json"]
     core.settings.quiet_start, core.settings.quiet_end = 0, 23
     assert not lease_deliveries(

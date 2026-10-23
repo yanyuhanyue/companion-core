@@ -124,9 +124,14 @@ def reserve(
             ):
                 raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)
         if scenario == "activity":
+            from companion import notices
             from companion.social import proactive_allowed
 
-            if not proactive_allowed(store, settings, now):
+            job = store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
+                            "WHERE job_id=?", (job_id,))
+            if notices.reference(job) is not None:
+                notices.validate(store, settings, job, now)
+            if not notices.required(store, job_id) and not proactive_allowed(store, settings, now):
                 raise CoreError("AUTONOMY_PAUSED", 409)
         total = total_monthly(store, month.isoformat(timespec="microseconds"))
         unlimited_period = bool(approval and approval.unlimited_period_spend)
@@ -626,9 +631,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
 
 async def _dispatch(model, store, settings, request_id, messages, scenario, clock):
     """Persisted admission is fenced before adapter I/O."""
-    from companion import live_text
+    from companion import live_text, notices
 
     live_text.check_model(store, settings, clock, request_id)
+    notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
         return await model.complete(messages, scenario)
     if not callable(clock):
@@ -727,6 +733,7 @@ async def _dispatch(model, store, settings, request_id, messages, scenario, cloc
                 custody = paid_budget.journal(store, approval)
                 quota_state = cumulative.check(store, settings, clock(), custody=custody)
                 current_job = live_text.check_model(store, settings, clock, request_id)
+                notices.check_request(store, settings, request_id, clock())
                 current = store.one(
                     "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
                     "FROM model_admissions a JOIN model_usage m "

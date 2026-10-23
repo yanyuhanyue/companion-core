@@ -12,7 +12,6 @@ from companion.observation import expired_sources
 from companion.privacy import epoch, redact, sensitive
 from companion.sources import content_target, observation_sources, source_definition, supports
 from companion.store import after, uid, utcnow
-from companion.transport import enqueue
 
 
 def quiet_hours(settings, now):
@@ -47,14 +46,22 @@ def proactive_counts(store, settings, now):
     # Activity jobs reserve a send slot before generation; social candidates reserve at queue.
     row = store.one(
         "SELECT COUNT(*) AS n,MAX(created_at)>? AS recent FROM ("
-        "SELECT created_at FROM jobs WHERE kind='activity' AND created_at>=? UNION ALL "
+        "SELECT j.created_at FROM jobs j JOIN events e USING(event_id) "
+        "WHERE j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
+        "<>'commitment' AND j.created_at>=? UNION ALL "
         "SELECT updated_at AS created_at FROM social_candidates WHERE message_id IS NOT NULL "
-        "AND updated_at>=?)",
+        "AND updated_at>=? AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j "
+        "ON j.event_id=o.origin_event_id WHERE o.message_id=social_candidates.message_id "
+        "AND j.kind='activity'))",
         (recent, min(day, recent), min(day, recent)),
     )
     daily = store.one(
-        "SELECT (SELECT COUNT(*) FROM jobs WHERE kind='activity' AND created_at>=?) + "
-        "(SELECT COUNT(*) FROM social_candidates WHERE message_id IS NOT NULL AND updated_at>=?) n",
+        "SELECT (SELECT COUNT(*) FROM jobs j JOIN events e USING(event_id) WHERE "
+        "j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
+        "<>'commitment' AND j.created_at>=?) + "
+        "(SELECT COUNT(*) FROM social_candidates WHERE message_id IS NOT NULL AND updated_at>=? "
+        "AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
+        "WHERE o.message_id=social_candidates.message_id AND j.kind='activity')) n",
         (day, day),
     )["n"]
     return daily, bool(row["recent"])
@@ -129,6 +136,14 @@ def share_source(event):
 
 def share_delivery_problem(store, settings, message_id, now):
     """Recheck native queued shares under the transport's write transaction."""
+    from companion import notices
+
+    try:
+        job = notices.delivery_job(store, message_id)
+    except (CoreError, KeyError, TypeError, ValueError):
+        return "NOTICE_SOURCE_CHANGED"
+    if job is not None:
+        return notices.delivery_problem(store, settings, message_id, now, job=job)
     candidate = store.one(
         "SELECT * FROM social_candidates WHERE message_id=?", (message_id,)
     )
@@ -169,19 +184,10 @@ def share_delivery_problem(store, settings, message_id, now):
     ):
         return "SOCIAL_DELIVERY_CHANGED"
     try:
-        expected = {"text": share_text(definition, body, canonical)}
-        if json.loads(delivery["content_json"]) != expected:
-            return "SOCIAL_CONTENT_CHANGED"
+        return "SOCIAL_WORDING_REQUIRED"
     except (KeyError, TypeError, ValueError):
         return "SOCIAL_CONTENT_CHANGED"
     return None
-
-
-def share_text(definition, body, canonical):
-    return (
-        "读到一段" + definition.share_label + "，想分享给你：\n"
-        + body["title"] + "\n" + body["text"][:500] + "\n" + canonical
-    )
 
 
 class SocialPlanner:
@@ -324,7 +330,7 @@ class SocialPlanner:
 
     def flush(self):
         cfg, s, now = self.settings, self.store, self.clock()
-        if not cfg.social_enabled:
+        if not cfg.social_enabled or not cfg.pricing_known:
             return False
         with s.transaction():
             if not proactive_allowed(s, cfg, now):
@@ -379,20 +385,13 @@ class SocialPlanner:
                     (now, candidate["candidate_id"]),
                 )
                 return False
-            definition, body, canonical = resolved
-            text = share_text(definition, body, canonical)
-            message_id = enqueue(
-                s,
-                candidate["event_id"],
-                conversation["conversation_id"],
-                text,
-                now,
-                action="qq.private.proactive",
-                key="share:" + candidate["candidate_id"],
-            )
+            from companion.notices import schedule
+
+            schedule(s, cfg, "share", candidate["candidate_id"],
+                     conversation["conversation_id"], now)
             s.execute(
-                "UPDATE social_candidates SET state='QUEUED',message_id=?,updated_at=? "
+                "UPDATE social_candidates SET state='QUEUED',updated_at=? "
                 "WHERE candidate_id=?",
-                (message_id, now, candidate["candidate_id"]),
+                (now, candidate["candidate_id"]),
             )
         return True

@@ -682,7 +682,10 @@ def test_expression_sends_one_text_and_image_chain(core, tmp_path, monkeypatch):
     run(scenario())
 
 
-def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(core, tmp_path):
+@pytest.mark.parametrize("change_during_dispatch", [False, True])
+def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
+    core, tmp_path, change_during_dispatch,
+):
     from companion.config import ObservationAdapterConfig
     from companion.exploration import ReadItem, ReadResult
     from tests.test_exploration import URL, discover, read_goal
@@ -693,6 +696,10 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(co
 
     async def scenario():
         options = companion_options(core)
+        policy = SegmentedReplyConfig(max_segments="unlimited", interval_ms=0)
+        options.update(segmented_reply=policy, max_send_attempts=20)
+        options["window_options"].update(max_attempts=20, max_visible_replies=20)
+        options["core_options"]["segmented_reply"] = policy
         options["link_scope"] = "owner_links_v1"
         options["core_options"].update(
             {
@@ -717,7 +724,14 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(co
             scope_options=options,
             rich_input_scope="references_v1",
         ) as (window, client, protocol, _, sends):
+            async def hook(request):
+                messages = json.loads(request.content)["messages"]
+                if change_during_dispatch and '"kind":"share"' in messages[-1]["content"]:
+                    core.store.execute("UPDATE observations SET source_sha256=? WHERE "
+                                       "result_status='FETCHED'", ("0" * 64,))
+
             async with httpx.AsyncClient(
+                event_hooks={"request": [hook]},
                 transport=httpx.MockTransport(
                     lambda request: httpx.Response(
                         200,
@@ -754,8 +768,29 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(co
                 assert core.goals.get(goal["goal_id"])["state"] == "DONE"
                 core.clock.advance(3601)
                 assert core.social.flush()
+                with Core(core.settings, core.model, core.clock) as independent_worker:
+                    assert await independent_worker.run_once("share-wording")
+                if change_during_dispatch:
+                    assert core.store.one("SELECT last_error_code FROM jobs "
+                                          "WHERE kind='activity'")["last_error_code"] == (
+                        "NOTICE_SOURCE_CHANGED"
+                    )
+                    assert len(sends) == 1
+                    assert not core.store.rows("SELECT * FROM outbox "
+                                               "WHERE action_type='qq.private.proactive'")
+                    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage "
+                                           "WHERE scenario='activity'")
+                    assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
+                    return
+                assert core.store.one("SELECT state,last_error_code FROM jobs "
+                                      "WHERE kind='activity'") == {
+                    "state": "SUCCEEDED", "last_error_code": None,
+                }
                 await continuous.pump_private(window, client, protocol)
-                assert len(sends) == 2
+                await continuous.pump_private(window, client, protocol)
+                assert len(sends) == 3
+                assert sends[-2]["message"] == [{"type": "text", "data": {"text": "一起看看吧。"}}]
+                assert sends[-1]["message"] == [{"type": "text", "data": {"text": URL}}]
                 assert (
                     core.store.one(
                         "SELECT state FROM outbox WHERE action_type='qq.private.proactive'"
