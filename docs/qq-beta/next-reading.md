@@ -24,7 +24,7 @@ WebReader。默认 legacy worker 继续使用 `/internal/v2/readers`；`reading-
 | B站 | 显式启用后先读取现有第 1 分 P 字幕，再在同一 Reader 请求/字节预算内读取评论和当前弹幕池的有界样本 | 评论、弹幕与正文/字幕分开；标明实际可用状态与 `partial`，弹幕范围为 `current_pool_sample` |
 | 小黑盒 | 保留同一次 tree 响应已经返回的有界评论、楼层和楼中楼回复关系 | 评论与帖子正文分开；保留评论 ID、回复关系及截断信息，上游总数不等于本次读到的条数 |
 
-B站补充读取默认关闭，仅常规 B站 Reader 可用 CLI `--discussion` 显式开启；
+B站补充读取默认关闭，仅 B站来源可用 CLI `--discussion` 显式开启；
 `legacy` 和 `reading-v1` 均支持。字幕优先，随后评论和弹幕各至多发起一次补充请求，
 共享原 `ReadBudget`；预算不足标为 `budget_limited`，不扩大原请求或字节额度。
 小黑盒不为补齐评论另行抓取；两者均不自动翻页读取全部讨论。

@@ -1,11 +1,14 @@
 """Real inbox HTTP, native Core lease/commit, and an isolated Reader CLI process."""
 
+import asyncio
+import hashlib
 import json
 import os
 import socket
 import subprocess
 import sys
 import threading
+import zlib
 from pathlib import Path
 
 import httpx
@@ -16,11 +19,12 @@ from companion.config import ObservationAdapterConfig
 from companion.core import Core
 from tests.conftest import event, run
 from tests.test_next_reading import HTML, WEB
-from tests.test_onebot_capture import capture_approval, source_window
+from tests.test_onebot_capture import capture_approval, real_core_http, source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import TOKEN, configure
+from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE
 
 
 def test_inbox_to_independent_reader_cli_then_restart_cannot_reexecute(core, tmp_path):
@@ -170,5 +174,194 @@ def test_signed_private_plaintext_web_read_late_result_cannot_cross_stop(core, t
             assert not core.store.one("SELECT 1 FROM observations")
             assert not core.store.one("SELECT 1 FROM model_usage")
             assert not sends
+
+    run(scenario())
+
+
+def test_bili_discussion_reader_cli_metering_context_and_restart(core, tmp_path):
+    configure(core)
+    core.settings.observation_adapters["bili"] = ObservationAdapterConfig(
+        source="bilibili", token=TOKEN, reader_max_requests=5,
+    )
+    metadata = {**META, "data": {
+        **META["data"], "aid": 1701, "bvid": ITEM["url"].rsplit("/", 1)[1], "duration": 12,
+    }}
+    comments = {"code": 0, "data": {"page": {"count": 12}, "replies": [{
+        "rpid": 101, "floor": 2, "member": {"uname": "外部评论者"},
+        "content": {"message": "评论层资料，不是字幕。"}, "replies": [{
+            "rpid": 102, "parent": 101, "member": {"uname": "回复者"},
+            "content": {"message": "这是一条楼中楼回复。"},
+        }],
+    }]}}
+    danmaku = (
+        '<i><chatid>1234</chatid><d p="1.25,1,25,0,0,0,fixture,1">弹幕样本一</d>'
+        '<d p="4.0,1,25,0,0,0,fixture,2">弹幕样本二</d></i>'
+    ).encode()
+    # Meter the compressed bytes received, independently of decoded XML size.
+    payloads = [json.dumps(value, ensure_ascii=False).encode()
+                for value in (metadata, PLAYER, SUBTITLE, comments)] + [zlib.compress(danmaku)]
+    roles = ["metadata", "player", "subtitle", "comments", "danmaku"]
+    source_root = str(Path(__file__).resolve().parents[1])
+    bridge_token = core.settings.bridge_token.get_secret_value()
+    child_input = json.dumps({"payloads": [raw.hex() for raw in payloads]})
+    script = r'''
+import importlib.abc
+import json
+import runpy
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+
+class Boundary(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'sqlite3', 'fastapi', 'pydantic', 'alembic'}:
+            raise ImportError('FORBIDDEN_READER_DEPENDENCY:' + fullname)
+        if fullname.startswith('companion.') and fullname != 'companion.source_policy':
+            raise ImportError('FORBIDDEN_CORE_MODULE:' + fullname)
+
+sys.meta_path.insert(0, Boundary())
+import httpcore
+from source_reader import network
+
+payloads = [bytes.fromhex(value) for value in json.loads(sys.stdin.read())['payloads']]
+responses = []
+for raw in payloads:
+    responses.append(b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(raw)).encode()
+                     + b'\r\nConnection: close\r\n\r\n' + raw)
+
+class Stream(httpcore.AsyncMockStream):
+    async def write(self, buffer, timeout=None):
+        if buffer:
+            assert buffer.startswith(b'GET '), buffer
+            assert b'authorization:' not in buffer.lower() and b'cookie:' not in buffer.lower()
+            backend.requests.append(buffer.split(b'\r\n', 1)[0].decode())
+
+    async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+        assert ssl_context.check_hostname
+        backend.server_names.append(server_hostname)
+        return self
+
+class Backend(httpcore.AsyncNetworkBackend):
+    def __init__(self):
+        self.requests, self.server_names = [], []
+
+    async def connect_tcp(self, host, port, **kwargs):
+        assert host == '93.184.216.34' and port == 443
+        return Stream([responses.pop(0)])
+
+async def public_addresses(host, port):
+    assert host in {'api.bilibili.com', 'aisubtitle.hdslb.com'} and port == 443
+    return ['93.184.216.34']
+
+backend = Backend()
+public_network = network.PublicNetwork
+network.PublicNetwork = lambda: public_network(resolver=public_addresses, backend=backend)
+origin = sys.argv[2]
+sys.argv = ['source_reader', '--source', 'bilibili', '--protocol', 'reading-v1',
+            '--core-url', origin, '--adapter-id', 'bili', '--discussion', '--once']
+runpy.run_module('source_reader', run_name='__main__')
+assert not {'sqlite3', 'fastapi', 'pydantic', 'alembic'} & sys.modules.keys()
+assert not [name for name in sys.modules
+            if name.startswith('companion.') and name != 'companion.source_policy']
+print(json.dumps({'provider_requests': backend.requests, 'server_names': backend.server_names,
+                  'unused_responses': len(responses)}))
+'''
+
+    async def scenario():
+        with Core(core.settings) as http_core:
+            async with real_core_http(http_core) as port:
+                origin = f"http://127.0.0.1:{port}"
+                async with httpx.AsyncClient(base_url=origin, trust_env=False) as client:
+                    admitted = await client.post(
+                        "/internal/v1/inbox/events", json=event(
+                            http_core, text="请阅读这个视频的字幕和评论弹幕 " + ITEM["url"],
+                        ).model_dump(mode="json"),
+                        headers={
+                            "Authorization": "Bearer " + bridge_token,
+                            "X-Idempotency-Key": "independent-bili-discussion-inbox",
+                        },
+                    )
+                    assert admitted.status_code == 202, admitted.text
+                children, snapshots = [], []
+                for _ in range(2):
+                    child = await asyncio.to_thread(
+                        subprocess.run,
+                        [sys.executable, "-I", "-c", script, source_root, origin],
+                        cwd=tmp_path, input=child_input,
+                        env={**os.environ, "COMPANION_READER_TOKEN": TOKEN},
+                        text=True, capture_output=True, timeout=30,
+                    )
+                    assert child.returncode == 0, child.stdout + child.stderr
+                    children.append(json.loads(child.stdout.splitlines()[-1]))
+                    snapshots.append((
+                        core.store.rows("SELECT * FROM reading_attempts"),
+                        core.store.rows("SELECT * FROM exploration_requests"),
+                        core.store.rows("SELECT * FROM observations"),
+                    ))
+                assert snapshots[0] == snapshots[1]  # Restart cannot reread or charge again.
+                requests = children[0]["provider_requests"]
+                assert len(requests) == 5 and children[0]["unused_responses"] == 0
+                assert [request.split("?", 1)[0] for request in requests] == [
+                    "GET /x/web-interface/view", "GET /x/player/v2",
+                    "GET /bfs/subtitle/example.json", "GET /x/v2/reply", "GET /x/v1/dm/list.so",
+                ]
+                assert children[1]["provider_requests"] == []
+                assert children[1]["unused_responses"] == 5
+                assert children[0]["server_names"] == [
+                    "api.bilibili.com", "api.bilibili.com", "aisubtitle.hdslb.com",
+                    "api.bilibili.com", "api.bilibili.com",
+                ]
+                attempts, exploration, observations = snapshots[0]
+                assert len(attempts) == len(exploration) == len(observations) == 1
+                assert attempts[0]["state"] == exploration[0]["state"] == "DONE"
+                assert attempts[0]["observed_requests"] == exploration[0]["used_requests"] == 5
+                assert attempts[0]["observed_bytes"] == exploration[0]["used_bytes"] == sum(
+                    len(raw) for raw in payloads
+                )
+                stored = json.loads(observations[0]["evidence_json"])["read_observation"]
+                assert stored["parser_version"] == "bilibili/2"
+                assert stored["provenance"]["source_event_ids"] == ["evt_test_1"]
+                assert stored["coverage"]["scope"] == "first_part_subtitles"
+                assert stored["coverage"]["complete_video"] is False
+                assert stored["coverage"]["video_analyzed"] is False
+                assert stored["coverage"]["audio_analyzed"] is False
+                evidence = stored["evidence"]
+                assert evidence["discussion_status"] == {
+                    "comments": "available", "danmaku": "available",
+                }
+                assert [row["role"] for row in evidence["sources"]] == roles
+                for source, raw in zip(evidence["sources"], payloads, strict=True):
+                    assert source["bytes"] == len(raw)
+                    assert source["sha256"] == hashlib.sha256(raw).hexdigest()
+                    assert "?" not in source["url"]
+                assert evidence["comments"]["reported_total"] == 12
+                assert evidence["comments"]["partial"] is True
+                comment_ids = [row["comment_id"] for row in evidence["comments"]["items"]]
+                assert comment_ids == ["101", "102"]
+                assert evidence["comments"]["items"][1]["reply_to_id"] == "101"
+                assert evidence["danmaku"] == {
+                    "cid": 1234, "scope": "current_pool_sample", "partial": True,
+                    "items": [{"at_seconds": 1.25, "text": "弹幕样本一"},
+                              {"at_seconds": 4.0, "text": "弹幕样本二"}],
+                }
+                context = json.loads(http_core.content.context_message(
+                    "evt_test_1", 16000,
+                ))["shared_content"]
+                parts = {row["kind"]: row for row in context}
+                assert set(parts) == {"text", "comments", "danmaku"}
+                assert "恒星的颜色与温度有关" in parts["text"]["text"]
+                assert "评论层资料" not in parts["text"]["text"]
+                assert "弹幕样本" not in parts["text"]["text"]
+                assert "评论层资料" in parts["comments"]["text"]
+                assert parts["comments"]["comment_scope"]["partial"] is True
+                assert "弹幕样本一" in parts["danmaku"]["text"]
+                assert parts["danmaku"]["danmaku_scope"]["scope"] == "current_pool_sample"
+                assert parts["danmaku"]["danmaku_scope"]["partial"] is True
+                assert parts["text"]["trust"] == "untrusted_external"
+                assert parts["comments"]["trust"] == "external_untrusted"
+                assert parts["danmaku"]["trust"] == "external_untrusted"
+                assert not core.store.one("SELECT 1 FROM outbox")
+                assert not core.store.one("SELECT 1 FROM model_usage")
 
     run(scenario())

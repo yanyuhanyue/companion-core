@@ -116,7 +116,7 @@ def test_heybox_retains_inline_order_and_does_not_invent_image_analysis():
     )
     image = row["evidence"]["images"][0]
     assert image["url"] == IMAGE and row["text"][image["text_offset"]:].startswith("[图片1链接]")
-    assert not row["coverage"]["images_analyzed"] and row["parser_version"] == "heybox/1"
+    assert not row["coverage"]["images_analyzed"] and row["parser_version"] == "heybox/2"
 
 
 def test_recalled_before_dispatch_performs_no_network_io():
