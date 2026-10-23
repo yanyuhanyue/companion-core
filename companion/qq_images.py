@@ -51,7 +51,7 @@ def manifest(body):
     images = [
         item
         for item in (body.get("rich") or {}).get("segments", [])
-        if item.get("type") == "image" and item.get("coverage") == "UNREAD"
+        if item.get("type") in {"image", "face"} and item.get("coverage") == "UNREAD"
     ]
     if not images:
         if body.get("shared_content"):

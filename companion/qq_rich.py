@@ -219,11 +219,19 @@ def validate(value):
                 elif len(field["value"]) > (128 if field["kind"] == "title" else 512):
                     raise ValueError("INVALID_RICH_CARD_FIELD")
         elif kind == "face":
-            if (set(item) != common | {"face_id"}
-                or not isinstance(item["face_id"], str)
+            graphic = item.get("coverage") == "UNREAD"
+            graphic_fields = {"slot", "source_sha256"} if graphic else set()
+            if (set(item) != common | {"face_id"} | graphic_fields
+                or not isinstance(item.get("face_id"), str)
                 or not re.fullmatch(r"0|[1-9][0-9]{0,5}", item["face_id"])
-                or item["coverage"] != "IDENTIFIED"):
+                or item["coverage"] not in {"IDENTIFIED", "UNREAD"}):
                 raise ValueError("INVALID_QQ_FACE")
+            if graphic:
+                if (type(item["slot"]) is not int or not 0 <= item["slot"] < 64
+                    or not isinstance(item["source_sha256"], str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", item["source_sha256"])):
+                    raise ValueError("INVALID_QQ_FACE_IMAGE")
+                slots.append(item["slot"])
         elif kind == "image" and item.get("coverage") == "UNREAD":
             if (
                 set(item) != common | {"slot", "source_sha256"}
@@ -275,6 +283,12 @@ def context(payload):
                 {"index": item["index"], "face_id": item["face_id"],
                  "name": FACE_NAMES.get(item["face_id"])} for item in faces
             ]))
+            graphics = [{"face_id": item["face_id"], "image_slot": item["slot"]}
+                        for item in faces if item["coverage"] == "UNREAD"]
+            if graphics:
+                parts.append("QQ表情图像来源（固定版本官方静态图，不包含动画或交互效果；"
+                             "UNREAD仅表示已安排图像，只有另附图像分析才表示已读取）：\n"
+                             + encoded(graphics))
     if emojis := unicode_annotations(payload.get("text", "")):
         parts.append("Unicode表情字符注释（已收到的文字，不是图片；名称仅辅助理解，不确认情绪或事实）：\n"
                      + encoded(emojis))

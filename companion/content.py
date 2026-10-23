@@ -1000,6 +1000,11 @@ class ContentService:
                     + "，逐图描述可见对象、文字、差异及适合检索主人既往需求的主题线索。"
                     "这些线索只描述当前图片，不能作为主人的历史偏好。"
                 )
+                faces = [f"图片{source['slot'] + 1}为QQ内置表情{source['face_id']}的"
+                         "官方静态图，只描述可见图案，不能推断动画、交互或主人的确定情绪。"
+                         for source in sources if source.get("type") == "face"]
+                if faces:
+                    prompt += "\n" + "\n".join(faces)
                 if sampling:
                     prompt += "\n" + "\n".join(sampling)
                 if video_input.enabled(cfg):

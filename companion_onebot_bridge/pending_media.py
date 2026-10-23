@@ -10,7 +10,7 @@ import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-from .images import OriginalImage, fetch_image, image_url, original_images
+from .images import OriginalImage, fetch_image, original_images, source_url
 from .spool import encode
 from .window import digest
 
@@ -82,7 +82,7 @@ def manifest(window, row):
             or len(value["images"]) != row["image_count"]):
             raise ValueError()
         images = [OriginalImage(**item) for item in value["images"]]
-        if any(image.slot != slot or image.url != image_url(image.url)
+        if any(image.slot != slot or image.url != source_url(image)
                for slot, image in enumerate(images)):
             raise ValueError()
     except (InvalidSignature, ValueError, TypeError, KeyError):
