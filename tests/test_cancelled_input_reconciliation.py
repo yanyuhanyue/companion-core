@@ -1,4 +1,4 @@
-"""A stopped input with no model/send attempt can retire without claiming delivery."""
+"""Stopped input retirement retains usage and never claims a delivery ACK."""
 
 import json
 
@@ -83,7 +83,8 @@ def test_stopped_cancelled_input_requires_native_no_attempt_proof(core, tmp_path
     run(scenario())
 
 
-def test_cancelled_input_proof_survives_handoff_and_cannot_be_forged_in_spool(tmp_path):
+@pytest.mark.parametrize("paid", [False, True])
+def test_cancelled_input_proof_survives_handoff_and_cannot_be_forged_in_spool(tmp_path, paid):
     from companion_onebot_bridge.spool import Spool
     from companion_onebot_bridge.window import TestWindow, digest
     from tests.test_onebot_direct import normalized
@@ -96,9 +97,13 @@ def test_cancelled_input_proof_survives_handoff_and_cannot_be_forged_in_spool(tm
         def __call__(self, request):
             if request.url.path.endswith('/inputs/cancelled'):
                 body=json.loads(request.content)
-                return httpx.Response(200,json={**body,'input_sha256':digest('你好'),
+                proof = {**body,'input_sha256':digest('你好'),
                     'state':'CANCELLED','event_sha256':'a'*64,'job_sha256':'b'*64,
-                    'privacy_epoch':0,'model_attempts':0,'send_attempts':0})
+                    'privacy_epoch':0,'model_attempts':0,'send_attempts':0}
+                if paid:
+                    proof.update(model_attempts=1, settled_model_usage_sha256='c'*64,
+                                 billed_micro_usd=295)
+                return httpx.Response(200,json=proof)
             return super().__call__(request)
 
     contract=Contract(plan)
