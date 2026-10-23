@@ -7,7 +7,10 @@ from .event_normalizer import decode, identifier
 
 async def bounded_post(
     client, path, body, *, headers=None, statuses=(200,), with_status=False, max_depth=8,
+    max_bytes=65536,
 ):
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 6000000:
+        raise ValueError("INVALID_RESPONSE_LIMIT")
     async with client.stream("POST", path, json=body, headers=headers) as response:
         if response.status_code not in statuses:
             response.raise_for_status()
@@ -15,9 +18,9 @@ async def bounded_post(
         content = bytearray()
         async for chunk in response.aiter_bytes(chunk_size=8192):
             content.extend(chunk)
-            if len(content) > 65536:
+            if len(content) > max_bytes:
                 raise ValueError("RESPONSE_TOO_LARGE")
-    result = decode(bytes(content), 65536, max_depth=max_depth)
+    result = decode(bytes(content), max_bytes, max_depth=max_depth)
     return (response.status_code, result) if with_status else result
 
 
@@ -103,6 +106,20 @@ class OneBotClient:
         if message_id == "0":
             raise ValueError("INVALID_ONEBOT_MESSAGE_ID")
         return message_id
+
+    async def send_native(self, prepared):
+        from .native_actions import send
+
+        if not self.config.delivery_enabled:
+            raise ValueError("DELIVERY_DISABLED")
+        return await send(self.client, prepared, self.config.owner_qq_id)
+
+    async def send_account(self, prepared, item):
+        from .native_actions import send_account
+
+        if not self.config.delivery_enabled:
+            raise ValueError("DELIVERY_DISABLED")
+        return await send_account(self.client, prepared, item, self.config)
 
 
 def http_client(url, token, *, transport=None):

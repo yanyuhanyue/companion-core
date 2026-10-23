@@ -544,3 +544,252 @@ def test_paid_capacity_does_not_guess_the_next_request_estimate(core, tmp_path):
     current = rows(core)["memory.recall"]
     assert current["state"] == "READY"
     assert current["reason_codes"] == []
+
+
+def native_capabilities(core, tmp_path):
+    from companion import paid_budget
+    from companion.file_evidence import PrivateFilesConfig
+    from companion.poke_protocol import PokePolicy
+    from companion.social_autonomy import SocialAutonomy
+    from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
+    from tests.test_bili_video import paid_options
+    from tests.test_onebot_capture import pinned_plan
+    from tests.test_social_autonomy import avatar
+    from tests.test_voice_jobs import voice_config
+
+    options = paid_options(core)
+    files = PrivateFilesConfig(enabled=True, parser_image="sha256:" + "d" * 64,
+                               parser_socket="/run/private-parser/parser.sock")
+    voice = voice_config()
+    poke = PokePolicy(enabled=True, allow_native=True)
+    social = SocialAutonomyConfig(enabled=True, scope="qq_social_v1",
+        authorization_sha256="a" * 64, qzone_enabled=True, nickname_enabled=True,
+        signature_enabled=True, avatar_enabled=True, asset_policy_sha256="e" * 64)
+    options.update(file_scope="owner_file_v1", voice_scope="owner_voice_v1",
+        voice_policy_sha256=voice.authority_sha256(), poke_scope="owner_poke_v1",
+        poke_policy_sha256=paid_budget.sha(poke.model_dump()), account_actions_scope="qq_social_v1",
+        account_actions_authorization_sha256=social.authorization_sha256)
+    options["core_options"].update(private_files=files, voice=voice, poke_policy=poke,
+                                   social_autonomy=social)
+    options["core_options"]["observation_adapters"][files.adapter_id] = ObservationAdapterConfig(
+        source="qq_file", token="synthetic-file-adapter-token-123456")
+    pinned_plan(core, tmp_path, 3001, live=True, approved=True,
+                rich_input_scope="references_v1", scope_options=options)
+    module = SocialAutonomy(core.store, core.settings, clock=core.clock)
+    for field in ("nickname", "signature", "avatar"):
+        module.record_profile(ProfileBaseline(bot_qq_id=core.settings.bot_qq_id,
+            field=field, value="0" * 64 if field == "avatar" else "synthetic original",
+            observed_at=core.clock(), receipt_sha256="b" * 64))
+    module.register_asset(avatar(core))
+    return module
+
+
+NATIVE_CAPABILITIES = (
+    "bilibili.video", "qq.files", "qq.voice.asr", "qq.voice.tts", "qq.poke", "qq.poke.native",
+    "qq.account.qzone_publish", "qq.account.nickname", "qq.account.signature",
+    "qq.account.avatar", "qq.profile.observe",
+)
+
+
+def test_native_capabilities_are_local_facts_without_guard_or_external_io(
+    core, tmp_path, monkeypatch,
+):
+    from companion import budget, live_text
+    from companion.social_autonomy import SocialAutonomy
+
+    native_capabilities(core, tmp_path)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("capability projection cannot authorize or execute")
+
+    monkeypatch.setattr(live_text, "guard", forbidden)
+    monkeypatch.setattr(budget, "reserve", forbidden)
+    monkeypatch.setattr(SocialAutonomy, "_authorized", forbidden)
+    before = list(core.store.db.iterdump())
+    current = rows(core)
+    assert all(current[name]["state"] == "READY" for name in NATIVE_CAPABILITIES)
+    assert all(current[name]["runtime_observation"] == "UNOBSERVED"
+               for name in ("bilibili.video", "qq.files", "qq.voice.asr", "qq.voice.tts"))
+    assert current["media.voice"]["state"] == "UNAVAILABLE"
+    assert current["model.understand_video"]["state"] == "UNAVAILABLE"
+    assert all("model_callable" not in current[name]["invocation"] for name in NATIVE_CAPABILITIES)
+    assert list(core.store.db.iterdump()) == before and core.model.calls == []
+    for compact in (False, True):
+        text = prompt(snapshot(core.store, core.settings, core.clock), compact=compact)
+        assert "视频画面分析未接入" not in text and "画面分析尚未接入" not in text
+        assert "字幕不代表看过完整视频" in text and "采样" in text
+        assert len(text.encode()) <= (3000 if compact else 6000)
+        assert "qq.files" in text and "qq.voice.asr" in text and "bilibili.video" in text
+    safe = json.dumps(current, ensure_ascii=False)
+    token = core.settings.voice.nodes["local"].token.get_secret_value()
+    for secret in ("a" * 64, "d" * 64, str(tmp_path), "/run/private-parser",
+                   "synthetic original", token):
+        assert secret not in safe
+
+
+@pytest.mark.parametrize("feature,scope", [
+    ("qq.files", "file_scope"), ("bilibili.video", "bili_video_scope"),
+    ("qq.voice.asr", "voice_scope"), ("qq.voice.tts", "voice_scope"),
+    ("qq.poke", "poke_scope"), ("qq.account.nickname", "account_actions_scope"),
+])
+def test_feature_toggle_without_original_scope_never_claims_ready(core, tmp_path, feature, scope):
+    native_capabilities(core, tmp_path)
+    core.settings.live_text_window = core.settings.live_text_window.model_copy(
+        update={scope: "none"})
+    assert rows(core)[feature]["state"] == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("image", "PRIVATE_FILE_CONFIG_INVALID"), ("socket", "PRIVATE_FILE_CONFIG_INVALID"),
+    ("adapter", "PRIVATE_FILE_ADAPTER_UNAVAILABLE"), ("bytes", "PRIVATE_FILE_TRAFFIC_EXHAUSTED"),
+])
+def test_files_require_pinned_parser_transport_adapter_and_original_traffic_budget(
+    core, tmp_path, change, reason,
+):
+    native_capabilities(core, tmp_path)
+    cfg = core.settings.private_files
+    if change == "image":
+        core.settings.private_files = cfg.model_copy(update={"parser_image": "floating:latest"})
+    elif change == "socket":
+        core.settings.private_files = cfg.model_copy(update={"parser_socket": "../unsafe.sock"})
+    elif change == "adapter":
+        core.settings.observation_adapters.pop(cfg.adapter_id)
+    else:
+        core.settings.private_files = cfg.model_copy(
+            update={"max_daily_bytes": cfg.max_file_bytes - 1})
+    before = list(core.store.db.iterdump())
+    fact = rows(core)["qq.files"]
+    assert reason in fact["reason_codes"] and fact["state"] != "READY"
+    assert list(core.store.db.iterdump()) == before
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("reader", "BILI_VIDEO_READER_UNAVAILABLE"), ("image", "PAID_IMAGE_APPROVAL_REQUIRED"),
+    ("provider", "PAID_VIDEO_APPROVAL_REQUIRED"), ("policy", "BILI_VIDEO_SCOPE_REQUIRED"),
+    ("bytes", "READ_BUDGET_UNAVAILABLE"), ("requests", "READ_BUDGET_UNAVAILABLE"),
+    ("restore", "BILI_VIDEO_RECONCILIATION_REQUIRED"),
+])
+def test_bili_sampling_follows_media_scope_provider_reader_and_full_reservation(
+    core, tmp_path, change, reason,
+):
+    from pydantic import SecretStr
+
+    native_capabilities(core, tmp_path)
+    cfg = core.settings
+    if change == "reader":
+        cfg.observation_adapters["bili"].media_analysis = False
+    elif change == "image":
+        cfg.paid_model = cfg.paid_model.model_copy(update={"image_input": None})
+    elif change == "provider":
+        cfg.video_model_key = SecretStr("")
+    elif change == "policy":
+        cfg.live_text_window = cfg.live_text_window.model_copy(
+            update={"bili_video_policy_sha256": "f" * 64})
+    elif change == "bytes":
+        cfg.exploration_daily_bytes = cfg.bili_video.media.max_input_bytes
+    elif change == "requests":
+        cfg.exploration_daily_requests = 7
+    else:
+        core.store.execute("INSERT INTO runtime_meta VALUES ('bili_video_restore_required','1')")
+    fact = rows(core)["bilibili.video"]
+    assert fact["state"] != "READY" and reason in fact["reason_codes"]
+
+
+@pytest.mark.parametrize("key", ["model_budget_restore_required", "model_budget_blocked"])
+def test_native_readiness_preserves_restore_and_independent_budget_blocks(core, tmp_path, key):
+    native_capabilities(core, tmp_path)
+    core.store.execute("INSERT INTO runtime_meta VALUES (?, '1')", (key,))
+    before = list(core.store.db.iterdump())
+    current = rows(core)
+    assert all(current[name]["state"] == "PAUSED" for name in NATIVE_CAPABILITIES)
+    assert list(core.store.db.iterdump()) == before
+
+
+def test_voice_observation_is_separate_from_lease_and_resource_admission(core, tmp_path):
+    native_capabilities(core, tmp_path)
+    core.store.insert("voice_node_state", node_id="local", resource_state="READY",
+                      last_seen_at=core.clock())
+    fact = rows(core)["qq.voice.asr"]
+    assert fact["state"] == "READY" and fact["runtime_observation"] == "OBSERVED"
+    core.clock.advance(core.settings.voice.lease_ttl_seconds + 1)
+    fact = rows(core)["qq.voice.asr"]
+    assert fact["state"] == "READY" and fact["runtime_observation"] == "STALE"
+    core.store.execute("UPDATE voice_node_state SET resource_state='QUARANTINED'")
+    fact = rows(core)["qq.voice.asr"]
+    assert fact["state"] == "PAUSED"
+    assert "VOICE_RESOURCE_RECONCILIATION_REQUIRED" in fact["reason_codes"]
+
+
+def test_account_state_uses_real_profile_evidence_native_cooldown_and_cached_observation_wording(
+    core, tmp_path,
+):
+    native_capabilities(core, tmp_path)
+    core.store.execute("DELETE FROM social_autonomy_profiles WHERE field='nickname'")
+    fact = rows(core)["qq.account.nickname"]
+    assert fact["state"] == "PAUSED"
+    assert "SOCIAL_PROFILE_BASELINE_REQUIRED" in fact["reason_codes"]
+    assert "缓存" in rows(core)["qq.profile.observe"]["summary"]
+    assert "不证明网络刷新" in rows(core)["qq.profile.observe"]["summary"]
+    core.store.execute("INSERT INTO runtime_meta VALUES ('social_autonomy_restore_required','1')")
+    assert rows(core)["qq.account.qzone_publish"]["state"] == "PAUSED"
+
+
+def test_unknown_model_liability_pauses_native_capabilities_without_settling_it(core, tmp_path):
+    native_capabilities(core, tmp_path)
+    usage(core, state="UNKNOWN", scenario="chat")
+    before = list(core.store.db.iterdump())
+    current = rows(core)
+    assert all(current[name]["state"] == "PAUSED" for name in NATIVE_CAPABILITIES)
+    assert "MODEL_USAGE_UNKNOWN" in current["qq.voice.asr"]["reason_codes"]
+    assert list(core.store.db.iterdump()) == before
+
+
+def test_cumulative_pause_is_read_from_original_journal_without_repair(core, tmp_path):
+    from tests.test_delivery_reconciliation import native
+
+    native(core, tmp_path)
+    before = list(core.store.db.iterdump())
+    result = rows(core)["memory.recall"]
+    assert result["state"] == "PAUSED" and "CUMULATIVE_PAUSED" in result["reason_codes"]
+    assert list(core.store.db.iterdump()) == before
+
+
+def test_oversized_capability_inventory_keeps_full_and_compact_utf8_limits(core):
+    result = snapshot(core.store, core.settings, core.clock)
+    template = result["capabilities"][0]
+    result["capabilities"] += [{**template, "id": "reading." + str(index) + "_" + "x" * 100}
+                               for index in range(150)]
+    for compact, limit in ((False, 6000), (True, 3000)):
+        text = prompt(result, compact=compact)
+        assert len(text.encode()) <= limit
+        assert "未列出的能力不推定可用" in text
+
+
+def test_voice_disabled_configuration_does_not_require_or_expose_signing_material(core):
+    from companion.voice_config import VoiceConfig, VoiceNode
+
+    core.settings.voice = VoiceConfig(enabled=False, nodes={
+        "retained": VoiceNode(enabled=False, token="x" * 32, manifest_sha256="f" * 64),
+    })
+    result = rows(core)
+    assert result["qq.voice.asr"]["state"] == result["qq.voice.tts"]["state"] == "UNAVAILABLE"
+    assert "x" * 32 not in json.dumps(result)
+
+
+def test_unknown_voice_resource_is_not_released_by_capability_projection(core, monkeypatch):
+    from tests.test_voice_flow import flow_fixture
+    from tests.test_voice_jobs import TEXT
+
+    _, jobs, message_id, _, _ = flow_fixture(core, monkeypatch)
+    core.settings.mode = "live"
+    with core.store.transaction():
+        created = jobs.create_tts(message_id, TEXT)
+        core.store.execute("UPDATE voice_jobs SET state='UNKNOWN',started_at=? WHERE job_id=?",
+                           (core.clock(), created["job_id"]))
+        core.store.insert("voice_node_state", node_id="local", active_job_id=created["job_id"],
+                          resource_state="READY", last_seen_at=core.clock())
+    before = list(core.store.db.iterdump())
+    fact = rows(core)["qq.voice.tts"]
+    assert fact["state"] == "PAUSED"
+    assert "VOICE_RESOURCE_RECONCILIATION_REQUIRED" in fact["reason_codes"]
+    assert list(core.store.db.iterdump()) == before

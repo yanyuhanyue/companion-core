@@ -138,7 +138,8 @@ def text_only(message):
     return text
 
 
-def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="none"):
+def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="none",
+              file_scope="none"):
     scope = config.rich_input_scope if rich_input_scope is None else rich_input_scope
     raw = decode(frame, config.max_frame_bytes, max_depth=20 if scope == "references_v1" else 8)
     if (
@@ -204,6 +205,19 @@ def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="no
             event["payload"]["shared_content"] = [
                 {"kind": "image", "slot": image.slot} for image in images
             ]
+    if file_scope != "none":
+        if file_scope != "owner_file_v1" or scope != "references_v1":
+            raise ValueError("INVALID_FILE_SCOPE")
+        from .files import original_files
+
+        files = original_files(raw.get("message"))
+        if files:
+            projections = {file.index: file.projection() for file in files}
+            rich["segments"] = [
+                projections.get(item["index"], item) for item in rich["segments"]
+            ]
+            event["payload"]["shared_content"].extend(
+                {"kind": "file", "slot": file.slot} for file in files)
     if rich:
         if len(encode(rich).encode()) > MAX_RICH_BYTES:
             raise ValueError("RICH_INPUT_TOO_LARGE")

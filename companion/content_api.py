@@ -1,10 +1,13 @@
 """Authenticated owner-share status and bounded, one-shot QQ image intake."""
 
+import base64
+import binascii
 import json
 
 from fastapi import Header, Request
 from pydantic import Field
 
+from companion import content_files
 from companion.contracts import CoreError, StrictModel
 from companion.store import encode
 
@@ -19,12 +22,50 @@ class ImageCheck(StrictModel):
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
+class FileClaim(StrictModel):
+    request_key: str = Field(pattern=r"^file:(0|[1-9][0-9]{0,8})$")
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 def register_content_routes(app, bridge_dependencies):
     prefix = "/internal/v2/content/{event_id}"
 
     @app.get(prefix, dependencies=bridge_dependencies)
     async def content_status(event_id: str):
         return app.state.core.content.status(event_id)
+
+    @app.post(prefix + "/file/claim", dependencies=bridge_dependencies)
+    async def claim_file(event_id: str, body: FileClaim):
+        return content_files.claim(
+            app.state.core.content, event_id, body.request_key, body.source_sha256,
+        )
+
+    @app.post(prefix + "/file/check", dependencies=bridge_dependencies)
+    async def check_file(event_id: str, body: ImageCheck):
+        return content_files.check(
+            app.state.core.content, event_id, body.lease_token, body.source_sha256,
+        )
+
+    @app.post(prefix + "/file", dependencies=bridge_dependencies)
+    async def upload_file(
+        event_id: str, request: Request,
+        x_content_key: str = Header(default=""), content_type: str = Header(default=""),
+        x_content_lease: str = Header(default=""), x_content_proof: str = Header(default=""),
+    ):
+        try:
+            if not x_content_proof or len(x_content_proof) > 16384:
+                raise ValueError()
+            raw = base64.b64decode(x_content_proof, altchars=b"-_", validate=True)
+            proof = json.loads(raw.decode("utf-8"))
+            if (encode(proof).encode() != raw
+                or base64.urlsafe_b64encode(raw).decode() != x_content_proof):
+                raise ValueError()
+        except (ValueError, TypeError, UnicodeError, binascii.Error):
+            raise CoreError("PRIVATE_FILE_UPLOAD_SIGNATURE_REQUIRED", 403) from None
+        return content_files.stage_file(
+            app.state.core.content, event_id, x_content_key, await request.body(),
+            content_type, x_content_lease, proof,
+        )
 
     @app.post(prefix + "/images/resume", dependencies=bridge_dependencies)
     async def resume_images(event_id: str):

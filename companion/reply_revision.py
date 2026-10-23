@@ -89,10 +89,10 @@ def check_job(store, job):
 
 def check_delivery(store, message_id):
     row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
-    if row and row["action_type"] == "qq.private.reply":
+    if row and row["action_type"] in {"qq.private.reply", "qq.private.poke"}:
         require_reply_source(store, row["origin_event_id"])
         for job in store.rows("SELECT job_id FROM jobs WHERE event_id=? "
-                              "AND kind IN ('chat','activity')",
+                              "AND kind IN ('chat','activity','poke')",
                               (row["origin_event_id"],)):
             check_sources(store, job["job_id"])
 
@@ -101,6 +101,9 @@ def advance(store, conversation_id, event_id, now):
     """Accept one new owner turn inside the caller's ingestion transaction."""
     if not store.db.in_transaction:
         raise RuntimeError("REPLY_REVISION_TRANSACTION_REQUIRED")
+    from companion.voice_jobs import fence_conversation
+
+    fence_conversation(store, conversation_id)
     source = store.one(
         "SELECT * FROM events WHERE event_id=? AND conversation_id=? AND source='qq.onebot' "
         "AND actor_id='owner' AND privacy_scope='private' AND redacted=0",

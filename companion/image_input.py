@@ -139,5 +139,7 @@ def contract(settings, job_id, logical_request_id):
 
         video_contract(settings, job_id, logical_request_id)
         calls += 1
-    if settings.paid_model.per_request_calls != calls:
+    from companion.video_input import call_limit_matches
+
+    if not call_limit_matches(settings, calls):
         raise CoreError("MODEL_IMAGE_TWO_CALL_CONTRACT_REQUIRED", 503)

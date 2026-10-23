@@ -27,7 +27,9 @@ PROJECTION = "model_budget_cumulative"
 DIMENSIONS = ("micro_usd", "model_attempts", "input_tokens", "output_tokens",
               "owner_inputs", "send_attempts")
 POLICY_RECORDS = {"quota_enroll", "quota_renew"}
-CONTROL_RECORDS = POLICY_RECORDS | {"quota_pause", "quota_operation", "quota_send_result"}
+CONTROL_RECORDS = POLICY_RECORDS | {
+    "quota_pause", "quota_operation", "quota_send_result", "quota_send_resolution",
+}
 LEGACY_DOMAIN = b"companion-core/cumulative-window-inventory/v1\x00"
 
 
@@ -131,7 +133,8 @@ def credential(settings, account_ref):
 
 def empty_state():
     return {"policy": None, "policy_sha256": None, "policies": {}, "models": {},
-            "operations": {}, "clock": None, "paused": False, "reason": None}
+            "operations": {}, "clock": None, "paused": False, "reason": None,
+            "send_resolutions": {}}
 
 
 def binding(state, path, head=None):
@@ -157,6 +160,11 @@ def _liability(value):
 def fold(state, row):
     """Pure projection of versioned records in the existing hash-chained journal."""
     kind = row["kind"]
+    if kind == "quota_send_resolution":
+        from companion.delivery_reconciliation import fold_record
+
+        fold_record(state, row)
+        return
     if kind in POLICY_RECORDS:
         expected = {"kind", "version", "at", "policy", "policy_sha256", "previous"}
         if kind == "quota_enroll":
@@ -259,6 +267,8 @@ def fold(state, row):
                 raise ValueError("unbound cumulative send result")
             if prior["state"] == "DELIVERY_UNCERTAIN" and row["state"] != "DELIVERY_UNCERTAIN":
                 raise ValueError("uncertain send needs independent reconciliation")
+            if prior["state"] in {"OWNER_SENT", "OWNER_CLOSED"}:
+                raise ValueError("owner decision cannot be replaced by a late send result")
             prior["state"] = row["state"]
             if row["state"] == "DELIVERY_UNCERTAIN":
                 state.update(paused=True, reason="DELIVERY_UNCERTAIN")

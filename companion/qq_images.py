@@ -48,13 +48,14 @@ def enabled(settings):
 
 
 def manifest(body):
+    shared = [item for item in body.get("shared_content", []) if item.get("kind") != "file"]
     images = [
         item
         for item in (body.get("rich") or {}).get("segments", [])
         if item.get("type") in {"image", "face"} and item.get("coverage") == "UNREAD"
     ]
     if not images:
-        if body.get("shared_content"):
+        if shared:
             raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
         return None
     if (
@@ -65,7 +66,7 @@ def manifest(body):
             or not re.fullmatch(r"[a-f0-9]{64}", image["source_sha256"])
             for slot, image in enumerate(images)
         )
-        or body.get("shared_content") != [
+        or shared != [
             {"kind": "image", "slot": slot} for slot in range(len(images))
         ]
     ):

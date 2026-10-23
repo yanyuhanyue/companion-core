@@ -26,7 +26,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class VideoSamplingConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False,
+                              validate_default=True)
 
     max_duration_seconds: float = Field(default=36000, strict=True, gt=0, le=86400)
     max_subtitles: int = Field(default=2000, strict=True, ge=1, le=10000)

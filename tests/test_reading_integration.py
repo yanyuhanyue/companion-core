@@ -340,7 +340,7 @@ print(json.dumps({'provider_requests': backend.requests, 'server_names': backend
                     len(raw) for raw in payloads
                 )
                 stored = json.loads(observations[0]["evidence_json"])["read_observation"]
-                assert stored["parser_version"] == "bilibili/3"
+                assert stored["parser_version"] == "bilibili/4"
                 assert stored["provenance"]["source_event_ids"] == ["evt_test_1"]
                 assert stored["coverage"]["scope"] == "first_part_subtitles"
                 assert stored["coverage"]["complete_video"] is False

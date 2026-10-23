@@ -262,10 +262,12 @@ def test_populated_0014_upgrade_keeps_rows_constraints_and_refuses_lossy_downgra
             created_at="2026-10-18T04:00:00+00:00",
             updated_at="2026-10-18T04:00:00+00:00",
         )
-        before = store.rows("SELECT * FROM content_items")
+        before = store.rows("SELECT * FROM content_items ORDER BY item_id")
     migrate(str(database))
     with closing(Store(str(database))) as store:
-        assert store.rows("SELECT * FROM content_items") == before
+        assert store.rows("SELECT * FROM content_items ORDER BY item_id") == [
+            {**row, "attachment_json": "{}"} for row in before
+        ]
         row = {**before[0], "item_id": "fifth-image", "slot": 4}
         store.insert("content_items", **row)
         for changes in ({"state": "INVALID"}, {"kind": "INVALID"}, {"slot": 64}):
@@ -277,3 +279,11 @@ def test_populated_0014_upgrade_keeps_rows_constraints_and_refuses_lossy_downgra
     config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
     with pytest.raises(RuntimeError, match="ARTICLE_IMAGES_DOWNGRADE"):
         command.downgrade(config, "0014_reader_budget")
+    with closing(Store(str(database))) as store:
+        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+            "0015_article_images"
+        )
+        assert store.rows("SELECT * FROM content_items ORDER BY item_id") == sorted(
+            [*before, row], key=lambda item: item["item_id"],
+        )
+        assert not store.rows("PRAGMA foreign_key_check")

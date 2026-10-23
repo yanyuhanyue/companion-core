@@ -86,14 +86,16 @@ class _AdmissionTransport(httpx.AsyncBaseTransport):
 
 def model_payload(settings, messages, scenario):
     video = (settings.paid_model.video_input
-             if scenario == "content_video" and settings.paid_model else None)
+             if scenario in {"content_video", "content_video_preview"}
+             and settings.paid_model else None)
     payload = {
         "model": video.model if video else settings.model_name,
         "messages": messages,
         "max_tokens": settings.output_tokens(scenario),
         "stream": False,
     }
-    if scenario in {"memory_extract", "memory_review", "diary", "reflection", "meme_caption"}:
+    if scenario in {"memory_extract", "memory_review", "diary", "reflection", "meme_caption",
+                    "qq_poke", "social_autonomy", "content_video_preview"}:
         payload["response_format"] = {"type": "json_object"}
     if settings.provider == "deepseek" and not video:
         payload["thinking"] = {"type": "disabled"}
@@ -111,6 +113,10 @@ class ModelClient:
 
     async def complete(self, messages, scenario, *, admission=None):
         if self.settings.mode == "demo":
+            if scenario == "qq_poke":
+                return ModelResponse('{"kind":"none"}', 0, 0)
+            if scenario == "social_autonomy":
+                return ModelResponse('{"kind":"skip","reason_code":"NO_ACTION"}', 0, 0)
             if scenario == "reflection":
                 return ModelResponse('{"suggestions":[]}', 0, 0)
             if scenario == "diary":
@@ -134,7 +140,8 @@ class ModelClient:
             raise CoreError("MODEL_ADMISSION_REQUIRED", 503)
         admission.consumed = True
         video = (self.settings.paid_model.video_input
-                 if scenario == "content_video" and self.settings.paid_model else None)
+                 if scenario in {"content_video", "content_video_preview"}
+                 and self.settings.paid_model else None)
         endpoint = (video.endpoint if video else self.settings.model_url).rstrip("/")
         endpoint += "/chat/completions"
         key = self.settings.video_model_key if video else self.settings.model_key

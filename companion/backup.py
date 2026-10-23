@@ -60,6 +60,12 @@ def restore(source, destination, key, ledger_path):
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                store.execute(
+                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
+                    "updated_at=?,last_error_code='RESTORED_POKE_REQUIRES_RECONCILIATION' "
+                    "WHERE kind='poke' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+                    (utcnow(),),
+                )
                 store.execute("UPDATE meme_discovery_reservations SET state='UNKNOWN',"
                               "updated_at=? WHERE state='RESERVED'", (utcnow(),))
                 store.execute(
@@ -87,6 +93,13 @@ def restore(source, destination, key, ledger_path):
                         "('model_budget_restore_required','1')"
                     )
                 restore_executive(store, utcnow())
+                from companion.bili_video import restore_bili_video
+                from companion.social_autonomy import restore_social_autonomy
+                from companion.voice_jobs import restore_voice_jobs
+
+                restore_social_autonomy(store, utcnow())
+                restore_voice_jobs(store)
+                restore_bili_video(store, utcnow())
                 store.execute(
                     "UPDATE media_sessions SET state='CLOSED',closed_at=?,"
                     "close_reason='RESTORED_SESSION_REVOKED' WHERE state='OPEN'",

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import AwareDatetime, Field, model_validator
 
 from companion.contracts import CoreError, StrictModel
+from companion.file_evidence import DocumentEvidence
 from companion.policy import ConsentService
 from companion.privacy import epoch, redact
 from companion.source_grants import SourceGrantService, SourceGrantSnapshot
@@ -125,6 +126,18 @@ class ShortLinkResolution(StrictModel):
         return self
 
 
+class VideoIdentity(StrictModel):
+    bvid: str = Field(pattern=r"^BV[A-Za-z0-9]{10}$")
+    cid: int = Field(gt=0, strict=True)
+    part: Literal[1]
+    duration_seconds: int = Field(gt=0, strict=True)
+
+
+class SubtitleText(SubtitleSpan):
+    text: str = Field(min_length=1, max_length=500)
+    partial: bool = Field(strict=True)
+
+
 class ReadingEvidence(StrictModel):
     level: Literal["L1", "L2"]
     method: Literal["public_api", "account_api", "static_page", "browser_render"]
@@ -143,10 +156,26 @@ class ReadingEvidence(StrictModel):
     resolution: ShortLinkResolution | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
+    video: VideoIdentity | None = Field(default=None, exclude_if=lambda value: value is None)
+    duration_source: Literal["view_first_part"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    subtitles: list[SubtitleText] = Field(default_factory=list, max_length=120,
+                                        exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def consistent(self):
         available = self.subtitle_status == "available"
+        if (self.video is None) != (self.duration_source is None):
+            raise ValueError("Video identity requires its metadata duration source")
+        if self.subtitles and (not available
+                               or sum(len(row.text) for row in self.subtitles) > 6000):
+            raise ValueError("Subtitle text requires bounded available subtitle evidence")
+        if self.subtitles and any(not any(
+            span.start_seconds <= row.start_seconds and row.end_seconds <= span.end_seconds
+            for span in self.spans
+        ) for row in self.subtitles):
+            raise ValueError("Subtitle text must belong to the declared coverage")
         if (self.level == "L2") != available or bool(self.spans) != available:
             raise ValueError("Reading level requires matching subtitle evidence")
         if available and not any(row.role == "subtitle" for row in self.sources):
@@ -202,6 +231,7 @@ class ObservationPayload(StrictModel):
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
     reading: ReadingEvidence | None = None
     article: ArticleEvidence | None = None
+    document: DocumentEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ObservationEvent(StrictModel):
@@ -300,6 +330,8 @@ class ObservationService:
         if hashlib.sha256(payload.text.encode()).hexdigest() != observation.source_sha256:
             raise CoreError("OBSERVATION_DIGEST_MISMATCH", 400)
         source_texts = [payload.title, payload.text, payload.url, payload.requested_url]
+        if payload.document is not None:
+            source_texts.append(payload.document.filename)
         for evidence in (payload.reading, payload.article):
             if evidence is not None and evidence.comments is not None:
                 source_texts.extend(value for comment in evidence.comments.items
@@ -335,6 +367,21 @@ class ObservationService:
         ):
             raise CoreError("OBSERVATION_TIME_OUT_OF_RANGE", 400)
         status, kind = observation.result_status, observation.source_kind
+        if payload.document is not None:
+            try:
+                payload.document.validate_text(payload.text)
+            except ValueError:
+                raise CoreError("DOCUMENT_EVIDENCE_MISMATCH", 400) from None
+            no_text = (status == "UNKNOWN" and not payload.text and payload.document.partial
+                       and payload.error_code == "PRIVATE_FILE_TEXT_UNAVAILABLE")
+            if (observation.source != "qq_file" or (status != "FETCHED" and not no_text)
+                or kind != "text"
+                or payload.url or payload.requested_url or payload.reading or payload.article
+                or payload.document.file_sha256 != payload.media_sha256
+                or payload.processor_id != payload.document.parser_version):
+                raise CoreError("DOCUMENT_EVIDENCE_MISMATCH", 400)
+        elif observation.source == "qq_file":
+            raise CoreError("DOCUMENT_EVIDENCE_REQUIRED", 400)
         if payload.article is not None:
             fetched = payload.article.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
             if (
@@ -365,6 +412,7 @@ class ObservationService:
                 raise CoreError("READING_RESOLUTION_MISMATCH", 400)
         kinds = {
             "qq_image": {"image_analysis"},
+            "qq_file": {"text"},
             "voice": {"audio_transcript"},
             "camera": {"image_analysis", "video_analysis"},
             "android": {"text", "image_analysis"},
@@ -430,6 +478,32 @@ class ObservationService:
                 for item in json.loads(event["body_json"]).get("shared_content", [])
             ):
                 raise CoreError("OWNER_SHARED_IMAGE_REQUIRED", 403)
+        if observation.source == "qq_file":
+            if len(observation.source_event_ids) != 1:
+                raise CoreError("OWNER_SHARED_FILE_REQUIRED", 403)
+            event = self.store.one(
+                "SELECT e.body_json FROM events e JOIN conversations c USING(conversation_id) "
+                "WHERE e.event_id=? AND e.source='qq.onebot' AND e.actor_id='owner' "
+                "AND e.redacted=0 AND c.scope='private' AND c.owner_actor_id='owner'",
+                (observation.source_event_ids[0],),
+            )
+            from companion.qq_files import manifest
+
+            document = payload.document
+            originals = manifest(json.loads(event["body_json"])) if event else []
+            matching = [item for item in originals
+                        if (item["file_id"], item["filename"], item["source_sha256"]) == (
+                            document.file_id, document.filename, document.source_sha256)]
+            if len(matching) != 1:
+                raise CoreError("OWNER_SHARED_FILE_REQUIRED", 403)
+            row = self.store.one(
+                "SELECT media_sha256,state,captured_privacy_epoch FROM content_items "
+                "WHERE owner_event_id=? AND kind='qq_file' AND slot=? AND redacted=0",
+                (observation.source_event_ids[0], matching[0]["slot"]),
+            )
+            if (not row or row["media_sha256"] != document.file_sha256
+                or row["state"] != "RUNNING" or row["captured_privacy_epoch"] != epoch(self.store)):
+                raise CoreError("PRIVATE_FILE_RESULT_FENCED", 409)
         # Tool receipts enter through the executor, added in the tool capability phase.
         if observation.source in {"dsh", "windows"}:
             raise CoreError("TOOL_RECEIPT_REQUIRED", 403)

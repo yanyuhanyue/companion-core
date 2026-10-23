@@ -26,7 +26,7 @@ def exact_hosts(values):
     return frozenset(values)
 
 
-def decode_lease(payload, source, now):
+def decode_lease(payload, source, now, *, media_limits=None):
     """Reject partial/foreign contracts before any provider or browser operation."""
     try:
         if not isinstance(payload, dict) or set(payload) != {"item"}:
@@ -39,7 +39,7 @@ def decode_lease(payload, source, now):
             "max_bytes", "max_requests", "max_items", "context", "allowed_hosts",
         }
         if (not isinstance(item, dict) or not required <= set(item)
-            or set(item) - required - {"source_grant"}
+            or set(item) - required - {"source_grant", "media"}
             or type(item["schema_version"]) is not int or item["schema_version"] != 1):
             raise ValueError("Invalid lease fields")
         for key, minimum in (("request_id", 1), ("lease_token", 8)):
@@ -48,7 +48,16 @@ def decode_lease(payload, source, now):
                 r"[A-Za-z0-9_-]{" + str(minimum) + r",128}", value,
             ):
                 raise ValueError("Invalid lease identity")
-        for name, maximum in (("max_bytes", 1048576), ("max_requests", 8), ("max_items", 40)):
+        media = item.get("media")
+        maximum_bytes = 1048576
+        if media is not None:
+            from companion.bili_video_protocol import MAX_DEADLINE_SECONDS, media_from_wire
+
+            if media_limits is None or source != "bilibili":
+                raise ValueError("media requires explicit Bili Reader capability")
+            media_from_wire(media, local_limits=media_limits)
+            maximum_bytes += media_limits.max_input_bytes
+        for name, maximum in (("max_bytes", maximum_bytes), ("max_requests", 8), ("max_items", 40)):
             if type(item[name]) is not int or not 1 <= item[name] <= maximum:
                 raise ValueError("Invalid lease limit")
         if (item["operation"] not in {"read", "discover"}
@@ -78,6 +87,15 @@ def decode_lease(payload, source, now):
                 raise ValueError("Invalid grant snapshot")
             instant(grant["expires_at"])
         until = instant(item["lease_until"])
+        if media is not None and (
+            item["operation"] != "read" or item["max_items"] != 1
+            or item["url"] != "https://www.bilibili.com/video/" + media["bvid"]
+            or media["source_event_id"] not in context["source_event_ids"]
+            or instant(media["deadline"]) != until
+            or (until - now).total_seconds() > MAX_DEADLINE_SECONDS
+            or item.get("source_grant") and instant(item["source_grant"]["expires_at"]) < until
+        ):
+            raise ValueError("media source or deadline differs from its lease")
     except (TypeError, ValueError, KeyError, OverflowError):
         raise ReadFailure("READER_LEASE_INVALID") from None
     if until <= now:

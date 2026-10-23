@@ -246,10 +246,15 @@ def cancel_proactive_work(store, now):
 
 
 def lease_deliveries(store, settings, request, now):
+    from companion import account_actions, poke, private_life
     from companion.social import proactive_allowed, share_delivery_problem
 
     with store.transaction():
         recover_deliveries(store, now)
+        account = request.delivery_lane == "qq_account"
+        approval = (account_actions.scope(store, settings, lambda: now,
+            request.window_sha256, request.account_actions_authorization_sha256)
+            if account else None)
         if not proactive_allowed(store, settings, now):
             cancel_proactive_work(store, now)
         # One delivery at a time per conversation. Uncertain items are never replayed;
@@ -258,12 +263,18 @@ def lease_deliveries(store, settings, request, now):
             "SELECT o.*,c.platform_session_key FROM outbox o JOIN conversations c "
             "ON c.conversation_id=o.conversation_id WHERE o.state IN ('PENDING','RETRY_WAIT') "
             "AND (o.next_attempt_at IS NULL OR o.next_attempt_at<=?) AND c.scope='private' "
-            "AND c.owner_actor_id='owner' AND o.action_type IN "
-            "('qq.private.reply','qq.private.proactive') AND NOT EXISTS (SELECT 1 FROM outbox b "
-            "WHERE b.conversation_id=o.conversation_id AND b.rowid<o.rowid AND b.state IN "
+            "AND c.owner_actor_id='owner' AND o.delivery_lane=? AND ((? AND o.action_type IN "
+            "('qzone.publish','qq.profile.nickname','qq.profile.signature','qq.profile.avatar')) "
+            "OR (NOT ? AND o.action_type IN "
+            "('qq.private.reply','qq.private.proactive','qq.private.poke'))) "
+            "AND (o.action_type!='qq.private.poke' OR ?) "
+            "AND NOT EXISTS (SELECT 1 FROM outbox b "
+            "WHERE b.conversation_id=o.conversation_id AND b.delivery_lane=o.delivery_lane "
+            "AND b.rowid<o.rowid AND b.state IN "
             "('PENDING','RETRY_WAIT','LEASED','SENDING')) "
             "ORDER BY o.rowid LIMIT ?",
-            (now, request.limit),
+            (now, request.delivery_lane, int(account), int(account),
+             int(private_life.enabled(settings) and poke.enabled(settings)), request.limit),
         )
         items = []
         for row in rows:
@@ -293,6 +304,16 @@ def lease_deliveries(store, settings, request, now):
                     if error.code == "REPLY_SEGMENT_NOT_READY":
                         continue
                     raise
+            voice_flow = None
+            if (not account and settings.voice.enabled
+                and row["action_type"] in {"qq.private.reply", "qq.private.proactive"}
+                and not store.one("SELECT 1 FROM poke_batches WHERE response_message_id=?",
+                                  (row["message_id"],))):
+                from companion.voice_flow import VoiceFlow
+
+                voice_flow = VoiceFlow(store, settings, lambda: now)
+                if voice_flow.prepare_reply(row["message_id"]).state == "WAITING":
+                    continue
             token = uid("lease")
             store.execute(
                 "UPDATE outbox SET state='LEASED',lease_owner=?,lease_token=?,"
@@ -305,6 +326,15 @@ def lease_deliveries(store, settings, request, now):
                     row["message_id"],
                 ),
             )
+            if account:
+                try:
+                    account_actions.lease_receipt(store, settings, lambda: now,
+                        row["message_id"], token, approval)
+                except CoreError as error:
+                    store.execute("UPDATE outbox SET state='CANCELLED',lease_token=NULL,"
+                                  "updated_at=?,last_error_code=? WHERE message_id=?",
+                                  (now, error.code, row["message_id"]))
+                    continue
             items.append(
                 {
                     "message_id": row["message_id"],
@@ -318,6 +348,15 @@ def lease_deliveries(store, settings, request, now):
             )
             if row.get("reply_group_id"):
                 items[-1]["reply_segment"] = segment_envelope(store, row["message_id"])
+            if voice_flow is not None:
+                voice = voice_flow.delivery_envelope(row["message_id"], token)
+                if voice is not None:
+                    items[-1]["voice"] = voice.model_dump(mode="json")
+            if account:
+                items[-1].update(delivery_lane="qq_account",
+                                 window_sha256=approval.plan_sha256,
+                                 content_sha256=row["content_sha256"])
+                continue
             from companion.private_life import enabled
 
             if enabled(settings):
@@ -345,7 +384,19 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
                          "AND lease_token=? AND lease_until>?", (message_id, token, now)):
             raise CoreError("STALE_DELIVERY_LEASE")
         reply_revision.check_delivery(store, message_id)
-        if settings is not None and live_text.active(store, settings):
+        account = store.one("SELECT 1 FROM outbox WHERE message_id=? "
+                            "AND delivery_lane='qq_account'", (message_id,))
+        if account:
+            from companion import account_actions
+
+            if settings is None or clock is None:
+                raise CoreError("SOCIAL_LIVE_SCOPE_REQUIRED", 403)
+            approval = account_actions.scope(store, settings, clock,
+                settings.live_text_window.plan_sha256 if settings.live_text_window else None,
+                settings.social_autonomy.authorization_sha256, message_id=message_id)
+            account_actions.lease_receipt(store, settings, clock, message_id, token, approval)
+            now = clock()
+        elif settings is not None and live_text.active(store, settings):
             live_text.check_delivery(store, settings, clock, message_id)
             now = clock()
         pending = store.one(
@@ -390,8 +441,35 @@ def delivery_result(store, settings, message_id, result, now):
         )
         if not row:
             raise CoreError("STALE_DELIVERY_LEASE")
+        native = row["action_type"] == "qq.private.poke"
+        account = row["delivery_lane"] == "qq_account"
+        receipt = result.account_action_receipt
+        if (account and (receipt is None or receipt.message_id != message_id
+                        or receipt.action_type != row["action_type"])) or (
+            not account and receipt is not None
+        ):
+            raise CoreError("SOCIAL_RECEIPT_REQUIRED", 400)
+        acknowledgement = encode(result.native_ack.model_dump()) if result.native_ack else None
+        if (native and result.result == "SENT" and (
+            not result.native_ack or result.native_ack.action != "friend_poke"
+            or result.provider_message_id is not None
+        )) or (not native and result.native_ack is not None):
+            raise CoreError("NATIVE_ACTION_ACK_REQUIRED", 400)
         if row["state"] == "SENT" and result.result == "SENT":
+            if native and row["native_ack_json"] != acknowledgement:
+                raise CoreError("NATIVE_ACTION_ACK_CONFLICT", 409)
+            if account:
+                from companion.social_autonomy import SocialAutonomy
+
+                SocialAutonomy(store, settings, clock=lambda: now).record_result(receipt)
             return {"state": "SENT"}
+        if account and row["state"] == "FAILED" and result.result == "PERMANENT_FAILURE":
+            from companion.social_autonomy import SocialAutonomy
+
+            if row["last_error_code"] != result.error_code:
+                raise CoreError("SOCIAL_RECEIPT_CONFLICT", 409)
+            SocialAutonomy(store, settings, clock=lambda: now).record_result(receipt)
+            return {"state": "FAILED"}
         if row["state"] not in {"LEASED", "SENDING", "DELIVERY_UNCERTAIN"}:
             raise CoreError("INVALID_DELIVERY_TRANSITION")
         if result.result == "SENT" and row["state"] == "LEASED":
@@ -416,17 +494,20 @@ def delivery_result(store, settings, message_id, result, now):
                 "DELIVERY_UNCERTAIN": "DELIVERY_UNCERTAIN",
                 "PERMANENT_FAILURE": "FAILED",
             }[result.result]
+        if native and row["state"] != "LEASED" and state == "FAILED":
+            state = "DELIVERY_UNCERTAIN"
         from companion import cumulative
 
         if state in {"SENT", "FAILED", "DELIVERY_UNCERTAIN"}:
             cumulative.send_result(store, message_id, state, now)
         store.execute(
-            "UPDATE outbox SET state=?,provider_message_id=?,last_error_code=?,"
+            "UPDATE outbox SET state=?,provider_message_id=?,native_ack_json=?,last_error_code=?,"
             "sent_at=?,updated_at=?,next_attempt_at=?,attempt_count=attempt_count+? "
             "WHERE message_id=?",
             (
                 state,
                 result.provider_message_id,
+                acknowledgement,
                 result.error_code,
                 now if state == "SENT" else None,
                 now,
@@ -436,6 +517,10 @@ def delivery_result(store, settings, message_id, result, now):
             ),
         )
         store.audit("delivery.result", message_id, "delivery", now, state=state)
+        if account:
+            from companion.social_autonomy import SocialAutonomy
+
+            SocialAutonomy(store, settings, clock=lambda: now).record_result(receipt)
         if row.get("reply_group_id"):
             if state == "SENT":
                 store.execute(
@@ -451,14 +536,20 @@ def delivery_result(store, settings, message_id, result, now):
         return {"state": state}
 
 
-def reconcile_delivery(store, message_id, outcome, now):
+def reconcile_delivery(store, message_id, outcome, now, settings=None, *,
+                       operation_id=None, operation_sha256=None):
+    if settings is not None:
+        from companion import delivery_reconciliation
+
+        return delivery_reconciliation.resolve(store, settings, message_id, outcome, now,
+            operation_id=operation_id, operation_sha256=operation_sha256)
     if outcome not in {"SENT", "CANCELLED"}:
         raise CoreError("INVALID_RECONCILIATION", 400)
     with store.transaction():
         changed = store.execute(
             "UPDATE outbox SET state=?,updated_at=?,sent_at=?,lease_token=NULL "
             "WHERE message_id=? AND state='DELIVERY_UNCERTAIN' AND action_type IN "
-            "('qq.private.reply','qq.private.proactive')",
+            "('qq.private.reply','qq.private.proactive','qq.private.poke')",
             (outcome, now, now if outcome == "SENT" else None, message_id),
         ).rowcount
         if changed != 1:

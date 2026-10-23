@@ -48,6 +48,7 @@ class BridgeConfig:
     data_dir: str = "/bridge-data"
     delivery_enabled: bool = False
     max_frame_bytes: int = 65536
+    max_voice_lease_bytes: int = 6000000
     max_pending: int = 1000
     max_disk_bytes: int = 67108864
     poll_seconds: float = 0.1
@@ -64,8 +65,26 @@ class BridgeConfig:
     meme_catalog_max_assets: int = 512
     meme_catalog_max_bindings: int = 10000
     meme_cooldown_seconds: int = 1800
+    account_asset_directory: str | None = None
+    account_asset_policy_sha256: str | None = None
+    account_asset_max_bytes: int = 2097152
+    account_asset_max_dimension: int = 2048
 
     def __post_init__(self):
+        if (self.account_asset_directory is None) != (self.account_asset_policy_sha256 is None):
+            raise ValueError("ACCOUNT_ASSET_REVIEW_POLICY_REQUIRED")
+        if self.account_asset_directory is not None and (
+            not isinstance(self.account_asset_directory, str)
+            or not Path(self.account_asset_directory).is_absolute()
+            or ".." in Path(self.account_asset_directory).parts
+            or not isinstance(self.account_asset_policy_sha256, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", self.account_asset_policy_sha256)
+        ):
+            raise ValueError("INVALID_ACCOUNT_ASSET_CONFIGURATION")
+        for value, high in ((self.account_asset_max_bytes, 20 * 1024 * 1024),
+                            (self.account_asset_max_dimension, 8192)):
+            if type(value) is not int or not 1 <= value <= high:
+                raise ValueError("INVALID_ACCOUNT_ASSET_LIMIT")
         if (type(self.meme_enabled) is not bool or type(self.meme_discovery_enabled) is not bool
             or type(self.meme_semantics_enabled) is not bool
             or self.meme_search_provider not in {"none", "brave"}):
@@ -145,6 +164,7 @@ class BridgeConfig:
         for value, low, high in (
             (self.max_pending, 1, 10000),
             (self.max_frame_bytes, 1024, 262144),
+            (self.max_voice_lease_bytes, 65536, 6000000),
             (self.max_disk_bytes, 1048576, 1073741824),
         ):
             if type(value) is not int or not low <= value <= high:

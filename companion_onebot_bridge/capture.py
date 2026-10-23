@@ -47,6 +47,8 @@ CAPTURE_PHASES = frozenset(
         "ws_close",
         "image_download",
         "image_upload",
+        "file_download",
+        "file_upload",
     }
 )
 CAPTURE_REASONS = frozenset(
@@ -102,7 +104,9 @@ def capture_diagnostic(error, phase):
         reason = "CAPTURE_WS_CLOSED"
     elif phase == "persist":
         reason = "CAPTURE_PERSISTENCE_FAILED"
-    elif isinstance(error, (httpx.ConnectError, OSError)) or code == "IMAGE_CONNECTION_FAILED":
+    elif isinstance(error, (httpx.ConnectError, OSError)) or code in {
+        "IMAGE_CONNECTION_FAILED", "FILE_CONNECTION_FAILED",
+    }:
         reason = "CAPTURE_CONNECTION_FAILED"
     elif isinstance(error, httpx.HTTPError):
         reason = "CAPTURE_HTTP_FAILURE"
@@ -153,6 +157,7 @@ def input_event(window, frame, received_at):
         now=received_at.timestamp(),
         rich_input_scope=scope,
         image_scope=image_scope,
+        file_scope=(window.plan.value.get("live_text") or {}).get("file_scope", "none"),
     )
     if (not plain and scope == "none") or event is None:
         raise ValueError("WINDOW_OWNER_TEXT_INPUT_REQUIRED")
@@ -553,7 +558,8 @@ async def capture_once(window, client, protocol):
 
 
 async def approve_captured(window, client, approval, *, image_transport=None, image_resolver=None,
-                           defer_media=False):
+                           defer_media=False, protocol=None, file_transport=None,
+                           file_resolver=None, voice_transport=None, voice_resolver=None):
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
     window.busy = True
@@ -639,7 +645,12 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
         window.verify()
         has_images = any(item.get("kind") == "image"
                          for item in event["payload"].get("shared_content", []))
-        if has_images and defer_media:
+        has_files = any(item.get("kind") == "file"
+                        for item in event["payload"].get("shared_content", []))
+        has_records = (window.plan.value.get("live_text", {}).get("voice_scope") == "owner_voice_v1"
+            and any(item.get("type") == "record" for item in (
+                event["payload"].get("rich") or {}).get("segments", [])))
+        if (has_images or has_files or has_records) and (defer_media or has_files or has_records):
             from .pending_media import queue
 
             queue(window, event, raw, receipt)
@@ -664,7 +675,22 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
         if window.db.execute("SELECT state FROM inbox WHERE key=?", (event["event_id"],))\
                 .fetchone()[0] == "erased":
             return window.status()
-        if has_images and not defer_media:
+        if (has_files or has_records) and not defer_media:
+            from .pending_media import MediaPump
+
+            def set_file_phase(value):
+                nonlocal phase
+                phase = value
+
+            pump = MediaPump(window, client, protocol=protocol,
+                file_transport=file_transport, file_resolver=file_resolver,
+                voice_transport=voice_transport, voice_resolver=voice_resolver,
+                image_transport=image_transport, image_resolver=image_resolver,
+                set_phase=set_file_phase)
+            queued = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+                                       (event["event_id"],)).fetchone()
+            await pump.execute(queued)
+        elif has_images and not defer_media:
             from .images import original_images
             from .pending_media import upload
 

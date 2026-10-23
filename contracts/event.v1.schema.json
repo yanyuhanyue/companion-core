@@ -81,10 +81,37 @@
         {
           "properties": {
             "type": {"const": "image"}, "coverage": {"const": "UNREAD"},
-            "slot": {"type": "integer", "minimum": 0, "maximum": 3},
+            "slot": {"type": "integer", "minimum": 0, "maximum": 63},
             "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
           },
           "required": ["slot", "source_sha256"]
+        },
+        {
+          "properties": {
+            "type": {"const": "file"}, "coverage": {"const": "UNREAD"},
+            "slot": {"type": "integer", "minimum": 0, "maximum": 63},
+            "file_id": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^(?=.*\\S)[^\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]+$"},
+            "filename": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^(?=.*\\S)[^\\\\/:\\u0000-\\u001f\\u007f-\\u009f\\ud800-\\udfff]+$", "not": {"enum": [".", ".."]}},
+            "size": {"type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991},
+            "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          },
+          "required": ["slot", "file_id", "filename", "size", "source_sha256"]
+        },
+        {
+          "properties": {
+            "type": {"const": "face"}, "coverage": {"const": "IDENTIFIED"},
+            "face_id": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,5})$"}
+          },
+          "required": ["face_id"]
+        },
+        {
+          "properties": {
+            "type": {"const": "face"}, "coverage": {"const": "UNREAD"},
+            "face_id": {"type": "string", "pattern": "^(?:0|[1-9][0-9]{0,5})$"},
+            "slot": {"type": "integer", "minimum": 0, "maximum": 63},
+            "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+          },
+          "required": ["face_id", "slot", "source_sha256"]
         },
         {"properties": {"type": {"enum": ["image", "record", "video", "file", "other"]}, "coverage": {"const": "UNSUPPORTED"}}}
       ],
@@ -135,7 +162,7 @@
           }
         },
         "shared_content": {
-          "type": "array", "maxItems": 4,
+          "type": "array", "maxItems": 64,
           "items": {
             "oneOf": [
               {
@@ -150,8 +177,8 @@
                 "type": "object", "additionalProperties": false,
                 "required": ["kind", "slot"],
                 "properties": {
-                  "kind": {"const": "image"},
-                  "slot": {"type": "integer", "minimum": 0, "maximum": 3}
+                  "kind": {"enum": ["image", "file"]},
+                  "slot": {"type": "integer", "minimum": 0, "maximum": 63}
                 }
               }
             ]

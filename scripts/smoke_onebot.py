@@ -8,12 +8,15 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+import companion_delivery_protocol as delivery_wire
+from companion_onebot_bridge import owner_resolution
 from companion_onebot_bridge.capture import SIGNATURE_DOMAIN
 from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.spool import Spool
 
 assert importlib.util.find_spec("astrbot") is None
 assert importlib.util.find_spec("companion") is None
+assert owner_resolution.wire is delivery_wire
 assert os.geteuid() == 10004
 capture_key = Ed25519PrivateKey.generate()
 config = BridgeConfig(

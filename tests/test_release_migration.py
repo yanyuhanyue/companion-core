@@ -48,6 +48,11 @@ REVISION_CHAIN = (
     "0025_meme_captions",
     "0026_cloud_budget",
     "0027_owner_console",
+    "0028_private_files",
+    "0029_social_autonomy",
+    "0030_private_poke",
+    "0031_voice_nodes",
+    "0032_bili_video",
 )
 LEGACY_TABLES = (
     "principals",
@@ -319,9 +324,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0027_owner_console"]
+    assert scripts.get_heads() == ["0032_bili_video"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0027_owner_console")
+    revisions, current = [], scripts.get_revision("0032_bili_video")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -383,7 +388,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0027_owner_console"}
+            {"version_num": "0032_bili_video"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
@@ -417,7 +422,10 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 assert actual["state"] == expected_state
                 assert actual["content_json"] == "{}" and actual["content_sha256"] == ""
             else:
-                expected = {**old, **SEGMENT_DEFAULTS}
+                expected = {
+                    **old, **SEGMENT_DEFAULTS,
+                    "delivery_lane": "owner_private", "native_ack_json": None,
+                }
                 if active:
                     expected.update(
                         state="DELIVERY_UNCERTAIN",
@@ -445,7 +453,10 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
             }
             unchanged["runtime_meta"] = {
                 **before["runtime_meta"],
-                "rows": before["runtime_meta"]["rows"] + [generation, restore_block],
+                "rows": before["runtime_meta"]["rows"] + [generation, restore_block] + [
+                    restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
+                    for name in ("social_autonomy_restore_required", "bili_video_restore_required")
+                ],
             }
             assert_old_columns_unchanged(restored, unchanged)
 

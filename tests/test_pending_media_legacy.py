@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from companion_onebot_bridge import images, pending_media
+from companion_onebot_bridge import images, pending_media, voice_runtime
 from companion_onebot_bridge.spool import encode
 from companion_onebot_bridge.window import digest
 from tests.test_onebot_images import image_segment
@@ -33,8 +33,13 @@ def queue_window(db):
     db.execute("INSERT INTO window_inputs VALUES (?,?,?)",
                (event["event_id"], encode(capture), capture["input_sha256"]))
     db.commit()
-    window = SimpleNamespace(db=db, plan=SimpleNamespace(sha256="a" * 64, config=config),
+    # Historical WindowPlan instances still carry their original scope dictionary;
+    # the pre-voice plan omits the newer voice authority fields entirely.
+    plan = SimpleNamespace(sha256="a" * 64, config=config,
+                           value={"live_text": {"image_scope": "owner_image_v1"}})
+    window = SimpleNamespace(db=db, plan=plan,
                              spool=SimpleNamespace(capacity=capacities.append), append=append)
+    assert voice_runtime.enabled(window) is False
     return window, event, capture, journal, capacities
 
 
@@ -99,6 +104,8 @@ def test_real_face_field_and_ordinary_image_shape_survive_signed_queue(tmp_path)
         pending_media.queue(window, event, raw, capture)
         before = dict(db.execute("SELECT * FROM automatic_media").fetchone())
         value = json.loads(before["manifest_json"])
+        assert set(value) == {"window_sha256", "event_id", "capture_sha256", "input_sha256",
+                              "images", "signature"}
         assert set(value["images"][0]) == {"index", "slot", "source_sha256", "url"}
         assert value["images"][1]["face_id"] == "277"
         assert set(value["images"][1]) == {"index", "slot", "source_sha256", "url", "face_id"}

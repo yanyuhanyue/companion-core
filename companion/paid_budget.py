@@ -41,6 +41,9 @@ def snapshot(settings):
     if approval.meme_input is not None:
         value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
         value["scenario_daily_micro_usd"]["meme_caption"] = settings.meme_caption_daily_micro_usd
+    if settings.social_autonomy.enabled:
+        value["scenario_daily_micro_usd"]["social_autonomy"] = (
+            settings.social_autonomy.model_daily_micro_usd)
     value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(
@@ -99,7 +102,15 @@ def estimate_input_tokens(approval, messages, scenario):
     """
     try:
         estimate = 32
-        if scenario == "content_video":
+        if scenario == "content_video_preview":
+            from companion.video_input import preview_text_and_estimate
+
+            text, image_estimate = preview_text_and_estimate(
+                approval.video_input, approval.image_input, messages,
+            )
+            messages = [{"role": "user", "content": text}]
+            estimate += image_estimate
+        elif scenario == "content_video":
             from companion.video_input import text_and_estimate
 
             text, video_estimate = text_and_estimate(approval.video_input, messages,
@@ -138,7 +149,8 @@ def estimate_input_tokens(approval, messages, scenario):
             ):
                 raise ValueError("unsupported message contract")
             estimate += 8 + (len(message["content"].encode("utf-8")) + 2) // 3
-        if scenario in {"memory_review", "memory_extract", "diary", "reflection", "meme_caption"}:
+        if scenario in {"memory_review", "memory_extract", "diary", "reflection", "meme_caption",
+                        "qq_poke", "social_autonomy", "content_video_preview"}:
             estimate += 32
         return (estimate * approval.input_estimate_safety_percent + 99) // 100
     except (ValueError, TypeError, KeyError, UnicodeError) as error:
@@ -198,13 +210,14 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
-def journal(store, approval, record=None, *, allow_settlement=False, initialize=True):
+def journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
+            resolution_replay=None):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
-    from companion import cumulative
+    from companion import cumulative, delivery_reconciliation
 
     path = Path(approval.journal_path)
     identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
@@ -227,6 +240,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, {}
         corrections = {}
+        resolutions = {}
         heads = set()
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
@@ -245,6 +259,14 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 ):
                     raise ValueError("journal identity")
             else:
+                if row.get("kind") == delivery_reconciliation.KIND:
+                    delivery_reconciliation.validate_journal_record(
+                        store, row, digest, lifecycle, identity["value"],
+                    )
+                    message_id = row["delivery"]["message_id"]
+                    if message_id in resolutions:
+                        raise ValueError("duplicate owner resolution")
+                    resolutions[message_id] = {**row, "sha256": digest}
                 cumulative.fold(account, row)
                 if row.get("kind") in cumulative.CONTROL_RECORDS:
                     continue
@@ -280,6 +302,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         stored_lifecycle = live_lifecycle(store)
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
+        delivery_reconciliation.validate_projection(store, resolutions, resolution_replay)
         lifecycle_record = record and record.get("kind") in {
             "window_stop", "window_open", "window_handoff"
         }
@@ -334,6 +357,11 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     raise ValueError("unrelated independent block")
             row = {**record, "previous": previous}
             row["sha256"] = sha(row)
+            if record["kind"] == delivery_reconciliation.KIND:
+                delivery_reconciliation.validate_journal_record(
+                    store, {k: v for k, v in row.items() if k != "sha256"}, row["sha256"],
+                    lifecycle, identity["value"],
+                )
             cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
             next_lifecycle = _live_record(
                 {k: v for k, v in row.items() if k != "sha256"}, row["sha256"], lifecycle, seen
@@ -345,17 +373,19 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             if record["kind"] == "video_rate_correction":
                 blocked.pop(record["request_id"])
             previous = row["sha256"]
-            if record["kind"] == "quota_pause":
+            if record["kind"] in {"quota_pause", delivery_reconciliation.KIND}:
                 store.retain_budget_stop(identity["value"], previous)
+            if record["kind"] == delivery_reconciliation.KIND:
+                resolutions[row["delivery"]["message_id"]] = row
             if lifecycle_record:
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (LIVE_LIFECYCLE, encode(next_lifecycle)))
                 lifecycle = next_lifecycle
-            if record["kind"] in cumulative.CONTROL_RECORDS:
+            if record["kind"] in cumulative.CONTROL_RECORDS and account["policy"]:
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (cumulative.PROJECTION,
                                encode(cumulative.binding(account, path, previous))))
         return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account,
-                "blocked_request_ids": sorted(blocked)}
+                "blocked_request_ids": sorted(blocked), "send_resolutions": resolutions}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error

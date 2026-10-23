@@ -36,6 +36,13 @@ class ReadingContext(StrictModel):
         return value
 
 
+class ReadingLeaseRequest(StrictModel):
+    source_grant: SourceGrantSnapshot | None = None
+    capabilities: list[Literal["bounded_video_media_v1"]] = Field(
+        default_factory=list, max_length=1, exclude_if=lambda value: not value,
+    )
+
+
 class ReadingProvenance(ReadingContext):
     source_grant: SourceGrantSnapshot | None = None
 

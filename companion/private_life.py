@@ -34,6 +34,7 @@ SCENARIOS = {
     "reflection": "reflection",
     "content_vision": "content",
     "content_video": "content",
+    "content_video_preview": "content",
     "meme_caption": "meme_semantics",
 }
 MODEL = "private_life_model:"
@@ -164,6 +165,11 @@ def check_job(store, settings, approval, job):
         from companion.meme_core import check_caption_job
 
         return check_caption_job(store, settings, approval, job)
+    if job["kind"] == "poke":
+        from companion import poke
+
+        poke.check_job(store, settings, approval, job)
+        return store.one("SELECT * FROM events WHERE event_id=?", (job["event_id"],))
     event = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
         "USING(conversation_id) WHERE e.event_id=?",
@@ -196,7 +202,12 @@ def admit_model(store, settings, clock, job_id, scenario):
     approval, _, attempts = live_text.guard(store, settings, clock)
     feature = ("goals" if scenario == "activity" and notices.required(store, job_id)
                else SCENARIOS.get(scenario))
-    if feature is None or not getattr(settings, feature + "_enabled"):
+    allowed_feature = (
+        settings.poke_policy.enabled if scenario == "qq_poke" else
+        settings.social_autonomy.enabled if scenario == "social_autonomy" else
+        feature is not None and getattr(settings, feature + "_enabled")
+    )
+    if not allowed_feature:
         raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     if attempts >= approval.max_model_attempts:
         raise CoreError("LIVE_TEXT_MODEL_ATTEMPT_CAP", 429)
@@ -206,13 +217,16 @@ def admit_model(store, settings, clock, job_id, scenario):
             raise CoreError("COMPANION_JOB_SCOPE_REQUIRED", 403)
         check_job(store, settings, approval, job)
         allowed = {
-            "chat": {"chat", "memory_review", "content_vision", "content_video"},
+            "chat": {"chat", "memory_review", "content_vision", "content_video",
+                     "content_video_preview"},
             "activity": {"activity", "memory_review"},
             "meme_caption": {"meme_caption"},
+            "poke": {"qq_poke"},
         }
         if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
-    elif scenario not in {"memory_extract", "memory_review", "diary", "reflection"}:
+    elif scenario not in {"memory_extract", "memory_review", "diary", "reflection",
+                          "social_autonomy"}:
         raise CoreError("COMPANION_BACKGROUND_SCOPE_REQUIRED", 403)
 
 
@@ -269,12 +283,26 @@ def check_model(store, settings, clock, request_id):
     ):
         raise CoreError("COMPANION_MODEL_SOURCE_CHANGED", 503)
     lease = row["lease_until"]
+    if row["scenario"] == "social_autonomy":
+        from companion.social_autonomy import SocialAutonomy
+
+        SocialAutonomy(store, settings, clock=clock).validate_model(request_id)
     if row["job_id"]:
         job = store.one("SELECT * FROM jobs WHERE job_id=?", (row["job_id"],))
         event = check_job(store, settings, approval, job)
         if event_digest(event) != record["event_sha256"]:
             raise CoreError("COMPANION_MODEL_SOURCE_CHANGED", 503)
-        if row["scenario"] in {"content_vision", "content_video"}:
+        from companion.budget import reader_video_binding
+
+        reader_binding = (reader_video_binding(store, settings, clock, request_id,
+            job_id=row["job_id"], scenario=row["scenario"],
+            logical_request_id=row["logical_request_id"])
+            if row["scenario"] in {"content_video", "content_video_preview"} else None)
+        if row["scenario"] == "content_video_preview" and reader_binding is None:
+            raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+        if reader_binding is not None:
+            lease = min(lease, reader_binding["lease_until"])
+        elif row["scenario"] in {"content_vision", "content_video"}:
             qq_images.frozen(store, settings, approval, job)
             source_request_id = request_id
             if row["scenario"] == "content_video":
@@ -305,7 +333,13 @@ def record_replies(store, settings, clock, job, message_ids):
     remaining = live_text.remaining_send_slots(store, approval)
     if remaining is not None and len(message_ids) > remaining:
         raise CoreError("LIVE_TEXT_SEND_ATTEMPT_CAP", 429)
-    live_text._reply_material(store, approval, message_ids[0])
+    if job["kind"] == "poke":
+        from companion import poke
+
+        for message_id in message_ids:
+            poke.check_delivery(store, settings, approval, message_id)
+    else:
+        live_text._reply_material(store, approval, message_ids[0])
     usage = store.rows(
         "SELECT request_id,state FROM model_usage WHERE job_id=? ORDER BY rowid", (job["job_id"],)
     )
@@ -369,10 +403,16 @@ def check_delivery(store, settings, clock, message_id, check=None):
         not row
         or row["scope"] != "private"
         or row["owner_actor_id"] != "owner"
-        or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
+        or row["action_type"] not in {"qq.private.reply", "qq.private.proactive", "qq.private.poke"}
         or row["content_sha256"] != paid_budget.sha(json.loads(row["content_json"]))
     ):
         raise CoreError("COMPANION_PRIVATE_DELIVERY_REQUIRED", 403)
+    poke_delivery = bool(store.one("SELECT 1 FROM poke_batches WHERE response_message_id=?",
+                                   (message_id,)))
+    if poke_delivery or row["action_type"] == "qq.private.poke":
+        from companion import poke
+
+        poke.check_delivery(store, settings, approval, message_id)
     if problem := notices.delivery_problem(store, settings, message_id, clock()):
         raise CoreError(problem, 403)
     expected = delivery_material(store, settings, row)
@@ -401,17 +441,20 @@ def check_delivery(store, settings, clock, message_id, check=None):
         )
     ):
         raise CoreError("COMPANION_DELIVERY_SOURCE_CHANGED", 403)
-    if row["action_type"] == "qq.private.reply":
+    if row["action_type"] == "qq.private.reply" and not poke_delivery:
         live_text._reply_material(store, approval, message_id)
     if row["action_type"] == "qq.private.proactive" and not proactive_allowed(
         store, settings, clock()
     ):
         raise CoreError("PROACTIVE_SEND_PAUSED", 409)
-    text = json.loads(row["content_json"])["text"]
+    content = json.loads(row["content_json"])
+    digest_matches = (check.content_sha256 == row["content_sha256"]
+                      if check and row["action_type"] == "qq.private.poke"
+                      else check and check.reply_sha256 == paid_budget.sha(content.get("text")))
     if check and (
         check.window_sha256 != approval.plan_sha256
         or check.event_id != row["origin_event_id"]
-        or check.reply_sha256 != paid_budget.sha(text)
+        or not digest_matches
         or check.lease_token != row["lease_token"]
     ):
         raise CoreError("LIVE_TEXT_SEND_CHECK_CHANGED", 403)

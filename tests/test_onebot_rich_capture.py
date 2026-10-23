@@ -212,7 +212,7 @@ def test_references_only_capture_has_no_owner_evidence_and_remains_in_sent_histo
                     "history_scope": "approved_window",
                     "max_history_turns": 1,
                     "max_history_utf8_bytes": 8000,
-                    "core_options": {"max_recent_messages": 2},
+                    "core_options": {"max_recent_messages": 2, "context_soft_tokens": 6000},
                 },
             ) as (window, client, protocol, _, sends),
             httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model,
@@ -287,8 +287,12 @@ def test_references_only_requires_approved_scope_and_does_not_enable_empty_or_sl
     run(scenario())
 
 
-@pytest.mark.parametrize("history_bytes", [100, 8000])
-def test_actual_rich_history_is_counted_and_bound_through_delivery(core, tmp_path, history_bytes):
+@pytest.mark.parametrize("history_bytes,soft_limit,include_history", [
+    (100, 6000, False), (8000, 6000, True), (8000, 1000, False),
+])
+def test_actual_rich_history_is_counted_and_bound_through_delivery(
+    core, tmp_path, history_bytes, soft_limit, include_history,
+):
     raw = raw_event(message=[{"type": "text", "data": {"text": "主人第一个问题"}}, card()])
     calls = []
 
@@ -316,7 +320,9 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(core, tmp_pat
                 approved=True,
                 rich_input_scope="references_v1",
                 scope_options={
-                    "core_options": {"max_recent_messages": 2},
+                    "core_options": {
+                        "max_recent_messages": 2, "context_soft_tokens": soft_limit,
+                    },
                     "history_scope": "approved_window",
                     "max_history_turns": 1,
                     "max_history_utf8_bytes": history_bytes,
@@ -338,13 +344,13 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(core, tmp_pat
             refs = [
                 message for message in calls[-1]["messages"] if "QQ引用资料" in message["content"]
             ]
-            assert len(refs) == (1 if history_bytes == 8000 else 0)
+            assert len(refs) == int(include_history)
             body = json.loads(prior["body_json"])
             body["rich"]["segments"][0]["fields"][0]["value"] = "mutated old card"
             core.store.execute(
                 "UPDATE events SET body_json=? WHERE event_id=?", (encode(body), prior["event_id"])
             )
-            if history_bytes == 8000:
+            if include_history:
                 with pytest.raises((ValueError, httpx.HTTPStatusError)):
                     await window.send_once(client, protocol, reply_approval(window.plan, core))
                 assert len(sends) == 1

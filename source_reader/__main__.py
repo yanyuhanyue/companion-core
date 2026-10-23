@@ -5,6 +5,7 @@ import json
 import os
 import re
 from contextlib import AsyncExitStack
+from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
@@ -41,6 +42,14 @@ def core_address(value):
 
 async def main(args):
     renderer = BrowserRenderer() if args.browser else None
+    media_limits = None
+    if getattr(args, "video_media", False):
+        from companion.bili_video_protocol import DEFAULT_LIMITS, limits_from_wire
+
+        media_limits = DEFAULT_LIMITS
+        if args.media_limits:
+            raw_limits = await asyncio.to_thread(Path(args.media_limits).read_text, "utf-8")
+            media_limits = limits_from_wire(json.loads(raw_limits))
     async with AsyncExitStack() as stack:
         public = None
         if args.source != "web":
@@ -98,6 +107,7 @@ async def main(args):
                         worked = await tick_reading(
                             core, reader, args.adapter_id, source=args.source,
                             local_hosts=args.allow_host, renderer=renderer,
+                            media_limits=media_limits,
                         )
                     else:
                         worked = await tick(core, reader, args.adapter_id)
@@ -123,6 +133,9 @@ if __name__ == "__main__":
     parser.add_argument("--discussion", action="store_true",
                         help="Read bounded Bilibili comments/danmaku")
     parser.add_argument("--bili-tools", action="store_true", help="Enable bounded Bilibili tools")
+    parser.add_argument("--video-media", action="store_true",
+                        help="Enable bounded_video_media_v1 on Core-authorized Bili reads")
+    parser.add_argument("--media-limits", help="Complete local MediaLimits JSON; must match Core")
     parser.add_argument("--search-keyword", help="Operator-selected Bilibili discovery keyword")
     parser.add_argument("--account-file", help="Explicit expiring read-only account grant file")
     parser.add_argument("--core-url", default="http://127.0.0.1:8765")
@@ -147,6 +160,10 @@ if __name__ == "__main__":
                 parser.error(str(error))
         if args.discussion and args.source != "bilibili":
             parser.error("--discussion requires --source bilibili")
+        if args.video_media and (args.source != "bilibili" or args.protocol != "reading-v1"):
+            parser.error("--video-media requires Bilibili and reading-v1")
+        if args.media_limits and not args.video_media:
+            parser.error("--media-limits requires --video-media")
         if args.browser and args.source not in {"bilibili", "web"}:
             parser.error("--browser requires Bilibili or reading-v1 web")
         if args.heybox_native and (args.source != "heybox" or args.source_url):

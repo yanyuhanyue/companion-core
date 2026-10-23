@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .onebot_client import bounded_post
@@ -15,8 +16,10 @@ def encode(value):
 class Spool:
     """One OS-held instance; durable receipts retain hashes, not acknowledged text."""
 
-    def __init__(self, config):
+    def __init__(self, config, *, reconciliation_only=False):
         self.config, self.db, self.lock = config, None, None
+        self.reconciliation_only = reconciliation_only
+        self.quiesced_at = None
         self.directory = Path(config.data_dir)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         if self.directory.is_symlink() or not self.directory.is_dir():
@@ -53,6 +56,8 @@ class Spool:
                     fcntl.flock(self.lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError as error:
                 raise RuntimeError("BRIDGE_ALREADY_RUNNING") from error
+            if reconciliation_only:
+                self.quiesced_at = datetime.now(UTC).isoformat()
             self.db = sqlite3.connect(database)
             if os.name != "nt":
                 os.chmod(database, 0o600)
@@ -110,6 +115,8 @@ class Spool:
             raise ValueError("SPOOL_DISK_CAPACITY")
 
     def put(self, payload, fingerprint=None):
+        if self.reconciliation_only:
+            raise ValueError("DELIVERY_QUIESCENT_PROCESS_REQUIRED")
         body = encode(payload)
         fingerprint = (
             fingerprint
@@ -210,7 +217,17 @@ class Spool:
         return row[0] if row else None
 
     def start_delivery(self, item):
+        from .account_actions import is_account
+        from .native_actions import AccountAck
+
+        if self.reconciliation_only:
+            raise ValueError("DELIVERY_QUIESCENT_PROCESS_REQUIRED")
         self.capacity(4096)
+        fallback = {"lease_token": item["lease_token"], "result": "DELIVERY_UNCERTAIN",
+                    "error_code": "BRIDGE_SEND_INTERRUPTED"}
+        if is_account(item):
+            fallback["account_action_receipt"] = AccountAck(
+                item["action_type"], error_code="BRIDGE_SEND_INTERRUPTED").value(item)
         with self.db:
             if self.db.execute(
                 "SELECT 1 FROM results WHERE message_id=?", (item["message_id"],)
@@ -220,23 +237,35 @@ class Spool:
                 "INSERT INTO results(message_id,body) VALUES (?,?)",
                 (
                     item["message_id"],
-                    encode(
-                        {
-                            "lease_token": item["lease_token"],
-                            "result": "DELIVERY_UNCERTAIN",
-                            "error_code": "BRIDGE_SEND_INTERRUPTED",
-                        }
-                    ),
+                    encode(fallback),
                 ),
             )
 
     def finish_delivery(self, message_id, provider_id):
+        from .native_actions import AccountAck, NativeAck
+
         with self.db:
             row = self.db.execute(
                 "SELECT body FROM results WHERE message_id=?", (message_id,)
             ).fetchone()
             body = json.loads(row[0])
-            if provider_id is not None:
+            if isinstance(provider_id, AccountAck):
+                original = body.get("account_action_receipt")
+                if not original or original["action_type"] != provider_id.action_type:
+                    raise ValueError("INVALID_ACCOUNT_ACTION_RECEIPT")
+                item = {"delivery_lane": "qq_account", "message_id": message_id,
+                        "lease_token": body["lease_token"], "action_type": original["action_type"],
+                        "content": {"payload_sha256": original["payload_sha256"]}}
+                receipt = provider_id.value(item)
+                body = {"lease_token": body["lease_token"], "result": "SENT" if provider_id
+                        else "DELIVERY_UNCERTAIN", "provider_message_id": None,
+                        "account_action_receipt": receipt}
+                if receipt["error_code"]:
+                    body["error_code"] = receipt["error_code"]
+            elif isinstance(provider_id, NativeAck):
+                body = {"lease_token": body["lease_token"], "result": "SENT",
+                        "provider_message_id": None, "native_ack": provider_id.value()}
+            elif provider_id is not None:
                 body = {
                     "lease_token": body["lease_token"],
                     "result": "SENT",
@@ -248,9 +277,15 @@ class Spool:
 
     def cancel_delivery(self, item, receipt):
         """Record authenticated no-dispatch cancellation without manufacturing a send ACK."""
+        from . import account_actions
+
         expected = {"cancelled": True, "message_id": item["message_id"], "state": "CANCELLED",
                     "send_attempt_retained": True}
-        if receipt != expected:
+        if account_actions.is_account(item):
+            account_actions.cancelled_proof(receipt, message_id=item["message_id"],
+                lease_token=item["lease_token"], content_sha256=item["content_sha256"],
+                payload_sha256=item["content"]["payload_sha256"])
+        elif receipt != expected:
             raise ValueError("NOT_SENT_CORE_PROOF_REQUIRED")
         prior = self.db.execute("SELECT * FROM results WHERE message_id=?",
                                 (item["message_id"],)).fetchone()
@@ -268,9 +303,9 @@ class Spool:
                             "state='accepted'", (item["message_id"], value))
 
     async def flush_result(self, client):
-        row = self.db.execute(
-            "SELECT message_id,body FROM results WHERE state='pending' ORDER BY rowid LIMIT 1"
-        ).fetchone()
+        from .owner_resolution import pending_result
+
+        row = pending_result(self)
         if not row:
             return False
         status, result = await bounded_post(

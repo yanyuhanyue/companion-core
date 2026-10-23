@@ -132,9 +132,22 @@ def main():
             "source_reader/accounts.py",
             "source_reader/heybox_source.py",
             "source_reader/bili_tools.py",
+            "source_reader/bili_media.py",
+            "source_reader/video_extract.py",
+            "companion/bili_video_protocol.py",
+            "companion/video_media_contract.py",
             "companion_onebot_bridge/__main__.py",
             "companion_onebot_bridge/spool.py",
+            "companion_onebot_bridge/voice_media.py",
+            "companion_onebot_bridge/account_actions.py",
             "companion_meme_protocol/__init__.py",
+            "companion/voice_protocol.py",
+            "companion_voice_node/__init__.py",
+            "companion_voice_node/providers.py",
+            "companion_voice_node/worker.py",
+            "companion_voice_node/state.py",
+            "companion_voice_node/supervisor.py",
+            "companion_delivery_protocol/__init__.py",
             "companion/telemetry.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
@@ -165,6 +178,10 @@ def main():
                 env=env,
                 check=True,
                 timeout=30,
+            )
+            subprocess.run(
+                [sys.executable, "-m", "companion_voice_node.worker", "--help"],
+                cwd=destination, env=env, check=True, timeout=30,
             )
     print("PASS: archives exclude private inputs; installed wheel initializes its migrations")
 

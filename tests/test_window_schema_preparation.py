@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 
+from companion_onebot_bridge.outbound import validate_item
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, digest
 from tests.conftest import run
@@ -174,8 +175,12 @@ def test_plain_reply_cannot_reserve_twice_without_event_unique_constraint(tmp_pa
 
             def operation(message_id):
                 item = {"message_id": message_id, "delivery_key": f"reply:{event['event_id']}:v1",
+                        "action_type": "qq.private.reply",
+                        "conversation_platform_session_key": window.plan.config.origin,
+                        "lease_token": "lease_" + message_id.removeprefix("msg_"),
                         "content": {"text": "one ordinary reply"},
                         "lease_until": window.plan.end.isoformat()}
+                validate_item(item, window.plan.config)
                 approval = {"window_sha256": window.plan.sha256, "event_id": event["event_id"],
                             "message_id": message_id,
                             "reply_sha256": digest(item["content"]["text"]),

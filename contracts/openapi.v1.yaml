@@ -5,6 +5,8 @@ info:
   description: >-
     Private Docker-network API; versioned contract for M0-M1.5.
     Protected by bearer token; NOT exposed to public Internet.
+    Optional media/account capability routes and their activation requirements
+    are documented in docs/qq-beta/media-autonomy.md. M0/M1 do not execute them.
 servers:
   - url: http://companion-api:8765
 security:
@@ -53,7 +55,10 @@ paths:
   /internal/v1/deliveries/lease:
     post:
       operationId: leaseDeliveries
-      description: Reserve pending private QQ deliveries for a known AstrBot sender.
+      description: >-
+        Reserve pending deliveries for an authenticated Bridge. The default lane
+        is owner_private. qq_account requires its explicitly enabled window and
+        account-action authority; it does not extend M0/M1 permissions.
       requestBody:
         required: true
         content:
@@ -61,13 +66,30 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [worker_id, limit]
+              required: [worker_id]
               properties:
                 worker_id: {type: string}
-                limit: {type: integer, minimum: 1, maximum: 20}
+                limit: {type: integer, minimum: 1, maximum: 20, default: 5}
+                delivery_lane: {enum: [owner_private, qq_account], default: owner_private}
+                window_sha256: {type: [string, 'null'], pattern: '^[a-f0-9]{64}$'}
+                account_actions_authorization_sha256: {type: [string, 'null'], pattern: '^[a-f0-9]{64}$'}
+              allOf:
+                - if:
+                    required: [delivery_lane]
+                    properties:
+                      delivery_lane: {const: qq_account}
+                  then:
+                    required: [window_sha256, account_actions_authorization_sha256]
+                    properties:
+                      window_sha256: {type: string}
+                      account_actions_authorization_sha256: {type: string}
+                  else:
+                    properties:
+                      window_sha256: {type: 'null'}
+                      account_actions_authorization_sha256: {type: 'null'}
       responses:
         '200':
-          description: Leased messages (never public/unapproved actions)
+          description: Leased deliveries within the requested approved lane
           content:
             application/json:
               schema:
@@ -106,6 +128,8 @@ paths:
       description: >-
         Sender reports SENT with provider message id, RETRYABLE_FAILURE, or
         DELIVERY_UNCERTAIN. A lease token prevents stale workers from ACKing.
+        Native poke and account actions carry their actual protocol receipts;
+        they never invent a QQ message id. Unknown outcomes are not retried blindly.
       parameters:
         - in: path
           name: message_id
@@ -116,14 +140,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required: [lease_token, result]
-              properties:
-                lease_token: {type: string}
-                result: {enum: [SENT, RETRYABLE_FAILURE, DELIVERY_UNCERTAIN, PERMANENT_FAILURE]}
-                provider_message_id: {type: [string, 'null']}
-                error_code: {type: [string, 'null']}
+              $ref: './delivery-result.v1.schema.json'
       responses:
         '200': {description: Result stored}
         '409': {description: Stale lease / invalid transition}
@@ -327,7 +344,10 @@ components:
         lease_token: {type: string}
         lease_until: {type: string, format: date-time}
         delivery_key: {type: string}
-        action_type: {enum: [qq.private.reply, qq.private.proactive]}
+        action_type:
+          enum: [qq.private.reply, qq.private.proactive, qq.private.poke, qzone.publish,
+                 qq.profile.nickname, qq.profile.signature, qq.profile.avatar]
+        delivery_lane: {enum: [owner_private, qq_account]}
     MemoryResult:
       type: object
       required: [memory_id, subject, content, status, confidence, evidence_ids]

@@ -17,12 +17,12 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from . import cumulative, reply_segments
+from . import account_actions, cumulative, reply_segments
 from .event_normalizer import decode, normalize
 from .network import checked_http_client, private_http_client, private_request_matches
 from .onebot_client import OneBotClient, bounded_post
@@ -42,6 +42,12 @@ INPUT_STATE_FIELDS = {"window_sha256", "event_id", "input_sha256", "reply_revisi
 
 def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def delivery_origin(item):
+    # Account plans have their own actual reference; they are never owner input events.
+    return item["content"]["plan_id"] if account_actions.is_account(item) else (
+        reply_segments.event_id(item))
 
 
 def handoff_abort_proof(plan, successor, scope, requested, receipt):
@@ -147,15 +153,20 @@ def not_sent_proof(message_id, value):
 
 
 def bridge_code_sha256():
+    import companion_delivery_protocol
     import companion_meme_protocol
 
     package = Path(__file__).parent
     protocol = Path(companion_meme_protocol.__file__).parent
+    delivery = Path(companion_delivery_protocol.__file__).parent
     return digest([[p.name, hashlib.sha256(p.read_bytes()).hexdigest()]
                    for p in sorted(package.glob("*.py"))]
                   + [["companion_meme_protocol/" + p.relative_to(protocol).as_posix(),
                       hashlib.sha256(p.read_bytes()).hexdigest()]
-                     for p in sorted(protocol.rglob("*.py"))])
+                     for p in sorted(protocol.rglob("*.py"))]
+                  + [["companion_delivery_protocol/" + p.relative_to(delivery).as_posix(),
+                      hashlib.sha256(p.read_bytes()).hexdigest()]
+                     for p in sorted(delivery.rglob("*.py"))])
 
 
 def private_json(path, max_bytes=65536):
@@ -413,12 +424,44 @@ class WindowPlan:
                 )
             ):
                 raise ValueError("INVALID_IMAGE_SCOPE")
+            if "file_scope" in scope:
+                expected_scope.add("file_scope")
+            if (scope.get("file_scope", "none") not in ("none", "owner_file_v1")
+                or (scope.get("file_scope") == "owner_file_v1" and (
+                    not companion or scope.get("rich_input_scope") != "references_v1"
+                    or not scope["capture_public_key"]))):
+                raise ValueError("INVALID_FILE_SCOPE")
+            if "poke_scope" in scope or "poke_policy_sha256" in scope:
+                expected_scope |= {"poke_scope", "poke_policy_sha256"}
+                if (scope.get("poke_scope") != "owner_poke_v1" or not companion
+                    or scope.get("automatic_reply") is not True or not scope["capture_public_key"]):
+                    raise ValueError("INVALID_POKE_SCOPE")
+            for field, enabled, proof in (
+                ("voice_scope", "owner_voice_v1", "voice_policy_sha256"),
+                ("account_actions_scope", "qq_social_v1",
+                 "account_actions_authorization_sha256"),
+                ("bili_video_scope", "bounded_video_media_v1", "bili_video_policy_sha256"),
+            ):
+                expected_scope.update(key for key in (field, proof) if key in scope)
+                if (scope.get(field, "none") not in {"none", enabled}
+                    or (scope.get(field, "none") == "none" and scope.get(proof) is not None)
+                    or (scope.get(field) == enabled and (
+                        not companion or not scope["capture_public_key"]
+                        or not isinstance(scope.get(proof), str)
+                        or not SHA.fullmatch(scope[proof])))):
+                    raise ValueError("INVALID_" + field.upper())
+            if (scope.get("bili_video_scope", "none") != "none"
+                and scope.get("link_scope") != "owner_links_v1"):
+                raise ValueError("INVALID_BILI_VIDEO_SCOPE")
             # Old history-only authority remains byte exact; no new grant is inferred.
             if set(scope) - {"history_approval_sha256"} != expected_scope or any(
                 not isinstance(scope[k], str) or not SHA.fullmatch(scope[k])
                 for k in expected_scope
                 if k.endswith("_sha256")
                 and k not in {"memory_approval_sha256", "image_approval_sha256"}
+                and not (k in {"voice_policy_sha256", "account_actions_authorization_sha256",
+                               "bili_video_policy_sha256"}
+                         and scope[k] is None)
             ):
                 raise ValueError("INVALID_LIVE_TEXT_SCOPE")
             facts = scope["memory_facts"]
@@ -772,6 +815,8 @@ class TestWindow:
         return history
 
     def verify(self, *, active=True, dispatch=False, capture_fence=None):
+        if (active or dispatch) and self.spool.reconciliation_only:
+            raise ValueError("DELIVERY_QUIESCENT_PROCESS_REQUIRED")
         if digest(self.plan.value) != self.plan.sha256:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
         if (active or dispatch) and (
@@ -793,9 +838,15 @@ class TestWindow:
         self.check_cancelled_inputs(history)
         self.check_terminal_inputs(history)
         self.check_recalls(history)
+        from .pokes import check_history
+
+        check_history(self, history)
         from .pending_media import verify_history
 
         verify_history(self, history)
+        from .owner_resolution import check_history as check_resolutions
+
+        check_resolutions(self, history)
         quota = cumulative.fold(self, history)
         if active or dispatch:
             cumulative.check(self, quota, self.clock())
@@ -856,10 +907,15 @@ class TestWindow:
                        and entry["data"].get("fence") == row["fence"]]
             if len(entries) != 1:
                 raise ValueError("NOT_SENT_JOURNAL_REQUIRED")
-            not_sent_proof(row["message_id"], entries[0]["data"].get("core_receipt"))
             result = self.db.execute("SELECT * FROM results WHERE message_id=?",
                                       (row["message_id"],)).fetchone()
             body = json.loads(result["body"]) if result else {}
+            proof = entries[0]["data"].get("core_receipt")
+            if re.fullmatch(r"social_[a-f0-9]{32}", row["event_id"]):
+                account_actions.cancelled_proof(proof, message_id=row["message_id"],
+                    lease_token=body.get("lease_token"), content_sha256=row["text_hash"])
+            else:
+                not_sent_proof(row["message_id"], proof)
             if (not result or result["state"] != "accepted" or body.get("result") != "NOT_SENT"
                 or body.get("core_receipt") != entries[0]["data"]["core_receipt"]):
                 raise ValueError("NOT_SENT_RESULT_REQUIRED")
@@ -1029,6 +1085,7 @@ class TestWindow:
             and (
                 self.plan.value["live_text"].get("image_scope") == "owner_image_v1"
                 or self.plan.value["live_text"].get("link_scope") == "owner_links_v1"
+                or self.plan.value["live_text"].get("file_scope") == "owner_file_v1"
             )
         )
         closed = (
@@ -1109,6 +1166,16 @@ class TestWindow:
             raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
 
     async def check_core_request(self, request):
+        path = request.url.path
+        if request.url.query:
+            expected = urlencode({"window_sha256": self.plan.sha256,
+                "authorization_sha256": self.plan.value.get("live_text", {}).get(
+                    "account_actions_authorization_sha256")})
+            if (not account_actions.enabled(self) or request.method != "GET"
+                or path != "/internal/v1/account-actions/profile-baselines/state"
+                or request.url.query != expected.encode()):
+                raise ValueError("LIVE_TEXT_CORE_ENDPOINT_CHANGED")
+            path += "?" + expected
         if (
             not (
                 request.url.path.startswith("/internal/v1/")
@@ -1120,12 +1187,20 @@ class TestWindow:
                     ) or (request.method == "GET" and re.fullmatch(
                         r"/internal/v2/content/evt_[a-f0-9]{64}", request.url.path)))
                 )
+                or (
+                    self.plan.value.get("live_text", {}).get("file_scope") == "owner_file_v1"
+                    and ((request.method == "POST" and re.fullmatch(
+                        r"/internal/v2/content/evt_[a-f0-9]{64}/file(?:/claim|/check)?",
+                        request.url.path,
+                    )) or (request.method == "GET" and re.fullmatch(
+                        r"/internal/v2/content/evt_[a-f0-9]{64}", request.url.path)))
+                )
             )
             or request.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
             or not private_request_matches(
                 request,
                 self.plan.config.core_url,
-                request.url.path,
+                path,
                 synthetic=self.plan.value["execution"] == "local_synthetic",
             )
         ):
@@ -1134,6 +1209,28 @@ class TestWindow:
     def core_http(self, client):
         self.check_core_client(client)
         return checked_http_client(client, self.check_core_request)
+
+    def file_http(self, protocol, original, check):
+        """Only the currently leased original file may resolve a native download URL."""
+        scope = self.plan.value.get("live_text", {})
+        if (scope.get("file_scope") != "owner_file_v1"
+            or scope.get("companion_scope") != "owner_private_v1"
+            or scope.get("rich_input_scope") != "references_v1"
+            or not self.plan.config.capture_public_key):
+            raise ValueError("INVALID_FILE_SCOPE")
+        body = {"user_id": int(self.plan.config.owner_qq_id), "file_id": original.file_id,
+                "file_hash": original.file_hash}
+
+        async def boundary(request):
+            check_protocol_request(self, request, file_read=True)
+            content = request.content
+            if decode(content, 16384) != body or "Cookie" in request.headers:
+                raise ValueError("FILE_ACTION_CHANGED")
+            await check()
+            self.verify()
+            seal_protocol_content(request, content)
+
+        return checked_http_client(protocol, boundary)
 
     async def core_post(self, client, path, body):
         async with self.core_http(client) as scoped:
@@ -1305,15 +1402,9 @@ class TestWindow:
         ):
             raise ValueError("WINDOW_ALREADY_REGISTERED")
         old.check_spool()
-        if self.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN "
-                           "('ACK','CANCELLED','SUPERSEDED','RECALLED') "
-                           "LIMIT 1").fetchone() or (
-            self.db.execute("SELECT 1 FROM window_attempts WHERE state NOT IN ('ACK','NOT_SENT') "
-                            "LIMIT 1").fetchone()
-        ) or self.db.execute(
-            "SELECT 1 FROM results WHERE state!='accepted' "
-            "OR json_extract(body,'$.result') NOT IN ('SENT','NOT_SENT') LIMIT 1"
-        ).fetchone():
+        from .owner_resolution import unsettled_attempts, unsettled_inputs, unsettled_results
+
+        if unsettled_inputs(old) or unsettled_attempts(old) or unsettled_results(old):
             raise ValueError("WINDOW_HANDOFF_RECONCILIATION_REQUIRED")
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'").fetchone():
             if self.db.execute("SELECT 1 FROM automatic_recalls WHERE state!='ACCEPTED' "
@@ -1635,10 +1726,12 @@ class TestWindow:
         return self.status()
 
     def check_spool(self):
+        from .owner_resolution import pending_result
+
         row = self.row()
         if (
             self.spool.pending_count
-            or self.db.execute("SELECT 1 FROM results WHERE state='pending' LIMIT 1").fetchone()
+            or pending_result(self.spool)
         ):
             raise ValueError("SPOOL_RECONCILIATION_REQUIRED")
         if self.db.execute(
@@ -1831,11 +1924,13 @@ class SendOperation:
         self.dispatched = False
         self.meme_prepared = False
         self.meme_sending = False
+        self.prepared_voice = None
 
     async def cancel_before_send(self, item):
         from .continuous import interruptible, pending_input
 
-        if (not interruptible(self.window) or self.dispatched or not self.current
+        account = account_actions.is_account(item)
+        if ((not interruptible(self.window) and not account) or self.dispatched or not self.current
             or self.current_item is not item):
             return False
         attempt = self.db.execute("SELECT * FROM window_attempts WHERE message_id=? AND fence=?",
@@ -1843,9 +1938,17 @@ class SendOperation:
         if (not attempt or attempt["state"] not in {"RESERVED", "IO_STARTED"}
             or attempt["item_hash"] != digest(item)):
             return False
-        cause = pending_input(self.window, reply_segments.event_id(item))
+        cause = None if account else pending_input(self.window, delivery_origin(item))
         revision = item.get("reply_revision")
-        if item.get("action_type") == "qq.private.reply":
+        poke_response = item.get("delivery_key", "").startswith("poke-response:")
+        if account:
+            if not account_actions.enabled(self.window):
+                return False
+        elif poke_response:
+            if (item.get("action_type") not in {"qq.private.reply", "qq.private.poke"}
+                or "reply_revision" in item):
+                return False
+        elif item.get("action_type") == "qq.private.reply":
             if item.get("window_notice") == "commitment" and "reply_revision" not in item:
                 # A new conversational turn does not revoke an accepted task.
                 # Core must establish that this exact notice's source is invalid.
@@ -1856,17 +1959,28 @@ class SendOperation:
               or "reply_revision" in item):
             return False
         try:
-            receipt = await self.window.core_post(self.client,
-                "/internal/v1/live-text/cancel-before-send", {
+            if account:
+                receipt = await self.window.core_post(self.client,
+                    "/internal/v1/account-actions/cancel-before-send",
+                    account_actions.send_check(self.window, item)
+                    | {"reason": "BRIDGE_PRE_DISPATCH_FENCED"})
+            else:
+                receipt = await self.window.core_post(self.client,
+                    "/internal/v1/live-text/cancel-before-send", {
                     "window_sha256": self.window.plan.sha256, "message_id": item["message_id"],
                     "lease_token": item["lease_token"],
                 } | ({"reply_revision": revision} if revision is not None else {})
                 | ({"content_sha256": digest(item["content"])}
-                   if item.get("window_notice") == "commitment" else {})
+                   if item.get("window_notice") == "commitment" or poke_response else {})
                 | ({"cause": "OWNER_INPUT_PENDING", "pending_event_id": cause} if cause else {}))
         except httpx.HTTPError:
             return False
-        not_sent_proof(item["message_id"], receipt)
+        if account:
+            account_actions.cancelled_proof(receipt, message_id=item["message_id"],
+                lease_token=item["lease_token"], content_sha256=item["content_sha256"],
+                payload_sha256=item["content"]["payload_sha256"])
+        else:
+            not_sent_proof(item["message_id"], receipt)
         if self.dispatched or attempt["item_hash"] != digest(item):
             raise ValueError("WINDOW_SEND_FENCED")
         self.window.verify(active=False)
@@ -1960,15 +2074,18 @@ class SendOperation:
         return bool(segment and segment["index"] < segment["count"] - 1)
 
     def reserve(self, item):
+        from . import pokes
+        from .native_actions import approval_hash, prepare
+
         self.window.verify()
         approval = self.approval
-        event_id = reply_segments.event_id(item)
+        event_id = delivery_origin(item)
         segment, not_before = self.segment_context(item, event_id)
         expected = {
             "window_sha256": self.window.plan.sha256,
             "event_id": event_id,
             "message_id": item["message_id"],
-            "reply_sha256": digest(item["content"]["text"]),
+            **approval_hash(item),
         }
         if (
             not isinstance(approval, dict)
@@ -1978,7 +2095,19 @@ class SendOperation:
             or not SHA.fullmatch(approval["evidence_sha256"])
         ):
             raise ValueError("INDIVIDUAL_REPLY_APPROVAL_REQUIRED")
-        if len(item["content"]["text"]) > self.window.plan.value["max_reply_chars"]:
+        account = account_actions.is_account(item)
+        native = item.get("action_type") == "qq.private.poke" or account
+        if account:
+            self.prepared_account = account_actions.prepare(self.window, item)
+        elif native:
+            if not pokes.enabled(self.window):
+                raise ValueError("PRIVATE_POKE_SCOPE_REQUIRED")
+            self.prepared_native = prepare(item["content"], self.window.plan.config.owner_qq_id)
+        if "voice" in item:
+            from .voice_runtime import prepare_delivery
+
+            self.prepared_voice = prepare_delivery(self.window, item)
+        if not native and len(item["content"]["text"]) > self.window.plan.value["max_reply_chars"]:
             raise ValueError("WINDOW_REPLY_TEXT_LIMIT")
         if not self.db.execute(
             "SELECT 1 FROM window_inputs WHERE event_id=? AND state='APPROVED' AND plan_hash=?",
@@ -1986,7 +2115,11 @@ class SendOperation:
         ).fetchone() and not (
             self.window.plan.value.get("live_text", {}).get("companion_scope") == "owner_private_v1"
             and (item.get("action_type") == "qq.private.proactive"
-                 or item.get("window_notice") == "commitment")
+                 or item.get("window_notice") == "commitment"
+                 or (account and account_actions.enabled(self.window))
+                 or (pokes.enabled(self.window) and pokes.admitted(self.window, event_id)
+                     and re.fullmatch(r"poke-response:job_[a-f0-9]{32}",
+                                      item.get("delivery_key", ""))))
         ):
             raise ValueError("UNAPPROVED_DELIVERY_INPUT")
         attempts = self.window.count("window_attempts")
@@ -2002,6 +2135,9 @@ class SendOperation:
                              amount=segment["count"])
         fence = self.window.row()["fence"] + 1
         item_hash = digest(item)
+        from .owner_resolution import binding
+
+        retained = binding(self.window, item, event_id)
         head = self.window.append(
             "RESERVED",
             {
@@ -2009,6 +2145,7 @@ class SendOperation:
                 "event_hash": digest(event_id),
                 "fence": fence,
                 "item_sha256": item_hash,
+                **({"delivery_binding": retained} if retained is not None else {}),
                 **({"reply_segment": reply_segments.journal_value(
                     segment, item["content"]["text"])} if segment else {}),
             },
@@ -2016,7 +2153,8 @@ class SendOperation:
         with self.db:
             self.db.execute(
                 "INSERT INTO window_attempts VALUES(?,?,?,'RESERVED',?,?,NULL,?,?)",
-                (item["message_id"], event_id, fence, expected["reply_sha256"], digest(approval),
+                (item["message_id"], event_id, fence, next(iter(approval_hash(item).values())),
+                 digest(approval),
                  item_hash, self.window.plan.sha256),
             )
             self.db.execute("UPDATE test_window SET fence=?,journal_head=?", (fence, head))
@@ -2052,6 +2190,8 @@ class SendOperation:
             raise ValueError("WINDOW_SEND_FENCED")
 
     def before_dispatch(self, *, state="IO_STARTED", request=None):
+        from .native_actions import approval_hash, prepare
+
         # HTTP request hooks can await DNS pinning after before_io(). Check again
         # after those hooks, at the transport boundary; keep the spent reservation.
         self.window.verify(active=False, dispatch=True)
@@ -2062,37 +2202,69 @@ class SendOperation:
         ).fetchone()
         item = self.current_item
         lease_until = min(self.lease_until, datetime.fromisoformat(item["lease_until"]))
-        stop_requested = self.window.stop_path.exists()
         quota = cumulative.inspect(self.window)
         _, not_before = (
             self.segment_context(item, attempt["event_id"], current=True)
             if attempt else (None, None)
         )
-        # All disk/DB reads are complete. Approval/config/lease/deadline below are
-        # pure checks with no lock, await, or file I/O after the last clock sample.
         if request is not None:
-            check_protocol_request(self.window, request)
-            expected = {"user_id": int(self.window.plan.config.owner_qq_id),
+            account = account_actions.is_account(item)
+            native = item.get("action_type") == "qq.private.poke"
+            check_protocol_request(self.window, request, native_poke=native,
+                account_action=self.prepared_account.path if account else None)
+            content = request.content
+            if account:
+                prepared = account_actions.prepare(self.window, item)
+                if (prepared != self.prepared_account or request.url.path != prepared.path
+                    or content != prepared.body or not attempt
+                    or prepared.content_sha256 != attempt["text_hash"]):
+                    raise ValueError("WINDOW_SEND_FENCED")
+                if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'")\
+                        .fetchone() and self.db.execute("SELECT 1 FROM automatic_recalls WHERE "
+                            "window_sha256=? AND state='PENDING' LIMIT 1",
+                            (self.window.plan.sha256,)).fetchone():
+                    raise ValueError("OWNER_RECALL_PENDING")
+            elif native:
+                prepared = prepare(item["content"], self.window.plan.config.owner_qq_id)
+                if (request.url.path != prepared.path or content != prepared.body
+                    or prepared != self.prepared_native or not attempt
+                    or prepared.content_sha256 != attempt["text_hash"]):
+                    raise ValueError("WINDOW_SEND_FENCED")
+            elif self.prepared_voice is not None:
+                from .voice_runtime import prepare_delivery
+
+                prepared = prepare_delivery(self.window, item)
+                body = decode(content, self.window.plan.config.max_voice_lease_bytes)
+                expected = {"user_id": int(self.window.plan.config.owner_qq_id),
+                            "message": prepared.message, "auto_escape": True}
+                if (request.url.path != "/send_private_msg" or prepared != self.prepared_voice
+                    or body != expected or digest(body) != prepared.body_sha256 or not attempt
+                    or digest(item["content"]["text"]) != attempt["text_hash"]):
+                    raise ValueError("WINDOW_SEND_FENCED")
+            else:
+                expected = {"user_id": int(self.window.plan.config.owner_qq_id),
                         "message": getattr(self, "prepared_message", None) or [
                             {"type": "text", "data": {"text": reply_segments.wire_text(item)}}],
                         "auto_escape": True}
-            content = request.content
-            body = decode(content, 6000000 if getattr(self, "prepared_message", None) else 65536)
-            if (
-                body != expected or not attempt
-                or body["message"][0]["data"]["text"] != reply_segments.wire_text(item)
-                or digest(item["content"]["text"]) != attempt["text_hash"]
-            ):
-                raise ValueError("WINDOW_SEND_FENCED")
+                body = decode(content, 6000000 if getattr(self, "prepared_message", None)
+                              else 65536)
+                if (request.url.path != "/send_private_msg" or body != expected or not attempt
+                    or body["message"][0]["data"]["text"] != reply_segments.wire_text(item)
+                    or digest(item["content"]["text"]) != attempt["text_hash"]):
+                    raise ValueError("WINDOW_SEND_FENCED")
+        stop_requested = self.window.stop_path.exists()
+        # Assets and ledger reads are complete. No await or file I/O follows the
+        # final clock sample before the checked request stream is handed off.
         if (
             stop_requested or not attempt
             or digest(self.approval) != attempt["approval_hash"]
             or digest(item) != attempt["item_hash"]
             or item["message_id"] != self.current[0]
             or self.approval["message_id"] != self.current[0]
-            or reply_segments.event_id(item) != attempt["event_id"]
+            or delivery_origin(item) != attempt["event_id"]
             or self.approval["event_id"] != attempt["event_id"]
-            or self.approval["reply_sha256"] != attempt["text_hash"]
+            or any(self.approval.get(key) != value or value != attempt["text_hash"]
+                   for key, value in approval_hash(item).items())
             or digest(self.window.plan.value) != self.window.plan.sha256
             or digest(asdict(self.window.plan.config)) != self.window.plan.value["config_sha256"]
             or row["state"] != "OPEN"
@@ -2108,12 +2280,16 @@ class SendOperation:
             seal_protocol_content(request, content)
 
     def complete(self, item, provider_id):
+        from .native_actions import AccountAck, NativeAck
+
         state = "ACK" if provider_id else "UNKNOWN"
         head = self.window.append(state, {"fence": self.current[1]})
         with self.db:
             self.db.execute(
                 "UPDATE window_attempts SET state=?,provider_ack_hash=? WHERE message_id=?",
-                (state, digest(provider_id) if provider_id else None, self.current[0]),
+                (state, digest(provider_id.value(item) if isinstance(provider_id, AccountAck)
+                               else provider_id.value() if isinstance(provider_id, NativeAck)
+                               else provider_id) if provider_id else None, self.current[0]),
             )
             segment = reply_segments.envelope(item)
             if provider_id and (segment is None or segment["index"] == segment["count"] - 1):
@@ -2136,8 +2312,12 @@ class WindowOneBot:
     def __init__(self, operation, protocol):
         self.operation, self.window = operation, operation.window
         self.config = self.window.plan.config
+        from .voice_runtime import enabled
+
+        self.voice_scope = enabled(self.window)
         self.companion = (self.window.plan.value.get("live_text", {}).get("companion_scope")
                           == "owner_private_v1")
+        self.account_scope = account_actions.enabled(self.window)
         if (
             str(protocol.base_url).rstrip("/") != self.config.onebot_http_url.rstrip("/")
             or protocol.headers.get("Authorization") != "Bearer " + self.config.onebot_token
@@ -2149,8 +2329,11 @@ class WindowOneBot:
 
     async def before_dispatch(self, request):
         live = self.window.plan.mode == "live_text"
-        check_protocol_request(self.window, request)
-        if request.url.path != "/send_private_msg":
+        native = self.operation.current_item.get("action_type") == "qq.private.poke"
+        account = account_actions.is_account(self.operation.current_item)
+        check_protocol_request(self.window, request, native_poke=native,
+            account_action=self.operation.prepared_account.path if account else None)
+        if request.url.path in {"/get_login_info", "/get_status", "/get_version_info"}:
             content = request.content
             if decode(content, 64) != {}:
                 raise ValueError("WINDOW_PROBE_CHANGED")
@@ -2158,7 +2341,21 @@ class WindowOneBot:
             seal_protocol_content(request, content)
             return
         item, approval = self.operation.current_item, self.operation.approval
-        if live:
+        if account:
+            from .continuous import flush_recalls
+
+            await flush_recalls(self.window, self.operation.client)
+            # A local rejection before the one-shot Core mark can still prove no dispatch.
+            self.operation.before_dispatch(request=request)
+            check = account_actions.send_check(self.window, item)
+            receipt = await self.window.core_post(self.operation.client,
+                "/internal/v1/account-actions/send-check", check)
+            if (set(receipt) != {"approved", "lease_until", "content_sha256", "payload_sha256"}
+                or receipt["approved"] is not True
+                or any(receipt[key] != check[key] for key in ("content_sha256", "payload_sha256"))):
+                raise ValueError("ACCOUNT_ACTION_SEND_FENCED")
+            self.operation.lease_until = datetime.fromisoformat(receipt["lease_until"])
+        elif live:
             from .continuous import flush_recalls, interruptible, pending_input
 
             while True:
@@ -2167,10 +2364,14 @@ class WindowOneBot:
                 receipt = await self.window.core_post(
                     self.operation.client, "/internal/v1/live-text/send-check",
                     {key: approval[key] for key in (
-                        "window_sha256", "event_id", "message_id", "reply_sha256"
+                        "window_sha256", "event_id", "message_id",
+                        "content_sha256" if native else "reply_sha256",
                     )} | {"lease_token": item["lease_token"]}
                     | ({"reply_revision": item["reply_revision"]}
-                       if "reply_revision" in item else {}),
+                       if "reply_revision" in item else {})
+                    | ({"voice": self.operation.prepared_voice.check}
+                       | {"reply_revision": item["voice"]["binding"]["reply_revision"]}
+                       if self.operation.prepared_voice is not None else {}),
                 )
                 pending = (interruptible(self.window) and self.window.db.execute(
                     "SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'",
@@ -2185,7 +2386,9 @@ class WindowOneBot:
             self.operation.lease_until = datetime.fromisoformat(receipt["lease_until"])
             # Core's await is the final asynchronous approval boundary. Rebind
             # the actual pending request as well as the local operation after it.
-            if (item["action_type"] == "qq.private.proactive" or "reply_revision" in item) and (
+            if (native or item["action_type"] == "qq.private.proactive"
+                or "reply_revision" in item or item.get("delivery_key", "").startswith(
+                    "poke-response:")) and (
                 pending_input(self.window, reply_segments.event_id(item))
             ):
                 raise ValueError("OWNER_INPUT_PENDING")
@@ -2207,6 +2410,16 @@ class WindowOneBot:
         return await self.delegate.send_text(reply_segments.wire_text(self.operation.current_item))
 
     async def send_content(self, content):
+        if self.operation.prepared_voice is not None:
+            self.operation.before_io(content["text"])
+            return await self.delegate.send_message(self.operation.prepared_voice.message)
+        if account_actions.is_account(self.operation.current_item):
+            self.operation.before_io(content)
+            return await self.delegate.send_account(self.operation.prepared_account,
+                                                    self.operation.current_item)
+        if self.operation.current_item.get("action_type") == "qq.private.poke":
+            self.operation.before_io(content)
+            return await self.delegate.send_native(self.operation.prepared_native)
         if "image" not in content:
             return await self.send_text(content["text"])
         if not self.companion:
@@ -2251,10 +2464,19 @@ def seal_protocol_content(request, content):
     request.headers["Content-Length"] = str(len(content))
 
 
-def check_protocol_request(window, request, *, reference_read=False):
+def check_protocol_request(window, request, *, reference_read=False, file_read=False,
+                           native_poke=False, account_action=None):
     config = window.plan.config
     if (
-        request.method != "POST" or request.url.path not in (
+        sum((reference_read, file_read, native_poke, account_action is not None)) > 1
+        or (account_action is not None and (account_action not in account_actions.PATHS.values()
+                                           or not account_actions.enabled(window)))
+        or request.method != "POST" or request.url.path not in (
+            {"/get_private_file_url"} if file_read else
+            {"/get_login_info", "/get_status", "/get_version_info", account_action}
+            if account_action is not None else
+            {"/get_login_info", "/get_status", "/get_version_info", "/friend_poke"}
+            if native_poke else
             {"/get_msg", "/get_forward_msg"} if reference_read else {
                 "/get_login_info", "/get_status", "/get_version_info", "/send_private_msg"
             }
@@ -2269,6 +2491,10 @@ def check_protocol_request(window, request, *, reference_read=False):
 
 
 async def command(config, args):
+    if args.command in {"window-delivery-prepare", "window-delivery-reconcile"}:
+        from .owner_resolution import command as reconcile_command
+
+        return await reconcile_command(config, args)
     if args.command == "window-status":
         return read_status(config)
     if args.command == "window-abort-handoff":
