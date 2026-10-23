@@ -6,7 +6,7 @@ import json
 import re
 from datetime import UTC, datetime
 from html.parser import HTMLParser
-from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpcore
 
@@ -15,6 +15,31 @@ from source_reader.network import ReadFailure, post_url, response_body
 
 IMAGE_HOSTS = source_definition("heybox").image_hosts
 POST_ID = r"(?:[0-9]{1,32}|[0-9a-fA-F]{12})"
+
+
+def post_matches(post, identifier):
+    actual = str(post.get("linkid", post.get("link_id", identifier))).lower()
+    if actual == identifier:
+        return True
+    # Short share IDs resolve to numeric post IDs. Accept that mapping only when
+    # this same response binds the requested alias in the official share locator.
+    share = post.get("share_url")
+    if (identifier.isdigit() or not re.fullmatch(r"[0-9a-f]{12}", identifier)
+            or not re.fullmatch(r"[0-9]{1,32}", actual)
+            or not isinstance(share, str) or len(share) > 2048
+            or "\\" in share or any(ord(char) <= 32 for char in share)):
+        return False
+    try:
+        locator = urlsplit(share)
+        ids = [value.lower() for key, value in parse_qsl(
+            locator.query, keep_blank_values=True, max_num_fields=20
+        ) if key == "link_id"]
+        return (locator.scheme == "https" and locator.hostname == "api.xiaoheihe.cn"
+                and not locator.username and not locator.password
+                and locator.port in {None, 443} and not locator.fragment
+                and locator.path == "/v3/bbs/app/api/web/share" and ids == [identifier])
+    except ValueError:
+        return False
 
 
 def image_url(value):
@@ -256,7 +281,7 @@ class HeyboxReader:
             if not isinstance(post, dict):
                 raise ReadFailure("READ_BODY_UNAVAILABLE")
             identifier = url.rsplit("/", 1)[1]
-            if str(post.get("linkid", post.get("link_id", identifier))).lower() != identifier:
+            if not post_matches(post, identifier):
                 raise ReadFailure("READER_TARGET_MISMATCH")
             title = post.get("title", "")
             parts = article_parts(post.get("text", post.get("content", "")))

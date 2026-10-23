@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 import ssl
+from datetime import datetime
 
 import httpcore
 import httpx
@@ -179,6 +180,106 @@ def test_source_response_must_match_the_requested_post():
     post["result"]["link"]["linkid"] += 1
     result, _ = run(read(response(post)))
     assert result["error_code"] == "READER_TARGET_MISMATCH"
+
+
+@pytest.mark.parametrize("share_id", ["a78a72b1fc02", "A78A72B1FC02"])
+def test_short_share_id_matches_official_response_locator(share_id):
+    post = copy.deepcopy(POST)
+    post["result"]["link"]["share_url"] = (
+        "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share"
+        "?h_camp=link&link_id=" + share_id + "&new_post_share_style_v2=0"
+    )
+    target = "https://www.xiaoheihe.cn/app/bbs/link/a78a72b1fc02"
+    result, backend = run(read(response(post), item={**ITEM, "url": target}))
+    assert result["status"] == "SUCCESS" and result["items"][0]["url"] == target
+    assert result["items"][0]["text"].startswith("第一段介绍了手绘地图。")
+    assert result["items"][0]["image_urls"] == [IMAGE]
+    assert len(backend.requests) == 1
+
+
+@pytest.mark.parametrize("share_url", [
+    "https://evil.test/v3/bbs/app/api/web/share?link_id=a78a72b1fc02",
+    "https://api.xiaoheihe.cn.evil.test/v3/bbs/app/api/web/share?link_id=a78a72b1fc02",
+    "https://user:pass@api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=a78a72b1fc02",
+    "http://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=a78a72b1fc02",
+    "https://api.xiaoheihe.cn:444/v3/bbs/app/api/web/share?link_id=a78a72b1fc02",
+    "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=a78a72b1fc02#fragment",
+    "https://api.xiaoheihe.cn/bbs/app/link/tree?link_id=a78a72b1fc02",
+    "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=000000000001",
+    "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=a78a72b1fc02&link_id=a78a72b1fc02",
+    "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=a78a72b1fc02&link_id=other",
+    None,
+])
+def test_short_share_id_rejects_unbound_or_ambiguous_response_locators(share_url):
+    post = copy.deepcopy(POST)
+    post["result"]["link"]["share_url"] = share_url
+    result, backend = run(read(response(post), item={
+        **ITEM, "url": "https://www.xiaoheihe.cn/app/bbs/link/a78a72b1fc02",
+    }))
+    assert result["error_code"] == "READER_TARGET_MISMATCH" and not result["items"]
+    assert len(backend.requests) == 1
+
+
+def test_numeric_target_mismatch_cannot_be_overridden_by_share_url():
+    post = copy.deepcopy(POST)
+    post["result"]["link"]["linkid"] += 1
+    post["result"]["link"]["share_url"] = (
+        "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=168860244"
+    )
+    result, _ = run(read(response(post)))
+    assert result["error_code"] == "READER_TARGET_MISMATCH"
+
+
+def test_native_short_share_http_worker_keeps_ordered_media_and_provenance(core, tmp_path):
+    from source_reader.heybox_source import NativeHeyboxSource
+    from tests.test_plugin_readonly import registered_grant
+
+    configure(core)
+    core.settings.content_enabled = True
+    target = "https://www.xiaoheihe.cn/app/bbs/link/a78a72b1fc02"
+    post = copy.deepcopy(POST)
+    post["result"]["link"]["share_url"] = (
+        "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=a78a72b1fc02"
+    )
+    static = "https://imgheybox1.max-c.com/bbs/static.webp"
+    motion = "https://imgheybox1.max-c.com/bbs/motion.gif"
+    post["result"]["link"]["text"] = json.dumps([
+        {"type": "img", "url": static},
+        {"type": "text", "text": "图集之后的正文。"},
+        {"type": "img", "url": motion + "?imageMogr2/format/jpg"},
+        {"type": "text", "text": "动图之后的正文。"},
+    ], ensure_ascii=False)
+    ingest(core, text=target)
+    app = create_app(core.settings)
+    app.state.core = core
+
+    async def scenario():
+        pool, backend = mock_pool(response(post))
+        path = registered_grant(core, tmp_path)
+        async with NativeHeyboxSource(
+            path, pool, clock=lambda: datetime.fromisoformat(core.clock())
+        ) as source:
+            token = core.settings.observation_adapters["heybox"].token.get_secret_value()
+            async with httpx.AsyncClient(
+                base_url="http://core", transport=httpx.ASGITransport(app=app),
+                headers={"Authorization": "Bearer " + token},
+            ) as client:
+                assert await tick(client, HeyboxReader(None, source, clock=core.clock), "heybox")
+        assert len(backend.requests) == 1 and b"link_id=a78a72b1fc02" in backend.requests[0]
+        assert token.encode() not in backend.requests[0]
+
+    run(scenario())
+    observation = core.store.one("SELECT result_status,evidence_json FROM observations")
+    assert observation["result_status"] == "FETCHED"
+    evidence = json.loads(observation["evidence_json"])["article"]
+    assert [image["url"] for image in evidence["images"]] == [static, motion]
+    context = core.content.context("evt_test_1")[0]
+    assert context["text"] == "[图片1链接]\n图集之后的正文。\n[图片2链接]\n动图之后的正文。"
+    assert evidence["response_sha256"] == hashlib.sha256(
+        json.dumps(post, ensure_ascii=False).encode()
+    ).hexdigest()
+    assert len(core.store.rows("SELECT * FROM content_items WHERE kind='link_image'")) == 2
+    assert "external_untrusted" in core.content.context_message("evt_test_1", 4000)
 
 
 def test_discovery_uses_only_the_feed_get_route_and_deduplicates_titles():
