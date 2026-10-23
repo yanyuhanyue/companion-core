@@ -17,6 +17,23 @@ WebReader。默认 legacy worker 继续使用 `/internal/v2/readers`；`reading-
 | 通用网页 | WebHTTP 受控 GET，再交给 Trafilatura 纯 HTML 解析 | 只说明提取到的页面文字；无正文、失效页面、限制访问、解析器缺失分别失败 |
 | JS 页面 | 复用 BrowserRenderer 的离线 Chromium 会话，解析内联脚本生成的 DOM | 外部脚本、网络请求、WebSocket、iframe 和新窗口仍受隔离；依赖外部加载的 SPA 可能没有正文 |
 
+### 评论与弹幕样本
+
+| 来源 | 新增读取范围 | 模型上下文中的覆盖说明 |
+| --- | --- | --- |
+| B站 | 显式启用后先读取现有第 1 分 P 字幕，再在同一 Reader 请求/字节预算内读取评论和当前弹幕池的有界样本 | 评论、弹幕与正文/字幕分开；标明实际可用状态与 `partial`，弹幕范围为 `current_pool_sample` |
+| 小黑盒 | 保留同一次 tree 响应已经返回的有界评论、楼层和楼中楼回复关系 | 评论与帖子正文分开；保留评论 ID、回复关系及截断信息，上游总数不等于本次读到的条数 |
+
+B站补充读取默认关闭，仅常规 B站 Reader 可用 CLI `--discussion` 显式开启；
+`legacy` 和 `reading-v1` 均支持。字幕优先，随后评论和弹幕各至多发起一次补充请求，
+共享原 `ReadBudget`；预算不足标为 `budget_limited`，不扩大原请求或字节额度。
+小黑盒不为补齐评论另行抓取；两者均不自动翻页读取全部讨论。
+
+评论中的图片数量只是未分析图片引用，不代表看过图片。当前弹幕池样本不等于完整视频
+的全部弹幕或历史弹幕。评论和弹幕继续作为 `untrusted_external` 资料，不能生成权限或
+执行指令；既有账号授权、来源撤回、派生清除、预算预留和 UNKNOWN 计量仍然生效。
+这次增量的验证单独记录在集成回执中；下述既有字幕回执不构成评论或弹幕的真实验收。
+
 B站结果始终是 `DISCOVERED` 或 `FETCHED`。本模块不会产生 `WATCHED`，也不产生视频
 片段/音频分析证据。片段分析由部署方的视频模块负责，需按其真实时间范围另行记录。
 
@@ -84,7 +101,7 @@ python -m source_reader --protocol reading-v1 --source bilibili `
 | `observations[].original_url / url` | 原请求 URL 与实际结果 URL；重定向不丢原来源 |
 | `fetched_at / content_sha256 / parser_version` | 获取时间、实际输出文本 UTF-8 SHA-256、固定解析器版本 |
 | `quotes` | 最多 8 段引用，每段最多 500 字符；`start/end` 是输出文本的 Python 字符偏移 |
-| `coverage / evidence` | 明确读取范围、截断、字幕区间、原始响应哈希和既有图片位置 |
+| `coverage / evidence` | 明确读取范围、截断、字幕区间、原始响应哈希和既有图片位置；附加评论/弹幕样本分别保留可用状态及部分覆盖说明 |
 | `provenance` | 根任务、来源类型、来源事件、privacy epoch、可选授权快照 |
 | `trust` | 固定 `untrusted_external`；正文不能产生权限、系统指令或模型工具调用 |
 | `used_requests / used_bytes` | 可结算的已知用量；UNKNOWN 或已启动请求后的取消返回 `null` |
