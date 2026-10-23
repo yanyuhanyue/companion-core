@@ -43,13 +43,15 @@ READER_AUTH = {"Authorization": "Bearer " + TOKEN}
 
 
 @asynccontextmanager
-async def window(core, tmp_path, monkeypatch):
+async def window(core, tmp_path, monkeypatch, *, context_soft_tokens=None):
     now = datetime.now(UTC)
     core.clock.now = now
     # This Reader fixture has no memory rows; it does not need an embedding model download.
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     monkeypatch.setattr(window_fixtures, "raw_event", lambda: raw_event(time=int(now.timestamp())))
     options = companion_options(core)
+    if context_soft_tokens is not None:
+        options["core_options"]["context_soft_tokens"] = context_soft_tokens
     options["link_scope"] = "owner_links_v1"
     options["core_options"].update(
         content_enabled=True, observation_enabled=True,
@@ -134,9 +136,13 @@ async def finish(client, core, item, *, status="SUCCESS"):
     return result.json(), body
 
 
-def test_signed_shortlink_read_continues_into_latest_reply_once(core, tmp_path, monkeypatch):
+@pytest.mark.parametrize("context_soft_tokens", [3200, 16000])
+def test_signed_shortlink_read_continues_into_latest_reply_once(
+    core, tmp_path, monkeypatch, context_soft_tokens,
+):
     async def scenario():
-        async with window(core, tmp_path, monkeypatch) as (client, config, plan):
+        async with window(core, tmp_path, monkeypatch,
+                          context_soft_tokens=context_soft_tokens) as (client, config, plan):
             first, old = await admit(client, core, config, plan, 1, card=SHORT)
             entered, release = asyncio.Event(), asyncio.Event()
             metadata = {**META, "data": {**META["data"], "aid": 1701, "duration": 12}}
@@ -227,8 +233,10 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(core, tmp_path, 
             assert len(calls) == 1
             prompt = encode(calls[0])
             assert all(value in prompt for value in (
-                "恒星的颜色与温度有关", "评论层观点", "current_pool_sample", "你试试应该可以看了",
+                "恒星的颜色与温度有关", "你试试应该可以看了", "shared_content", "FETCHED",
             ))
+            if context_soft_tokens == 16000:
+                assert "评论层观点" in prompt and "current_pool_sample" in prompt
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": latest["event_id"]},
             ]

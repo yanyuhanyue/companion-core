@@ -13,6 +13,7 @@ from companion import (
     input_recall,
     live_text,
     notices,
+    owner_exploration,
     private_life,
     qq_images,
     qq_rich,
@@ -230,6 +231,8 @@ class Core(Runtime):
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
                 if not diary_command and not control_command:
                     self.content.schedule(event.event_id)
+                    self.content.followup(event.event_id)
+                    owner_exploration.schedule(self, event.event_id)
                 self.affect.observe(event.event_id)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
                 return {
@@ -328,6 +331,8 @@ class Core(Runtime):
                         live_text.check_model(s, self.settings, self.clock, inflight["request_id"])
                         return None
                 if self.content.status(row["event_id"])["pending"]:
+                    return None
+                if owner_exploration.pending(self, row["event_id"]):
                     return None
             token = uid("lease")
             s.execute(
@@ -487,6 +492,12 @@ class Core(Runtime):
         body = json.loads(job["body_json"])
         text = body.get("text", "")
         rules = PRINCIPLES + self.expression.instruction(job["event_id"])
+        if private_life.enabled(cfg):
+            from companion.capabilities import prompt as capability_prompt
+            from companion.capabilities import snapshot as capability_snapshot
+
+            rules += capability_prompt(capability_snapshot(s, cfg, self.clock),
+                                       compact=cfg.context_soft_tokens < 8000)
         if (job["kind"] == "chat" and cfg.segmented_reply is not None
             and cfg.segmented_reply.mode == "semantic"):
             from companion.reply_segments import SEMANTIC_RULES
@@ -501,6 +512,8 @@ class Core(Runtime):
         references = []
         reference_sources = []
         reference_proofs = []
+        if browsing := owner_exploration.context(self, job["event_id"]):
+            reference_sources.append((browsing["message"], browsing["source_event_ids"]))
         bounded_text = private_life.strict(s, cfg)
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
         combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
@@ -525,7 +538,13 @@ class Core(Runtime):
             and not body.get("control_command")
         ):
             available = cfg.context_soft_tokens - budget.token_upper_bound([rules, current])
-            if body.get("rich"):
+            if private_life.enabled(cfg) and self.content._consumer_rows(job["event_id"]):
+                # Current reading evidence is required input. A capability inventory
+                # must not consume its entire excerpt allowance; paid admission still
+                # checks the complete payload, as for other required current input.
+                available = max(min(cfg.context_soft_tokens, cfg.content.max_context_chars),
+                                available)
+            elif body.get("rich"):
                 # Keep current evidence alongside rich metadata; paid admission
                 # still checks the complete request against its hard limits.
                 available = max(2048, available)
@@ -621,6 +640,8 @@ class Core(Runtime):
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             rules["content"] += qq_rich.RULES
         current_input = []
+        if browsing:
+            current_input.append(browsing["message"])
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         if rich_reference := qq_rich.context(body):

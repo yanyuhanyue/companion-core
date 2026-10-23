@@ -39,7 +39,8 @@ def queue(window, event, raw, capture):
     prepare(window)
     value = {"window_sha256": window.plan.sha256, "event_id": event["event_id"],
              "capture_sha256": digest(capture), "input_sha256": capture["input_sha256"],
-             "images": [asdict(image) for image in images]}
+             "images": [{key: item for key, item in asdict(image).items()
+                         if key != "face_id" or item is not None} for image in images]}
     value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
         window.plan.config.capture_signing_key)).sign(DOMAIN + encode(value).encode()).hex()
     prior = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
