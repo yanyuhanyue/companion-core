@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from companion import live_text, paid_budget, private_life, qq_images, video_input
+from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.exploration import METERED_READS_SQL
 from companion.source_grants import SourceGrantService, SourceGrantSnapshot
@@ -61,9 +62,11 @@ def _model_blocks(store, settings, now):
     reasons = _live_blocks(store, settings, now)
     if settings.mode == "live":
         try:
-            paid_budget.contract(settings, now)
+            approval = paid_budget.contract(settings, now)
         except CoreError as error:
             reasons.append(error.code)
+        else:
+            reasons += _paid_capacity_blocks(store, settings, approval, now)
     else:
         reasons.append("DEMO_MODE")
     return reasons
@@ -74,6 +77,69 @@ def _periods(settings, now):
     day = local.replace(hour=0, minute=0, second=0, microsecond=0)
     return tuple(at.astimezone(UTC).isoformat(timespec="microseconds")
                  for at in (day, day.replace(day=1)))
+
+
+def _paid_capacity_blocks(store, settings, approval, now):
+    """Report exhausted native quotas without estimating or reserving another call."""
+    reasons = []
+    if store.one(
+        "SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
+        "WHERE a.request_id IS NULL AND m.state IN ('RESERVED','UNKNOWN') LIMIT 1",
+    ):
+        reasons.append("MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED")
+    day, month = _periods(settings, now)
+    daily = store.one(
+        "SELECT COUNT(*) calls,COALESCE(SUM(billed_micro_usd),0) amount "
+        "FROM model_usage WHERE occurred_at>=?", (day,),
+    )
+    unlimited = approval.unlimited_period_spend
+    if (daily["calls"] >= approval.daily_calls
+        or (not unlimited and daily["amount"] >= approval.daily_micro_usd)):
+        reasons.append("MODEL_DAILY_BUDGET_EXHAUSTED")
+    if not unlimited:
+        monthly = total_monthly(store, month)
+        if settings.pricing_known and monthly >= settings.monthly_limit_micro_usd:
+            reasons.append("MONTHLY_BUDGET_EXHAUSTED")
+        if monthly >= approval.monthly_micro_usd:
+            reasons.append("MODEL_MONTHLY_BUDGET_EXHAUSTED")
+    window = store.one(
+        "SELECT COUNT(*) calls,COALESCE(SUM(m.billed_micro_usd),0) amount "
+        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a.window_id=?",
+        (approval.window_id,),
+    )
+    if (window["calls"] >= approval.window_calls
+        or (not unlimited and window["amount"] >= approval.window_micro_usd)):
+        reasons.append("MODEL_WINDOW_BUDGET_EXHAUSTED")
+    running = store.one(
+        "SELECT COUNT(*) n FROM model_usage m JOIN model_admissions a USING(request_id) "
+        "WHERE m.state IN ('RESERVED','UNKNOWN')",
+    )["n"]
+    if running >= approval.concurrency:
+        reasons.append("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
+    return reasons
+
+
+def _reflection_blocks(store, settings, now):
+    day, month = _periods(settings, now)
+    used = store.one(
+        "SELECT COUNT(CASE WHEN occurred_at>=? THEN 1 END) calls,"
+        "COALESCE(SUM(CASE WHEN occurred_at>=? THEN billed_micro_usd ELSE 0 END),0) daily,"
+        "COALESCE(SUM(billed_micro_usd),0) monthly FROM model_usage "
+        "WHERE scenario='reflection' AND occurred_at>=?", (day, day, month),
+    )
+    reasons = []
+    if used["calls"] >= settings.reflection_max_daily_calls:
+        reasons.append("SCENARIO_CALL_LIMIT")
+    unlimited = bool(settings.mode == "live" and settings.paid_model
+                     and settings.paid_model.unlimited_period_spend)
+    if not unlimited:
+        if (settings.reflection_daily_micro_usd > 0
+            and used["daily"] >= settings.reflection_daily_micro_usd):
+            reasons.append("DAILY_BUDGET_EXHAUSTED")
+        if (settings.reflection_monthly_micro_usd > 0
+            and used["monthly"] >= settings.reflection_monthly_micro_usd):
+            reasons.append("SCENARIO_MONTHLY_BUDGET_EXHAUSTED")
+    return reasons
 
 
 def public_source_readiness(store, settings, clock, adapter_id, *, integration=None,
@@ -183,13 +249,16 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         ("consolidation", "整理已有记忆和日常记录。", life_pause, {}),
         ("reflection", "基于已有来源提出反思建议。", life_pause,
          {"daily_micro_usd": cfg.reflection_daily_micro_usd,
-          "monthly_micro_usd": cfg.reflection_monthly_micro_usd}),
+          "monthly_micro_usd": cfg.reflection_monthly_micro_usd,
+          "max_daily_calls": cfg.reflection_max_daily_calls}),
         ("wake", "在已有目标和限额内调度自主活动。", life_pause,
          {"max_daily_runs": cfg.wake_max_daily_runs}),
     ):
         paused = model_blocks + extra
         if limits and any(value <= 0 for value in limits.values()):
             paused += ["SCENARIO_BUDGET_DISABLED"]
+        if name == "reflection":
+            paused += _reflection_blocks(store, cfg, now)
         if name == "diary" and _meta(store, "owner_qq_id") != cfg.owner_qq_id:
             paused += ["OWNER_IDENTITY_REQUIRED"]
         if name == "wake" and not (cfg.goals_enabled and cfg.exploration_enabled):

@@ -1,7 +1,7 @@
 """Capability claims follow native state, without mutating or disclosing it."""
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -274,3 +274,271 @@ def test_discovery_keeps_source_grant_scope_and_web_is_read_only(core):
     current = public_source_readiness(core.store, cfg, core.clock, "web", operation="discover")
     assert current["state"] == "UNAVAILABLE"
     assert "READER_OPERATION_UNAVAILABLE" in current["reason_codes"]
+
+
+def reflection_settings(core, tmp_path, *, unlimited=False):
+    approved_live(core, tmp_path, **({
+        "unlimited_period_spend": True, "daily_micro_usd": None,
+        "monthly_micro_usd": None, "window_micro_usd": None,
+    } if unlimited else {}))
+    core.settings.reflection_enabled = True
+    core.settings.reflection_daily_micro_usd = 100
+    core.settings.reflection_monthly_micro_usd = 1000
+
+
+def usage(core, *, state="SETTLED", amount=1, at=None, scenario="reflection"):
+    number = core.store.one("SELECT COUNT(*) n FROM model_usage")["n"]
+    core.store.insert(
+        "model_usage", usage_id=f"usage_capability_{number}",
+        request_id=f"request_capability_{number}", scenario=scenario,
+        provider=core.settings.provider, model=core.settings.model_name,
+        state=state, billed_micro_usd=amount, occurred_at=at or core.clock(),
+    )
+    return f"request_capability_{number}"
+
+
+@pytest.mark.parametrize("state", ["SETTLED", "RESERVED", "UNKNOWN"])
+@pytest.mark.parametrize("unlimited", [False, True])
+def test_reflection_capability_counts_every_attempt_even_with_unlimited_spend(
+    core, tmp_path, state, unlimited,
+):
+    reflection_settings(core, tmp_path, unlimited=unlimited)
+    assert rows(core)["reflection"]["state"] == "READY"
+    usage(core, state=state)
+    before = list(core.store.db.iterdump())
+    current = rows(core)["reflection"]
+    assert current["state"] == "PAUSED"
+    assert "SCENARIO_CALL_LIMIT" in current["reason_codes"]
+    assert current["limits"]["max_daily_calls"] == 1
+    assert list(core.store.db.iterdump()) == before
+    assert not (tmp_path / "budget.jsonl").exists()
+
+
+@pytest.mark.parametrize("state", ["SETTLED", "RESERVED", "UNKNOWN"])
+@pytest.mark.parametrize("period,reason", [
+    ("daily", "DAILY_BUDGET_EXHAUSTED"),
+    ("monthly", "SCENARIO_MONTHLY_BUDGET_EXHAUSTED"),
+])
+def test_reflection_capability_includes_all_accounted_amounts(
+    core, tmp_path, state, period, reason,
+):
+    reflection_settings(core, tmp_path)
+    core.settings.reflection_max_daily_calls = 5
+    at = None if period == "daily" else "2026-10-18T04:00:00.000000+00:00"
+    amount = getattr(core.settings, "reflection_" + period + "_micro_usd")
+    usage(core, state=state, amount=amount, at=at)
+    current = rows(core)["reflection"]
+    assert current["state"] == "PAUSED"
+    assert reason in current["reason_codes"]
+    assert "SCENARIO_CALL_LIMIT" not in current["reason_codes"]
+    if period == "monthly":
+        assert "DAILY_BUDGET_EXHAUSTED" not in current["reason_codes"]
+
+
+def test_reflection_capability_unlimited_spend_does_not_remove_call_limit(core, tmp_path):
+    reflection_settings(core, tmp_path, unlimited=True)
+    core.settings.reflection_max_daily_calls = 2
+    usage(core, amount=1000)
+    current = rows(core)["reflection"]
+    assert current["state"] == "READY"
+    assert current["reason_codes"] == []
+    usage(core, amount=1000)
+    current = rows(core)["reflection"]
+    assert current["state"] == "PAUSED"
+    assert current["reason_codes"] == ["SCENARIO_CALL_LIMIT"]
+
+
+@pytest.mark.parametrize("period", ["daily", "monthly"])
+def test_reflection_capability_zero_amount_stays_disabled_with_unlimited_spend(
+    core, tmp_path, period,
+):
+    reflection_settings(core, tmp_path, unlimited=True)
+    setattr(core.settings, "reflection_" + period + "_micro_usd", 0)
+    current = rows(core)["reflection"]
+    assert current["state"] == "PAUSED"
+    assert current["reason_codes"] == ["SCENARIO_BUDGET_DISABLED"]
+
+
+@pytest.mark.parametrize("now,at,reasons", [
+    ("2026-11-01T00:00:00+08:00", "2026-10-31T15:59:59.999999+00:00", []),
+    ("2026-11-01T00:00:00+08:00", "2026-10-31T16:00:00.000000+00:00",
+     ["SCENARIO_CALL_LIMIT", "DAILY_BUDGET_EXHAUSTED", "SCENARIO_MONTHLY_BUDGET_EXHAUSTED"]),
+    ("2026-10-19T00:00:00+08:00", "2026-10-18T15:59:59.999999+00:00",
+     ["SCENARIO_MONTHLY_BUDGET_EXHAUSTED"]),
+])
+def test_reflection_capability_uses_local_day_and_month_boundaries(
+    core, tmp_path, now, at, reasons,
+):
+    reflection_settings(core, tmp_path)
+    core.clock.now = datetime.fromisoformat(now)
+    usage(core, amount=1000, at=at)
+    current = rows(core)["reflection"]
+    assert current["reason_codes"] == reasons
+    assert current["state"] == ("PAUSED" if reasons else "READY")
+
+
+def test_reflection_capability_does_not_charge_other_scenarios(core, tmp_path):
+    reflection_settings(core, tmp_path)
+    for scenario in ("chat", "diary", "memory_review"):
+        usage(core, amount=1000, scenario=scenario)
+    current = rows(core)["reflection"]
+    assert current["state"] == "READY"
+    assert current["reason_codes"] == []
+
+
+def paid_capacity_settings(core, tmp_path, **changes):
+    approval = approved_live(core, tmp_path, **{
+        "daily_micro_usd": 1000000, "monthly_micro_usd": 10000000,
+        "window_micro_usd": 1000000, "daily_calls": 20,
+        "window_calls": 10, "concurrency": 32, **changes,
+    })
+    core.settings.memory_enabled = True
+    return approval
+
+
+def admission(core, request_id, *, window_id=None):
+    approval = core.settings.paid_model
+    window_id = window_id or approval.window_id
+    core.store.execute("INSERT OR IGNORE INTO model_budget_windows VALUES (?,?)",
+                       (window_id, "a" * 64))
+    core.store.insert(
+        "model_admissions", request_id=request_id, logical_request_id=request_id,
+        attempt_id="attempt_" + request_id, attempt_number=1, window_id=window_id,
+        contract_sha256="a" * 64, payload_sha256="b" * 64, snapshot_json="{}",
+        reserved_micro_usd=1, input_bound=1, output_bound=1, lease_token="fixture-lease",
+        lease_until="2000-01-01T00:00:00.000000+00:00",
+        journal_path=approval.journal_path, journal_id="budget_" + "a" * 32,
+    )
+
+
+def tool_charge(core, amount, *, at=None):
+    number = core.store.one("SELECT COUNT(*) n FROM tool_tasks")["n"]
+    core.store.insert(
+        "tool_tasks", task_id=f"tool_capability_{number}", idempotency_key=f"tool-key-{number}",
+        request_sha256="a" * 64, scope_sha256="b" * 64, executor_id="synthetic",
+        capability="dsh.run", scope_json="{}", risk_level=3, state="UNKNOWN",
+        captured_privacy_epoch=0, billed_micro_usd=amount, dispatched_at=at or core.clock(),
+        created_at=core.clock(), updated_at=core.clock(),
+    )
+
+
+@pytest.mark.parametrize("state", ["SETTLED", "RESERVED", "UNKNOWN"])
+def test_paid_capacity_daily_amount_counts_preexisting_other_window_usage(core, tmp_path, state):
+    approval = paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
+    request = usage(core, state=state, amount=100, scenario="chat")
+    admission(core, request, window_id="previous-paid-window")
+    assert not core.store.one("SELECT 1 FROM model_admissions WHERE window_id=?",
+                              (approval.window_id,))
+    before = list(core.store.db.iterdump())
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert "MODEL_DAILY_BUDGET_EXHAUSTED" in current["reason_codes"]
+    assert "MODEL_WINDOW_BUDGET_EXHAUSTED" not in current["reason_codes"]
+    assert list(core.store.db.iterdump()) == before
+    assert not (tmp_path / "budget.jsonl").exists()
+
+
+@pytest.mark.parametrize("state", ["RESERVED", "UNKNOWN"])
+def test_paid_capacity_requires_reconciliation_for_legacy_unadmitted_usage(core, tmp_path, state):
+    paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
+    usage(core, state=state, amount=100, scenario="content_video")
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert "MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED" in current["reason_codes"]
+    assert "MODEL_DAILY_BUDGET_EXHAUSTED" in current["reason_codes"]
+    assert "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" not in current["reason_codes"]
+
+
+def test_paid_capacity_unlimited_daily_calls_still_count_all_model_scenarios(core, tmp_path):
+    paid_capacity_settings(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
+                           monthly_micro_usd=None, window_micro_usd=None, daily_calls=2)
+    usage(core, amount=100000000, scenario="diary")
+    usage(core, amount=100000000, scenario="chat")
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert current["reason_codes"] == ["MODEL_DAILY_BUDGET_EXHAUSTED"]
+
+
+@pytest.mark.parametrize("ceiling,reason", [
+    ("paid", "MODEL_MONTHLY_BUDGET_EXHAUSTED"),
+    ("local", "MONTHLY_BUDGET_EXHAUSTED"),
+])
+def test_paid_capacity_monthly_totals_include_tool_responsibility(core, tmp_path, ceiling, reason):
+    paid_capacity_settings(core, tmp_path, monthly_micro_usd=500 if ceiling == "paid" else 1000)
+    core.settings.monthly_limit_micro_usd = 500 if ceiling == "local" else 1000
+    usage(core, amount=200, scenario="chat")
+    tool_charge(core, 300)
+    tool_charge(core, 1000000, at="2026-09-30T15:59:59.999999+00:00")
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert current["reason_codes"] == [reason]
+
+
+@pytest.mark.parametrize("ceiling", ["amount", "calls"])
+def test_paid_capacity_window_totals_use_only_current_window(core, tmp_path, ceiling):
+    paid_capacity_settings(core, tmp_path, window_micro_usd=100 if ceiling == "amount" else 1000,
+                           window_calls=2 if ceiling == "calls" else 10)
+    previous = usage(core, amount=500, scenario="chat")
+    admission(core, previous, window_id="previous-paid-window")
+    assert rows(core)["memory.recall"]["state"] == "READY"
+    first = usage(core, amount=50, scenario="chat")
+    admission(core, first)
+    assert rows(core)["memory.recall"]["state"] == "READY"
+    second = usage(core, amount=50, scenario="chat")
+    admission(core, second)
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert current["reason_codes"] == ["MODEL_WINDOW_BUDGET_EXHAUSTED"]
+
+
+@pytest.mark.parametrize("state", ["RESERVED", "UNKNOWN"])
+@pytest.mark.parametrize("unlimited", [False, True])
+def test_paid_capacity_concurrency_does_not_expire_with_lease_or_window(
+    core, tmp_path, state, unlimited,
+):
+    paid_capacity_settings(core, tmp_path, concurrency=2, **({
+        "unlimited_period_spend": True, "daily_micro_usd": None,
+        "monthly_micro_usd": None, "window_micro_usd": None,
+    } if unlimited else {}))
+    for window in ("previous-paid-window", core.settings.paid_model.window_id):
+        request = usage(core, state=state, scenario="chat")
+        admission(core, request, window_id=window)
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" in current["reason_codes"]
+    assert "MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED" not in current["reason_codes"]
+
+
+def test_paid_capacity_unlimited_amounts_leave_window_call_limit_intact(core, tmp_path):
+    paid_capacity_settings(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
+                           monthly_micro_usd=None, window_micro_usd=None, window_calls=2)
+    core.settings.monthly_limit_micro_usd = 1
+    first = usage(core, amount=100000000, scenario="chat")
+    admission(core, first)
+    tool_charge(core, 100000000)
+    assert rows(core)["memory.recall"]["state"] == "READY"
+    second = usage(core, amount=100000000, scenario="chat")
+    admission(core, second)
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "PAUSED"
+    assert current["reason_codes"] == ["MODEL_WINDOW_BUDGET_EXHAUSTED"]
+
+
+def test_paid_capacity_daily_limit_resets_at_local_midnight(core, tmp_path):
+    paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
+    core.clock.now = datetime.fromisoformat("2026-10-19T23:59:59.999999+08:00")
+    usage(core, amount=100, scenario="chat", at="2026-10-19T15:59:59.999999+00:00")
+    assert "MODEL_DAILY_BUDGET_EXHAUSTED" in rows(core)["memory.recall"]["reason_codes"]
+    core.clock.now += timedelta(microseconds=1)
+    assert rows(core)["memory.recall"]["state"] == "READY"
+
+
+def test_paid_capacity_does_not_guess_the_next_request_estimate(core, tmp_path):
+    paid_capacity_settings(core, tmp_path, daily_micro_usd=100, monthly_micro_usd=100,
+                           window_micro_usd=100)
+    core.settings.monthly_limit_micro_usd = 100
+    request = usage(core, amount=99, scenario="chat")
+    admission(core, request)
+    current = rows(core)["memory.recall"]
+    assert current["state"] == "READY"
+    assert current["reason_codes"] == []

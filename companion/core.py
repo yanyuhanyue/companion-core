@@ -229,7 +229,8 @@ class Core(Runtime):
                 if private_life.enabled(cfg):
                     cancel_proactive_work(s, now)
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
-                if not diary_command and not control_command:
+                if (not diary_command and not control_command
+                    and not body["text"].lstrip().startswith("/")):
                     self.content.schedule(event.event_id)
                     self.content.followup(event.event_id)
                     owner_exploration.schedule(self, event.event_id)
