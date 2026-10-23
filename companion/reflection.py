@@ -1,7 +1,7 @@
 """Bounded hypotheses grounded in source events, never self-authorizing personality changes."""
 
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,19 @@ text 最多500字，evidence 至少一条 {source_id,exact_quote}，引用原始
 observation 的 text 必须等于唯一引文。其他类型只提出暂时假设，不声明新增现实经历、
 浏览、执行行为或固定性格。主人偏好不等于我的兴趣；标题级来源不等于读过正文。
 日记不是事实证据；不更改记忆、人格、规则、权限或承诺。无值得保留的内容返回空数组。"""
+
+ADMISSION_RETRY_CODES = {"SCENARIO_CALL_LIMIT", "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED",
+                         "BACKGROUND_YIELD_TO_CHAT"}
+
+
+def retryable_admission(row, now):
+    return bool(
+        row and row["model_request_id"] is None
+        and ((row["state"] in {"FAILED", "RETRY_WAIT"}
+              and row["last_error_code"] in ADMISSION_RETRY_CODES)
+             or (row["state"] == "CANCELLED" and row["last_error_code"] == "LIVE_WINDOW_STOPPED"))
+        and (not row["next_attempt_at"] or row["next_attempt_at"] <= now)
+    )
 
 
 class ReflectionSuggestion(StrictModel):
@@ -68,7 +81,7 @@ def erase_reflections(store, event_ids, clear_replies):
         store.execute("DELETE FROM reflection_evidence WHERE run_id=?", (run_id,))
     store.execute(
         "UPDATE reflection_runs SET state='CANCELLED',lease_token=NULL,"
-        "last_error_code='PRIVACY_CHANGED' WHERE state='RUNNING'"
+        "last_error_code='PRIVACY_CHANGED' WHERE state IN ('RUNNING','RETRY_WAIT')"
     )
 
 
@@ -111,7 +124,26 @@ class ReflectionService:
                         "last_error_code='REFLECTION_LEASE_EXPIRED' WHERE run_id=?",
                         (prior["run_id"],),
                     )
-                return None
+                if not retryable_admission(prior, now):
+                    return None
+                sources = self.sources(day)
+                if prior["source_set_sha256"] != source_hash(sources):
+                    s.execute(
+                        "UPDATE reflection_runs SET state='CANCELLED',lease_token=NULL,"
+                        "next_attempt_at=NULL,last_error_code='REFLECTION_SOURCES_CHANGED' "
+                        "WHERE run_id=?", (prior["run_id"],),
+                    )
+                    return None
+                token = uid("reflection_lease")
+                s.execute(
+                    "UPDATE reflection_runs SET state='RUNNING',lease_token=?,lease_until=?,"
+                    "captured_privacy_epoch=?,next_attempt_at=NULL,last_error_code=NULL,"
+                    "updated_at=? WHERE run_id=?",
+                    (token, after(now, self.settings.lease_seconds), epoch(s), now,
+                     prior["run_id"]),
+                )
+                return {**s.one("SELECT * FROM reflection_runs WHERE run_id=?", (prior["run_id"],)),
+                        "sources": sources}
             sources = self.sources(day)
             token, run_id = uid("reflection_lease"), uid("reflection")
             s.insert(
@@ -162,14 +194,15 @@ class ReflectionService:
         ):
             raise CoreError("REFLECTION_SOURCES_CHANGED", 409)
 
-    def finish(self, run, state, code=None, suggestions=()):
+    def finish(self, run, state, code=None, suggestions=(), next_attempt_at=None):
         with self.store.transaction():
             if state in {"COMMITTED", "SKIPPED"}:
                 self.validate_lease(run)
             changed = self.store.execute(
                 "UPDATE reflection_runs SET state=?,lease_token=NULL,last_error_code=?,"
-                "updated_at=? WHERE run_id=? AND state='RUNNING' AND lease_token=?",
-                (state, code, self.clock(), run["run_id"], run["lease_token"]),
+                "next_attempt_at=?,updated_at=? WHERE run_id=? AND state='RUNNING' "
+                "AND lease_token=?",
+                (state, code, next_attempt_at, self.clock(), run["run_id"], run["lease_token"]),
             ).rowcount
             if changed:
                 for suggestion in suggestions:
@@ -276,6 +309,19 @@ class ReflectionService:
             )
         except Exception as error:
             code = error.code if isinstance(error, CoreError) else "REFLECTION_INVALID_OUTPUT"
+            current = self.store.one("SELECT * FROM reflection_runs WHERE run_id=?",
+                                     (run["run_id"],))
+            if code in ADMISSION_RETRY_CODES and current and current["model_request_id"] is None:
+                local = datetime.fromisoformat(self.clock()).astimezone(
+                    ZoneInfo(self.settings.timezone)
+                )
+                retry_at = (
+                    (local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    .astimezone(UTC).isoformat(timespec="microseconds")
+                    if code == "SCENARIO_CALL_LIMIT" else after(self.clock(), 60)
+                )
+                self.finish(run, "RETRY_WAIT", code, next_attempt_at=retry_at)
+                return self.status(day)
             self.finish(
                 run,
                 "CANCELLED"
@@ -287,8 +333,8 @@ class ReflectionService:
 
     def status(self, day):
         return self.store.one(
-            "SELECT run_id,state,last_error_code FROM reflection_runs WHERE local_date=? AND "
-            "timezone=?",
+            "SELECT run_id,state,last_error_code,next_attempt_at FROM reflection_runs "
+            "WHERE local_date=? AND timezone=?",
             (day.isoformat(), self.settings.timezone),
         )
 

@@ -41,6 +41,7 @@ REVISION_CHAIN = (
     "0018_reflection_goal_lineage",
     "0019_segmented_replies",
     "0020_reply_segment_capacity",
+    "0021_reflection_admission_retry",
 )
 LEGACY_TABLES = (
     "principals",
@@ -312,9 +313,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0020_reply_segment_capacity"]
+    assert scripts.get_heads() == ["0021_reflection_admission_retry"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0020_reply_segment_capacity")
+    revisions, current = [], scripts.get_revision("0021_reflection_admission_retry")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -372,7 +373,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0020_reply_segment_capacity"}
+            {"version_num": "0021_reflection_admission_retry"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
@@ -526,3 +527,54 @@ def test_0018_preserves_populated_goals_without_guessing_reflection_origins(tmp_
         }
         assert_old_columns_unchanged(store, before)
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
+
+
+def test_0021_retains_reflection_provenance_and_guards_pending_wait_downgrade(tmp_path):
+    database, _, _ = seed_legacy(tmp_path, "0004_diary")
+    migrate(str(database), "0020_reply_segment_capacity")
+    tables = ("reflection_runs", "reflection_evidence", "reflection_suggestions", "model_usage")
+    with closing(Store(str(database))) as store:
+        for index, state in enumerate(("FAILED", "COMMITTED", "SKIPPED", "CANCELLED")):
+            run_id = "old_reflection_" + str(index)
+            store.insert(
+                "reflection_runs", run_id=run_id, identity_id="companion",
+                local_date=f"2026-10-{10 + index}", timezone="Asia/Shanghai", state=state,
+                source_set_sha256="a" * 64, captured_privacy_epoch=2,
+                last_error_code="SCENARIO_CALL_LIMIT" if state == "FAILED" else None,
+                created_at=TIMES["keep"], updated_at=TIMES["keep"],
+            )
+            store.insert("reflection_evidence", run_id=run_id, event_id="evt_keep",
+                         source_id="owner:evt_keep")
+        store.insert(
+            "reflection_suggestions", suggestion_id="old_suggestion", run_id="old_reflection_1",
+            kind="next_question", content="继续了解银杉航线", evidence_json="[]", state="PENDING",
+            created_at=TIMES["keep"], updated_at=TIMES["keep"],
+        )
+        before = table_snapshot(store, tables)
+    migrate(str(database))
+    migrate(str(database))
+    with closing(Store(str(database))) as store:
+        assert_old_columns_unchanged(store, before)
+        assert all(row["next_attempt_at"] is None
+                   for row in store.rows("SELECT * FROM reflection_runs"))
+        assert store.rows("PRAGMA foreign_key_check") == []
+        store.execute("UPDATE reflection_runs SET state='RETRY_WAIT',next_attempt_at=? "
+                      "WHERE run_id='old_reflection_0'", (TIMES["keep"],))
+        pending = table_snapshot(store, tables)
+    config = Config()
+    config.set_main_option(
+        "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
+    )
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + database.resolve().as_posix())
+    with pytest.raises(
+        RuntimeError, match="REFLECTION_RETRY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"
+    ):
+        command.downgrade(config, "0020_reply_segment_capacity")
+    with closing(Store(str(database))) as store:
+        assert table_snapshot(store, tables) == pending
+        store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
+                      "WHERE run_id='old_reflection_0'")
+    command.downgrade(config, "0020_reply_segment_capacity")
+    with closing(Store(str(database))) as store:
+        assert table_snapshot(store, tables) == before
+        assert store.rows("PRAGMA foreign_key_check") == []
