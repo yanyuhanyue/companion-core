@@ -502,6 +502,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return live_text.prepare_handoff(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/live-text/handoff/abort", dependencies=auth)
+    async def live_text_handoff_abort(body: live_text.AbortHandoffReference):
+        core = app.state.core
+        return live_text.abort_handoff(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/inputs/approve", dependencies=auth)
     async def live_text_input(body: live_text.InputApproval):
         core = app.state.core
