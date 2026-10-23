@@ -15,6 +15,37 @@ def identifier(value, *, signed=False):
     return value
 
 
+def message_identity(config, message_id):
+    message_id = identifier(message_id, signed=True)
+    source = f"{config.bot_qq_id}:{config.origin}:epoch:{config.protocol_epoch}:{message_id}"
+    return source, "evt_" + hashlib.sha256(source.encode()).hexdigest()
+
+
+def normalize_recall(frame, config, *, now=None):
+    """Project only a canonical OneBot friend recall; direction needs an inbound receipt."""
+    raw = decode(frame, config.max_frame_bytes)
+    if raw.get("post_type") != "notice" or raw.get("notice_type") != "friend_recall":
+        return None
+    try:
+        if (identifier(raw.get("self_id")) != config.bot_qq_id
+            or identifier(raw.get("user_id")) != config.owner_qq_id):
+            return None
+    except ValueError:
+        return None
+    if set(raw) != {"time", "self_id", "post_type", "notice_type", "user_id", "message_id"}:
+        raise ValueError("INVALID_OWNER_RECALL")
+    stamp = raw.get("time")
+    if type(stamp) is not int or not 946684800 <= stamp <= (now or time.time()) + 300:
+        raise ValueError("INVALID_EVENT_TIME")
+    if identifier(raw["message_id"], signed=True) in {"0", "-0"}:
+        raise ValueError("INVALID_OWNER_RECALL")
+    source, event_id = message_identity(config, raw["message_id"])
+    occurred = datetime.fromtimestamp(stamp, UTC).isoformat()
+    return {"recall_id": "recall_" + hashlib.sha256((source + occurred).encode()).hexdigest(),
+            "target_source_event_id": source, "target_event_id": event_id,
+            "occurred_at": occurred}
+
+
 def decode(frame, max_bytes, *, max_depth=8):
     if not isinstance(frame, (str, bytes)) or len(frame) > max_bytes:
         raise ValueError("FRAME_TOO_LARGE")
@@ -132,8 +163,8 @@ def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="no
     timestamp = raw.get("time")
     if type(timestamp) is not int or not 946684800 <= timestamp <= (now or time.time()) + 300:
         raise ValueError("INVALID_EVENT_TIME")
-    source = f"{config.bot_qq_id}:{config.origin}:epoch:{config.protocol_epoch}:{message_id}"
-    key = hashlib.sha256(source.encode()).hexdigest()
+    source, event_id = message_identity(config, message_id)
+    key = event_id.removeprefix("evt_")
     rich = None
     if scope == "references_v1":
         from .rich_input import MAX_RICH_BYTES, project

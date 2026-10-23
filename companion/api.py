@@ -10,7 +10,15 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import AsyncClient
 
-from companion import __version__, cumulative, live_text, qq_images, qq_rich
+from companion import (
+    __version__,
+    cumulative,
+    input_protocol,
+    live_text,
+    meme_service,
+    qq_images,
+    qq_rich,
+)
 from companion.config import Settings
 from companion.content_api import register_content_routes
 from companion.contracts import (
@@ -467,10 +475,49 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return live_text.cancelled_input(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/live-text/inputs/recall", dependencies=auth)
+    async def live_text_recall(body: input_protocol.RecallReceipt):
+        core = app.state.core
+        return input_protocol.receive_recall(core.store, settings, core.ledger, core.clock, body)
+
+    @app.get(prefix + "/live-text/inputs/{event_id}/state", dependencies=auth)
+    async def live_text_input_state(event_id: str):
+        return input_protocol.input_state(app.state.core.store, settings, event_id)
+
+    @app.post(prefix + "/live-text/cancel-before-send", dependencies=auth)
+    async def live_text_not_sent(body: input_protocol.CancelBeforeSend):
+        core = app.state.core
+        return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/send-check", dependencies=auth)
     async def live_text_send(body: live_text.SendCheck):
         core = app.state.core
         return live_text.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/discovery/submit", dependencies=auth)
+    async def meme_submit(body: meme_service.DiscoveryRequest):
+        core = app.state.core
+        return meme_service.submit(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/discovery/lease", dependencies=auth)
+    async def meme_lease(body: meme_service.DiscoveryLeaseRequest):
+        core = app.state.core
+        return meme_service.lease(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/discovery/{job_id}/check", dependencies=auth)
+    async def meme_check(job_id: str, body: meme_service.DiscoveryCheck):
+        core = app.state.core
+        return meme_service.check(core.store, settings, core.clock, job_id, body)
+
+    @app.post(prefix + "/memes/discovery/{job_id}/reserve", dependencies=auth)
+    async def meme_reserve(job_id: str, body: meme_service.DiscoveryReserve):
+        core = app.state.core
+        return meme_service.reserve(core.store, settings, core.clock, job_id, body)
+
+    @app.post(prefix + "/memes/discovery/{job_id}/result", dependencies=auth)
+    async def meme_result(job_id: str, body: meme_service.DiscoveryResult):
+        core = app.state.core
+        return meme_service.result(core.store, settings, core.clock, job_id, body)
 
     @app.post(prefix + "/live-text/stop", dependencies=auth)
     async def live_text_stop(body: live_text.WindowReference):

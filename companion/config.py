@@ -15,6 +15,7 @@ from companion.media_config import ContentConfig, MediaConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.sources import ObservationSource
 from companion.trial_limits import TrialCount, TrialText
+from companion.video_input import VideoInputPolicy
 
 
 class ObservationAdapterConfig(BaseModel):
@@ -63,6 +64,9 @@ class PaidModelApproval(BaseModel):
         default=False, strict=True, exclude_if=lambda value: value is False,
     )
     image_input: ImageInputPolicy | None = None
+    video_input: VideoInputPolicy | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     cumulative: CumulativeApproval | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -277,6 +281,7 @@ class Settings(BaseModel):
     model_name: str = "deepseek-flash"
     provider: str = "deepseek"
     model_key: SecretStr = SecretStr("")
+    video_model_key: SecretStr = Field(default=SecretStr(""), exclude_if=lambda value: not value)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
     max_output_tokens: int = Field(default=768, ge=128, le=8192)
     context_soft_tokens: int = Field(default=3200, ge=1000, le=16000)
@@ -345,6 +350,11 @@ class Settings(BaseModel):
     social_semantic_threshold: float = Field(default=0.9, ge=0.8, le=1)
     expression_enabled: bool = False
     expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
+    expression_selection_probability: float = Field(default=0.35, ge=0, le=1)
+    meme_discovery_enabled: bool = False
+    meme_discovery_daily_queries: int = Field(default=2, ge=0, le=100)
+    meme_discovery_daily_download_bytes: int = Field(default=16777216, ge=0, le=268435456)
+    meme_discovery_daily_storage_bytes: int = Field(default=4194304, ge=0, le=67108864)
     expression_meme_categories: list[Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]] = (
         Field(
             default_factory=lambda: ["happy", "like", "surprised", "morning", "sleep"],
@@ -409,6 +419,11 @@ class Settings(BaseModel):
             tokens.append(token)
         if self.mode == "live" and not self.model_key.get_secret_value():
             raise ValueError("COMPANION_MODEL_KEY is required in live mode")
+        if self.paid_model and self.paid_model.video_input:
+            if not self.video_model_key.get_secret_value():
+                raise ValueError("video_model_key is required for approved video input")
+            if self.video_model_key.get_secret_value() in tokens:
+                raise ValueError("video_model_key must be separate from management credentials")
         request_span = self.timeout_seconds * (2 if self.memory_enabled else 1)
         if self.lease_seconds <= request_span + 10:
             raise ValueError("lease_seconds must cover model calls plus more than 10 seconds")
@@ -426,11 +441,18 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "content_video" and self.paid_model and self.paid_model.video_input:
+            return self.paid_model.video_input.max_output_tokens
         if scenario == "content_vision":
             return min(self.max_output_tokens, 300)
         if scenario == "reflection":
             return self.reflection_max_output_tokens
         return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
+
+    def model_timeout(self, scenario):
+        if scenario == "content_video" and self.paid_model and self.paid_model.video_input:
+            return self.paid_model.video_input.timeout_seconds
+        return self.timeout_seconds
 
     @classmethod
     def load(cls):

@@ -4,6 +4,9 @@ This byte-based bound is not a provider token count or paid admission. The budge
 engine still checks the complete final prompt under its own admission contract.
 """
 
+import json
+
+from companion import reply_revision
 from companion.budget import token_upper_bound
 from companion.contracts import CoreError
 from companion.qq_rich import context
@@ -17,16 +20,16 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
 
 
 def turn_messages(source):
-    import json
-
     rich = context(json.loads(source["body_json"])) if source.get("body_json") else None
     return [*([rich] if rich else []), {"role": "user", "content": source["user_text"]},
-            {"role": "assistant", "content": source["reply_text"]}]
+            *([{"role": "assistant", "content": source["reply_text"]}]
+              if source["reply_text"] else [])]
 
 
-def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None):
+def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None,
+                        include_partial=False):
     """Return source-bound turns; an optional small allowlist is applied before LIMIT."""
-    from companion.transport import reply_group, segment_envelopes
+    from companion.transport import digest, reply_group, segment_envelopes
 
     if max_turns <= 0:
         return []
@@ -35,6 +38,15 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
     allowed = ""
     if event_ids is not None:
         allowed = "AND e.event_id IN (" + ",".join("?" for _ in event_ids) + ") "
+    completeness = (
+        "AND ((reply.reply_group_id IS NULL AND reply.segment_index=0 "
+        "AND reply.segment_count=1 AND reply.reply_group_sha256 IS NULL "
+        "AND reply.segment_interval_ms=0 AND reply.delivery_key NOT LIKE 'reply:%:v2:%') "
+        "OR (reply.reply_group_id IS NOT NULL AND "
+        "(SELECT COUNT(*) FROM outbox part WHERE part.reply_group_id=reply.reply_group_id) "
+        "=reply.segment_count AND NOT EXISTS (SELECT 1 FROM outbox part "
+        "WHERE part.reply_group_id=reply.reply_group_id AND part.state!='SENT'))) "
+    ) if not include_partial else ""
     rows = store.rows(
         "SELECT e.*,o.message_id,o.content_json,o.content_sha256,o.delivery_key,o.reply_group_id,"
         "json_extract(e.body_json,'$.text') AS user_text,"
@@ -43,13 +55,7 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "(SELECT MAX(reply.rowid) FROM outbox reply WHERE reply.conversation_id=? "
         "AND reply.action_type='qq.private.reply' AND reply.state='SENT' "
         "AND json_type(reply.content_json,'$.text')='text' "
-        "AND ((reply.reply_group_id IS NULL AND reply.segment_index=0 "
-        "AND reply.segment_count=1 AND reply.reply_group_sha256 IS NULL "
-        "AND reply.segment_interval_ms=0 AND reply.delivery_key NOT LIKE 'reply:%:v2:%') "
-        "OR (reply.reply_group_id IS NOT NULL AND "
-        "(SELECT COUNT(*) FROM outbox part WHERE part.reply_group_id=reply.reply_group_id) "
-        "=reply.segment_count AND NOT EXISTS (SELECT 1 FROM outbox part "
-        "WHERE part.reply_group_id=reply.reply_group_id AND part.state!='SENT'))) "
+        + completeness +
         "AND length(json_extract(reply.content_json,'$.text'))>0 GROUP BY reply.origin_event_id) "
         "WHERE e.conversation_id=? AND e.actor_id='owner' AND e.privacy_scope='private' "
         "AND e.source='qq.onebot' "
@@ -67,22 +73,93 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
     )
     sources = []
     for row in rows:
+        # This operational column is outside historical input and context fingerprints.
+        row.pop("reply_revision", None)
+        if not reply_revision.source_active(store, row["event_id"]):
+            continue
         if row.pop("reply_group_id") is not None:
             try:
-                group = reply_group(store, row["message_id"], require_sent=True)
+                group = reply_group(store, row["message_id"], require_sent=not include_partial)
                 if not group:
                     continue
-                row["reply_text"] = group["text"]
+                parts = group["rows"]
+                if include_partial:
+                    prefix = []
+                    for part in parts:
+                        if part["state"] != "SENT":
+                            break
+                        if not part["sent_at"]:
+                            raise CoreError("REPLY_GROUP_CHANGED", 409)
+                        prefix.append(part)
+                    if (not prefix or any(part["state"] == "SENT" for part in parts[len(prefix):])
+                        or prefix[-1]["message_id"] != row["message_id"]):
+                        continue
+                    if len(prefix) < len(parts):
+                        row["reply_complete"] = False
+                    parts = prefix
+                row["reply_text"] = "".join(json.loads(part["content_json"])["text"]
+                                           for part in parts)
                 envelopes = segment_envelopes(group)
                 row["reply_segments"] = [
                     {"message_id": part["message_id"],
                      **envelopes[part["message_id"]]}
-                    for part in group["rows"]
+                    for part in parts
                 ]
             except CoreError:
                 continue
+        elif include_partial:
+            delivered = store.one("SELECT * FROM outbox WHERE message_id=?", (row["message_id"],))
+            content = json.loads(row["content_json"])
+            if (not delivered or not delivered["sent_at"] or delivered["segment_index"] != 0
+                or delivered["segment_count"] != 1 or delivered["reply_group_sha256"] is not None
+                or delivered["segment_interval_ms"] != 0 or ":v2:" in row["delivery_key"]
+                or not isinstance(content, dict) or not isinstance(content.get("text"), str)
+                or digest(content) != row["content_sha256"]):
+                continue
         sources.append(row)
     return list(reversed(sources))
+
+
+def pending_owner_sources(store, conversation_id, current_event_id, max_turns):
+    """Keep unanswered admitted inputs in order after their reply was superseded."""
+    if max_turns <= 0:
+        return []
+    rows = store.rows(
+        "SELECT e.*,json_extract(e.body_json,'$.text') AS user_text,'' AS reply_text "
+        "FROM events e JOIN jobs j USING(event_id) WHERE e.conversation_id=? "
+        "AND e.actor_id='owner' AND e.source='qq.onebot' AND e.privacy_scope='private' "
+        "AND e.event_type IN ('message.received','message.media_received') "
+        "AND e.redacted=0 AND e.reply_revision>0 AND j.kind='chat' "
+        "AND j.state='CANCELLED' AND j.last_error_code=? "
+        "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?) "
+        "AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
+        "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "
+        "AND (length(json_extract(e.body_json,'$.text'))>0 "
+        "OR json_type(e.body_json,'$.rich')='object') "
+        "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.origin_event_id=e.event_id "
+        "AND o.action_type='qq.private.reply' AND o.state='SENT') "
+        "ORDER BY e.rowid DESC LIMIT ?",
+        (conversation_id, reply_revision.SUPERSEDED, current_event_id, max_turns),
+    )
+    for row in rows:
+        row.pop("reply_revision", None)
+        row["reply_complete"] = False
+    return [row for row in reversed(rows) if reply_revision.source_active(store, row["event_id"])]
+
+
+def recent_context_sources(store, conversation_id, current_event_id, max_turns):
+    """Combine observed sent prefixes with unanswered inputs; never invent assistant text."""
+    sources = recent_sent_sources(store, conversation_id, current_event_id, max_turns,
+                                  include_partial=True)
+    sources += pending_owner_sources(store, conversation_id, current_event_id, max_turns)
+    if not sources:
+        return []
+    marks = ",".join("?" for _ in sources)
+    order = {row["event_id"]: row["rowid"] for row in store.rows(
+        f"SELECT event_id,rowid FROM events WHERE event_id IN ({marks})",
+        tuple(source["event_id"] for source in sources),
+    )}
+    return sorted(sources, key=lambda row: order[row["event_id"]])[-max_turns:]
 
 
 def fit_context(rules, references, turns, current_input, soft_limit):

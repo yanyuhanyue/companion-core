@@ -39,9 +39,11 @@ def source(store, settings, approval, event_id, *, allow_commands=False):
             or value.get("event_id") != event_id
             or value.get("window_sha256") != approval.plan_sha256
             or (value.get("privacy_epoch") != epoch(store) and not (
-                allow_commands and (body.get("control_command") or body.get("diary_command"))
-                and type(value.get("privacy_epoch")) is int
-                and value["privacy_epoch"] < epoch(store)))
+                type(value.get("privacy_epoch")) is int
+                and 0 <= value["privacy_epoch"] < epoch(store)
+                and (approval.companion_scope == "owner_private_v1" or (
+                    allow_commands and (body.get("control_command") or body.get("diary_command"))
+                ))))
             or value.get("input_sha256") != input_digest(body)
             or not isinstance(capture, dict)
             or capture.get("source_event_id") != event["source_event_id"]

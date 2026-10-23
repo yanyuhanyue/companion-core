@@ -95,8 +95,12 @@ class Store:
 
     def schema_capabilities(self):
         required = {
-            "events": {"event_id", "redacted", "memory_processed", "fingerprint"},
-            "jobs": {"lease_token", "state"},
+            "conversations": {"conversation_id", "reply_revision"},
+            "events": {"event_id", "redacted", "memory_processed", "fingerprint", "reply_revision"},
+            "jobs": {"lease_token", "state", "context_tracked"},
+            "job_sources": {"job_id", "event_id"},
+            "meme_discovery_reservations": {"job_id", "attempt_key", "state", "reserved_queries",
+                                             "reserved_download_bytes", "reserved_storage_bytes"},
             "outbox": {"lease_token", "state", "content_json", "reply_group_id", "segment_index",
                        "segment_count", "reply_group_sha256", "segment_interval_ms"},
             "memories": {"needs_review", "fact_key"},

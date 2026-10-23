@@ -9,10 +9,13 @@ from companion import (
     budget,
     dialogue_history,
     image_spool,
+    input_protocol,
+    input_recall,
     live_text,
     private_life,
     qq_images,
     qq_rich,
+    reply_revision,
 )
 from companion.affect import AffectEngine
 from companion.commands import command_parts, is_memory_command
@@ -100,6 +103,8 @@ class Core(Runtime):
             raise CoreError("INVALID_SOURCE_EVENT_ID", 400)
         if not key or len(key) > 512:
             raise CoreError("INVALID_IDEMPOTENCY_KEY", 400)
+        input_protocol.apply_pending_input(s, cfg, self.ledger, self.clock, event)
+        input_recall.require_not_recalled(s, event.source_event_id)
         raw = event.model_dump(mode="json", exclude={"event_id", "trace_id"})
         fingerprint = digest(raw)
         try:
@@ -130,6 +135,7 @@ class Core(Runtime):
                         "job_id": job["job_id"],
                         "duplicate": True,
                         "state": job["state"],
+                        "reply_revision": existing["reply_revision"],
                     }
                 conversation = s.one(
                     "SELECT * FROM conversations WHERE platform=? AND platform_session_key=?",
@@ -204,7 +210,11 @@ class Core(Runtime):
                     fingerprint=fingerprint,
                     memory_processed=int(diary_command or control_command),
                 )
-                cancel_interrupted_replies(s, conversation_id, now)
+                revision = 0
+                if private_life.enabled(cfg):
+                    revision = reply_revision.advance(s, conversation_id, event.event_id, now)
+                else:
+                    cancel_interrupted_replies(s, conversation_id, now)
                 if private_life.enabled(cfg):
                     cancel_proactive_work(s, now)
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
@@ -217,6 +227,7 @@ class Core(Runtime):
                     "job_id": job_id,
                     "duplicate": False,
                     "state": "QUEUED",
+                    "reply_revision": revision,
                 }
         except sqlite3.IntegrityError as error:
             raise CoreError("IDEMPOTENCY_CONFLICT") from error
@@ -233,13 +244,17 @@ class Core(Runtime):
             max_attempts=self.settings.max_attempts,
             created_at=now,
             updated_at=now,
+            context_tracked=1,
         )
+        if event_id is not None:
+            self.store.insert("job_sources", job_id=job_id, event_id=event_id)
         return job_id
 
     def recover(self, now):
         s = self.store
         image_spool.cleanup(s, now)
-        expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' AND lease_until<=?", (now,))
+        expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' "
+                         "AND kind IN ('chat','activity') AND lease_until<=?", (now,))
         for job in expired:
             s.execute(
                 "UPDATE model_usage SET state='UNKNOWN' WHERE job_id=? AND state='RESERVED'",
@@ -251,22 +266,31 @@ class Core(Runtime):
                 "updated_at=? WHERE job_id=?",
                 (state, now, job["job_id"]),
             )
+        budget.expire_cancelled_reservations(s, self.settings, now)
         recover_deliveries(s, now)
 
     def claim_job(self, worker_id):
         s, now = self.store, self.clock()
         with s.transaction():
             self.recover(now)
-            if private_life.enabled(self.settings) and private_life.busy(s, now):
-                return None
+            if private_life.enabled(self.settings):
+                if private_life.busy(s, now) or s.one(
+                    "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
+                ):
+                    # Input admission and tail cancellation proceed independently;
+                    # the worker waits for an existing model/send responsibility.
+                    return None
             if not proactive_allowed(s, self.settings, now):
                 cancel_proactive_work(s, now)
             row = s.one(
-                "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted FROM jobs j "
+                "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
+                "FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
+                "AND j.kind IN ('chat','activity') "
                 "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
                 "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
                 "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
+                "AND b.kind IN ('chat','activity') "
                 "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) ORDER BY j.rowid LIMIT 1",
                 (now,),
             )
@@ -358,9 +382,10 @@ class Core(Runtime):
 
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
+        reply_revision.check_job(s, job)
         body = json.loads(job["body_json"])
         text = body.get("text", "")
-        rules = PRINCIPLES + self.expression.instruction()
+        rules = PRINCIPLES + self.expression.instruction(job["event_id"])
         if (job["kind"] == "chat" and cfg.segmented_reply is not None
             and cfg.segmented_reply.mode == "semantic"):
             from companion.reply_segments import SEMANTIC_RULES
@@ -373,6 +398,7 @@ class Core(Runtime):
             rules += qq_rich.RULES
         rules = {"role": "system", "content": rules}
         references = []
+        reference_sources = []
         bounded_text = private_life.strict(s, cfg)
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
         combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
@@ -412,6 +438,11 @@ class Core(Runtime):
                     + encode(goals),
                 }
             )
+            goal_sources = {item["result_event_id"] for item in goals
+                            if item.get("result_event_id")}
+            for goal in self.goals.recent()[:3]:
+                goal_sources.update(self.goals.source_ids(goal["goal_id"]))
+            reference_sources.append((references[-1], goal_sources))
         if affect["evidence"]:
             references.append(
                 {
@@ -420,6 +451,8 @@ class Core(Runtime):
                     + encode(affect),
                 }
             )
+            reference_sources.append((references[-1],
+                                      {row["event_id"] for row in affect["evidence"]}))
         if cfg.memory_enabled:
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
             hits = self.memory.search(text or "*", limit=6, memory_ids=allowed) if (
@@ -427,14 +460,13 @@ class Core(Runtime):
             ) else memories
             from companion.interest import profile
 
-            traits = (
+            trait_rows = (
                 []
                 if bounded_text
-                else [
-                    {k: item[k] for k in ("namespace", "topic", "status", "confidence")}
-                    for item in profile(s, cfg, self.clock(), cfg.owner_qq_id)["self.interest"][:5]
-                ]
+                else profile(s, cfg, self.clock(), cfg.owner_qq_id)["self.interest"][:5]
             )
+            traits = [{k: item[k] for k in ("namespace", "topic", "status", "confidence")}
+                      for item in trait_rows]
             if hits or traits or memory_paused:
                 memories = [
                     {
@@ -457,6 +489,9 @@ class Core(Runtime):
                     ),
                 }
                 references.append(memory_reference)
+                reference_sources.append((memory_reference,
+                    {event_id for hit in hits for event_id in hit["evidence_ids"]}
+                    | {item["event_id"] for trait in trait_rows for item in trait["evidence"]}))
         if bounded_text:
             sources = live_text.history_sources(s, cfg, self.clock, job)
             turns = [dialogue_history.turn_messages(source) for source in sources]
@@ -505,10 +540,22 @@ class Core(Runtime):
                         if any(message is turn[0] for message in messages)]
             used = hits if any(message is memory_reference for message in messages) else []
             live_text.freeze_context(s, cfg, self.clock, job, selected, messages, used)
+        actual_sources = {source["event_id"] for source, turn in zip(sources, turns, strict=True)
+                          if any(message is turn[0] for message in messages)}
+        for reference, evidence in reference_sources:
+            if any(message is reference for message in messages):
+                actual_sources.update(evidence)
+        if content_reference:
+            for item in json.loads(content_reference)["shared_content"]:
+                actual_sources.add(item["event_id"])
+                if item.get("article_event_id"):
+                    actual_sources.add(item["article_event_id"])
+        reply_revision.remember_sources(s, job, actual_sources)
         return messages
 
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""
+        reply_revision.check_job(self.store, job)
         query = json.loads(job["body_json"]).get("text", "")
         bounded_text = private_life.strict(self.store, self.settings)
         image_context = (
@@ -570,6 +617,9 @@ class Core(Runtime):
             live_text.freeze_memory_review(
                 self.store, self.settings, self.clock, job, hits, messages, history,
             )
+        reply_revision.remember_sources(self.store, job,
+            {source["event_id"] for source in history}
+            | {event_id for hit in hits for event_id in hit["evidence_ids"]})
         try:
             request_id = budget.reserve(
                 self.store, self.settings, job["job_id"], "memory_review", messages, self.clock(),
@@ -627,6 +677,9 @@ class Core(Runtime):
         ]
         if not candidates:
             return [], []
+        job = s.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)) if job_id else None
+        if job:
+            reply_revision.remember_sources(s, job, {row.evidence_event_id for row in candidates})
         existing = {}
         for candidate in candidates:
             for row in self.memory.search(candidate.content, subjects=[candidate.subject], limit=6):
@@ -652,6 +705,9 @@ class Core(Runtime):
             {"role": "system", "content": REVIEW_RULES},
             {"role": "user", "content": encode(payload)},
         ]
+        if job:
+            reply_revision.remember_sources(s, job,
+                {event_id for row in catalog.values() for event_id in row["evidence_ids"]})
         request_id = budget.reserve(
             s,
             cfg,
@@ -742,6 +798,11 @@ class Core(Runtime):
         if not command:
             return None
         now, s = self.clock(), self.store
+        if command in {"读日记", "日记列表", "目标列表", "承诺列表", "反思列表",
+                       "当前交互状态", "为什么形成偏好", "你记得什么"}:
+            # These service responses do not yet expose complete source receipts.
+            # Recall treats them conservatively instead of claiming exact lineage.
+            s.execute("UPDATE jobs SET context_tracked=0 WHERE job_id=?", (job["job_id"],))
         diary_reply = self.diary.command(text, self.settings.owner_qq_id)
         if diary_reply is not None:
             return diary_reply
@@ -844,6 +905,20 @@ class Core(Runtime):
             return f"已处理：{result['memory_id']} · {result['state']}"
         return None
 
+    def _check_reply_epoch(self, job, captured_epoch):
+        if epoch(self.store) == captured_epoch:
+            return
+        tracked = self.store.one(
+            "SELECT context_tracked FROM jobs WHERE job_id=?", (job["job_id"],),
+        )
+        if private_life.enabled(self.settings) and tracked and tracked["context_tracked"]:
+            # Revalidate the actual prompt sources. An unrelated recall must not
+            # turn a current independent reply into a global window failure.
+            reply_revision.check_job(self.store, job)
+            reply_revision.check_sources(self.store, job["job_id"])
+            return
+        raise CoreError("PRIVACY_CHANGED", 503)
+
     async def run_once(self, worker_id="worker"):
         job = self.claim_job(worker_id)
         if job is None:
@@ -859,6 +934,7 @@ class Core(Runtime):
         )
         request_id = None
         try:
+            reply_revision.check_job(self.store, job)
             bounded_text = live_text.active(self.store, self.settings)
             generated_reply = False
             if bounded_text:
@@ -870,6 +946,7 @@ class Core(Runtime):
                     and (not bounded_text or private_life.enabled(self.settings)))
                 else None
             )
+            reply_revision.check_job(self.store, job)
             captured_epoch = epoch(self.store)
             command, _ = command_parts(json.loads(job["body_json"]).get("text", ""))
             if (
@@ -899,13 +976,12 @@ class Core(Runtime):
                 else:
                     if self.settings.memory_enabled:
                         hits, paused_memory = await self.recall_for_reply(job)
-                        if captured_epoch != epoch(self.store):
-                            raise CoreError("PRIVACY_CHANGED", 503)
+                        self._check_reply_epoch(job, captured_epoch)
                         messages = self.context(job, hits, paused_memory)
                     else:
                         messages = self.context(job)
-                    if captured_epoch != epoch(self.store):
-                        raise CoreError("PRIVACY_CHANGED", 503)
+                    self._check_reply_epoch(job, captured_epoch)
+                    reply_revision.check_job(self.store, job)
                     emit(
                         "t_context_ready",
                         job["trace_id"],
@@ -948,6 +1024,7 @@ class Core(Runtime):
                     reply = redact(response.text, self.settings)
                     generated_reply = True
             with self.store.transaction():
+                reply_revision.check_job(self.store, job)
                 if bounded_text:
                     live_text.check_job(self.store, self.settings, self.clock, job)
                 current = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
@@ -955,8 +1032,7 @@ class Core(Runtime):
                     return True
                 if current["lease_until"] <= self.clock():
                     return True
-                if epoch(self.store) != captured_epoch:
-                    raise CoreError("PRIVACY_CHANGED", 503)
+                self._check_reply_epoch(job, captured_epoch)
                 now = self.clock()
                 should_send = reply.strip() not in {"[SKIP]", ""} and proactive_allowed(
                     self.store, self.settings, now
@@ -1035,6 +1111,31 @@ class Core(Runtime):
     def fail_job(self, job, code):
         now = self.clock()
         with self.store.transaction():
+            current = self.store.one("SELECT state,lease_token FROM jobs WHERE job_id=?",
+                                     (job["job_id"],))
+            if (not current or current["state"] != "RUNNING"
+                or current["lease_token"] != job["lease_token"]):
+                return
+            if code in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
+                        reply_revision.CANCELLED, "INPUT_RECALLED"}:
+                self.store.execute(
+                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
+                    "updated_at=? WHERE job_id=?", (code, now, job["job_id"]),
+                )
+                return
+            if (code == "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"
+                and private_life.enabled(self.settings)
+                and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+                                       (job["job_id"],))
+                and not self.store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN'")):
+                # A different process occupied the provider slot after claim. No
+                # attempt was admitted here, so wait without spending a retry or STOP.
+                self.store.execute(
+                    "UPDATE jobs SET state='RETRY_WAIT',lease_token=NULL,last_error_code=?,"
+                    "next_attempt_at=?,attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=?",
+                    (code, after(now, 1), now, job["job_id"]),
+                )
+                return
             bounded_text = live_text.active(self.store, self.settings)
             if bounded_text:
                 live_text.record_failure(self.store, self.settings, code)
@@ -1177,7 +1278,7 @@ class Core(Runtime):
         events = s.rows(
             "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
             "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
-            "AND e.source='qq.onebot' AND j.state='SUCCEEDED' "
+            "AND e.source='qq.onebot' AND j.kind='chat' AND j.state='SUCCEEDED' "
             "AND e.ingested_at<=? " + day_filter + " ORDER BY e.rowid LIMIT 20",
             (after(now, -cfg.extraction_idle_seconds), *bounds),
         )

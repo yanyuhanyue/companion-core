@@ -32,6 +32,8 @@ from .spool import Spool, encode
 SHA = re.compile(r"[a-f0-9]{64}")
 ACTIVE = {"PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN"}
 HANDOFF_DOMAIN = b"companion-core/window-handoff/v1\x00"
+INPUT_STATE_FIELDS = {"window_sha256", "event_id", "input_sha256", "reply_revision", "state",
+                      "unsettled_model", "unsettled_delivery"}
 
 
 def digest(value):
@@ -50,6 +52,31 @@ def cancelled_input_proof(row, value):
         or any(type(value[name]) is not int or value[name] != 0
                for name in ("model_attempts", "send_attempts"))):
         raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
+
+
+def input_state_proof(row, value, *, terminal=False):
+    if (not isinstance(value, dict)
+        or set(value) not in (INPUT_STATE_FIELDS, INPUT_STATE_FIELDS | {"reason"})
+        or value["window_sha256"] != row["plan_hash"] or value["event_id"] != row["event_id"]
+        or value["input_sha256"] != row["input_hash"]
+        or type(value["reply_revision"]) is not int or value["reply_revision"] < 0
+        or value["state"] not in {"QUEUED", "RUNNING", "REPLIED", "ACK", "SUPERSEDED",
+                                  "RECALLED", "FAILED"}
+        or type(value["unsettled_model"]) is not bool
+        or type(value["unsettled_delivery"]) is not bool
+        or ("reason" in value and value["reason"] is not None
+            and not isinstance(value["reason"], str))
+        or (terminal and (value["state"] not in {"SUPERSEDED", "RECALLED"}
+                          or value["unsettled_model"] or value["unsettled_delivery"]))):
+        raise ValueError("INPUT_STATE_CORE_PROOF_REQUIRED")
+    return value
+
+
+def not_sent_proof(message_id, value):
+    if (value != {"cancelled": True, "message_id": message_id, "state": "CANCELLED",
+                  "send_attempt_retained": True}
+        or value["cancelled"] is not True or value["send_attempt_retained"] is not True):
+        raise ValueError("NOT_SENT_CORE_PROOF_REQUIRED")
 
 
 def bridge_code_sha256():
@@ -540,12 +567,21 @@ class TestWindow:
         self.db.row_factory = sqlite3.Row
         self.clock = clock or (lambda: datetime.now(UTC))
         self.busy = False
+        self._memes = None
         self.model_attempts = None
         self.core_stop_ack = False
         self.stop_path = stop_path(spool.directory, plan.value, plan.sha256)
         # Revocation must survive damage to the mutable plan, Spool or journal.
         self._stop_identity = (plan.mode, plan.sha256, plan.config,
                                plan.value["execution"] == "local_synthetic")
+
+    @property
+    def memes(self):
+        if self._memes is None:
+            from .meme_runtime import MemeRuntime
+
+            self._memes = MemeRuntime(self)
+        return self._memes
 
     def row(self):
         self.db.row_factory = sqlite3.Row
@@ -681,6 +717,11 @@ class TestWindow:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
         history = self.verify_history(records)
         self.check_cancelled_inputs(history)
+        self.check_terminal_inputs(history)
+        self.check_recalls(history)
+        from .pending_media import verify_history
+
+        verify_history(self, history)
         quota = cumulative.fold(self, history)
         if active or dispatch:
             cumulative.check(self, quota, self.clock())
@@ -691,7 +732,7 @@ class TestWindow:
                 raise ValueError("CAPTURE_RECONCILIATION_REQUIRED")
             if row["state"] != "OPEN" and not capturing:
                 raise ValueError("WINDOW_STOPPED")
-            unknown = self.count("window_attempts", "state!='ACK'")
+            unknown = self.count("window_attempts", "state NOT IN ('ACK','NOT_SENT')")
             if unknown:
                 raise ValueError("WINDOW_ATTEMPT_RECONCILIATION_REQUIRED")
             if not self.plan.start <= self.clock() < self.plan.end:
@@ -707,6 +748,90 @@ class TestWindow:
             if len(entries) != 1:
                 raise ValueError("CANCELLED_INPUT_JOURNAL_REQUIRED")
             cancelled_input_proof(row, entries[0]["data"].get("core_receipt"))
+
+    def check_terminal_inputs(self, history):
+        journals = {plan.sha256: records for plan, records in history}
+        for row in self.db.execute("SELECT * FROM window_inputs "
+                                    "WHERE state IN ('SUPERSEDED','RECALLED')"):
+            entries = [entry for entry in journals.get(row["plan_hash"], [])
+                       if entry["kind"] == "INPUT_" + row["state"]
+                       and entry["data"].get("event_hash") == digest(row["event_id"])]
+            if len(entries) != 1:
+                raise ValueError("TERMINAL_INPUT_JOURNAL_REQUIRED")
+            proof = input_state_proof(row, entries[0]["data"].get("core_receipt"), terminal=True)
+            if proof["state"] != row["state"]:
+                raise ValueError("INPUT_STATE_CORE_PROOF_REQUIRED")
+        for row in self.db.execute("SELECT * FROM window_attempts WHERE state='NOT_SENT'"):
+            entries = [entry for entry in journals.get(row["plan_hash"], [])
+                       if entry["kind"] == "NOT_SENT"
+                       and entry["data"].get("fence") == row["fence"]]
+            if len(entries) != 1:
+                raise ValueError("NOT_SENT_JOURNAL_REQUIRED")
+            not_sent_proof(row["message_id"], entries[0]["data"].get("core_receipt"))
+            result = self.db.execute("SELECT * FROM results WHERE message_id=?",
+                                      (row["message_id"],)).fetchone()
+            body = json.loads(result["body"]) if result else {}
+            if (not result or result["state"] != "accepted" or body.get("result") != "NOT_SENT"
+                or body.get("core_receipt") != entries[0]["data"]["core_receipt"]):
+                raise ValueError("NOT_SENT_RESULT_REQUIRED")
+        if self.db.execute("SELECT 1 FROM results r WHERE json_extract(r.body,'$.result')="
+                           "'NOT_SENT' AND NOT EXISTS (SELECT 1 FROM window_attempts a "
+                           "WHERE a.message_id=r.message_id AND a.state='NOT_SENT')").fetchone():
+            raise ValueError("NOT_SENT_RESULT_REQUIRED")
+
+    async def input_state(self, client, row):
+        value = await self.core_get(client, "/internal/v1/live-text/inputs/" + row["event_id"]
+                                    + "/state")
+        return input_state_proof(row, value)
+
+    def check_recalls(self, history):
+        received, accepted = {}, {}
+        for plan, entries in history:
+            for entry in entries:
+                if entry["kind"] in {"RECALL_RECEIVED", "RECALL_ACCEPTED"}:
+                    target = received if entry["kind"] == "RECALL_RECEIVED" else accepted
+                    key = entry["data"].get("recall_id")
+                    if key in target:
+                        raise ValueError("RECALL_JOURNAL_RECONCILIATION_REQUIRED")
+                    target[key] = (plan.sha256, entry["data"])
+        exists = self.db.execute("SELECT 1 FROM sqlite_master "
+                                  "WHERE name='automatic_recalls'").fetchone()
+        rows = self.db.execute("SELECT * FROM automatic_recalls").fetchall() if exists else []
+        if set(received) != {row["recall_id"] for row in rows} or set(accepted) - set(received):
+            raise ValueError("RECALL_JOURNAL_RECONCILIATION_REQUIRED")
+        for row in rows:
+            plan_hash, data = received[row["recall_id"]]
+            receipt = json.loads(row["record_json"])
+            if (plan_hash != row["window_sha256"]
+                or data.get("receipt_sha256") != digest(receipt)
+                or receipt.get("recall_id") != row["recall_id"]
+                or receipt.get("target_event_id") != row["target_event_id"]):
+                raise ValueError("RECALL_JOURNAL_RECONCILIATION_REQUIRED")
+            prior = accepted.get(row["recall_id"])
+            if row["state"] == "ACCEPTED":
+                if (not prior or prior[0] != plan_hash or not row["response_json"]
+                    or prior[1].get("core_receipt") != json.loads(row["response_json"])):
+                    raise ValueError("RECALL_JOURNAL_RECONCILIATION_REQUIRED")
+            elif row["state"] != "PENDING" or prior or row["response_json"] is not None:
+                raise ValueError("RECALL_JOURNAL_RECONCILIATION_REQUIRED")
+
+    def retire_input(self, row, value):
+        input_state_proof(row, value, terminal=True)
+        if self.db.execute("SELECT 1 FROM window_attempts WHERE event_id=? "
+                           "AND state NOT IN ('ACK','NOT_SENT')", (row["event_id"],)).fetchone():
+            raise ValueError("INPUT_ATTEMPT_RECONCILIATION_REQUIRED")
+        current = self.db.execute("SELECT state FROM window_inputs WHERE event_id=?",
+                                   (row["event_id"],)).fetchone()
+        if current["state"] == value["state"]:
+            return
+        if current["state"] != "APPROVED":
+            raise ValueError("INPUT_STATE_CORE_PROOF_REQUIRED")
+        head = self.append("INPUT_" + value["state"], {"event_hash": digest(row["event_id"]),
+                                                       "core_receipt": value})
+        with self.db:
+            self.db.execute("UPDATE window_inputs SET state=? WHERE event_id=?",
+                            (value["state"], row["event_id"]))
+            self.db.execute("UPDATE test_window SET journal_head=?", (head,))
 
     async def reconcile_cancelled_inputs(self, client):
         """Retire known zero-attempt inputs; never turn failure into a delivery ACK."""
@@ -900,10 +1025,11 @@ class TestWindow:
                 request.url.path.startswith("/internal/v1/")
                 or (
                     self.plan.value.get("live_text", {}).get("image_scope") == "owner_image_v1"
-                    and re.fullmatch(
+                    and (re.fullmatch(
                         r"/internal/v2/content/evt_[a-f0-9]{64}/image(?:/claim|/check)?",
                         request.url.path,
-                    )
+                    ) or (request.method == "GET" and re.fullmatch(
+                        r"/internal/v2/content/evt_[a-f0-9]{64}", request.url.path)))
                 )
             )
             or request.headers.get("Authorization") != "Bearer " + self.plan.config.bridge_token
@@ -923,6 +1049,17 @@ class TestWindow:
     async def core_post(self, client, path, body):
         async with self.core_http(client) as scoped:
             return await bounded_post(scoped, path, body)
+
+    async def core_get(self, client, path):
+        content = bytearray()
+        async with self.core_http(client) as scoped:
+            async with scoped.stream("GET", path) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    content.extend(chunk)
+                    if len(content) > 65536:
+                        raise ValueError("INVALID_CORE_RECEIPT")
+        return decode(bytes(content), 65536)
 
     async def stop_core(self, client):
         mode, plan_hash, config, synthetic = self._stop_identity
@@ -1079,14 +1216,25 @@ class TestWindow:
         ):
             raise ValueError("WINDOW_ALREADY_REGISTERED")
         old.check_spool()
-        if self.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN ('ACK','CANCELLED') "
+        if self.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN "
+                           "('ACK','CANCELLED','SUPERSEDED','RECALLED') "
                            "LIMIT 1").fetchone() or (
-            self.db.execute("SELECT 1 FROM window_attempts WHERE state!='ACK' LIMIT 1").fetchone()
+            self.db.execute("SELECT 1 FROM window_attempts WHERE state NOT IN ('ACK','NOT_SENT') "
+                            "LIMIT 1").fetchone()
         ) or self.db.execute(
             "SELECT 1 FROM results WHERE state!='accepted' "
-            "OR json_extract(body,'$.result')!='SENT' LIMIT 1"
+            "OR json_extract(body,'$.result') NOT IN ('SENT','NOT_SENT') LIMIT 1"
         ).fetchone():
             raise ValueError("WINDOW_HANDOFF_RECONCILIATION_REQUIRED")
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'").fetchone():
+            if self.db.execute("SELECT 1 FROM automatic_recalls WHERE state!='ACCEPTED' "
+                               "LIMIT 1").fetchone():
+                raise ValueError("WINDOW_RECALL_RECONCILIATION_REQUIRED")
+        from .pending_media import exists
+
+        if exists(self) and self.db.execute("SELECT 1 FROM automatic_media "
+                                           "WHERE state NOT IN ('DONE','CANCELLED')").fetchone():
+            raise ValueError("WINDOW_MEDIA_RECONCILIATION_REQUIRED")
         if (
             old.stop_path.is_symlink() or not old.stop_path.is_file()
             or old.stop_path.read_bytes() != b"OWNER_STOP\n"
@@ -1290,6 +1438,13 @@ class TestWindow:
             ).fetchone():
                 self.db.execute("DELETE FROM automatic_received WHERE window_sha256=?",
                                 (self.plan.sha256,))
+        from .pending_media import stop
+
+        stop(self)
+        if self.plan.config.meme_enabled:
+            for row in self.db.execute("SELECT event_id FROM window_inputs WHERE plan_hash=?",
+                                       (self.plan.sha256,)).fetchall():
+                self.memes.cancel(row["event_id"])
         return self.status()
 
     def check_spool(self):
@@ -1486,6 +1641,53 @@ class SendOperation:
         self.current = self.current_item = None
         self.lease_until = None
         self.segmented_scope = reply_segments.scope(window.plan)
+        self.dispatched = False
+        self.meme_prepared = False
+        self.meme_sending = False
+
+    async def cancel_before_send(self, item):
+        from .continuous import interruptible, pending_input
+
+        if (not interruptible(self.window) or self.dispatched or not self.current
+            or self.current_item is not item):
+            return False
+        attempt = self.db.execute("SELECT * FROM window_attempts WHERE message_id=? AND fence=?",
+                                   self.current).fetchone()
+        if (not attempt or attempt["state"] not in {"RESERVED", "IO_STARTED"}
+            or attempt["item_hash"] != digest(item)):
+            return False
+        cause = pending_input(self.window, reply_segments.event_id(item))
+        revision = item.get("reply_revision")
+        if item.get("action_type") == "qq.private.reply":
+            if type(revision) is not int or revision < 0:
+                return False
+        elif (item.get("action_type") != "qq.private.proactive" or not cause
+              or "reply_revision" in item):
+            return False
+        try:
+            receipt = await self.window.core_post(self.client,
+                "/internal/v1/live-text/cancel-before-send", {
+                    "window_sha256": self.window.plan.sha256, "message_id": item["message_id"],
+                    "lease_token": item["lease_token"],
+                } | ({"reply_revision": revision} if revision is not None else {})
+                | ({"cause": "OWNER_INPUT_PENDING", "pending_event_id": cause} if cause else {}))
+        except httpx.HTTPError:
+            return False
+        not_sent_proof(item["message_id"], receipt)
+        if self.dispatched or attempt["item_hash"] != digest(item):
+            raise ValueError("WINDOW_SEND_FENCED")
+        self.window.verify(active=False)
+        head = self.window.append("NOT_SENT", {"fence": self.current[1], "core_receipt": receipt})
+        with self.db:
+            self.window.spool.cancel_delivery(item, receipt)
+            self.db.execute("UPDATE window_attempts SET state='NOT_SENT' WHERE message_id=?",
+                            (item["message_id"],))
+            self.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        if self.meme_prepared:
+            self.window.memes.confirm_not_sent(item, self, receipt)
+        elif item.get("content", {}).get("image", {}).get("source") == "companion.meme_catalog":
+            self.window.memes.cancel(reply_segments.event_id(item))
+        return True
 
     def segment_context(self, item, event_id, *, current=False):
         segment = reply_segments.envelope(item)
@@ -1763,18 +1965,43 @@ class WindowOneBot:
             return
         item, approval = self.operation.current_item, self.operation.approval
         if live:
-            receipt = await self.window.core_post(
-                self.operation.client, "/internal/v1/live-text/send-check",
-                {key: approval[key] for key in (
-                    "window_sha256", "event_id", "message_id", "reply_sha256"
-                )} | {"lease_token": item["lease_token"]},
-            )
+            from .continuous import flush_recalls, interruptible, pending_input
+
+            while True:
+                if interruptible(self.window):
+                    await flush_recalls(self.window, self.operation.client)
+                receipt = await self.window.core_post(
+                    self.operation.client, "/internal/v1/live-text/send-check",
+                    {key: approval[key] for key in (
+                        "window_sha256", "event_id", "message_id", "reply_sha256"
+                    )} | {"lease_token": item["lease_token"]}
+                    | ({"reply_revision": item["reply_revision"]}
+                       if "reply_revision" in item else {}),
+                )
+                pending = (interruptible(self.window) and self.window.db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'",
+                ).fetchone() and self.window.db.execute(
+                    "SELECT 1 FROM automatic_recalls WHERE window_sha256=? "
+                    "AND state='PENDING' LIMIT 1", (self.window.plan.sha256,),
+                ).fetchone())
+                if not pending:
+                    break
             if set(receipt) != {"approved", "lease_until"} or receipt["approved"] is not True:
                 raise ValueError("LIVE_TEXT_SEND_FENCED")
             self.operation.lease_until = datetime.fromisoformat(receipt["lease_until"])
             # Core's await is the final asynchronous approval boundary. Rebind
             # the actual pending request as well as the local operation after it.
+            if pending_input(self.window, reply_segments.event_id(item)):
+                raise ValueError("OWNER_INPUT_PENDING")
+        if self.operation.meme_prepared:
+            self.window.memes.mark_sending(
+                item, check=lambda: self.operation.before_dispatch(request=request),
+            )
+            self.operation.meme_sending = True
         self.operation.before_dispatch(request=request)
+        # CheckedTransport invokes its delegate immediately after this hook returns.
+        # Once set, even a transport exception cannot establish non-delivery.
+        self.operation.dispatched = True
 
     async def probe(self):
         return await self.delegate.probe()
@@ -1788,18 +2015,35 @@ class WindowOneBot:
             return await self.send_text(content["text"])
         if not self.companion:
             raise ValueError("EXPRESSION_SCOPE_REQUIRED")
-        message = [{"type": "text", "data": {"text": content["text"]}}]
-        if self.config.meme_directory:
+        item = self.operation.current_item
+        message = [{"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+        image = None
+        if content["image"]["source"] == "companion.meme_catalog":
+            image = self.window.memes.prepare(
+                item, check=lambda: self.operation.before_dispatch(state="RESERVED"),
+            )
+            self.operation.meme_prepared = image is not None
+            if image is None:
+                self.window.memes.cancel(reply_segments.event_id(item))
+        elif self.config.meme_directory:
             from .meme_library import MemeLibrary
 
             library = MemeLibrary(self.config.meme_directory, enabled=True)
-            image = library.prepare(content["image"], self.operation.current_item["delivery_key"])
-            if image:
-                message.append({"type": "image", "data": {
-                    "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
+            image = library.prepare(content["image"], item["delivery_key"])
+        if image:
+            message.append({"type": "image", "data": {
+                "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
         self.operation.prepared_message = message
         self.operation.before_io(content["text"])
-        return await self.delegate.send_message(message)
+        try:
+            provider_id = await self.delegate.send_message(message)
+        except BaseException:
+            if self.operation.meme_sending and self.operation.dispatched:
+                self.window.memes.receipt(item, "UNKNOWN")
+            raise
+        if self.operation.meme_sending:
+            self.window.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
+        return provider_id
 
 
 def seal_protocol_content(request, content):

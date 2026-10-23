@@ -200,7 +200,8 @@ class Spool:
                 os.close(descriptor)
 
     def trace_for(self, delivery_key):
-        match = re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v(?:1|2:[0-2])", delivery_key or "")
+        match = re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v(?:1|2:(?:0|[1-9][0-9]{0,9}))",
+                             delivery_key or "")
         row = (
             self.db.execute("SELECT trace FROM inbox WHERE key=?", (match[1],)).fetchone()
             if match
@@ -244,6 +245,27 @@ class Spool:
             self.db.execute(
                 "UPDATE results SET body=? WHERE message_id=?", (encode(body), message_id)
             )
+
+    def cancel_delivery(self, item, receipt):
+        """Record authenticated no-dispatch cancellation without manufacturing a send ACK."""
+        expected = {"cancelled": True, "message_id": item["message_id"], "state": "CANCELLED",
+                    "send_attempt_retained": True}
+        if receipt != expected:
+            raise ValueError("NOT_SENT_CORE_PROOF_REQUIRED")
+        prior = self.db.execute("SELECT * FROM results WHERE message_id=?",
+                                (item["message_id"],)).fetchone()
+        if prior:
+            value = json.loads(prior["body"])
+            if (value.get("lease_token") != item["lease_token"]
+                or value.get("result") not in {"DELIVERY_UNCERTAIN", "NOT_SENT"}
+                or (prior["state"] != "pending" and value.get("result") != "NOT_SENT")):
+                raise ValueError("DELIVERY_ALREADY_ATTEMPTED")
+        value = encode({"lease_token": item["lease_token"], "result": "NOT_SENT",
+                        "core_receipt": receipt})
+        with self.db:
+            self.db.execute("INSERT INTO results(message_id,body,state) VALUES (?,?,'accepted') "
+                            "ON CONFLICT(message_id) DO UPDATE SET body=excluded.body,"
+                            "state='accepted'", (item["message_id"], value))
 
     async def flush_result(self, client):
         row = self.db.execute(

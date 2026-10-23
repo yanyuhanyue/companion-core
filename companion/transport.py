@@ -3,6 +3,7 @@ import json
 from contextlib import nullcontext
 from datetime import datetime
 
+from companion import reply_revision
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 
@@ -14,26 +15,29 @@ def digest(value):
 def enqueue(store, event_id, conversation_id, text, now, action="qq.private.reply", key=None):
     if action not in {"qq.private.reply", "qq.private.proactive"}:
         raise CoreError("CAPABILITY_DISABLED", 403)
-    content = {"text": text}
-    key = key or f"reply:{event_id}:v1"
-    previous = store.one("SELECT message_id FROM outbox WHERE delivery_key=?", (key,))
-    if previous:
-        return previous["message_id"]
-    message_id = uid("msg")
-    store.insert(
-        "outbox",
-        message_id=message_id,
-        origin_event_id=event_id,
-        conversation_id=conversation_id,
-        action_type=action,
-        content_json=encode(content),
-        content_sha256=digest(content),
-        state="PENDING",
-        delivery_key=key,
-        created_at=now,
-        updated_at=now,
-    )
-    return message_id
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        if action == "qq.private.reply":
+            reply_revision.require_current(store, event_id)
+        content = {"text": text}
+        key = key or f"reply:{event_id}:v1"
+        previous = store.one("SELECT message_id FROM outbox WHERE delivery_key=?", (key,))
+        if previous:
+            return previous["message_id"]
+        message_id = uid("msg")
+        store.insert(
+            "outbox",
+            message_id=message_id,
+            origin_event_id=event_id,
+            conversation_id=conversation_id,
+            action_type=action,
+            content_json=encode(content),
+            content_sha256=digest(content),
+            state="PENDING",
+            delivery_key=key,
+            created_at=now,
+            updated_at=now,
+        )
+        return message_id
 
 
 def _group_manifest(job_id, parts, interval_ms):
@@ -51,6 +55,7 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now):
     ):
         raise CoreError("INVALID_REPLY_SEGMENTS", 400)
     with nullcontext() if store.db.in_transaction else store.transaction():
+        reply_revision.check_job(store, job)
         source = store.one(
             "SELECT j.job_id,j.kind,e.event_id,e.conversation_id,e.redacted "
             "FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=?", (job["job_id"],),
@@ -185,7 +190,7 @@ def cancel_interrupted_replies(store, conversation_id, now):
     if not store.one("SELECT 1 FROM pragma_table_info('outbox') WHERE name='reply_group_id'"):
         return
     store.execute(
-        "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+        "UPDATE outbox SET state='CANCELLED',updated_at=?,"
         "last_error_code='REPLY_INTERRUPTED_BY_OWNER' WHERE conversation_id=? "
         "AND reply_group_id IS NOT NULL AND state IN ('PENDING','LEASED','RETRY_WAIT')",
         (now, conversation_id),
@@ -217,11 +222,8 @@ def recover_deliveries(store, now):
 
 
 def cancel_proactive_work(store, now):
-    # Caller holds the write transaction. Started I/O keeps its uncertain accounting.
-    store.execute(
-        "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id IN "
-        "(SELECT job_id FROM jobs WHERE kind='activity' AND state='RUNNING')"
-    )
+    # Caller holds the write transaction. A dispatched model still owns settlement;
+    # logical cancellation must not turn its eventual observed usage into UNKNOWN.
     store.execute(
         "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
         "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
@@ -258,6 +260,16 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
+            try:
+                reply_revision.check_delivery(store, row["message_id"])
+            except CoreError as error:
+                if error.code not in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED}:
+                    raise
+                store.execute(
+                    "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                    "last_error_code=? WHERE message_id=?", (now, error.code, row["message_id"]),
+                )
+                continue
             if row.get("reply_group_id"):
                 try:
                     check_segment_ready(store, row["message_id"], now)
@@ -302,6 +314,11 @@ def lease_deliveries(store, settings, request, now):
 
             if enabled(settings):
                 items[-1]["window_origin_event_id"] = row["origin_event_id"]
+                if row["action_type"] == "qq.private.reply":
+                    items[-1]["reply_revision"] = store.one(
+                        "SELECT reply_revision FROM events WHERE event_id=?",
+                        (row["origin_event_id"],),
+                    )["reply_revision"]
         return {"items": items}
 
 
@@ -310,6 +327,10 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
     with store.transaction():
         from companion import live_text
 
+        if not store.one("SELECT 1 FROM outbox WHERE message_id=? AND state='LEASED' "
+                         "AND lease_token=? AND lease_until>?", (message_id, token, now)):
+            raise CoreError("STALE_DELIVERY_LEASE")
+        reply_revision.check_delivery(store, message_id)
         if settings is not None and live_text.active(store, settings):
             live_text.check_delivery(store, settings, clock, message_id)
             now = clock()

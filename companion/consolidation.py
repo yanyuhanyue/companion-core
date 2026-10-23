@@ -259,7 +259,8 @@ class NightlyConsolidator:
                 remaining = self.store.one(
                     "SELECT COUNT(*) AS n FROM events e JOIN jobs j USING(event_id) WHERE "
                     "e.actor_id='owner' AND e.source='qq.onebot' AND e.redacted=0 AND "
-                    "e.memory_processed=0 AND j.state='SUCCEEDED' AND e.occurred_at>=? AND "
+                    "e.memory_processed=0 AND j.kind='chat' AND j.state='SUCCEEDED' "
+                    "AND e.occurred_at>=? AND "
                     "e.occurred_at<?",
                     (start, end),
                 )["n"]

@@ -33,6 +33,7 @@ SCENARIOS = {
     "diary": "diary",
     "reflection": "reflection",
     "content_vision": "content",
+    "content_video": "content",
 }
 MODEL = "private_life_model:"
 DELIVERY = "private_life_delivery:"
@@ -93,10 +94,10 @@ def ready(store, settings, clock):
 
 
 def recent_history(store, settings, job):
-    from companion.dialogue_history import recent_sent_sources, turn_messages
+    from companion.dialogue_history import recent_context_sources, turn_messages
 
     approval = settings.live_text_window
-    sources = recent_sent_sources(
+    sources = recent_context_sources(
         store, job["conversation_id"], job["event_id"], approval.max_history_turns
     )
     while (
@@ -155,6 +156,9 @@ def event_digest(event):
 
 
 def check_job(store, settings, approval, job):
+    from companion.reply_revision import check_job as check_reply_job
+
+    check_reply_job(store, job)
     event = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
         "USING(conversation_id) WHERE e.event_id=?",
@@ -196,7 +200,7 @@ def admit_model(store, settings, clock, job_id, scenario):
             raise CoreError("COMPANION_JOB_SCOPE_REQUIRED", 403)
         check_job(store, settings, approval, job)
         if scenario not in (
-            {"chat", "memory_review", "content_vision"}
+            {"chat", "memory_review", "content_vision", "content_video"}
             if job["kind"] == "chat"
             else {"activity", "memory_review"}
         ):
@@ -230,18 +234,27 @@ def freeze_model(store, settings, request_id):
 def check_model(store, settings, clock, request_id):
     from companion import live_text, qq_images
 
-    approval, _, _ = live_text.guard(store, settings, clock, current_request=request_id)
     row = store.one(
         "SELECT a.*,m.job_id,m.scenario,m.state FROM model_admissions a "
         "JOIN model_usage m USING(request_id) WHERE request_id=?",
         (request_id,),
     )
+    if row and row["job_id"]:
+        from companion.reply_revision import check_job as check_reply_job
+
+        check_reply_job(store, store.one("SELECT * FROM jobs WHERE job_id=?", (row["job_id"],)))
+    approval, _, _ = live_text.guard(store, settings, clock, current_request=request_id)
     record = live_text._meta(store, MODEL + request_id)
+    retained_sources = bool(row and row["job_id"] and store.one(
+        "SELECT 1 FROM jobs WHERE job_id=? AND context_tracked=1", (row["job_id"],),
+    ))
     if (
         not row
         or not record
         or row["state"] != "RESERVED"
-        or record["privacy_epoch"] != epoch(store)
+        or (record["privacy_epoch"] != epoch(store) and not (
+            retained_sources and type(record.get("privacy_epoch")) is int
+            and 0 <= record["privacy_epoch"] < epoch(store)))
         or record["plan_sha256"] != approval.plan_sha256
         or record["payload_sha256"] != row["payload_sha256"]
         or record["job_id"] != row["job_id"]
@@ -254,10 +267,18 @@ def check_model(store, settings, clock, request_id):
         event = check_job(store, settings, approval, job)
         if event_digest(event) != record["event_sha256"]:
             raise CoreError("COMPANION_MODEL_SOURCE_CHANGED", 503)
-        if row["scenario"] == "content_vision":
+        if row["scenario"] in {"content_vision", "content_video"}:
             qq_images.frozen(store, settings, approval, job)
+            source_request_id = request_id
+            if row["scenario"] == "content_video":
+                from companion import qq_video
+
+                video, _, source_request_id = qq_video.current(store, settings, approval, job)
+                if (video["request_id"] != request_id
+                    or video["payload_sha256"] != row["payload_sha256"]):
+                    raise CoreError("LIVE_VIDEO_SOURCE_CHANGED", 403)
             image, _, _ = qq_images.lease(
-                store, settings, approval, clock, job["event_id"], request_id=request_id
+                store, settings, approval, clock, job["event_id"], request_id=source_request_id
             )
             lease = min(lease, image["lease_until"])
         else:

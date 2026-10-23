@@ -3,7 +3,7 @@ import stat
 import tomllib
 from dataclasses import dataclass
 from ipaddress import ip_address, ip_network
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
 
@@ -54,8 +54,56 @@ class BridgeConfig:
     capture_signing_key: str | None = None
     rich_input_scope: str = "none"
     meme_directory: str | None = None
+    meme_enabled: bool = False
+    meme_discovery_enabled: bool = False
+    meme_search_provider: str = "none"
+    meme_search_api_key: str | None = None
+    meme_trusted_sources: tuple[dict, ...] = ()
+    meme_catalog_max_storage_bytes: int = 67108864
+    meme_catalog_max_assets: int = 512
+    meme_catalog_max_bindings: int = 10000
+    meme_cooldown_seconds: int = 1800
 
     def __post_init__(self):
+        if (type(self.meme_enabled) is not bool or type(self.meme_discovery_enabled) is not bool
+            or self.meme_search_provider not in {"none", "brave"}):
+            raise ValueError("INVALID_MEME_CONFIGURATION")
+        if self.meme_search_api_key is not None and (
+            not isinstance(self.meme_search_api_key, str)
+            or not 1 <= len(self.meme_search_api_key) <= 4096
+            or not self.meme_search_api_key.isascii()
+            or any(ord(char) <= 32 or ord(char) == 127 for char in self.meme_search_api_key)
+        ):
+            raise ValueError("INVALID_MEME_SEARCH_CREDENTIAL")
+        for value, low, high in (
+            (self.meme_catalog_max_storage_bytes, 1, 1073741824),
+            (self.meme_catalog_max_assets, 1, 4096),
+            (self.meme_catalog_max_bindings, 1, 100000),
+            (self.meme_cooldown_seconds, 0, 86400),
+        ):
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError("INVALID_MEME_LIMIT")
+        if not isinstance(self.meme_trusted_sources, (tuple, list)) or len(
+            self.meme_trusted_sources
+        ) > 64:
+            raise ValueError("INVALID_MEME_SOURCE_POLICY")
+        for rule in self.meme_trusted_sources:
+            if (not isinstance(rule, dict) or set(rule) != {
+                "repo", "revision", "license", "license_path", "license_sha256",
+                "asset_prefix", "usage_basis",
+            } or any(not isinstance(value, str) or not value or len(value) > 512
+                     for value in rule.values())
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", rule["repo"])
+                or any(part in {".", ".."} for part in rule["repo"].split("/"))
+                or not re.fullmatch(r"[a-f0-9]{40}", rule["revision"])
+                or not re.fullmatch(r"[a-f0-9]{64}", rule["license_sha256"])):
+                raise ValueError("INVALID_MEME_SOURCE_POLICY")
+            for key in ("license_path", "asset_prefix"):
+                path = PurePosixPath(rule[key])
+                if (path.is_absolute() or ".." in path.parts or "\\" in rule[key]
+                    or ":" in rule[key]):
+                    raise ValueError("INVALID_MEME_SOURCE_POLICY")
+        object.__setattr__(self, "meme_trusted_sources", tuple(self.meme_trusted_sources))
         if self.meme_directory is not None and (
             not isinstance(self.meme_directory, str) or not Path(self.meme_directory).is_absolute()
             or ".." in Path(self.meme_directory).parts

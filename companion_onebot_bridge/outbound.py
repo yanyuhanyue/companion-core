@@ -29,6 +29,10 @@ def validate_item(item, config, *, companion=False):
     ):
         raise ValueError("OWNER_REPLY_REQUIRED")
     content = item.get("content")
+    if "reply_revision" in item and (
+        type(item["reply_revision"]) is not int or item["reply_revision"] < 0
+    ):
+        raise ValueError("INVALID_REPLY_REVISION")
     if (
         not isinstance(content, dict)
         or set(content) not in ({"text"}, {"text", "image"})
@@ -39,10 +43,17 @@ def validate_item(item, config, *, companion=False):
     if "image" in content:
         image = content["image"]
         if (not companion or item["action_type"] != "qq.private.reply"
-            or not isinstance(image, dict) or set(image) != {"source", "category"}
-            or image["source"] != "astrbot.meme_manager"
-            or not isinstance(image["category"], str)
+            or not isinstance(image, dict)
+            or not isinstance(image.get("category"), str)
             or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", image["category"])):
+            raise ValueError("EXPRESSION_SCOPE_REQUIRED")
+        if image.get("source") == "companion.meme_catalog":
+            if (set(image) != {"source", "category", "candidate_id", "offer_key"}
+                or not isinstance(image["candidate_id"], str)
+                or not re.fullmatch(r"[a-f0-9]{64}", image["candidate_id"])
+                or image["offer_key"] != "meme:" + reply_segments.event_id(item)):
+                raise ValueError("EXPRESSION_SCOPE_REQUIRED")
+        elif image.get("source") != "astrbot.meme_manager" or set(image) != {"source", "category"}:
             raise ValueError("EXPRESSION_SCOPE_REQUIRED")
     reply_segments.envelope(item)
 
@@ -67,16 +78,21 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):
     trace = spool.trace_for(item.get("delivery_key"))
     if metrics:
         metrics.emit("t_outbox_lease", trace)
-    if not (await onebot.probe())["connection_ready"]:
-        raise ValueError("ONEBOT_NOT_READY")
     message_id = item["message_id"]
-    started = await bounded_post(
-        client,
-        f"/internal/v1/deliveries/{message_id}/begin-send",
-        {"lease_token": item["lease_token"]},
-    )
-    if started != {"state": "SENDING"}:
-        raise ValueError("INVALID_BEGIN_SEND_ACK")
+    try:
+        if not (await onebot.probe())["connection_ready"]:
+            raise ValueError("ONEBOT_NOT_READY")
+        started = await bounded_post(
+            client,
+            f"/internal/v1/deliveries/{message_id}/begin-send",
+            {"lease_token": item["lease_token"]},
+        )
+        if started != {"state": "SENDING"}:
+            raise ValueError("INVALID_BEGIN_SEND_ACK")
+    except Exception:
+        if guard is not None and await guard.cancel_before_send(item):
+            return True
+        raise
     if metrics:
         metrics.emit("t_begin_send", trace)
     # The durable fallback is uncertain BEFORE starting any external send I/O.
@@ -87,7 +103,8 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):
         provider_id = await onebot.send_content(item["content"]) if hasattr(
             onebot, "send_content") else await onebot.send_text(item["content"]["text"])
     except Exception:
-        pass
+        if guard is not None and await guard.cancel_before_send(item):
+            return True
     ack_ns = time.perf_counter_ns()
     spool.finish_delivery(message_id, provider_id)
     if metrics:

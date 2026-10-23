@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from companion import budget, image_spool, live_text, qq_images
+from companion import budget, image_spool, live_text, qq_images, qq_video, video_input
 from companion.contracts import CoreError
 from companion.media_config import MediaEndpoint
 from companion.media_provider import HTTPMediaProvider
@@ -117,9 +117,13 @@ def erase_content(store, event_ids):
         store.execute(
             "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND request_id IN "
             "(SELECT usage_request_id FROM content_items WHERE owner_event_id=? "
-            "OR source_event_id=? OR output_event_id=?)",
+            "OR source_event_id=? OR output_event_id=?) AND NOT EXISTS "
+            "(SELECT 1 FROM model_admissions a WHERE a.request_id=model_usage.request_id)",
             (event_id, event_id, event_id),
         )
+        # A paid request may still return known usage. Preserve its reservation
+        # until that callback settles it, or cancelled-job lease recovery records
+        # UNKNOWN through the independent budget journal. Erasure never refunds it.
         store.execute(
             "UPDATE content_items SET target_url='',media_sha256='',fingerprint='',"
             "output_event_id=NULL,lease_token=NULL,lease_until=NULL,state='ERASED',"
@@ -800,9 +804,9 @@ class ContentService:
             from companion.image_frames import prepare
             from companion.image_input import text_and_estimate
 
-            prepared = prepare(
-                data, mime, policy.model_copy(update={"max_bytes_per_image": maximum}),
-            )
+            bounded = policy.model_copy(update={"max_bytes_per_image": maximum})
+            prepared = (video_input.preview(data, mime, bounded)[0] if video_input.enabled(cfg)
+                        else prepare(data, mime, bounded))
             part = prepared.part()
             text_and_estimate(policy, [{"role": "user", "content": [
                 {"type": "text", "text": VISION_PROMPT}, part,
@@ -854,7 +858,8 @@ class ContentService:
                         != item["fingerprint"]):
                         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
                     proofs.append(staged_proof)
-                    prepared = prepare(saved, saved_mime, policy)
+                    prepared = (video_input.preview(saved, saved_mime, policy)[0]
+                                if video_input.enabled(cfg) else prepare(saved, saved_mime, policy))
                     parts.append(prepared.part())
                     if prepared.note:
                         sampling.append(f"图片{item['slot'] + 1}：" + prepared.note)
@@ -865,6 +870,17 @@ class ContentService:
                 )
                 if sampling:
                     prompt += "\n" + "\n".join(sampling)
+                if video_input.enabled(cfg):
+                    _, owner_body, _, _ = qq_images.source(
+                        s, cfg, approval, row["owner_event_id"],
+                    )
+                    prompt += (
+                        "\nunderstand_video 可按需查看本次动图的完整时序。若需要知道动作、"
+                        "互动过程、表情变化或主人问动图含义，就调用它；只需静态内容或图片"
+                        "与当前问题无关时可不调用。未调用时不能猜动作。静态图片不调用。"
+                        "\n主人当前消息（资料）：" + json.dumps(owner_body.get("text", ""),
+                                                              ensure_ascii=False)
+                    )
                 messages = [{"role": "user", "content": [{"type": "text", "text": prompt}, *parts]}]
                 text_and_estimate(policy, messages)
                 s.execute(
@@ -885,9 +901,16 @@ class ContentService:
                 response = await budget.complete(
                     model, s, cfg, request_id, messages, "content_vision", clock,
                 )
+            result_model = cfg.model_name
+            if response.tool_calls:
+                response = await qq_video.analyze(model, s, cfg, clock, job, response.tool_calls)
+                result_model = cfg.paid_model.video_input.model
+                sampling = ["[本批动图已按原时间顺序转为无声视频分析，图像预览仅为首帧。]"]
             text = redact(response.text, cfg).replace(
                 cfg.model_key.get_secret_value(), "[REDACTED]",
             )
+            if cfg.video_model_key.get_secret_value():
+                text = text.replace(cfg.video_model_key.get_secret_value(), "[REDACTED]")
             if not text.strip():
                 raise CoreError("CONTENT_IMAGE_RESULT_INVALID", 502)
             if sampling:
@@ -907,19 +930,44 @@ class ContentService:
                     event_ids.append(self._record_image(
                         current, text,
                         title=f"主人当前分享的图片{current['slot'] + 1}（同批联合观察）",
-                        model=cfg.model_name, source_event_ids=[current["owner_event_id"]],
+                        model=result_model, source_event_ids=[current["owner_event_id"]],
                     ))
             return {"state": "SUCCEEDED", "event_id": event_ids[0], "duplicate": False}
         except BaseException as error:
             self.discard_images(original["owner_event_id"])
             with s.transaction():
-                s.execute(
-                    "UPDATE content_items SET state=?,error_code='CONTENT_IMAGE_FAILED_CLOSED',"
-                    "updated_at=? WHERE owner_event_id=? AND kind='qq_image' "
-                    "AND state IN ('WAITING','QUEUED','FETCHING','RUNNING')",
-                    ("UNKNOWN" if reserved else "FAILED", clock(), original["owner_event_id"]),
+                from companion import reply_revision
+
+                cancelled = None
+                current_job = s.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'",
+                                    (original["owner_event_id"],))
+                if current_job:
+                    try:
+                        reply_revision.check_job(s, current_job)
+                    except CoreError as changed:
+                        if changed.code in {reply_revision.SUPERSEDED,
+                                            reply_revision.SOURCE_RECALLED,
+                                            reply_revision.CANCELLED}:
+                            cancelled = changed.code
+                unsettled = current_job and s.one(
+                    "SELECT 1 FROM model_usage WHERE job_id=? AND state<>'SETTLED' LIMIT 1",
+                    (current_job["job_id"],),
                 )
-                live_text.record_failure(s, cfg, "CONTENT_IMAGE_FAILED_CLOSED")
+                if cancelled and not unsettled:
+                    s.execute("UPDATE content_items SET state='FAILED',error_code=?,updated_at=? "
+                              "WHERE owner_event_id=? AND kind='qq_image' "
+                              "AND state IN ('WAITING','QUEUED','FETCHING','RUNNING')",
+                              (cancelled, clock(), original["owner_event_id"]))
+                else:
+                    s.execute(
+                        "UPDATE content_items SET state=?,error_code='CONTENT_IMAGE_FAILED_CLOSED',"
+                        "updated_at=? WHERE owner_event_id=? AND kind='qq_image' "
+                        "AND state IN ('WAITING','QUEUED','FETCHING','RUNNING')",
+                        ("UNKNOWN" if reserved else "FAILED", clock(), original["owner_event_id"]),
+                    )
+                    live_text.record_failure(s, cfg, "CONTENT_IMAGE_FAILED_CLOSED")
+            if cancelled and not unsettled:
+                raise CoreError(cancelled, 409) from None
             if isinstance(error, CoreError):
                 raise
             if isinstance(error, Exception):
@@ -1025,6 +1073,7 @@ class ContentService:
             if qq_images.enabled(self.settings):
                 approval, _, attempts = live_text.guard(self.store, self.settings, self.clock)
                 needed = 3 if approval.memory_scope != "none" else 2
+                needed += int(video_input.enabled(self.settings))
                 if attempts + needed > min(
                     approval.max_model_attempts, self.settings.paid_model.window_calls,
                 ):
