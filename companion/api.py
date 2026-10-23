@@ -21,6 +21,7 @@ from companion import (
     qq_rich,
 )
 from companion.config import Settings
+from companion.console_api import register_console_routes
 from companion.content_api import register_content_routes
 from companion.contracts import (
     CoreError,
@@ -174,6 +175,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     prefix = "/internal/v1"
     auth = [Depends(authenticate)]
     register_content_routes(app, auth)
+    register_console_routes(app, settings)
 
     @app.middleware("http")
     async def memory_control_exclusive(request, call_next):

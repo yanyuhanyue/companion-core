@@ -1,0 +1,307 @@
+"""Owner configuration proposals, encrypted at rest and applied on process startup."""
+
+import base64
+import hashlib
+import hmac
+import json
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from cryptography.fernet import Fernet, InvalidToken
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    ValidationError,
+    model_validator,
+)
+
+from companion.contracts import CoreError, StrictModel
+from companion.store import encode
+
+
+class ConsoleConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    public_origin: str = "https://console.11314520.xyz"
+    session_seconds: int = Field(default=3600, ge=300, le=86400)
+    max_sessions: int = Field(default=5, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def valid_origin(self):
+        url = AnyHttpUrl(self.public_origin)
+        if (url.scheme != "https" or url.username is not None or url.password is not None
+            or urlsplit(self.public_origin).username is not None
+            or url.path not in {"", "/"} or url.query is not None or url.fragment is not None):
+            raise ValueError("console requires an HTTPS origin without a path or credentials")
+        port = f":{url.port}" if url.port != 443 else ""
+        self.public_origin = f"https://{url.host}{port}"
+        return self
+
+
+class ConfigurationChange(StrictModel):
+    expected_version: int = Field(ge=0)
+    changes: dict = Field(min_length=1, max_length=100)
+
+
+# Identity, ledger locations and signed approvals are deployment custody, not browser inputs.
+EXCLUDED = frozenset({
+    "owner_qq_id", "bot_qq_id", "bridge_token", "diary_admin_token", "control_token",
+    "database", "erasure_ledger", "embedding_cache_dir", "paid_model", "live_text_window",
+    "observation_adapters", "executive", "media", "cloud_budget", "timezone", "mode",
+    "diary_auto_share",
+})
+LABELS = {
+    "model_url": "聊天模型服务地址", "model_name": "聊天模型名称", "model_key": "聊天模型密钥",
+    "video_model_key": "视频模型密钥", "provider": "模型服务类型",
+    "input_rate": "输入价格（微美元／百万 token）",
+    "cached_input_rate": "缓存输入价格（微美元／百万 token）",
+    "output_rate": "输出价格（微美元／百万 token）", "max_output_tokens": "最大回复 token",
+    "timeout_seconds": "模型请求超时（秒）", "content": "阅读与图片限制",
+    "console": "控制台与公网地址", "segmented_reply": "分段回复",
+    "expression_enabled": "自动选择表情", "expression_learning_enabled": "表达习惯学习",
+    "expression_selection_probability": "表情选择概率",
+    "expression_cooldown_minutes": "表情使用间隔（分钟）",
+    "diary_enabled": "私人日记", "memory_enabled": "长期记忆",
+    "exploration_enabled": "自主阅读", "proactive_enabled": "主动分享",
+    "context_soft_tokens": "对话上下文软上限（token）",
+    "max_recent_messages": "最近消息数量上限", "rich_input_scope": "富媒体输入范围",
+    "monthly_limit_micro_usd": "模型与工具月额度（微美元）",
+    "autonomous_daily_micro_usd": "主动交流日额度（微美元）",
+    "memory_daily_micro_usd": "记忆处理日额度（微美元）",
+    "diary_generate_hour": "日记整理时刻（小时）",
+    "diary_min_source_events": "日记最少来源事件数",
+    "diary_max_source_events": "日记最多来源事件数",
+    "diary_max_output_tokens": "日记输出上限（token）",
+    "diary_max_body_chars": "日记正文上限（字符）",
+    "diary_catchup_days": "日记补写范围（天）",
+    "diary_max_attempts": "日记最大尝试次数",
+    "diary_daily_micro_usd": "日记日额度（微美元）",
+    "content_enabled": "分享内容读取", "web_reading_enabled": "指定网站读取",
+    "observation_enabled": "来源观察", "voice_enabled": "语音输入",
+    "camera_enabled": "摄像头观察", "android_enabled": "Android 观察",
+    "affect_enabled": "互动状态调整", "affect_decay_minutes": "互动状态有效期（分钟）",
+    "affect_max_evidence": "互动状态证据上限",
+    "consolidation_enabled": "记忆整理", "consolidation_local_hour": "记忆整理时刻（小时）",
+    "consolidation_catchup_days": "记忆补整理范围（天）",
+    "reflection_enabled": "来源支持的反思",
+    "reflection_daily_max_suggestions": "每日反思建议上限",
+    "reflection_min_sources": "反思最少来源数",
+    "reflection_max_output_tokens": "反思输出上限（token）",
+    "reflection_max_daily_calls": "每日反思调用上限",
+    "reflection_daily_micro_usd": "反思日额度（微美元）",
+    "reflection_monthly_micro_usd": "反思月额度（微美元）",
+    "goals_enabled": "目标与承诺", "goals_max_active": "活动目标数量上限",
+    "goal_max_attempts": "目标最大尝试次数", "wake_enabled": "自主活动调度",
+    "wake_min_interval_minutes": "自主活动最小间隔（分钟）",
+    "wake_max_daily_runs": "每日自主活动上限",
+    "exploration_daily_candidate_limit": "每日发现候选上限",
+    "exploration_daily_deep_reads": "每日深入阅读上限",
+    "exploration_daily_requests": "阅读每日网络请求上限",
+    "exploration_monthly_requests": "阅读每月网络请求上限",
+    "exploration_max_response_bytes": "单次读取响应上限（字节）",
+    "exploration_daily_bytes": "每日阅读流量上限（字节）",
+    "social_enabled": "阅读内容分享", "social_semantic_threshold": "内容分享相似度阈值",
+    "meme_discovery_enabled": "发现表情素材", "meme_semantics_enabled": "表情素材理解",
+    "meme_caption_daily_micro_usd": "表情理解日额度（微美元）",
+    "meme_caption_max_output_tokens": "表情理解输出上限（token）",
+    "meme_discovery_daily_queries": "每日表情发现次数上限",
+    "meme_discovery_daily_download_bytes": "每日表情下载上限（字节）",
+    "meme_discovery_daily_storage_bytes": "每日表情新增存储上限（字节）",
+    "expression_meme_categories": "允许的表情素材分类",
+    "semantic_min_score": "记忆相似度下限", "extraction_min_events": "记忆提取最少事件数",
+    "extraction_idle_seconds": "记忆提取空闲等待（秒）",
+    "emerging_min_sessions": "初步偏好最少独立会话数",
+    "stable_min_days": "稳定偏好最少观察天数",
+    "proactive_interval_seconds": "主动分享最小间隔（秒）",
+    "proactive_idle_seconds": "主动分享空闲等待（秒）",
+    "proactive_daily_limit": "每日主动分享上限",
+    "quiet_start": "安静时段开始（小时）", "quiet_end": "安静时段结束（小时）",
+    "lease_seconds": "任务领取有效期（秒）", "max_attempts": "任务最大尝试次数",
+    "raw_event_retention_days": "原始事件保留期（天）",
+}
+
+
+def _cipher(settings):
+    token = settings.control_token.get_secret_value()
+    if len(token) < 24:
+        raise CoreError("CONSOLE_OWNER_CREDENTIAL_REQUIRED", 503)
+    key = hashlib.sha256(("companion/operator-config/v1:" + token).encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def _decode(row, settings):
+    if not row:
+        return {}
+    try:
+        data = json.loads(_cipher(settings).decrypt(row["encrypted_overrides"].encode()))
+        if not isinstance(data, dict):
+            raise ValueError("configuration shape")
+        return data
+    except (InvalidToken, ValueError, TypeError):
+        raise CoreError("OPERATOR_CONFIGURATION_UNREADABLE", 503) from None
+
+
+def latest(store):
+    return store.one("SELECT * FROM operator_configuration ORDER BY version DESC LIMIT 1")
+
+
+def _raw(value):
+    if isinstance(value, SecretStr):
+        return value.get_secret_value()
+    if isinstance(value, BaseModel):
+        return _raw(value.model_dump(mode="python"))
+    if isinstance(value, dict):
+        return {key: _raw(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_raw(item) for item in value]
+    return value
+
+
+def _safe(value):
+    if isinstance(value, SecretStr):
+        return None
+    if isinstance(value, BaseModel):
+        return _safe(value.model_dump(mode="python"))
+    if isinstance(value, dict):
+        return {key: _safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_safe(item) for item in value]
+    return value
+
+
+def _merge(original, changes):
+    if isinstance(original, SecretStr) and changes is None:
+        return original  # Write-only fields are returned as null, not a request to erase a key.
+    if not isinstance(original, dict) or not isinstance(changes, dict):
+        return changes
+    result = dict(original)
+    for key, value in changes.items():
+        result[key] = _merge(result.get(key), value)
+    return result
+
+
+def _candidate(settings, overrides):
+    try:
+        values = settings.model_dump(mode="python")
+        # An empty write-only field can be excluded from serialization. Preserve
+        # its actual type so a null roundtrip still means "keep the desired key".
+        for name in type(settings).model_fields:
+            value = getattr(settings, name)
+            if isinstance(value, SecretStr):
+                values[name] = value
+        return type(settings).model_validate(_merge(values, overrides))
+    except (ValidationError, ValueError, TypeError):
+        # Never include rejected input in an exception, even if it contains a credential.
+        raise CoreError("INVALID_OPERATOR_CONFIGURATION", 400) from None
+
+
+def load(settings):
+    """Read a committed desired version once; in-flight processes retain their settings."""
+    path = Path(settings.database).resolve()
+    if not path.is_file():
+        return settings
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        if not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='operator_configuration'",
+        ).fetchone():
+            return settings
+        row = db.execute("SELECT * FROM operator_configuration ORDER BY version DESC LIMIT 1")
+        record = row.fetchone()
+        if record:
+            result = _candidate(settings, _decode(dict(record), settings))
+            result._operator_config_version = record["version"]
+            return result
+    return settings
+
+
+def _group(key):
+    if key.startswith(("model", "provider", "input_rate", "cached_input", "output_rate")):
+        return "model"
+    if key.startswith(("content", "web_reading", "voice", "camera", "video")):
+        return "content"
+    if key.startswith(("expression", "meme", "segmented")):
+        return "expression"
+    if key.startswith(("memory", "extraction", "semantic", "raw_event")):
+        return "memory"
+    if key.startswith(("diary", "reflection", "goals", "goal_", "wake", "exploration",
+                       "proactive", "social", "affect", "consolidation", "quiet")):
+        return "autonomy"
+    return "system"
+
+
+def _field_type(schema, definitions):
+    variants = schema.get("anyOf", [schema])
+    nullable = any(item.get("type") == "null" for item in variants)
+    variants = [item for item in variants if item.get("type") != "null"]
+    selected = variants[0] if len(variants) == 1 else schema
+    if "$ref" in selected:
+        selected = definitions.get(selected["$ref"].rsplit("/", 1)[-1], selected)
+    return selected.get("type", "string"), nullable
+
+
+def view(store, settings):
+    row = latest(store)
+    desired = _candidate(settings, _decode(row, settings))
+    document = type(settings).model_json_schema()
+    properties, definitions = document["properties"], document.get("$defs", {})
+    fields = []
+    for key in type(settings).model_fields:
+        if key in EXCLUDED:
+            continue
+        value, active = getattr(desired, key), getattr(settings, key)
+        schema = properties[key]
+        kind, nullable = _field_type(schema, definitions)
+        if isinstance(value, SecretStr):
+            kind = "secret"
+        item = {"key": key, "label": LABELS.get(key, key), "group": _group(key),
+                "type": kind, "value": _safe(value), "active_value": _safe(active),
+                "nullable": nullable, "effect": "restart_and_window_handoff", "schema": schema}
+        for bound in ("minimum", "maximum"):
+            if bound in schema:
+                item[bound] = schema[bound]
+        if kind == "secret":
+            item["configured"] = bool(value.get_secret_value())
+        fields.append(item)
+    version = row["version"] if row else 0
+    history = [{"version": item["version"], "created_at": item["created_at"],
+                "fields": json.loads(item["fields_json"]), "effect": "restart_and_window_handoff"}
+               for item in store.rows("SELECT version,created_at,fields_json FROM "
+                                      "operator_configuration ORDER BY version DESC LIMIT 20")]
+    return {"version": version, "active_version": settings._operator_config_version,
+            "pending_restart": version != settings._operator_config_version,
+            "fields": fields, "history": history}
+
+
+def update(store, settings, body, key, now):
+    if set(body.changes) - (set(type(settings).model_fields) - EXCLUDED):
+        raise CoreError("CONFIGURATION_FIELD_NOT_EDITABLE", 400)
+    fingerprint = hmac.new(settings.control_token.get_secret_value().encode(),
+                           encode(body.model_dump()).encode(), hashlib.sha256).hexdigest()
+    with store.transaction():
+        previous = store.one("SELECT request_sha256 FROM operator_configuration WHERE request_id=?",
+                             (key,))
+        if previous:
+            if previous["request_sha256"] != fingerprint:
+                raise CoreError("IDEMPOTENCY_CONFLICT", 409)
+        else:
+            current = latest(store)
+            version = current["version"] if current else 0
+            if body.expected_version != version:
+                raise CoreError("CONFIGURATION_VERSION_CHANGED", 409)
+            overrides = _decode(current, settings)
+            desired = _candidate(settings, overrides)
+            validated = _candidate(desired, body.changes)
+            overrides.update({name: _raw(getattr(validated, name)) for name in body.changes})
+            encrypted = _cipher(settings).encrypt(encode(_raw(overrides)).encode()).decode()
+            store.insert("operator_configuration", version=version + 1, request_id=key,
+                         request_sha256=fingerprint, encrypted_overrides=encrypted,
+                         fields_json=encode(sorted(body.changes)), created_at=now)
+            store.audit("configuration.saved", str(version + 1), "console", now,
+                        fields=sorted(body.changes), effect="restart_and_window_handoff")
+    return view(store, settings)
