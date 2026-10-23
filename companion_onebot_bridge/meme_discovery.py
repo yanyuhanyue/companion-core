@@ -295,7 +295,7 @@ async def run_discovery(job_key, intent, provider, catalog, *, budget, check, re
         await reservation.check()
 
     fetcher = PublicFetcher(limits, usage, fence, transport=transport, resolver=resolver)
-    accepted, rejected = [], 0
+    accepted, rejected, pending = [], 0, []
     try:
         await fence()
         number = 0
@@ -362,12 +362,19 @@ async def run_discovery(job_key, intent, provider, catalog, *, budget, check, re
             sha = catalog.add(data, metadata, check=commit_check)
             if not existed:
                 usage.storage_bytes += len(data)
-            if sha not in accepted:
-                accepted.append(sha)
+            from .meme_semantic import managed, usable
+
+            awaiting_caption = managed(catalog.db, sha) and not usable(catalog, sha)
+            destination = pending if awaiting_caption else accepted
+            if sha not in destination:
+                destination.append(sha)
         await fence()
         await reservation.finish(usage)
-        return {"status": "completed", "accepted": accepted, "rejected": rejected,
-                "usage": usage.__dict__}
+        result = {"status": "completed", "accepted": accepted, "rejected": rejected,
+                  "usage": usage.__dict__}
+        if pending:
+            result["pending_caption"] = pending
+        return result
     except BaseException:
         # Cancellation, process-loss recovery and late provider errors never imply refunds.
         await reservation.unknown(usage)

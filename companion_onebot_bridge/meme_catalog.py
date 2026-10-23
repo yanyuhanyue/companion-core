@@ -120,9 +120,12 @@ class MemeCatalog:
             raise ValueError("MEME_ASSET_INVALID")
         with self.atomic(check):
             check()
-            row = self.db.execute("SELECT sha FROM meme_assets WHERE sha=?",
+            from .meme_semantic import stage_if_enabled
+
+            row = self.db.execute("SELECT metadata FROM meme_assets WHERE sha=?",
                                   (image.sha256,)).fetchone()
             if row:
+                stage_if_enabled(self, image.sha256, self.metadata(row[0]))
                 return image.sha256  # Never reactivate a removed asset on rediscovery.
             count, size = self.db.execute(
                 "SELECT COUNT(*),COALESCE(SUM(LENGTH(data)),0) FROM meme_assets"
@@ -131,6 +134,7 @@ class MemeCatalog:
                 raise ValueError("MEME_STORAGE_LIMIT")
             self.db.execute("INSERT INTO meme_assets(sha,data,metadata) VALUES (?,?,?)",
                             (image.sha256, data, json.dumps(asdict(metadata), ensure_ascii=False)))
+            stage_if_enabled(self, image.sha256, metadata)
         return image.sha256
 
     def add_local(self, path, metadata, *, check):
@@ -177,7 +181,11 @@ class MemeCatalog:
                 (self.max_assets,),
             ).fetchall()
             ranked = []
+            from .meme_semantic import managed
+
             for sha, raw in rows:
+                if managed(self.db, sha):
+                    continue  # Managed assets require caption-based context retrieval.
                 meta = self.metadata(raw)
                 score = semantic_score(meta, intent)
                 if score and (category is None or meta.category == category):
@@ -207,6 +215,10 @@ class MemeCatalog:
         with self.atomic(check):
             check()
             if not self.library.enabled:
+                return None
+            from .meme_semantic import usable
+
+            if candidate_id is not None and not usable(self, candidate_id, key):
                 return None
             pin = self.db.execute("SELECT sha,state FROM meme_pins WHERE key=?",
                                   (key,)).fetchone()
@@ -244,6 +256,12 @@ class MemeCatalog:
         with self.atomic(check):
             check()
             if not self.library.enabled:
+                raise ValueError("MEME_SEND_FENCED")
+            from .meme_semantic import usable
+
+            key = key_hash(delivery_key)
+            pin = self.db.execute("SELECT sha FROM meme_pins WHERE key=?", (key,)).fetchone()
+            if pin and pin[0] is not None and not usable(self, pin[0], key):
                 raise ValueError("MEME_SEND_FENCED")
             cursor = self.db.execute(
                 "UPDATE meme_pins SET state='SENDING' WHERE key=? AND state='PREPARED' "
@@ -286,4 +304,7 @@ class MemeCatalog:
 
     def remove(self, sha):
         with self.atomic():
+            from .meme_semantic import invalidate_in_transaction
+
+            invalidate_in_transaction(self.db, sha)
             self.db.execute("UPDATE meme_assets SET active=0,data=NULL WHERE sha=?", (sha,))
