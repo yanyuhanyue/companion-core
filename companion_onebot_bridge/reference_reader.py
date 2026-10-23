@@ -51,6 +51,7 @@ class _Reader:
     def __init__(self, onebot, redact):
         self.onebot, self.redact = onebot, redact
         self.deadline = time.monotonic() + TIMEOUT_SECONDS
+        self.exhausted = False
         self.fetches = self.count = self.chars = self.visited = 0
         self.cache = {}
 
@@ -92,14 +93,15 @@ class _Reader:
             body["issues"].add("FETCH_LIMIT")
             return None
         remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
+        if self.exhausted or remaining <= 0:
             body["issues"].add("TIMEOUT")
             return None
         self.fetches += 1
         body["source"] = "ONEBOT"
         result, issue = None, None
+        timeout = asyncio.timeout(remaining)
         try:
-            async with asyncio.timeout(remaining):
+            async with timeout:
                 result = await (
                     self.onebot.get_msg(reference) if kind == "reply"
                     else self.onebot.get_forward_msg(reference)
@@ -111,6 +113,10 @@ class _Reader:
             ):
                 raise ValueError("REFERENCE_ID_MISMATCH")
         except (TimeoutError, httpx.TimeoutException):
+            # This timer owns the remaining total budget. Its expiry is terminal
+            # even when a coarse monotonic clock has not reached the next tick.
+            if timeout.expired():
+                self.exhausted = True
             result, issue = None, "TIMEOUT"
         except (httpx.HTTPError, OSError):
             result, issue = None, "FETCH_FAILED"

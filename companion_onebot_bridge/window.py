@@ -41,14 +41,24 @@ def digest(value):
 def cancelled_input_proof(row, value):
     fields = {"window_sha256", "event_id", "input_sha256", "state", "event_sha256",
               "job_sha256", "privacy_epoch", "model_attempts", "send_attempts"}
-    if (not isinstance(value, dict) or set(value) != fields or value["state"] != "CANCELLED"
+    paid_fields = {"settled_model_usage_sha256", "billed_micro_usd"}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | paid_fields)
+        or value["state"] != "CANCELLED"
         or value["window_sha256"] != row["plan_hash"] or value["event_id"] != row["event_id"]
         or value["input_sha256"] != row["input_hash"]
         or any(not isinstance(value[name], str) or not SHA.fullmatch(value[name])
                for name in ("event_sha256", "job_sha256"))
         or type(value["privacy_epoch"]) is not int or value["privacy_epoch"] < 0
-        or any(type(value[name]) is not int or value[name] != 0
-               for name in ("model_attempts", "send_attempts"))):
+        or type(value["send_attempts"]) is not int or value["send_attempts"] != 0
+        or type(value["model_attempts"]) is not int or value["model_attempts"] < 0):
+        raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
+    if value["model_attempts"]:
+        if (set(value) != fields | paid_fields
+            or not isinstance(value["settled_model_usage_sha256"], str)
+            or not SHA.fullmatch(value["settled_model_usage_sha256"])
+            or type(value["billed_micro_usd"]) is not int or value["billed_micro_usd"] < 0):
+            raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
+    elif set(value) != fields:
         raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
 
 
@@ -709,7 +719,7 @@ class TestWindow:
             cancelled_input_proof(row, entries[0]["data"].get("core_receipt"))
 
     async def reconcile_cancelled_inputs(self, client):
-        """Retire known zero-attempt inputs; never turn failure into a delivery ACK."""
+        """Retire inputs with no send; settled model attempts remain charged and counted."""
         row = self.verify(active=False)
         records, _ = self.read_journal()
         if (row["state"] != "STOPPED" or self.plan.mode != "live_text"

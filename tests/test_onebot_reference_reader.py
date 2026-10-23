@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -178,6 +179,36 @@ def test_real_wait_uses_one_total_timeout(monkeypatch):
     run(reader.enrich(event, message, protocol, lambda value: value))
     assert protocol.calls == ["1"]
     assert all(body(event, index)["issues"] == ["TIMEOUT"] for index in range(2))
+
+
+def test_total_timeout_stays_exhausted_before_the_next_coarse_clock_tick(monkeypatch):
+    class Slow(Protocol):
+        async def get_msg(self, reference):
+            self.calls.append(reference)
+            await asyncio.Event().wait()
+
+    # Windows 3.12 can expire an asyncio timer within a 15.625ms monotonic
+    # tick. Keep only the reader's clock fixed; asyncio still uses its real timer.
+    monkeypatch.setattr(reader, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    monkeypatch.setattr(reader, "TIMEOUT_SECONDS", 0.01)
+    protocol, message = Slow(), [reply("1"), reply("2")]
+    event = prepared(message)
+    run(reader.enrich(event, message, protocol, lambda value: value))
+    assert protocol.calls == ["1"]
+    assert all(body(event, index)["issues"] == ["TIMEOUT"] for index in range(2))
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), httpx.ReadTimeout("upstream timeout")])
+def test_upstream_timeout_keeps_the_remaining_total_budget(monkeypatch, error):
+    monkeypatch.setattr(reader, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+    event, protocol = enriched([reply("1"), reply("2")], {
+        ("reply", "1"): error,
+        ("reply", "2"): node("A", text("仍在总预算内的第二条引用")),
+    })
+    assert protocol.calls == [("reply", "1"), ("reply", "2")]
+    assert body(event)["issues"] == ["TIMEOUT"]
+    assert body(event, 1)["status"] == "READ"
+    assert body(event, 1)["nodes"][0]["text"] == "仍在总预算内的第二条引用"
 
 
 def test_restore_reuses_signed_projection_and_rejects_changed_owner_or_reference():

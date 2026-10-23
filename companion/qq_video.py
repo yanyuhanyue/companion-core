@@ -47,7 +47,9 @@ async def analyze(model, store, settings, clock, job, tool_calls):
     policy = video_input.contract(settings, job["job_id"], job["job_id"])
     try:
         call, = tool_calls
-        if (set(call) != {"id", "type", "function"} or call["type"] != "function"
+        if (set(call) not in ({"id", "type", "function"}, {"id", "type", "function", "index"})
+            or ("index" in call and (type(call["index"]) is not int or call["index"] != 0))
+            or call["type"] != "function"
             or not isinstance(call["id"], str) or not 1 <= len(call["id"]) <= 128
             or set(call["function"]) != {"name", "arguments"}
             or call["function"]["name"] != "understand_video"):
