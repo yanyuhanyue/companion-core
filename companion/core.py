@@ -783,10 +783,15 @@ class Core(Runtime):
                 )
                 return [], True
             raise
+        validation_reason = "schema"
         try:
             selected = MemorySelection.model_validate_json(response.text).relevant
-            if len(selected) != len(set(selected)) or any(ref not in catalog for ref in selected):
-                raise ValueError("invalid selection")
+            if len(selected) != len(set(selected)):
+                validation_reason = "duplicate_reference"
+                raise ValueError("duplicate selection")
+            if any(ref not in catalog for ref in selected):
+                validation_reason = "unknown_reference"
+                raise ValueError("unknown selection")
             rows = [catalog[ref] for ref in selected]
             if bounded_text:
                 live_text.select_memory(
@@ -794,7 +799,22 @@ class Core(Runtime):
                 )
             return rows, False
         except ValueError as error:
-            self.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"], self.clock())
+            self.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"], self.clock(),
+                             reason=validation_reason, request_id=request_id)
+            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                                   (request_id,))
+            if (not bounded_text and private_life.enabled(self.settings) and job["kind"] == "chat"
+                and reply_revision.owner_input(self.store, job["event_id"])
+                and not reply_revision.control_job(self.store, job)
+                and usage and usage["state"] == "SETTLED"):
+                # Recall selection is optional context, not a memory write. Drop
+                # every candidate and expose unavailability; never retry this paid
+                # review or report an invalid selection as a valid empty result.
+                self.store.audit(
+                    "memory.recall_paused", job["job_id"], job["trace_id"], self.clock(),
+                    code="MEMORY_REVIEW_INVALID", reason=validation_reason, request_id=request_id,
+                )
+                return [], True
             raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
 
     async def prepare_memories(
