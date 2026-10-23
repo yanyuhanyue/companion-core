@@ -13,12 +13,22 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from companion import budget, image_spool, live_text, qq_images, qq_video, video_input
+from companion import (
+    budget,
+    image_spool,
+    live_text,
+    private_life,
+    qq_images,
+    qq_video,
+    reply_revision,
+    video_input,
+)
 from companion.contracts import CoreError
 from companion.media_config import MediaEndpoint
 from companion.media_provider import HTTPMediaProvider
 from companion.observation import ObservationEvent, ObservationPayload
 from companion.privacy import epoch, redact
+from companion.reading import FOLLOWUP, followup_item
 from companion.sources import content_target, public_image_url, supports, web_hosts
 from companion.store import after, encode, uid, utcnow
 
@@ -331,6 +341,68 @@ class ContentService:
                 )
         return self.status(event_id)["items"]
 
+    def followup(self, event_id):
+        """Let an explicit owner follow-up consume one existing read, without reissuing it."""
+        if not self.settings.content_enabled or not private_life.enabled(self.settings):
+            return
+        event, body = self._source(event_id)
+        if self._rows(event_id) or body.get("shared_content"):
+            return
+        text = body.get("text", "").strip()
+        if re.search(r"别|不要|不用|停止|取消|算了|不看|不读|换.{0,2}话题|聊别的", text):
+            return
+        continuation = re.search(
+            r"(?:继续|接着|再试|重新|重试|试试).{0,16}(?:读|看|打开)|再(?:读|看)"
+            r"|(?:现在|这次|应该).{0,8}(?:可以|能).{0,8}(?:读|看|打开)", text,
+        )
+        references = {segment["reference"] for segment in (body.get("rich") or {}).get(
+            "segments", []
+        ) if segment["type"] == "reply"}
+        if not continuation and not references:
+            return
+        s = self.store
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            self._source(event_id)
+            reply_revision.require_current(s, event_id, event["reply_revision"])
+            candidates = s.rows(
+                "SELECT c.*,e.source_event_id AS owner_source_event_id FROM content_items c "
+                "JOIN events e "
+                "ON e.event_id=c.owner_event_id JOIN exploration_requests r "
+                "ON r.request_id=c.read_request_id WHERE e.conversation_id=? "
+                "AND e.redacted=0 AND c.redacted=0 AND c.kind='link' AND r.redacted=0 "
+                "AND r.operation='read' AND r.goal_step_json='{}' "
+                "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?) "
+                "ORDER BY e.rowid DESC,c.slot LIMIT ?",
+                (event["conversation_id"], event_id,
+                 self.settings.live_text_window.max_history_turns),
+            )
+            namespace = event["source_event_id"].rpartition(":")[0]
+            for item in candidates:
+                if references and item["owner_source_event_id"] not in {
+                    namespace + ":" + reference for reference in references
+                }:
+                    continue
+                try:
+                    self._source(item["owner_event_id"])
+                except CoreError:
+                    continue
+                value = {"item_id": item["item_id"], "privacy_epoch": epoch(s),
+                         "window_sha256": self.settings.live_text_window.plan_sha256}
+                s.execute("INSERT OR IGNORE INTO runtime_meta(key,value) VALUES (?,?)",
+                          (FOLLOWUP + event_id, encode(value)))
+                current = followup_item(s, self.settings, event_id)
+                if current:
+                    job = s.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+                    reply_revision.remember_sources(s, job, {current["owner_event_id"], event_id})
+                return
+
+    def _consumer_rows(self, event_id):
+        rows = self._rows(event_id)
+        inherited = followup_item(self.store, self.settings, event_id)
+        if inherited:
+            rows.append(inherited)
+        return rows
+
     def _rows(self, event_id):
         return self.store.rows(
             "SELECT * FROM content_items WHERE owner_event_id=? AND redacted=0 ORDER BY kind,slot",
@@ -340,7 +412,7 @@ class ContentService:
     def status(self, event_id):
         self._source(event_id)
         items, deadlines = [], []
-        for row in self._rows(event_id):
+        for row in self._consumer_rows(event_id):
             state, error = row["state"], row["error_code"]
             if row["kind"] == "link" and row["read_request_id"]:
                 read = self.store.one(
@@ -394,6 +466,10 @@ class ContentService:
         )
         if live_text.active(self.store, self.settings):
             roots = [{"event_id": event_id}]
+            inherited = followup_item(self.store, self.settings, event_id)
+            if inherited:
+                roots.append({"event_id": inherited["owner_event_id"],
+                              "item_id": inherited["item_id"]})
         result = []
         for root in reversed(roots):
             statuses = {
@@ -401,6 +477,8 @@ class ContentService:
                 for item in self.status(root["event_id"])["items"]
             }
             for row in self._rows(root["event_id"]):
+                if root.get("item_id") and row["item_id"] != root["item_id"]:
+                    continue
                 status = statuses.get((row["kind"], row["slot"]))
                 if status is None:
                     continue

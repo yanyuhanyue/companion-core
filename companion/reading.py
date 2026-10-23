@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC
 
-from companion import reply_revision
+from companion import private_life, qq_source, reply_revision
 from companion.contracts import CoreError
 from companion.exploration import ReadItem, ReadResult
 from companion.observation import ArticleEvidence, ReadingEvidence
@@ -14,6 +14,40 @@ from companion.source_grants import ReaderReadValidation
 from companion.sources import content_target
 from companion.store import after, encode, utcnow
 from companion.transport import digest
+
+FOLLOWUP = "reading_followup:"
+
+
+def followup_item(store, settings, event_id):
+    """Resolve a current consumer without changing the Reader's original authority."""
+    if not private_life.enabled(settings):
+        return None
+    record = store.one("SELECT value FROM runtime_meta WHERE key=?", (FOLLOWUP + event_id,))
+    if not record:
+        return None
+    value = json.loads(record["value"])
+    approval = settings.live_text_window
+    if (value["window_sha256"] != approval.plan_sha256
+        or value["privacy_epoch"] != epoch(store)):
+        return None
+    item = store.one(
+        "SELECT c.* FROM content_items c JOIN exploration_requests r "
+        "ON r.request_id=c.read_request_id WHERE c.item_id=? AND c.kind='link' "
+        "AND c.redacted=0 AND r.redacted=0 AND r.operation='read' AND r.goal_step_json='{}'",
+        (value["item_id"],),
+    )
+    if not item:
+        return None
+    try:
+        consumer, _, job = qq_source.source(store, settings, approval, event_id)
+        source, _, _ = qq_source.source(store, settings, approval, item["owner_event_id"])
+        reply_revision.check_job(store, {**job, "reply_revision": consumer["reply_revision"]})
+        if (source["conversation_id"] != consumer["conversation_id"]
+            or not reply_revision.source_active(store, source["event_id"])):
+            return None
+    except CoreError:
+        return None
+    return item
 
 
 def erase_reading(store, event_ids):
@@ -30,6 +64,12 @@ def erase_reading(store, event_ids):
                   "WHERE EXISTS (SELECT 1 FROM runtime_meta "
                   "WHERE key='erased_source_grant:' || x.source_grant_id))")
     for event_id in event_ids:
+        store.execute(
+            "DELETE FROM runtime_meta WHERE key=? OR (key LIKE ? AND "
+            "json_extract(value,'$.item_id') IN "
+            "(SELECT item_id FROM content_items WHERE owner_event_id=?))",
+            (FOLLOWUP + event_id, FOLLOWUP + "%", event_id),
+        )
         # Retain only the attempt identity/counters: a late receipt cannot revive content.
         store.execute(clear + "WHERE request_id IN "
             "(SELECT request_id FROM exploration_evidence WHERE event_id=?) OR "
@@ -69,7 +109,21 @@ class ReadingService:
                 raise CoreError("REPLY_SOURCE_RECALLED", 409)
             # An accepted goal owns continuation. Ordinary direct reads own the current turn.
             if row["goal_step_json"] == "{}" and reply_revision.owner_input(self.store, source_id):
-                reply_revision.require_current(self.store, source_id)
+                if reply_revision.current(self.store, source_id):
+                    continue
+                consumer = self.store.one(
+                    "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
+                    "WHERE e.conversation_id=(SELECT conversation_id FROM events WHERE event_id=?) "
+                    "AND e.reply_revision=c.reply_revision AND e.redacted=0",
+                    (source_id,),
+                )
+                item = followup_item(self.store, self.settings, consumer["event_id"]) if (
+                    consumer
+                ) else None
+                if not item or (item["owner_event_id"], item["read_request_id"]) != (
+                    source_id, row["request_id"],
+                ):
+                    reply_revision.require_current(self.store, source_id)
 
     def lease(self, adapter_id, source_grant=None):
         s = self.store
