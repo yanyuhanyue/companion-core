@@ -738,6 +738,15 @@ class Core(Runtime):
         proof = self.memory_context.pin(self.clock(), rows=hits,
                                         event_ids={source["event_id"] for source in history})
         reply_revision.remember_sources(self.store, job, proof["source_event_ids"])
+        captured_epoch = epoch(self.store)
+
+        def check_sources(current_request=None):
+            # Keep the reply's existing forget/retry contract before checking the
+            # stronger source proof. Recalled or superseded jobs remain cancelled.
+            self._check_reply_epoch(job, captured_epoch)
+            self._check_context_snapshots(job, [{"kind": "memory", "proof": proof}],
+                                          current_request=current_request)
+
         try:
             request_id = budget.reserve(
                 self.store, self.settings, job["job_id"], "memory_review", messages, self.clock(),
@@ -751,11 +760,9 @@ class Core(Runtime):
                 messages,
                 "memory_review",
                 self.clock,
-                source_check=lambda: self._check_context_snapshots(
-                    job, [{"kind": "memory", "proof": proof}], current_request=request_id,
-                ),
+                source_check=lambda: check_sources(request_id),
             )
-            self._check_context_snapshots(job, [{"kind": "memory", "proof": proof}])
+            check_sources()
         except Exception as error:
             if not bounded_text and isinstance(error, CoreError) and error.code in {
                 "DAILY_BUDGET_EXHAUSTED",

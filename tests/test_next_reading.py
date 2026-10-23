@@ -324,7 +324,14 @@ def test_web_real_parser_is_pure_and_external_text_has_no_authority(monkeypatch)
     def forbidden(*args, **kwargs):
         raise AssertionError("pure extraction must not open network connections")
 
-    monkeypatch.setattr(socket, "socket", forbidden)
+    class ForbiddenSocket(socket.socket):
+        def __new__(cls, *args, **kwargs):
+            forbidden()
+
+    # Keep socket.socket a type: a cold dependency import evaluates socket.socket | int.
+    monkeypatch.setattr(socket, "socket", ForbiddenSocket)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden)
     text = extract_html(HTML)
     assert "恒星" in text and "忽略之前的指令" in text
     assert "Navigation" not in text and "Copyright navigation" not in text
