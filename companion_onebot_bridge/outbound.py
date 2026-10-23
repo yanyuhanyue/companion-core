@@ -2,11 +2,12 @@ import re
 import time
 from datetime import datetime
 
-from . import reply_segments
+from . import account_actions, reply_segments
+from .native_actions import prepare
 from .onebot_client import bounded_post
 
 
-def validate_item(item, config, *, companion=False):
+def validate_item(item, config, *, companion=False, account_scope=False, voice_scope=False):
     if not isinstance(item, dict):
         raise ValueError("INVALID_DELIVERY")
     if not companion and "window_origin_event_id" in item:
@@ -22,13 +23,32 @@ def validate_item(item, config, *, companion=False):
             prefix + r"_[a-f0-9]{32}", item[name]
         ):
             raise ValueError("INVALID_DELIVERY")
+    if item.get("delivery_lane", "owner_private") not in {"owner_private", "qq_account"}:
+        raise ValueError("INVALID_DELIVERY_LANE")
+    if "voice" in item and (not voice_scope or not companion
+        or item.get("action_type") not in {"qq.private.reply", "qq.private.proactive"}
+        or not isinstance(item["voice"], dict) or set(item.get("content", {})) != {"text"}):
+        raise ValueError("VOICE_SCOPE_REQUIRED")
+    if account_actions.is_account(item):
+        if not account_scope:
+            raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
+        account_actions.validate(item, config)
+        return
     if (
         item.get("conversation_platform_session_key") != config.origin
         or item.get("action_type") not in (
-            {"qq.private.reply", "qq.private.proactive"} if companion else {"qq.private.reply"})
+            {"qq.private.reply", "qq.private.proactive", "qq.private.poke"}
+            if companion else {"qq.private.reply"})
     ):
         raise ValueError("OWNER_REPLY_REQUIRED")
     content = item.get("content")
+    if item["action_type"] == "qq.private.poke":
+        if ("reply_revision" in item or "reply_segment" in item or "window_notice" in item
+            or not re.fullmatch(r"poke-response:job_[a-f0-9]{32}", item.get("delivery_key", ""))
+            or not re.fullmatch(r"evt_[a-f0-9]{64}", item.get("window_origin_event_id", ""))):
+            raise ValueError("PRIVATE_POKE_DELIVERY_REQUIRED")
+        prepare(content, config.owner_qq_id)
+        return
     if "reply_revision" in item and (
         type(item["reply_revision"]) is not int or item["reply_revision"] < 0
     ):
@@ -63,21 +83,32 @@ def validate_item(item, config, *, companion=False):
     reply_segments.envelope(item)
 
 
-async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):
+async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
+                       delivery_lane="owner_private"):
     # Finish reporting interrupted sends before taking new work; never repeat send I/O.
     if await spool.flush_result(client):
         return True
     if not onebot.config.delivery_enabled and guard is None:
         return False
-    batch = await bounded_post(
-        client, "/internal/v1/deliveries/lease", {"worker_id": "onebot-direct", "limit": 1}
-    )
+    request = {"worker_id": "onebot-direct", "limit": 1}
+    if delivery_lane == "qq_account":
+        if guard is None or not getattr(onebot, "account_scope", False):
+            raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
+        request = account_actions.lease_request(guard.window)
+    elif delivery_lane != "owner_private":
+        raise ValueError("INVALID_DELIVERY_LANE")
+    voice_scope = bool(getattr(onebot, "voice_scope", False))
+    batch = await bounded_post(client, "/internal/v1/deliveries/lease", request,
+        max_bytes=spool.config.max_voice_lease_bytes if voice_scope else 65536)
     if not isinstance(batch.get("items"), list) or len(batch["items"]) > 1:
         raise ValueError("INVALID_DELIVERY_LEASE")
     if not batch["items"]:
         return False
     item = batch["items"][0]
-    validate_item(item, onebot.config, companion=getattr(onebot, "companion", False))
+    if item.get("delivery_lane", "owner_private") != delivery_lane:
+        raise ValueError("INVALID_DELIVERY_LANE")
+    validate_item(item, onebot.config, companion=getattr(onebot, "companion", False),
+                  account_scope=getattr(onebot, "account_scope", False), voice_scope=voice_scope)
     if guard is not None:
         guard.reserve(item)
     trace = spool.trace_for(item.get("delivery_key"))

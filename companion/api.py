@@ -1,3 +1,5 @@
+import base64
+import binascii
 import hmac
 import re
 from contextlib import asynccontextmanager, nullcontext
@@ -12,11 +14,13 @@ from httpx import AsyncClient
 
 from companion import (
     __version__,
+    account_actions,
     cumulative,
     input_protocol,
     live_text,
     meme_core,
     meme_service,
+    poke,
     qq_images,
     qq_rich,
 )
@@ -43,14 +47,23 @@ from companion.memory_control import (
     stopped_workers,
 )
 from companion.model import ModelClient
+from companion.poke_protocol import PokeCapture
 from companion.transport import begin_send, delivery_result, lease_deliveries
+from companion.voice_jobs import VoiceASRProof
+from companion.voice_node_api import register_voice_node_routes
+from companion.voice_protocol import MAX_RESULT_BODY_BYTES
 
 
 class BodyLimit:
-    def __init__(self, app, image_limit=131072, meme_limit=131072):
+    def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
+                 voice_limit=131072, voice_input_limit=131072, video_limit=131072):
         self.app = app
         self.image_limit = image_limit
         self.meme_limit = meme_limit
+        self.file_limit = file_limit
+        self.voice_limit = voice_limit
+        self.voice_input_limit = voice_input_limit
+        self.video_limit = video_limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -59,8 +72,17 @@ class BodyLimit:
         limit = (
             self.image_limit
             if re.fullmatch(r"/internal/v2/content/[^/]+/image", scope["path"])
+            else self.file_limit
+            if re.fullmatch(r"/internal/v2/content/[^/]+/file", scope["path"])
             else self.meme_limit
             if scope["path"] == "/internal/v1/memes/captions"
+            else self.voice_limit
+            if re.fullmatch(r"/internal/v1/voice-node/jobs/voice_[a-f0-9]{32}/result",
+                            scope["path"])
+            else self.voice_input_limit
+            if re.fullmatch(r"/internal/v1/voice-inputs/[^/]+", scope["path"])
+            else self.video_limit
+            if re.fullmatch(r"/internal/v3/readers/[^/]+/[^/]+/media", scope["path"])
             else 131072
         )
         while True:
@@ -124,7 +146,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
+        file_limit=(settings.private_files.max_file_bytes
+                    if settings.private_files.enabled else 131072),
         meme_limit=6 * 1024 * 1024 if settings.meme_semantics_enabled else 131072,
+        voice_limit=MAX_RESULT_BODY_BYTES if settings.voice.enabled else 131072,
+        voice_input_limit=8_000_000 if settings.voice.enabled else 131072,
+        video_limit=(4 * ((settings.bili_video.media.max_total_output_bytes + 2) // 3)
+                     + 131072 if settings.bili_video.enabled else 131072),
     )
 
     async def authenticate(authorization: str = Header(default="")):
@@ -176,6 +204,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     auth = [Depends(authenticate)]
     register_content_routes(app, auth)
     register_console_routes(app, settings)
+    register_voice_node_routes(app)
 
     @app.middleware("http")
     async def memory_control_exclusive(request, call_next):
@@ -240,8 +269,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
-    from companion.reading_protocol import ReadObservation
+    from companion.reading_protocol import ReadingLeaseRequest, ReadObservation
     from companion.reflection import ReflectionDecision
+    from companion.social_autonomy import SocialAutonomy
+    from companion.social_autonomy_protocol import ReviewedAvatar
     from companion.source_grants import (
         ReaderLeaseRequest,
         ReaderReadValidation,
@@ -251,6 +282,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     control_auth = [Depends(control_admin)]
     adapter_auth = [Depends(observation_adapter)]
     register_media_routes(app, control_auth)
+
+    @app.post("/internal/v2/account-assets", dependencies=control_auth)
+    async def register_account_asset(body: ReviewedAvatar):
+        core = app.state.core
+        return SocialAutonomy(core.store, settings, clock=core.clock).register_asset(body)
 
     @app.get("/internal/v2/tools", dependencies=control_auth)
     async def list_tools():
@@ -310,9 +346,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         return app.state.core.exploration.complete(adapter_id, request_id, body)
 
     @app.post("/internal/v3/readers/{adapter_id}/lease", dependencies=adapter_auth)
-    async def reading_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
+    async def reading_lease(adapter_id: str, body: ReadingLeaseRequest | None = None):
         grant = body.source_grant if body else None
-        return {"item": app.state.core.reading.lease(adapter_id, grant)}
+        capabilities = body.capabilities if body else ()
+        return {"item": app.state.core.reading.lease(adapter_id, grant,
+                                                     capabilities=capabilities)}
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
     async def reading_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
@@ -321,6 +359,28 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
     async def reading_result(adapter_id: str, request_id: str, body: ReadObservation):
         return app.state.core.reading.complete(adapter_id, request_id, body)
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/media/prepare",
+              dependencies=adapter_auth)
+    async def reading_media_prepare(adapter_id: str, request_id: str, body: dict):
+        return app.state.core.bili_video.prepare(adapter_id, request_id, body)
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/media",
+              dependencies=adapter_auth)
+    async def reading_media_upload(adapter_id: str, request_id: str, body: dict):
+        core = app.state.core
+        core.bili_video.model = core.model
+        return await core.bili_video.upload(adapter_id, request_id, body)
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/media/receipt",
+              dependencies=adapter_auth)
+    async def reading_media_receipt(adapter_id: str, request_id: str, body: dict):
+        return app.state.core.bili_video.receipt(adapter_id, request_id, body)
+
+    @app.post("/internal/v3/readers/{adapter_id}/{request_id}/media/result",
+              dependencies=adapter_auth)
+    async def reading_media_result(adapter_id: str, request_id: str, body: dict):
+        return app.state.core.bili_video.result(adapter_id, request_id, body)
 
     @app.get("/internal/v2/exploration", dependencies=control_auth)
     async def exploration_status():
@@ -429,6 +489,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def observe(adapter_id: str, body: ObservationEvent):
         if settings.observation_adapters[adapter_id].source == "qq_image":
             raise CoreError("CONTENT_IMAGE_INTAKE_REQUIRED", 403)
+        if settings.observation_adapters[adapter_id].source == "qq_file":
+            raise CoreError("CONTENT_FILE_INTAKE_REQUIRED", 403)
         return app.state.core.observations.append(adapter_id, body)
 
     @app.get("/internal/v2/observations", dependencies=control_auth)
@@ -536,6 +598,38 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return live_text.send_check(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/live-text/pokes", dependencies=auth)
+    async def receive_poke(body: PokeCapture):
+        core = app.state.core
+        return poke.receive(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/voice-inputs/{event_id}", dependencies=auth)
+    async def voice_input(event_id: str, request: Request,
+                          x_voice_proof: str = Header(default=""),
+                          content_type: str = Header(default="")):
+        from companion.voice_protocol import canonical_bytes
+
+        if not settings.voice.enabled or content_type != "audio/wav":
+            raise CoreError("VOICE_ASR_SCOPE_REQUIRED", 403)
+        try:
+            if not 1 <= len(x_voice_proof) <= 8192:
+                raise ValueError()
+            raw = base64.b64decode(x_voice_proof, altchars=b"-_", validate=True)
+            proof = VoiceASRProof.model_validate_json(raw)
+            if (canonical_bytes(proof) != raw
+                or base64.urlsafe_b64encode(raw).decode() != x_voice_proof):
+                raise ValueError()
+        except (ValueError, TypeError, binascii.Error):
+            raise CoreError("VOICE_ASR_PROOF_REQUIRED", 403) from None
+        wav = await request.body()
+        core = app.state.core
+        with core.store.transaction():
+            return core.voice.submit_signed_asr(event_id, wav, upload_proof=proof)
+
+    @app.get(prefix + "/voice-inputs/{event_id}/state", dependencies=auth)
+    async def voice_input_state(event_id: str):
+        return app.state.core.voice.input_receipt(event_id)
+
     @app.post(prefix + "/memes/semantics/profile", dependencies=auth)
     async def meme_profile():
         return app.state.core.memes.profile()
@@ -603,6 +697,50 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def lease(body: LeaseRequest):
         core = app.state.core
         return lease_deliveries(core.store, settings, body, core.clock())
+
+    @app.post(prefix + "/deliveries/reconciliation/prepare", dependencies=auth)
+    async def prepare_delivery_reconciliation(body: dict):
+        from companion import delivery_reconciliation
+
+        core = app.state.core
+        return delivery_reconciliation.prepare(core.store, settings, body, core.clock())
+
+    @app.post(prefix + "/deliveries/{message_id}/reconciliation/lookup", dependencies=auth)
+    async def lookup_delivery_reconciliation(message_id: str, body: dict):
+        from companion import delivery_reconciliation
+
+        if (set(body) != {"proof_sha256"} or not isinstance(body["proof_sha256"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", body["proof_sha256"])):
+            raise CoreError("DELIVERY_QUIESCENCE_REQUIRED", 400)
+        core = app.state.core
+        receipt = delivery_reconciliation.lookup(core.store, settings, message_id,
+                                                 proof_sha256=body["proof_sha256"])
+        return ({"state": "FOUND", "receipt": receipt} if receipt is not None
+                else {"state": "NOT_FOUND"})
+
+    @app.post(prefix + "/account-actions/send-check", dependencies=auth)
+    async def account_send_check(body: account_actions.SendCheck):
+        core = app.state.core
+        return account_actions.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/account-actions/profile-baselines", dependencies=auth)
+    async def account_profiles(body: account_actions.ProfileProbe):
+        core = app.state.core
+        return account_actions.record_profiles(core.store, settings, core.clock, body)
+
+    @app.get(prefix + "/account-actions/profile-baselines/state", dependencies=auth)
+    async def account_profile_probe_state(window_sha256: str, authorization_sha256: str):
+        if not all(re.fullmatch(r"[a-f0-9]{64}", value)
+                   for value in (window_sha256, authorization_sha256)):
+            raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400)
+        core = app.state.core
+        return account_actions.profile_probe_state(
+            core.store, settings, core.clock, window_sha256, authorization_sha256)
+
+    @app.post(prefix + "/account-actions/cancel-before-send", dependencies=auth)
+    async def account_cancel_before_send(body: account_actions.CancelBeforeSend):
+        core = app.state.core
+        return account_actions.cancel_before_send(core.store, settings, core.clock, body)
 
     @app.post(prefix + "/deliveries/{message_id}/begin-send", dependencies=auth)
     async def begin(message_id: str, body: LeaseToken):

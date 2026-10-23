@@ -173,14 +173,13 @@ def dispatch(window, state, message_id, now):
 
 def legacy_inventory(window):
     """Signed anonymous timestamps from the full original journal chain, offline."""
+    from .owner_resolution import unsettled_attempts, unsettled_inputs
+
     window.verify(active=False)
     if (window.row()["state"] != "STOPPED" or window.plan.mode != "live_text"
         or not window.plan.config.capture_signing_key
-        or window.db.execute("SELECT 1 FROM window_attempts WHERE state NOT IN ('ACK','NOT_SENT') "
-                             "LIMIT 1").fetchone()
-        or window.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN "
-                             "('ACK','CANCELLED','SUPERSEDED','RECALLED') "
-                             "LIMIT 1").fetchone()):
+        or unsettled_attempts(window)
+        or unsettled_inputs(window)):
         raise ValueError("CUMULATIVE_STOPPED_SETTLED_HISTORY_REQUIRED")
     records, _ = window.read_journal()
     reservations, projection = [], {}

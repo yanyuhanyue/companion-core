@@ -450,9 +450,14 @@ def _validate_result(candidate, expected, limits):
         raise ValueError("PARSER_PROTOCOL_INVALID")
 
 
-def _container_argv(docker, image, name, filename, mime_type, limits):
+def _container_argv(docker, image, name, filename, mime_type, limits, *, owner_label=None):
     if not re.fullmatch(r"(?:[a-z0-9][a-z0-9./:_-]*@)?sha256:[0-9a-f]{64}", image):
         raise ValueError("PINNED_PARSER_IMAGE_REQUIRED")
+    if not re.fullmatch(r"companion-file-(?:fixtures-)?[0-9a-f]{32}", name):
+        raise ValueError("INVALID_PARSER_CONTAINER_NAME")
+    if owner_label is not None and not re.fullmatch(r"[0-9a-f]{32}", owner_label):
+        raise ValueError("INVALID_PARSER_OWNER_LABEL")
+    labels = [] if owner_label is None else ["--label=com.companion.parser-host=" + owner_label]
     return [docker, "run", "--rm", "--pull=never", "--name=" + name, "--network=none",
             "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
             "--user=10003:10003", "--cpus=1", "--memory=" + str(limits.memory_bytes),
@@ -463,19 +468,22 @@ def _container_argv(docker, image, name, filename, mime_type, limits):
             "--tmpfs=/scratch:rw,nosuid,nodev,noexec,size=" + str(limits.scratch_bytes)
             + ",uid=10003,gid=10003,mode=0700", "--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=33554432",
             "--workdir=/scratch", "--env=TMPDIR=/scratch", "--env=HOME=/scratch",
-            "--log-driver=none", "--entrypoint=python", "-i", image, "/app/file_parser.py",
+            "--log-driver=none", *labels, "--entrypoint=/usr/bin/timeout", "-i", image,
+            "--signal=KILL", str(limits.wall_seconds) + "s", "python", "/app/file_parser.py",
             "--worker", "--filename=" + filename, "--mime-type=" + mime_type,
             "--limits=" + json.dumps(asdict(limits), separators=(",", ":"))]
 
 
 def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: str,
-                   workspace: str | Path, limits=DEFAULT_LIMITS, docker="docker"):
+                   workspace: str | Path, limits=DEFAULT_LIMITS, docker="docker",
+                   container_name=None, owner_label=None, docker_env=None):
     """Run once in a pinned, offline Linux image. Never substitute host-side parsing."""
     result = _result(data, filename, mime_type)
     try:
         _identify(data, filename, mime_type, limits)
-        command = _container_argv(docker, image, "companion-file-" + uuid.uuid4().hex,
-                                  filename, mime_type, limits)
+        name = container_name or "companion-file-" + uuid.uuid4().hex
+        command = _container_argv(docker, image, name,
+                                  filename, mime_type, limits, owner_label=owner_label)
     except _Failure as error:
         result["error_code"] = error.code
         return result
@@ -488,6 +496,7 @@ def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: st
         try:
             process = subprocess.Popen(command, shell=False, cwd=directory, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                       env=docker_env,
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt"
                                        else 0)
         except OSError:
@@ -522,7 +531,7 @@ def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: st
             try:
                 removed = subprocess.run([docker, "rm", "--force", command[4].split("=", 1)[1]],
                     shell=False, cwd=directory, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, env=docker_env,
                     timeout=5, check=False)
                 if removed.returncode:
                     code = "PARSER_CLEANUP_UNCONFIRMED"

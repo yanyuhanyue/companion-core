@@ -8,7 +8,8 @@ from typing import Literal
 
 ContentSource = Literal["bilibili", "heybox", "web"]
 ObservationSource = Literal[
-    ContentSource, "voice", "camera", "android", "dsh", "windows", "simulation", "qq_image"
+    ContentSource, "voice", "camera", "android", "dsh", "windows", "simulation",
+    "qq_image", "qq_file",
 ]
 SourceCapability = Literal[
     "get", "read", "discover", "reading", "article", "share", "source_grant", "link_images"

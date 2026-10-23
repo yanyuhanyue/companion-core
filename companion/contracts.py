@@ -1,6 +1,8 @@
 from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from companion.social_autonomy_protocol import ActionReceipt
 
 
 class StrictModel(BaseModel):
@@ -33,10 +35,16 @@ class SharedImage(StrictModel):
     slot: int = Field(ge=0, le=63, strict=True)
 
 
+class SharedFile(StrictModel):
+    kind: Literal["file"]
+    slot: int = Field(ge=0, le=63, strict=True)
+
+
 class Payload(StrictModel):
     text: str = Field(max_length=20000)
     media: list[Media] = Field(max_length=10)
-    shared_content: list[Annotated[SharedLink | SharedImage, Field(discriminator="kind")]] = Field(
+    shared_content: list[Annotated[SharedLink | SharedImage | SharedFile,
+                                   Field(discriminator="kind")]] = Field(
         default_factory=list, max_length=64
     )
     # Absent plain input serializes exactly as before, including historical fingerprints.
@@ -66,16 +74,63 @@ class InboundEvent(StrictModel):
 class LeaseRequest(StrictModel):
     worker_id: str = Field(min_length=1, max_length=128)
     limit: int = Field(default=5, ge=1, le=20)
+    delivery_lane: Literal["owner_private", "qq_account"] = "owner_private"
+    window_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    account_actions_authorization_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def account_authority(self):
+        if (self.delivery_lane == "qq_account") != bool(
+            self.window_sha256 and self.account_actions_authorization_sha256
+        ) or (self.delivery_lane == "owner_private" and (
+            self.window_sha256 or self.account_actions_authorization_sha256
+        )):
+            raise ValueError("account delivery requires its explicit window and authority")
+        return self
 
 
 class LeaseToken(StrictModel):
     lease_token: str = Field(min_length=1, max_length=128)
 
 
+class NativeActionAck(StrictModel):
+    kind: Literal["onebot_action"]
+    action: Literal["friend_poke"]
+    status: Literal["ok"]
+    retcode: int = Field(strict=True, ge=0, le=0)
+    response_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class DeliveryResult(LeaseToken):
     result: Literal["SENT", "RETRYABLE_FAILURE", "DELIVERY_UNCERTAIN", "PERMANENT_FAILURE"]
     provider_message_id: str | None = Field(default=None, max_length=128)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
+    native_ack: NativeActionAck | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    account_action_receipt: ActionReceipt | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def native_receipt(self):
+        if self.account_action_receipt is not None and (
+            self.native_ack is not None or self.provider_message_id is not None
+            or self.lease_token != self.account_action_receipt.lease_token
+            or self.result != {"SUCCEEDED": "SENT", "REJECTED": "PERMANENT_FAILURE",
+                               "UNKNOWN": "DELIVERY_UNCERTAIN"}[
+                self.account_action_receipt.result
+            ]
+        ):
+            raise ValueError("account action receipt differs from its native result")
+        if self.native_ack is not None and (
+            self.result != "SENT" or self.provider_message_id is not None
+            or self.error_code is not None
+        ):
+            raise ValueError("native action acceptance has no QQ message identifier")
+        return self
 
 
 class SearchRequest(StrictModel):

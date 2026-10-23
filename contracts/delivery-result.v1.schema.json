@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/companion/contracts/delivery-result.v1.schema.json",
+  "$defs": {
+    "ActionReceipt": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "message_id": {
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Message Id",
+          "type": "string"
+        },
+        "lease_token": {
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Lease Token",
+          "type": "string"
+        },
+        "payload_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Payload Sha256",
+          "type": "string"
+        },
+        "action_type": {
+          "enum": [
+            "qzone.publish",
+            "qq.profile.nickname",
+            "qq.profile.signature",
+            "qq.profile.avatar"
+          ],
+          "title": "Action Type",
+          "type": "string"
+        },
+        "result": {
+          "enum": [
+            "SUCCEEDED",
+            "REJECTED",
+            "UNKNOWN"
+          ],
+          "title": "Result",
+          "type": "string"
+        },
+        "native_receipt_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Receipt Sha256"
+        },
+        "native_retcode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Native Retcode"
+        },
+        "resource_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Id"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z0-9_]{1,64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        }
+      },
+      "required": [
+        "message_id",
+        "lease_token",
+        "payload_sha256",
+        "action_type",
+        "result"
+      ],
+      "title": "ActionReceipt",
+      "type": "object"
+    },
+    "NativeActionAck": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "onebot_action",
+          "title": "Kind",
+          "type": "string"
+        },
+        "action": {
+          "const": "friend_poke",
+          "title": "Action",
+          "type": "string"
+        },
+        "status": {
+          "const": "ok",
+          "title": "Status",
+          "type": "string"
+        },
+        "retcode": {
+          "maximum": 0,
+          "minimum": 0,
+          "title": "Retcode",
+          "type": "integer"
+        },
+        "response_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Response Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "action",
+        "status",
+        "retcode",
+        "response_sha256"
+      ],
+      "title": "NativeActionAck",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "lease_token": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Lease Token",
+      "type": "string"
+    },
+    "result": {
+      "enum": [
+        "SENT",
+        "RETRYABLE_FAILURE",
+        "DELIVERY_UNCERTAIN",
+        "PERMANENT_FAILURE"
+      ],
+      "title": "Result",
+      "type": "string"
+    },
+    "provider_message_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Provider Message Id"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "pattern": "^[A-Z0-9_]{1,64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "native_ack": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeActionAck"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "account_action_receipt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ActionReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "lease_token",
+    "result"
+  ],
+  "title": "DeliveryResult",
+  "type": "object",
+  "description": "A lease-bound delivery outcome. Native action receipts do not manufacture QQ message IDs. The server also validates action/result mapping, lease identity and mutually exclusive receipt types."
+}

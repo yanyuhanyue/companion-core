@@ -10,7 +10,8 @@ RUN uv export --frozen --only-group reader --no-emit-project --format requiremen
     useradd -m -u 10003 companion-reader && mkdir /scratch && chown 10003:10003 /scratch
 COPY source_reader ./source_reader
 # Share only immutable stdlib policy data; the Reader does not include Core services.
-COPY companion/__init__.py companion/source_policy.py ./companion/
+COPY companion/__init__.py companion/source_policy.py companion/video_media_contract.py \
+    companion/bili_video_protocol.py ./companion/
 USER 10003:10003
 ENV TMPDIR=/scratch
 ENTRYPOINT ["python", "-m", "source_reader"]

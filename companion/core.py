@@ -14,6 +14,7 @@ from companion import (
     live_text,
     notices,
     owner_exploration,
+    poke,
     private_life,
     qq_images,
     qq_rich,
@@ -54,6 +55,7 @@ from companion.transport import (
     reconcile_delivery,
     recover_deliveries,
 )
+from companion.voice_flow import VoiceFlow
 from companion.wake import WakePlanner
 
 
@@ -95,8 +97,14 @@ class Core(Runtime):
                 self.content.register_link_images, clock,
             )
             self.reading = ReadingService(self.store, settings, self.exploration, clock)
+            from companion.bili_video import BiliVideoService
+
+            self.bili_video = BiliVideoService(self.store, settings, self.reading, model, clock)
+            self.reading.video = self.bili_video
+            self.content.video = self.bili_video
             self.expression = ExpressionEngine(self.store, settings, clock)
             self.memes = MemeCaptionService(self.store, settings, lambda: self.model, clock)
+            self.voice = VoiceFlow(self.store, settings, clock)
             self.executive = Executive(self.store, settings, clock)
         except BaseException:
             self.close()
@@ -313,6 +321,9 @@ class Core(Runtime):
             if self.memes.waiting_offer(row, now):
                 return None
             body = json.loads(row["body_json"])
+            if (self.settings.voice.enabled and row["kind"] == "chat"
+                and self.voice.input_status(row["event_id"], row["job_id"]).state == "WAITING"):
+                return None
             if (
                 self.settings.content_enabled
                 and row["kind"] == "chat"
@@ -411,6 +422,8 @@ class Core(Runtime):
                     current = self._expression_learning_reference(job, self.affect.snapshot())
                     if current is None or current["snapshot"] != snapshot["proof"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
+                elif snapshot["kind"] == "voice":
+                    self.voice.check_context(job, snapshot["proof"])
             except CoreError as error:
                 if error.code == "PRIVACY_CHANGED":
                     # A now-invalid source cancels this response, not the companion window.
@@ -645,6 +658,17 @@ class Core(Runtime):
             current_input.append(browsing["message"])
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
+        if cfg.voice.enabled and job["kind"] == "chat":
+            voice_reference = self.voice.for_context(job["event_id"], job)
+            if voice_reference is not None:
+                from companion.voice_flow import CONTEXT_RULES as VOICE_CONTEXT_RULES
+
+                rules["content"] += "\n" + VOICE_CONTEXT_RULES
+                current_input.append(voice_reference["message"])
+                reference_sources.append((voice_reference["message"],
+                                          voice_reference["source_event_ids"]))
+                reference_proofs.append((voice_reference["message"],
+                                         {"kind": "voice", "proof": voice_reference["proof"]}))
         if rich_reference := qq_rich.context(body):
             if any(segment["type"] == "reply"
                    for segment in (body.get("rich") or {}).get("segments", [])):
@@ -1004,7 +1028,10 @@ class Core(Runtime):
         reconciliation = re.fullmatch(r"核对发送\s+(msg_[a-f0-9]+)\s+(已发送|取消)", text)
         if reconciliation:
             outcome = "SENT" if reconciliation[2] == "已发送" else "CANCELLED"
-            reconcile_delivery(s, reconciliation[1], outcome, now)
+            reconcile_delivery(s, reconciliation[1], outcome, now, self.settings,
+                operation_id=job["event_id"],
+                operation_sha256=digest({"event_id": job["event_id"],
+                                         "message_id": reconciliation[1], "outcome": outcome}))
             return "已记录核对结果，不会重发该条消息。"
         if text in {"暂停主动分享", "恢复主动分享"}:
             with s.transaction():
@@ -1049,6 +1076,7 @@ class Core(Runtime):
             if not content:
                 prior = s.one(
                     "SELECT event_id,body_json FROM events WHERE actor_id='owner' "
+                    "AND event_type IN ('message.received','message.media_received') "
                     "AND redacted=0 AND conversation_id=? AND rowid<(SELECT rowid "
                     "FROM events WHERE event_id=?) ORDER BY rowid DESC LIMIT 1",
                     (job["conversation_id"], evidence_id),
@@ -1124,10 +1152,63 @@ class Core(Runtime):
             return
         raise CoreError("PRIVACY_CHANGED", 503)
 
+    async def _run_poke_once(self, worker_id):
+        if not poke.enabled(self.settings):
+            return False
+        try:
+            job = poke.claim_ready(self.store, self.settings, self.clock, worker_id)
+        except CoreError:
+            return False
+        if job is None:
+            return False
+        try:
+            messages = poke.context(self.store, self.settings, job)
+            request_id = budget.reserve(
+                self.store, self.settings, job["job_id"], "qq_poke", messages, self.clock(),
+                clock=self.clock,
+            )
+            response = await budget.complete(
+                self.model, self.store, self.settings, request_id, messages, "qq_poke", self.clock,
+                source_check=lambda: poke.check_job(
+                    self.store, self.settings, self.settings.live_text_window, job,
+                ),
+            )
+            decision = poke.decide(response.text, self.settings.poke_policy)
+            with self.store.transaction():
+                approval, _ = live_text.check_job(self.store, self.settings, self.clock, job)
+                message_ids = poke.finish(
+                    self.store, self.settings, approval, job, decision, self.clock(),
+                )
+                if message_ids:
+                    live_text.record_replies(
+                        self.store, self.settings, self.clock, job, message_ids,
+                    )
+                self.store.audit("poke.completed", job["job_id"], job["trace_id"], self.clock(),
+                                 decision=decision.kind)
+        except Exception as error:
+            # A notice owns one attempt. Known usage remains settled; uncertainty
+            # blocks the ordinary paid admission path and never creates a retry.
+            code = error.code if isinstance(error, CoreError) else "PRIVATE_POKE_FAILED"
+            with self.store.transaction():
+                self.store.execute(
+                    "UPDATE jobs SET state='FAILED',lease_token=NULL,last_error_code=?,"
+                    "updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    (code, self.clock(), job["job_id"], job["lease_token"]),
+                )
+                self.store.audit("poke.failed", job["job_id"], job["trace_id"], self.clock(),
+                                 error_code=code)
+        return True
+
     async def run_once(self, worker_id="worker"):
         job = self.claim_job(worker_id)
         if job is None:
-            return await self.memes.run_once(worker_id)
+            if await self._run_poke_once(worker_id):
+                return True
+            if await self.memes.run_once(worker_id):
+                return True
+            from companion.social_autonomy_runtime import run_once as social_autonomy_once
+
+            return await social_autonomy_once(self.store, self.settings, self.model, self.clock)
         started_ns = time.perf_counter_ns()
         emit(
             "t_job_started",
@@ -1288,6 +1369,7 @@ class Core(Runtime):
                                 parts = [reply]
                         if len(parts) > 1 and self.store.one(
                             "SELECT 1 FROM events WHERE conversation_id=? AND actor_id='owner' "
+                            "AND event_type IN ('message.received','message.media_received') "
                             "AND source='qq.onebot' AND rowid>(SELECT rowid FROM events "
                             "WHERE event_id=?) LIMIT 1", (job["conversation_id"], job["event_id"]),
                         ):

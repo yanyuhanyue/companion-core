@@ -13,14 +13,21 @@
 ```bash
 cp config.example.toml config.toml
 cp .env.example .env
-chmod 600 .env config.toml
 # 编辑 .env，填写 QQ 账号、随机 bridge token 和模型 Key。
 # 编辑 config.toml，核对模型、费率与预算。先保持 memory_enabled=false。
+chmod 600 .env
+# config.toml 只读挂入以 UID/GID 10001 运行的 Core，须由该身份可读。
+sudo chown 10001:10001 config.toml
+sudo chmod 600 config.toml
 docker compose up -d --build
 docker compose exec companion-api /app/.venv/bin/python -m companion status
 ```
 
 Compose 默认启动一次性迁移容器、API 和聊天 Worker。日记、生活、工具、内容 Worker 分别通过 `--profile diary`、`--profile life`、`--profile tools`、`--profile content` 启用；对应功能还需配置开关。数据库和遗忘日志分别放在 `core-data`、`erasure-ledger` 卷中。API **没有宿主机端口映射**，通过 Docker 网络 `companion-internal` 访问；网络保留模型 API 所需的出网能力。不得给 8765 添加公网端口或公网反向代理。容器以非 root 用户运行、只读根文件系统、删除 Linux capabilities。
+
+`.env` 由宿主 Compose 读取，保留宿主部署用户或 root 所有；不要将它交给容器用户。
+后续编辑替换 `config.toml` 时重新核对其 UID/GID 与 `0600` 权限。
+可选媒体节点和解析器的部署边界见[私聊媒体与 QQ 账号自主能力](qq-beta/media-autonomy.md)。
 
 现有 AstrBot 容器接入相同网络：
 

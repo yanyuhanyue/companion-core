@@ -226,8 +226,28 @@ def diagnostics(core):
         ("outbox", "message_id", "'FAILED','DELIVERY_UNCERTAIN','RETRY_WAIT'"),
         ("exploration_requests", "request_id", "'FAILED','UNKNOWN','CANCELLED'"),
     ):
-        for row in s.rows(f"SELECT {key} id,state,last_error_code,updated_at FROM {table} "
+        fields = ",action_type" if table == "outbox" else ""
+        for row in s.rows(f"SELECT {key} id,state,last_error_code,updated_at{fields} FROM {table} "
                           f"WHERE state IN ({states}) ORDER BY rowid DESC LIMIT 20"):
+            delivery = {}
+            if table == "outbox":
+                from companion import delivery_reconciliation
+
+                supported = row["state"] == "DELIVERY_UNCERTAIN" and row["action_type"] in {
+                    "qq.private.reply", "qq.private.proactive", "qq.private.poke",
+                }
+                ready = (delivery_reconciliation.readiness(s, core.settings, row["id"], now=now)
+                         if supported else {"prepared": False, "reason": None})
+                delivery = {"action_type": row["action_type"],
+                            "can_reconcile": supported and ready["prepared"],
+                            "reconciliation_prepared": ready["prepared"]}
+                if supported and not ready["prepared"]:
+                    delivery["reconciliation_reason"] = (
+                        "需先停止发送进程并准备原投递的核对凭证。"
+                        if ready["reason"] == "DELIVERY_QUIESCENCE_REQUIRED"
+                        else "原投递凭证或账本状态尚未核对一致，请查看运行记录。"
+                    )
             items.append(entry(row["id"], table, row["id"], row["state"], row["updated_at"],
-                               redact(row["last_error_code"] or "", core.settings)))
+                               redact(row["last_error_code"] or "", core.settings),
+                               **delivery))
     return collection(core, items)

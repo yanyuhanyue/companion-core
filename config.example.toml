@@ -144,3 +144,144 @@ max_request_micro_usd = 0
 # max_segments = 3
 # min_chars = 12
 # interval_ms = 1500
+
+# Optional owner-private media and account actions. All top-level capabilities remain off.
+# Activation prerequisites, signed scopes and deployment: docs/qq-beta/media-autonomy.md.
+# These planning ceilings attach to native model/tool charges; they do not enable a provider.
+[cloud_budget]
+daily_micro_cny = 20000000
+video_per_item_micro_cny = 1000000
+asr_per_item_micro_cny = 500000
+usd_to_cny_micro = 8000000
+fx_source = "operator_planning_estimate"
+fx_validity_seconds = 2592000
+
+[private_files]
+enabled = false
+parser_image = ""
+parser_socket = ""
+adapter_id = "content_file"
+max_files_per_event = 2
+max_daily_files = 32
+max_daily_bytes = 67108864
+wait_seconds = 75
+upload_window_seconds = 300
+upload_lease_seconds = 20
+worker_lease_seconds = 50
+spool_retention_seconds = 300
+# Production uses the pinned host parser and /run/companion-parser/parser.sock.
+# No Core container receives the Docker socket; only content-worker receives the parser socket.
+[private_files.limits]
+max_file_bytes = 8388608
+max_expanded_bytes = 33554432
+max_zip_entries = 512
+max_compression_ratio = 200
+max_pages = 200
+max_records = 2000
+max_text_chars = 12000
+max_table_depth = 8
+max_pdf_stream_bytes = 8388608
+cpu_seconds = 15
+wall_seconds = 30
+memory_bytes = 805306368
+scratch_bytes = 134217728
+max_processes = 96
+
+[bili_video]
+enabled = false
+deadline_seconds = 180
+max_concurrent = 1
+max_context_chars = 3000
+# Reader --media-limits must contain this COMPLETE object, exactly matching Core.
+[bili_video.media]
+max_preview_frames = 4
+max_clips = 3
+max_clip_seconds = 20.0
+max_total_clip_seconds = 30.0
+max_input_bytes = 33554432
+max_asset_bytes = 4000000
+max_total_output_bytes = 8000000
+max_width = 512
+max_height = 512
+max_source_pixels = 8294400
+max_source_seconds = 36000.0
+max_decoded_frames = 3000
+max_output_frames = 1501
+output_fps = 25
+timestamp_tolerance_seconds = 0.04
+max_frame_gap_seconds = 1.0
+timeout_seconds = 30.0
+terminate_grace_seconds = 1.0
+max_process_output_bytes = 262144
+max_memory_bytes = 536870912
+[bili_video.sampling]
+initial_frames = 4
+max_segments = 3
+max_segment_seconds = 20.0
+max_total_segment_seconds = 30.0
+
+[poke_policy]
+enabled = false
+mode = "auto"
+allow_native = false
+coalesce_seconds = 2
+cooldown_seconds = 30
+daily_limit = 20
+max_coalesced = 20
+max_text_chars = 160
+max_pending_seconds = 300
+
+# Local outbound voice nodes; this is separate from the legacy voice_enabled/media switches.
+# Keep signing_private_key and per-node credentials in private COMPANION_VOICE JSON.
+# An enabled node also requires its measured manifest_sha256 and matching local provider files.
+[voice]
+enabled = false
+nodes = {}
+job_ttl_seconds = 90
+lease_ttl_seconds = 30
+result_ttl_seconds = 90
+max_pending_jobs = 32
+max_private_blob_bytes = 32000000
+# Subpolicy defaults apply only after the top-level voice capability is enabled and scoped.
+[voice.reply]
+enabled = true
+mode = "voice_input"
+max_chars = 400
+wait_seconds = 15
+proactive = false
+[voice.asr]
+enabled = true
+wait_seconds = 20
+max_records = 2
+max_context_chars = 4000
+
+[social_autonomy]
+enabled = false
+scope = "none"
+# Enabling requires authorization_sha256; avatar additionally requires asset_policy_sha256.
+# Both hashes must refer to actual approved scope/review evidence in the signed plan.
+policy_version = 1
+qzone_enabled = false
+nickname_enabled = false
+signature_enabled = false
+avatar_enabled = false
+qzone_daily_limit = 1
+profile_daily_limit = 1
+qzone_cooldown_seconds = 3600
+profile_cooldown_seconds = 604800
+model_daily_calls = 4
+model_daily_micro_usd = 100000
+decision_interval_seconds = 3600
+max_publish_chars = 500
+max_nickname_chars = 24
+max_signature_chars = 120
+max_source_refs = 3
+max_source_chars = 3000
+max_input_bytes = 16000
+max_output_tokens = 1024
+timeout_seconds = 45
+plan_ttl_seconds = 3600
+profile_baseline_seconds = 300
+max_pending_plans = 4
+max_asset_bytes = 2097152
+max_asset_dimension = 2048

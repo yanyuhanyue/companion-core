@@ -8,7 +8,15 @@ source checks and budgets at dispatch. No guard that writes state is called here
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from companion import cloud_budget, live_text, paid_budget, private_life, qq_images, video_input
+from companion import (
+    cloud_budget,
+    cumulative,
+    live_text,
+    paid_budget,
+    private_life,
+    qq_images,
+    video_input,
+)
 from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.exploration import METERED_READS_SQL
@@ -37,7 +45,7 @@ def _observation(facts, now):
         return "UNOBSERVED", {}
 
 
-def _live_blocks(store, settings, now):
+def _live_blocks(store, settings, now, *, cumulative_state=None):
     approval = settings.live_text_window
     reasons = []
     if live_text.active(store, settings):
@@ -55,11 +63,17 @@ def _live_blocks(store, settings, now):
         reasons.append("BUDGET_RECONCILIATION_REQUIRED")
     if store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN' LIMIT 1"):
         reasons.append("MODEL_USAGE_UNKNOWN")
-    return reasons
+    if store.one("SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
+                 "WHERE m.state='RESERVED' AND (a.request_id IS NULL OR a.lease_until<=?) LIMIT 1",
+                 (now,)):
+        reasons.append("MODEL_USAGE_UNRECONCILED")
+    if store.one("SELECT 1 FROM outbox WHERE state='DELIVERY_UNCERTAIN' LIMIT 1"):
+        reasons.append("DELIVERY_RECONCILIATION_REQUIRED")
+    return reasons + _cumulative_blocks(store, settings, now, state=cumulative_state)
 
 
-def _model_blocks(store, settings, now):
-    reasons = _live_blocks(store, settings, now)
+def _model_blocks(store, settings, now, *, live_blocks=None, cumulative_state=None):
+    reasons = list(live_blocks) if live_blocks is not None else _live_blocks(store, settings, now)
     reasons += cloud_budget.capacity_blocks(store, settings, now)
     if settings.mode == "live":
         try:
@@ -70,6 +84,50 @@ def _model_blocks(store, settings, now):
             reasons += _paid_capacity_blocks(store, settings, approval, now)
     else:
         reasons.append("DEMO_MODE")
+    return reasons + _cumulative_blocks(store, settings, now,
+        dimensions=("model_attempts", "input_tokens", "output_tokens", "micro_usd"),
+        state=cumulative_state)
+
+
+def _cumulative_blocks(store, settings, now, *, dimensions=(), state=None):
+    """The native status verifies its journal with initialization and repair disabled."""
+    status = cumulative.status(store, settings, now) if state is None else state
+    scope = settings.paid_model.cumulative if settings.paid_model else None
+    if not status["enrolled"]:
+        return ["CUMULATIVE_ACCOUNT_NOT_ENROLLED"] if scope else []
+    if not status.get("available"):
+        return ["BUDGET_RECONCILIATION_REQUIRED"]
+    reasons = ["CUMULATIVE_PAUSED"] if status["paused"] else []
+    if scope is None or status["policy_sha256"] != paid_budget.sha(scope.model_dump(mode="json")):
+        reasons.append("CUMULATIVE_SCOPE_REQUIRED")
+    if datetime.fromisoformat(status["expires_at"]) <= datetime.fromisoformat(now):
+        reasons.append("CUMULATIVE_POLICY_EXPIRED")
+    for dimension in dimensions:
+        if any(status["used"][period][dimension] >= limits[dimension]
+               for period, limits in status["limits"].items()):
+            reasons.append("CUMULATIVE_" + dimension.upper() + "_LIMIT")
+    return reasons
+
+
+def _private_scope(settings, field, expected, code, *, digest_field=None, digest=None):
+    approval = settings.live_text_window
+    if (settings.mode != "live" or not private_life.enabled(settings) or not approval
+        or not approval.capture_public_key or getattr(approval, field, None) != expected
+        or digest_field and getattr(approval, digest_field, None) != digest):
+        return [code]
+    return []
+
+
+def _scenario_blocks(store, settings, now, scenarios, amount, *, calls=None, unlimited=False):
+    day, _ = _periods(settings, now)
+    usage = store.one("SELECT COUNT(*) calls,COALESCE(SUM(billed_micro_usd),0) amount "
+        "FROM model_usage WHERE occurred_at>=? AND scenario IN ("
+        + ",".join("?" for _ in scenarios) + ")", (day, *scenarios))
+    reasons = []
+    if calls is not None and usage["calls"] >= calls:
+        reasons.append("SCENARIO_CALL_LIMIT")
+    if not unlimited and usage["amount"] >= amount:
+        reasons.append("SCENARIO_BUDGET_DISABLED" if amount <= 0 else "DAILY_BUDGET_EXHAUSTED")
     return reasons
 
 
@@ -144,12 +202,13 @@ def _reflection_blocks(store, settings, now):
 
 
 def public_source_readiness(store, settings, clock, adapter_id, *, integration=None,
-                            operation="read"):
+                            operation="read", live_blocks=None):
     """Use native adapter/grant and reservation accounting without exposing custody."""
     now = clock()
     policy = settings.observation_adapters.get(adapter_id)
     observation, facts = _observation(integration, now)
-    unavailable, paused = [], _live_blocks(store, settings, now)
+    unavailable = []
+    paused = list(live_blocks) if live_blocks is not None else _live_blocks(store, settings, now)
     limits = {}
     source = policy.source if policy else None
     if not policy or not supports(source, "get"):
@@ -215,6 +274,239 @@ def public_source_readiness(store, settings, clock, adapter_id, *, integration=N
     }
 
 
+def _file_facts(store, settings, now, live_blocks):
+    from companion import qq_files
+    from companion.file_evidence import PrivateFilesConfig
+
+    try:
+        config = PrivateFilesConfig.model_validate(settings.private_files.model_dump())
+    except ValueError:
+        return {"unavailable": ["PRIVATE_FILE_CONFIG_INVALID"]}
+    unavailable = _private_scope(settings, "file_scope", "owner_file_v1",
+                                  "PRIVATE_FILE_SCOPE_REQUIRED")
+    if not unavailable:
+        try:
+            qq_files.policy(settings, settings.live_text_window)
+        except CoreError as error:
+            unavailable.append(error.code)
+    adapter = settings.observation_adapters.get(config.adapter_id)
+    if not adapter or adapter.source != "qq_file":
+        unavailable.append("PRIVATE_FILE_ADAPTER_UNAVAILABLE")
+    if not config.parser_image:
+        unavailable.append("PINNED_PARSER_IMAGE_REQUIRED")
+    day, _ = _periods(settings, now)
+    used = store.one("SELECT COUNT(*) files,COALESCE(SUM(reserved_bytes),0) bytes "
+        "FROM content_items WHERE kind='qq_file' AND COALESCE(started_at,created_at)>=? "
+        "AND reserved_bytes>0", (day,))
+    paused = []
+    if (used["files"] >= config.max_daily_files
+        or used["bytes"] + config.max_file_bytes > config.max_daily_bytes):
+        paused.append("PRIVATE_FILE_TRAFFIC_EXHAUSTED")
+    return {"enabled": config.enabled, "unavailable": unavailable,
+            "paused": live_blocks + paused,
+            "limits": {"max_file_bytes": config.max_file_bytes,
+                "max_files_per_event": config.max_files_per_event,
+                "daily_files": config.max_daily_files, "daily_bytes": config.max_daily_bytes,
+                "max_text_chars": config.limits.max_text_chars,
+                "parser_transport": ("host_socket" if config.parser_socket
+                                     else "isolated_container")}}
+
+
+def _bili_video_facts(store, settings, now, readers, model_blocks):
+    from companion.bili_video_protocol import CAPABILITY, MAX_METADATA_BYTES
+
+    config, approval = settings.bili_video, settings.paid_model
+    unavailable = _private_scope(settings, "bili_video_scope", CAPABILITY,
+        "BILI_VIDEO_SCOPE_REQUIRED", digest_field="bili_video_policy_sha256",
+        digest=paid_budget.sha(config.model_dump(mode="json")))
+    if not settings.content_enabled:
+        unavailable.append("CONTENT_DISABLED")
+    if not settings.live_text_window or settings.live_text_window.link_scope != "owner_links_v1":
+        unavailable.append("LIVE_LINK_SCOPE_REQUIRED")
+    try:
+        video_input.contract(settings, "capability-check", "capability-check")
+    except CoreError as error:
+        unavailable.append(error.code)
+    if not approval or not approval.image_input:
+        unavailable.append("PAID_IMAGE_APPROVAL_REQUIRED")
+    choices = [row for row in readers if row["source"] == "bilibili"
+        and settings.observation_adapters[row["adapter_id"]].media_analysis]
+    if not choices or all(row["state"] == "UNAVAILABLE" for row in choices):
+        unavailable.append("BILI_VIDEO_READER_UNAVAILABLE")
+    paused = []
+    if choices and not any(row["state"] == "READY" for row in choices):
+        paused.append("BILI_VIDEO_READER_PAUSED")
+    if store.one("SELECT 1 FROM runtime_meta WHERE key='bili_video_restore_required'"):
+        paused.append("BILI_VIDEO_RECONCILIATION_REQUIRED")
+    active = store.one("SELECT COUNT(*) n FROM bili_video_items b "
+                      "JOIN exploration_requests r USING(request_id) WHERE r.state='RUNNING'")["n"]
+    if active >= config.max_concurrent:
+        paused.append("BILI_VIDEO_CONCURRENCY_LIMIT")
+    day, month = _periods(settings, now)
+    used = store.one("SELECT SUM(accounted_requests) monthly,SUM(CASE WHEN started_at>=? "
+        "THEN accounted_requests ELSE 0 END) daily,SUM(CASE WHEN started_at>=? "
+        "THEN accounted_bytes ELSE 0 END) bytes,SUM(CASE WHEN started_at>=? "
+        "AND operation='read' THEN 1 ELSE 0 END) reads "
+        f"FROM ({METERED_READS_SQL}) WHERE started_at>=?", (day, day, day, month))
+    media_bytes = config.media.max_input_bytes + MAX_METADATA_BYTES
+    if ((used["daily"] or 0) + 8 > settings.exploration_daily_requests
+        or (used["monthly"] or 0) + 8 > settings.exploration_monthly_requests
+        or (used["bytes"] or 0) + media_bytes > settings.exploration_daily_bytes
+        or (used["reads"] or 0) >= settings.exploration_daily_deep_reads):
+        paused.append("READ_BUDGET_UNAVAILABLE")
+    paused += _scenario_blocks(store, settings, now,
+        ("content_vision", "content_video_preview", "content_video"),
+        settings.content.image_daily_micro_usd,
+        unlimited=bool(approval and approval.unlimited_period_spend))
+    observation = ("OBSERVED" if any(row["runtime_observation"] == "OBSERVED" for row in choices)
+                   else "STALE" if choices and all(row["runtime_observation"] == "STALE"
+                                                   for row in choices) else "UNOBSERVED")
+    return {"enabled": config.enabled, "unavailable": unavailable,
+            "paused": model_blocks + paused, "observation": observation,
+            "limits": {"max_source_seconds": config.media.max_source_seconds,
+                "preview_frames": config.sampling.initial_frames,
+                "max_clips": config.sampling.max_segments,
+                "max_total_clip_seconds": config.sampling.max_total_segment_seconds,
+                "max_read_requests": 8, "max_read_bytes": media_bytes}}
+
+
+def _voice_facts(store, settings, now, operation, live_blocks):
+    config = settings.voice
+    try:
+        policy_hash = config.authority_sha256() if config.enabled else None
+    except ValueError:
+        return {"unavailable": ["VOICE_CONFIG_INVALID"]}
+    unavailable = _private_scope(settings, "voice_scope", "owner_voice_v1",
+        "VOICE_SCOPE_REQUIRED", digest_field="voice_policy_sha256",
+        digest=policy_hash)
+    nodes = {key: node for key, node in config.nodes.items()
+             if node.enabled and operation in node.capabilities}
+    if not nodes:
+        unavailable.append("VOICE_NODE_SCOPE_REQUIRED")
+    if operation == "asr" and (not settings.live_text_window
+                              or settings.live_text_window.rich_input_scope != "references_v1"):
+        unavailable.append("VOICE_ASR_SCOPE_REQUIRED")
+    policy = config.asr if operation == "asr" else config.reply
+    used = store.one("SELECT COUNT(CASE WHEN state IN ('QUEUED','LEASED','RUNNING') THEN 1 END) "
+        "pending,COALESCE(SUM(COALESCE(length(input_blob),0)+COALESCE(length(result_blob),0)),0) "
+        "bytes FROM voice_jobs")
+    paused = []
+    if used["pending"] >= config.max_pending_jobs or used["bytes"] >= config.max_private_blob_bytes:
+        paused.append("VOICE_CAPACITY_EXCEEDED")
+    states = [row for row in store.rows("SELECT v.*,j.state job_state FROM voice_node_state v "
+              "LEFT JOIN voice_jobs j ON v.active_job_id=j.job_id") if row["node_id"] in nodes]
+    unavailable_nodes = {row["node_id"] for row in states
+                         if row["resource_state"] == "QUARANTINED" or row["job_state"] == "UNKNOWN"}
+    if nodes and set(nodes) <= unavailable_nodes:
+        paused.append("VOICE_RESOURCE_RECONCILIATION_REQUIRED")
+    age = []
+    for row in states:
+        try:
+            elapsed = (datetime.fromisoformat(now)
+                       - datetime.fromisoformat(row["last_seen_at"])).total_seconds()
+            if elapsed >= 0:
+                age.append(elapsed)
+        except (TypeError, ValueError):
+            continue
+    observation = ("OBSERVED" if any(value <= config.lease_ttl_seconds for value in age)
+                   else "STALE" if age else "UNOBSERVED")
+    limits = {"max_pending_jobs": config.max_pending_jobs,
+              "max_private_blob_bytes": config.max_private_blob_bytes,
+              "wait_seconds": policy.wait_seconds}
+    if operation == "asr":
+        limits.update(max_records=policy.max_records, max_context_chars=policy.max_context_chars)
+    else:
+        limits.update(max_chars=policy.max_chars, mode=policy.mode)
+    return {"enabled": config.enabled and policy.enabled, "unavailable": unavailable,
+            "paused": live_blocks + paused,
+            "observation": observation, "limits": limits}
+
+
+def _poke_facts(store, settings, now, model_blocks, send_blocks, *, native=False):
+    from companion import poke
+
+    config = settings.poke_policy
+    unavailable = _private_scope(settings, "poke_scope", "owner_poke_v1",
+                                  "PRIVATE_POKE_SCOPE_REQUIRED")
+    if not unavailable:
+        try:
+            poke.policy(settings, settings.live_text_window)
+        except CoreError as error:
+            unavailable.append(error.code)
+    if native and (not config.allow_native or config.mode not in {"auto", "poke_only"}):
+        unavailable.append("PRIVATE_POKE_NATIVE_DISABLED")
+    paused = []
+    stamps = store.rows("SELECT claimed_at FROM poke_batches WHERE claimed_at IS NOT NULL")
+    day, _ = _periods(settings, now)
+    if (config.mode == "none"
+        or sum(row["claimed_at"] >= day for row in stamps) >= config.daily_limit):
+        paused.append("POKE_RATE_LIMIT")
+    current = datetime.fromisoformat(now)
+    if any((current - datetime.fromisoformat(row["claimed_at"])).total_seconds()
+           < config.cooldown_seconds for row in stamps):
+        paused.append("POKE_COOLDOWN")
+    return {"enabled": config.enabled, "unavailable": unavailable,
+            "paused": model_blocks + paused + send_blocks,
+            "limits": {"daily_limit": config.daily_limit,
+                       "cooldown_seconds": config.cooldown_seconds, "mode": config.mode}}
+
+
+def _account_facts(store, settings, now, field, live_blocks, model_blocks, send_blocks):
+    from companion.social_autonomy import SocialAutonomy
+
+    module = SocialAutonomy(store, settings, clock=lambda: now)
+    config = module.config
+    unavailable = _private_scope(settings, "account_actions_scope", "qq_social_v1",
+        "SOCIAL_LIVE_SCOPE_REQUIRED", digest_field="account_actions_authorization_sha256",
+        digest=config.authorization_sha256)
+    paused = []
+    observation = "UNOBSERVED"
+    try:
+        module._policy()
+        if field != "observe":
+            module._planning_room(config, now, settings.timezone)
+            module._capacity("qzone.publish" if field == "qzone" else "qq.profile." + field,
+                             settings.timezone, now)
+            if field != "qzone":
+                module._profile(field, now)
+                observation = "OBSERVED"
+            if field == "avatar":
+                assets = store.rows("SELECT asset_id FROM social_autonomy_assets "
+                                    "WHERE revoked_at IS NULL")
+                valid = False
+                for asset in assets:
+                    try:
+                        module._asset(asset["asset_id"], now)
+                        valid = True
+                        break
+                    except CoreError:
+                        continue
+                if not valid:
+                    paused.append("SOCIAL_REVIEWED_AVATAR_REQUIRED")
+    except CoreError as error:
+        if error.code in {"SOCIAL_AUTONOMY_DISABLED", "SOCIAL_LIVE_SCOPE_REQUIRED"}:
+            unavailable.append(error.code)
+        else:
+            paused.append(error.code)
+    if field != "observe":
+        paused += model_blocks
+        paused += _scenario_blocks(store, settings, now, ("social_autonomy",),
+            config.model_daily_micro_usd, calls=config.model_daily_calls)
+        paused += send_blocks
+    else:
+        paused += live_blocks
+    limits = {"max_observation_age_seconds": config.profile_baseline_seconds}
+    if field != "observe":
+        limits = {"daily_limit": config.qzone_daily_limit if field == "qzone"
+                  else config.profile_daily_limit, "model_daily_calls": config.model_daily_calls,
+                  "cooldown_seconds": config.qzone_cooldown_seconds if field == "qzone"
+                  else config.profile_cooldown_seconds}
+    return {"enabled": config.enabled and (field == "observe"
+                                          or getattr(config, field + "_enabled")),
+            "unavailable": unavailable, "paused": paused, "observation": observation,
+            "limits": limits}
+
+
 def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
     """Return a closed, credential-free projection; integration data is never echoed."""
     now, cfg = clock(), settings
@@ -222,8 +514,10 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
     readers = integrations.get("readers", {})
     readers = readers if isinstance(readers, dict) else {}
     rows = []
-    live_blocks = _live_blocks(store, cfg, now)
-    model_blocks = _model_blocks(store, cfg, now)
+    quota = cumulative.status(store, cfg, now)
+    live_blocks = _live_blocks(store, cfg, now, cumulative_state=quota)
+    model_blocks = _model_blocks(store, cfg, now, live_blocks=live_blocks, cumulative_state=quota)
+    send_blocks = _cumulative_blocks(store, cfg, now, dimensions=("send_attempts",), state=quota)
     life_pause = ["LIFE_PAUSED"] if _meta(store, "life_paused") == "1" else []
 
     def add(identifier, summary, invocation=("automatic",), *, enabled=True,
@@ -286,11 +580,11 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         if not supports(policy.source, "get"):
             continue
         ready = public_source_readiness(store, cfg, clock, adapter_id,
-                                        integration=readers.get(adapter_id))
+            integration=readers.get(adapter_id), live_blocks=live_blocks)
         readable.append(ready)
         discoverable.append(public_source_readiness(
             store, cfg, clock, adapter_id, integration=readers.get(adapter_id),
-            operation="discover",
+            operation="discover", live_blocks=live_blocks,
         ))
         summaries = {
             "bilibili": "读取 B站元数据、可用字幕及有证据的部分评论和弹幕；覆盖以读取回执为准。",
@@ -310,8 +604,30 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         else ["READER_UNAVAILABLE"], paused=live_blocks + life_pause +
         ([] if any(row["state"] == "READY" for row in discoverable)
          else ["READ_BUDGET_UNAVAILABLE"]))
-    add("bilibili.video", "B站视频画面分析尚未接入；字幕不代表看过完整视频。",
-        unavailable=["VIDEO_FRAMES_NOT_CONNECTED"])
+    add("bilibili.video", "分析已读取B站视频的受限预览帧及按需短片段；"
+        "结论仅覆盖回执列出的采样范围，字幕不代表看过完整视频。",
+        **_bili_video_facts(store, cfg, now, readable, model_blocks))
+    add("qq.files", "解析主人本次发送的DOCX、PDF、DOC、TXT和Markdown；"
+        "只依据解析回执中的文本、表格与页码，扫描件或截断不能假称完整读取。",
+        **_file_facts(store, cfg, now, live_blocks))
+    add("qq.voice.asr", "接收主人当前语音并生成有范围标注的机器转写；"
+        "转写可能出错，不能当作主人原话、命令或授权。",
+        **_voice_facts(store, cfg, now, "asr", live_blocks))
+    add("qq.voice.tts", "把当前已授权回复转为语音；等待和失败按策略回退文字，"
+        "是否发出以原发送回执为准。", **_voice_facts(store, cfg, now, "tts", live_blocks))
+    add("qq.poke", "按策略回应主人私聊的原生戳一戳通知，可选择文字、回拍或不回应。",
+        **_poke_facts(store, cfg, now, model_blocks, send_blocks))
+    add("qq.poke.native", "在单独许可与互动限额内向主人回拍一次。",
+        **_poke_facts(store, cfg, now, model_blocks, send_blocks, native=True))
+    for field, label in (("qzone", "向主人可见的QQ空间发布有公开来源依据的内容"),
+                         ("nickname", "调整昵称"), ("signature", "调整个性签名"),
+                         ("avatar", "从已审核素材中选择头像")):
+        add("qq.account." + ("qzone_publish" if field == "qzone" else field),
+            "在独立授权、原配额和冷却期内" + label + "；实际结果须有原生回执。",
+            **_account_facts(store, cfg, now, field, live_blocks, model_blocks, send_blocks))
+    add("qq.profile.observe", "读取账号资料的API观测可能来自缓存；"
+        "观测时刻不证明网络刷新，也不证明资料修改成功。",
+        **_account_facts(store, cfg, now, "observe", live_blocks, model_blocks, send_blocks))
 
     image_errors = []
     try:
@@ -390,23 +706,35 @@ def prompt(summary, *, compact=False):
     routes = {"automatic": "系统流程", "owner_command": "主人指令", "model_callable": "本轮工具"}
     lines = ["\n当前能力事实：可用表示本地可接纳相应任务，不代表已经执行或远端在线。",
              "系统流程和主人指令不等于模型工具。只有标记为可用的本轮工具可直接调用。",
-             "没有回执不要声称看过、听过或完成。B站字幕不代表看过完整视频；视频画面分析未接入。",
+             "没有回执不要声称看过、听过或完成。B站字幕不代表看过完整视频；"
+             "画面分析只覆盖回执列出的采样帧和短片段。",
              "UNOBSERVED 只表示没有进程运行观测，不等于功能关闭；实际素材和覆盖以回执为准。"]
     tools = [row["id"] for row in summary["capabilities"]
              if row["state"] == "READY" and "model_callable" in row["invocation"]]
     lines.append("本轮可调用工具：" + ("、".join(tools) if tools else "无") + "。")
     if compact:
         # Keep the full state inventory without displacing current reading evidence.
-        lines = ["\n能力状态是本地接纳条件，不是已执行或远端在线；以本轮回执确认结果。",
+        lines = ["\n能力状态是本地接纳条件，不是已执行或远端在线；"
+                 "进程观测与本次任务回执各自独立，以本轮回执确认结果。",
                  "系统流程和主人指令不等于模型工具；本轮工具："
                  + ("、".join(tools) if tools else "无") + "。",
-                 "B站仅元数据/可用字幕/部分评论弹幕；字幕不代表看过完整视频。"
-                 "小黑盒仅正文/图片引用/部分评论。图片、动图、表情以分析回执为准。"]
+                 "B站字幕不代表看过完整视频；画面结论仅覆盖回执中的采样帧/短片段。"
+                 "文档以解析文本/表格/页码为准，语音转写不等于主人原话或授权。"
+                 "小黑盒正文/图片引用/部分评论、图片/动图/表情以回执为准。"
+                 "账号资料API观测可能来自缓存，观测时刻不证明网络刷新。"]
         for state, label in labels.items():
             names = [row["id"] for row in summary["capabilities"] if row["state"] == state]
             if names:
-                lines.append(label + "：" + ",".join(names) + "。")
-        lines.append("所有未观测的进程在线状态、素材和覆盖均待实际回执确认。")
+                selected = []
+                omitted = "部分能力未列出；未列出的能力不推定可用。"
+                for name in names:
+                    line = label + "：" + ",".join([*selected, name]) + "。"
+                    if len("\n".join([*lines, line, omitted]).encode()) > 3000:
+                        if selected:
+                            lines.append(label + "：" + ",".join(selected) + "。")
+                        return "\n".join([*lines, omitted])
+                    selected.append(name)
+                lines.append(label + "：" + ",".join(selected) + "。")
         return "\n".join(lines)
     omitted = "部分能力未列出；未列出的能力不推定可用。"
     for row in summary["capabilities"]:

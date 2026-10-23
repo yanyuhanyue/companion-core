@@ -9,6 +9,10 @@ anyio==4.15.1 \
     --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101 \
     --hash=sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94
     # via httpx
+av==16.1.0 \
+    --hash=sha256:27ee558d9c02a142eebcbe55578a6d817fedfde42ff5676275504e16d07a7f86 \
+    --hash=sha256:7ae547f6d5fa31763f73900d43901e8c5fa6367bb9a9840978d57b5a7ae14ed2
+    # via -r deploy/onebot-bridge.in (Linux CPython 3.12, aarch64/x86_64)
 certifi==2026.10.19 \
     --hash=sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae \
     --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b
@@ -399,6 +403,10 @@ pydantic-core==2.50.1 \
     --hash=sha256:f5187624823423e1d1b82b1072ac41dc837389e18d3d0572cc19bbee46cd550a \
     --hash=sha256:fe90228920fd8ff2be62622b6bb8a2b11acd65046d50c6b130614b5879605a20
     # via -r deploy/onebot-bridge.in
+silk-python==0.2.8 \
+    --hash=sha256:62e2e87be6b5848ab80b3384920b920deaeea90141c1494729f877a0912a7cbf \
+    --hash=sha256:7e7be31f3b3aa6902fdb86c3188961075a5bd153c61f37dd53ebddb82817fa63
+    # via -r deploy/onebot-bridge.in (Linux CPython 3.12, aarch64/x86_64)
 typing-extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
     --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5

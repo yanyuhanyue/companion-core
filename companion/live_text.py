@@ -16,9 +16,17 @@ from typing import Literal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 
-from companion import cumulative, image_spool, input_recall, paid_budget, private_life, qq_images
+from companion import (
+    cumulative,
+    image_spool,
+    input_recall,
+    paid_budget,
+    private_life,
+    qq_files,
+    qq_images,
+)
 from companion.contracts import CoreError, StrictModel
 from companion.expression import MemeOffer
 from companion.privacy import ErasureLedger, epoch
@@ -87,23 +95,44 @@ class CancelledInputReference(WindowReference):
 class SendCheck(WindowReference):
     event_id: str = Field(pattern=r"^[A-Za-z0-9_:-]{8,128}$")
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
-    reply_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reply_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
+    content_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
     lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
     reply_revision: int | None = Field(default=None, ge=0, strict=True,
                                        exclude_if=lambda value: value is None)
+    voice: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_validator("voice")
+    @classmethod
+    def voice_binding(cls, value):
+        from companion.voice_flow import VoiceDeliveryCheck
+
+        return VoiceDeliveryCheck.model_validate(value).model_dump() if value is not None else None
+
+    @model_validator(mode="after")
+    def one_payload_digest(self):
+        if (self.reply_sha256 is None) == (self.content_sha256 is None):
+            raise ValueError("exactly one delivery payload digest is required")
+        return self
 
 
 def code_sha256():
+    import companion_delivery_protocol
     import companion_meme_protocol
+    import companion_voice_node
 
     package = Path(__file__).parent
-    protocol = Path(companion_meme_protocol.__file__).parent
+    shared = (companion_meme_protocol, companion_delivery_protocol, companion_voice_node)
     return paid_budget.sha([
         [p.relative_to(package).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest()]
         for p in sorted(package.rglob("*.py"))
-    ] + [["companion_meme_protocol/" + p.relative_to(protocol).as_posix(),
-           hashlib.sha256(p.read_bytes()).hexdigest()]
-          for p in sorted(protocol.rglob("*.py"))])
+    ] + [[module.__name__ + "/" + p.relative_to(Path(module.__file__).parent).as_posix(),
+          hashlib.sha256(p.read_bytes()).hexdigest()]
+         for module in shared for p in sorted(Path(module.__file__).parent.rglob("*.py"))])
 
 
 def config_sha256(settings):
@@ -199,12 +228,44 @@ def guard(
         )
         images = approval.image_scope == "owner_image_v1"
         links = approval.link_scope == "owner_links_v1"
+        files = approval.file_scope == "owner_file_v1"
+        if settings.poke_policy.enabled != (approval.poke_scope == "owner_poke_v1"):
+            raise CoreError("PRIVATE_POKE_SCOPE_REQUIRED", 403)
+        if settings.poke_policy.enabled:
+            from companion import poke
+
+            poke.policy(settings, approval)
+        if settings.voice.enabled != (approval.voice_scope == "owner_voice_v1") or (
+            settings.voice.enabled
+            and approval.voice_policy_sha256 != settings.voice.authority_sha256()
+        ):
+            raise CoreError("PRIVATE_VOICE_SCOPE_REQUIRED", 403)
+        if settings.social_autonomy.enabled != (
+            approval.account_actions_scope == "qq_social_v1"
+        ) or (
+            settings.social_autonomy.enabled and approval.account_actions_authorization_sha256
+            != settings.social_autonomy.authorization_sha256
+        ):
+            raise CoreError("QQ_ACCOUNT_ACTION_SCOPE_REQUIRED", 403)
+        if settings.bili_video.enabled != (
+            approval.bili_video_scope == "bounded_video_media_v1"
+        ) or (settings.bili_video.enabled and (
+            approval.bili_video_policy_sha256 != paid_budget.sha(
+                settings.bili_video.model_dump(mode="json"))
+            or not settings.paid_model or not settings.paid_model.image_input
+            or not settings.paid_model.video_input
+        )):
+            raise CoreError("BILI_VIDEO_SCOPE_REQUIRED", 403)
         if images:
             qq_images.policy(settings, approval)
+        if files:
+            qq_files.policy(settings, approval)
         from companion.sources import supports
 
         invalid_adapters = any(
             not ((images and name == settings.content.image_adapter and item.source == "qq_image")
+                 or (files and name == settings.private_files.adapter_id
+                     and item.source == "qq_file")
                  or (links and supports(item.source, "get")))
             for name, item in settings.observation_adapters.items()
         )
@@ -213,12 +274,13 @@ def guard(
              else (any(not getattr(settings, name + "_enabled") for name in private_life.FEATURES)
                    or any(getattr(settings, name) for name in
                           ("voice_enabled", "camera_enabled", "android_enabled"))))
-            or settings.content_enabled != (images or links)
+            or settings.content_enabled != (images or links or files)
+            or settings.private_files.enabled != files
             or settings.memory_enabled != (approval.memory_scope != "none")
             or settings.executive.enabled
             or settings.media.enabled
             or invalid_adapters
-            or (links and not settings.observation_enabled)
+            or ((links or files) and not settings.observation_enabled)
             or settings.max_recent_messages != approval.max_history_turns * 2
         ):
             raise CoreError("LIVE_TEXT_CLOSED_FEATURES_REQUIRED", 503)
@@ -228,12 +290,16 @@ def guard(
                 cumulative.pause(store, settings.paid_model, now, "EXPIRED")
             raise CoreError("LIVE_TEXT_APPROVAL_EXPIRED", 503)
         paid = paid_budget.contract(settings, clock())
+        from companion.video_input import call_limit_matches
+
         if (
             paid.window_id != approval.window_id
             or paid.concurrency != 1
-            or paid.per_request_calls
-            != (3 + int(paid.video_input is not None) if private_life.enabled(settings) else
-                1 + int(approval.memory_scope == "approved_facts") + int(images))
+            or not call_limit_matches(
+                settings,
+                3 + int(paid.video_input is not None) if private_life.enabled(settings) else
+                1 + int(approval.memory_scope == "approved_facts") + int(images),
+            )
             or paid.window_calls > approval.max_model_attempts
             or paid.starts_at > approval.starts_at
             or paid.expires_at < approval.ends_at
@@ -243,7 +309,7 @@ def guard(
             raise CoreError("LIVE_TEXT_PAID_CONTRACT_CHANGED", 503)
         if approval.memory_scope == "approved_facts":
             memory_sources(store, settings, clock, approval)
-        if approval.memory_scope != "none" or images or links:
+        if approval.memory_scope != "none" or images or links or files:
             ledger_sha256 = _ledger_custody(store, settings)
         journal = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
         if not journal or journal["value"] != approval.budget_journal_id:
@@ -826,6 +892,9 @@ def approve_input(store, settings, clock, body):
                 "AND json_extract(value,'$.window_sha256')=?",
                 (INPUT + "%", approval.plan_sha256),
             )["n"]
+            from companion.poke import input_count
+
+            count += input_count(store, approval.plan_sha256)
             if count >= approval.max_inputs or attempts >= approval.max_model_attempts:
                 raise CoreError("LIVE_TEXT_INPUT_OR_MODEL_CAP", 429)
             if not private_life.enabled(settings) and store.one(
@@ -847,7 +916,10 @@ def check_input(store, settings, clock, event):
     if (
         event.event_type != "message.received"
         or event.payload.media
-        or (event.payload.shared_content and approval.image_scope == "none")
+        or any(item.kind not in {"image", "file"}
+               or (item.kind == "image" and approval.image_scope != "owner_image_v1")
+               or (item.kind == "file" and approval.file_scope != "owner_file_v1")
+               for item in event.payload.shared_content)
         or (event.payload.rich and approval.rich_input_scope != "references_v1")
         or (not text.strip() and not references_only)
         or (text.strip().startswith("/") and not private_life.enabled(settings))
@@ -866,6 +938,7 @@ def check_input(store, settings, clock, event):
     ):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 403)
     image = qq_images.manifest(event.payload.model_dump())
+    files = qq_files.manifest(event.payload.model_dump())
     if image and approval.image_scope != "owner_image_v1":
         raise CoreError("LIVE_IMAGE_APPROVAL_REQUIRED", 403)
     capture = json.loads(receipt["value"]).get("capture")
@@ -877,7 +950,7 @@ def check_input(store, settings, clock, event):
             or capture.get("event_id") != event.event_id
             or capture.get("window_sha256") != approval.plan_sha256):
             raise CoreError("LIVE_TEXT_CAPTURE_BINDING_CHANGED", 403)
-    if image and not capture:
+    if (image or files) and not capture:
         raise CoreError("LIVE_TEXT_AUTHENTICATED_CAPTURE_REQUIRED", 403)
     if capture and (
         capture["source_event_id"] != event.source_event_id
@@ -1564,7 +1637,8 @@ def remaining_send_slots(store, approval):
         occupied = store.one(
             "SELECT COALESCE(SUM(o.attempt_count + CASE WHEN o.state IN "
             "('PENDING','LEASED','RETRY_WAIT') THEN 1 ELSE 0 END),0) n "
-            "FROM outbox o JOIN runtime_meta r ON r.key=? || o.message_id "
+            "FROM outbox o JOIN runtime_meta r ON r.key IN (? || o.message_id, "
+            "'account_action_delivery:' || o.message_id) "
             "WHERE json_extract(r.value,'$.plan_sha256')=?",
             (private_life.DELIVERY, approval.plan_sha256),
         )["n"]
@@ -1708,6 +1782,18 @@ def record_replies(store, settings, clock, job, message_ids):
 def send_check(store, settings, clock, body):
     with store.transaction():
         result = check_delivery(store, settings, clock, body.message_id, check=body)
+        if settings.voice.enabled or body.voice is not None:
+            from companion.voice_flow import VoiceFlow
+
+            if store.one("SELECT 1 FROM poke_batches WHERE response_message_id=?",
+                         (body.message_id,)):
+                if body.voice is not None:
+                    raise CoreError("VOICE_DELIVERY_BINDING_CHANGED", 403)
+            else:
+                VoiceFlow(store, settings, clock).validate_send(
+                    body.message_id, body.lease_token,
+                    body.voice,
+                )
         cumulative.admit_operation(store, settings, clock(), "send", body.message_id,
             paid_budget.sha(body.model_dump(mode="json")), logical=body.event_id)
         return result

@@ -109,7 +109,8 @@ def _native(store, kind, reference_id):
         )
         if not row:
             return None
-        task_kind = "video" if row["scenario"] == "content_video" else "model"
+        task_kind = ("video" if row["scenario"] in {"content_video", "content_video_preview"}
+                     else "model")
         task_id = row["logical_request_id"] or row["job_id"] or row["request_id"]
         if row["scenario"] == "media":
             media = store.one("SELECT * FROM media_requests WHERE usage_request_id=?",

@@ -82,13 +82,15 @@ class ExplorationService:
         self.observations, self.goals, self.social = observations, goals, social
         self.register_link_images = register_link_images
 
-    def _read_scope(self, row):
+    def _read_scope(self, row, *, current_request=None):
         """Recheck the current signed card before bounded Reader work can proceed."""
         from companion import live_text, qq_source
 
         if not live_text.active(self.store, self.settings):
             return
-        approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
+        approval, _, _ = live_text.guard(
+            self.store, self.settings, self.clock, current_request=current_request,
+        )
         if approval.companion_scope == "owner_private_v1":
             return  # Native goal/source/adapter and resource leases below still apply.
         if (
@@ -292,7 +294,8 @@ class ExplorationService:
             and (not for_read or (row["reads"] or 0) < cfg.exploration_daily_deep_reads)
         )
 
-    def lease(self, adapter_id, source_grant=None, *, reading=False, source_check=None):
+    def lease(self, adapter_id, source_grant=None, *, reading=False, source_check=None,
+              request_limits=None):
         from companion import live_text
 
         policy = self.adapter(adapter_id)
@@ -322,14 +325,6 @@ class ExplorationService:
                 f"FROM ({METERED_READS_SQL}) WHERE started_at>=?",
                 (day, day, day, month),
             )
-            if (
-                (counts["daily"] or 0) + policy.reader_max_requests > cfg.exploration_daily_requests
-                or (counts["monthly"] or 0) + policy.reader_max_requests
-                > cfg.exploration_monthly_requests
-                or (counts["bytes"] or 0) + cfg.exploration_max_response_bytes
-                > cfg.exploration_daily_bytes
-            ):
-                return None
             rows = s.rows(
                 "SELECT * FROM exploration_requests WHERE adapter_id=? AND state='QUEUED' "
                 "ORDER BY CASE operation WHEN 'read' THEN 0 ELSE 1 END,created_at",
@@ -337,6 +332,33 @@ class ExplorationService:
             )
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
             for row in rows:
+                limits = {"max_bytes": cfg.exploration_max_response_bytes,
+                          "max_requests": policy.reader_max_requests,
+                          "max_items": min(40, cfg.exploration_daily_candidate_limit),
+                          "deadline": after(now, 30)}
+                if request_limits is not None:
+                    try:
+                        selected = request_limits(row)
+                    except CoreError as error:
+                        if error.status == 429:
+                            continue
+                        s.execute("UPDATE exploration_requests SET state='CANCELLED',"
+                                  "last_error_code=?,updated_at=? WHERE request_id=?",
+                                  (error.code, now, row["request_id"]))
+                        continue
+                    if selected is False:
+                        continue
+                    if selected is not None:
+                        limits.update(selected)
+                if (
+                    (counts["daily"] or 0) + limits["max_requests"]
+                    > cfg.exploration_daily_requests
+                    or (counts["monthly"] or 0) + limits["max_requests"]
+                    > cfg.exploration_monthly_requests
+                    or (counts["bytes"] or 0) + limits["max_bytes"]
+                    > cfg.exploration_daily_bytes
+                ):
+                    continue
                 if row["operation"] == "discover" and not cfg.exploration_enabled:
                     continue
                 step = json.loads(row["goal_step_json"])
@@ -379,7 +401,7 @@ class ExplorationService:
                         )
                         continue
                 self._read_scope(row)
-                token, until = uid("reader_lease"), after(now, 30)
+                token, until = uid("reader_lease"), limits["deadline"]
                 if step:
                     goal_until = s.one(
                         "SELECT lease_until FROM goal_steps WHERE step_id=?", (step["step_id"],)
@@ -393,8 +415,8 @@ class ExplorationService:
                     (
                         token,
                         until,
-                        cfg.exploration_max_response_bytes,
-                        policy.reader_max_requests,
+                        limits["max_bytes"],
+                        limits["max_requests"],
                         now,
                         now,
                         source_grant.grant_id if source_grant else None,
@@ -407,16 +429,17 @@ class ExplorationService:
                     "lease_token": token,
                     "operation": row["operation"],
                     "url": row["url"],
-                    "max_bytes": cfg.exploration_max_response_bytes,
-                    "max_items": min(40, cfg.exploration_daily_candidate_limit),
-                    "max_requests": policy.reader_max_requests,
+                    "max_bytes": limits["max_bytes"],
+                    "max_items": limits["max_items"],
+                    "max_requests": limits["max_requests"],
                 }
                 if source_grant:
                     item["source_grant"] = source_grant.snapshot()
                 return item
         return None
 
-    def validate_read(self, adapter_id, request_id, validation, *, reading=False):
+    def validate_read(self, adapter_id, request_id, validation, *, reading=False,
+                      current_request=None):
         self.adapter(adapter_id)
         s = self.store
         with nullcontext() if s.db.in_transaction else s.transaction():
@@ -432,7 +455,7 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
-            self._read_scope(row)
+            self._read_scope(row, current_request=current_request)
             captured = self.observations.grants.captured(row)
             if captured != validation.source_grant:
                 raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)

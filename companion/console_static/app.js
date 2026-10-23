@@ -42,6 +42,8 @@ const PATHS = {
   warning: ["m12 3 10 18H2zM12 9v5m0 3h.01"],
   wallet: ["M4 6V4h15v4H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h17V8H4m17 5h-6v4h6"],
   inbox: ["M4 4h16l2 13v4H2v-4zM2 17h6l2 2h4l2-2h6"],
+  microphone: ["M9 4a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0zM5 10v1a7 7 0 0 0 14 0v-1M12 18v4M8 22h8"],
+  account: ["M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8M4 21v-2a8 8 0 0 1 16 0v2M17 5h5M20 2v6"],
   edit: ["m15 4 5 5M4 20l5-1L21 7l-5-5L4 14z"],
   trash: ["M3 6h18M8 6V3h8v3M5 6l1 15h12l1-15M10 10v7m4-7v7"],
   link: ["m9 15 6-6M8 16l-2 2a4 4 0 0 1-6-6l5-5a4 4 0 0 1 6 0m2 1 2-2a4 4 0 0 1 6 6l-5 5a4 4 0 0 1-6 0"],
@@ -66,6 +68,8 @@ const ROUTES = {
   life: ["成长与日记", "日常的积累", "查看日记、成长与主动行为留下的记录。"],
   content: ["阅读与文件", "内容与来源", "查看阅读、视频和文件任务的进度与来源。"],
   memes: ["表情素材", "理解之后，再表达", "查看来源审核、图片理解和索引的实际状态。"],
+  voice: ["语音与节点", "从听见到回应", "查看节点联系、语音处理与原消息的投递记录。"],
+  "account-actions": ["QQ 自主行为", "计划与实际结果", "分别查看账号计划、平台回执、资料观测与素材许可。"],
   diagnostics: ["运行诊断", "运行的细节", "检查工作进程、队列、费用和需要处理的问题。"],
   configuration: ["配置", "按需要调整", "查看生效版本，管理服务、能力与使用限额。"],
 };
@@ -84,6 +88,11 @@ const STATUS = {
   INDEXED: "已索引", FETCHED: "已取得内容", DISCOVERED: "已发现", WATCHED: "已有分析记录",
   PARTIAL: "部分完成", RESERVED: "已预留", WAITING: "等待中", NOT_CONFIGURED: "未配置",
   COMPLETE: "已完成", DELIVERY_UNCERTAIN: "投递结果不明", BLOCKED: "受阻", DRAFT: "草稿",
+  ONLINE: "近期有联系", OFFLINE: "联系记录已过期", BUSY: "有未结束任务",
+  TRANSCRIBED: "转写已完成", LEASED: "已领取", SENDING: "已开始发送",
+  UNVERIFIED: "需要核对", FRESH: "近期已观测", REVIEWED: "审核有效", REVOKED: "已撤销",
+  AVAILABLE: "限频未阻止", REJECTED: "未通过", SKIPPED: "本轮保持不变", PLANNING: "正在规划",
+  MATCHED: "与预期一致", CHANGED: "与预期不同",
 };
 const KINDS = {
   memory: "记忆", diary: "日记", life: "生活记录", growth: "成长", job: "任务",
@@ -93,6 +102,13 @@ const KINDS = {
   jobs: "任务", outbox: "消息投递", meme_caption: "表情理解", qq_image: "主人图片",
   link_image: "文章图片", link: "分享链接", goal: "目标", reflection: "反思",
   core: "运行记录", console: "主人操作", "cloud-budget": "费用与预算",
+  voice_node: "语音节点", voice_job: "语音任务", account_plan: "账号计划",
+  account_profile: "资料观测", account_asset: "头像素材",
+};
+const DELIVERY_ACTIONS = {
+  "qq.private.reply": "私聊回复", "qq.private.proactive": "主动分享", "qq.private.poke": "拍一拍",
+  "qzone.publish": "QQ空间发布", "qq.profile.nickname": "昵称更新",
+  "qq.profile.signature": "签名更新", "qq.profile.avatar": "头像更新",
 };
 const ACTIVITY_TITLES = {
   "event.accepted": "已接收一条输入", "console.login": "主人登录控制台",
@@ -142,13 +158,28 @@ const DETAIL_LABELS = {
   trace_id: "关联记录", owner_event_id: "主人输入", output_event_id: "输出记录",
   read_request_id: "读取请求", usage_request_id: "用量记录", reserved_bytes: "预留空间（字节）",
   count: "数量", billed_micro_usd: "已计费用量（微美元）", commitment_state: "承诺状态",
+  action_type: "投递类型",
+  last_seen_at: "最近联系", resource_state: "上次资源状态", active_job_id: "关联任务",
+  node_id: "执行节点", capabilities: "已配置能力", limits: "资源上限", operation: "处理类型",
+  task_state: "处理状态", partial: "音频覆盖不完整", input_bytes: "输入大小",
+  result_bytes: "结果大小", input_duration_seconds: "输入时长", delivery_state: "原消息投递",
+  message_id: "原消息编号", deadline_at: "处理截止", result_expires_at: "结果有效期",
+  expected_manifest_sha256: "预期配置摘要", verified_manifest_sha256: "最近任务核验摘要",
+  manifest_verified_at: "最近任务核验时间", manifest_state: "配置核验",
+  plan_state: "计划状态", receipt_state: "平台回执", native_retcode: "平台返回码",
+  resource_id: "平台内容编号", receipt_sha256: "回执摘要", dispatched_at: "开始发送时间",
+  expires_at: "有效期至", revoked_at: "撤销时间", license_label: "使用许可",
+  usage_conditions: "使用条件", purpose: "审核用途", dimensions: "图片尺寸", size_bytes: "素材大小",
+  review_receipt_sha256: "审核凭证摘要", field: "资料项目", baseline_value: "最近观测内容",
+  observed_at: "观测时间", freshness_seconds: "观测有效时长", freshness_state: "观测新鲜度",
+  last_action_at: "最近相关操作", level: "读取范围", part: "内容部分",
 };
 const SECRET_KEY = /password|cookie|authorization|api_key|access_token|refresh_token|csrf|secret|credential/i;
 const state = {
   session: null, epoch: 0, generation: 0, route: "overview", data: null,
   selection: null, query: "", filter: "all", controller: null,
   group: null, dirty: false, configDraft: new Map(), budgetDraft: new Map(), expandedCapabilities: false,
-  configSave: null, budgetSave: null,
+  configSave: null, budgetSave: null, deliverySaves: new Map(),
   updatedAt: null, toastTimer: null, searchTimer: null,
 };
 
@@ -267,13 +298,13 @@ function money(value) {
 }
 function tone(value) {
   const status = String(value || "").toUpperCase();
-  if (["FAILED", "ERROR", "UNKNOWN", "ATTENTION", "INVALID", "DELIVERY_UNCERTAIN", "BLOCKED"].includes(status)) return "danger";
-  if (["QUEUED", "PENDING", "RETRY_WAIT", "HYPOTHESIS", "PROPOSED", "REVIEW", "STALE", "PARTIAL", "RESERVED"].includes(status)) return "pending";
-  if (["SUCCEEDED", "COMPLETED", "COMMITTED", "CONFIRMED", "SETTLED", "SENT", "ACK", "INDEXED", "OBSERVED"].includes(status)) return "success";
-  if (["READY", "ACTIVE", "ENABLED", "RUNNING", "RECORDED"].includes(status)) return "active";
+  if (["FAILED", "ERROR", "UNKNOWN", "ATTENTION", "INVALID", "DELIVERY_UNCERTAIN", "BLOCKED", "UNVERIFIED", "QUARANTINED"].includes(status)) return "danger";
+  if (["QUEUED", "PENDING", "RETRY_WAIT", "HYPOTHESIS", "PROPOSED", "REVIEW", "STALE", "PARTIAL", "RESERVED", "OFFLINE", "SENDING"].includes(status)) return "pending";
+  if (["SUCCEEDED", "COMPLETED", "COMMITTED", "CONFIRMED", "SETTLED", "SENT", "ACK", "INDEXED", "OBSERVED", "FRESH", "REVIEWED", "TRANSCRIBED"].includes(status)) return "success";
+  if (["READY", "ACTIVE", "ENABLED", "RUNNING", "RECORDED", "ONLINE", "BUSY", "LEASED"].includes(status)) return "active";
   return "";
 }
-function pill(value) { return el("span", { class: "status-pill " + tone(value) }, STATUS[value] || value || "未记录"); }
+function pill(value, label) { return el("span", { class: "status-pill " + tone(value) }, label || STATUS[value] || value || "未记录"); }
 function action(text, onClick, { style = "", symbol, small = false } = {}) {
   return el("button", { type: "button", class: "button " + style + (small ? " small" : ""), onclick: onClick },
     symbol ? icon(symbol) : null, text);
@@ -338,6 +369,7 @@ function clearSession(message = "") {
   state.budgetDraft.clear();
   state.configSave = null;
   state.budgetSave = null;
+  state.deliverySaves.clear();
   clearTimeout(state.searchTimer);
   state.dirty = false;
   state.query = "";
@@ -570,6 +602,8 @@ function renderBudget(budget) {
 
 function kindIcon(kind) {
   const name = String(kind || "");
+  if (/voice/.test(name)) return "microphone";
+  if (/account/.test(name)) return name === "account_asset" ? "image" : "account";
   if (/memory/.test(name)) return "memory";
   if (/diary|life|growth|reflection/.test(name)) return "life";
   if (/meme|caption|image/.test(name)) return "image";
@@ -580,6 +614,10 @@ function kindIcon(kind) {
 }
 function filteredItems() {
   let items = Array.isArray(state.data?.items) ? state.data.items : [];
+  if (state.route === "account-actions") {
+    const priority = { account_plan: 0, account_profile: 1, account_asset: 2 };
+    items = [...items].sort((left, right) => (priority[left.kind] ?? 3) - (priority[right.kind] ?? 3));
+  }
   if (state.route !== "memories" && state.query.trim()) {
     const query = state.query.trim().toLocaleLowerCase();
     items = items.filter(item => [displayTitle(item), item.title, item.summary, item.kind, item.id].join(" ").toLocaleLowerCase().includes(query));
@@ -587,6 +625,52 @@ function filteredItems() {
   if (state.filter === "attention") items = items.filter(item => ["pending", "danger"].includes(tone(item.status)));
   if (state.filter === "completed") items = items.filter(item => tone(item.status) === "success");
   return items;
+}
+function mediaRoute() { return state.route === "voice" || state.route === "account-actions"; }
+function itemStatusLabel(item) {
+  return item.detail?.state_label || (item.kind === "account_profile" && item.status === "UNOBSERVED" ? "尚无资料观测" : null);
+}
+function duration(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds)) return "未记录";
+  if (seconds >= 86400 && seconds % 86400 === 0) return seconds / 86400 + " 天";
+  if (seconds >= 3600 && seconds % 3600 === 0) return seconds / 3600 + " 小时";
+  if (seconds >= 60 && seconds % 60 === 0) return seconds / 60 + " 分钟";
+  return seconds.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) + " 秒";
+}
+function bytes(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "未记录";
+  return value >= 1e6 ? (value / 1e6).toFixed(1) + " MB" : value >= 1000 ? (value / 1000).toFixed(1) + " KB" : value + " 字节";
+}
+function renderMediaOverview() {
+  const meta = state.data?.meta;
+  if (!meta || typeof meta !== "object") return null;
+  const voice = state.route === "voice";
+  const metrics = voice
+    ? [metric("近期联系", meta.nodes_recent, duration(meta.freshness_seconds) + "内的联系记录", "microphone", "/ " + count(meta.nodes_total)),
+      metric("等待与处理中", meta.pending_jobs, "以节点任务记录为准", "clock"),
+      metric("投递待核对", meta.uncertain_deliveries, "处理完成不等于已送达", "inbox")]
+    : [metric("等待投递", meta.pending_deliveries, "沿原消息记录执行", "clock"),
+      metric("结果待核对", meta.uncertain_deliveries, "尚无可确认的最终结果", "warning"),
+      metric("投递记录", meta.total_deliveries, "包含完成、失败与未知", "account")];
+  const policy = voice ? meta.reply_policy : null;
+  const note = voice
+    ? (!meta.enabled ? "当前未启用语音能力" : policy?.enabled ? (policy.mode === "voice_input" ? "优先回应语音输入" : "短回复可使用语音") +
+      " · 最多 " + count(policy.max_chars) + " 字 · 最长等待 " + duration(policy.wait_seconds) : "当前未启用语音回复")
+    : "平台回执与资料观测分别记录。昵称、签名和头像共用资料修改次数上限。";
+  const detail = !voice && Array.isArray(meta.limits) ? el("details", { class: "media-limits panel" },
+    el("summary", {}, "当前限频与冷却", el("span", { class: "muted" }, "展开查看各项")),
+    el("ul", { class: "limit-grid" }, meta.limits.map(item => el("li", {},
+      el("div", { class: "limit-heading" }, el("strong", {}, item.title), pill(item.state)),
+      el("p", {}, "每日最多 " + count(item.daily_limit) + " 次 · 间隔 " + duration(item.cooldown_seconds)),
+      el("p", { class: "muted" }, item.reason || "暂无状态说明"),
+      item.next_after && Date.parse(item.next_after) > Date.parse(state.data.observed_at)
+        ? el("p", { class: "muted" }, "冷却截至 " + formatDate(item.next_after)) : null)))) : null;
+  return el("section", { class: "media-overview", "aria-label": voice ? "语音概况" : "账号行为概况" },
+    el("div", { class: "media-summary" }, el("div", {},
+      el("p", {}, pill(meta.enabled ? "ENABLED" : "DISABLED", meta.enabled ? "配置已开启" : "配置未开启"), el("span", {}, note)),
+      meta.policy_problem ? el("p", { class: "form-error" }, meta.policy_problem) : null,
+      voice ? el("p", { class: "panel-note" }, "节点联系反映最近记录，不代表设备健康检查；显示最近 " + count(meta.displayed_jobs) + " 条任务。") : null),
+      link("查看配置", "configuration")), el("div", { class: "metrics" }, metrics), detail);
 }
 function renderCollection() {
   const filters = state.route === "memories"
@@ -613,7 +697,7 @@ function renderCollection() {
     action("按日期查看日记", openDiaryLookup, { symbol: "content", small: true }),
     action("管理日记与主动行为", openModeDialog, { symbol: "settings", small: true })) : null;
   const body = el("div", { id: "collection-body" });
-  const result = el("div", {}, headingActions, tools, body);
+  const result = el("div", {}, mediaRoute() ? renderMediaOverview() : null, headingActions, tools, body);
   renderCollectionBody(body);
   return result;
 }
@@ -642,8 +726,9 @@ function renderCollectionBody(target = $("#collection-body")) {
       el("span", { class: "record-overline" }, el("span", { class: "record-kind" }, icon(kindIcon(item.kind)), KINDS[item.kind] || item.kind || "记录"),
         el("time", { datetime: item.occurred_at || "" }, formatDate(item.occurred_at))),
       el("span", { class: "record-title", title: item.title }, displayTitle(item)),
-      item.summary ? el("span", { class: "record-summary" }, item.summary) : null,
-      el("span", { class: "record-bottom" }, pill(item.status), el("span", { class: "record-ref" }, String(item.id || "")))));
+      item.summary && !(mediaRoute() && item.summary === item.detail?.state_label) ? el("span", { class: "record-summary" }, item.summary) : null,
+      el("span", { class: "record-bottom" }, pill(item.status, itemStatusLabel(item)),
+        el("span", { class: "record-ref", title: String(item.id || "") }, mediaRoute() ? "记录 " + String(item.id || "").slice(-8) : String(item.id || "")))));
   }));
   const selected = items.find(item => String(item.id) === state.selection);
   const more = state.route === "activity" && state.data.next_cursor !== null && state.data.next_cursor !== undefined
@@ -654,23 +739,40 @@ function renderCollectionBody(target = $("#collection-body")) {
 
 function renderDetail(item) {
   const details = item.detail && typeof item.detail === "object" && !Array.isArray(item.detail) ? item.detail : {};
-  const body = el("div", { class: "panel-body" }, pill(item.status), el("h3", { class: "detail-title" }, displayTitle(item)));
+  const body = el("div", { class: "panel-body" }, pill(item.status, itemStatusLabel(item)), el("h3", { class: "detail-title" }, displayTitle(item)));
   if (state.route === "activity" && ACTIVITY_TITLES[item.title]) {
     body.append(el("div", { class: "detail-section" }, el("h3", {}, "操作代码"), el("p", { class: "detail-text data" }, item.title)));
   }
-  if (item.summary) body.append(el("p", { class: "detail-text" }, item.summary));
+  if (item.summary && !(mediaRoute() && item.summary === details.state_label)) body.append(el("p", { class: "detail-text" }, item.summary));
   body.append(el("div", { class: "detail-section" }, el("h3", {}, "记录信息"),
     el("div", { class: "key-value" }, el("span", {}, "发生时间"), el("time", {}, formatDate(item.occurred_at))),
-    el("div", { class: "key-value" }, el("span", {}, "记录编号"), el("span", { class: "data" }, item.id))));
+    !mediaRoute() ? el("div", { class: "key-value" }, el("span", {}, "记录编号"), el("span", { class: "data" }, item.id)) : null));
+  const technical = [];
   for (const [key, value] of Object.entries(details)) {
-    if (SECRET_KEY.test(key) || value === null || value === undefined) continue;
+    if (["can_reconcile", "reconciliation_prepared", "reconciliation_reason", "state_label"].includes(key) || SECRET_KEY.test(key) || value === null || value === undefined) continue;
+    if (mediaRoute() && (/_sha256$/.test(key) || ["message_id", "active_job_id", "native_retcode", "resource_id", "last_error_code"].includes(key))) {
+      technical.push([key, value]); continue;
+    }
     const label = DETAIL_LABELS[key] || key;
     const section = el("div", { class: "detail-section" }, el("h3", {}, label));
     const url = /url|source_page/.test(key) ? safeUrl(value) : null;
-    if (url) section.append(el("a", { href: url, target: "_blank", rel: "noopener noreferrer", class: "detail-text" }, String(value), icon("arrow")));
-    else section.append(el("p", { class: "detail-text" }, safeValue(value)));
+    if (mediaRoute() && key === "sources" && Array.isArray(value)) {
+      section.append(value.length ? el("ul", { class: "source-list" }, value.map(source => el("li", {},
+        safeUrl(source.url) ? el("a", { href: safeUrl(source.url), target: "_blank", rel: "noopener noreferrer" }, source.title, icon("arrow")) : el("span", {}, source.title || "来源当前不可用"),
+        pill(source.status), source.coverage ? el("details", { class: "source-coverage" },
+          el("summary", {}, source.coverage.scope === "first_part_subtitles" ? "第 " + (source.coverage.part ?? "—") + " 部分字幕记录" : source.coverage.scope === "article_text" ? "文章文字记录" : "查看来源读取范围"),
+          el("p", { class: "muted" }, safeValue(source.coverage))) : null))) : el("p", { class: "detail-text" }, "本条计划没有可展示的公开出处。"));
+    } else if (mediaRoute() && key === "limits") {
+      section.append(el("p", { class: "detail-text" }, "合成：最多 " + count(value.tts_chars) + " 字 / " + duration(value.tts_seconds) + "，输出 " + bytes(value.tts_output_bytes)),
+        el("p", { class: "detail-text" }, "转写：输入 " + bytes(value.asr_input_bytes) + " / " + duration(value.asr_seconds) + "，最多 " + count(value.asr_chars) + " 字、" + count(value.asr_segments) + " 段"));
+    } else if (url) section.append(el("a", { href: url, target: "_blank", rel: "noopener noreferrer", class: "detail-text" }, String(value), icon("arrow")));
+    else section.append(el("p", { class: "detail-text" },
+      mediaRoute() ? mediaDetailValue(key, value) : key === "action_type" && DELIVERY_ACTIONS[value] ? DELIVERY_ACTIONS[value] : safeValue(value)));
     body.append(section);
   }
+  if (mediaRoute()) body.append(el("details", { class: "technical-details" }, el("summary", {}, "来源与核验编号"),
+    el("div", { class: "detail-section" }, el("h3", {}, "记录编号"), el("p", { class: "detail-text data" }, item.id)),
+    technical.map(([key, value]) => el("div", { class: "detail-section" }, el("h3", {}, DETAIL_LABELS[key] || key), el("p", { class: "detail-text data" }, safeValue(value))))));
   const actions = el("div", { class: "detail-actions" });
   if (state.route === "memories" && !["DELETED", "FORGOTTEN", "REDACTED", "RETRACTED"].includes(item.status)) {
     if (item.status !== "CONFIRMED") actions.append(action("确认记忆", () => memoryAction(item, "confirm"), { style: "subtle", small: true, symbol: "check" }));
@@ -680,9 +782,35 @@ function renderDetail(item) {
   const day = diaryDay(item);
   if (state.route === "life" && day) actions.append(action("查看这一天", () => showDiary(day), { small: true, symbol: "content" }));
   if (actions.childElementCount) body.append(actions);
+  if (state.route === "diagnostics" && item.kind === "outbox" && item.status === "DELIVERY_UNCERTAIN"
+    && Object.hasOwn(DELIVERY_ACTIONS, details.action_type)
+    && typeof item.id === "string" && /^msg_[a-f0-9]{32}$/.test(item.id)) {
+    body.append(details.can_reconcile === true && details.reconciliation_prepared === true
+      ? deliveryReconciliation(item) : el("div", { class: "reconciliation-note", role: "status" },
+        el("strong", {}, "需要先准备核对"), el("p", {}, typeof details.reconciliation_reason === "string"
+          ? details.reconciliation_reason : "请先停止发送进程并准备核对凭证，完成后刷新此页。")));
+  }
   return el("aside", { class: "panel detail", id: "record-detail", "aria-labelledby": "detail-heading" },
     el("div", { class: "panel-header" }, el("h2", { id: "detail-heading", tabindex: "-1" }, "记录详情"),
       el("span", { class: "mini-icon" }, icon(kindIcon(item.kind)))), body);
+}
+
+function mediaDetailValue(key, value) {
+  if (/_bytes$/.test(key)) return bytes(value);
+  if (/_seconds$/.test(key)) return duration(value);
+  if (/_at$/.test(key) && typeof value === "string") return formatDate(value);
+  if (key === "manifest_state" && value === "UNOBSERVED") return "暂无任务核验证据";
+  if (key === "freshness_state" && value === "UNOBSERVED") return "尚无资料观测";
+  if (key === "resource_state" && value === "READY") return "上次记录为空闲";
+  if (key === "task_state" && value === "READY") return "音频已生成";
+  if (key === "plan_state" && value === "READY") return "计划已准备";
+  if (key === "receipt_state") return ({ SUCCEEDED: "平台已接受", REJECTED: "平台已拒绝", UNKNOWN: "平台结果不明", UNOBSERVED: "尚无完整平台回执", INVALID: "回执不完整或不匹配" })[value] || STATUS[value] || value;
+  if (["task_state", "plan_state", "delivery_state", "receipt_state", "resource_state", "freshness_state", "manifest_state"].includes(key)) return STATUS[value] || value;
+  if (key === "capabilities") return Array.isArray(value) ? value.map(item => ({ asr: "语音转写", tts: "语音合成" })[item] || item).join("、") : "未记录";
+  if (key === "operation") return value === "asr" ? "语音转写" : value === "tts" ? "语音合成" : value;
+  if (key === "field") return ({ nickname: "昵称", signature: "签名", avatar: "头像" })[value] || value;
+  if (key === "action_type") return ({ "qzone.publish": "QQ空间发布", "qq.profile.nickname": "昵称更新", "qq.profile.signature": "签名更新", "qq.profile.avatar": "头像更新" })[value] || value;
+  return safeValue(value);
 }
 
 function openDialog(title, content) {
@@ -719,6 +847,52 @@ async function perform(form, button, operation, success) {
     button.disabled = false;
     button.textContent = label;
   }
+}
+
+function deliveryReconciliation(item) {
+  const form = el("form", { class: "delivery-reconcile", "aria-label": "核对这条投递" });
+  const choices = [["SENT", "标记已送达"], ["CANCELLED", "结束核对"]];
+  const buttons = choices.map(([outcome, label]) => action(label, async event => {
+    if (state.deliverySaves.has(item.id)) return;
+    const submission = { epoch: state.epoch, outcome };
+    state.deliverySaves.set(item.id, submission);
+    buttons.forEach(button => { button.disabled = true; });
+    form.setAttribute("aria-busy", "true");
+    try {
+      await perform(form, event.currentTarget,
+        () => api.write("/deliveries/" + encodeURIComponent(item.id) + "/reconcile", { outcome }, "POST",
+          result => result.state === outcome), async result => {
+          const current = state.data?.items?.find(record => String(record.id) === item.id);
+          if (current) {
+            current.status = result.state;
+            current.detail = { ...current.detail, can_reconcile: false };
+          }
+          renderCollectionBody();
+          toast(outcome === "SENT" ? "已记录为已送达。" : "核对已结束。");
+          await loadRoute();
+        });
+    } finally {
+      if (state.deliverySaves.get(item.id) === submission) state.deliverySaves.delete(item.id);
+      if (form.isConnected) {
+        buttons.forEach(button => { button.disabled = false; });
+        form.setAttribute("aria-busy", "false");
+      } else if (submission.epoch === state.epoch && state.session && state.route === "diagnostics") {
+        renderCollectionBody();
+      }
+    }
+  }, { style: outcome === "SENT" ? "primary" : "" }));
+  const running = state.deliverySaves.get(item.id);
+  if (running) {
+    buttons.forEach((button, index) => {
+      button.disabled = true;
+      if (choices[index][0] === running.outcome) button.textContent = "正在处理…";
+    });
+  }
+  form.setAttribute("aria-busy", String(Boolean(running)));
+  form.addEventListener("submit", event => event.preventDefault());
+  form.append(el("p", { class: "panel-note" }, "记录核对结果，不会再次发送。"),
+    el("div", { class: "button-row" }, buttons));
+  return form;
 }
 
 function memoryAction(item, decision) {

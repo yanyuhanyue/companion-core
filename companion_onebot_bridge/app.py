@@ -187,6 +187,8 @@ def main():
             "window-status",
             "window-stop",
             "window-quota-inventory",
+            "window-delivery-prepare",
+            "window-delivery-reconcile",
             "memory-control-once",
         ),
     )
@@ -196,6 +198,7 @@ def main():
     parser.add_argument("--event", type=Path)
     parser.add_argument("--approval", type=Path)
     parser.add_argument("--memory-control-sha256")
+    parser.add_argument("--message-id")
     args = parser.parse_args()
     try:
         config = BridgeConfig.load(args.config)

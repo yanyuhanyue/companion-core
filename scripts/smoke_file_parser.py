@@ -1,7 +1,7 @@
 """Native Linux Docker acceptance for the standalone file parser; no live user data.
 
 Build deploy/file-parser.Dockerfile, inspect the local image's sha256 ID, then run:
-    python scripts/smoke_file_parser.py --image sha256:<image-id>
+    python scripts/smoke_file_parser.py --image sha256:<image-id> --verify-launcher-death
 The host needs only Python's standard library and Docker. Fixtures, including a
 real legacy DOC conversion, are generated inside the same pinned offline image.
 """
@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -132,7 +133,9 @@ def generate_fixtures(image, workspace, docker):
     limits = replace(file_parser.DEFAULT_LIMITS, wall_seconds=45)
     name = "companion-file-fixtures-" + uuid.uuid4().hex
     command = file_parser._container_argv(docker, image, name, "unused.txt", "", limits)
-    command = command[:command.index(image) + 1] + ["-c", GENERATOR]
+    command = command[:command.index(image) + 1] + [
+        "--signal=KILL", str(limits.wall_seconds) + "s", "python", "-c", GENERATOR,
+    ]
     scratch = workspace / ".local" / "test-temp"
     if not scratch.resolve().is_relative_to(workspace):
         raise ValueError("native fixture scratch must remain inside workspace")
@@ -164,12 +167,78 @@ def generate_fixtures(image, workspace, docker):
             raise
 
 
+def verify_launcher_death(image, workspace, docker):
+    """Kill only this smoke's launcher; the container must enforce its own deadline."""
+    if sys.platform != "linux":
+        raise RuntimeError("launcher SIGKILL acceptance requires Linux")
+    limits = replace(file_parser.DEFAULT_LIMITS, wall_seconds=5)
+    name, owner = "companion-file-" + uuid.uuid4().hex, uuid.uuid4().hex
+    command = file_parser._container_argv(docker, image, name, "unused.txt", "", limits,
+                                          owner_label=owner)
+    # A trusted synthetic workload outlives the deadline and spawns a descendant.
+    workload = ("import subprocess,time; "
+                "subprocess.Popen(['python','-c','import time; time.sleep(600)']); "
+                "time.sleep(600)")
+    command = command[:command.index(image) + 1] + [
+        "--signal=KILL", "5s", "python", "-c", workload,
+    ]
+    child = ("import json,subprocess,sys; "
+             "p=subprocess.Popen(json.loads(sys.argv[1]),stdin=subprocess.DEVNULL,"
+             "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); p.wait()")
+    process = subprocess.Popen([sys.executable, "-I", "-c", child, json.dumps(command)],
+                               shell=False, cwd=workspace, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def state():
+        result = subprocess.run(
+            [docker, "ps", "-a", "--filter", "label=com.companion.parser-host=" + owner,
+             "--format", "{{.Names}} {{.State}}"], shell=False, cwd=workspace,
+            capture_output=True, timeout=2, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError("cannot confirm native container state")
+        rows = result.stdout.decode("ascii").splitlines()
+        if any(not row.startswith(name + " ") for row in rows):
+            raise RuntimeError("unexpected native acceptance container identity")
+        return rows
+
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if name + " running" in state():
+                break
+            if process.poll() is not None:
+                raise RuntimeError("native launcher exited before running container was observed")
+            time.sleep(0.05)
+        else:
+            raise RuntimeError("native acceptance container did not start")
+        process.kill()  # Linux SIGKILL; no launcher finally block can clean up this container.
+        process.wait(timeout=2)
+        killed_at = time.monotonic()
+        while time.monotonic() - killed_at < limits.wall_seconds + 5:
+            if not state():
+                return {"launcher_signal": "SIGKILL", "running_container_observed": True,
+                        "container_removed": True, "inner_wall_seconds": limits.wall_seconds,
+                        "seconds_after_launcher_death": round(time.monotonic() - killed_at, 3)}
+            time.sleep(0.1)
+        raise RuntimeError("container survived its independent wall deadline")
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=2)
+        # Only the random name created by this invocation is eligible for cleanup.
+        subprocess.run([docker, "rm", "--force", name], shell=False, cwd=workspace,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+                       check=False)
+
+
 def main(argv=None):
     arguments = argparse.ArgumentParser(description=__doc__)
     arguments.add_argument("--image", required=True, help="local sha256 ID or repository@sha256")
     arguments.add_argument("--workspace", type=Path,
                            default=REPOSITORY / ".local/file-parser-native")
     arguments.add_argument("--docker", default="docker")
+    arguments.add_argument("--verify-launcher-death", action="store_true")
     args = arguments.parse_args(argv)
     workspace = args.workspace.resolve()
     if not workspace.is_relative_to(REPOSITORY):
@@ -221,9 +290,13 @@ def main(argv=None):
     bounded_zip = parse("table.docx", "ERROR", label="docx-expanded-limit",
                         limits=replace(file_parser.DEFAULT_LIMITS, max_expanded_bytes=64))
     assert bounded_zip["error_code"] == "ZIP_EXPANSION_LIMIT"
+    launcher_death = verify_launcher_death(args.image, workspace, args.docker) if (
+        args.verify_launcher_death
+    ) else None
     print(json.dumps({"status": "PASS", "image": args.image, "cases": cases,
                       "versions": generated["versions"],
-                      "os_controls": generated["os_controls"]}, ensure_ascii=True))
+                      "os_controls": generated["os_controls"],
+                      "launcher_death": launcher_death}, ensure_ascii=True))
     return 0
 
 

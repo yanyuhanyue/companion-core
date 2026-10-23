@@ -14,6 +14,11 @@ from companion.store import encode
 
 # Covers one vision pass, bounded memory review, and final answer; never history.
 RETENTION_SECONDS = 300
+FILE_MIMES = frozenset({
+    "application/pdf", "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain", "text/markdown", "application/octet-stream",
+})
 
 
 def directory(store):
@@ -73,14 +78,28 @@ def _timestamp(value):
     return stamp
 
 
+def _file_limits(row):
+    value = json.loads(row["attachment_json"])
+    retention, size = value["spool_retention_seconds"], value["max_bytes"]
+    if (type(retention) is not int or not 1 <= retention <= 86400
+        or type(size) is not int or not 1 <= size <= 128 * 1024 * 1024):
+        raise ValueError()
+    return retention, size
+
+
 def _header(stream, row):
     line = stream.readline(512)
     if not line.endswith(b"\n"):
         raise ValueError()
     value = json.loads(line)
+    is_file = row.get("kind") == "qq_file"
+    retention = _file_limits(row)[0] if is_file else RETENTION_SECONDS
+    mimes = FILE_MIMES if is_file else {
+        "image/png", "image/jpeg", "image/webp", "image/gif", "image/apng",
+    }
     if (
         not isinstance(value, dict) or set(value) != {"mime", "expires_at", "privacy_epoch"}
-        or value["mime"] not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/apng"}
+        or value["mime"] not in mimes
         or type(value["privacy_epoch"]) is not int
         or value["privacy_epoch"] != row["captured_privacy_epoch"]
     ):
@@ -90,13 +109,20 @@ def _header(stream, row):
     # retention beyond that deadline plus the fixed original-image lifetime.
     if (
         expires <= datetime.fromisoformat(row["created_at"])
-        or expires > datetime.fromisoformat(row["deadline"]) + timedelta(seconds=RETENTION_SECONDS)
+        or expires > datetime.fromisoformat(row["deadline"]) + timedelta(seconds=retention)
     ):
         raise ValueError()
     return value
 
 
 def put(store, row, data, mime, expires_at):
+    if row.get("kind") == "qq_file":
+        retention, max_bytes = _file_limits(row)
+        expires = _timestamp(expires_at)
+        if (mime not in FILE_MIMES or not data or len(data) > max_bytes
+            or expires <= datetime.fromisoformat(row["created_at"])
+            or expires > datetime.fromisoformat(row["deadline"]) + timedelta(seconds=retention)):
+            raise CoreError("FILE_ORIGINAL_INVALID", 400)
     target = _path(store, row["item_id"])
     target.parent.mkdir(mode=0o700, exist_ok=True)
     target = _path(store, row["item_id"])
@@ -159,14 +185,15 @@ def discard(store, item_ids):
 
 def discard_window(store, plan_sha256):
     for row in store.rows(
-        "SELECT c.item_id,r.value FROM content_items c JOIN runtime_meta r "
-        "ON r.key='live_text_input:' || c.owner_event_id WHERE c.kind='qq_image'",
+        "SELECT c.item_id,c.kind,r.value FROM content_items c JOIN runtime_meta r "
+        "ON r.key='live_text_input:' || c.owner_event_id WHERE c.kind IN ('qq_image','qq_file')",
     ):
         if json.loads(row["value"]).get("window_sha256") == plan_sha256:
             discard(store, [row["item_id"]])
             store.execute(
                 "DELETE FROM runtime_meta WHERE key=?",
-                ("live_text_image_upload:" + row["item_id"],),
+                (("live_text_file_upload:" if row["kind"] == "qq_file"
+                  else "live_text_image_upload:") + row["item_id"],),
             )
 
 
@@ -197,8 +224,9 @@ def cleanup(store, now, max_bytes=4_000_000):
             )
             if not expired:
                 try:
-                    get(store, row, now, max_bytes)
-                except CoreError:
+                    limit = _file_limits(row)[1] if row["kind"] == "qq_file" else max_bytes
+                    get(store, row, now, limit)
+                except (CoreError, ValueError, KeyError, TypeError):
                     expired = True
             if expired:
                 discard(store, [item_id])

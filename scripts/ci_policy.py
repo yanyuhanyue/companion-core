@@ -47,7 +47,8 @@ CRITICAL_FILES = {
     "source_reader/accounts.py", "source_reader/network.py", "source_reader/worker.py",
 }
 CRITICAL_DIRS = (".github/", "contracts/", "migrations/", "db/", "deploy/",
-                 "companion_onebot_bridge/", "companion_meme_protocol/",
+                 "companion_onebot_bridge/", "companion_meme_protocol/", "companion_voice_node/",
+                 "companion_delivery_protocol/",
                  "astrbot_plugin_companion_bridge/")
 
 

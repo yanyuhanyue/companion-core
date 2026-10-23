@@ -26,6 +26,7 @@ def validation_error(response):
 async def tick(
     core_client, reader, adapter_id, *, source, local_hosts=None, renderer=None,
     validation_interval=0.75, clock=lambda: datetime.now(UTC),
+    media_limits=None, media_work_dir=None,
 ):
     if (not isinstance(adapter_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", adapter_id)
         or not 0.5 <= validation_interval <= 1):
@@ -34,11 +35,16 @@ async def tick(
     prefix = "/internal/v3/readers/" + adapter_id
     snapshot = getattr(reader, "grant_snapshot", lambda **kwargs: None)
     current_grant = snapshot(required=True)
-    response = await core_client.post(
-        prefix + "/lease", json={"source_grant": current_grant} if current_grant else {},
-    )
+    lease_request = {"source_grant": current_grant} if current_grant else {}
+    if media_limits is not None:
+        from companion.bili_video_protocol import CAPABILITY
+
+        if source != "bilibili":
+            raise ValueError("media capability is Bili-only")
+        lease_request["capabilities"] = [CAPABILITY]
+    response = await core_client.post(prefix + "/lease", json=lease_request)
     response.raise_for_status()
-    lease = decode_lease(response.json(), source, clock())
+    lease = decode_lease(response.json(), source, clock(), media_limits=media_limits)
     if lease is None:
         return False
     item, context, hosts, until = lease
@@ -110,6 +116,14 @@ async def tick(
             reader = WebReader(public, renderer, clock=lambda: clock().isoformat())
         watcher = asyncio.create_task(watch())
         try:
+            if item.get("media") is not None:
+                from source_reader.bili_media import run_media
+
+                return await run_media(
+                    core_client, reader, item, context, path, validate_read,
+                    limits=media_limits, until=until, cancel_event=cancelled,
+                    clock=clock, work_dir=media_work_dir,
+                )
             remaining = min(20.0, (until - clock()).total_seconds())
             # Expiry between decoding and scheduling must not dispatch a new read.
             if remaining <= 0:

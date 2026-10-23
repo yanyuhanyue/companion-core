@@ -360,6 +360,10 @@ def test_container_launcher_uses_offline_os_controls_and_no_mounts(monkeypatch, 
                    "--cpus=1", "--pids-limit=96", "--log-driver=none", "--filename=--harmless.txt"):
         assert option in command
     assert image in command
+    assert "--entrypoint=/usr/bin/timeout" in command
+    start = command.index(image) + 1
+    assert command[start:start + 4] == ["--signal=KILL", "30s", "python", "/app/file_parser.py"]
+    assert "--foreground" not in command
     assert any(value.startswith("--memory=") for value in command)
     assert any(value.startswith("--ulimit=cpu=") for value in command)
     assert not any(value.startswith(("--mount", "--volume", "--env-file")) for value in command)
@@ -380,6 +384,26 @@ def test_no_host_parser_fallback_without_docker(monkeypatch, tmp_path):
     assert result["text"] == ""
     with pytest.raises(ValueError, match="PINNED_PARSER_IMAGE_REQUIRED"):
         parser.parse_isolated(b"text", "a.txt", image="parser:latest", workspace=tmp_path)
+
+
+def test_host_supplied_identity_and_environment_reach_launch_and_cleanup(monkeypatch, tmp_path):
+    _, calls = fake_docker(monkeypatch, b"", block=True)
+    name, owner = "companion-file-" + "c" * 32, "d" * 32
+    environment = {"PATH": "/usr/bin:/bin", "DOCKER_HOST": "unix:///var/run/docker.sock"}
+    result = parser.parse_isolated(
+        b"text", "a.txt", image=IMAGE, workspace=tmp_path,
+        limits=replace(parser.DEFAULT_LIMITS, wall_seconds=1),
+        container_name=name, owner_label=owner, docker_env=environment,
+    )
+    assert result["error_code"] == "PARSER_TIMEOUT"
+    assert "--name=" + name in calls[0][0]
+    assert "--label=com.companion.parser-host=" + owner in calls[0][0]
+    assert calls[1][0] == ["docker", "rm", "--force", name]
+    assert calls[0][1]["env"] == calls[1][1]["env"] == environment
+    for bad_name, bad_owner in [("another-container", owner), (name, "invalid=owner")]:
+        with pytest.raises(ValueError, match="INVALID_PARSER_"):
+            parser._container_argv("docker", IMAGE, bad_name, "a.txt", "", parser.DEFAULT_LIMITS,
+                                    owner_label=bad_owner)
 
 
 @pytest.mark.parametrize("cleanup_returncode", [0, 1])

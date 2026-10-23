@@ -17,16 +17,21 @@ from pydantic import (
     model_validator,
 )
 
+from companion.bili_video_config import BiliVideoConfig
 from companion.cloud_budget import CloudBudgetConfig
 from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
+from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
 from companion.media_config import ContentConfig, MediaConfig
 from companion.operator_config import ConsoleConfig
+from companion.poke_protocol import PokePolicy
 from companion.reply_segments import SegmentedReplyConfig
+from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.sources import ObservationSource
 from companion.trial_limits import TrialCount, TrialText
 from companion.video_input import VideoInputPolicy
+from companion.voice_config import VoiceConfig
 
 
 class ObservationAdapterConfig(BaseModel):
@@ -210,6 +215,33 @@ class LiveTextWindowApproval(BaseModel):
     link_scope: Literal["none", "owner_links_v1"] = Field(
         default="none", exclude_if=lambda value: value == "none",
     )
+    file_scope: Literal["none", "owner_file_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
+    poke_scope: Literal["none", "owner_poke_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
+    poke_policy_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
+    voice_scope: Literal["none", "owner_voice_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
+    voice_policy_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
+    account_actions_scope: Literal["none", "qq_social_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
+    account_actions_authorization_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
+    bili_video_scope: Literal["none", "bounded_video_media_v1"] = Field(
+        default="none", exclude_if=lambda value: value == "none",
+    )
+    bili_video_policy_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
+    )
     image_scope: Literal["none", "owner_image_v1"] = "none"
     image_approval_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     history_scope: Literal["none", "approved_window", "owner_private"] = "none"
@@ -240,6 +272,27 @@ class LiveTextWindowApproval(BaseModel):
             self.rich_input_scope != "references_v1" or not self.capture_public_key
         ):
             raise ValueError("authenticated owner-card link scope required")
+        if self.file_scope != "none" and (
+            not companion or self.rich_input_scope != "references_v1" or not self.capture_public_key
+        ):
+            raise ValueError("authenticated owner-private file scope required")
+        if (self.poke_scope == "none" and self.poke_policy_sha256 is not None) or (
+            self.poke_scope == "owner_poke_v1"
+            and (not companion or not self.capture_public_key or not self.poke_policy_sha256)
+        ):
+            raise ValueError("authenticated owner-private poke policy required")
+        for scope, expected, fingerprint in (
+            (self.voice_scope, "owner_voice_v1", self.voice_policy_sha256),
+            (self.account_actions_scope, "qq_social_v1", self.account_actions_authorization_sha256),
+            (self.bili_video_scope, "bounded_video_media_v1", self.bili_video_policy_sha256),
+        ):
+            if (scope == "none" and fingerprint is not None) or (
+                scope == expected
+                and (not companion or not self.capture_public_key or not fingerprint)
+            ):
+                raise ValueError("explicit authenticated private capability scope required")
+        if self.bili_video_scope != "none" and self.link_scope != "owner_links_v1":
+            raise ValueError("video media requires the authenticated owner link scope")
         if self.segmented_reply is not None and self.max_send_attempts is None:
             raise ValueError("segmented replies require an explicit bounded send limit")
         if (self.image_scope == "none" and self.image_approval_sha256 is not None) or (
@@ -354,6 +407,11 @@ class Settings(BaseModel):
     content_enabled: bool = False
     web_reading_enabled: bool = False
     content: ContentConfig = Field(default_factory=ContentConfig)
+    private_files: PrivateFilesConfig = Field(default_factory=PrivateFilesConfig)
+    poke_policy: PokePolicy = Field(default_factory=PokePolicy)
+    voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    social_autonomy: SocialAutonomyConfig = Field(default_factory=SocialAutonomyConfig)
+    bili_video: BiliVideoConfig = Field(default_factory=BiliVideoConfig)
     observation_enabled: bool = False
     observation_adapters: dict[str, ObservationAdapterConfig] = Field(default_factory=dict)
     voice_enabled: bool = False
@@ -490,9 +548,13 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "social_autonomy":
+            return self.social_autonomy.max_output_tokens
         if scenario == "meme_caption":
             return self.meme_caption_max_output_tokens
-        if scenario == "content_video" and self.paid_model and self.paid_model.video_input:
+        if scenario in {"content_video", "content_video_preview"} and (
+            self.paid_model and self.paid_model.video_input
+        ):
             return self.paid_model.video_input.max_output_tokens
         if scenario == "content_vision":
             return min(self.max_output_tokens, 300)
@@ -501,7 +563,11 @@ class Settings(BaseModel):
         return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
 
     def model_timeout(self, scenario):
-        if scenario == "content_video" and self.paid_model and self.paid_model.video_input:
+        if scenario == "social_autonomy":
+            return self.social_autonomy.timeout_seconds
+        if scenario in {"content_video", "content_video_preview"} and (
+            self.paid_model and self.paid_model.video_input
+        ):
             return self.paid_model.video_input.timeout_seconds
         return self.timeout_seconds
 
@@ -524,6 +590,16 @@ class Settings(BaseModel):
                     data[field] = MediaConfig.model_validate_json(value)
                 elif field == "content":
                     data[field] = ContentConfig.model_validate_json(value)
+                elif field == "private_files":
+                    data[field] = PrivateFilesConfig.model_validate_json(value)
+                elif field == "poke_policy":
+                    data[field] = PokePolicy.model_validate_json(value)
+                elif field == "voice":
+                    data[field] = VoiceConfig.model_validate_json(value)
+                elif field == "social_autonomy":
+                    data[field] = SocialAutonomyConfig.model_validate_json(value)
+                elif field == "bili_video":
+                    data[field] = BiliVideoConfig.model_validate_json(value)
                 elif field == "console":
                     data[field] = ConsoleConfig.model_validate_json(value)
                 elif field == "cloud_budget":

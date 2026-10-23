@@ -57,7 +57,7 @@ class VideoPage(HTMLParser):
 
 def api_data(raw):
     payload = json.loads(raw)
-    if payload.get("code") in {-101, -111, -352, -412, -403, -10403}:
+    if payload.get("code") in {-101, -111, -352, -401, -412, -403, -10403}:
         raise ReadFailure("UPSTREAM_ACCESS_LIMIT")
     if payload.get("code") != 0 or not isinstance(payload.get("data"), dict):
         raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
@@ -109,7 +109,7 @@ class BilibiliReader:
         self.public, self.renderer, self.clock = public, renderer, clock
         self.subtitles = subtitles
         self.discussion = discussion
-        self.parser_version = "bilibili/3"
+        self.parser_version = "bilibili/4"
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
@@ -202,6 +202,19 @@ class BilibiliReader:
             evidence["resolution"] = resolution
         subtitle = ""
         cid = data.get("cid")
+        pages = data.get("pages")
+        if (isinstance(pages, list) and pages and isinstance(pages[0], dict)
+            and pages[0].get("page") == 1 and pages[0].get("cid") == cid
+            and type(cid) is int and cid > 0
+            and isinstance(data.get("bvid"), str)
+            and re.fullmatch(r"BV[0-9A-Za-z]{10}", data["bvid"])
+            and type(pages[0].get("duration")) is int
+            and math.isfinite(pages[0]["duration"]) and 0 < pages[0]["duration"] <= 36000):
+            evidence["video"] = {
+                "bvid": data["bvid"], "cid": cid, "part": 1,
+                "duration_seconds": pages[0]["duration"],
+            }
+            evidence["duration_source"] = "view_first_part"
         if self.subtitles and isinstance(cid, int) and cid > 0:
             try:
                 aid = data.get("aid")
@@ -265,12 +278,23 @@ class BilibiliReader:
                     if type(duration) not in {int, float} or not math.isfinite(duration):
                         duration = None
                     subtitle, spans, truncated = subtitle_excerpt(raw, duration=duration)
+                    cues, cue_chars = [], 0
+                    for row in json.loads(raw)["body"][:len(spans)]:
+                        text = row["content"].strip()[:500]
+                        if cue_chars + len(text) > 6000:
+                            break
+                        cues.append({
+                            "start_seconds": row["from"], "end_seconds": row["to"], "text": text,
+                            "partial": len(text) < len(row["content"].strip()),
+                        })
+                        cue_chars += len(text)
                     evidence.update(
                         level="L2",
                         subtitle_status="available",
                         spans=spans,
                         language=str(track.get("lan", ""))[:32],
                         truncated=truncated,
+                        subtitles=cues,
                     )
             except ReadFailure as error:
                 if str(error) in {

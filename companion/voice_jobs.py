@@ -1,0 +1,920 @@
+"""Private, bounded voice custody. Native source and Outbox authority stay in Core."""
+
+import hashlib
+import hmac
+import json
+import secrets
+from contextlib import nullcontext
+from datetime import UTC, datetime
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from pydantic import Field
+
+from companion import live_text, paid_budget, private_life, qq_source, reply_revision
+from companion.contracts import CoreError
+from companion.privacy import epoch
+from companion.qq_rich import input_digest
+from companion.store import after, encode, uid, utcnow
+from companion.voice_protocol import (
+    Digest,
+    VoiceAudioResult,
+    VoiceClaimResponse,
+    VoiceControlResponse,
+    VoiceDTO,
+    VoiceLease,
+    VoiceResultReceipt,
+    VoiceTranscriptResult,
+    canonical_bytes,
+    digest,
+    sign_voice_lease,
+)
+from companion_voice_node.providers import LocalVoiceError, WAVLimits, validate_wav
+
+UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v1\x00"
+ACTIVE = {"QUEUED", "LEASED", "RUNNING"}
+COMPLETED = {"READY", "TRANSCRIBED"}
+REPLY_RECEIPT = "voice_reply:"
+INPUT_RECEIPT = "voice_input:"
+
+
+class VoiceASRProof(VoiceDTO):
+    """Capture-key attestation binding one native record segment to uploaded WAV bytes."""
+
+    plan_sha256: Digest
+    event_id: str = Field(min_length=1, max_length=128)
+    source_event_id: str = Field(min_length=1, max_length=256)
+    source_input_sha256: Digest
+    source_segment_index: int = Field(ge=0, le=63, strict=True)
+    audio_sha256: Digest
+    audio_bytes: int = Field(ge=44, le=8_000_000, strict=True)
+    source_partial: bool = Field(strict=True)
+    signature: str = Field(pattern=r"^[a-f0-9]{128}$", repr=False)
+
+
+def sign_asr_proof(private_key, **material):
+    """For the authenticated capture adapter; canonical encoding is protocol v1 JSON."""
+    unsigned = VoiceASRProof(**material, signature="0" * 128).model_dump(
+        mode="json", exclude={"signature"}
+    )
+    return VoiceASRProof(
+        **unsigned, signature=private_key.sign(UPLOAD_DOMAIN + canonical_bytes(unsigned)).hex()
+    )
+
+
+def _transaction_required(store):
+    if not store.db.in_transaction:
+        raise RuntimeError("VOICE_TRANSACTION_REQUIRED")
+
+
+def _fence(store, row, reason, now, *, expired=False):
+    # Input release is the dispatch boundary. An absent result cannot prove no GPU work.
+    state = row["state"]
+    if state in ACTIVE | COMPLETED:
+        state = (
+            "UNKNOWN"
+            if row["started_at"] and state in ACTIVE
+            else "EXPIRED"
+            if expired
+            else "CANCELLED"
+        )
+    store.execute(
+        "UPDATE voice_jobs SET state=?,input_blob=NULL,result_blob=NULL,"
+        "updated_at=?,last_error_code=? WHERE job_id=?",
+        (state, now, reason, row["job_id"]),
+    )
+    if state != row["state"] or row["input_blob"] is not None or row["result_blob"] is not None:
+        store.audit(
+            "voice.fenced",
+            row["job_id"],
+            row["event_id"],
+            now,
+            state=state,
+            reason=reason,
+            node_id=row["node_id"],
+        )
+    if not row["started_at"]:
+        store.execute(
+            "UPDATE voice_node_state SET active_job_id=NULL WHERE active_job_id=?",
+            (row["job_id"],),
+        )
+
+
+def erase_voice_jobs(store, event_ids):
+    _transaction_required(store)
+    for event_id in set(event_ids):
+        for row in store.rows(
+            "SELECT DISTINCT v.* FROM voice_jobs v LEFT JOIN jobs j ON j.event_id=v.event_id "
+            "LEFT JOIN job_sources s ON s.job_id=j.job_id WHERE v.event_id=? OR s.event_id=?",
+            (event_id, event_id),
+        ):
+            _fence(store, row, "VOICE_SOURCE_ERASED", utcnow())
+            _invalidate_flow(store, row, "VOICE_SOURCE_ERASED")
+        store.execute(
+            "UPDATE runtime_meta SET value=? WHERE key=?",
+            (
+                encode({"state": "FENCED", "reason": "VOICE_SOURCE_ERASED"}),
+                INPUT_RECEIPT + event_id,
+            ),
+        )
+        _invalidate_receipts(store,
+            "key IN "
+            "(SELECT ? || message_id FROM outbox WHERE origin_event_id=?)",
+            (REPLY_RECEIPT, event_id), "VOICE_SOURCE_ERASED",
+        )
+
+
+def _invalidate_flow(store, row, reason):
+    _invalidate_receipts(store, "key IN (?,?)",
+                         (REPLY_RECEIPT + str(row["message_id"]), INPUT_RECEIPT + row["event_id"]),
+                         reason)
+
+
+def _invalidate_receipts(store, where, parameters, reason):
+    # Keep only validated, content-free delivery authority for later owner resolution.
+    # Input transcripts, audio bytes, and arbitrary/corrupt receipt fields are erased.
+    from companion.voice_flow import VoiceDeliveryBinding
+
+    for row in store.rows("SELECT key,value FROM runtime_meta WHERE " + where, parameters):
+        value = {"state": "FENCED", "reason": reason}
+        if row["key"].startswith(REPLY_RECEIPT):
+            try:
+                previous = json.loads(row["value"])
+                binding = VoiceDeliveryBinding.model_validate(previous.get("binding"))
+                if (previous.get("state") in {"AUDIO", "FENCED"}
+                    and previous.get("binding_sha256") == digest(binding)
+                    and previous.get("job_id") == binding.job_id
+                    and row["key"] == REPLY_RECEIPT + binding.message_id):
+                    value.update(job_id=binding.job_id, binding=binding.model_dump(mode="json"),
+                                 binding_sha256=previous["binding_sha256"])
+            except (ValueError, TypeError, AttributeError):
+                pass
+        store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), row["key"]))
+
+
+def restore_voice_jobs(store):
+    _transaction_required(store)
+    for row in store.rows("SELECT * FROM voice_jobs"):
+        _fence(store, row, "VOICE_RESTORE_FENCED", utcnow())
+    _invalidate_receipts(store,
+        "key LIKE 'voice_reply:%' "
+        "OR key LIKE 'voice_input:%'",
+        (), "VOICE_RESTORE_FENCED",
+    )
+
+
+def fence_conversation(store, conversation_id, reason="REPLY_SUPERSEDED"):
+    _transaction_required(store)
+    for row in store.rows("SELECT * FROM voice_jobs WHERE conversation_id=?", (conversation_id,)):
+        _fence(store, row, reason, utcnow())
+        _invalidate_flow(store, row, reason)
+    _invalidate_receipts(store,
+        "key IN "
+        "(SELECT ? || event_id FROM events WHERE conversation_id=? UNION "
+        "SELECT ? || message_id FROM outbox WHERE conversation_id=?)",
+        (
+            INPUT_RECEIPT,
+            conversation_id,
+            REPLY_RECEIPT,
+            conversation_id,
+        ), reason,
+    )
+
+
+class VoiceJobs:
+    def __init__(self, store, settings, clock=utcnow):
+        self.store, self.settings, self.clock = store, settings, clock
+
+    def _transaction(self):
+        return nullcontext() if self.store.db.in_transaction else self.store.transaction()
+
+    def _node(self, node_id=None, operation=None):
+        config = self.settings.voice
+        if not config.enabled or not private_life.enabled(self.settings):
+            raise CoreError("VOICE_DISABLED", 403)
+        approval = self.settings.live_text_window
+        if (
+            approval.voice_scope != "owner_voice_v1"
+            or approval.voice_policy_sha256 != config.authority_sha256()
+        ):
+            raise CoreError("VOICE_SCOPE_REQUIRED", 403)
+        if node_id is None:
+            node_id = next(
+                (
+                    key
+                    for key, node in sorted(config.nodes.items())
+                    if node.enabled and (operation is None or operation in node.capabilities)
+                ),
+                None,
+            )
+        node = config.nodes.get(node_id)
+        if not node or not node.enabled or (operation and operation not in node.capabilities):
+            raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
+        return node_id, node
+
+    def _tts_source(self, message_id, text=None, *, delivery_token=None):
+        row = private_life.check_delivery(self.store, self.settings, self.clock, message_id)
+        reply_revision.check_delivery(self.store, message_id)
+        content = json.loads(row["content_json"])
+        valid_stage = row["state"] == "PENDING" and row["attempt_count"] == 0
+        if delivery_token is not None:
+            valid_stage = (
+                row["state"] in {"LEASED", "SENDING"}
+                and row["lease_token"] == delivery_token
+                and row["lease_until"] is not None
+                and datetime.fromisoformat(row["lease_until"])
+                > datetime.fromisoformat(self.clock())
+            )
+        if (
+            not valid_stage
+            or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
+            or not isinstance(content.get("text"), str)
+            or (text is not None and content["text"] != text)
+        ):
+            raise CoreError("VOICE_OUTBOX_SOURCE_REQUIRED", 403)
+        event = self.store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
+        if not event or not reply_revision.source_active(self.store, event["event_id"]):
+            raise CoreError("VOICE_SOURCE_CHANGED", 403)
+        if event["source"] == "qq.onebot":
+            qq_source.source(
+                self.store,
+                self.settings,
+                self.settings.live_text_window,
+                event["event_id"],
+                allow_commands=True,
+            )
+        return event, row
+
+    def _asr_source(self, event_id, segment_index):
+        approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
+        if approval.rich_input_scope != "references_v1":
+            raise CoreError("VOICE_ASR_SCOPE_REQUIRED", 403)
+        event, body, job = qq_source.source(self.store, self.settings, approval, event_id)
+        reply_revision.require_current(self.store, event_id)
+        reply_revision.check_job(self.store, job)
+        segment = next(
+            (
+                item
+                for item in (body.get("rich") or {}).get("segments", [])
+                if item.get("index") == segment_index
+            ),
+            None,
+        )
+        if segment != {
+            "index": segment_index,
+            "type": "record",
+            "actor": "UNVERIFIED",
+            "coverage": "UNSUPPORTED",
+        }:
+            raise CoreError("VOICE_RECORD_SOURCE_REQUIRED", 403)
+        return event, body
+
+    def _base(self, event, node_id, operation, data, mime, **extra):
+        now, config = self.clock(), self.settings.voice
+        revision = self.store.one(
+            "SELECT reply_revision,scope,owner_actor_id FROM conversations WHERE conversation_id=?",
+            (event["conversation_id"],),
+        )
+        if (
+            not revision
+            or revision["scope"] != "private"
+            or revision["owner_actor_id"] != "owner"
+            or event["privacy_scope"] != "private"
+        ):
+            raise CoreError("VOICE_PRIVATE_SOURCE_REQUIRED", 403)
+        deadline = min(
+            after(now, config.job_ttl_seconds),
+            self.settings.live_text_window.ends_at.astimezone(UTC).isoformat(
+                timespec="microseconds"
+            ),
+        )
+        return dict(
+            job_id=uid("voice"),
+            operation=operation,
+            event_id=event["event_id"],
+            native_source_event_id=event["source_event_id"],
+            conversation_id=event["conversation_id"],
+            source_sha256=private_life.event_digest(event),
+            identity_sha256=paid_budget.sha([self.settings.owner_qq_id, self.settings.bot_qq_id]),
+            window_sha256=self.settings.live_text_window.plan_sha256,
+            captured_privacy_epoch=epoch(self.store),
+            captured_reply_revision=revision["reply_revision"],
+            node_id=node_id,
+            manifest_sha256=config.nodes[node_id].manifest_sha256,
+            config_sha256=config.node_fingerprint(node_id),
+            config_json=encode(config.node_snapshot(node_id)),
+            state="QUEUED",
+            generation=1,
+            input_mime=mime,
+            input_sha256=hashlib.sha256(data).hexdigest(),
+            input_bytes=len(data),
+            input_blob=data,
+            source_partial=0,
+            created_at=now,
+            updated_at=now,
+            deadline_at=deadline,
+            **extra,
+        )
+
+    def _capacity(self, additional_bytes, *, new_job=False):
+        used = self.store.one(
+            "SELECT COALESCE(SUM(COALESCE(length(input_blob),0)+"
+            "COALESCE(length(result_blob),0)),0) AS bytes,"
+            "SUM(state IN ('QUEUED','LEASED','RUNNING')) AS pending FROM voice_jobs"
+        )
+        if used["bytes"] + additional_bytes > self.settings.voice.max_private_blob_bytes or (
+            new_job and (used["pending"] or 0) >= self.settings.voice.max_pending_jobs
+        ):
+            raise CoreError("VOICE_CAPACITY_EXCEEDED", 429)
+
+    def create_tts(self, message_id, text, *, node_id=None):
+        _transaction_required(self.store)
+        existing = self.store.one("SELECT * FROM voice_jobs WHERE message_id=?", (message_id,))
+        if existing:
+            if (
+                not isinstance(text, str)
+                or hashlib.sha256(text.encode()).hexdigest() != (existing["input_sha256"])
+                or (node_id is not None and node_id != existing["node_id"])
+            ):
+                raise CoreError("VOICE_IDEMPOTENCY_CONFLICT", 409)
+            return self.status(existing["job_id"])
+        node_id, node = self._node(node_id, "tts")
+        if not isinstance(text, str) or not text.strip() or len(text) > node.max_tts_chars:
+            raise CoreError("VOICE_TTS_TEXT_INVALID", 400)
+        event, outbox = self._tts_source(message_id, text)
+        data = text.encode("utf-8")
+        self._capacity(len(data), new_job=True)
+        row = self._base(
+            event,
+            node_id,
+            "tts",
+            data,
+            "text/plain",
+            message_id=message_id,
+            outbox_content_sha256=outbox["content_sha256"],
+            outbox_delivery_key=outbox["delivery_key"],
+        )
+        self.store.insert("voice_jobs", **row)
+        self.store.audit(
+            "voice.created",
+            row["job_id"],
+            event["event_id"],
+            row["created_at"],
+            operation="tts",
+            node_id=node_id,
+            input_sha256=row["input_sha256"],
+        )
+        return self._public(row)
+
+    def create_asr(
+        self,
+        owner_event_id,
+        wavbytes,
+        *,
+        source_segment_index,
+        upload_proof,
+        source_partial=False,
+        node_id=None,
+    ):
+        _transaction_required(self.store)
+        if (
+            type(source_segment_index) is not int
+            or not 0 <= source_segment_index <= 63
+            or (type(source_partial) is not bool)
+        ):
+            raise CoreError("VOICE_ASR_SOURCE_INVALID", 400)
+        node_id, node = self._node(node_id, "asr")
+        event, body = self._asr_source(owner_event_id, source_segment_index)
+        try:
+            audio = validate_wav(
+                wavbytes,
+                WAVLimits(
+                    max_bytes=node.max_asr_input_bytes,
+                    max_duration_seconds=node.max_asr_seconds,
+                ),
+            )
+            proof = VoiceASRProof.model_validate(upload_proof)
+            expected = dict(
+                plan_sha256=self.settings.live_text_window.plan_sha256,
+                event_id=owner_event_id,
+                source_event_id=event["source_event_id"],
+                source_input_sha256=input_digest(body),
+                source_segment_index=source_segment_index,
+                audio_sha256=audio.sha256,
+                audio_bytes=len(wavbytes),
+                source_partial=source_partial,
+            )
+            if proof.model_dump(mode="json", exclude={"signature"}) != expected:
+                raise ValueError()
+            Ed25519PublicKey.from_public_bytes(
+                bytes.fromhex(self.settings.live_text_window.capture_public_key)
+            ).verify(bytes.fromhex(proof.signature), UPLOAD_DOMAIN + canonical_bytes(expected))
+        except (ValueError, TypeError, InvalidSignature, LocalVoiceError):
+            raise CoreError("VOICE_ASR_UPLOAD_PROOF_REQUIRED", 403) from None
+        existing = self.store.one(
+            "SELECT * FROM voice_jobs WHERE event_id=? AND source_segment_index=?",
+            (owner_event_id, source_segment_index),
+        )
+        if existing:
+            if (existing["input_sha256"], existing["source_proof_sha256"], existing["node_id"]) != (
+                audio.sha256,
+                digest(proof),
+                node_id,
+            ):
+                raise CoreError("VOICE_IDEMPOTENCY_CONFLICT", 409)
+            return self.status(existing["job_id"])
+        self._capacity(len(wavbytes), new_job=True)
+        row = self._base(
+            event,
+            node_id,
+            "asr",
+            wavbytes,
+            "audio/wav",
+            source_segment_index=source_segment_index,
+            source_input_sha256=input_digest(body),
+            source_proof_sha256=digest(proof),
+            input_duration_seconds=audio.duration_seconds,
+        )
+        row["source_partial"] = int(source_partial)
+        self.store.insert("voice_jobs", **row)
+        self.store.audit(
+            "voice.created",
+            row["job_id"],
+            event["event_id"],
+            row["created_at"],
+            operation="asr",
+            node_id=node_id,
+            input_sha256=row["input_sha256"],
+        )
+        return self._public(row)
+
+    def _delivery_binding(self, row):
+        """A selected result may survive Outbox leasing; this never grants execution."""
+        receipt = self.store.one(
+            "SELECT value FROM runtime_meta WHERE key=?", (REPLY_RECEIPT + str(row["message_id"]),)
+        )
+        try:
+            value = json.loads(receipt["value"]) if receipt else {}
+            binding = value["binding"]
+            expected = {
+                "job_id": row["job_id"],
+                "generation": row["generation"],
+                "message_id": row["message_id"],
+                "result_sha256": row["result_sha256"],
+                "content_sha256": row["outbox_content_sha256"],
+                "delivery_key": row["outbox_delivery_key"],
+                "source_sha256": row["source_sha256"],
+                "window_sha256": row["window_sha256"],
+                "identity_sha256": row["identity_sha256"],
+                "privacy_epoch": row["captured_privacy_epoch"],
+                "reply_revision": row["captured_reply_revision"],
+                "node_config_sha256": row["config_sha256"],
+                "voice_policy_sha256": self.settings.voice.authority_sha256(),
+                "event_id": row["event_id"],
+                "node_id": row["node_id"],
+                "manifest_sha256": row["manifest_sha256"],
+            }
+            if (
+                value["state"] != "AUDIO"
+                or value["job_id"] != row["job_id"]
+                or value["binding_sha256"] != digest(binding)
+                or any(binding.get(key) != item for key, item in expected.items())
+                or datetime.fromisoformat(binding["expires_at"])
+                != datetime.fromisoformat(row["result_expires_at"])
+            ):
+                return None
+            return binding
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def _authority(self, row, *, delivery_token=None):
+        node_id, _ = self._node(row["node_id"], row["operation"])
+        approval = self.settings.live_text_window
+        if (
+            row["config_sha256"] != self.settings.voice.node_fingerprint(node_id)
+            or row["window_sha256"] != approval.plan_sha256
+            or row["captured_privacy_epoch"] != epoch(self.store)
+            or row["identity_sha256"]
+            != paid_budget.sha([self.settings.owner_qq_id, self.settings.bot_qq_id])
+        ):
+            raise CoreError("VOICE_AUTHORITY_CHANGED", 403)
+        if row["operation"] == "tts":
+            if delivery_token is None and row["state"] == "READY" and self._delivery_binding(row):
+                sending = self.store.one(
+                    "SELECT lease_token FROM outbox WHERE message_id=? "
+                    "AND state IN ('LEASED','SENDING')",
+                    (row["message_id"],),
+                )
+                if sending:
+                    delivery_token = sending["lease_token"]
+            event, outbox = self._tts_source(row["message_id"], delivery_token=delivery_token)
+            if (outbox["content_sha256"], outbox["delivery_key"]) != (
+                row["outbox_content_sha256"],
+                row["outbox_delivery_key"],
+            ):
+                raise CoreError("VOICE_OUTBOX_SOURCE_CHANGED", 403)
+        else:
+            event, body = self._asr_source(row["event_id"], row["source_segment_index"])
+            if input_digest(body) != row["source_input_sha256"]:
+                raise CoreError("VOICE_SOURCE_CHANGED", 403)
+        current = self.store.one(
+            "SELECT reply_revision FROM conversations WHERE conversation_id=?",
+            (row["conversation_id"],),
+        )
+        if not current or current["reply_revision"] != row["captured_reply_revision"]:
+            raise CoreError("REPLY_SUPERSEDED", 409)
+        if private_life.event_digest(event) != row["source_sha256"]:
+            raise CoreError("VOICE_SOURCE_CHANGED", 403)
+
+    def _reconcile(self, row):
+        if row["state"] not in ACTIVE | COMPLETED:
+            return row
+        now = self.clock()
+        expired = any(
+            value and datetime.fromisoformat(value) <= datetime.fromisoformat(now)
+            for value in (
+                row["deadline_at"],
+                row["lease_until"] if row["state"] in ACTIVE else None,
+                row["result_expires_at"],
+            )
+        )
+        reason = "VOICE_EXPIRED" if expired else None
+        if not reason:
+            try:
+                self._authority(row)
+            except CoreError as error:
+                reason = error.code
+        if reason:
+            _fence(self.store, row, reason, now, expired=expired)
+            return self._get(row["job_id"])
+        return row
+
+    def _get(self, job_id):
+        row = self.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (job_id,))
+        if row is None:
+            raise CoreError("VOICE_JOB_NOT_FOUND", 404)
+        return row
+
+    @staticmethod
+    def _public(row):
+        return {
+            key: row.get(key)
+            for key in (
+                "job_id",
+                "operation",
+                "state",
+                "generation",
+                "node_id",
+                "event_id",
+                "message_id",
+                "source_segment_index",
+                "deadline_at",
+                "result_expires_at",
+                "last_error_code",
+            )
+        } | {"execution": "local", "billed_micro_usd": 0}
+
+    def status(self, job_id):
+        with self._transaction():
+            return self._public(self._reconcile(self._get(job_id)))
+
+    def result(self, job_id):
+        with self._transaction():
+            row = self._reconcile(self._get(job_id))
+            if row["state"] not in COMPLETED or row["result_blob"] is None:
+                return None
+            if row["operation"] == "tts" and not self.store.one(
+                "SELECT 1 FROM outbox WHERE message_id=? AND state='PENDING' AND attempt_count=0",
+                (row["message_id"],),
+            ):
+                return None
+            model = VoiceAudioResult if row["operation"] == "tts" else VoiceTranscriptResult
+            return model.model_validate_json(row["result_blob"])
+
+    def delivery_audio(self, job_id, message_id, lease_token):
+        """Read only the selected, completed audio bound to this live Outbox lease."""
+        _transaction_required(self.store)
+        row = self._reconcile(self._get(job_id))
+        if (
+            row["state"] != "READY"
+            or row["message_id"] != message_id
+            or row["result_blob"] is None
+            or not self._delivery_binding(row)
+        ):
+            raise CoreError("VOICE_DELIVERY_FENCED", 409)
+        self._authority(row, delivery_token=lease_token)
+        return VoiceAudioResult.model_validate_json(row["result_blob"])
+
+    def withdraw(self, job_id, reason="VOICE_FLOW_WITHDRAWN"):
+        _transaction_required(self.store)
+        row = self._get(job_id)
+        _fence(self.store, row, reason, self.clock())
+        return self._public(self._get(job_id))
+
+    def untrusted_transcription(self, job_id):
+        with self._transaction():
+            row = self._reconcile(self._get(job_id))
+            if row["state"] != "TRANSCRIBED" or row["result_blob"] is None:
+                return None
+            payload = VoiceTranscriptResult.model_validate_json(row["result_blob"])
+            return {
+                "kind": "untrusted_transcription",
+                "text": payload.text,
+                "source_event_id": row["event_id"],
+                "segment_index": row["source_segment_index"],
+                "audio_sha256": row["input_sha256"],
+                "partial": payload.partial,
+                "language": payload.language,
+                "result_sha256": row["result_sha256"],
+            }
+
+    def _ref(self, node_id, ref):
+        row = self._get(ref.job_id)
+        if (
+            row["node_id"] != node_id
+            or row["generation"] != ref.generation
+            or (row["input_sha256"], row["manifest_sha256"])
+            != (ref.input_sha256, ref.manifest_sha256)
+            or not hmac.compare_digest(
+                row["lease_token_sha256"] or "",
+                hashlib.sha256(ref.lease_token.encode()).hexdigest(),
+            )
+        ):
+            raise CoreError("VOICE_LEASE_MISMATCH", 409)
+        return row
+
+    def claim(self, node_id, request):
+        error, response = None, None
+        with self._transaction():
+            try:
+                response = self._claim(node_id, request)
+            except CoreError as caught:
+                # A revoked configuration must clear existing custody even if
+                # this claim cannot receive a new lease under the current window.
+                error = caught
+        if error:
+            raise error
+        return response
+
+    def _claim(self, node_id, request):
+        with self._transaction():
+            if node_id != request.node_id:
+                raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
+            for row in self.store.rows("SELECT * FROM voice_jobs WHERE node_id=?", (node_id,)):
+                self._reconcile(row)
+            _, node = self._node(node_id)
+            previous = self.store.one(
+                "SELECT * FROM voice_claims WHERE node_id=? AND request_id=?",
+                (node_id, request.request_id),
+            )
+            if previous:
+                if previous["request_sha256"] != digest(request):
+                    raise CoreError("VOICE_IDEMPOTENCY_CONFLICT", 409)
+                return VoiceClaimResponse.model_validate_json(previous["response_json"])
+            if request.manifest_sha256 != node.manifest_sha256:
+                raise CoreError("VOICE_MANIFEST_CHANGED", 409)
+            now = self.clock()
+            self.store.execute(
+                "INSERT INTO voice_node_state(node_id,resource_state,last_seen_at) VALUES (?,?,?) "
+                "ON CONFLICT(node_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
+                (node_id, request.resource_state, now),
+            )
+            state = self.store.one("SELECT * FROM voice_node_state WHERE node_id=?", (node_id,))
+            response = VoiceClaimResponse()
+            if not state["active_job_id"]:
+                self.store.execute(
+                    "UPDATE voice_node_state SET resource_state=? WHERE node_id=?",
+                    (request.resource_state, node_id),
+                )
+                if request.resource_state == "READY":
+                    row = self.store.one(
+                        "SELECT * FROM voice_jobs WHERE node_id=? AND state='QUEUED' "
+                        "ORDER BY created_at,job_id LIMIT 1",
+                        (node_id,),
+                    )
+                    if row:
+                        lease = VoiceLease(
+                            job_id=row["job_id"],
+                            generation=row["generation"],
+                            node_id=node_id,
+                            operation=row["operation"],
+                            lease_token=secrets.token_urlsafe(32),
+                            input_sha256=row["input_sha256"],
+                            input_bytes=row["input_bytes"],
+                            input_mime=row["input_mime"],
+                            source_partial=bool(row["source_partial"]),
+                            manifest_sha256=row["manifest_sha256"],
+                            issued_at=now,
+                            server_time=now,
+                            lease_expires_at=min(
+                                after(now, self.settings.voice.lease_ttl_seconds),
+                                row["deadline_at"],
+                            ),
+                            job_deadline_at=row["deadline_at"],
+                        )
+                        signed = sign_voice_lease(lease, self.settings.voice.private_key())
+                        self.store.execute(
+                            "UPDATE voice_jobs SET state='LEASED',lease_token_sha256=?,"
+                            "lease_json=?,lease_issued_at=?,lease_until=?,updated_at=? "
+                            "WHERE job_id=?",
+                            (
+                                hashlib.sha256(lease.lease_token.encode()).hexdigest(),
+                                canonical_bytes(signed).decode(),
+                                now,
+                                lease.lease_expires_at.isoformat(timespec="microseconds"),
+                                now,
+                                row["job_id"],
+                            ),
+                        )
+                        self.store.execute(
+                            "UPDATE voice_node_state SET active_job_id=? WHERE node_id=?",
+                            (row["job_id"], node_id),
+                        )
+                        self.store.audit(
+                            "voice.leased",
+                            row["job_id"],
+                            row["event_id"],
+                            now,
+                            generation=row["generation"],
+                            node_id=node_id,
+                        )
+                        response = VoiceClaimResponse(lease=signed)
+            self.store.insert(
+                "voice_claims",
+                node_id=node_id,
+                request_id=request.request_id,
+                request_sha256=digest(request),
+                response_json=canonical_bytes(response).decode(),
+                job_id=response.lease.job_id if response.lease else None,
+                created_at=now,
+            )
+            return response
+
+    def control(self, node_id, request):
+        with self._transaction():
+            row = self._reconcile(self._ref(node_id, request.ref))
+            now = self.clock()
+            self.store.execute(
+                "UPDATE voice_node_state SET resource_state=?,last_seen_at=?,last_error_code=? "
+                "WHERE node_id=? AND active_job_id=?",
+                (request.resource_state, now, request.error_code, node_id, row["job_id"]),
+            )
+            if row["state"] in ACTIVE and request.phase in {
+                "FAILED",
+                "CANCELLED",
+                "UNKNOWN",
+                "RESULT_LOST",
+            }:
+                _fence(self.store, row, "VOICE_NODE_" + request.phase, now)
+                row = self._get(row["job_id"])
+            if row["state"] not in ACTIVE:
+                if request.resource_state == "READY" and request.phase not in {
+                    "CLAIMED",
+                    "RUNNING",
+                }:
+                    self.store.execute(
+                        "UPDATE voice_node_state SET active_job_id=NULL WHERE active_job_id=?",
+                        (row["job_id"],),
+                    )
+                if row["state"] in COMPLETED:
+                    if request.result_sha256 not in {None, row["result_sha256"]}:
+                        raise CoreError("VOICE_RESULT_CONFLICT", 409)
+                    return VoiceControlResponse(
+                        action="COMMITTED", committed_result_sha256=row["result_sha256"]
+                    )
+                return VoiceControlResponse(
+                    action=(
+                        "EXPIRED"
+                        if row["last_error_code"] == "VOICE_EXPIRED"
+                        else "SUPERSEDED"
+                        if row["last_error_code"] == "REPLY_SUPERSEDED"
+                        else "CANCEL"
+                    )
+                )
+            if request.resource_state == "QUARANTINED":
+                _fence(self.store, row, "VOICE_GPU_QUARANTINED", now)
+                return VoiceControlResponse(action="CANCEL")
+            if request.phase in {"RUNNING", "RESULT_READY"} and not row["started_at"]:
+                raise CoreError("VOICE_INPUT_NOT_RELEASED", 409)
+            lease = VoiceLease.model_validate(
+                {
+                    key: value
+                    for key, value in json.loads(row["lease_json"]).items()
+                    if key != "signature"
+                }
+            )
+            lease = lease.model_copy(
+                update={
+                    "server_time": datetime.fromisoformat(now),
+                    "lease_expires_at": datetime.fromisoformat(
+                        min(after(now, self.settings.voice.lease_ttl_seconds), row["deadline_at"])
+                    ),
+                }
+            )
+            signed = sign_voice_lease(lease, self.settings.voice.private_key())
+            self.store.execute(
+                "UPDATE voice_jobs SET lease_json=?,lease_until=?,updated_at=? WHERE job_id=?",
+                (
+                    canonical_bytes(signed).decode(),
+                    lease.lease_expires_at.isoformat(timespec="microseconds"),
+                    now,
+                    row["job_id"],
+                ),
+            )
+            return VoiceControlResponse(action="CONTINUE", renewed_lease=signed)
+
+    def input(self, node_id, ref):
+        error, result = None, None
+        with self._transaction():
+            row = self._reconcile(self._ref(node_id, ref))
+            if row["state"] not in {"LEASED", "RUNNING"} or row["input_blob"] is None:
+                error = CoreError("VOICE_INPUT_FENCED", 409)
+            else:
+                now = self.clock()
+                self.store.execute(
+                    "UPDATE voice_jobs SET state='RUNNING',started_at=COALESCE(started_at,?),"
+                    "updated_at=? WHERE job_id=?",
+                    (now, now, row["job_id"]),
+                )
+                self.store.execute(
+                    "UPDATE voice_node_state SET resource_state='RUNNING' WHERE active_job_id=?",
+                    (row["job_id"],),
+                )
+                result = row["input_blob"], row["input_mime"]
+        if error:
+            raise error
+        return result
+
+    def submit(self, node_id, result):
+        error, receipt = None, None
+        with self._transaction():
+            row = self._reconcile(self._ref(node_id, result.ref))
+            if row["state"] not in {"RUNNING", *COMPLETED}:
+                error = CoreError("VOICE_RESULT_FENCED", 409)
+            elif row["result_sha256"] and row["result_sha256"] != result.result_sha256:
+                error = CoreError("VOICE_RESULT_CONFLICT", 409)
+            elif result.operation != row["operation"]:
+                error = CoreError("VOICE_RESULT_SCOPE_MISMATCH", 409)
+            else:
+                node = self.settings.voice.nodes[node_id]
+                payload = result.payload
+                invalid = (
+                    isinstance(payload, VoiceAudioResult)
+                    and (
+                        len(payload.audio_bytes()) > node.max_tts_output_bytes
+                        or payload.duration_seconds > node.max_tts_seconds
+                    )
+                ) or (
+                    isinstance(payload, VoiceTranscriptResult)
+                    and (
+                        len(payload.text) > node.max_asr_chars
+                        or len(payload.segments) > node.max_asr_segments
+                        or abs(payload.duration_seconds - row["input_duration_seconds"]) > 1e-9
+                        or payload.partial != bool(row["source_partial"])
+                    )
+                )
+                if invalid:
+                    error = CoreError("VOICE_RESULT_LIMIT_EXCEEDED", 400)
+                elif row["state"] == "RUNNING":
+                    data, now = canonical_bytes(payload), self.clock()
+                    self._capacity(max(0, len(data) - len(row["input_blob"] or b"")))
+                    self.store.execute(
+                        "UPDATE voice_jobs SET state=?,input_blob=NULL,result_blob=?,"
+                        "result_sha256=?,result_bytes=?,completed_at=?,result_expires_at=?,"
+                        "updated_at=? WHERE job_id=?",
+                        (
+                            "READY" if row["operation"] == "tts" else "TRANSCRIBED",
+                            data,
+                            result.result_sha256,
+                            len(data),
+                            now,
+                            min(
+                                row["deadline_at"],
+                                after(now, self.settings.voice.result_ttl_seconds),
+                            ),
+                            now,
+                            row["job_id"],
+                        ),
+                    )
+                    self.store.execute(
+                        "UPDATE voice_node_state SET active_job_id=NULL WHERE active_job_id=? "
+                        "AND resource_state='READY'",
+                        (row["job_id"],),
+                    )
+                    self.store.audit(
+                        "voice.committed",
+                        row["job_id"],
+                        row["event_id"],
+                        now,
+                        result_sha256=result.result_sha256,
+                        result_bytes=len(data),
+                    )
+                if error is None:
+                    receipt = VoiceResultReceipt(
+                        job_id=row["job_id"],
+                        generation=row["generation"],
+                        result_sha256=result.result_sha256,
+                    )
+        if error:
+            raise error
+        return receipt

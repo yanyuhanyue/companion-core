@@ -120,18 +120,36 @@ class ReadingService:
                 item = followup_item(self.store, self.settings, consumer["event_id"]) if (
                     consumer
                 ) else None
-                if not item or (item["owner_event_id"], item["read_request_id"]) != (
-                    source_id, row["request_id"],
-                ):
+                retained = bool(item and item["owner_event_id"] == source_id and (
+                    item["read_request_id"] == row["request_id"] or (
+                        self.store.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'")
+                        and self.store.one("SELECT 1 FROM bili_video_items WHERE item_id=? "
+                                           "AND request_id=? AND owner_event_id=? AND redacted=0",
+                                           (item["item_id"], row["request_id"], source_id))
+                    )
+                ))
+                if not retained:
                     reply_revision.require_current(self.store, source_id)
 
-    def lease(self, adapter_id, source_grant=None):
+    def lease(self, adapter_id, source_grant=None, *, capabilities=()):
         s = self.store
         with s.transaction():
             policy = self.exploration.adapter(adapter_id)
+
+            def request_limits(row):
+                video = getattr(self, "video", None)
+                exists = s.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'")
+                if not exists or not s.one("SELECT 1 FROM bili_video_items WHERE request_id=?",
+                                          (row["request_id"],)):
+                    return None
+                if video is None or "bounded_video_media_v1" not in capabilities:
+                    return False
+                return {**video.lease_limits(row["request_id"], source_grant), "max_items": 1}
+
             item = self.exploration.lease(
                 adapter_id, source_grant, reading=True,
                 source_check=lambda row: self._sources(row, self._context(row, policy.source)),
+                request_limits=request_limits,
             )
             if item is None:
                 return None
@@ -154,8 +172,10 @@ class ReadingService:
                 source_grant_json=encode(item.get("source_grant")), state="RUNNING",
                 created_at=self.clock(), updated_at=self.clock(),
             )
-            return {**item, "schema_version": 1, "lease_until": row["lease_until"],
-                    "context": context.model_dump(), "allowed_hosts": hosts}
+            result = {**item, "schema_version": 1, "lease_until": row["lease_until"],
+                      "context": context.model_dump(), "allowed_hosts": hosts}
+            video = getattr(self, "video", None)
+            return video.bind_lease(result) if video is not None else result
 
     def _attempt(self, adapter_id, request_id, token):
         attempt = self.store.one(
@@ -166,7 +186,7 @@ class ReadingService:
             raise CoreError("STALE_READER_LEASE", 409)
         return attempt
 
-    def _validate(self, attempt, validation):
+    def _validate(self, attempt, validation, *, current_request=None):
         s = self.store
         if attempt["state"] != "RUNNING" or attempt["lease_until"] <= self.clock():
             raise CoreError("STALE_READER_LEASE", 409)
@@ -177,6 +197,7 @@ class ReadingService:
             raise CoreError("PRIVACY_CHANGED", 409)
         self.exploration.validate_read(
             attempt["adapter_id"], attempt["request_id"], validation, reading=True,
+            current_request=current_request,
         )
         row = s.one("SELECT * FROM exploration_requests WHERE request_id=?",
                     (attempt["request_id"],))
@@ -247,6 +268,10 @@ class ReadingService:
     def complete(self, adapter_id, request_id, result):
         s, fingerprint, step = self.store, digest(result.model_dump(mode="json")), None
         with s.transaction():
+            if s.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'") and s.one(
+                "SELECT 1 FROM bili_video_items WHERE request_id=?", (request_id,),
+            ):
+                raise CoreError("READER_MEDIA_PROTOCOL_REQUIRED", 409)
             attempt = self._attempt(adapter_id, request_id, result.lease_token)
             if attempt["result_sha256"]:
                 if attempt["result_sha256"] != fingerprint:
@@ -315,6 +340,24 @@ class ReadingService:
                 (outcome["state"], fingerprint, encode(outcome["event_ids"]),
                  result.observed_requests, result.observed_bytes, self.clock(), request_id),
             )
+            video = getattr(self, "video", None)
+            if video is not None and self.settings.bili_video.enabled and (
+                outcome["state"] == "DONE"
+            ):
+                for content in s.rows("SELECT item_id FROM content_items WHERE read_request_id=? "
+                                      "AND kind='link' AND redacted=0", (request_id,)):
+                    for event_id in outcome["event_ids"]:
+                        source = s.one("SELECT source FROM events WHERE event_id=?", (event_id,))
+                        if source["source"] != "observation.bilibili":
+                            continue
+                        try:
+                            video.schedule(content["item_id"], event_id)
+                        except CoreError as error:
+                            s.execute("UPDATE content_items SET error_code=?,updated_at=? "
+                                      "WHERE item_id=?", (error.code, self.clock(),
+                                                         content["item_id"]))
+                            s.audit("bili_video.unavailable", content["item_id"], request_id,
+                                    self.clock(), error_code=error.code)
         if step and result.status != "SUCCESS":
             self.exploration.goals.fail(step, code or "READ_FAILED", retryable=True)
         if step and step["kind"] == "self":

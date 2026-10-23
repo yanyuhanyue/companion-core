@@ -298,7 +298,7 @@ def input_state(store, settings, event_id):
 def cancel_before_send(store, settings, clock, body):
     """Consume the Bridge's narrow pre-delegate non-dispatch attestation."""
     with store.transaction():
-        approval_for_receipt(store, settings, body.window_sha256)
+        approval = approval_for_receipt(store, settings, body.window_sha256)
         key = "input_cancel_before_send:" + body.message_id
         prior = live_text._meta(store, key)
         material = body.model_dump(mode="json")
@@ -325,7 +325,28 @@ def cancel_before_send(store, settings, clock, body):
                         "delivery_key": row["delivery_key"]}
             bound_delivery = record and all(record.get(key) == value
                                             for key, value in expected.items())
-            if row["action_type"] == "qq.private.reply":
+            poke_delivery = bool(store.one(
+                "SELECT 1 FROM poke_batches WHERE response_message_id=?", (body.message_id,),
+            ))
+            if poke_delivery:
+                erased = bool(store.one(
+                    "SELECT 1 FROM poke_batches p JOIN job_sources s USING(job_id) "
+                    "JOIN events e USING(event_id) WHERE p.response_message_id=? "
+                    "AND (e.redacted=1 OR EXISTS (SELECT 1 FROM runtime_meta "
+                    "WHERE key='erased_event:' || e.event_id)) LIMIT 1", (body.message_id,),
+                ))
+                identity = record and all(record.get(key) == value
+                    for key, value in expected.items() if key != "content_sha256")
+                if (row["action_type"] not in {"qq.private.reply", "qq.private.poke"}
+                    or body.reply_revision is not None or not identity
+                    or body.content_sha256 != record.get("content_sha256")
+                    or (row["content_sha256"] != body.content_sha256
+                        and not (erased and row["content_sha256"] == ""))
+                    or (body.cause is not None and not pending)
+                    or store.one("SELECT 1 FROM audit_log WHERE action='delivery.result' "
+                                 "AND entity_id=?", (body.message_id,))):
+                    raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
+            elif row["action_type"] == "qq.private.reply":
                 if not reply_revision.owner_input(store, row["origin_event_id"]):
                     # Required notices have no owner-input revision. Their original
                     # Core authorization survives source erasure as a narrow proof
@@ -354,10 +375,18 @@ def cancel_before_send(store, settings, clock, body):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             if not pending:
                 try:
-                    reply_revision.check_delivery(store, body.message_id)
+                    if poke_delivery:
+                        from companion import poke
+
+                        poke.check_delivery(store, settings, approval, body.message_id)
+                    else:
+                        reply_revision.check_delivery(store, body.message_id)
                 except CoreError as error:
                     if error.code not in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
-                                          reply_revision.CANCELLED}:
+                                          reply_revision.CANCELLED,
+                                          *({"POKE_CONTEXT_SUPERSEDED", "POKE_CONTEXT_CHANGED",
+                                             "PRIVATE_POKE_SOURCE_CHANGED"}
+                                            if poke_delivery else set())}:
                         raise
                 else:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)

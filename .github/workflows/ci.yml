@@ -59,7 +59,7 @@ jobs:
           CI_REUSE: ${{ needs.preflight.outputs.reuse }}
         run: python scripts/ci_reuse.py validate
       - if: ${{ needs.preflight.outputs.profile == 'full' }}
-        run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
+        run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
       - name: Validate documentation privacy, references and evidence
         if: ${{ needs.preflight.outputs.profile == 'docs' }}
         run: uv run --extra onebot python scripts/ci_policy.py docs
@@ -147,6 +147,9 @@ jobs:
           --entrypoint python companion-onebot-bridge:review -c
           "import importlib.util; import companion_meme_protocol as contract;
           from companion_onebot_bridge.meme_caption import CaptionResult;
+          from companion_onebot_bridge import owner_resolution;
+          import companion_delivery_protocol as wire;
+          assert owner_resolution.wire is wire;
           assert CaptionResult is contract.CaptionResult;
           assert importlib.util.find_spec('companion') is None"
       - run: >-

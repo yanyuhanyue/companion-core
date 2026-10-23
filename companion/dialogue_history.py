@@ -27,7 +27,7 @@ def turn_messages(source):
 
 
 def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, event_ids=None,
-                        include_partial=False):
+                        include_partial=False, cutoff_rowid=None):
     """Return source-bound turns; an optional small allowlist is applied before LIMIT."""
     from companion.transport import digest, reply_group, segment_envelopes
 
@@ -38,6 +38,8 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
     allowed = ""
     if event_ids is not None:
         allowed = "AND e.event_id IN (" + ",".join("?" for _ in event_ids) + ") "
+    cutoff = ("e.rowid<=?" if cutoff_rowid is not None
+              else "e.rowid<(SELECT rowid FROM events WHERE event_id=?)")
     completeness = (
         "AND ((reply.reply_group_id IS NULL AND reply.segment_index=0 "
         "AND reply.segment_count=1 AND reply.reply_group_sha256 IS NULL "
@@ -60,7 +62,7 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "WHERE e.conversation_id=? AND e.actor_id='owner' AND e.privacy_scope='private' "
         "AND e.source='qq.onebot' "
         "AND e.event_type IN ('message.received','message.media_received') "
-        "AND e.redacted=0 AND e.rowid<(SELECT rowid FROM events WHERE event_id=?) "
+        "AND e.redacted=0 AND " + cutoff + " "
         "AND json_type(e.body_json,'$.text')='text' "
         "AND (length(json_extract(e.body_json,'$.text'))>0 "
         "OR json_type(e.body_json,'$.rich')='object') "
@@ -69,7 +71,9 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
         "AND NOT EXISTS (SELECT 1 FROM memory_evidence me "
         "JOIN memories m ON m.memory_id=me.memory_id WHERE me.event_id=e.event_id "
         "AND m.status IN ('SUPERSEDED','FORGOTTEN')) " + allowed + "ORDER BY e.rowid DESC LIMIT ?",
-        (conversation_id, conversation_id, current_event_id, *(event_ids or ()), max_turns),
+        (conversation_id, conversation_id,
+         cutoff_rowid if cutoff_rowid is not None else current_event_id,
+         *(event_ids or ()), max_turns),
     )
     sources = []
     for row in rows:
@@ -120,10 +124,13 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
     return list(reversed(sources))
 
 
-def pending_owner_sources(store, conversation_id, current_event_id, max_turns):
+def pending_owner_sources(store, conversation_id, current_event_id, max_turns, *,
+                          cutoff_rowid=None):
     """Keep unanswered admitted inputs in order after their reply was superseded."""
     if max_turns <= 0:
         return []
+    cutoff = ("e.rowid<=?" if cutoff_rowid is not None
+              else "e.rowid<(SELECT rowid FROM events WHERE event_id=?)")
     rows = store.rows(
         "SELECT e.*,json_extract(e.body_json,'$.text') AS user_text,'' AS reply_text "
         "FROM events e JOIN jobs j USING(event_id) WHERE e.conversation_id=? "
@@ -131,7 +138,7 @@ def pending_owner_sources(store, conversation_id, current_event_id, max_turns):
         "AND e.event_type IN ('message.received','message.media_received') "
         "AND e.redacted=0 AND e.reply_revision>0 AND j.kind='chat' "
         "AND j.state='CANCELLED' AND j.last_error_code=? "
-        "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?) "
+        "AND " + cutoff + " "
         "AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
         "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "
         "AND (length(json_extract(e.body_json,'$.text'))>0 "
@@ -139,7 +146,8 @@ def pending_owner_sources(store, conversation_id, current_event_id, max_turns):
         "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.origin_event_id=e.event_id "
         "AND o.action_type='qq.private.reply' AND o.state='SENT') "
         "ORDER BY e.rowid DESC LIMIT ?",
-        (conversation_id, reply_revision.SUPERSEDED, current_event_id, max_turns),
+        (conversation_id, reply_revision.SUPERSEDED,
+         cutoff_rowid if cutoff_rowid is not None else current_event_id, max_turns),
     )
     for row in rows:
         row.pop("reply_revision", None)
@@ -147,11 +155,13 @@ def pending_owner_sources(store, conversation_id, current_event_id, max_turns):
     return [row for row in reversed(rows) if reply_revision.source_active(store, row["event_id"])]
 
 
-def recent_context_sources(store, conversation_id, current_event_id, max_turns):
+def recent_context_sources(store, conversation_id, current_event_id, max_turns, *,
+                           cutoff_rowid=None):
     """Combine observed sent prefixes with unanswered inputs; never invent assistant text."""
     sources = recent_sent_sources(store, conversation_id, current_event_id, max_turns,
-                                  include_partial=True)
-    sources += pending_owner_sources(store, conversation_id, current_event_id, max_turns)
+                                  include_partial=True, cutoff_rowid=cutoff_rowid)
+    sources += pending_owner_sources(store, conversation_id, current_event_id, max_turns,
+                                     cutoff_rowid=cutoff_rowid)
     if not sources:
         return []
     marks = ",".join("?" for _ in sources)

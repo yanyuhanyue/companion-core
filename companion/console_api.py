@@ -16,7 +16,7 @@ from companion import cloud_budget, console_read, operator_config
 from companion.contracts import CoreError, StrictModel
 from companion.diary import DiaryCorrection
 from companion.store import after, encode
-from companion.transport import cancel_proactive_work
+from companion.transport import cancel_proactive_work, reconcile_delivery
 
 COOKIE = "companion_owner_session"
 
@@ -35,6 +35,10 @@ class MemoryChange(StrictModel):
     corrected_content: str | None = Field(default=None, min_length=1, max_length=500)
 
 
+class DeliveryReconciliation(StrictModel):
+    outcome: Literal["SENT", "CANCELLED"]
+
+
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
@@ -48,24 +52,30 @@ def _credential(settings):
     return digest("companion/session/v1:" + settings.control_token.get_secret_value())
 
 
-def _operation(core, request, key, body, apply):
+def _operation(core, request, key, body, apply, *, recover=None):
     if not key or len(key) > 128 or not key.isascii():
         raise CoreError("IDEMPOTENCY_KEY_REQUIRED", 400)
     s, now = core.store, core.clock()
     fingerprint = digest(encode([request.method, request.url.path, body]))
+    result = None
     with s.transaction():
         row = s.one("SELECT * FROM console_operations WHERE request_id=?", (key,))
         if row:
             if row["request_sha256"] != fingerprint:
                 raise CoreError("IDEMPOTENCY_CONFLICT", 409)
             if row["state"] != "COMPLETE":
-                raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
-            return json.loads(row["result_json"])
-        s.insert("console_operations", request_id=key, request_sha256=fingerprint,
-                 state="STARTED", created_at=now, updated_at=now)
+                result = recover(key, fingerprint) if recover is not None else None
+                if result is None:
+                    raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
+            else:
+                return json.loads(row["result_json"])
+        else:
+            s.insert("console_operations", request_id=key, request_sha256=fingerprint,
+                     state="STARTED", created_at=now, updated_at=now)
     # Native services own their transactions and erasure replay. A process death
     # between native commit and this receipt never blindly repeats the operation.
-    result = apply()
+    if result is None:
+        result = apply()
     safe = {name: result[name] for name in (
         "memory_id", "state", "supersedes", "entry_id", "version", "enabled", "target",
     ) if name in result}
@@ -220,6 +230,43 @@ def register_console_routes(app, settings):
     @app.get(prefix + "/diagnostics", dependencies=auth)
     async def diagnostics():
         return console_read.diagnostics(app.state.core)
+
+    @app.get(prefix + "/voice", dependencies=auth)
+    async def voice():
+        from companion.console_media_views import voice
+
+        return voice(app.state.core)
+
+    @app.get(prefix + "/account-actions", dependencies=auth)
+    async def account_actions():
+        from companion.console_media_views import account_actions
+
+        return account_actions(app.state.core)
+
+    @app.post(prefix + "/deliveries/{message_id}/reconcile", dependencies=auth)
+    async def reconcile(message_id: str, body: DeliveryReconciliation, request: Request,
+                        idempotency_key: str = Header(default="")):
+        from companion import delivery_reconciliation
+
+        core = app.state.core
+        material = body.model_dump()
+        fingerprint = digest(encode([request.method, request.url.path, material]))
+
+        def recovered(key, fingerprint):
+            receipt = delivery_reconciliation.lookup(core.store, settings, message_id,
+                operation_id=key, operation_sha256=fingerprint, outcome=body.outcome,
+                repair=True, now=core.clock())
+            return {"state": body.outcome} if receipt is not None else None
+
+        if not core.store.one("SELECT 1 FROM console_operations WHERE request_id=?",
+                              (idempotency_key,)):
+            readiness = delivery_reconciliation.readiness(core.store, settings, message_id,
+                                                           now=core.clock())
+            if not readiness["prepared"]:
+                raise CoreError(readiness["reason"] or "DELIVERY_QUIESCENCE_REQUIRED", 409)
+        return _operation(core, request, idempotency_key, material, lambda:
+            reconcile_delivery(core.store, message_id, body.outcome, core.clock(), settings,
+                operation_id=idempotency_key, operation_sha256=fingerprint), recover=recovered)
 
     @app.get(prefix + "/diary/{day}", dependencies=auth)
     async def diary(day: date):

@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from companion.contracts import CoreError
 from companion.image_frames import FORMATS, MAX_DECODED_PIXELS, MAX_FRAMES, PreparedImage
 
+SCENARIOS = {"content_video", "content_video_preview"}
+
 
 class VideoInputPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -57,6 +59,24 @@ def enabled(settings):
     return bool(settings.paid_model and settings.paid_model.video_input)
 
 
+def call_limit_matches(settings, baseline):
+    """Extra media stages need the same explicitly frozen Bili scope and policy."""
+    paid, approval = settings.paid_model, settings.live_text_window
+    if paid is None:
+        return False
+    if paid.per_request_calls == baseline:
+        return True
+    from companion.paid_budget import sha
+
+    return bool(
+        baseline < paid.per_request_calls <= 10 and enabled(settings) and paid.image_input
+        and settings.bili_video.enabled and approval
+        and approval.bili_video_scope == "bounded_video_media_v1"
+        and approval.link_scope == "owner_links_v1"
+        and approval.bili_video_policy_sha256 == sha(settings.bili_video.model_dump(mode="json"))
+    )
+
+
 def contract(settings, job_id, logical_request_id):
     from companion import private_life
 
@@ -67,6 +87,16 @@ def contract(settings, job_id, logical_request_id):
     if not job_id or logical_request_id != job_id:
         raise CoreError("MODEL_VIDEO_CHAT_JOB_REQUIRED", 503)
     return settings.paid_model.video_input
+
+
+def preview_text_and_estimate(video_policy, image_policy, messages):
+    """The same approved video gateway observes bounded Reader preview frames."""
+    from companion.image_input import text_and_estimate as image_estimate
+
+    if video_policy is None or image_policy is None:
+        raise CoreError("PAID_VIDEO_APPROVAL_REQUIRED", 503)
+    text, _ = image_estimate(image_policy, messages)
+    return text, video_policy.estimated_tokens_per_image * (len(messages[0]["content"]) - 1)
 
 
 def _animation(data, mime, policy):

@@ -18,8 +18,9 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from websockets.exceptions import ConnectionClosed
 
-from . import capture, reply_segments
+from . import account_actions, capture, pokes, reply_segments
 from .event_normalizer import decode, identifier, normalize, normalize_recall
+from .native_actions import approval_hash
 from .network import checked_http_client, websocket
 from .onebot_client import OneBotClient
 from .outbound import deliver_tick
@@ -28,6 +29,7 @@ from .window import (
     SendOperation,
     WindowOneBot,
     check_protocol_request,
+    delivery_origin,
     digest,
     seal_protocol_content,
 )
@@ -184,6 +186,10 @@ class ObservedFrame:
 
 def observed_record(window, record):
     value = json.loads(record)
+    if value.get("kind") == pokes.KIND:
+        observed = pokes.ObservedPoke(value)
+        observed.verify(window)
+        return observed
     if set(value) != {"frame", "received_at", "peer", "window_sha256", "event_id", "signature"}:
         raise ValueError("AUTOMATIC_BUFFER_CHANGED")
     observed = ObservedFrame(value["frame"], datetime.fromisoformat(value["received_at"]),
@@ -206,6 +212,8 @@ def pending_input(window, current_event_id):
         observed = observed_record(window, row["record_json"])
         if observed.event_id != row["event_id"]:
             raise ValueError("AUTOMATIC_BUFFER_EVENT_CHANGED")
+        if isinstance(observed, pokes.ObservedPoke):
+            continue
         previous = window.db.execute("SELECT fingerprint FROM inbox WHERE key=?",
                                       (observed.event_id,)).fetchone()
         if previous:
@@ -394,6 +402,9 @@ class OwnerSource:
                             if raw.get("notice_type") == "friend_recall" and interruptible(window):
                                 self.put_recall(frame, received_at, ws.remote_address)
                             elif (raw.get("notice_type") == "notify"
+                                  and raw.get("sub_type") == "poke"):
+                                pokes.put(self, frame, received_at, ws.remote_address)
+                            elif (raw.get("notice_type") == "notify"
                                 and raw.get("sub_type") == "input_status"
                                 and identifier(raw.get("user_id"))
                                 == window.plan.config.owner_qq_id):
@@ -404,6 +415,7 @@ class OwnerSource:
                             frame, window.plan.config, now=received_at.timestamp(),
                             rich_input_scope=scope.get("rich_input_scope", "none"),
                             image_scope=scope.get("image_scope", "none"),
+                            file_scope=scope.get("file_scope", "none"),
                         )
                         if event is None:
                             continue
@@ -449,6 +461,8 @@ async def capture_observed(window, client, protocol, observed):
     observed.verify(window)
     if observed.window_sha256 != window.plan.sha256 or window.busy:
         raise ValueError("AUTOMATIC_CAPTURE_SCOPE_CHANGED")
+    if isinstance(observed, pokes.ObservedPoke):
+        return await pokes.receive(window, client, observed)
     window.busy = True
     try:
         capture.capacity(window)
@@ -472,8 +486,8 @@ class AutomaticSend(SendOperation):
     def reserve(self, item):
         require_scope(self.window)
         value = {"window_sha256": self.window.plan.sha256,
-                 "event_id": reply_segments.event_id(item), "message_id": item["message_id"],
-                 "reply_sha256": digest(item["content"]["text"])}
+                 "event_id": delivery_origin(item), "message_id": item["message_id"],
+                 **approval_hash(item)}
         self.approval = {**value, "evidence_sha256": evidence(self.window, "reply", value)}
         super().reserve(item)
 
@@ -537,7 +551,13 @@ async def pump_private(window, client, protocol, *, status=None):
         operation = AutomaticSend(window, client)
         sender = WindowOneBot(operation, protocol)
         async with window.core_http(client) as scoped, sender.delegate.client:
-            await deliver_tick(scoped, sender, window.spool, guard=operation)
+            sent = await deliver_tick(scoped, sender, window.spool, guard=operation)
+        if not sent and account_actions.enabled(window):
+            operation = AutomaticSend(window, client)
+            sender = WindowOneBot(operation, protocol)
+            async with window.core_http(client) as scoped, sender.delegate.client:
+                await deliver_tick(scoped, sender, window.spool, guard=operation,
+                                   delivery_lane="qq_account")
 
 
 async def finish_input(window, client, protocol, source, event_id):
@@ -717,25 +737,28 @@ class MemePump:
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def run_interleaved(window, client, protocol, source, pause, media, memes):
+async def run_interleaved(window, client, protocol, source, pause, media, memes, profiles):
     """Admit received owner turns before waiting for generation or the next reply bubble."""
     watches = {}
     interval = (reply_segments.scope(window.plan) or {}).get("interval_ms", 0) / 1000
     while True:
         source.check()
         if pause.is_set():
+            await profiles.close()
             await memes.close()
             if media.task is not None:
                 await media.task
             emit("automatic_service_paused")
             return window.status()
         window.verify()
-        if source.first() is not None or window.db.execute(
+        if pending_input(window, "") is not None or window.db.execute(
             "SELECT 1 FROM automatic_recalls WHERE window_sha256=? AND state='PENDING' LIMIT 1",
             (window.plan.sha256,),
         ).fetchone():
+            profiles.interrupt()
             memes.interrupt()
         await flush_recalls(window, client)
+        await pokes.flush(window, client)
         rows = window.db.execute(
             "SELECT * FROM window_inputs WHERE plan_hash=? AND state "
             "NOT IN ('ACK','CANCELLED','SUPERSEDED','RECALLED') ORDER BY rowid",
@@ -799,8 +822,9 @@ async def run_interleaved(window, client, protocol, source, pause, media, memes)
         foreground = bool(rows or any(row["count"] for row in status["deliveries"]
                                      if row["state"] in {"PENDING", "LEASED", "SENDING"}))
         media_running = media.task is not None and not media.task.done()
-        memes.tick(idle=not foreground and not media_running)
-        if not media_running and not memes.running:
+        profiles.tick(idle=not foreground and not media_running and not memes.running)
+        memes.tick(idle=not foreground and not media_running and not profiles.running)
+        if not media_running and not memes.running and not profiles.running:
             await pump_private(window, client, protocol, status=status)
         if window.row()["state"] == "STOPPED":
             await window.stop_core(client)
@@ -822,7 +846,9 @@ async def run_interleaved(window, client, protocol, source, pause, media, memes)
             pass
 
 
-async def run(window, client, protocol, *, pause=None, image_transport=None, image_resolver=None):
+async def run(window, client, protocol, *, pause=None, image_transport=None, image_resolver=None,
+              file_transport=None, file_resolver=None, voice_transport=None, voice_resolver=None,
+              profile_transport=None, profile_resolver=None):
     """Resume known work. UNKNOWN or partial irreversible steps stay stopped."""
     if (window.plan.mode != "live_text"
         or window.plan.value["live_text"].get("automatic_reply") is not True):
@@ -830,6 +856,7 @@ async def run(window, client, protocol, *, pause=None, image_transport=None, ima
     pause = pause or asyncio.Event()
     media = None
     memes = None
+    profiles = None
     installed = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -838,6 +865,7 @@ async def run(window, client, protocol, *, pause=None, image_transport=None, ima
         except NotImplementedError:
             pass
     try:
+        await pokes.flush(window, client)
         if window.row()["state"] == "STOPPED":
             await window.stop_core(client)
             await flush_recalls(window, client)
@@ -849,11 +877,17 @@ async def run(window, client, protocol, *, pause=None, image_transport=None, ima
                  ends_at=window.plan.value["ends_at"])
             if interruptible(window):
                 from .pending_media import MediaPump
+                from .profile_probe import ProfilePump
 
                 media = MediaPump(window, client, image_transport=image_transport,
-                                  image_resolver=image_resolver)
+                    image_resolver=image_resolver, protocol=protocol,
+                    file_transport=file_transport, file_resolver=file_resolver,
+                    voice_transport=voice_transport, voice_resolver=voice_resolver)
                 memes = MemePump(window, client)
-                return await run_interleaved(window, client, protocol, source, pause, media, memes)
+                profiles = ProfilePump(window, client, protocol, transport=profile_transport,
+                    **({"resolver": profile_resolver} if profile_resolver is not None else {}))
+                return await run_interleaved(window, client, protocol, source, pause, media,
+                                             memes, profiles)
             while True:
                 require_scope(window)
                 rows = window.db.execute(
@@ -907,6 +941,8 @@ async def run(window, client, protocol, *, pause=None, image_transport=None, ima
             return window.status()
         raise
     finally:
+        if profiles is not None:
+            await profiles.close()
         if memes is not None:
             await memes.close()
         if media is not None:

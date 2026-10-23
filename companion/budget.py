@@ -10,6 +10,7 @@ import httpx
 from companion import cloud_budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
+from companion.video_input import SCENARIOS as VIDEO_SCENARIOS
 
 
 def token_upper_bound(messages):
@@ -18,7 +19,7 @@ def token_upper_bound(messages):
 
 
 def cost(settings, input_tokens, output_tokens, cached=0, *, scenario=None):
-    if scenario == "content_video" and settings.paid_model and settings.paid_model.video_input:
+    if scenario in VIDEO_SCENARIOS and settings.paid_model and settings.paid_model.video_input:
         settings = SimpleNamespace(pricing_known=True,
                                    **settings.paid_model.video_input.model_dump())
     if not settings.pricing_known:
@@ -56,22 +57,48 @@ def chat_pending(store, now):
     ))
 
 
+def reader_video_binding(store, settings, clock, request_id, *, job_id=None, scenario=None,
+                         logical_request_id=None):
+    if not request_id or not store.one(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='bili_video_phases'"
+    ):
+        return None
+    from companion.bili_video import model_binding
+
+    return model_binding(store, settings, clock, request_id, job_id=job_id, scenario=scenario,
+                         logical_request_id=logical_request_id)
+
+
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None, cloud_task_kind=None, cloud_task_id=None,
 ):
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
+    video_binding = (reader_video_binding(store, settings, clock or (lambda: now), request_id,
+        job_id=job_id, scenario=scenario, logical_request_id=logical_request_id or job_id)
+        if scenario in VIDEO_SCENARIOS else None)
+    if scenario == "content_video_preview" and video_binding is None:
+        raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
     if scenario == "meme_caption":
         from companion import meme_input
 
         logical_request_id = logical_request_id or job_id
         meme_input.contract(settings, job_id, logical_request_id)
-    elif scenario == "content_video":
+    elif scenario in VIDEO_SCENARIOS:
         from companion.video_input import contract as video_contract
 
         logical_request_id = logical_request_id or job_id
         video_contract(settings, job_id, logical_request_id)
+        if video_binding is not None:
+            from companion.model import model_payload
+
+            if (video_binding["payload_sha256"] != paid_budget.sha(
+                model_payload(settings, messages, scenario))
+                or cloud_task_kind not in {None, "video"}
+                or cloud_task_id not in {None, video_binding["task_id"]}):
+                raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+            cloud_task_kind, cloud_task_id = "video", video_binding["task_id"]
     elif scenario == "content_vision" or any(
         isinstance(message, dict) and isinstance(message.get("content"), list)
         for message in messages
@@ -85,7 +112,7 @@ def reserve(
             or settings.live_text_window.image_scope != "owner_image_v1"
         ):
             raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-    autonomous = scenario != "chat"
+    autonomous = scenario not in {"chat", "qq_poke"}
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
@@ -126,14 +153,19 @@ def reserve(
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
         if scenario == "meme_caption":
             meme_input.check_attempt(store, job_id)
+        if video_binding is not None and reader_video_binding(
+            store, settings, clock or (lambda: now), request_id, job_id=job_id,
+            scenario=scenario, logical_request_id=logical_request_id,
+        ) != video_binding:
+            raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
         live_text.reserve_model(store, settings, clock, job_id, scenario)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
-        if scenario in {"content_vision", "content_video"}:
+        if scenario in {"content_vision", *VIDEO_SCENARIOS}:
             if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
                 raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-            if store.one(
+            if video_binding is None and store.one(
                 "SELECT 1 FROM model_usage WHERE job_id=? AND scenario=?", (job_id, scenario),
             ):
                 raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)
@@ -159,12 +191,22 @@ def reserve(
             elif scenario == "diary":
                 scenarios = ("diary",)
                 limit = settings.diary_daily_micro_usd
-            elif scenario in {"content_vision", "content_video"}:
-                scenarios = ("content_vision", "content_video")
+            elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
+                scenarios = ("content_vision", *sorted(VIDEO_SCENARIOS))
                 limit = settings.content.image_daily_micro_usd
             elif scenario == "meme_caption":
                 scenarios = ("meme_caption",)
                 limit = settings.meme_caption_daily_micro_usd
+            elif scenario == "social_autonomy":
+                scenarios = ("social_autonomy",)
+                limit = settings.social_autonomy.model_daily_micro_usd
+                calls = store.one("SELECT COUNT(*) n FROM model_usage "
+                                  "WHERE scenario='social_autonomy' AND occurred_at>=?",
+                                  (day.isoformat(timespec="microseconds"),))["n"]
+                if not settings.social_autonomy.enabled or limit == 0:
+                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
+                if calls >= settings.social_autonomy.model_daily_calls:
+                    raise CoreError("SCENARIO_CALL_LIMIT", 429)
             elif scenario == "activity":
                 scenarios = ("activity",)
                 limit = settings.autonomous_daily_micro_usd
@@ -195,17 +237,19 @@ def reserve(
                 "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in scenarios) + ")",
                 (day.isoformat(timespec="microseconds"), *scenarios),
             )["n"]
-            if (not unlimited_period or scenario == "meme_caption") and spent + estimate > limit:
+            if (not unlimited_period or scenario in {"meme_caption", "social_autonomy"}) and (
+                spent + estimate > limit
+            ):
                 raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
             _admit(store, settings, approval, logical_request_id, estimate, now, day, month)
-        cloud_pricing = (settings.paid_model.video_input if scenario == "content_video"
+        cloud_pricing = (settings.paid_model.video_input if scenario in VIDEO_SCENARIOS
                          and settings.paid_model and settings.paid_model.video_input else settings)
         cloud_budget.reserve(
             store, settings, reference_type="model", reference_id=request_id,
             estimated_micro_usd=estimate, now=now,
-            task_kind=cloud_task_kind or ("video" if scenario == "content_video" else "model"),
+            task_kind=cloud_task_kind or ("video" if scenario in VIDEO_SCENARIOS else "model"),
             task_id=cloud_task_id or logical_request_id or job_id or request_id,
             pricing={"pricing_known": bool(settings.pricing_known), **{
                 key: getattr(cloud_pricing, key)
@@ -226,9 +270,9 @@ def reserve(
             request_id=request_id,
             job_id=job_id,
             scenario=scenario,
-            provider=(approval.video_input.provider if scenario == "content_video"
+            provider=(approval.video_input.provider if scenario in VIDEO_SCENARIOS
                       else settings.provider),
-            model=(approval.video_input.model if scenario == "content_video"
+            model=(approval.video_input.model if scenario in VIDEO_SCENARIOS
                    else settings.model_name),
             input_tokens=estimated_input,
             output_tokens=output_tokens,
@@ -446,7 +490,7 @@ def _settle_paid(store, settings, admission, response):
             True,
         )
         return
-    rates = snapshot["video_input"] if usage["scenario"] == "content_video" else snapshot
+    rates = snapshot["video_input"] if usage["scenario"] in VIDEO_SCENARIOS else snapshot
     pricing = SimpleNamespace(
         pricing_known=True,
         **{name: rates[name] for name in ("input_rate", "cached_input_rate", "output_rate")},
@@ -515,7 +559,7 @@ def _settle_paid(store, settings, admission, response):
         if limits:
             amount, state, blocked = max(actual, admission["reserved_micro_usd"]), "UNKNOWN", True
     current_pricing = settings
-    if usage["scenario"] == "content_video":
+    if usage["scenario"] in VIDEO_SCENARIOS:
         current_pricing = settings.paid_model.video_input if settings.paid_model else None
     if current_pricing is None or (
         current_pricing.input_rate, current_pricing.cached_input_rate, current_pricing.output_rate,
@@ -741,11 +785,11 @@ async def _dispatch(
     from companion.model import ModelAdmission, ModelClient, model_payload
 
     if live_text.active(store, settings) or scenario in {
-        "content_vision", "content_video", "meme_caption",
+        "content_vision", *VIDEO_SCENARIOS, "meme_caption",
     }:
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
-        target_url = (settings.paid_model.video_input.endpoint if scenario == "content_video"
+        target_url = (settings.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
                       else settings.model_url)
         if live_text.active(store, settings) and (
             settings.live_text_window.execution == "local_synthetic"
@@ -776,13 +820,18 @@ async def _dispatch(
 
             meme_input.contract(settings, row["usage_job_id"], row["logical_request_id"])
             meme_input.check_attempt(store, row["usage_job_id"], request_id)
-        elif scenario in {"content_vision", "content_video"}:
+        elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
             from companion.image_input import contract as image_contract
+            from companion.video_input import contract as video_contract
 
-            image_contract(settings, row["usage_job_id"], row["logical_request_id"])
-            if scenario == "content_video":
-                from companion.video_input import contract as video_contract
-
+            reader_binding = reader_video_binding(store, settings, clock, request_id,
+                job_id=row["usage_job_id"], scenario=scenario,
+                logical_request_id=row["logical_request_id"])
+            if scenario == "content_video_preview" and reader_binding is None:
+                raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+            if reader_binding is None:
+                image_contract(settings, row["usage_job_id"], row["logical_request_id"])
+            if scenario in VIDEO_SCENARIOS:
                 video_contract(settings, row["usage_job_id"], row["logical_request_id"])
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
@@ -851,7 +900,7 @@ async def _dispatch(
                     or current["io_started_at"] != now
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
-                    or (scenario in {"content_vision", "content_video", "meme_caption"} and (
+                    or (scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"} and (
                         current["scenario"] != scenario
                         or current["usage_job_id"] != row["usage_job_id"]
                         or current["logical_request_id"] != row["logical_request_id"]
@@ -865,9 +914,15 @@ async def _dispatch(
             if scenario == "meme_caption":
                 meme_input.contract(settings, row["usage_job_id"], row["logical_request_id"])
                 meme_input.check_attempt(store, row["usage_job_id"], request_id)
-            elif scenario in {"content_vision", "content_video"}:
-                image_contract(settings, row["usage_job_id"], row["logical_request_id"])
-                if scenario == "content_video":
+            elif scenario in {"content_vision", *VIDEO_SCENARIOS}:
+                reader_binding = reader_video_binding(store, settings, clock, request_id,
+                    job_id=row["usage_job_id"], scenario=scenario,
+                    logical_request_id=row["logical_request_id"])
+                if scenario == "content_video_preview" and reader_binding is None:
+                    raise CoreError("BILI_VIDEO_MODEL_BINDING_REQUIRED", 403)
+                if reader_binding is None:
+                    image_contract(settings, row["usage_job_id"], row["logical_request_id"])
+                if scenario in VIDEO_SCENARIOS:
                     video_contract(settings, row["usage_job_id"], row["logical_request_id"])
             if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                 raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)

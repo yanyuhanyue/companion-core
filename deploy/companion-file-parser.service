@@ -1,0 +1,52 @@
+# Install only after the deployment owner checks paths, pinned image and group 10001.
+# /etc/companion/file-parser.env is root-owned mode 0600 and defines:
+# COMPANION_FILE_PARSER_IMAGE=sha256:<reviewed-installed-image-id>
+# COMPANION_FILE_PARSER_LIMITS_JSON=<compact JSON matching private_files.limits>
+[Unit]
+Description=Companion private file parser host
+Requires=docker.service
+After=docker.service
+ConditionFileIsExecutable=/usr/bin/docker
+ConditionFileIsExecutable=/opt/companion-core/.venv/bin/python
+
+[Service]
+Type=exec
+User=root
+Group=root
+WorkingDirectory=/opt/companion-core
+EnvironmentFile=/etc/companion/file-parser.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONNOUSERSITE=1
+UMask=0077
+RuntimeDirectory=companion-parser
+RuntimeDirectoryMode=0700
+StateDirectory=companion-parser
+StateDirectoryMode=0700
+ExecStart=/opt/companion-core/.venv/bin/python -B -m companion.file_parser_host \
+    --socket /run/companion-parser/parser.sock \
+    --state-dir /var/lib/companion-parser \
+    --image ${COMPANION_FILE_PARSER_IMAGE} \
+    --limits-json ${COMPANION_FILE_PARSER_LIMITS_JSON} \
+    --docker /usr/bin/docker --docker-host unix:///var/run/docker.sock \
+    --max-concurrency 1 --read-timeout 15 --max-history 10000 \
+    --socket-mode 0660 --socket-group 10001
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+CapabilityBoundingSet=CAP_CHOWN
+ReadWritePaths=/run/companion-parser /var/lib/companion-parser
+
+[Install]
+WantedBy=multi-user.target

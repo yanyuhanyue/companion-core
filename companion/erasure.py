@@ -43,6 +43,7 @@ def event_cleanup(name, erase):
 def cleanup_contracts():
     # Lazy imports preserve the existing modules' privacy helper dependencies.
     from companion.affect import erase_affect
+    from companion.bili_video import erase_bili_video
     from companion.consolidation import erase_consolidation
     from companion.content import erase_content
     from companion.executive import erase_executive
@@ -51,8 +52,11 @@ def cleanup_contracts():
     from companion.media import erase_media_links
     from companion.meme_core import erase_captions
     from companion.observation import erase_observations
+    from companion.poke import erase as erase_poke
     from companion.reading import erase_reading
     from companion.reflection import erase_reflections
+    from companion.social_autonomy import erase_social_autonomy
+    from companion.voice_jobs import erase_voice_jobs
 
     return (
         event_cleanup("observations", erase_observations),
@@ -71,6 +75,10 @@ def cleanup_contracts():
         event_cleanup("media", erase_media_links),
         event_cleanup("meme-captions", erase_captions),
         event_cleanup("content", erase_content),
+        event_cleanup("poke", erase_poke),
+        event_cleanup("social-autonomy", erase_social_autonomy),
+        event_cleanup("voice", erase_voice_jobs),
+        event_cleanup("bili-video", erase_bili_video),
     )
 
 
