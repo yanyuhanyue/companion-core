@@ -1,0 +1,352 @@
+"""Pre-dispatch cancellation retains custody until Core accepts stopped-resource control."""
+
+import asyncio
+import json
+import os
+import ssl
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+from companion.core import Core
+from companion.model import ModelClient
+from companion.retrieval import SemanticIndex
+from companion.store import encode
+from companion.voice_config import VoiceNode, VoiceReplyPolicy
+from companion.voice_protocol import VoiceControlRequest, VoiceProtocolError, digest
+from companion_onebot_bridge import continuous
+from companion_onebot_bridge.network import private_http_client
+from companion_voice_node.state import NodeState
+from companion_voice_node.supervisor import ProcessSupervisor, process_has_exited
+from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest
+from tests.conftest import run
+from tests.test_onebot_capture import capture_approval, real_core_http, source_window
+from tests.test_onebot_direct import raw_event
+from tests.test_private_companion import companion_options
+from tests.test_voice_jobs import voice_config
+from tests.test_voice_node_api import independent_node, tls_core
+from tests.test_voice_node_worker import FakeCore, FixtureSupervisor, child_receipts
+from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
+
+
+class CancelCore(FakeCore):
+    def __init__(self, config, key, *, claimed, loss=None):
+        super().__init__(config, key)
+        self.cancel_at, self.claimed, self.loss = claimed, 0, loss
+        self.terminal_controls, self.children = [], []
+        self.allow_running = False
+        self.terminal_continue = False
+
+    def __call__(self, request):
+        if request.url.path.endswith("/control"):
+            body = VoiceControlRequest.model_validate_json(request.content)
+            if body.phase == "CLAIMED":
+                self.claimed += 1
+                if self.claimed == self.cancel_at:
+                    self.controls.append(body)
+                    return httpx.Response(200, json={"action": "CANCEL"})
+            if body.phase == "CANCELLED":
+                self.terminal_controls.append(body)
+                for child in self.children:
+                    assert process_has_exited(child.process.pid, child.identity) or (
+                        self.allow_running and body.resource_state == "QUARANTINED")
+                if self.terminal_continue:
+                    return httpx.Response(200, json={"action": "CONTINUE",
+                        "renewed_lease": self.lease(body.ref.manifest_sha256)})
+                if self.loss == "before":
+                    self.loss = None
+                    raise httpx.ReadError("synthetic lost control request")
+                response = super().__call__(request)
+                if self.loss == "after":
+                    self.loss = None
+                    raise httpx.ReadError("synthetic lost control acknowledgment")
+                return response
+        return super().__call__(request)
+
+    def supervisor(self, workspace, temporary, *, counter):
+        child = FixtureSupervisor(workspace, temporary, counter=counter)
+        self.children.append(child)
+        return child
+
+
+@pytest.mark.parametrize("claimed", [1, 2])
+@pytest.mark.parametrize("loss", [None, "before", "after"])
+def test_cancel_control_waits_for_exit_and_replays_after_ack_loss(node, claimed, loss):
+    config, key, counter = node
+    remote = CancelCore(config, key, claimed=claimed, loss=loss)
+
+    def worker():
+        return VoiceNodeWorker(config, transport=httpx.MockTransport(remote),
+            supervisor_factory=lambda workspace, temporary: remote.supervisor(
+                workspace, temporary, counter=counter))
+
+    async def scenario():
+        if loss:
+            with pytest.raises(VoiceProtocolError, match="VOICE_CORE_UNAVAILABLE"):
+                await worker().run(once=True)
+            with NodeState(config.state_directory) as state:
+                assert state.active_job()["phase"] == "CANCELLED"
+                assert state.resource()["state"] == "READY"
+            assert await worker().run(once=True) == "DISCARDED"
+        else:
+            assert await worker().run(once=True) == "DISCARDED"
+        assert len(remote.terminal_controls) == (2 if loss else 1)
+        assert all(row.resource_state == "READY" for row in remote.terminal_controls)
+        assert len({row.ref.model_dump_json() for row in remote.terminal_controls}) == 1
+        assert remote.claimed == claimed
+        assert len(remote.children) == claimed - 1
+        assert child_receipts(counter) == [] and remote.result_bodies == []
+        assert sum(request.url.path.endswith("/input")
+                   for request in remote.requests) == claimed - 1
+        with NodeState(config.state_directory) as state:
+            assert state.active_job() is None
+            assert state.resource()["state"] == "READY"
+
+    run(scenario())
+
+
+def test_cancel_control_continue_is_not_a_terminal_acknowledgment(node):
+    config, key, counter = node
+    remote = CancelCore(config, key, claimed=1)
+    remote.terminal_continue = True
+
+    async def scenario():
+        worker = VoiceNodeWorker(config, transport=httpx.MockTransport(remote),
+            supervisor_factory=lambda *_: pytest.fail("cancelled claim cannot start a child"))
+        with pytest.raises(VoiceProtocolError, match="VOICE_CANCEL_ACK_REQUIRED"):
+            await worker.run(once=True)
+        with NodeState(config.state_directory) as state:
+            assert state.active_job()["phase"] == "CANCELLED"
+        remote.terminal_continue = False
+        assert await worker.run(once=True) == "DISCARDED"
+        assert child_receipts(counter) == []
+
+    run(scenario())
+
+
+def test_unconfirmed_child_stop_cannot_release_slot_until_operator_confirms_exit(node):
+    config, key, counter = node
+    remote = CancelCore(config, key, claimed=2)
+    remote.allow_running = True
+
+    class UnconfirmedStop(FixtureSupervisor):
+        async def stop(self):
+            return False
+
+    def factory(workspace, temporary):
+        child = UnconfirmedStop(workspace, temporary, counter=counter)
+        remote.children.append(child)
+        return child
+
+    async def scenario():
+        worker = VoiceNodeWorker(config, transport=httpx.MockTransport(remote),
+                                 supervisor_factory=factory)
+        try:
+            assert await worker.run(once=True) == "RETRY"
+            with NodeState(config.state_directory) as state:
+                assert state.active_job()["phase"] == "CANCELLED"
+                resource = state.resource()
+                assert resource["state"] == "QUARANTINED"
+            assert len(remote.terminal_controls) == 1
+            assert remote.terminal_controls[0].resource_state == "QUARANTINED"
+            assert remote.children[0].process.returncode is None
+            assert child_receipts(counter) == []
+            assert await ProcessSupervisor.stop(remote.children[0])
+            with NodeState(config.state_directory) as state:
+                state.recover_manually(quarantine_id=resource["quarantine_id"],
+                    operator="synthetic-operator", service_instance="synthetic-process",
+                    confirmation="inflight-execution-stopped")
+            assert await worker.run(once=True) == "DISCARDED"
+            assert remote.terminal_controls[-1].resource_state == "READY"
+            assert len(remote.children) == 1 and child_receipts(counter) == []
+        finally:
+            for child in remote.children:
+                await ProcessSupervisor.stop(child)
+
+    run(scenario())
+
+
+async def launch_node(config, certificate, counter, tmp_path, timestamp, *, gate, loss):
+    config_file = tmp_path / "cancel-node-config.json"
+    config_file.write_text(encode(config.model_dump(mode="json") | {
+        "credential": config.credential.get_secret_value()}), encoding="utf-8")
+    return await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
+        "tests.test_voice_node_cancellation_handshake", "--cancel-node", str(config_file),
+        str(certificate), str(counter), "gate" if gate else "resume", loss or "none",
+        str(timestamp),
+        cwd=str(config.workspace), stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+
+
+async def node_finished(process):
+    stdout, stderr = await asyncio.wait_for(process.communicate(), 30)
+    assert process.returncode == 0, stderr.decode("utf-8", errors="replace")
+    value = json.loads(stdout)
+    assert value["stage"] == "finished" and value["pid"] != os.getpid()
+    return value["outcome"]
+
+
+@pytest.mark.parametrize("loss", [None, "before", "after"])
+def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
+    core, node, tmp_path, monkeypatch, loss,
+):
+    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
+    config, signing_key, counter = node
+    config = config.model_copy(update={"node_id": "local", "request_timeout_seconds": 10.0,
+                                       "execution_timeout_seconds": 20.0})
+    voice = voice_config(signing_private_key=signing_key.private_bytes_raw().hex(),
+        reply=VoiceReplyPolicy(mode="auto"), nodes={"local": VoiceNode(token=config.credential,
+            manifest_sha256=digest(local_manifest(config)))})
+    scope = companion_options(core)
+    scope["core_options"]["voice"] = voice
+    scope.update(voice_scope="owner_voice_v1", voice_policy_sha256=voice.authority_sha256())
+    incoming, calls = [], []
+
+    async def source(ws):
+        incoming.append(True)
+        await ws.send(encode(raw_event(len(incoming), time=int(core.clock.now.timestamp()),
+                                       text="请回答第" + str(len(incoming)) + "个问题")))
+        await ws.wait_closed()
+
+    def model(request):
+        calls.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "合成语音回复。"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+
+    async def scenario():
+        processes = []
+        async with real_core_http(core) as port, source_window(core, tmp_path, source,
+            live=True, approved=True, scope_options=scope,
+            bridge_options={"core_url": f"http://127.0.0.1:{port}"}) as (
+            window, _, protocol, handshakes, sends,
+        ), private_http_client(window.plan.config.core_url,
+            window.plan.config.bridge_token) as client, httpx.AsyncClient(
+            transport=httpx.MockTransport(model)) as external:
+            await window.capture_once(client, protocol)
+            await window.approve_captured(client, capture_approval(window))
+            with Core(core.settings, ModelClient(core.settings, external), core.clock) as worker:
+                assert worker.store is not core.store
+                assert await worker.run_once("first-native-voice-chat")
+                await continuous.pump_private(window, client, protocol)
+                first = core.store.one("SELECT * FROM voice_jobs")
+                assert first["state"] == "QUEUED"
+                async with tls_core(core, tmp_path) as (origin, certificate):
+                    node_config = config.model_copy(update={"core_origin": origin})
+                    process = await launch_node(node_config, certificate, counter, tmp_path,
+                        core.clock.now.timestamp(), gate=True, loss=loss)
+                    processes.append(process)
+                    try:
+                        line = await asyncio.wait_for(process.stdout.readline(), 15)
+                        assert line, (await process.stderr.read()).decode()
+                        started = json.loads(line)
+                        assert started["stage"] == "child-ready"
+                        assert started["node_pid"] != os.getpid()
+                        assert not process_has_exited(started["pid"], started["identity"])
+                        assert child_receipts(counter) == []
+                        assert core.store.one("SELECT state FROM voice_jobs")["state"] == (
+                            "RUNNING")
+                        async with continuous.OwnerSource(
+                            window, protocol, asyncio.Event(),
+                        ) as owner:
+                            observed = await asyncio.wait_for(owner.next(), 10)
+                            await continuous.capture_observed(window, client, protocol, observed)
+                            owner.consume(observed)
+                            row = window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
+                                                    (observed.event_id,)).fetchone()
+                            await continuous.approve_row(window, client, row)
+                        assert await worker.run_once("second-native-voice-chat")
+                        await continuous.pump_private(window, client, protocol)
+                        following = core.store.one("SELECT * FROM voice_jobs WHERE job_id<>?",
+                                                   (first["job_id"],))
+                        assert following["state"] == "QUEUED"
+                        assert core.store.one("SELECT active_job_id FROM voice_node_state")[
+                            "active_job_id"] == first["job_id"]
+                        process.stdin.write(b"continue\n")
+                        await process.stdin.drain()
+                        outcome = await node_finished(process)
+                        assert outcome == ("VOICE_CORE_UNAVAILABLE" if loss else "DISCARDED")
+                        assert process_has_exited(started["pid"], started["identity"])
+                        assert child_receipts(counter) == []
+                        if loss:
+                            with NodeState(config.state_directory) as state:
+                                assert state.active_job()["phase"] == "CANCELLED"
+                                assert state.resource()["state"] == "READY"
+                            # A distinct node process replays the terminal handshake;
+                            # it cannot consume the next queued job in the same cycle.
+                            resumed = await launch_node(node_config, certificate, counter,
+                                tmp_path, core.clock.now.timestamp(), gate=False, loss=None)
+                            processes.append(resumed)
+                            assert await node_finished(resumed) == "DISCARDED"
+                        assert core.store.one("SELECT active_job_id FROM voice_node_state")[
+                            "active_job_id"] is None
+                        retained = core.store.one("SELECT state,started_at FROM voice_jobs "
+                                                  "WHERE job_id=?", (first["job_id"],))
+                        assert retained["state"] == "UNKNOWN" and retained["started_at"]
+                        await independent_node(node_config, certificate, counter, tmp_path,
+                                               core.clock.now.timestamp())
+                    finally:
+                        for current in processes:
+                            if current.returncode is None:
+                                current.kill()
+                                await current.wait()
+                assert core.store.one("SELECT state FROM voice_jobs WHERE job_id=?",
+                                      (following["job_id"],))["state"] == "READY"
+                assert len(child_receipts(counter)) == 1 and len(calls) == 2
+                assert len(handshakes) == 2 and not sends
+                assert core.store.one("SELECT active_job_id FROM voice_node_state")[
+                    "active_job_id"] is None
+                window.verify()
+
+    run(scenario())
+
+
+async def independent_cancel_node():
+    config = VoiceNodeConfig.model_validate_json(await asyncio.to_thread(
+        Path(sys.argv[2]).read_text, "utf-8"))
+    trust = ssl.create_default_context(cafile=sys.argv[3])
+    counter, gate, loss = Path(sys.argv[4]), sys.argv[5] == "gate", sys.argv[6]
+
+    class GatedSupervisor(FixtureSupervisor):
+        async def start(self, seconds):
+            await super().start(seconds)
+            if gate:
+                print(json.dumps({"stage": "child-ready", "pid": self.process.pid,
+                    "identity": self.identity, "node_pid": os.getpid()}), flush=True)
+                assert await asyncio.wait_for(asyncio.to_thread(sys.stdin.readline), 15) == (
+                    "continue\n")
+
+    class LostControl(httpx.AsyncHTTPTransport):
+        async def handle_async_request(self, request):
+            nonlocal loss
+            cancel = (request.url.path.endswith("/control")
+                      and json.loads(request.content).get("phase") == "CANCELLED")
+            if cancel and loss == "before":
+                loss = "none"
+                raise httpx.ReadError("synthetic cancel request lost", request=request)
+            response = await super().handle_async_request(request)
+            if cancel and loss == "after":
+                loss = "none"
+                await response.aread()
+                await response.aclose()
+                raise httpx.ReadError("synthetic cancel ACK lost", request=request)
+            return response
+
+    # Share the existing native window fixture's wall clock. Signature, source,
+    # lease and monotonic request budgets still use their actual implementations.
+    with patch("companion_voice_node.worker.time.time", return_value=float(sys.argv[7])):
+        try:
+            outcome = await VoiceNodeWorker(config, transport=LostControl(verify=trust),
+                supervisor_factory=lambda workspace, temporary: GatedSupervisor(
+                    workspace, temporary, counter=counter)).run(once=True)
+        except VoiceProtocolError as error:
+            outcome = error.code
+    print(json.dumps({"stage": "finished", "outcome": outcome, "pid": os.getpid()}), flush=True)
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--cancel-node"]:
+    asyncio.run(independent_cancel_node())

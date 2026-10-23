@@ -212,11 +212,14 @@ class VoiceJobs:
             raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
         return node_id, node
 
-    def _tts_source(self, message_id, text=None, *, delivery_token=None):
+    def _tts_source(self, message_id, text=None, *, delivery_token=None, retained_ready=False):
         row = private_life.check_delivery(self.store, self.settings, self.clock, message_id)
         reply_revision.check_delivery(self.store, message_id)
         content = json.loads(row["content_json"])
         valid_stage = row["state"] == "PENDING" and row["attempt_count"] == 0
+        if retained_ready and row["state"] in {"PENDING", "RETRY_WAIT", "LEASED"}:
+            # This preserves an already selected result, never authorizes new TTS or a send.
+            valid_stage = True
         if delivery_token is not None:
             valid_stage = (
                 row["state"] in {"LEASED", "SENDING"}
@@ -450,12 +453,14 @@ class VoiceJobs:
 
     def _delivery_binding(self, row):
         """A selected result may survive Outbox leasing; this never grants execution."""
+        from companion.voice_flow import VoiceDeliveryBinding
+
         receipt = self.store.one(
             "SELECT value FROM runtime_meta WHERE key=?", (REPLY_RECEIPT + str(row["message_id"]),)
         )
         try:
             value = json.loads(receipt["value"]) if receipt else {}
-            binding = value["binding"]
+            binding = VoiceDeliveryBinding.model_validate(value["binding"]).model_dump(mode="json")
             expected = {
                 "job_id": row["job_id"],
                 "generation": row["generation"],
@@ -499,18 +504,22 @@ class VoiceJobs:
         ):
             raise CoreError("VOICE_AUTHORITY_CHANGED", 403)
         if row["operation"] == "tts":
-            if delivery_token is None and row["state"] == "READY" and self._delivery_binding(row):
+            binding = self._delivery_binding(row) if row["state"] == "READY" else None
+            if delivery_token is None and binding:
                 sending = self.store.one(
                     "SELECT lease_token FROM outbox WHERE message_id=? "
-                    "AND state IN ('LEASED','SENDING')",
+                    "AND state='SENDING'",
                     (row["message_id"],),
                 )
                 if sending:
                     delivery_token = sending["lease_token"]
-            event, outbox = self._tts_source(row["message_id"], delivery_token=delivery_token)
+            event, outbox = self._tts_source(row["message_id"], delivery_token=delivery_token,
+                retained_ready=bool(binding and delivery_token is None))
             if (outbox["content_sha256"], outbox["delivery_key"]) != (
                 row["outbox_content_sha256"],
                 row["outbox_delivery_key"],
+            ) or binding and binding["reply_sha256"] != paid_budget.sha(
+                json.loads(outbox["content_json"])["text"]
             ):
                 raise CoreError("VOICE_OUTBOX_SOURCE_CHANGED", 403)
         else:
@@ -594,6 +603,8 @@ class VoiceJobs:
     def delivery_audio(self, job_id, message_id, lease_token):
         """Read only the selected, completed audio bound to this live Outbox lease."""
         _transaction_required(self.store)
+        if not isinstance(lease_token, str) or not lease_token:
+            raise CoreError("STALE_DELIVERY_LEASE", 409)
         row = self._reconcile(self._get(job_id))
         if (
             row["state"] != "READY"

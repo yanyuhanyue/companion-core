@@ -522,11 +522,35 @@ class VoiceNodeWorker:
             raise VoiceProtocolError("VOICE_PROCESS_OUTPUT_INVALID")
         return payload
 
+    async def _settle_cancel(self, client, state, lease, error_code):
+        # A stopped local process is not a Core resource receipt. Retain the
+        # CANCELLED job across timeout/ACK loss and replay this same reference.
+        response, lease = await self._control(
+            client, state, lease, "CANCELLED", error_code=error_code,
+        )
+        if response.action == "CONTINUE":
+            raise VoiceProtocolError("VOICE_CANCEL_ACK_REQUIRED")
+        if state.resource()["state"] != "READY":
+            return "RETRY"
+        state.finish(lease, error_code=error_code)
+        return "DISCARDED"
+
+    async def _cancel_claim(self, client, state, lease, action, *, supervisor=None):
+        if supervisor is not None:
+            stopped = False
+            try:
+                stopped = await supervisor.stop()
+            finally:
+                if not stopped:
+                    state.quarantine("VOICE_PROCESS_EXIT_UNCONFIRMED")
+        error_code = "VOICE_LEASE_" + action
+        state.phase(lease, "CANCELLED", error_code=error_code)
+        return await self._settle_cancel(client, state, lease, error_code)
+
     async def _execute(self, client, state, lease):
         response, lease = await self._control(client, state, lease, "CLAIMED")
         if response.action != "CONTINUE":
-            state.finish(lease, error_code="VOICE_LEASE_" + response.action)
-            return "DISCARDED"
+            return await self._cancel_claim(client, state, lease, response.action)
         data = await self._input(client, lease)
         if digest(await asyncio.to_thread(local_manifest, self.config)) != self.manifest_sha256:
             raise VoiceProtocolError("VOICE_MANIFEST_CHANGED")
@@ -540,8 +564,9 @@ class VoiceNodeWorker:
             await supervisor.start(min(remaining, self.config.startup_timeout_seconds))
             response, lease = await self._control(client, state, lease, "CLAIMED")
             if response.action != "CONTINUE":
-                state.finish(lease, error_code="VOICE_LEASE_" + response.action)
-                return "DISCARDED"
+                return await self._cancel_claim(
+                    client, state, lease, response.action, supervisor=supervisor,
+                )
             state.dispatch(lease, pid=supervisor.process.pid, process_identity=supervisor.identity)
             dispatched = True
             overall_deadline = time.monotonic() + self.config.execution_timeout_seconds
@@ -640,7 +665,9 @@ class VoiceNodeWorker:
         lease = SignedVoiceLease.model_validate_json(job["lease_json"])
         if job["phase"] == "RESULT_READY":
             return await self._upload(client, state, job, lease), retry_after
-        if job["phase"] in {"FAILED", "CANCELLED", "UNKNOWN", "RESULT_LOST", "TERMINAL"}:
+        if job["phase"] == "CANCELLED":
+            return await self._settle_cancel(client, state, lease, job["error_code"]), retry_after
+        if job["phase"] in {"FAILED", "UNKNOWN", "RESULT_LOST", "TERMINAL"}:
             response, lease = await self._control(
                 client,
                 state,

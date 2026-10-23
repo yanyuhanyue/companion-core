@@ -385,6 +385,25 @@ class VoiceFlow:
             "voice_policy_sha256": self.settings.voice.authority_sha256(),
         }
 
+    def _input_wait_until(self, event):
+        return min(
+            datetime.fromisoformat(after(event["ingested_at"],
+                                         self.settings.voice.asr.wait_seconds)),
+            self.settings.live_text_window.ends_at,
+        ).astimezone(UTC).isoformat(timespec="microseconds")
+
+    @staticmethod
+    def _stale_input_epoch(value, authority):
+        changed = {key for key, item in authority.items() if value.get(key) != item}
+        if not changed:
+            return False
+        old_epoch = value.get("privacy_epoch")
+        if (changed != {"privacy_epoch"} or type(old_epoch) is not int
+            or not 0 <= old_epoch < authority["privacy_epoch"]
+            or value.get("state") not in {"WAITING", "READY", "FALLBACK"}):
+            raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
+        return True
+
     def input_status(self, event_id, chat_job_id=None):
         with self._transaction():
             if (
@@ -396,7 +415,7 @@ class VoiceFlow:
             event = self.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
             if not event or not _records(json.loads(event["body_json"])):
                 return VoiceInputStatus(state="NONE")
-            event, body, _ = self._input_source(event_id, chat_job_id)
+            event, body, job = self._input_source(event_id, chat_job_id)
             records, policy = _records(body), self.settings.voice.asr
             value = self._read(INPUT_RECEIPT + event_id)
             authority = self._input_authority(event)
@@ -406,15 +425,27 @@ class VoiceFlow:
                     "state": "WAITING",
                     "records": records[: policy.max_records],
                     "record_count": len(records),
-                    "wait_until": min(
-                        after(event["ingested_at"], policy.wait_seconds),
-                        self.settings.live_text_window.ends_at.astimezone(UTC).isoformat(
-                            timespec="microseconds"
-                        ),
-                    ),
+                    "wait_until": self._input_wait_until(event),
                 }
-            elif any(value.get(key) != item for key, item in authority.items()):
-                raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
+            elif self._stale_input_epoch(value, authority):
+                if job["state"] not in {"QUEUED", "RETRY_WAIT"}:
+                    raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
+                # A different source's erasure invalidates old media authority,
+                # but must not strand this still-authenticated conversation.
+                # Discard all prior audio/transcripts, retaining native UNKNOWN
+                # resource responsibility for any input already released.
+                reason = "VOICE_INPUT_PRIVACY_EPOCH_CHANGED"
+                for row in self.store.rows("SELECT job_id FROM voice_jobs "
+                                           "WHERE event_id=? AND operation='asr'", (event_id,)):
+                    self.jobs.withdraw(row["job_id"], reason)
+                value = {
+                    **authority, "state": "FALLBACK", "reason": reason,
+                    "records": records[:policy.max_records], "record_count": len(records),
+                    "wait_until": self._input_wait_until(event),
+                    "results": [{"index": index, "status": "UNAVAILABLE", "reason": reason}
+                                for index in records[:policy.max_records]],
+                }
+                self._write(INPUT_RECEIPT + event_id, value)
             if not self._asr_available() and value["state"] == "WAITING":
                 value.update(
                     state="FALLBACK", reason="VOICE_ASR_NODE_UNAVAILABLE",
@@ -559,14 +590,9 @@ class VoiceFlow:
                 raise CoreError("VOICE_ASR_SOURCE_INVALID", 403)
             authority = self._input_authority(event)
             value = self._read(INPUT_RECEIPT + event_id)
-            if value and any(value.get(key) != item for key, item in authority.items()):
-                raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
-            until = min(
-                datetime.fromisoformat(after(event["ingested_at"],
-                                             self.settings.voice.asr.wait_seconds)),
-                self.settings.live_text_window.ends_at,
-            )
-            state = value["state"] if value else "WAITING"
+            stale_epoch = bool(value and self._stale_input_epoch(value, authority))
+            until = datetime.fromisoformat(self._input_wait_until(event))
+            state = "FALLBACK" if stale_epoch else value["state"] if value else "WAITING"
             if state == "WAITING" and (until <= datetime.fromisoformat(self.clock())
                                         or job["state"] not in {"QUEUED", "RETRY_WAIT"}
                                         or not self._asr_available()):
