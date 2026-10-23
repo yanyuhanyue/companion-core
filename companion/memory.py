@@ -215,11 +215,12 @@ class Memory:
             return None
         event, content = validated
         s = self.store
-        same = s.one(
+        sources = MemorySources(self, now)
+        same = next((row for row in s.rows(
             "SELECT * FROM memories WHERE content=? AND subject=? AND status IN "
             "('HYPOTHESIS','CONFIRMED')",
             (content, candidate.subject),
-        )
+        ) if sources.current(row)), None)
         conflicts = []
         if resolution is not None:
             for memory_id in [resolution.get("same"), *resolution.get("conflicts", [])]:
@@ -230,18 +231,18 @@ class Memory:
                     "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0",
                     (memory_id, candidate.subject),
                 )
-                if not row:
+                if not row or not sources.current(row):
                     raise CoreError("MEMORY_MATCH_STALE", 409)
                 if memory_id == resolution.get("same"):
                     same = row
                 else:
                     conflicts.append(row)
         elif not same:
-            conflicts = s.rows(
+            conflicts = [row for row in s.rows(
                 "SELECT * FROM memories WHERE subject=? AND fact_key=? "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
-            )
+            ) if sources.current(row)]
         if same:
             memory_id = same["memory_id"]
             if confirmed:

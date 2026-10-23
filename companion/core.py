@@ -388,10 +388,11 @@ class Core(Runtime):
                 indices.append(segment["index"])
         return indices
 
-    def _check_context_snapshots(self, job, snapshots):
+    def _check_context_snapshots(self, job, snapshots, *, current_request=None):
         reply_revision.check_job(self.store, job)
         if private_life.strict(self.store, self.settings):
-            live_text.check_job(self.store, self.settings, self.clock, job)
+            live_text.check_job(self.store, self.settings, self.clock, job,
+                                current_request=current_request)
         for snapshot in snapshots:
             try:
                 if snapshot["kind"] == "memory":
@@ -750,6 +751,9 @@ class Core(Runtime):
                 messages,
                 "memory_review",
                 self.clock,
+                source_check=lambda: self._check_context_snapshots(
+                    job, [{"kind": "memory", "proof": proof}], current_request=request_id,
+                ),
             )
             self._check_context_snapshots(job, [{"kind": "memory", "proof": proof}])
         except Exception as error:
@@ -846,6 +850,7 @@ class Core(Runtime):
             messages,
             "memory_review",
             self.clock,
+            source_check=lambda: self.memory_context.revalidate(proof, self.clock()),
         )
         # Preserve the existing write-reconciliation failure contract. A real input
         # recall already cancelled the tracked job; a concurrent explicit forget
@@ -1154,6 +1159,9 @@ class Core(Runtime):
                         messages,
                         job["kind"],
                         self.clock,
+                        source_check=lambda: self._check_context_snapshots(
+                            job, context_snapshots, current_request=request_id,
+                        ),
                     )
                     model_done_ns = time.perf_counter_ns()
                     usage = self.store.one(
@@ -1500,6 +1508,7 @@ class Core(Runtime):
                 messages,
                 "memory_extract",
                 self.clock,
+                source_check=lambda: self.memory_context.revalidate(proof, self.clock()),
             )
             extraction = Extraction.model_validate_json(response.text)
             if (captured_epoch != epoch(s) or not self._owns_memory_lease(lease)

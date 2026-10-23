@@ -654,7 +654,8 @@ def _persist_accounting(
         store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
 
 
-async def complete(model, store, settings, request_id, messages, scenario, clock):
+async def complete(model, store, settings, request_id, messages, scenario, clock, *,
+                   source_check=None):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
     from companion.model import ModelClient, ModelResponseError
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
@@ -663,7 +664,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     dispatch = {"dispatched": False}
     try:
         response = await _dispatch(model, store, settings, request_id, messages, scenario, clock,
-                                   dispatch=dispatch)
+                                   dispatch=dispatch, source_check=source_check)
         return response
     except ModelResponseError as error:
         # An unusable reply can still carry observed usage.
@@ -681,10 +682,13 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
 
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
+    source_check=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
     from companion import live_text, notices
 
+    if source_check is not None:
+        source_check()
     live_text.check_model(store, settings, clock, request_id)
     notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
@@ -820,6 +824,11 @@ async def _dispatch(
                 model_payload(settings, messages, scenario),
             ):
                 raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+            if source_check is not None:
+                # Caller-owned evidence may expire while an HTTP hook awaits.
+                # Keep this synchronous proof inside the existing transport fence.
+                with store.transaction():
+                    source_check()
             if live_text.active(store, settings):
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport

@@ -348,7 +348,7 @@ def test_strict_fact_scope_does_not_authorize_episode_context(core, tmp_path):
             assert core.store.one("SELECT COUNT(*) n FROM episodes")["n"] == 1
             await capture()
             assert await core.run_once()
-            assert len(calls) == 2
+            assert len(calls) == 2, core.store.rows("SELECT state,last_error_code FROM jobs")
             assert "近期情景接续" not in encode(calls)
             assert canary not in encode(calls)
     run(scenario())
