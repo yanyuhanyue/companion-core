@@ -198,9 +198,11 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert discovered["status"] == "completed", discovered
                     assert discovered["accepted"] == []
                     assert discovered["pending_caption"] == [asset_sha]
-                    assert len(public_calls) == 3
-                    assert core.store.one("SELECT state FROM meme_discovery_reservations") == {
-                        "state": "SETTLED",
+                    assert len(public_calls) == 5
+                    assert core.store.one(
+                        "SELECT state,queries,requests FROM meme_discovery_reservations",
+                    ) == {
+                        "state": "SETTLED", "queries": 1, "requests": 5,
                     }
                     assert (await runtime.run_once(client))["status"] == "CAPTION_PENDING"
                     assert visual_calls == []
@@ -245,7 +247,13 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                         "SELECT data,metadata FROM meme_assets WHERE sha=?", (asset_sha,),
                     ).fetchone()
                     assert stored["data"] == asset
-                    assert json.loads(stored["metadata"])["acquisition_json"]
+                    acquisition = json.loads(json.loads(stored["metadata"])["acquisition_json"])
+                    assert acquisition["archive_member"] == ""
+                    assert set(acquisition["source_files"]) == {"manifest", "license", "listing"}
+                    assert acquisition["fetch"]["body_sha256"] == asset_sha
+                    assert acquisition["source_files"]["license"]["body_sha256"] == (
+                        RULE["license_sha256"]
+                    )
                     assert window.db.execute(
                         "SELECT state FROM meme_runtime_sources WHERE sha=? ORDER BY rowid DESC",
                         (asset_sha,),
@@ -256,6 +264,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     caption_row = core.store.one(
                         "SELECT * FROM meme_captions ORDER BY rowid DESC LIMIT 1",
                     )
+                    assert json.loads(caption_row["source_json"])["acquisition"] == acquisition
                     assert json.loads(caption_row["result_json"])["sampled_frames"][
                         "coverage"
                     ] == "complete"
@@ -290,7 +299,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     await continuous.pump_private(window, client, protocol)
                     assert len(sends) == len(chat_calls) == len(handshakes) == 3 + handoff
                     assert len(sends[-1]["message"]) == 1
-                    assert len(visual_calls) == 1 and len(public_calls) == 3 * (1 + handoff)
+                    assert len(visual_calls) == 1 and len(public_calls) == 5 * (1 + handoff)
                     assert tuple(window.db.execute(
                         "SELECT * FROM meme_caption_cache",
                     ).fetchone()) == tuple(cached)
