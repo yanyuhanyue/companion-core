@@ -6,6 +6,7 @@ from contextlib import closing
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
@@ -29,16 +30,17 @@ from tests.test_release_migration import (
 )
 from tests.test_source_grants import prepare
 
-HEAD = "0024_reading_attempts"
+READING_REVISION = "0024_reading_attempts"
 PREVIOUS = "0023_meme_discovery_reservations"
 
 
 def test_empty_reading_migration_is_reversible_and_repeated_upgrade_is_safe(tmp_path):
     database = tmp_path / "empty.db"
+    head = ScriptDirectory.from_config(config_for(database)).get_current_head()
     migrate(str(database))
     migrate(str(database))
     with closing(Store(str(database))) as store:
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == HEAD
+        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == head
         assert store.rows("SELECT * FROM reading_attempts") == []
         assert store.schema_capabilities()
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
@@ -87,7 +89,9 @@ def test_reading_upgrade_preserves_legacy_reservations_and_blocks_lossy_downgrad
     with pytest.raises(RuntimeError, match="READING_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(config_for(database), PREVIOUS)
     with closing(Store(str(database))) as store:
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == HEAD
+        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+            READING_REVISION
+        )
         assert table_snapshot(store, (*tables, "reading_attempts")) == protected
         assert store.rows("PRAGMA foreign_key_check") == []
 
