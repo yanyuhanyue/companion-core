@@ -17,7 +17,7 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from .images import resolve_public
-from .meme_caption import CaptionContext, parse
+from .meme_caption import CaptionContext
 from .meme_catalog import INTENTS, MOCKERY, MemeCatalog, Metadata, key_hash
 from .meme_discovery import BraveImages, DiscoveryLimits, ReviewApproval, Usage, run_discovery
 from .meme_library import CATEGORY, MemeLibrary
@@ -210,6 +210,7 @@ class MemeRuntime:
         self.semantics_enabled = getattr(self.config, "meme_semantics_enabled", False)
         self.semantics = None
         self._profile_lock = asyncio.Lock()
+        self._profile_refreshed = False
         self.transport, self.resolver = transport, resolver
         self.reviewer = reviewer or TrustedReviewer(
             getattr(self.config, "meme_trusted_sources", ()),
@@ -246,8 +247,8 @@ class MemeRuntime:
         ):
             self.db.execute(sql)
         self.db.commit()
-        # Resume immutable selections with the last Core-issued profile. Fresh databases
-        # require HTTP profile admission before discovery, retrieval or image delivery.
+        # Resume immutable selections with the last Core-issued profile. New work must
+        # refresh it from this window's Core once, including after a process restart.
         if self.semantics_enabled and installed(self.db):
             saved = profile(self.db)
             if saved is not None:
@@ -389,12 +390,16 @@ class MemeRuntime:
     async def _ensure_semantics(self, client, check):
         async with self._profile_lock:
             check()
-            if self.semantics is None:
+            if not self._profile_refreshed:
                 identity, embedding = await SemanticHTTP(self.window, client, check=check).profile()
                 check()
                 self.spool.capacity(65536)
-                self.semantics = SemanticLibrary(self.catalog, identity, embedding)
+                minimum = self.semantics.settings["minimum_confidence"] if self.semantics else 0.8
+                self.semantics = SemanticLibrary(
+                    self.catalog, identity, embedding, minimum_confidence=minimum,
+                )
             self.semantics._profile_check()
+            self._profile_refreshed = True
         return self.semantics
 
     def _admitted_check(self, event_id):
@@ -510,13 +515,12 @@ class MemeRuntime:
                 return {"status": "CAPTION_" + value["state"]}
             if status == "READY":
                 binding = self.db.execute(
-                    "SELECT b.job_id,b.context_json FROM meme_semantic_assets a "
+                    "SELECT b.job_id FROM meme_semantic_assets a "
                     "JOIN meme_caption_bindings b ON b.request_sha=a.binding_request "
                     "WHERE a.sha=? AND b.state='SUCCEEDED'", (sha,),
                 ).fetchone()
-                bound_context = parse(CaptionContext, binding[1])
                 embedder = CaptionEmbeddingHTTP(
-                    http, job_id=binding[0], context=bound_context,
+                    http, job_id=binding[0], context=context,
                     caption=semantics.caption(sha)[0],
                 )
                 await semantics.index(sha, embedder, check=check, commit_check=fence)
