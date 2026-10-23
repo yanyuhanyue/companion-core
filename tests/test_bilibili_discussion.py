@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import zlib
+from datetime import datetime
 
 import httpcore
 import httpx
@@ -16,6 +17,7 @@ from companion.backup import backup, restore
 from companion.observation import CommentEvidence, DanmakuEvidence, ReadingEvidence, SourceComment
 from companion.store import Store
 from source_reader.bili_discussion import danmaku
+from source_reader.bili_tools import BilibiliAccountHTTP
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP, ReadFailure, permitted_url
 from source_reader.worker import read_result, tick
@@ -65,6 +67,27 @@ def test_subtitles_comments_and_compressed_danmaku_keep_distinct_raw_evidence():
     assert source.sha256 == hashlib.sha256(WIRE).hexdigest()
     assert result["used_bytes"] == sum(row.bytes for row in evidence.sources)
     assert len(backend.requests) == 5 and b"oid=1234" in backend.requests[-1]
+
+
+def test_account_reader_accepts_danmaku_binary_without_treating_it_as_json(tmp_path):
+    from tests.test_plugin_readonly import grant
+
+    async def scenario():
+        pool, backend = mock_pool(*replies())
+        path = grant(tmp_path, "bilibili")
+        async with BilibiliAccountHTTP(
+            path, pool, clock=lambda: datetime.fromisoformat(NOW)
+        ) as source:
+            result = await read_result(BilibiliReader(source, clock=lambda: NOW, discussion=True),
+                                       {**ITEM, "max_requests": 5})
+        assert len(backend.requests) == 5
+        assert b"Cookie:" not in backend.requests[-1]
+        return result
+
+    result = run(scenario())
+    assert result["status"] == "SUCCESS"
+    assert result["items"][0]["reading"]["discussion_status"]["danmaku"] == "available"
+    assert result["items"][0]["reading"]["danmaku"]["items"][0]["text"] == "sample"
 
 
 @pytest.mark.parametrize("maximum", [3, 4])
