@@ -93,6 +93,10 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 升级前先备份，停止所有已启用 Worker 和 API，再执行一次迁移，随后启动服务。当前 Alembic 链支持空库和同版升级；含日记记录的 `0004_diary` 拒绝破坏性降级。`0003_memory_index → 0002_m1` 仅移除可重建的向量缓存，但不要直接降级删除事实或 v0.5 业务表。应用回退前验证 schema 兼容性与最新遗忘回放，不能仅把数据库和日志都换成旧版本。恢复时会撤销旧媒体会话，并将未完成投递、执行和内容读取置为需要核对的状态。
 
+`0021_reflection_admission_retry` 为反思保留 `RETRY_WAIT` 和下次尝试时间。历史任务若因调用次数或并发不足而在模型请求预留前失败，会在来源集合一致、当前授权有效时续跑；已完成的记忆和日记步骤继续复用。日调用次数耗尽等到配置时区的次日零点，并发占用短暂等待。已发出或计费不明的模型请求保持原状态，不自动重放。可按实际回补天数配置 `reflection_max_daily_calls`（默认 1，最大 5），所有预算及窗口上限仍生效。有等待任务时拒绝降级此迁移。
+
+独立 B 站 Reader 的公开发现使用固定的热门列表 API，每次至多取得 20 个去重视频标题；取得标题后仍需独立的读取任务才能形成正文证据。访问受限、跳转或响应异常会记录失败，不切换接口规避限制。
+
 ## 常见运行状态
 
 原生 OneBot Bridge 的引用、卡片正文及签名受控窗口的多图与记忆配置，见 [QQ 输入理解说明](qq-input-understanding.md)。
@@ -103,5 +107,6 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 - `ERASURE_LEDGER_MISSING/MISMATCH/TRUNCATED`：停止服务，找回最新独立日志再恢复。
 - `OWNER_IDENTITY_MISMATCH`：已有数据库属于另一主人，禁止直接更换 owner；新身份使用新数据库。
 - `WORKER_ALREADY_RUNNING`：已有 Worker 持有 OS 锁，正常关停该实例；不要删除锁文件绕过检查。
+- 反思 `RETRY_WAIT / SCENARIO_CALL_LIMIT`：尚未发出模型请求，等待次日可用额度后由生活 Worker 续跑；不会重复生成已完成的日记。
 
 原始事件按 `raw_event_retention_days` 到期清空；失去有效来源的记忆会降为待审查且不进入检索。长期保留策略应在实际使用后明确配置。

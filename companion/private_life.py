@@ -118,7 +118,7 @@ def stop_work(store, now):
         ("jobs", "'QUEUED','RUNNING','RETRY_WAIT'"),
         ("outbox", "'PENDING','LEASED','RETRY_WAIT'"),
         ("diary_runs", "'PENDING','RUNNING','RETRY_WAIT'"),
-        ("reflection_runs", "'RUNNING'"),
+        ("reflection_runs", "'RUNNING','RETRY_WAIT'"),
         ("consolidation_runs", "'SCHEDULED','LEASED','PARTIAL'"),
     ):
         store.execute(

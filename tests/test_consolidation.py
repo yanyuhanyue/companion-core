@@ -302,10 +302,11 @@ def test_reflection_budget_is_independent_and_hard_bounded(core, limit):
 
         budget.reserve(core.store, core.settings, None, "reflection", [], core.clock())
     result = run(core.reflections.run_day(DAY))
-    assert result["state"] == "FAILED"
+    expected = "RETRY_WAIT" if limit == "calls" else "FAILED"
+    assert result["state"] == expected
     assert not model.calls
     assert (
-        run(core.reflections.run_day(DAY))["state"] == "FAILED"
+        run(core.reflections.run_day(DAY))["state"] == expected
     )  # Repeated ticks do not call again.
 
 

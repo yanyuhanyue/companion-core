@@ -8,6 +8,7 @@ from companion import private_life
 from companion.contracts import CoreError
 from companion.diary import day_bounds, source_hash
 from companion.privacy import epoch
+from companion.reflection import retryable_admission
 from companion.store import after, encode, uid
 
 CONFIG_VERSION = "v05-1"
@@ -53,6 +54,31 @@ class NightlyConsolidator:
         with self.store.transaction():
             existing = self.status(day)
             if existing:
+                steps = json.loads(existing["steps_json"])
+                reflection = self.store.one(
+                    "SELECT * FROM reflection_runs WHERE local_date=? AND timezone=?",
+                    (day.isoformat(), self.settings.timezone),
+                )
+                if (
+                    (existing["state"] == "PARTIAL" or
+                     (existing["state"] == "CANCELLED"
+                      and existing["last_error_code"] == "LIVE_WINDOW_STOPPED"))
+                    and steps.get("reflection") in {"FAILED", "RETRY_WAIT", "CANCELLED"}
+                    and retryable_admission(reflection, self.clock())
+                    and existing["source_set_sha256"] == reflection["source_set_sha256"]
+                    == source_hash(self.diary.repo.sources(day))
+                ):
+                    steps["reflection"] = "WAITING"
+                    steps.pop("goals", None)
+                    self.store.execute(
+                        "UPDATE consolidation_runs SET state='SCHEDULED',steps_json=?,"
+                        "next_attempt_at=NULL,last_error_code=NULL,updated_at=? WHERE run_id=?",
+                        (encode(steps), self.clock(), existing["run_id"]),
+                    )
+                    self.store.audit(
+                        "consolidation.resumed", existing["run_id"], existing["run_id"],
+                        self.clock(), reason="UNADMITTED_REFLECTION",
+                    )
                 return existing["run_id"]
             run_id, now = uid("nightly"), self.clock()
             self.store.insert(
@@ -184,7 +210,7 @@ class NightlyConsolidator:
                 (run["captured_privacy_epoch"], run["run_id"]),
             )
 
-    def checkpoint(self, run, state="LEASED", code=None, waiting=False):
+    def checkpoint(self, run, state="LEASED", code=None, waiting=False, next_attempt_at=None):
         s, now = self.store, self.clock()
         with s.transaction():
             current = s.one("SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],))
@@ -205,7 +231,7 @@ class NightlyConsolidator:
                     encode(run["steps"]),
                     run["lease_token"] if state == "LEASED" else None,
                     after(now, self.settings.lease_seconds),
-                    after(now, 60) if waiting else None,
+                    (next_attempt_at or after(now, 60)) if waiting else None,
                     code,
                     now,
                     run["run_id"],
@@ -275,8 +301,9 @@ class NightlyConsolidator:
                     else None
                 )
                 steps["reflection"] = result["state"] if result else "SKIPPED"
-                if steps["reflection"] == "RUNNING":
-                    self.checkpoint(run, "PARTIAL", "REFLECTION_PENDING", waiting=True)
+                if steps["reflection"] in {"RUNNING", "RETRY_WAIT"}:
+                    self.checkpoint(run, "PARTIAL", "REFLECTION_PENDING", waiting=True,
+                                    next_attempt_at=result.get("next_attempt_at"))
                     return True
             failed = any(value in {"FAILED", "CANCELLED"} for value in steps.values())
             if self.settings.goals_enabled and steps.get("goals") != "COMPLETE":

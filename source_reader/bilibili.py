@@ -108,20 +108,25 @@ class BilibiliReader:
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
-            raw = await self.public.get("https://www.bilibili.com/", budget, "page")
-            page = VideoPage()
-            page.feed(raw.decode("utf-8", errors="replace"))
+            limit = min(20, item["max_items"])
+            raw = await self.public.get(
+                "https://api.bilibili.com/x/web-interface/popular?"
+                + urlencode({"pn": 1, "ps": limit}), budget, "discovery",
+            )
+            rows = api_data(raw).get("list")
+            if not isinstance(rows, list):
+                raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
             found = {}
-            for link in page.links:
-                try:
-                    url = video_url(urljoin("https://www.bilibili.com/", link["url"]))
-                    if link["title"].strip():
-                        found.setdefault(
-                            url, {"url": url, "title": link["title"][:300], "text": ""}
-                        )
-                except (ReadFailure, ValueError):
+            for row in rows[:20]:
+                if not isinstance(row, dict):
+                    raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+                bvid, title = row.get("bvid"), row.get("title")
+                if (not isinstance(bvid, str) or not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)
+                    or not isinstance(title, str) or not title.strip()):
                     continue
-            return list(found.values())[: min(40, item["max_items"])]
+                url = video_url("https://www.bilibili.com/video/" + bvid)
+                found.setdefault(url, {"url": url, "title": title.strip()[:300], "text": ""})
+            return list(found.values())[:limit]
         if item["operation"] != "read":
             raise ReadFailure("READER_OPERATION_INVALID")
         requested_url, resolution = item["url"], None
