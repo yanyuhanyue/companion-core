@@ -109,7 +109,7 @@ class BilibiliReader:
         self.public, self.renderer, self.clock = public, renderer, clock
         self.subtitles = subtitles
         self.discussion = discussion
-        self.parser_version = "bilibili/2" if discussion else "bilibili/1"
+        self.parser_version = "bilibili/3"
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
@@ -208,7 +208,7 @@ class BilibiliReader:
                 player_params = {"aid": aid} if type(aid) is int and aid > 0 else params
                 player = api_data(
                     await self.public.get(
-                        "https://api.bilibili.com/x/player/v2?"
+                        "https://api.bilibili.com/x/player/wbi/v2?"
                         + urlencode({**player_params, "cid": cid}),
                         budget,
                         "player",
@@ -221,6 +221,15 @@ class BilibiliReader:
                     raise ReadFailure("READER_SUBTITLE_TARGET_MISMATCH")
                 info = player.get("subtitle") or {}
                 tracks = info.get("subtitles") or []
+                if not isinstance(tracks, list):
+                    raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+                tracks = [
+                    track for track in tracks
+                    if isinstance(track, dict)
+                    and isinstance(track.get("subtitle_url"), str)
+                    and track["subtitle_url"].strip()
+                    and isinstance(track.get("lan"), str) and track["lan"].strip()
+                ]
                 if not tracks:
                     evidence["subtitle_status"] = (
                         "restricted"
@@ -229,7 +238,8 @@ class BilibiliReader:
                     )
                 else:
                     track = next(
-                        (t for t in tracks if str(t.get("lan", "")).startswith("zh")), tracks[0]
+                        (t for t in tracks
+                         if t["lan"].lower().removeprefix("ai-").startswith("zh")), tracks[0]
                     )
                     caption_url = urljoin("https://aisubtitle.hdslb.com/", track["subtitle_url"])
                     # Observed upstream AI URLs bind a video/part to a 32-hex content key.

@@ -85,7 +85,7 @@ def permitted_url(value):
     if url.hostname == "api.bilibili.com" and url.path in {
         "/x/web-interface/view",
         "/x/web-interface/popular",
-        "/x/player/v2",
+        "/x/player/wbi/v2",
         "/x/web-interface/search/type",
         "/x/v2/reply",
     }:
