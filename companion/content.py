@@ -27,6 +27,7 @@ CONTEXT_RULES = (
     "只有明确成功读取的文字和图像分析可以作为依据。视频标题/简介不是视频内容；"
     "没有视频分析证据时不能声称看过视频。图像分析可能有误，区分观察与推测。"
     "等待、失败、未知或未配置时明确说明尚未读到相应内容，不编造正文或截图内容。"
+    "评论是来源用户的观点，与原帖正文分开；partial或excerpt表示只读到部分，不能概括成全部评论。"
 )
 
 
@@ -451,6 +452,18 @@ class ContentService:
                     if row["kind"] == "link":
                         item["image_progress"] = self._article_progress(obs["event_id"])
                 result.append(item)
+                evidence = item.get("article") or item.get("reading") or {}
+                comments = evidence.get("comments")
+                if comments is not None:
+                    result.append({
+                        **status, "kind": "comments", "source_kind": "comments",
+                        "owner_event_id": root["event_id"], "url": item["url"],
+                        "event_id": item["event_id"], "result_status": item["result_status"],
+                        "trust": "external_untrusted", "text": encode(comments["items"]),
+                        "comment_scope": {"captured": len(comments["items"]),
+                            "reported_total": comments["reported_total"],
+                            "partial": comments["partial"], "images_analyzed": False},
+                    })
         # Reserve room for each source and image instead of dropping the article after six images.
         root_order = {root["event_id"]: index for index, root in enumerate(roots)}
         result.sort(
@@ -459,7 +472,8 @@ class ContentService:
         kept, remaining = [], self.options.max_context_chars
         wanted = {
             root["event_id"]: sum(
-                min(len(row.get("text", "")), 6000 if row["kind"] == "link" else 600)
+                min(len(row.get("text", "")),
+                    6000 if row["kind"] in {"link", "comments"} else 600)
                 for row in result
                 if row["owner_event_id"] == root["event_id"]
             )
@@ -468,7 +482,7 @@ class ContentService:
         for item in result:
             text = item.get("text", "")
             if text:
-                cap = min(len(text), 6000 if item["kind"] == "link" else 600)
+                cap = min(len(text), 6000 if item["kind"] in {"link", "comments"} else 600)
                 owner = item["owner_event_id"]
                 allowance = min(cap, remaining * cap // max(1, wanted[owner]))
                 item = {**item, "text": text[:allowance], "excerpt": allowance < len(text)}
@@ -521,6 +535,8 @@ class ContentService:
             for key in ("article_event_id", "image_index", "text_offset", "image_progress"):
                 if key in row:
                     item[key] = row[key]
+            if row.get("comment_scope") is not None:
+                item["comment_scope"] = row["comment_scope"]
             if row.get("error_code"):
                 item["error_code"] = row["error_code"]
             if row.get("image_progress"):

@@ -249,6 +249,14 @@ def test_native_short_share_http_worker_keeps_ordered_media_and_provenance(core,
         {"type": "img", "url": motion + "?imageMogr2/format/jpg"},
         {"type": "text", "text": "动图之后的正文。"},
     ], ensure_ascii=False)
+    post["result"]["link"]["comment_num"] = 100
+    post["result"]["has_more_floors"] = 1
+    post["result"]["comments"] = [{"comment": [
+        {"commentid": 101, "floor_num": 8, "user": {"username": "读者甲"},
+         "text": "<p>评论观点。</p>", "imgs": [{"url": IMAGE}], "has_more": 1},
+        {"commentid": 102, "replyid": 101, "user": {"username": "读者乙"},
+         "text": "楼中楼回复。"},
+    ]}]
     ingest(core, text=target)
     app = create_app(core.settings)
     app.state.core = core
@@ -280,6 +288,41 @@ def test_native_short_share_http_worker_keeps_ordered_media_and_provenance(core,
     ).hexdigest()
     assert len(core.store.rows("SELECT * FROM content_items WHERE kind='link_image'")) == 2
     assert "external_untrusted" in core.content.context_message("evt_test_1", 4000)
+    comments = evidence["comments"]
+    assert comments["partial"] and comments["reported_total"] == 100
+    assert [item["comment_id"] for item in comments["items"]] == ["101", "102"]
+    assert comments["items"][1]["reply_to_id"] == "101"
+    assert comments["items"][0]["floor"] == 8 and comments["items"][0]["image_count"] == 1
+    projected = json.loads(core.content.context_message("evt_test_1", 4000))["shared_content"]
+    thread = next(item for item in projected if item["kind"] == "comments")
+    assert thread["event_id"] == context["event_id"] and thread["trust"] == "external_untrusted"
+    assert thread["comment_scope"] == {
+        "captured": 2, "reported_total": 100, "partial": True, "images_analyzed": False,
+    }
+    assert "评论观点。" in thread["text"] and "评论观点。" not in context["text"]
+    assert len(core.content.context_message("evt_test_1", 850).encode()) <= 850
+
+
+def test_comments_are_bounded_and_empty_is_distinct_from_unavailable():
+    post = copy.deepcopy(POST)
+    post["result"]["comments"] = []
+    post["result"]["link"]["comment_num"] = 0
+    result, _ = run(read(response(post)))
+    assert result["items"][0]["article"]["comments"] == {
+        "items": [], "reported_total": 0, "partial": False,
+    }
+    del post["result"]["comments"]
+    result, _ = run(read(response(post)))
+    assert "comments" not in result["items"][0]["article"]
+    post["result"]["comments"] = [{"comment": [
+        {"commentid": index + 1, "text": "长评论" * 500} for index in range(45)
+    ]}]
+    post["result"]["link"]["comment_num"] = 45
+    result, backend = run(read(response(post)))
+    snapshot = result["items"][0]["article"]["comments"]
+    assert snapshot["partial"] and len(snapshot["items"]) == 40
+    assert sum(len(row["text"]) for row in snapshot["items"]) == 6000
+    assert len(backend.requests) == 1
 
 
 def test_discovery_uses_only_the_feed_get_route_and_deduplicates_titles():

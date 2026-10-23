@@ -31,6 +31,32 @@ class MediaSpan(StrictModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class SourceComment(StrictModel):
+    comment_id: str = Field(pattern=r"^[0-9]{1,32}$")
+    reply_to_id: str | None = Field(default=None, pattern=r"^[0-9]{1,32}$")
+    floor: int | None = Field(default=None, ge=0, le=2147483647)
+    author: str = Field(default="", max_length=80)
+    text: str = Field(default="", max_length=1000)
+    image_count: int = Field(default=0, ge=0, le=1000)
+    truncated: bool = False
+
+
+class CommentEvidence(StrictModel):
+    items: list[SourceComment] = Field(default_factory=list, max_length=40)
+    reported_total: int | None = Field(default=None, ge=0, le=2147483647)
+    partial: bool = True
+
+    @model_validator(mode="after")
+    def unique_comments(self):
+        if len({item.comment_id for item in self.items}) != len(self.items):
+            raise ValueError("Duplicate source comment")
+        if any(item.reply_to_id == item.comment_id for item in self.items):
+            raise ValueError("Self-referencing source comment")
+        if sum(len(item.text) for item in self.items) > 6000:
+            raise ValueError("Comment excerpt exceeds budget")
+        return self
+
+
 class ReadingSource(StrictModel):
     role: Literal["metadata", "page", "player", "subtitle"]
     url: str = Field(max_length=2048)
@@ -86,6 +112,7 @@ class ReadingEvidence(StrictModel):
     spans: list[SubtitleSpan] = Field(default_factory=list, max_length=120)
     sources: list[ReadingSource] = Field(min_length=1, max_length=4)
     truncated: bool = False
+    comments: CommentEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
     resolution: ShortLinkResolution | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -117,6 +144,7 @@ class ArticleEvidence(StrictModel):
     response_bytes: int = Field(gt=0, le=1048576)
     images: list[ArticleImage] = Field(default_factory=list, max_length=32)
     truncated: bool = False
+    comments: CommentEvidence | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def image_order(self):

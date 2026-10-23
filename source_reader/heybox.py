@@ -139,6 +139,64 @@ def article_parts(value):
     return parts
 
 
+def comment_snapshot(body, post):
+    groups = body.get("comments")
+    if not isinstance(groups, list):
+        return None
+    total = post.get("comment_num")
+    total = total if type(total) is int and 0 <= total <= 2147483647 else None
+    more = body.get("has_more_floors") in (True, 1, "1")
+    items, seen, remaining = [], set(), 6000
+    partial = more or total is None or len(groups) > 40
+    for group in groups[:40]:
+        if not isinstance(group, dict):
+            partial = True
+            continue
+        rows = group.get("comment", [group])
+        if not isinstance(rows, list):
+            partial = True
+            continue
+        root = None
+        partial |= len(rows) > 40
+        for row in rows[:40]:
+            if not isinstance(row, dict):
+                partial = True
+                continue
+            identifier = str(row.get("commentid", ""))
+            if not re.fullmatch(r"[0-9]{1,32}", identifier) or identifier in seen:
+                partial = True
+                continue
+            if len(items) == 40:
+                partial = True
+                break
+            parts = article_parts(row.get("text", ""))
+            text = "\n".join(value for kind, value in parts if kind == "text")
+            images = row.get("imgs", [])
+            image_count = len(images) if isinstance(images, list) else 0
+            image_count += sum(kind == "image" for kind, _ in parts)
+            allowance = min(1000, remaining)
+            truncated = len(text) > allowance
+            reply = str(row.get("replyid") or root or "")
+            if reply == identifier:
+                reply = ""
+                partial = True
+            user = row.get("user")
+            author = user.get("username", "") if isinstance(user, dict) else ""
+            floor = row.get("floor_num")
+            items.append({"comment_id": identifier,
+                "reply_to_id": reply if re.fullmatch(r"[0-9]{1,32}", reply) else None,
+                "floor": floor if type(floor) is int and 0 <= floor <= 2147483647 else None,
+                "author": author[:80] if isinstance(author, str) else "",
+                "text": text[:allowance], "image_count": min(1000, image_count),
+                "truncated": truncated})
+            seen.add(identifier)
+            root = root or identifier
+            remaining -= min(len(text), allowance)
+            partial |= truncated or row.get("has_more") in (True, 1, "1")
+    return {"items": items, "reported_total": total,
+            "partial": partial or total != len(items)}
+
+
 def render_article(parts, limit=11500):
     text, images, body_chars, truncated = "", [], 0, False
     prepared, urls = [], []
@@ -249,6 +307,7 @@ class HeyboxReader:
         if discover and not self.source:
             raise ReadFailure("DISCOVERY_SOURCE_REQUIRED")
         url = "https://www.xiaoheihe.cn/" if discover else post_url(item["url"])
+        comments = None
         if self.source:
             raw = await self.source.get(item, budget)
             payload = json.loads(raw)
@@ -298,6 +357,7 @@ class HeyboxReader:
                 for value in extra_images
             )
             method = "source_api"
+            comments = comment_snapshot(payload["result"], post)
         else:
             raw = await self.public.get(url, budget, "page")
             page = ArticleHTML(article_only=True)
@@ -322,6 +382,7 @@ class HeyboxReader:
                     "response_bytes": len(raw),
                     "images": images,
                     "truncated": truncated,
+                    **({"comments": comments} if comments is not None else {}),
                 },
             }
         ]
