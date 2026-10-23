@@ -91,13 +91,12 @@ def _original_image(index, slot, value):
     data = value.get("data")
     if set(value) != {"type", "data"} or not isinstance(data, dict):
         raise ValueError("INVALID_IMAGE_SEGMENT")
-    # The pinned SnowLuma receive codec emits these fields for an ordinary image.
-    # Sticker subtypes, flash pictures and market-face extensions are different
-    # media scopes even when they happen to point at an otherwise allowed CDN.
+    # SnowLuma emits subtype 11 for owner-sent animated image emoji. The original
+    # CDN bytes still cross the signed upload boundary; flash/market-face do not.
     if (
         not set(data) <= {"url", "file", "sub_type", "summary"}
         or type(data.get("sub_type", 0)) is not int
-        or data.get("sub_type", 0) != 0
+        or data.get("sub_type", 0) not in {0, 11}
         or any(
             not isinstance(data[key], str) or (key != "url" and "\x00" in data[key])
             for key in ("url", "file", "summary") if key in data
@@ -191,7 +190,7 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
             if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
                 raise ValueError("IMAGE_ENCODING_UNSUPPORTED")
             mime = response.headers.get("content-type", "").split(";")[0].strip().lower()
-            if mime not in {"image/png", "image/jpeg", "image/webp"}:
+            if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/apng"}:
                 raise ValueError("IMAGE_MIME_UNSUPPORTED")
             try:
                 size = int(response.headers.get("content-length", "0"))

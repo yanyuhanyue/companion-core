@@ -1,6 +1,5 @@
 """Authenticated current-owner originals; source and result fences, never downloads."""
 
-import base64
 import hashlib
 import json
 import re
@@ -294,6 +293,8 @@ def retrieval_text(store, settings, clock, job):
 
 
 def original_parts(store, settings, clock, job):
+    from companion.image_frames import prepare
+
     result(store, settings, settings.live_text_window, job)
     parts = []
     maximum = min(
@@ -306,8 +307,5 @@ def original_parts(store, settings, clock, job):
             or hashlib.sha256(mime.encode() + b"\0" + data).hexdigest() != row["fingerprint"]
         ):
             raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-        parts.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii")},
-        })
+        parts.append(prepare(data, mime, settings.paid_model.image_input).part())
     return parts

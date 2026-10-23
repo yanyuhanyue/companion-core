@@ -1,7 +1,6 @@
 """Owner-shared content stays quoted evidence, never instructions or tool authority."""
 
 import asyncio
-import base64
 import hashlib
 import io
 import json
@@ -798,14 +797,13 @@ class ContentService:
             self._source(original["owner_event_id"], upload=True)
             policy = qq_images.policy(cfg, cfg.live_text_window)
             maximum = min(self.options.max_image_bytes, policy.max_bytes_per_image)
-            validate_image(data, mime, maximum)
+            from companion.image_frames import prepare
             from companion.image_input import text_and_estimate
 
-            part = {
-                "type": "image_url", "image_url": {
-                    "url": f"data:{mime};base64," + base64.b64encode(data).decode("ascii"),
-                },
-            }
+            prepared = prepare(
+                data, mime, policy.model_copy(update={"max_bytes_per_image": maximum}),
+            )
+            part = prepared.part()
             text_and_estimate(policy, [{"role": "user", "content": [
                 {"type": "text", "text": VISION_PROMPT}, part,
             ]}])
@@ -837,7 +835,7 @@ class ContentService:
                 if any(item["deadline"] <= clock() for item in rows):
                     raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)
                 _, _, sources, _ = qq_images.source(s, cfg, approval, row["owner_event_id"])
-                parts, proofs = [], []
+                parts, proofs, sampling = [], [], []
                 for item, source_image in zip(rows, sources, strict=True):
                     saved, saved_mime = image_spool.get(
                         s, item, clock(), maximum,
@@ -856,15 +854,17 @@ class ContentService:
                         != item["fingerprint"]):
                         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
                     proofs.append(staged_proof)
-                    parts.append({"type": "image_url", "image_url": {
-                        "url": f"data:{saved_mime};base64,"
-                        + base64.b64encode(saved).decode("ascii"),
-                    }})
+                    prepared = prepare(saved, saved_mime, policy)
+                    parts.append(prepared.part())
+                    if prepared.note:
+                        sampling.append(f"图片{item['slot'] + 1}：" + prepared.note)
                 prompt = VISION_PROMPT + (
                     " 图片按发送顺序编号为图片1至图片" + str(len(parts))
                     + "，逐图描述可见对象、文字、差异及适合检索主人既往需求的主题线索。"
                     "这些线索只描述当前图片，不能作为主人的历史偏好。"
                 )
+                if sampling:
+                    prompt += "\n" + "\n".join(sampling)
                 messages = [{"role": "user", "content": [{"type": "text", "text": prompt}, *parts]}]
                 text_and_estimate(policy, messages)
                 s.execute(
@@ -888,7 +888,11 @@ class ContentService:
             text = redact(response.text, cfg).replace(
                 cfg.model_key.get_secret_value(), "[REDACTED]",
             )
-            if not text.strip() or len(text) > 6000:
+            if not text.strip():
+                raise CoreError("CONTENT_IMAGE_RESULT_INVALID", 502)
+            if sampling:
+                text = "\n".join(sampling) + "\n" + text
+            if len(text) > 6000:
                 raise CoreError("CONTENT_IMAGE_RESULT_INVALID", 502)
             with s.transaction():
                 approval, _, _ = live_text.guard(s, cfg, clock)

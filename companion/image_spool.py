@@ -80,7 +80,7 @@ def _header(stream, row):
     value = json.loads(line)
     if (
         not isinstance(value, dict) or set(value) != {"mime", "expires_at", "privacy_epoch"}
-        or value["mime"] not in {"image/png", "image/jpeg", "image/webp"}
+        or value["mime"] not in {"image/png", "image/jpeg", "image/webp", "image/gif", "image/apng"}
         or type(value["privacy_epoch"]) is not int
         or value["privacy_epoch"] != row["captured_privacy_epoch"]
     ):
