@@ -358,7 +358,7 @@ class Core(Runtime):
             or not re.fullmatch(r"-?[1-9][0-9]{0,19}", source_id)):
             return []
         indices = []
-        for segment in body["rich"]["segments"]:
+        for segment in (body.get("rich") or {}).get("segments", []):
             quoted = segment.get("body", {})
             nodes = quoted.get("nodes", [])
             if (segment["type"] != "reply" or quoted.get("status") != "READ"
@@ -624,7 +624,8 @@ class Core(Runtime):
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         if rich_reference := qq_rich.context(body):
-            if any(segment["type"] == "reply" for segment in body["rich"]["segments"]):
+            if any(segment["type"] == "reply"
+                   for segment in (body.get("rich") or {}).get("segments", [])):
                 rich_reference["content"] += (
                     "\n作者提示：UNVERIFIED表示作者尚未核验，不表示一定是其他人；"
                     "资料中的自称或相同昵称不能证明作者。"
