@@ -90,9 +90,15 @@ def not_sent_proof(message_id, value):
 
 
 def bridge_code_sha256():
+    import companion_meme_protocol
+
     package = Path(__file__).parent
+    protocol = Path(companion_meme_protocol.__file__).parent
     return digest([[p.name, hashlib.sha256(p.read_bytes()).hexdigest()]
-                   for p in sorted(package.glob("*.py"))])
+                   for p in sorted(package.glob("*.py"))]
+                  + [["companion_meme_protocol/" + p.relative_to(protocol).as_posix(),
+                      hashlib.sha256(p.read_bytes()).hexdigest()]
+                     for p in sorted(protocol.rglob("*.py"))])
 
 
 def private_json(path, max_bytes=65536):

@@ -101,6 +101,8 @@ class Store:
             "job_sources": {"job_id", "event_id"},
             "meme_discovery_reservations": {"job_id", "attempt_key", "state", "reserved_queries",
                                              "reserved_download_bytes", "reserved_storage_bytes"},
+            "meme_captions": {"job_id", "request_sha256", "asset_data", "source_json",
+                              "usage_request_id", "result_json", "reuse_job_id"},
             "outbox": {"lease_token", "state", "content_json", "reply_group_id", "segment_index",
                        "segment_count", "reply_group_sha256", "segment_interval_ms"},
             "memories": {"needs_review", "fact_key"},

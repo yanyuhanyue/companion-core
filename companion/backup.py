@@ -65,7 +65,8 @@ def restore(source, destination, key, ledger_path):
                 store.execute(
                     "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
                     "updated_at=?,last_error_code='RESTORED_DISCOVERY_REQUIRES_RECONCILIATION' "
-                    "WHERE kind='meme_discovery' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+                    "WHERE kind IN ('meme_discovery','meme_caption') "
+                    "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
                     (utcnow(),),
                 )
                 # A backup cannot re-authorize a consumed stopped memory-control grant.

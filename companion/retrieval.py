@@ -14,7 +14,7 @@ INDEX_VERSION = f"{MODEL}@{REVISION}"
 
 
 @lru_cache(maxsize=2)
-def encoder(cache_dir):
+def encoder(cache_dir, *, local_only=False):
     from fastembed import TextEmbedding
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
@@ -31,6 +31,8 @@ def encoder(cache_dir):
         if not (Path(path) / "model_optimized.onnx").is_file():
             raise LocalEntryNotFoundError("Incomplete model snapshot")
     except LocalEntryNotFoundError:
+        if local_only:
+            raise
         path = snapshot_download(**options)
     return TextEmbedding(
         MODEL,

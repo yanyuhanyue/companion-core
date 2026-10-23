@@ -62,7 +62,12 @@ def reserve(
 ):
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
-    if scenario == "content_video":
+    if scenario == "meme_caption":
+        from companion import meme_input
+
+        logical_request_id = logical_request_id or job_id
+        meme_input.contract(settings, job_id, logical_request_id)
+    elif scenario == "content_video":
         from companion.video_input import contract as video_contract
 
         logical_request_id = logical_request_id or job_id
@@ -119,6 +124,8 @@ def reserve(
             month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
             cumulative.activate(store, settings, now)
+        if scenario == "meme_caption":
+            meme_input.check_attempt(store, job_id)
         live_text.reserve_model(store, settings, clock, job_id, scenario)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
@@ -155,6 +162,9 @@ def reserve(
             elif scenario in {"content_vision", "content_video"}:
                 scenarios = ("content_vision", "content_video")
                 limit = settings.content.image_daily_micro_usd
+            elif scenario == "meme_caption":
+                scenarios = ("meme_caption",)
+                limit = settings.meme_caption_daily_micro_usd
             elif scenario == "activity":
                 scenarios = ("activity",)
                 limit = settings.autonomous_daily_micro_usd
@@ -185,7 +195,7 @@ def reserve(
                 "WHERE occurred_at>=? AND scenario IN (" + ",".join("?" for _ in scenarios) + ")",
                 (day.isoformat(timespec="microseconds"), *scenarios),
             )["n"]
-            if not unlimited_period and spent + estimate > limit:
+            if (not unlimited_period or scenario == "meme_caption") and spent + estimate > limit:
                 raise CoreError("DAILY_BUDGET_EXHAUSTED", 429)
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
@@ -537,19 +547,21 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
         limited = column != "window_id" or not snapshot.get("unlimited_period_spend", False)
         if limited and total + delta > cap:
             limits.append(code)
-    if snapshot.get("unlimited_period_spend", False):
+    unlimited_period = snapshot.get("unlimited_period_spend", False)
+    if unlimited_period and usage["scenario"] != "meme_caption":
         return limits
-    daily = store.one(
-        "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
-        "WHERE occurred_at>=? AND occurred_at<?", (day, next_day),
-    )["n"]
-    if daily + delta > snapshot["daily_micro_usd"]:
-        limits.append("DAILY_AMOUNT")
-    monthly = total_monthly(store, month, next_month) + delta
-    if monthly > min(snapshot["monthly_micro_usd"], snapshot.get(
-        "local_monthly_micro_usd", snapshot["monthly_micro_usd"],
-    )):
-        limits.append("MONTHLY_AMOUNT")
+    if not unlimited_period:
+        daily = store.one(
+            "SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+            "WHERE occurred_at>=? AND occurred_at<?", (day, next_day),
+        )["n"]
+        if daily + delta > snapshot["daily_micro_usd"]:
+            limits.append("DAILY_AMOUNT")
+        monthly = total_monthly(store, month, next_month) + delta
+        if monthly > min(snapshot["monthly_micro_usd"], snapshot.get(
+            "local_monthly_micro_usd", snapshot["monthly_micro_usd"],
+        )):
+            limits.append("MONTHLY_AMOUNT")
     scenario = usage["scenario"]
     cap = snapshot.get("scenario_daily_micro_usd", {}).get(scenario)
     if cap is not None:
@@ -699,7 +711,9 @@ async def _dispatch(
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
-    if live_text.active(store, settings) or scenario in {"content_vision", "content_video"}:
+    if live_text.active(store, settings) or scenario in {
+        "content_vision", "content_video", "meme_caption",
+    }:
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
         target_url = (settings.paid_model.video_input.endpoint if scenario == "content_video"
@@ -728,7 +742,12 @@ async def _dispatch(
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
         if row["usage_scenario"] != scenario:
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        if scenario in {"content_vision", "content_video"}:
+        if scenario == "meme_caption":
+            from companion import meme_input
+
+            meme_input.contract(settings, row["usage_job_id"], row["logical_request_id"])
+            meme_input.check_attempt(store, row["usage_job_id"], request_id)
+        elif scenario in {"content_vision", "content_video"}:
             from companion.image_input import contract as image_contract
 
             image_contract(settings, row["usage_job_id"], row["logical_request_id"])
@@ -803,7 +822,7 @@ async def _dispatch(
                     or current["io_started_at"] != now
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
-                    or (scenario in {"content_vision", "content_video"} and (
+                    or (scenario in {"content_vision", "content_video", "meme_caption"} and (
                         current["scenario"] != scenario
                         or current["usage_job_id"] != row["usage_job_id"]
                         or current["logical_request_id"] != row["logical_request_id"]
@@ -814,7 +833,10 @@ async def _dispatch(
                              "('model_budget_blocked','model_budget_restore_required')"):
                     raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
             paid_budget.contract(settings, clock())
-            if scenario in {"content_vision", "content_video"}:
+            if scenario == "meme_caption":
+                meme_input.contract(settings, row["usage_job_id"], row["logical_request_id"])
+                meme_input.check_attempt(store, row["usage_job_id"], request_id)
+            elif scenario in {"content_vision", "content_video"}:
                 image_contract(settings, row["usage_job_id"], row["logical_request_id"])
                 if scenario == "content_video":
                     video_contract(settings, row["usage_job_id"], row["logical_request_id"])

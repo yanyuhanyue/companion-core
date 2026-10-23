@@ -79,6 +79,23 @@ class ExpressionEngine:
         return tuple(dict.fromkeys(c for c in configured if CATEGORY.fullmatch(c)))[:12]
 
     def _offer(self, event_id):
+        if getattr(self.settings, "meme_semantics_enabled", False):
+            row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                 ("meme_offer:" + event_id,)) if event_id else None
+            try:
+                value = json.loads(row["value"]) if row else {}
+                if (value.get("event_id") != event_id
+                    or not reply_revision.current(self.store, event_id,
+                                                   value.get("reply_revision"))):
+                    return True, None
+                job = self.store.one("SELECT * FROM jobs WHERE job_id=?", (value["job_id"],))
+                if not job or job["event_id"] != event_id:
+                    return True, None
+                reply_revision.check_sources(self.store, job["job_id"])
+                offer = MemeOffer.model_validate(value["offer"]) if value.get("offer") else None
+                return True, offer
+            except (CoreError, ValidationError, ValueError, TypeError, KeyError):
+                return True, None
         row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
                              ("live_text_input:" + event_id,)) if event_id else None
         value = json.loads(row["value"]) if row else {}

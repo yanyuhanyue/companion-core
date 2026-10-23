@@ -38,6 +38,9 @@ def snapshot(settings):
     if approval.image_input is not None:
         value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
         value["scenario_daily_micro_usd"]["content_vision"] = settings.content.image_daily_micro_usd
+    if approval.meme_input is not None:
+        value["image_estimator"] = "approved-fixed-image-plus-utf8-third-v1"
+        value["scenario_daily_micro_usd"]["meme_caption"] = settings.meme_caption_daily_micro_usd
     value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(
@@ -103,6 +106,12 @@ def estimate_input_tokens(approval, messages, scenario):
                                                     approval.image_input)
             messages = [{"role": "user", "content": text}]
             estimate += video_estimate
+        elif scenario == "meme_caption":
+            from companion.meme_input import text_and_estimate
+
+            text, image_estimate = text_and_estimate(approval.meme_input, messages)
+            messages = [{"role": "user", "content": text}]
+            estimate += image_estimate
         elif scenario == "content_vision":
             from companion.image_input import text_and_estimate
 
@@ -129,7 +138,7 @@ def estimate_input_tokens(approval, messages, scenario):
             ):
                 raise ValueError("unsupported message contract")
             estimate += 8 + (len(message["content"].encode("utf-8")) + 2) // 3
-        if scenario in {"memory_review", "memory_extract", "diary", "reflection"}:
+        if scenario in {"memory_review", "memory_extract", "diary", "reflection", "meme_caption"}:
             estimate += 32
         return (estimate * approval.input_estimate_safety_percent + 99) // 100
     except (ValueError, TypeError, KeyError, UnicodeError) as error:

@@ -90,11 +90,16 @@ class SendCheck(WindowReference):
 
 
 def code_sha256():
+    import companion_meme_protocol
+
     package = Path(__file__).parent
+    protocol = Path(companion_meme_protocol.__file__).parent
     return paid_budget.sha([
         [p.relative_to(package).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest()]
         for p in sorted(package.rglob("*.py"))
-    ])
+    ] + [["companion_meme_protocol/" + p.relative_to(protocol).as_posix(),
+           hashlib.sha256(p.read_bytes()).hexdigest()]
+          for p in sorted(protocol.rglob("*.py"))])
 
 
 def config_sha256(settings):

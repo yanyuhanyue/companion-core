@@ -17,10 +17,13 @@ from urllib.parse import unquote, urlsplit
 import httpx
 
 from .images import resolve_public
+from .meme_caption import CaptionContext, parse
 from .meme_catalog import INTENTS, MOCKERY, MemeCatalog, Metadata, key_hash
 from .meme_discovery import BraveImages, DiscoveryLimits, ReviewApproval, Usage, run_discovery
 from .meme_library import CATEGORY, MemeLibrary
 from .meme_packs import CommunityPacks, relative_path
+from .meme_semantic import SemanticLibrary, installed, profile
+from .meme_semantic_http import CaptionEmbeddingHTTP, CaptionHTTP, SemanticHTTP
 from .reply_segments import event_id as delivery_event_id
 from .spool import encode
 
@@ -70,8 +73,9 @@ class TrustedReviewer:
     tags to the downloaded image's original hash and semantic entry identity.
     """
 
-    def __init__(self, rules):
+    def __init__(self, rules, *, require_semantics=True):
         self.rules = tuple(dict(rule) for rule in rules)
+        self.require_semantics = require_semantics
         self.rejected = 0
         if len(self.rules) > 32:
             raise ValueError("MEME_TRUST_RULE_INVALID")
@@ -140,13 +144,16 @@ class TrustedReviewer:
                 or candidate.revision != rule["revision"]
                 or candidate.license != rule["license"]
                 or candidate.license_sha256 != rule["license_sha256"]
-                or candidate.semantic_verified is not True
+                or evidence.image_sha256 != image.sha256
+                or hashlib.sha256(image.data).hexdigest() != image.sha256
+            ):
+                continue
+            if self.require_semantics and (
+                candidate.semantic_verified is not True
                 or not isinstance(candidate.description, str)
                 or not candidate.description.strip()
                 or not isinstance(candidate.tags, tuple)
                 or not candidate.tags
-                or evidence.image_sha256 != image.sha256
-                or hashlib.sha256(image.data).hexdigest() != image.sha256
             ):
                 continue
             try:
@@ -160,20 +167,22 @@ class TrustedReviewer:
                 relative_path(rule["asset_prefix"]).as_posix() + "/"
             ):
                 continue
-            words = (candidate.description + " " + " ".join(candidate.tags)).casefold()
+            description = candidate.description if self.require_semantics else "待理解素材"
+            tags = candidate.tags if self.require_semantics else ()
+            words = (description + " " + " ".join(tags)).casefold()
             suitable = tuple(
                 intent for intent, terms in INTENTS.items() if any(term in words for term in terms)
             )
-            if not suitable:
+            if self.require_semantics and not suitable:
                 continue
             avoid = ("comfort",) if any(word in words for word in MOCKERY) else ()
             category = path.rsplit("/", 2)[-2]
             if not CATEGORY.fullmatch(category):
-                category = CATEGORIES[suitable[0]]
+                category = CATEGORIES[suitable[0]] if suitable else "happy"
             metadata = Metadata(
                 category,
-                candidate.description,
-                candidate.tags,
+                description,
+                tags,
                 suitable,
                 avoid,
                 candidate.source_page,
@@ -198,9 +207,13 @@ class MemeRuntime:
         if self.db.in_transaction:
             raise RuntimeError("MEME_RUNTIME_REQUIRES_TRANSACTION_BOUNDARY")
         self.config = window.plan.config
+        self.semantics_enabled = getattr(self.config, "meme_semantics_enabled", False)
+        self.semantics = None
+        self._profile_lock = asyncio.Lock()
         self.transport, self.resolver = transport, resolver
         self.reviewer = reviewer or TrustedReviewer(
-            getattr(self.config, "meme_trusted_sources", ())
+            getattr(self.config, "meme_trusted_sources", ()),
+            require_semantics=not self.semantics_enabled,
         )
         self.library = MemeLibrary(
             self.config.meme_directory or Path(self.spool.directory) / "memes",
@@ -225,9 +238,23 @@ class MemeRuntime:
             "category TEXT NOT NULL,window_sha256 TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS meme_runtime_results (attempt_key TEXT PRIMARY KEY,"
             "job_id TEXT NOT NULL,body_json TEXT NOT NULL,state TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS meme_runtime_sources (sha TEXT,attempt_key TEXT,"
+            "claim_json TEXT NOT NULL,state TEXT NOT NULL,PRIMARY KEY(sha,attempt_key))",
+            "CREATE TABLE IF NOT EXISTS meme_runtime_semantic_offers (event_id TEXT PRIMARY KEY,"
+            "window_sha256 TEXT NOT NULL,reply_revision INTEGER,query_binding TEXT,"
+            "offer_json TEXT,state TEXT NOT NULL)",
         ):
             self.db.execute(sql)
         self.db.commit()
+        # Resume immutable selections with the last Core-issued profile. Fresh databases
+        # require HTTP profile admission before discovery, retrieval or image delivery.
+        if self.semantics_enabled and installed(self.db):
+            saved = profile(self.db)
+            if saved is not None:
+                self.semantics = SemanticLibrary(
+                    self.catalog, saved["caption"], saved["embedding"],
+                    minimum_confidence=saved["minimum_confidence"],
+                )
         self.running = False
 
     def _window_check(self):
@@ -282,7 +309,7 @@ class MemeRuntime:
                 raise ValueError("MEME_INPUT_CANCELLED")
 
     def prepare_offer(self, event, capture=None):
-        if not self.library.enabled:
+        if not self.library.enabled or self.semantics_enabled:
             return None
         event_id = event.get("event_id")
         prefix = f"{self.config.bot_qq_id}:{self.config.origin}:epoch:{self.config.protocol_epoch}:"
@@ -350,12 +377,156 @@ class MemeRuntime:
     def missing_offer(self, event_id):
         if not isinstance(event_id, str) or not EVENT.fullmatch(event_id):
             raise ValueError("MEME_INPUT_INVALID")
+        table = "meme_runtime_semantic_offers" if self.semantics_enabled else "meme_runtime_offers"
         row = self.db.execute(
-            "SELECT offer_json FROM meme_runtime_offers WHERE event_id=? AND window_sha256=?",
+            f"SELECT offer_json FROM {table} WHERE event_id=? AND window_sha256=?"
+            + (" AND state='ACCEPTED'" if self.semantics_enabled else ""),
             (event_id, self.window.plan.sha256),
         ).fetchone()
         offer = json.loads(row[0]) if row else None
         return offer if offer is not None and not offer["candidates"] else None
+
+    async def _ensure_semantics(self, client, check):
+        async with self._profile_lock:
+            check()
+            if self.semantics is None:
+                identity, embedding = await SemanticHTTP(self.window, client, check=check).profile()
+                check()
+                self.spool.capacity(65536)
+                self.semantics = SemanticLibrary(self.catalog, identity, embedding)
+            self.semantics._profile_check()
+        return self.semantics
+
+    def _admitted_check(self, event_id):
+        self._event_check(event_id)
+        row = self.db.execute("SELECT state FROM inbox WHERE key=?", (event_id,)).fetchone()
+        if not row or row[0] != "accepted":
+            raise ValueError("MEME_INPUT_NOT_ADMITTED")
+
+    async def semantic_offer(self, client, event_id, *, reply_revision):
+        """One bounded post-inbox attempt; never edits the signed input offer."""
+        if not self.semantics_enabled or not self.library.enabled:
+            return {"status": "DISABLED"}
+
+        def check():
+            self._admitted_check(event_id)
+            self.spool.capacity(65536)
+
+        check()
+        with self.catalog.atomic(check):
+            if self.db.execute(
+                "SELECT 1 FROM meme_runtime_semantic_offers WHERE event_id=?", (event_id,)
+            ).fetchone():
+                return {"status": "ALREADY_ATTEMPTED"}
+            if self.db.execute(
+                "SELECT COUNT(*) FROM meme_runtime_semantic_offers"
+            ).fetchone()[0] >= self.catalog.max_bindings:
+                raise ValueError("MEME_BINDING_LIMIT")
+            self.db.execute(
+                "INSERT INTO meme_runtime_semantic_offers VALUES (?,?,?,NULL,NULL,'REQUESTING')",
+                (event_id, self.window.plan.sha256, reply_revision),
+            )
+        try:
+            semantics = await self._ensure_semantics(client, check)
+            http = SemanticHTTP(self.window, client, check=check)
+            query = await http.query(event_id, reply_revision)
+            offer = None
+            if query["query"]["intent"] is not None:
+                key = "meme:" + event_id
+                candidates = semantics.candidates(
+                    key, query["query"], query_vector=query["embedding"], check=check,
+                )
+                offer = {"offer_key": key, "intent": query["query"]["intent"],
+                         "candidates": candidates}
+            # Retain only opaque query identity and public asset metadata, never private text.
+            binding = {key: query[key] for key in (
+                "job_id", "event_id", "reply_revision", "query_sha256",
+            )}
+            with self.catalog.atomic(check):
+                self.db.execute(
+                    "UPDATE meme_runtime_semantic_offers SET query_binding=?,offer_json=?,"
+                    "state='PREPARED' WHERE event_id=?",
+                    (encode(binding), encode(offer), event_id),
+                )
+            await http.offer(query, offer)
+            with self.catalog.atomic(check):
+                self.db.execute(
+                    "UPDATE meme_runtime_semantic_offers SET state='ACCEPTED' WHERE event_id=?",
+                    (event_id,),
+                )
+            return {"status": "OFFER_ACCEPTED"}
+        except BaseException:
+            with self.db:
+                self.db.execute(
+                    "UPDATE meme_runtime_semantic_offers SET state='DEFERRED' WHERE event_id=?",
+                    (event_id,),
+                )
+            raise
+
+    async def _semantic_once(self, client):
+        semantics = await self._ensure_semantics(client, self._window_check)
+        rows = self.db.execute(
+            "SELECT s.sha,s.attempt_key,s.claim_json,r.state FROM meme_runtime_sources s "
+            "JOIN meme_runtime_results r ON r.attempt_key=s.attempt_key "
+            "WHERE s.state='PENDING' ORDER BY s.rowid LIMIT ?", (self.catalog.max_bindings,),
+        ).fetchall()
+        for sha, attempt, raw, settlement in rows:
+            claim = json.loads(raw)
+            try:
+                self._event_check(claim["event_id"])
+                semantics._current(sha)
+            except ValueError:
+                with self.db:
+                    self.db.execute(
+                        "UPDATE meme_runtime_sources SET state='CANCELLED' "
+                        "WHERE sha=? AND attempt_key=?", (sha, attempt),
+                    )
+                continue
+            if settlement != "SETTLED":
+                continue  # An uncertain download never starts another paid operation.
+            context = CaptionContext(
+                event_id=claim["event_id"], reply_revision=claim["reply_revision"],
+                discovery_job_id=claim["job_id"], attempt_key=attempt,
+            )
+
+            def fence(context=context, attempt=attempt):
+                self._event_check(context.event_id)
+                self.spool.capacity(65536)
+                result = self.db.execute(
+                    "SELECT state FROM meme_runtime_results WHERE attempt_key=?", (attempt,),
+                ).fetchone()
+                if not result or result[0] != "SETTLED":
+                    raise ValueError("MEME_DISCOVERY_UNSETTLED")
+
+            async def check():
+                fence()
+
+            http = SemanticHTTP(self.window, client, check=fence)
+            status = semantics._status(sha)["state"]
+            if status == "PENDING":
+                value = await semantics.advance(
+                    sha, CaptionHTTP(http, self.catalog), context, check=check, commit_check=fence,
+                )
+                return {"status": "CAPTION_" + value["state"]}
+            if status == "READY":
+                binding = self.db.execute(
+                    "SELECT b.job_id,b.context_json FROM meme_semantic_assets a "
+                    "JOIN meme_caption_bindings b ON b.request_sha=a.binding_request "
+                    "WHERE a.sha=? AND b.state='SUCCEEDED'", (sha,),
+                ).fetchone()
+                bound_context = parse(CaptionContext, binding[1])
+                embedder = CaptionEmbeddingHTTP(
+                    http, job_id=binding[0], context=bound_context,
+                    caption=semantics.caption(sha)[0],
+                )
+                await semantics.index(sha, embedder, check=check, commit_check=fence)
+            with self.catalog.atomic(fence):
+                self.db.execute(
+                    "UPDATE meme_runtime_sources SET state=? WHERE sha=? AND attempt_key=?",
+                    ("INDEXED" if status == "READY" else "QUARANTINED", sha, attempt),
+                )
+            return {"status": "SEMANTIC_" + status}
+        return None
 
     def _item(self, item):
         image = item.get("content", {}).get("image")
@@ -397,6 +568,8 @@ class MemeRuntime:
         return event_id, image
 
     def prepare(self, item, *, check):
+        if self.semantics_enabled and self.semantics is None:
+            raise ValueError("MEME_SEMANTIC_PROFILE_REQUIRED")
         event_id, image = self._item(item)
         self.spool.capacity(4096)
 
@@ -415,6 +588,8 @@ class MemeRuntime:
         )
 
     def mark_sending(self, item, *, check):
+        if self.semantics_enabled and self.semantics is None:
+            raise ValueError("MEME_SEMANTIC_PROFILE_REQUIRED")
         event_id, image = self._binding(item)
 
         def fence():
@@ -566,11 +741,15 @@ class MemeRuntime:
             if pending:
                 state = await self._flush_result(client, pending)
                 return {"status": "RESULT_RECONCILED", "state": state}
-            if not self.library.enabled or not getattr(
-                self.config, "meme_discovery_enabled", False
-            ):
+            if not self.library.enabled:
                 return {"status": "DISABLED"}
             self._window_check()
+            if self.semantics_enabled:
+                semantic = await self._semantic_once(client)
+                if semantic:
+                    return semantic
+            if not getattr(self.config, "meme_discovery_enabled", False):
+                return {"status": "DISABLED"}
             response = await self.window.core_post(
                 client,
                 BASE + "/lease",
@@ -604,6 +783,17 @@ class MemeRuntime:
                 value = self.reviewer(candidate, image, evidence)
                 value = await value if inspect.isawaitable(value) else value
                 self.spool.capacity(len(image.data) * 3 + 8192)
+                if (self.semantics_enabled and isinstance(value, ReviewApproval)
+                    and value.evidence_sha256 == evidence.sha256):
+                    with self.catalog.atomic(lambda: self._claim_check(claim)):
+                        if self.db.execute(
+                            "SELECT COUNT(*) FROM meme_runtime_sources"
+                        ).fetchone()[0] >= self.catalog.max_bindings:
+                            raise ValueError("MEME_BINDING_LIMIT")
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO meme_runtime_sources VALUES (?,?,?,'PENDING')",
+                            (image.sha256, claim["attempt_key"], encode(claim)),
+                        )
                 return value
 
             result = await run_discovery(

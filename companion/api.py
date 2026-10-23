@@ -15,6 +15,7 @@ from companion import (
     cumulative,
     input_protocol,
     live_text,
+    meme_core,
     meme_service,
     qq_images,
     qq_rich,
@@ -45,9 +46,10 @@ from companion.transport import begin_send, delivery_result, lease_deliveries
 
 
 class BodyLimit:
-    def __init__(self, app, image_limit=131072):
+    def __init__(self, app, image_limit=131072, meme_limit=131072):
         self.app = app
         self.image_limit = image_limit
+        self.meme_limit = meme_limit
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["method"] not in {"POST", "PUT", "PATCH"}:
@@ -56,6 +58,8 @@ class BodyLimit:
         limit = (
             self.image_limit
             if re.fullmatch(r"/internal/v2/content/[^/]+/image", scope["path"])
+            else self.meme_limit
+            if scope["path"] == "/internal/v1/memes/captions"
             else 131072
         )
         while True:
@@ -119,6 +123,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
+        meme_limit=6 * 1024 * 1024 if settings.meme_semantics_enabled else 131072,
     )
 
     async def authenticate(authorization: str = Header(default="")):
@@ -523,6 +528,30 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def live_text_send(body: live_text.SendCheck):
         core = app.state.core
         return live_text.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/memes/semantics/profile", dependencies=auth)
+    async def meme_profile():
+        return app.state.core.memes.profile()
+
+    @app.post(prefix + "/memes/captions", dependencies=auth)
+    async def meme_caption(body: meme_core.CaptionBody):
+        return app.state.core.memes.submit(body)
+
+    @app.post(prefix + "/memes/captions/{job_id}", dependencies=auth)
+    async def meme_caption_status(job_id: str):
+        return app.state.core.memes.outcome(job_id)
+
+    @app.post(prefix + "/memes/embeddings", dependencies=auth)
+    async def meme_embedding(body: meme_core.EmbedBody):
+        return await app.state.core.memes.embed(body)
+
+    @app.post(prefix + "/memes/query", dependencies=auth)
+    async def meme_query(body: meme_core.QueryBody):
+        return await app.state.core.memes.query(body)
+
+    @app.post(prefix + "/memes/offers", dependencies=auth)
+    async def meme_offer(body: meme_core.OfferBody):
+        return app.state.core.memes.offer(body)
 
     @app.post(prefix + "/memes/discovery/submit", dependencies=auth)
     async def meme_submit(body: meme_service.DiscoveryRequest):

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -67,6 +68,40 @@ def verify_export_rebuild(source, temporary):
     print("PASS: exported source rebuild excludes private inputs without Git metadata")
 
 
+def verify_meme_protocol(destination, env=None):
+    """Import the extracted contract without either application's runtime dependencies."""
+    script = textwrap.dedent("""
+        import importlib.abc
+        import sys
+        from pathlib import Path
+
+        destination = Path(sys.argv[1]).resolve()
+        sys.path.insert(0, str(destination))
+        blocked = {"companion", "companion_onebot_bridge", "sqlite3", "sqlalchemy",
+                   "httpx", "fastapi", "fastembed", "uvicorn"}
+
+        class RuntimeDependencyGuard(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split(".", 1)[0] in blocked:
+                    raise AssertionError("Shared protocol imported runtime dependency: " + fullname)
+
+        sys.meta_path.insert(0, RuntimeDependencyGuard())
+        import companion_meme_protocol as shared
+        assert Path(shared.__file__).resolve().is_relative_to(destination)
+        assert shared.caption_model_schema()["title"] == "CaptionResult"
+        blocked.remove("companion_onebot_bridge")
+        from companion_onebot_bridge import meme_caption, meme_library, meme_semantic
+        assert meme_caption.CaptionResult is shared.CaptionResult
+        assert meme_caption.sample_frames is shared.sample_frames
+        assert meme_semantic.caption_text is shared.caption_text
+        assert meme_library.PreparedImage is shared.PreparedImage
+        assert shared.validate_bytes(b"invalid image") is None
+        assert "companion" not in sys.modules and "sqlite3" not in sys.modules
+    """)
+    subprocess.run([sys.executable, "-I", "-c", script, str(destination)], cwd=destination,
+                   env=env, check=True, timeout=30)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist-dir", type=Path, default=ROOT / "dist")
@@ -96,6 +131,7 @@ def main():
             "source_reader/bili_tools.py",
             "companion_onebot_bridge/__main__.py",
             "companion_onebot_bridge/spool.py",
+            "companion_meme_protocol/__init__.py",
             "companion/telemetry.py",
         } <= set(archive.namelist())
         with tempfile.TemporaryDirectory(prefix="package-check-", dir=temporary) as folder:
@@ -112,6 +148,7 @@ def main():
                 PYTHONDONTWRITEBYTECODE="1",
                 PYTHONPATH=str(destination),
             )
+            verify_meme_protocol(destination, env)
             subprocess.run(
                 [sys.executable, "-m", "companion", "init"],
                 cwd=destination,

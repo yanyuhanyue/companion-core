@@ -595,14 +595,59 @@ class MemePump:
 
     def __init__(self, window, client):
         self.window, self.client, self.task = window, client, None
+        self.query_task = None
+        self.query_event = None
+        self.query_tasks = set()
         self.enabled = window.plan.config.meme_enabled
         self.submitted = set()
         self.next_run = 0
         self.runtime = window.memes if self.enabled else None
 
     def interrupt(self):
+        self._interrupt_background()
+        for task in self.query_tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+
+    def _interrupt_background(self):
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
+
+    def admitted(self, event_id):
+        if not self.enabled or not self.runtime.semantics_enabled:
+            return
+        if event_id == self.query_event:
+            return
+        row = self.window.db.execute(
+            "SELECT w.* FROM window_inputs w JOIN inbox i ON i.key=w.event_id "
+            "WHERE w.event_id=? AND w.plan_hash=? AND i.state='accepted'",
+            (event_id, self.window.plan.sha256),
+        ).fetchone()
+        if row is None or row["state"] in {"ACK", "CANCELLED", "SUPERSEDED", "RECALLED"}:
+            return
+        if self.window.db.execute(
+            "SELECT 1 FROM meme_runtime_semantic_offers WHERE event_id=?", (event_id,),
+        ).fetchone():
+            return
+        self.interrupt()
+        self.query_event = event_id
+        self.query_task = asyncio.create_task(self._query(row))
+        self.query_tasks.add(self.query_task)
+        self.query_task.add_done_callback(self.query_tasks.discard)
+
+    async def _query(self, row):
+        try:
+            # Core's candidate window is two seconds; retrieval never holds the input loop.
+            async with asyncio.timeout(1.5):
+                self.runtime._admitted_check(row["event_id"])
+                state = await self.window.input_state(self.client, row)
+                await self.runtime.semantic_offer(
+                    self.client, row["event_id"], reply_revision=state["reply_revision"],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            emit("meme_semantic_offer", status="DEFERRED")
 
     async def execute(self, row):
         try:
@@ -629,16 +674,29 @@ class MemePump:
     def tick(self, *, idle):
         if not self.enabled:
             return
+        if self.runtime.semantics_enabled:
+            latest = self.window.db.execute(
+                "SELECT event_id FROM window_inputs WHERE plan_hash=? ORDER BY rowid DESC LIMIT 1",
+                (self.window.plan.sha256,),
+            ).fetchone()
+            if latest:
+                self.admitted(latest[0])
+            if self.query_task is not None and self.query_task.done():
+                if not self.query_task.cancelled():
+                    self.query_task.result()
+                self.query_task = None
         if self.task is not None:
             if not self.task.done():
                 if not idle:
-                    self.interrupt()
+                    self._interrupt_background()
                 return
             if not self.task.cancelled():
                 self.task.result()
             self.task = None
             self.next_run = time.monotonic() + 5
         if not idle or time.monotonic() < self.next_run:
+            return
+        if self.query_task is not None and not self.query_task.done():
             return
         row = self.window.db.execute(
             "SELECT * FROM window_inputs WHERE plan_hash=? ORDER BY rowid DESC LIMIT 1",
@@ -654,8 +712,9 @@ class MemePump:
 
     async def close(self):
         self.interrupt()
-        if self.task is not None:
-            await asyncio.gather(self.task, return_exceptions=True)
+        tasks = [*self.query_tasks, *([self.task] if self.task is not None else [])]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def run_interleaved(window, client, protocol, source, pause, media, memes):
@@ -690,7 +749,9 @@ async def run_interleaved(window, client, protocol, source, pause, media, memes)
             raise ValueError("AUTOMATIC_INPUT_RECONCILIATION_REQUIRED")
         if window.spool.pending_count:
             async with window.core_http(client) as scoped:
-                await window.spool.flush_one(scoped)
+                accepted = await window.spool.flush_one(scoped)
+            if accepted:
+                memes.admitted(accepted["event_id"])
             continue
         if observed := source.first():
             await capture_observed(window, client, protocol, observed)

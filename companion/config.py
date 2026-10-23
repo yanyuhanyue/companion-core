@@ -81,6 +81,9 @@ class PaidModelApproval(BaseModel):
         default=False, strict=True, exclude_if=lambda value: value is False,
     )
     image_input: ImageInputPolicy | None = None
+    meme_input: ImageInputPolicy | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     video_input: VideoInputPolicy | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -98,6 +101,11 @@ class PaidModelApproval(BaseModel):
             raise ValueError("approval interval exceeds configured rate validity")
         if self.cached_input_rate > self.input_rate:
             raise ValueError("cached rate must not exceed uncached admission price")
+        if self.meme_input and (
+            self.meme_input.max_images_per_request == "unlimited"
+            or self.meme_input.max_images_per_request > 5
+        ):
+            raise ValueError("meme input permits at most five image samples")
         if self.unlimited_period_spend and self.cumulative is not None:
             raise ValueError("unlimited period spend cannot override a cumulative account ceiling")
         periods = (self.daily_micro_usd, self.monthly_micro_usd, self.window_micro_usd)
@@ -371,6 +379,15 @@ class Settings(BaseModel):
     expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
     expression_selection_probability: float = Field(default=0.35, ge=0, le=1)
     meme_discovery_enabled: bool = False
+    meme_semantics_enabled: bool = Field(
+        default=False, exclude_if=lambda value: value is False,
+    )
+    meme_caption_daily_micro_usd: int = Field(
+        default=0, ge=0, exclude_if=lambda value: value == 0,
+    )
+    meme_caption_max_output_tokens: int = Field(
+        default=2000, ge=128, le=4096, exclude_if=lambda value: value == 2000,
+    )
     meme_discovery_daily_queries: int = Field(default=2, ge=0, le=100)
     meme_discovery_daily_download_bytes: int = Field(default=16777216, ge=0, le=268435456)
     meme_discovery_daily_storage_bytes: int = Field(default=4194304, ge=0, le=67108864)
@@ -460,6 +477,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "meme_caption":
+            return self.meme_caption_max_output_tokens
         if scenario == "content_video" and self.paid_model and self.paid_model.video_input:
             return self.paid_model.video_input.max_output_tokens
         if scenario == "content_vision":

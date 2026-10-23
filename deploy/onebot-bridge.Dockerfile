@@ -6,6 +6,7 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock && \
     useradd -m -u 10004 bridge && mkdir -m 0700 /bridge-data && \
     chown bridge:bridge /bridge-data
 COPY companion_onebot_bridge ./companion_onebot_bridge
+COPY companion_meme_protocol ./companion_meme_protocol
 COPY scripts/probe_snowluma_direct.py ./scripts/probe_snowluma_direct.py
 USER bridge
 ENTRYPOINT ["python", "-m", "companion_onebot_bridge"]

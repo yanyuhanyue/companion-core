@@ -55,6 +55,7 @@ class BridgeConfig:
     rich_input_scope: str = "none"
     meme_directory: str | None = None
     meme_enabled: bool = False
+    meme_semantics_enabled: bool = False
     meme_discovery_enabled: bool = False
     meme_search_provider: str = "none"
     meme_search_api_key: str | None = None
@@ -66,6 +67,7 @@ class BridgeConfig:
 
     def __post_init__(self):
         if (type(self.meme_enabled) is not bool or type(self.meme_discovery_enabled) is not bool
+            or type(self.meme_semantics_enabled) is not bool
             or self.meme_search_provider not in {"none", "brave"}):
             raise ValueError("INVALID_MEME_CONFIGURATION")
         if self.meme_search_api_key is not None and (

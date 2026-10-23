@@ -1,0 +1,126 @@
+"""Opaque Core HTTP v1 adapters; model admission and embedding live only in Core."""
+
+import base64
+import hashlib
+import re
+
+from .meme_caption import (
+    CaptionIdentity,
+    EmbeddingBatch,
+    EmbeddingSpec,
+    caption_text,
+    digest,
+    parse,
+    source_evidence,
+)
+from .meme_semantic_search import SemanticQuery
+
+BASE = "/internal/v1/memes"
+JOB = re.compile(r"job_[a-f0-9]{32}")
+SHA = re.compile(r"[a-f0-9]{64}")
+
+
+class SemanticHTTP:
+    def __init__(self, window, client, *, check):
+        self.window, self.client, self.check = window, client, check
+
+    async def post(self, suffix, body, *, after=True):
+        self.check()
+        result = await self.window.core_post(self.client, BASE + suffix, body)
+        if after:
+            self.check()
+        return result
+
+    async def profile(self):
+        value = await self.post("/semantics/profile", {})
+        if not isinstance(value, dict) or set(value) != {"identity", "embedding"}:
+            raise ValueError("MEME_SEMANTIC_PROFILE_INVALID")
+        if (not isinstance(value["identity"], dict)
+            or set(value["identity"]) != {"model_version", "prompt_version"}):
+            raise ValueError("MEME_SEMANTIC_PROFILE_INVALID")
+        return parse(CaptionIdentity, value["identity"]), parse(EmbeddingSpec, value["embedding"])
+
+    async def query(self, event_id, reply_revision):
+        value = await self.post("/query", {"event_id": event_id, "reply_revision": reply_revision})
+        if (not isinstance(value, dict) or set(value) != {
+            "job_id", "event_id", "reply_revision", "query_sha256", "query", "embedding",
+        } or not isinstance(value["job_id"], str) or not JOB.fullmatch(value["job_id"])
+            or value["event_id"] != event_id or type(value["reply_revision"]) is not int
+            or value["reply_revision"] != reply_revision
+            or not isinstance(value["query_sha256"], str)
+            or not SHA.fullmatch(value["query_sha256"])):
+            raise ValueError("MEME_QUERY_RECEIPT_INVALID")
+        query = value["query"]
+        if (not isinstance(query, dict) or set(query) != {"text", "intent", "target"}
+            or not isinstance(query["text"], str) or not 1 <= len(query["text"]) <= 2000
+            or not isinstance(query["target"], str)
+            or query["target"] not in {"self", "recipient", "third_party", "neutral", "uncertain"}):
+            raise ValueError("MEME_QUERY_RECEIPT_INVALID")
+        if query["intent"] is not None:
+            parse(SemanticQuery, query)
+        if value["embedding"] is not None:
+            parse(EmbeddingBatch, value["embedding"])
+        return value
+
+    async def offer(self, query, offer):
+        binding = {key: query[key] for key in (
+            "job_id", "event_id", "reply_revision", "query_sha256",
+        )}
+        response = await self.post("/offers", {**binding, "offer": offer})
+        expected = {key: binding[key] for key in ("job_id", "event_id", "reply_revision")}
+        if (not isinstance(response, dict) or set(response) != {*expected, "accepted"}
+            or any(response[key] != value for key, value in expected.items())
+            or type(response["reply_revision"]) is not int or response["accepted"] is not True):
+            raise ValueError("MEME_OFFER_RECEIPT_INVALID")
+        return response
+
+
+class CaptionHTTP:
+    def __init__(self, http, catalog):
+        self.http, self.catalog = http, catalog
+
+    async def submit(self, request):
+        asset = request.asset
+        row = self.catalog.db.execute("SELECT data,metadata,active FROM meme_assets WHERE sha=?",
+                                      (asset.asset_sha256,)).fetchone()
+        if (not row or row[2] != 1 or row[0] != asset.data
+            or hashlib.sha256(asset.data).hexdigest() != asset.asset_sha256
+            or len(asset.data) != asset.byte_length):
+            raise ValueError("MEME_CAPTION_ASSET_CHANGED")
+        evidence = source_evidence(self.catalog.metadata(row[1]))
+        if digest(evidence) != asset.source_evidence_sha256:
+            raise ValueError("MEME_CAPTION_SOURCE_CHANGED")
+        body = {
+            "asset": {"data_base64": base64.b64encode(asset.data).decode("ascii"),
+                      "asset_sha256": asset.asset_sha256,
+                      "source_evidence_sha256": asset.source_evidence_sha256,
+                      "mime": asset.mime, "byte_length": asset.byte_length},
+            "context": request.context.model_dump(mode="json"),
+            "identity": request.identity.model_dump(mode="json"),
+            "source_evidence": evidence,
+        }
+        # SemanticLibrary.accept records real usage first, then performs the post-await
+        # source/STOP fence before any content commit. A late receipt is not a refund.
+        return await self.http.post("/captions", body, after=False)
+
+    async def get(self, job_id):
+        if not isinstance(job_id, str) or not JOB.fullmatch(job_id):
+            raise ValueError("MEME_CAPTION_JOB_INVALID")
+        return await self.http.post("/captions/" + job_id, {}, after=False)
+
+
+class CaptionEmbeddingHTTP:
+    def __init__(self, http, *, job_id, context, caption):
+        if not isinstance(job_id, str) or not JOB.fullmatch(job_id):
+            raise ValueError("MEME_CAPTION_JOB_INVALID")
+        self.http, self.job_id, self.context = http, job_id, context
+        self.text = caption_text(caption)
+
+    async def embed(self, texts):
+        if tuple(texts) != (self.text,):
+            raise ValueError("MEME_EMBEDDING_TEXT_CHANGED")
+        # Core loads the successful caption itself; arbitrary caller text is never sent.
+        return await self.http.post("/embeddings", {
+            "job_id": self.job_id, "event_id": self.context.event_id,
+            "reply_revision": self.context.reply_revision,
+        })

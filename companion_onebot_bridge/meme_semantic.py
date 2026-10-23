@@ -7,6 +7,8 @@ are retained independently of semantic eligibility, including after cancellation
 import hashlib
 import re
 
+from companion_meme_protocol import caption_text as caption_text
+
 from .meme_caption import (
     CaptionAsset,
     CaptionContext,
@@ -59,6 +61,16 @@ def managed(db, sha):
     )
 
 
+def terminal_without_usage(binding):
+    if not binding or binding[0] not in {"FAILED", "CANCELLED"} or binding[2] is not None:
+        return False
+    try:
+        outcome = parse(CaptionOutcome, binding[1])
+        return outcome.state == binding[0] and outcome.usage is None
+    except (ValueError, TypeError):
+        return False
+
+
 def stage_if_enabled(catalog, sha, metadata):
     if not installed(catalog.db):
         return
@@ -69,6 +81,13 @@ def stage_if_enabled(catalog, sha, metadata):
         "INSERT OR IGNORE INTO meme_semantic_assets VALUES (?,?,NULL,NULL,'PENDING')",
         (sha, source_hash(metadata)),
     )
+    binding = catalog.db.execute(
+        "SELECT b.state,b.outcome_json,b.usage_json FROM meme_semantic_assets a "
+        "JOIN meme_caption_bindings b ON b.request_sha=a.binding_request "
+        "WHERE a.sha=? AND a.state='QUARANTINED'", (sha,),
+    ).fetchone()
+    if terminal_without_usage(binding):
+        catalog.db.execute("UPDATE meme_semantic_assets SET state='PENDING' WHERE sha=?", (sha,))
 
 
 def invalidate_in_transaction(db, sha):
@@ -256,6 +275,7 @@ class SemanticLibrary:
         """Submit once or poll once. The caller/ Core worker decides when another step runs."""
         await check()
         request = self._request(sha, context)
+        current_request = request
         with self.catalog.atomic(commit_check):
             commit_check()
             row = self.db.execute(
@@ -264,10 +284,21 @@ class SemanticLibrary:
             ).fetchone()
             selected_request = row[2] if row[1] == request.cache_key else request.sha256
             binding = self.db.execute(
-                "SELECT context_json,job_id,state FROM meme_caption_bindings WHERE request_sha=?",
+                "SELECT context_json,job_id,state,outcome_json,usage_json "
+                "FROM meme_caption_bindings WHERE request_sha=?",
                 (selected_request,),
             ).fetchone()
-            if row[1] == request.cache_key and row[0] in {"READY", "QUARANTINED"}:
+            handoff = selected_request != request.sha256 and terminal_without_usage(
+                binding[2:] if binding else None,
+            )
+            if handoff:
+                selected_request = request.sha256
+                binding = self.db.execute(
+                    "SELECT context_json,job_id,state,outcome_json,usage_json "
+                    "FROM meme_caption_bindings WHERE request_sha=?", (selected_request,),
+                ).fetchone()
+            if (not handoff and row[1] == request.cache_key
+                and row[0] in {"READY", "QUARANTINED"}):
                 cached = self.db.execute(
                     "SELECT result_json FROM meme_caption_cache WHERE cache_key=?",
                     (request.cache_key,),
@@ -337,7 +368,23 @@ class SemanticLibrary:
             await check()
             self._current(sha)
             value = await client.submit(request) if submit else await client.get(job_id)
-            return await self.accept(request, value, check=check, commit_check=commit_check)
+            result = await self.accept(request, value, check=check, commit_check=commit_check)
+            if request.sha256 != current_request.sha256:
+                # One poll confirms the old operation ended before admission. A later
+                # step can submit the newly authorized context, retaining the old proof.
+                with self.catalog.atomic(commit_check):
+                    commit_check()
+                    binding = self.db.execute(
+                        "SELECT b.state,b.outcome_json,b.usage_json FROM meme_semantic_assets a "
+                        "JOIN meme_caption_bindings b ON b.request_sha=a.binding_request "
+                        "WHERE a.sha=? AND a.binding_request=?", (sha, request.sha256),
+                    ).fetchone()
+                    if terminal_without_usage(binding):
+                        self.db.execute(
+                            "UPDATE meme_semantic_assets SET state='PENDING' WHERE sha=?", (sha,),
+                        )
+                        result = self._status(sha)
+            return result
         except BaseException:
             with self.catalog.atomic():
                 self.db.execute(
@@ -512,10 +559,3 @@ class SemanticLibrary:
         return candidates(
             self, delivery_key, query, query_vector=query_vector, limit=limit, check=check
         )
-
-
-def caption_text(caption):
-    # Provider limit is checked before dispatch; negative contexts must not improve recall.
-    return " ".join((caption.description, caption.visible_text, *caption.tags, *caption.use_when))[
-        :2000
-    ]

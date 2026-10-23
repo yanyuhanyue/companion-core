@@ -31,6 +31,7 @@ from companion.goals import GoalEngine
 from companion.growth import ExpressionLearning
 from companion.life import LifeService, is_life_command
 from companion.media import MediaService
+from companion.meme_core import MemeCaptionService
 from companion.memory import Memory
 from companion.memory_context import MemoryContext
 from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
@@ -94,6 +95,7 @@ class Core(Runtime):
             )
             self.reading = ReadingService(self.store, settings, self.exploration, clock)
             self.expression = ExpressionEngine(self.store, settings, clock)
+            self.memes = MemeCaptionService(self.store, settings, lambda: self.model, clock)
             self.executive = Executive(self.store, settings, clock)
         except BaseException:
             self.close()
@@ -303,6 +305,8 @@ class Core(Runtime):
                 (now,),
             )
             if not row:
+                return None
+            if self.memes.waiting_offer(row, now):
                 return None
             body = json.loads(row["body_json"])
             if (
@@ -1073,7 +1077,7 @@ class Core(Runtime):
     async def run_once(self, worker_id="worker"):
         job = self.claim_job(worker_id)
         if job is None:
-            return False
+            return await self.memes.run_once(worker_id)
         started_ns = time.perf_counter_ns()
         emit(
             "t_job_started",

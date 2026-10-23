@@ -627,6 +627,98 @@ def test_before_admission_outcome_keeps_usage_null(semantic, state):
     assert store.db.execute("SELECT usage_json FROM meme_caption_bindings").fetchone()[0] is None
 
 
+@pytest.mark.parametrize("state", ["FAILED", "CANCELLED"])
+def test_fresh_discovery_replaces_terminal_binding_only_after_confirmed_no_usage(semantic, state):
+    store, client = semantic
+    sha = add(semantic)
+
+    async def no_admission(request):
+        client.submissions.append(request)
+        job_id = "job_" + str(len(client.submissions)) * 32
+        return client.envelope(request, job_id, state, None, None)
+
+    client.submit = no_admission
+    assert step(semantic, sha)["state"] == "QUARANTINED"
+    old = tuple(store.db.execute("SELECT * FROM meme_caption_bindings").fetchone())
+    store.catalog.add(png(), metadata(), check=check)
+    assert step(semantic, sha)["state"] == "QUARANTINED"
+    assert len(client.submissions) == 1  # Reopening cannot repeat the same operation.
+    store.catalog.add(png(), metadata(), check=check)
+    replacement = CONTEXT.model_copy(update={
+        "event_id": "evt_" + "3" * 64,
+        "discovery_job_id": "job_" + "4" * 32,
+        "attempt_key": "replacement-discovery",
+    })
+    asyncio.run(store.advance(sha, client, replacement, check=async_check, commit_check=check))
+    assert [request.context for request in client.submissions] == [CONTEXT, replacement]
+    assert tuple(store.db.execute(
+        "SELECT * FROM meme_caption_bindings WHERE request_sha=?", (old[0],),
+    ).fetchone()) == old
+
+
+@pytest.mark.parametrize("outcome", [
+    "CANCELLED", "FAILED", "UNKNOWN", "RUNNING", "submission_timeout", "low_confidence",
+    "malformed_paid",
+])
+def test_fresh_context_cannot_repeat_uncertain_or_used_caption(semantic, outcome):
+    store, client = semantic
+    sha = add(semantic)
+
+    async def submit(request):
+        client.submissions.append(request)
+        if outcome == "submission_timeout":
+            raise TimeoutError("submission outcome unknown")
+        client.jobs["job_" + "a" * 32] = request
+        return client.envelope(request, "job_" + "a" * 32, "QUEUED", None, None)
+
+    async def poll(job_id):
+        client.polls.append(job_id)
+        request = client.jobs[job_id]
+        usage_state = {"RUNNING": "RESERVED", "UNKNOWN": "UNKNOWN"}.get(outcome, "SETTLED")
+        usage = {
+            "usage_request_id": "actual-request-with-zero-charge",
+            "state": usage_state,
+            "input_tokens": 0 if usage_state == "SETTLED" else None,
+            "output_tokens": 0 if usage_state == "SETTLED" else None,
+            "billed_micro_usd": 0 if usage_state == "SETTLED" else None,
+        }
+        result = None
+        state = outcome
+        if outcome in {"low_confidence", "malformed_paid"}:
+            state = "SUCCEEDED"
+            sampling, _ = sample_frames(request.asset.data, client.library)
+            result = caption(confidence=0.1)
+            result["sampled_frames"] = sampling.model_dump(mode="json")
+            if outcome == "malformed_paid":
+                result["tone"] = "invalid-tone"
+        return client.envelope(request, job_id, state, result, usage)
+
+    client.submit, client.get = submit, poll
+    if outcome == "submission_timeout":
+        with pytest.raises(TimeoutError):
+            step(semantic, sha)
+    else:
+        assert step(semantic, sha)["state"] == "PENDING"
+        if outcome == "malformed_paid":
+            with pytest.raises(ValueError):
+                step(semantic, sha)
+        else:
+            step(semantic, sha)
+    stored = store.db.execute("SELECT usage_json FROM meme_caption_bindings").fetchone()[0]
+    store.catalog.add(png(), metadata(), check=check)
+    replacement = CONTEXT.model_copy(update={
+        "event_id": "evt_" + "3" * 64,
+        "discovery_job_id": "job_" + "4" * 32,
+        "attempt_key": "replacement-discovery",
+    })
+    result = asyncio.run(store.advance(
+        sha, client, replacement, check=async_check, commit_check=check,
+    ))
+    assert result["state"] == ("PENDING" if outcome == "RUNNING" else "QUARANTINED")
+    assert len(client.submissions) == 1
+    assert store.db.execute("SELECT usage_json FROM meme_caption_bindings").fetchone()[0] == stored
+
+
 @pytest.mark.parametrize("state", ["RUNNING", "SUCCEEDED", "UNKNOWN", "CANCELLED"])
 def test_admitted_job_cannot_discard_usage_receipt(semantic, state):
     store, client = semantic

@@ -47,7 +47,8 @@ CRITICAL_FILES = {
     "source_reader/accounts.py", "source_reader/network.py", "source_reader/worker.py",
 }
 CRITICAL_DIRS = (".github/", "contracts/", "migrations/", "db/", "deploy/",
-                 "companion_onebot_bridge/", "astrbot_plugin_companion_bridge/")
+                 "companion_onebot_bridge/", "companion_meme_protocol/",
+                 "astrbot_plugin_companion_bridge/")
 
 
 def safe_path(name):

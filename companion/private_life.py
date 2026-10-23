@@ -34,6 +34,7 @@ SCENARIOS = {
     "reflection": "reflection",
     "content_vision": "content",
     "content_video": "content",
+    "meme_caption": "meme_semantics",
 }
 MODEL = "private_life_model:"
 DELIVERY = "private_life_delivery:"
@@ -159,6 +160,10 @@ def check_job(store, settings, approval, job):
     from companion.reply_revision import check_job as check_reply_job
 
     check_reply_job(store, job)
+    if job["kind"] == "meme_caption":
+        from companion.meme_core import check_caption_job
+
+        return check_caption_job(store, settings, approval, job)
     event = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
         "USING(conversation_id) WHERE e.event_id=?",
@@ -200,11 +205,12 @@ def admit_model(store, settings, clock, job_id, scenario):
         if not job:
             raise CoreError("COMPANION_JOB_SCOPE_REQUIRED", 403)
         check_job(store, settings, approval, job)
-        if scenario not in (
-            {"chat", "memory_review", "content_vision", "content_video"}
-            if job["kind"] == "chat"
-            else {"activity", "memory_review"}
-        ):
+        allowed = {
+            "chat": {"chat", "memory_review", "content_vision", "content_video"},
+            "activity": {"activity", "memory_review"},
+            "meme_caption": {"meme_caption"},
+        }
+        if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     elif scenario not in {"memory_extract", "memory_review", "diary", "reflection"}:
         raise CoreError("COMPANION_BACKGROUND_SCOPE_REQUIRED", 403)
