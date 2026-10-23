@@ -80,6 +80,7 @@ class TrustedReviewer:
         if len(self.rules) > 32:
             raise ValueError("MEME_TRUST_RULE_INVALID")
         self.license_files = {}
+        licenses = {}
         for rule in self.rules:
             if (
                 set(rule)
@@ -120,10 +121,17 @@ class TrustedReviewer:
             ):
                 raise ValueError("MEME_TRUST_RULE_INVALID")
             identity = rule["repo"], rule["revision"]
-            policy = rule["license_path"] if self.require_semantics else dict(rule)
-            if self.license_files.get(identity, policy) != policy:
+            license_identity = rule["license_path"], rule["license_sha256"], rule["license"]
+            if licenses.get(identity, license_identity) != license_identity:
                 raise ValueError("MEME_TRUST_RULE_INVALID")
-            self.license_files[identity] = policy
+            licenses[identity] = license_identity
+            if self.require_semantics:
+                self.license_files[identity] = rule["license_path"]
+            else:
+                policy = self.license_files.setdefault(identity, {**rule, "asset_prefixes": ()})
+                prefix = relative_path(rule["asset_prefix"]).as_posix()
+                if prefix not in policy["asset_prefixes"]:
+                    policy["asset_prefixes"] += (prefix,)
 
     @staticmethod
     def _exact_fetch(fetch, url):

@@ -254,8 +254,14 @@ class CommunityPacks:
         license_file = await fetcher.get(prefix + quote(license_path), 64 * 1024, redirects=False)
         if hashlib.sha256(license_file.data).hexdigest() != rule["license_sha256"]:
             raise ValueError("MEME_PACK_LICENSE_MISMATCH")
+        approved_prefixes = tuple(relative_path(value).as_posix() for value in
+                                  rule.get("asset_prefixes", (rule["asset_prefix"],)))
         ranked = []
         for category, value in categories.items():
+            directory = root + "memes/" + category
+            if not any(directory == allowed or directory.startswith(allowed + "/")
+                       for allowed in approved_prefixes):
+                continue
             words = (category + " " + value["description"]).casefold()
             score = sum(term in words for term in INTENTS[intent])
             if score:
@@ -263,8 +269,6 @@ class CommunityPacks:
         ranked.sort(key=lambda row: (-row[0], row[1]))
         for _, category in ranked[:2]:
             directory = root + "memes/" + category
-            if not directory.startswith(relative_path(rule["asset_prefix"]).as_posix() + "/"):
-                continue
             endpoint = f"https://api.github.com/repos/{repo}/contents/{quote(directory)}"
             listing = await fetcher.get(endpoint + "?ref=" + revision, 256 * 1024, redirects=False)
             for entry in file_entries(listing.data, directory):
