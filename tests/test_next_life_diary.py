@@ -69,15 +69,34 @@ def test_recompute_after_old_backup_replay_uses_current_remaining_evidence(core,
     withdraw(core)
     restore(archive, restored_path, key, core.settings.erasure_ledger)
     settings = core.settings.model_copy(update={"database": str(restored_path)})
-    with Core(settings, DiaryModel(), core.clock) as restored:
+    model = DiaryModel()
+    with Core(settings, model, core.clock) as restored:
         assert restored.diary.get_day(DAY, settings.owner_qq_id) is None
+        sources = restored.diary.repo.sources(DAY)
+        assert [(source["event_id"], source["text"]) for source in sources] == [
+            (f"evt_test_{i + 1}", f"今天讨论了读书计划的第 {i} 步。") for i in range(1, 4)
+        ]
+        usage = restored.store.rows("SELECT * FROM model_usage")
+        entries = restored.store.rows("SELECT * FROM diary_entries")
         assert recompute(restored)
         assert run(restored.diary.generate_once("restored-worker"))
-        assert "第 0 步" not in restored.diary.get_day(DAY, settings.owner_qq_id)["body_md"]
-    with Core(settings, DiaryModel(), core.clock) as reopened:
-        # Replaying the already applied source erasure does not erase independent new evidence.
-        assert reopened.diary.get_day(DAY, settings.owner_qq_id)
-        assert recompute(reopened) is None
+        assert model.calls == []
+        assert restored.diary.get_day(DAY, settings.owner_qq_id) is None
+        assert restored.store.rows("SELECT * FROM model_usage") == usage
+        assert restored.store.rows("SELECT * FROM diary_entries") == entries
+        assert restored.store.one("SELECT state,last_error_code FROM diary_runs") == {
+            "state": "FAILED", "last_error_code": "CLOUD_BUDGET_RESTORE_RECONCILIATION_REQUIRED",
+        }
+    with Core(settings, model, core.clock) as reopened:
+        # Replaying erasure preserves independent evidence, but cannot authorize new spending.
+        assert reopened.diary.repo.sources(DAY) == sources
+        assert reopened.diary.get_day(DAY, settings.owner_qq_id) is None
+        assert reopened.store.one(
+            "SELECT value FROM runtime_meta WHERE key='cloud_budget_restore_required'"
+        ) == {"value": "1"}
+        assert not run(reopened.diary.generate_once("reopened-worker"))
+        assert reopened.store.rows("SELECT * FROM model_usage") == usage
+        assert model.calls == []
 
 
 @pytest.mark.parametrize("usage_state", ["UNKNOWN", "RESERVED"])

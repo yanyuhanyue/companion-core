@@ -8,9 +8,13 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import create_engine
 
 from companion import budget
 from companion.api import create_app
@@ -583,9 +587,23 @@ def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core,
         migration = Config()
         migration.set_main_option("script_location", str(Path("migrations").resolve()))
         migration.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
-        with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
+        costs = old.store.rows("SELECT * FROM cloud_cost_snapshots")
+        with pytest.raises(RuntimeError, match="CLOUD_BUDGET_DOWNGRADE"):
             command.downgrade(migration, "0003_memory_index")
+        assert old.store.rows("SELECT * FROM cloud_cost_snapshots") == costs
         assert old.diary.get_day(DAY, "10001")
+        # The later cost-custody guard is encountered first. The original diary
+        # migration must independently retain its own destructive-downgrade guard.
+        engine = create_engine("sqlite:///" + path.as_posix())
+        try:
+            with engine.connect() as connection:
+                with Operations.context(MigrationContext.configure(connection)):
+                    with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
+                        ScriptDirectory.from_config(migration).get_revision(
+                            "0004_diary",
+                        ).module.downgrade()
+        finally:
+            engine.dispose()
     finally:
         old.store.close()
 

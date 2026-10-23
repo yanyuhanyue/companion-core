@@ -452,6 +452,7 @@ def test_paid_capacity_requires_reconciliation_for_legacy_unadmitted_usage(core,
 def test_paid_capacity_unlimited_daily_calls_still_count_all_model_scenarios(core, tmp_path):
     paid_capacity_settings(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
                            monthly_micro_usd=None, window_micro_usd=None, daily_calls=2)
+    core.settings.cloud_budget.daily_micro_cny = 2_000_000_000
     usage(core, amount=100000000, scenario="diary")
     usage(core, amount=100000000, scenario="chat")
     current = rows(core)["memory.recall"]
@@ -512,6 +513,7 @@ def test_paid_capacity_concurrency_does_not_expire_with_lease_or_window(
 def test_paid_capacity_unlimited_amounts_leave_window_call_limit_intact(core, tmp_path):
     paid_capacity_settings(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
                            monthly_micro_usd=None, window_micro_usd=None, window_calls=2)
+    core.settings.cloud_budget.daily_micro_cny = 10_000_000_000
     core.settings.monthly_limit_micro_usd = 1
     first = usage(core, amount=100000000, scenario="chat")
     admission(core, first)

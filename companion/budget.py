@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from companion import cumulative, paid_budget
+from companion import cloud_budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 
@@ -58,7 +58,7 @@ def chat_pending(store, now):
 
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
-    clock=None,
+    clock=None, cloud_task_kind=None, cloud_task_id=None,
 ):
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
@@ -116,14 +116,14 @@ def reserve(
             store, clock() if callable(clock) else now,
         ):
             raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
-        if approval and (approval.cumulative or store.one(
+        activate_cumulative = bool(approval and (approval.cumulative or store.one(
             "SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,),
-        )):
+        )))
+        if activate_cumulative:
             now = clock() if callable(clock) else now
             local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
             month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
             day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-            cumulative.activate(store, settings, now)
         if scenario == "meme_caption":
             meme_input.check_attempt(store, job_id)
         live_text.reserve_model(store, settings, clock, job_id, scenario)
@@ -200,6 +200,24 @@ def reserve(
         if approval:
             logical_request_id = logical_request_id or job_id or uid("logical")
             _admit(store, settings, approval, logical_request_id, estimate, now, day, month)
+        cloud_pricing = (settings.paid_model.video_input if scenario == "content_video"
+                         and settings.paid_model and settings.paid_model.video_input else settings)
+        cloud_budget.reserve(
+            store, settings, reference_type="model", reference_id=request_id,
+            estimated_micro_usd=estimate, now=now,
+            task_kind=cloud_task_kind or ("video" if scenario == "content_video" else "model"),
+            task_id=cloud_task_id or logical_request_id or job_id or request_id,
+            pricing={"pricing_known": bool(settings.pricing_known), **{
+                key: getattr(cloud_pricing, key)
+                for key in ("input_rate", "cached_input_rate", "output_rate")
+            }},
+        )
+        if approval:
+            # All monetary admission checks precede any journal initialization;
+            # rejecting the CNY limit must not leave an orphaned fsynced header.
+            if activate_cumulative:
+                cumulative.activate(store, settings, now)
+            paid_budget.journal(store, approval)
             quota = cumulative.admit_model(store, settings, request_id, logical_request_id, now,
                                             estimate, estimated_input, output_tokens)
         store.insert(
@@ -339,11 +357,13 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
     )["n"]
     if running >= approval.concurrency:
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
-    paid_budget.journal(store, approval)
 
 
 def settle(store, settings, request_id, response=None):
     with store.transaction():
+        usage = store.one("SELECT occurred_at FROM model_usage WHERE request_id=?", (request_id,))
+        if usage:
+            cloud_budget.sync(store, settings, usage["occurred_at"])
         admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
         if admission:
             _settle_paid(store, settings, admission, response)
@@ -362,7 +382,7 @@ def settle(store, settings, request_id, response=None):
                     response.output_tokens,
                     response.cached_tokens,
                     cost(
-                        settings,
+                        cloud_budget.model_pricing(store, request_id, settings),
                         response.input_tokens,
                         response.output_tokens,
                         response.cached_tokens,
@@ -371,6 +391,7 @@ def settle(store, settings, request_id, response=None):
                 ),
             )
         # Configured rates make monetary amounts estimates even with observed usage.
+        cloud_budget.sync_reference(store, "model", request_id)
 
 
 def expire_cancelled_reservations(store, settings, now):
@@ -668,6 +689,7 @@ def _persist_accounting(
             )
     if blocked:
         store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
+    cloud_budget.sync_reference(store, "model", admission["request_id"])
 
 
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
@@ -708,6 +730,9 @@ async def _dispatch(
     live_text.check_model(store, settings, clock, request_id)
     notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
+        with store.transaction():
+            cloud_budget.mark_dispatched(store, "model", request_id,
+                                         clock() if callable(clock) else clock)
         return await model.complete(messages, scenario)
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
@@ -855,6 +880,8 @@ async def _dispatch(
                 # Keep this synchronous proof inside the existing transport fence.
                 with store.transaction():
                     source_check()
+            with store.transaction():
+                cloud_budget.mark_dispatched(store, "model", request_id, clock())
             if live_text.active(store, settings):
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport
@@ -884,6 +911,8 @@ async def _dispatch(
         admission = ModelAdmission(row["payload_sha256"], before_dispatch)
     if isinstance(model, ModelClient):
         return await model.complete(messages, scenario, admission=admission)
+    with store.transaction():
+        cloud_budget.mark_dispatched(store, "model", request_id, clock())
     return await model.complete(messages, scenario)
 
 
