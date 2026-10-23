@@ -103,12 +103,15 @@ def scope_options(core, *, model):
     return options
 
 
-@pytest.mark.parametrize("selected,model,extra_static", [
-    (True, "configurable-video-one", False), (True, "configurable-video-two", False),
-    (False, "configurable-video-one", False), (True, "configurable-video-one", True),
+@pytest.mark.parametrize("selected,model,extra_static,tool_index", [
+    (True, "configurable-video-one", False, None),
+    (True, "configurable-video-two", False, None),
+    (False, "configurable-video-one", False, None),
+    (True, "configurable-video-one", True, None),
+    (True, "configurable-video-one", False, 0),
 ])
 def test_deepseek_selects_video_tool_then_independent_worker_chats(
-    core, tmp_path, monkeypatch, selected, model, extra_static,
+    core, tmp_path, monkeypatch, selected, model, extra_static, tool_index,
 ):
     from companion import __main__, api
     from companion import core as core_module
@@ -144,6 +147,8 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
                     "name": "understand_video", "arguments": '{"question":"描述颜色变化过程"}',
                 },
             }]}
+            if tool_index is not None:
+                message["tool_calls"][0]["index"] = tool_index
         elif body["model"] == model:
             assert str(request.url) == "https://video.example.test/v1/chat/completions"
             assert request.headers["Authorization"] == "Bearer synthetic-video-provider-key-12345"
@@ -235,6 +240,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
 
 @pytest.mark.parametrize("boundary", [
     "stop", "key", "payload", "unknown", "missing_usage", "invalid_tool",
+    "invalid_index", "boolean_index", "unknown_field",
 ])
 def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
     core, tmp_path, boundary,
@@ -267,14 +273,22 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
             if boundary != "missing_usage":
                 result["usage"] = {"prompt_tokens": 100, "completion_tokens": 20}
             return httpx.Response(200, json=result)
-        return httpx.Response(200, json={
+        result = {
             "choices": [{"message": {"content": None, "tool_calls": [{
                 "id": "call_video_1", "type": "function", "function": {
                     "name": "unknown_tool" if boundary == "invalid_tool" else "understand_video",
                     "arguments": '{"question":"描述动作"}',
                 },
             }]}}], "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
+        }
+        tool = result["choices"][0]["message"]["tool_calls"][0]
+        if boundary == "invalid_index":
+            tool["index"] = 1
+        elif boundary == "boolean_index":
+            tool["index"] = False
+        elif boundary == "unknown_field":
+            tool["source_url"] = "https://untrusted.invalid/private"
+        return httpx.Response(200, json=result)
 
     async def scenario():
         async with source_window(
@@ -290,17 +304,26 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
                 async def resolve(*_):
                     return ["1.1.1.1"]
 
-                with pytest.raises(httpx.HTTPStatusError):
+                invalid_tool = boundary in {
+                    "invalid_tool", "invalid_index", "boolean_index", "unknown_field",
+                }
+                with pytest.raises(httpx.HTTPStatusError) as failed:
                     await window.approve_captured(client, capture_approval(window),
                         image_transport=httpx.MockTransport(lambda _: httpx.Response(
                             200, content=animation(size=(3, 2)),
                             headers={"Content-Type": "image/gif"},
                         )), image_resolver=resolve)
+                if invalid_tool:
+                    assert failed.value.response.json()["error"] == (
+                        "CONTENT_VIDEO_TOOL_INVALID"
+                    )
+                    item = core.store.one("SELECT state,error_code FROM content_items")
+                    assert item == {"state": "UNKNOWN", "error_code": "CONTENT_VIDEO_TOOL_INVALID"}
                 expected_calls = 2 if boundary in {"unknown", "missing_usage"} else 1
                 assert len(calls) == expected_calls and sends == []
                 usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
                 assert usages[0]["state"] == "SETTLED"
-                if boundary != "invalid_tool":
+                if not invalid_tool:
                     assert len(usages) == 2 and usages[1]["state"] == "UNKNOWN"
                     assert usages[1]["billed_micro_usd"] > 0
                 assert not core.store.rows("SELECT * FROM outbox")

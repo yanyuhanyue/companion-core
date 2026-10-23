@@ -957,6 +957,11 @@ class ContentService:
             return {"state": "SUCCEEDED", "event_id": event_ids[0], "duplicate": False}
         except BaseException as error:
             self.discard_images(original["owner_event_id"])
+            failure_code = (
+                error.code if isinstance(error, CoreError)
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{1,99}", error.code)
+                else "CONTENT_IMAGE_FAILED_CLOSED"
+            )
             with s.transaction():
                 from companion import reply_revision
 
@@ -982,10 +987,11 @@ class ContentService:
                               (cancelled, clock(), original["owner_event_id"]))
                 else:
                     s.execute(
-                        "UPDATE content_items SET state=?,error_code='CONTENT_IMAGE_FAILED_CLOSED',"
+                        "UPDATE content_items SET state=?,error_code=?,"
                         "updated_at=? WHERE owner_event_id=? AND kind='qq_image' "
                         "AND state IN ('WAITING','QUEUED','FETCHING','RUNNING')",
-                        ("UNKNOWN" if reserved else "FAILED", clock(), original["owner_event_id"]),
+                        ("UNKNOWN" if reserved else "FAILED", failure_code, clock(),
+                         original["owner_event_id"]),
                     )
                     live_text.record_failure(s, cfg, "CONTENT_IMAGE_FAILED_CLOSED")
             if cancelled and not unsettled:

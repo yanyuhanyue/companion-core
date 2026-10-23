@@ -520,8 +520,44 @@ def prepare_handoff(store, settings, clock, reference):
         return receipt
 
 
+def _cancelled_model_usage(store, settings, approval, job, now):
+    usage = store.rows("SELECT * FROM model_usage WHERE job_id=? ORDER BY rowid", (job["job_id"],))
+    admissions = store.rows(
+        "SELECT * FROM model_admissions WHERE logical_request_id=? OR request_id IN "
+        "(SELECT request_id FROM model_usage WHERE job_id=?) ORDER BY rowid",
+        (job["job_id"], job["job_id"]),
+    )
+    if not usage:
+        if admissions or store.one(
+            "SELECT 1 FROM content_items WHERE owner_event_id=? AND "
+            "(usage_request_id IS NOT NULL OR output_event_id IS NOT NULL "
+            "OR media_sha256!='' OR lease_until>?)", (job["event_id"], now),
+        ):
+            raise CoreError("LIVE_TEXT_CANCELLED_INPUT_ATTEMPTED", 409)
+        return {"model_attempts": 0}
+    if ({row["request_id"] for row in usage} != {row["request_id"] for row in admissions}
+        or any(row["state"] != "SETTLED" for row in usage)
+        or any(row["logical_request_id"] != job["job_id"]
+               or row["window_id"] != approval.window_id for row in admissions)
+        or store.one(
+            "SELECT 1 FROM content_items WHERE owner_event_id=? AND "
+            "(state NOT IN ('SUCCEEDED','FAILED','UNKNOWN') OR lease_until>?)",
+            (job["event_id"], now),
+        )):
+        raise CoreError("LIVE_TEXT_CANCELLED_INPUT_ATTEMPTED", 409)
+    custody = paid_budget.journal(
+        store, settings.paid_model, initialize=False, allow_settlement=True,
+    )
+    if (not custody["lifecycle"] or custody["lifecycle"]["state"] != "STOPPED"
+        or custody["lifecycle"]["plan_sha256"] != approval.plan_sha256):
+        raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
+    return {"model_attempts": len(usage),
+            "settled_model_usage_sha256": paid_budget.sha([usage, admissions]),
+            "billed_micro_usd": sum(row["billed_micro_usd"] for row in usage)}
+
+
 def cancelled_input(store, settings, clock, reference):
-    """Read-only proof of a stopped, cancelled job with no model or send attempt."""
+    """Prove stopped generation never sent; preserve every settled model attempt and fee."""
     with store.transaction():
         approval, binding = settings.live_text_window, _meta(store, BINDING)
         allowed = {approval.plan_sha256} if approval else set()
@@ -543,20 +579,14 @@ def cancelled_input(store, settings, clock, reference):
             or job["state"] != "CANCELLED"
             or job["last_error_code"] != "LIVE_WINDOW_STOPPED"):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
-        if (store.one("SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],))
-            or store.one("SELECT 1 FROM model_admissions WHERE logical_request_id=?",
-                         (job["job_id"],))
-            or store.one("SELECT 1 FROM outbox WHERE origin_event_id=?", (reference.event_id,))
-            or store.one("SELECT 1 FROM content_items WHERE owner_event_id=? AND "
-                         "(usage_request_id IS NOT NULL OR output_event_id IS NOT NULL "
-                         "OR media_sha256!='' OR lease_until>?)",
-                         (reference.event_id, clock()))):
+        if store.one("SELECT 1 FROM outbox WHERE origin_event_id=?", (reference.event_id,)):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_ATTEMPTED", 409)
+        usage = _cancelled_model_usage(store, settings, approval, job, clock())
         _idle(store)
         return {"window_sha256": reference.window_sha256, "event_id": reference.event_id,
                 "input_sha256": receipt["input_sha256"], "state": "CANCELLED",
                 "event_sha256": paid_budget.sha(event), "job_sha256": paid_budget.sha(job),
-                "privacy_epoch": epoch(store), "model_attempts": 0, "send_attempts": 0}
+                "privacy_epoch": epoch(store), **usage, "send_attempts": 0}
 
 
 def _verify_handoff_receipt(approval, history, receipt):
