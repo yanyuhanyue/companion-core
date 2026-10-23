@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from pydantic import Field
 
@@ -112,6 +112,95 @@ def _public_url(value):
     return url
 
 
+def _fetch_proof(fetch):
+    if (
+        set(fetch) != {"requested_url", "final_url", "hops", "body_sha256", "fetched_at"}
+        or not re.fullmatch(r"[a-f0-9]{64}", fetch["body_sha256"])
+        or not isinstance(fetch["hops"], list)
+        or not 1 <= len(fetch["hops"]) <= 6
+        or datetime.fromisoformat(fetch["fetched_at"]).utcoffset() is None
+    ):
+        raise ValueError()
+    _public_url(fetch["requested_url"])
+    _public_url(fetch["final_url"])
+    for hop in fetch["hops"]:
+        _public_url(hop["url"])
+        if (
+            set(hop) != {"url", "address", "status"}
+            or not ipaddress.ip_address(hop["address"]).is_global
+            or type(hop["status"]) is not int
+            or hop["status"] not in {200, 301, 302, 303, 307, 308}
+        ):
+            raise ValueError()
+    if (
+        fetch["hops"][0]["url"] != fetch["requested_url"]
+        or fetch["hops"][-1]["url"] != fetch["final_url"]
+        or fetch["hops"][-1]["status"] != 200
+    ):
+        raise ValueError()
+
+
+def _repository_path(value):
+    if (
+        not isinstance(value, str) or not 1 <= len(value) <= 512
+        or "\\" in value or ":" in value or ".." in value
+        or any(ord(c) < 32 for c in value)
+        or any(part in {"", "."} or part.endswith((" ", ".")) for part in value.split("/"))
+    ):
+        raise ValueError()
+    return value
+
+
+def _source_files_proof(value, acquired):
+    files = acquired["source_files"]
+    page = re.fullmatch(
+        r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/tree/([a-f0-9]{40})",
+        value["source_page"],
+    )
+    license_proof = re.search(
+        r"; license-file=([^;]+); license-sha256=([a-f0-9]{64})$", value["usage_basis"],
+    )
+    if (
+        not isinstance(files, dict) or set(files) != {"manifest", "license", "listing"}
+        or not page or page[2] != value["revision"] or not license_proof
+        or any(part in {".", ".."} for part in page[1].split("/"))
+        or acquired["archive_member"] != ""
+    ):
+        raise ValueError()
+    repo, revision = page[1], page[2]
+    prefix = f"https://raw.githubusercontent.com/{repo}/{revision}/"
+    asset_url = value["asset_url"]
+    if not asset_url.startswith(prefix):
+        raise ValueError()
+    path = _repository_path(unquote(asset_url[len(prefix):]))
+    parts = path.split("/")
+    if (
+        len(parts) < 3 or parts[-3] != "memes"
+        or asset_url != prefix + quote(path)
+        or acquired["discovered_asset_url"] != asset_url
+    ):
+        raise ValueError()
+    root = "/".join(parts[:-3])
+    manifest = (root + "/" if root else "") + "manifest.json"
+    license_path = _repository_path(license_proof[1])
+    expected = {
+        "manifest": prefix + quote(manifest),
+        "license": prefix + quote(license_path),
+        "listing": f"https://api.github.com/repos/{repo}/contents/"
+                   + quote(path.rsplit("/", 1)[0]) + "?ref=" + revision,
+    }
+    for role, fetch in {"image": acquired["fetch"], **files}.items():
+        _fetch_proof(fetch)
+        url = asset_url if role == "image" else expected[role]
+        if (
+            fetch["requested_url"] != url or fetch["final_url"] != url
+            or len(fetch["hops"]) != 1
+        ):
+            raise ValueError()
+    if files["license"]["body_sha256"] != license_proof[2]:
+        raise ValueError()
+
+
 def _proof(value, asset_sha, source_sha):
     """Validate the authenticated Bridge's completed acquisition/reviewer witness.
 
@@ -146,7 +235,7 @@ def _proof(value, asset_sha, source_sha):
         _public_url(value["asset_url"])
         acquired = value["acquisition"]
         if (
-            set(acquired)
+            set(acquired) - {"source_files"}
             != {
                 "source_page",
                 "discovered_asset_url",
@@ -162,30 +251,10 @@ def _proof(value, asset_sha, source_sha):
             raise ValueError()
         _public_url(acquired["discovered_asset_url"])
         fetch = acquired["fetch"]
+        _fetch_proof(fetch)
         if (
-            set(fetch) != {"requested_url", "final_url", "hops", "body_sha256", "fetched_at"}
-            or fetch["requested_url"] != value["asset_url"]
+            fetch["requested_url"] != value["asset_url"]
             or fetch["fetched_at"] != value["fetched_at"]
-            or not re.fullmatch(r"[a-f0-9]{64}", fetch["body_sha256"])
-            or not 1 <= len(fetch["hops"]) <= 6
-        ):
-            raise ValueError()
-        moment = datetime.fromisoformat(value["fetched_at"])
-        if moment.utcoffset() is None:
-            raise ValueError()
-        for hop in fetch["hops"]:
-            _public_url(hop["url"])
-            if (
-                set(hop) != {"url", "address", "status"}
-                or not ipaddress.ip_address(hop["address"]).is_global
-                or type(hop["status"]) is not int
-                or hop["status"] not in {200, 301, 302, 303, 307, 308}
-            ):
-                raise ValueError()
-        if (
-            fetch["hops"][0]["url"] != fetch["requested_url"]
-            or fetch["hops"][-1]["url"] != fetch["final_url"]
-            or fetch["hops"][-1]["status"] != 200
         ):
             raise ValueError()
         member = acquired["archive_member"]
@@ -203,6 +272,8 @@ def _proof(value, asset_sha, source_sha):
                 raise ValueError()
         elif fetch["body_sha256"] != asset_sha:
             raise ValueError()
+        if "source_files" in acquired:
+            _source_files_proof(value, acquired)
     except (ValueError, TypeError, KeyError, AttributeError) as error:
         raise CoreError("MEME_SOURCE_EVIDENCE_INVALID", 403) from error
 
