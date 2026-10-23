@@ -177,7 +177,8 @@ def legacy_inventory(window):
     if (window.row()["state"] != "STOPPED" or window.plan.mode != "live_text"
         or not window.plan.config.capture_signing_key
         or window.db.execute("SELECT 1 FROM window_attempts WHERE state!='ACK' LIMIT 1").fetchone()
-        or window.db.execute("SELECT 1 FROM window_inputs WHERE state!='ACK' LIMIT 1").fetchone()):
+        or window.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN ('ACK','CANCELLED') "
+                             "LIMIT 1").fetchone()):
         raise ValueError("CUMULATIVE_STOPPED_SETTLED_HISTORY_REQUIRED")
     records, _ = window.read_journal()
     reservations, projection = [], {}

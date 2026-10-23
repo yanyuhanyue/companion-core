@@ -20,6 +20,7 @@ from companion.reply_segments import SegmentedReplyConfig
 from companion_onebot_bridge import continuous, images
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
+from tests.test_image_connect_recovery import ConnectThenGet
 from tests.test_live_image_input import options as image_options
 from tests.test_onebot_capture import source_window
 from tests.test_onebot_direct import config, raw_event
@@ -177,13 +178,14 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
         return httpx.Response(200, content=original, headers={"Content-Type": mime})
 
     async def resolve(*_):
-        return ["1.1.1.1"]
+        return ["1.1.1.1", "8.8.8.8"]
 
     fetch = images.fetch_image
+    connection_attempts = []
 
     async def mocked_cdn(image, maximum, **kwargs):
         return await fetch(image, maximum, **{**kwargs, "resolver": resolve,
-                                             "transport": httpx.MockTransport(cdn)})
+            "transport": ConnectThenGet(httpx.MockTransport(cdn), addresses=connection_attempts)})
 
     async def scenario():
         monkeypatch.setattr(api, "Core", construct)
@@ -229,6 +231,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
                     await asyncio.gather(task, return_exceptions=True)
         assert len(instances) == 2 and instances[0].store is not instances[1].store
         assert len(calls) == 3 and len(downloads) == 1
+        assert connection_attempts == ["1.1.1.1", "8.8.8.8"]
         assert [part["message"][0]["data"]["text"] for part in sends] == (
             first_reply.splitlines() + second_reply.splitlines()
         )

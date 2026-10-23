@@ -45,6 +45,8 @@ CAPTURE_PHASES = frozenset(
         "persist",
         "final_check",
         "ws_close",
+        "image_download",
+        "image_upload",
     }
 )
 CAPTURE_REASONS = frozenset(
@@ -100,7 +102,7 @@ def capture_diagnostic(error, phase):
         reason = "CAPTURE_WS_CLOSED"
     elif phase == "persist":
         reason = "CAPTURE_PERSISTENCE_FAILED"
-    elif isinstance(error, (httpx.ConnectError, OSError)):
+    elif isinstance(error, (httpx.ConnectError, OSError)) or code == "IMAGE_CONNECTION_FAILED":
         reason = "CAPTURE_CONNECTION_FAILED"
     elif isinstance(error, httpx.HTTPError):
         reason = "CAPTURE_HTTP_FAILURE"
@@ -523,6 +525,7 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
     if window.busy:
         raise ValueError("WINDOW_EXECUTOR_BUSY")
     window.busy = True
+    phase = "admission"
     try:
         window.verify()
         if not isinstance(approval, dict):
@@ -655,6 +658,7 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
                         raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
 
                 options = {"resolver": image_resolver} if image_resolver is not None else {}
+                phase = "image_download"
                 data, mime = await fetch_image(
                     image, claim["max_bytes"], check=check_image,
                     transport=image_transport, **options,
@@ -666,6 +670,7 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
                 proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
                     window.plan.config.capture_signing_key)).sign(
                         b"companion-core/onebot-owner-image/v1\x00" + encode(proof).encode()).hex()
+                phase = "image_upload"
                 async with window.core_http(client) as scoped:
                     response = await scoped.post(
                         prefix,
@@ -684,8 +689,14 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
                         raise ValueError("IMAGE_ANALYSIS_FAILED_CLOSED")
                 window.verify()
         return window.status()
-    except BaseException:
-        await failed(window, client, "CAPTURE_APPROVAL_FAILED_CLOSED")
+    except BaseException as error:
+        diagnostic = capture_diagnostic(error, phase)
+        error.capture_diagnostic = diagnostic
+        try:
+            await failed(window, client, "CAPTURE_APPROVAL_FAILED_CLOSED")
+        except BaseException as stop_error:
+            stop_error.capture_diagnostic = diagnostic
+            raise
         raise
     finally:
         window.busy = False

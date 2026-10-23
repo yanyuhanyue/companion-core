@@ -462,6 +462,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return live_text.approve_input(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/live-text/inputs/cancelled", dependencies=auth)
+    async def live_text_cancelled_input(body: live_text.CancelledInputReference):
+        core = app.state.core
+        return live_text.cancelled_input(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/send-check", dependencies=auth)
     async def live_text_send(body: live_text.SendCheck):
         core = app.state.core
