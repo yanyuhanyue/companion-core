@@ -9,7 +9,7 @@
 | 引用消息 | 优先读取消息链中的正文；缺失时按消息 ID 调用 `get_msg`。 |
 | 合并转发 | 按原顺序展开文字节点，保留显示昵称和节点路径，支持有限层数的嵌套。 |
 | QQ JSON 卡片 | 提取支持的标题、摘要和链接字段；Bilibili 视频与小黑盒帖子链接交给已有 Reader。 |
-| 多张图片 | 一次主人消息最多 4 张顶层普通图片，每张独立编号、领取、下载和校验；批量识图一次。 |
+| 多张图片 | 按顶层普通图片顺序独立编号、领取、下载和校验，批量识图一次；数量可配置或设为 `"unlimited"`。 |
 | 图片与记忆 | 识图线索参与限定范围的记忆检索；核对候选后，将原图、确认记忆及当前问题一起交给视觉模型回答。 |
 
 例如两张耳机图片配合“结合我以前的需求选哪个”，最终请求同时包含两张原图和与耳机有关的获准记忆。回答规则要求区分图片可见细节、以前明确确认的需求与推测。图中文字不会被自动记成主人偏好。
@@ -32,17 +32,17 @@ Bridge 收到 Core 的成功接收或事件已删除回执后，会清除对应�
 
 多图在原受控窗口中沿用 `image_scope = "owner_image_v1"`、独立图片准入和签名上传；该范围不是常驻 Bridge 的顶层配置项。Core 同时启用 Content、Observation、`content.use_chat_model_for_vision = true`，并配置 `source = "qq_image"`、`media_analysis = true` 的图片 adapter。调整现有配置时应同时核对：
 
-- `content.max_images_per_event` 与 `paid_model.image_input.max_images_per_request`，均可设为 1–4；每张重复图片也占一个位置。
+- `content.max_images_per_event` 与 `paid_model.image_input.max_images_per_request`，均可设正整数或 `"unlimited"`；每张重复图片也占一个位置。取消数量配置上限后，仍受原消息最多 64 个协议段及整体富消息字节限制。
 - 每图字节、像素及固定输入 token 估值，以及累计输入、单次、单作业、每日和窗口费用限制。两次视觉请求都按实际图片数量估算；收到 usage 后按原账本结算。
 - 普通图片问答的 `per_request_calls = 2`：一次批量 `content_vision`，一次携带原图的 `chat`。
 - 联合记忆的 `memory_scope = "approved_facts"`、已确认记忆清单、记忆范围摘要和 `memory_enabled = true`；`per_request_calls = 3`，为可能的 `memory_review` 保留额度。没有候选时只进行两次调用。
-- 该图片窗口保留 `history_scope = "none"`；长期事实的范围单独核对，不通过历史图片或未批准记忆扩大范围。
+- 原批准事实窗口保留 `history_scope = "none"`。显式[私人陪伴范围](qq-beta/private-companion.md)可同时使用近期完整 SENT 回合和原生长期记忆；历史图片保留文字观察，不重新上传旧原图。
 
 联合理解的顺序为：批量识图提取线索 → 在批准事实中检索并用 `memory_review` 核对候选 → 将原图、选中的确认记忆和当前问题交给 `chat`。没有检索候选时跳过核对调用；图片线索本身不作为长期记忆证据。
 
 原图仅通过内嵌 base64 传给同一个获准视觉模型。支持单帧 PNG、JPEG、WebP。API 与聊天 worker 之间的原图暂存在数据库旁的私有目录，有效期为上传后 300 秒；事件正文、数据库和账本只保留必要的来源、摘要与状态，不存原图字节或 QQ 签名 URL。最终调用前重新核对原图哈希、隐私版本和到期时间。成功、失败、取消、停止窗口和删除来源会移除暂存文件；启动及 worker 运行时清理到期文件，删除回放也处理旧备份旁残留的原图。
 
-常规聊天启用后台记忆提取时，应同时运行 `life` profile，由现有 `companion-life-worker` 执行提取。本页受控图片窗口只读取批准的事实，检索和核对随聊天 worker 执行；图片参与检索不会创建新的长期记忆。
+常规聊天启用后台记忆提取时，应同时运行 `life` profile，由现有 `companion-life-worker` 执行提取。原批准事实范围只读取批准事实；私人陪伴范围可从主人原始文字自动提取记忆。图片参与检索不会使图中文字成为主人事实证据。
 
 ## 上游依据与验证范围
 

@@ -83,7 +83,7 @@ def test_top_level_images_keep_source_order_and_hash_without_url_projection():
     assert images.original_images([{"type": "node", "data": {"content": [raw]}}]) == []
     assert images.original_images("[CQ:image,url=forged]") == []
     assert len(images.original_images([raw] * images.MAX_OWNER_IMAGES)) == images.MAX_OWNER_IMAGES
-    with pytest.raises(ValueError, match="OWNER_IMAGE_LIMIT_EXCEEDED"):
+    with pytest.raises(ValueError, match="INVALID_IMAGE_MESSAGE"):
         images.original_images([raw] * (images.MAX_OWNER_IMAGES + 1))
 
 

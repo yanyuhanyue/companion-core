@@ -6,9 +6,11 @@ from . import reply_segments
 from .onebot_client import bounded_post
 
 
-def validate_item(item, config):
+def validate_item(item, config, *, companion=False):
     if not isinstance(item, dict):
         raise ValueError("INVALID_DELIVERY")
+    if not companion and "window_origin_event_id" in item:
+        raise ValueError("COMPANION_DELIVERY_SCOPE_REQUIRED")
     try:
         lease_until = datetime.fromisoformat(item["lease_until"])
         if lease_until.utcoffset() is None:
@@ -22,17 +24,26 @@ def validate_item(item, config):
             raise ValueError("INVALID_DELIVERY")
     if (
         item.get("conversation_platform_session_key") != config.origin
-        or item.get("action_type") != "qq.private.reply"
+        or item.get("action_type") not in (
+            {"qq.private.reply", "qq.private.proactive"} if companion else {"qq.private.reply"})
     ):
         raise ValueError("OWNER_REPLY_REQUIRED")
     content = item.get("content")
     if (
         not isinstance(content, dict)
-        or set(content) != {"text"}
+        or set(content) not in ({"text"}, {"text", "image"})
         or not isinstance(content["text"], str)
         or not 1 <= len(content["text"]) <= 20000
     ):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
+    if "image" in content:
+        image = content["image"]
+        if (not companion or item["action_type"] != "qq.private.reply"
+            or not isinstance(image, dict) or set(image) != {"source", "category"}
+            or image["source"] != "astrbot.meme_manager"
+            or not isinstance(image["category"], str)
+            or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", image["category"])):
+            raise ValueError("EXPRESSION_SCOPE_REQUIRED")
     reply_segments.envelope(item)
 
 
@@ -50,7 +61,7 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):
     if not batch["items"]:
         return False
     item = batch["items"][0]
-    validate_item(item, onebot.config)
+    validate_item(item, onebot.config, companion=getattr(onebot, "companion", False))
     if guard is not None:
         guard.reserve(item)
     trace = spool.trace_for(item.get("delivery_key"))
@@ -73,7 +84,8 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None):
     provider_id = None
     send_start = time.perf_counter_ns()
     try:
-        provider_id = await onebot.send_text(item["content"]["text"])
+        provider_id = await onebot.send_content(item["content"]) if hasattr(
+            onebot, "send_content") else await onebot.send_text(item["content"]["text"])
     except Exception:
         pass
     ack_ns = time.perf_counter_ns()

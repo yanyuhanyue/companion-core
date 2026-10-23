@@ -159,7 +159,8 @@ def input_event(window, frame, received_at):
     references_only = scope == "references_v1" and bool(event["payload"].get("rich"))
     if (
         (not text.strip() and not references_only)
-        or text.strip().startswith("/")
+        or (text.strip().startswith("/") and window.plan.value.get("live_text", {}).get(
+            "companion_scope") != "owner_private_v1")
         or len(text) > window.plan.value["max_input_chars"]
         or not window.plan.start <= occurred_at <= received_at < window.plan.end
         or (received_at - occurred_at).total_seconds() > MAX_AGE_SECONDS
@@ -612,6 +613,19 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
         if any(item.get("kind") == "image" for item in event["payload"].get("shared_content", [])):
             from .images import fetch_image, original_images
 
+            if window.plan.value["live_text"].get("companion_scope") == "owner_private_v1":
+                from .continuous import core_status
+
+                # The accepted chat job now yields background admission. Allow a
+                # known in-flight background call to settle before vision takes
+                # the same single paid-provider slot.
+                async with asyncio.timeout(60):
+                    while (await core_status(window, client))["operations"]["budget"][
+                        "unsettled_calls"
+                    ]:
+                        await window.core_counts(client)
+                        window.verify()
+                        await asyncio.sleep(0.25)
             images = original_images(raw["message"])
             if not images:
                 raise ValueError("ORIGINAL_OWNER_IMAGE_REQUIRED")

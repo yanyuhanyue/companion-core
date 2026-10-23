@@ -221,7 +221,7 @@ def validate(value):
             if (
                 set(item) != common | {"slot", "source_sha256"}
                 or type(item["slot"]) is not int
-                or not 0 <= item["slot"] < 4
+                or not 0 <= item["slot"] < 64
                 or not isinstance(item["source_sha256"], str)
                 or not re.fullmatch(r"[a-f0-9]{64}", item["source_sha256"])
             ):

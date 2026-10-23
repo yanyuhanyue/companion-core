@@ -21,8 +21,11 @@ def validate_scope(value, outer):
     policy = value.get("segmented_reply")
     if (not isinstance(policy, dict)
         or set(policy) != {"max_segments", "min_chars", "interval_ms"}
+        or (policy.get("max_segments") != "unlimited" and (
+            type(policy.get("max_segments")) is not int
+            or not 2 <= policy["max_segments"] <= 2**31 - 1))
         or any(type(policy[name]) is not int or not low <= policy[name] <= high
-               for name, low, high in (("max_segments", 2, 3), ("min_chars", 4, 100),
+               for name, low, high in (("min_chars", 4, 100),
                                        ("interval_ms", 0, 3000)))
         or type(value.get("max_send_attempts")) is not int
         or not 1 <= value["max_send_attempts"] <= 2**31 - 1
@@ -31,8 +34,15 @@ def validate_scope(value, outer):
 
 
 def event_id(item):
+    if "window_origin_event_id" in item:
+        value = item["window_origin_event_id"]
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9_:-]{8,128}", value,
+        ):
+            raise ValueError("INVALID_WINDOW_ORIGIN")
+        return value
     key = item.get("delivery_key", "")
-    match = (re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v(?:1|2:[0-2])", key)
+    match = (re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v(?:1|2:(?:0|[1-9][0-9]{0,9}))", key)
              if isinstance(key, str) else None)
     if not match:
         raise ValueError("WINDOW_REPLY_KEY_REQUIRED")
@@ -47,13 +57,13 @@ def envelope(item):
     if not present and not v2:
         return None
     value = item.get("reply_segment")
-    match = (re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v2:([0-2])", key)
+    match = (re.fullmatch(r"reply:(evt_[a-f0-9]{64}):v2:(0|[1-9][0-9]{0,9})", key)
              if isinstance(key, str) else None)
     if (not match or not isinstance(value, dict) or set(value) != FIELDS
         or type(value["version"]) is not int or value["version"] != 1
         or any(type(value[name]) is not int for name in
                ("index", "count", "total_chars", "interval_ms"))
-        or not 1 <= value["count"] <= 3 or not 0 <= value["index"] < value["count"]
+        or not 1 <= value["count"] <= 2**31 - 1 or not 0 <= value["index"] < value["count"]
         or value["index"] != int(match[2]) or not 0 <= value["interval_ms"] <= 3000
         or not isinstance(value["group_id"], str)
         or not re.fullmatch(r"job_[a-f0-9]{32}", value["group_id"])

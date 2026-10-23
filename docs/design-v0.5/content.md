@@ -29,7 +29,8 @@ Bridge 的原始字节 POST 使用 `Content-Type: image/png|image/jpeg` 和 `X-C
 
 帖子读取返回的 `ReadItem.image_urls` 最多保留 32 个有序候选。正文观察提交后，`register_link_images(owner_event_id, observation_id, urls)` 检查原始主人事件依赖，再持久排队。`run_once()` 一次处理一张配图，worker 使用 `run_batch()` 每批顺序处理最多两张；每张都独立预留并提交。小黑盒配图只允许 `imgheybox.max-c.com`、`imgheybox1.max-c.com`；B 站只允许 `i0.hdslb.com`、`i1.hdslb.com`、`i2.hdslb.com`。请求强制 HTTPS，移除查询参数，不跟随重定向；来自另一个平台或私有地址的图片不会读取。
 
-同一主人消息的 QQ 截图仍保留原协议的两个槽位；文章配图按篇独立计数，默认最多识别 32 张，单条消息最多两篇、64 张引用。低于引用数量的配置上限只阻止后续识别，不删除引用。自主探索没有主人分享来源时不进入配图分析。原读者适配器需配置 `media_analysis=true` 才能产生该平台的图片观察；QQ 图片使用 `content.image_adapter` 指定的 `qq_image` 适配器。
+同一主人消息的 QQ 图片使用最多 64 个协议段的槽位；数量配置可设为正整数或 `"unlimited"`。
+文章配图按篇独立计数，默认最多识别 32 张，单条消息最多两篇、64 张引用。低于引用数量的配置上限只阻止后续识别，不删除引用。自主探索没有主人分享来源时不进入配图分析。原读者适配器需配置 `media_analysis=true` 才能产生该平台的图片观察；QQ 图片使用 `content.image_adapter` 指定的 `qq_image` 适配器。
 
 默认每图最多 1 MB、单边不超过 4096 像素、累计不超过 1600 万像素；文章配图接受静态 PNG/JPEG/WebP，QQ Bridge 保留现有 PNG/JPEG 入口。下载总截止 10 秒，模型截止默认 20 秒。Core 和 Bridge 均不保存原图或媒体缓存；媒体只存在一次调用的内存缓冲中。返回观察包括真实媒体哈希、处理模型、根事件依赖与 `image_analysis` 层级。
 

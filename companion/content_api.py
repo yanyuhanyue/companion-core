@@ -10,7 +10,7 @@ from companion.store import encode
 
 
 class ImageClaim(StrictModel):
-    request_key: str = Field(pattern=r"^image:[0-3]$")
+    request_key: str = Field(pattern=r"^image:(0|[1-9][0-9]{0,8})$")
     source_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 

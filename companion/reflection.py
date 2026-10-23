@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import Field
 
-from companion import budget
+from companion import budget, private_life
 from companion.contracts import CoreError, StrictModel
 from companion.diary import UNSUPPORTED_ACTIVITY, DiaryCitation, source_hash
 from companion.observation import expired_sources
@@ -89,7 +89,9 @@ class ReflectionService:
 
     def claim(self, day):
         self.validate_day(day)
-        if not self.settings.reflection_enabled:
+        if not self.settings.reflection_enabled or not private_life.ready(
+            self.store, self.settings, self.clock
+        ):
             return None
         s, now = self.store, self.clock()
         with s.transaction():
@@ -140,6 +142,7 @@ class ReflectionService:
             }
 
     def validate_lease(self, run):
+        private_life.ensure_active(self.store, self.settings, self.clock)
         current = self.store.one("SELECT * FROM reflection_runs WHERE run_id=?", (run["run_id"],))
         if (
             not current
@@ -223,6 +226,7 @@ class ReflectionService:
                 messages,
                 self.clock(),
                 logical_request_id="reflection:" + run["run_id"],
+                clock=self.clock,
             )
             try:
                 with self.store.transaction():

@@ -9,7 +9,6 @@ from PIL import Image
 
 from companion.model import ModelClient
 from companion_onebot_bridge.event_normalizer import normalize
-from companion_onebot_bridge.images import MAX_OWNER_IMAGES
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
 from tests.test_live_image_input import options
@@ -43,7 +42,7 @@ def test_normalized_images_preserve_slots_positions_and_owner_question():
 
 
 @pytest.mark.parametrize("count, failure", [
-    (2, None), (MAX_OWNER_IMAGES, None), (3, "second"), (2, "policy"),
+    (2, None), (7, None), (3, "second"), (2, "policy"),
 ])
 def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
     core, tmp_path, count, failure,
@@ -53,9 +52,11 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
         {"type": "text", "data": {"text": "按顺序比较这些图片的颜色。"}}, *image_inputs(count),
     ])
     data = []
-    for color in ("red", "blue", "green", "yellow")[:count]:
+    for index in range(count):
         out = io.BytesIO()
-        Image.new("RGB", (3, 2), color).save(out, format="PNG")
+        Image.new("RGB", (3, 2), ("red", "blue", "green", "yellow")[index % 4]).save(
+            out, format="PNG",
+        )
         data.append(out.getvalue())
 
     async def source(ws):
@@ -84,6 +85,9 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
         })
 
     opts = options()
+    opts["core_options"]["content"] = opts["core_options"]["content"].model_copy(
+        update={"max_images_per_event": count},
+    )
     opts["paid_options"]["image_input"] = opts["paid_options"]["image_input"].model_copy(
         update={"max_images_per_request": 1 if failure == "policy" else count},
     )

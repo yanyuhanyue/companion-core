@@ -302,7 +302,7 @@ def test_qq_image_requires_manifest_owner_and_fresh_upload(core):
         run(service.analyze_image(event_id, "image:0", png(), "image/png"))
     event_id = owner_share(core, 2, manifest=[{"kind": "image", "slot": 0}])
     with pytest.raises(CoreError, match="CONTENT_IMAGE_SLOT_INVALID"):
-        run(service.analyze_image(event_id, "image:8", png(), "image/png"))
+        run(service.analyze_image(event_id, "image:-1", png(), "image/png"))
     core.clock.advance(301)
     with pytest.raises(CoreError, match="CONTENT_UPLOAD_EXPIRED"):
         run(service.analyze_image(event_id, "image:0", png(), "image/png"))

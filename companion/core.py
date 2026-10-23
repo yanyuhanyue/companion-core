@@ -10,6 +10,7 @@ from companion import (
     dialogue_history,
     image_spool,
     live_text,
+    private_life,
     qq_images,
     qq_rich,
 )
@@ -104,6 +105,7 @@ class Core(Runtime):
         try:
             with s.transaction():
                 bounded_text = live_text.check_input(s, cfg, self.clock, event)
+                native_controls = not bounded_text or private_life.enabled(cfg)
                 if (event.payload.rich and not bounded_text
                     and cfg.rich_input_scope != "references_v1"):
                     raise CoreError("RICH_INPUT_SCOPE_REQUIRED", 403)
@@ -163,8 +165,8 @@ class Core(Runtime):
                     except ValueError:
                         raise CoreError("INVALID_RICH_INPUT", 400) from None
                 command, arguments = command_parts(body["text"])
-                diary_command = not bounded_text and is_diary_command(body["text"])
-                control_command = not bounded_text and (
+                diary_command = native_controls and is_diary_command(body["text"])
+                control_command = native_controls and (
                     is_life_command(body["text"]) or is_memory_command(body["text"])
                 )
                 if control_command:
@@ -174,10 +176,10 @@ class Core(Runtime):
                     body["diary_command"] = True
                     body["diary_correction"] = command == "修改日记"
                     body["diary_timezone"] = cfg.timezone
-                if not bounded_text and command == "暂停写日记" and not arguments:
+                if native_controls and command == "暂停写日记" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
                     self.diary.repo.cancel_pending("DIARY_PAUSED")
-                if not bounded_text and command == "暂停主动分享" and not arguments:
+                if native_controls and command == "暂停主动分享" and not arguments:
                     s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('proactive_paused','1')")
                     cancel_proactive_work(s, now)
                 # M0/M1 never fetch attachments; discard URL/ref content that may carry credentials.
@@ -203,6 +205,8 @@ class Core(Runtime):
                     memory_processed=int(diary_command or control_command),
                 )
                 cancel_interrupted_replies(s, conversation_id, now)
+                if private_life.enabled(cfg):
+                    cancel_proactive_work(s, now)
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
                 if not diary_command and not control_command:
                     self.content.schedule(event.event_id)
@@ -253,6 +257,8 @@ class Core(Runtime):
         s, now = self.store, self.clock()
         with s.transaction():
             self.recover(now)
+            if private_life.enabled(self.settings) and private_life.busy(s, now):
+                return None
             if not proactive_allowed(s, self.settings, now):
                 cancel_proactive_work(s, now)
             row = s.one(
@@ -362,7 +368,7 @@ class Core(Runtime):
             rules += qq_rich.RULES
         rules = {"role": "system", "content": rules}
         references = []
-        bounded_text = live_text.active(s, cfg)
+        bounded_text = private_life.strict(s, cfg)
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
         combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
                     and cfg.live_text_window.memory_scope == "approved_facts")
@@ -450,9 +456,11 @@ class Core(Runtime):
             sources = live_text.history_sources(s, cfg, self.clock, job)
             turns = [dialogue_history.turn_messages(source) for source in sources]
         else:
-            turns = dialogue_history.recent_sent_turns(
-                s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2,
-            )
+            sources = dialogue_history.recent_sent_sources(
+                s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2)
+            if private_life.enabled(cfg):
+                sources = private_life.recent_history(s, cfg, job)
+            turns = [dialogue_history.turn_messages(source) for source in sources]
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             rules["content"] += qq_rich.RULES
         current_input = []
@@ -497,7 +505,7 @@ class Core(Runtime):
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""
         query = json.loads(job["body_json"]).get("text", "")
-        bounded_text = live_text.active(self.store, self.settings)
+        bounded_text = private_life.strict(self.store, self.settings)
         image_context = (
             qq_images.retrieval_text(self.store, self.settings, self.clock, job)
             if qq_images.enabled(self.settings)
@@ -509,6 +517,8 @@ class Core(Runtime):
         history = live_text.history_sources(self.store, self.settings, self.clock, job) if (
             bounded_text and self.settings.live_text_window.history_scope == "approved_window"
         ) else []
+        if private_life.enabled(self.settings):
+            history = private_life.recent_history(self.store, self.settings, job)
         recent = [message for source in history
                   for message in dialogue_history.turn_messages(source)]
         retrieval_query = "\n".join(filter(None, [
@@ -602,7 +612,7 @@ class Core(Runtime):
         self, candidates, confirmed=False, job_id=None, logical_request_id=None
     ):
         """Plan semantic matches without holding a SQLite transaction across model I/O."""
-        if live_text.active(self.store, self.settings):
+        if private_life.strict(self.store, self.settings):
             raise CoreError("LIVE_TEXT_MEMORY_READ_ONLY", 403)
         s, cfg = self.store, self.settings
         candidates = [
@@ -701,8 +711,9 @@ class Core(Runtime):
 
     def add_memories(self, candidates, resolutions, now, confirmed=False):
         """Caller owns the transaction and checks the captured privacy revision first."""
-        if live_text.active(self.store, self.settings):
+        if private_life.strict(self.store, self.settings):
             raise CoreError("LIVE_TEXT_MEMORY_READ_ONLY", 403)
+        private_life.ensure_active(self.store, self.settings, self.clock)
         added = {}
         for i, (candidate, resolution) in enumerate(zip(candidates, resolutions, strict=True)):
             same = resolution["same"]
@@ -841,7 +852,9 @@ class Core(Runtime):
             before_command = epoch(self.store)
             reply = (
                 await self.command_reply(job)
-                if job["kind"] == "chat" and not bounded_text else None
+                if (job["kind"] == "chat"
+                    and (not bounded_text or private_life.enabled(self.settings)))
+                else None
             )
             captured_epoch = epoch(self.store)
             command, _ = command_parts(json.loads(job["body_json"]).get("text", ""))
@@ -1051,6 +1064,11 @@ class Core(Runtime):
         if not cfg.pricing_known:
             return False
         with s.transaction():
+            if private_life.enabled(cfg):
+                try:
+                    live_text.guard(s, cfg, self.clock)
+                except CoreError:
+                    return False
             if not proactive_allowed(s, cfg, now):
                 return False
             conversation = s.one(
@@ -1096,7 +1114,7 @@ class Core(Runtime):
             return True
 
     async def extract_once(self, local_day=None):
-        if live_text.active(self.store, self.settings) or (
+        if private_life.strict(self.store, self.settings) or (
             not self.settings.memory_enabled or not self.settings.pricing_known
         ):
             return False
@@ -1105,6 +1123,11 @@ class Core(Runtime):
             {"token": uid("memory_lease"), "until": after(now, self.settings.lease_seconds)}
         )
         with s.transaction():
+            if private_life.enabled(self.settings):
+                live_text.guard(s, self.settings, self.clock)
+                if (private_life.busy(s, now)
+                    or private_life.owner_waiting(s, self.settings, now)):
+                    return False
             old = s.one("SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'")
             if old and json.loads(old["value"])["until"] > now:
                 return False
@@ -1181,7 +1204,9 @@ class Core(Runtime):
                 self.clock,
             )
             extraction = Extraction.model_validate_json(response.text)
-            if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
+            if (captured_epoch != epoch(s) or not self._owns_memory_lease(lease)
+                or (private_life.enabled(cfg)
+                    and private_life.owner_waiting(s, cfg, self.clock()))):
                 return False
             valid_ids = {e["event_id"] for e in events}
             candidates = []
@@ -1198,7 +1223,9 @@ class Core(Runtime):
                 candidates, logical_request_id=attempt_key
             )
             with s.transaction():
-                if captured_epoch != epoch(s) or not self._owns_memory_lease(lease):
+                if (captured_epoch != epoch(s) or not self._owns_memory_lease(lease)
+                    or (private_life.enabled(cfg)
+                        and private_life.owner_waiting(s, cfg, self.clock()))):
                     return False
                 self.add_memories(candidates, resolutions, now)
                 # Keep episodes scoped to a single conversation.

@@ -243,7 +243,7 @@ def test_unsupported_multimodal_shapes_cannot_create_admission(core, tmp_path, m
 @pytest.mark.parametrize(
     "field,value",
     [
-        ("max_images_per_request", 5),
+        ("max_images_per_request", 0),
         ("max_images_per_request", True),
         ("approval_sha256", ""),
         ("estimated_tokens_per_image", 0),

@@ -12,7 +12,7 @@ from cryptography.fernet import Fernet
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.reply_segments import SegmentedReplyConfig
-from companion.store import Store
+from companion.store import Store, migrate
 from companion.transport import (
     begin_send,
     check_segment_ready,
@@ -85,6 +85,33 @@ def test_group_is_atomic_idempotent_and_content_is_not_duplicated(core, monkeypa
     assert [json.loads(row["content_json"])["text"] for row in group["rows"]] == PARTS
     assert all(set(json.loads(row["content_json"])) == {"text"} for row in group["rows"])
     assert core.store.rows("PRAGMA foreign_key_check") == []
+
+
+def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(core):
+    _, ids = freeze(core)
+    before = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    indexes = core.store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
+                              "AND tbl_name='outbox' ORDER BY name")
+    migration = Config()
+    migration.set_main_option("script_location", str(Path("migrations").resolve()))
+    migration.set_main_option(
+        "sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
+    command.downgrade(migration, "0019_segmented_replies")
+    migrate(core.settings.database)
+    assert core.store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+    assert core.store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
+                           "AND tbl_name='outbox' ORDER BY name") == indexes
+    assert core.store.rows("PRAGMA foreign_key_check") == []
+    assert reply_group(core.store, ids[0])["text"] == "".join(PARTS)
+    ingest(core, 2)
+    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
+                         "WHERE j.event_id='evt_test_2'")
+    expanded = enqueue_reply_parts(core.store, job, PARTS + PARTS[:2], 0, core.clock())
+    assert len(expanded) == 5
+    with pytest.raises(RuntimeError, match="REPLY_CAPACITY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"
+                       ):
+        command.downgrade(migration, "0019_segmented_replies")
+    assert reply_group(core.store, expanded[0])["text"] == "".join(PARTS + PARTS[:2])
 
 
 def test_two_workers_cannot_lease_later_parts_and_ack_starts_the_gap(core):
