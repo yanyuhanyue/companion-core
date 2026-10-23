@@ -34,7 +34,9 @@ def scope(plan):
 def validate_scope(value, outer):
     policy = value.get("segmented_reply")
     if (not isinstance(policy, dict)
-        or set(policy) != {"max_segments", "min_chars", "interval_ms"}
+        or set(policy) not in ({"max_segments", "min_chars", "interval_ms"},
+                               {"max_segments", "min_chars", "interval_ms", "mode"})
+        or policy.get("mode", "sentence") not in {"sentence", "semantic"}
         or (policy.get("max_segments") != "unlimited" and (
             type(policy.get("max_segments")) is not int
             or not 2 <= policy["max_segments"] <= 2**31 - 1))

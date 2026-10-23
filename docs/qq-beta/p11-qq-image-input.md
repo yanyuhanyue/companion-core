@@ -1,5 +1,8 @@
 # P11 A2：单张主人原图
 
+本文保留首版验收合同；后续扩展的常用动图输入见[主人私聊动图](animated-image-input.md)，
+多图与记忆组合见[消息分条](segmented-replies.md)。
+
 这是有界文字窗口的独立可选媒体范围。默认 `image_scope="none"`，
 `references_v1` 本身不允许领取、下载、上传或调用 Vision。
 

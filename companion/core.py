@@ -361,6 +361,11 @@ class Core(Runtime):
         body = json.loads(job["body_json"])
         text = body.get("text", "")
         rules = PRINCIPLES + self.expression.instruction()
+        if (job["kind"] == "chat" and cfg.segmented_reply is not None
+            and cfg.segmented_reply.mode == "semantic"):
+            from companion.reply_segments import SEMANTIC_RULES
+
+            rules += SEMANTIC_RULES
         if cfg.content_enabled:
             rules += CONTEXT_RULES
         if (body.get("rich") or cfg.rich_input_scope == "references_v1"

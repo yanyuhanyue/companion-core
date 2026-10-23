@@ -7,9 +7,15 @@
 max_segments = "unlimited"
 min_chars = 12
 interval_ms = 1500
+mode = "semantic"
 ```
 
 `max_segments` 可取不小于 2 的整数或 `"unlimited"`；省略时兼容旧配置，缺省为 3。
+`mode="semantic"` 让当前聊天模型直接以换行标记自然语义停顿，不增加模型调用。
+此模式不使用 `min_chars` 合并短回应，也不按固定字数或逐个逗号切开；优先保留安全换行，
+未提供换行时回退到句末标点。引用、括号动作和代码块受到保护。省略 `mode` 时继续使用
+兼容旧配置的 `"sentence"` 模式及短句合并规则；旧审批的序列化字段保持不变。
+
 `"unlimited"` 不合并超出三条的自然片段，完整文本仍受 20,000 字合同、窗口发送额度和
 `max_reply_chars` 约束。`min_chars` 为 4–100 个非空白字符；`interval_ms` 为 0–3000 毫秒。
 间隔从上一条成功回执开始计算，实际时间还受 Bridge 轮询影响。删除这张配置表即可恢复单条生成；已冻结的待发回复保留原分条结果。
@@ -54,3 +60,4 @@ Inspector 为分条组提供不含正文的摘要。手机反馈可填写 `expec
 - [AstrBot respond](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/pipeline/respond/stage.py)：分条发送与间隔。
 - [astrbot_plugin_splitter](https://github.com/nuomicici/astrbot_plugin_splitter/blob/dffce04449922e510dd72fd494f99b150b908e6d/splitter/splitter.py)：代码片段保护、短段合并及数量上限。
 - [astrbot_plugin_pacer](https://github.com/Lansheen3096/astrbot_plugin_pacer/blob/74d5c45ef6b0702de8ef5765a614b86a90d86af4/main.py)：新输入到达时停止继续分条。
+- [astrbot_plugin_smart_segmentation](https://github.com/exynos967/astrbot_plugin_smart_segmentation/blob/2fa230fa4a1456ce6d0addf8ecd0052bc8506ce0/segmentation.py)：按自然语义和表达意图分段，保留相关分句。本项目将停顿要求放入原聊天调用，未采用额外分段调用。
