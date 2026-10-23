@@ -10,7 +10,7 @@ import json
 import signal
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 import httpx
@@ -490,10 +490,50 @@ async def core_status(window, client):
     return decode(bytes(content), 65536)
 
 
+def segment_pacing_pending(window):
+    """Defer leasing while the local ACK interval exceeds Core's earlier result clock."""
+    window.verify()
+    policy = reply_segments.scope(window.plan)
+    if not policy or not policy["interval_ms"]:
+        return False
+    row = window.db.execute(
+        "SELECT * FROM window_attempts WHERE plan_hash=? ORDER BY fence DESC LIMIT 1",
+        (window.plan.sha256,),
+    ).fetchone()
+    if not row or row["state"] != "ACK":
+        return False
+    incoming = window.db.execute(
+        "SELECT state FROM window_inputs WHERE event_id=? AND plan_hash=?",
+        (row["event_id"], window.plan.sha256),
+    ).fetchone()
+    if incoming and incoming["state"] in {"SUPERSEDED", "RECALLED", "CANCELLED"}:
+        return False
+    records, _ = window.read_journal()
+    reservation = next((record for record in reversed(records) if record["kind"] == "RESERVED"
+                        and record["data"].get("fence") == row["fence"]), None)
+    terminal = next((record for record in reversed(records)
+                     if record["kind"] in {"IO_STARTED", "ACK", "UNKNOWN"}
+                     and record["data"].get("fence") == row["fence"]), None)
+    if (not reservation or not terminal or terminal["kind"] != "ACK"
+        or reservation["data"].get("event_hash") != digest(row["event_id"])
+        or reservation["data"].get("message_hash") != digest(row["message_id"])
+        or reservation["data"].get("item_sha256") != row["item_hash"]):
+        raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+    segment = reservation["data"].get("reply_segment")
+    if not segment or segment["index"] >= segment["count"] - 1:
+        return False
+    if segment["interval_ms"] != policy["interval_ms"]:
+        raise ValueError("REPLY_SEGMENT_SEQUENCE_REQUIRED")
+    return window.clock() < datetime.fromisoformat(terminal["at"]) + timedelta(
+        milliseconds=policy["interval_ms"])
+
+
 async def pump_private(window, client, protocol, *, status=None):
     status = status if status is not None else await core_status(window, client)
     if any(row["state"] == "PENDING" and row["count"] for row in status["deliveries"]):
         await window.core_counts(client)
+        if segment_pacing_pending(window):
+            return
         operation = AutomaticSend(window, client)
         sender = WindowOneBot(operation, protocol)
         async with window.core_http(client) as scoped, sender.delegate.client:
@@ -524,11 +564,7 @@ async def finish_input(window, client, protocol, source, event_id):
                     raise ValueError("AUTOMATIC_REPLY_TIMEOUT")
                 sending = True
                 deadline = time.monotonic() + SEND_PROGRESS_SECONDS + interval
-            await window.core_counts(client)
-            operation = AutomaticSend(window, client)
-            sender = WindowOneBot(operation, protocol)
-            async with window.core_http(client) as scoped, sender.delegate.client:
-                await deliver_tick(scoped, sender, window.spool, guard=operation)
+            await pump_private(window, client, protocol, status=status)
             if window.row()["state"] == "STOPPED":
                 await window.stop_core(client)
                 return
