@@ -356,6 +356,20 @@ class Memory:
                     or arguments.split(maxsplit=1) != expected
                 ):
                     raise CoreError("MEMORY_DECISION_SOURCE_INVALID", 403)
+                if decision == "correct":
+                    # The successor and this source link commit together. Recover
+                    # the same result after a crash before Outbox/job completion.
+                    previous = s.one(
+                        "SELECT m.memory_id,m.status,m.content FROM memories m "
+                        "JOIN memory_evidence v USING(memory_id) "
+                        "WHERE m.supersedes_memory_id=? AND v.event_id=? AND v.polarity=1",
+                        (memory_id, evidence_event_id),
+                    )
+                    if previous:
+                        if previous["status"] != "CONFIRMED" or previous["content"] != corrected:
+                            raise CoreError("MEMORY_NOT_ACTIVE")
+                        return {"memory_id": previous["memory_id"], "state": "CONFIRMED",
+                                "supersedes": memory_id}
                 s.audit(
                     "memory.owner_decision",
                     memory_id,
@@ -446,6 +460,8 @@ class Memory:
                     polarity=1,
                     created_at=now,
                 )
+                s.insert("event_dependencies", event_id=event_id,
+                         source_event_id=evidence_event_id)
             s.execute("DELETE FROM conversation_summaries")
             s.execute("UPDATE episodes SET summary='',status='REDACTED'")
             s.execute(

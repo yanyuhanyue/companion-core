@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -159,9 +159,13 @@ class ErasureLedger:
                 ):
                     raise ValueError("invalid sequence")
                 if record.get("target_type", "memory") not in {
-                    "memory", "event_batch", "diary", "source_grant",
+                    "memory", "event_batch", "raw_retention", "diary", "source_grant",
                 }:
                     raise ValueError("unknown erasure target")
+                if record.get("target_type") == "raw_retention":
+                    cutoff = datetime.fromisoformat(record["retention_cutoff"])
+                    if cutoff.utcoffset() is None or cutoff > datetime.fromisoformat(record["at"]):
+                        raise ValueError("invalid retention cutoff")
                 if record.get("target_type") == "source_grant" and (
                     not re.fullmatch(r"grant_[0-9a-f]{32}", record.get("source_grant_id", ""))
                     or record["source_grant_id"] != record["memory_id"]
@@ -208,7 +212,7 @@ class ErasureLedger:
             os.fsync(stream.fileno())
         self.apply(store, record)
 
-    def expire_events(self, store, event_ids, now):
+    def expire_events(self, store, event_ids, now, *, retention_cutoff=None):
         record = {
             "seq": len(self.read()),
             "erasure_id": uid("erase"),
@@ -216,8 +220,10 @@ class ErasureLedger:
             "memory_ids": [],
             "event_ids": event_ids,
             "at": now,
-            "target_type": "event_batch",
+            "target_type": "raw_retention" if retention_cutoff is not None else "event_batch",
         }
+        if retention_cutoff is not None:
+            record["retention_cutoff"] = retention_cutoff
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(encode(record) + "\n")
             stream.flush()
@@ -356,13 +362,18 @@ class ErasureLedger:
             "SELECT key FROM runtime_meta WHERE value=? AND substr(key,1,?)=? "
             "AND length(key)>?", (record["erasure_id"], len(prefix), prefix, len(prefix)),
         )}
-        event_ids, memory_ids = source_grant_closure(
-            store, set(record["event_ids"]) | recorded, record["memory_ids"]
-        )
+        roots = set(record["event_ids"]) | recorded
+        if record.get("target_type") == "raw_retention":
+            event_ids, memory_ids = self.retention_events(store, roots), set(record["memory_ids"])
+        else:
+            event_ids, memory_ids = source_grant_closure(store, roots, record["memory_ids"])
         scoped_record = {**record, "event_ids": sorted(event_ids),
                          "memory_ids": sorted(memory_ids)}
         copies = erase_diary_projections(store, scoped_record, conservative=False)
-        self.erase_memories(store, memory_ids, record["at"])
+        if record.get("target_type") == "raw_retention":
+            self.expire_memory_evidence(store, scoped_record)
+        else:
+            self.erase_memories(store, memory_ids, record["at"])
         event_ids |= copies
         erase_derivatives(store, ErasureScope(frozenset(event_ids), False))
         self.erase_events(store, record, event_ids)
@@ -397,7 +408,9 @@ class ErasureLedger:
                 self.record_complete(store, record)
                 return
 
-        event_ids = dependent_events(store, record["event_ids"])
+        event_ids = (self.retention_events(store, record["event_ids"])
+                     if record.get("target_type") == "raw_retention"
+                     else dependent_events(store, record["event_ids"]))
         memory_ids = set(record["memory_ids"])
         for event_id in event_ids:
             memory_ids.update(
@@ -408,7 +421,10 @@ class ErasureLedger:
             )
         record = {**record, "event_ids": sorted(event_ids), "memory_ids": sorted(memory_ids)}
         copies = self.erase_diary_projections(store, record)
-        self.erase_memories(store, record["memory_ids"], record["at"])
+        if record.get("target_type") == "raw_retention":
+            self.expire_memory_evidence(store, record)
+        else:
+            self.erase_memories(store, record["memory_ids"], record["at"])
         event_ids = set(record["event_ids"]) | copies
         erase_derivatives(store, ErasureScope(frozenset(event_ids),
                                              record.get("target_type") != "diary"))
@@ -426,6 +442,69 @@ class ErasureLedger:
             store.execute(self.clear_reply_sql())
         advance_epoch(store)
         self.record_complete(store, record)
+
+    @staticmethod
+    def retention_events(store, event_ids):
+        """Expire derived originals too, including legacy QQ correction copies."""
+        from companion.observation import dependent_events
+
+        event_ids = set(event_ids)
+        while True:
+            previous = set(event_ids)
+            event_ids = dependent_events(store, event_ids)
+            # Older corrections predate event_dependencies but retained this
+            # explicit source-to-successor relation. It is not a second source.
+            for row in store.rows(
+                "SELECT m.memory_id,m.supersedes_memory_id,m.content,e.body_json "
+                "FROM memories m JOIN memory_evidence v USING(memory_id) "
+                "JOIN events e USING(event_id) WHERE m.supersedes_memory_id IS NOT NULL "
+                "AND e.source='qq.onebot' AND e.event_id IN (SELECT value FROM json_each(?))",
+                (encode(sorted(event_ids)),),
+            ):
+                command, arguments = command_parts(json.loads(row["body_json"]).get("text", ""))
+                if command == "纠正这一条" and arguments.split(maxsplit=1) == [
+                    row["supersedes_memory_id"], row["content"],
+                ]:
+                    event_ids.update(item["event_id"] for item in store.rows(
+                        "SELECT e.event_id FROM memory_evidence v JOIN events e USING(event_id) "
+                        "WHERE v.memory_id=? AND e.source='owner.decision' "
+                        "AND e.event_type='memory.corrected'", (row["memory_id"],),
+                    ))
+            if event_ids == previous:
+                return event_ids
+
+    @staticmethod
+    def expire_memory_evidence(store, record):
+        """Keep facts with independent live support; quarantine unsupported facts."""
+        from companion.observation import expired_sources
+
+        events = encode(record["event_ids"])
+        affected = {row["memory_id"] for row in store.rows(
+            "SELECT memory_id FROM memory_evidence WHERE event_id IN "
+            "(SELECT value FROM json_each(?))", (events,),
+        )} | set(record["memory_ids"])
+        store.execute("DELETE FROM memory_evidence WHERE event_id IN "
+                      "(SELECT value FROM json_each(?))", (events,))
+        for memory_id in affected:
+            sources = [row["event_id"] for row in store.rows(
+                "SELECT e.event_id FROM memory_evidence v JOIN events e USING(event_id) "
+                "JOIN conversations c USING(conversation_id) WHERE v.memory_id=? "
+                "AND v.polarity=1 AND e.redacted=0 AND e.actor_id='owner' "
+                "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
+                "AND NOT EXISTS (SELECT 1 FROM runtime_meta r "
+                "WHERE r.key='erased_event:'||e.event_id)",
+                (memory_id,),
+            )]
+            valid = any(not expired_sources(store, [source], record["retention_cutoff"])
+                        for source in sources)
+            store.execute("DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
+            if not valid:
+                store.execute(
+                    "UPDATE memories SET confidence=0,needs_review=1,updated_at=?,"
+                    "status=CASE WHEN status IN ('CONFIRMED','HYPOTHESIS') "
+                    "THEN 'HYPOTHESIS' ELSE status END WHERE memory_id=? AND status<>'FORGOTTEN'",
+                    (record["at"], memory_id),
+                )
 
     @staticmethod
     def erase_memories(store, memory_ids, at):

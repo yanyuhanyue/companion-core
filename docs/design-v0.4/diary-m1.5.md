@@ -8,7 +8,9 @@
 
 每天本地时间 02:00 后整理前一天，使用现有 `timezone`。补写范围为最近 `diary_catchup_days` 个自然日；夏令时按相邻本地午夜换算 UTC。每天只有一个任务，重复调度不会覆盖已完成、失败、删除或取消的结果。首版不提供自动重建或旧日记的递归引用。
 
-任务状态为 `PENDING / RUNNING / RETRY_WAIT / COMMITTED / SKIPPED / FAILED / CANCELLED`。网络错误和结构化字段错误最多尝试 `diary_max_attempts` 次；伪造来源、无效引文、敏感内容或无依据经历直接失败。租约、开关、来源指纹和隐私版本必须在提交事务内再次通过检查。
+任务状态为 `PENDING / RUNNING / RETRY_WAIT / COMMITTED / SKIPPED / FAILED / CANCELLED`。已知用量的可重试响应或结构化字段错误受 `diary_max_attempts` 限制；伪造来源、无效引文、敏感内容或无依据经历直接失败。模型结果 UNKNOWN 或已预留请求的租约失效时保留费用责任，停止自动重发。尚未预留模型请求的租约失效可重新领取。租约、开关、来源指纹和隐私版本必须在提交事务内再次通过检查。
+
+领取后、预留前遇到 `MODEL_PROVIDER_CONCURRENCY_EXHAUSTED` 时进入 `RETRY_WAIT`，30 秒后重验准入；付费模型日/月额度耗尽则等到下一个本地周期。任务保留累计领取次数和错误原因，未派发的短期拒绝即使累计领取已达限制，也继续等待资源恢复。STOP 取消后的同一日记录不会被重复调度重新激活；新窗口不隐式续跑这类取消任务。
 
 ## 事实、来源与写作
 
