@@ -10,6 +10,7 @@ from companion import (
     dialogue_history,
     image_spool,
     live_text,
+    notices,
     private_life,
     qq_images,
     qq_rich,
@@ -358,6 +359,8 @@ class Core(Runtime):
 
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
+        if messages := notices.messages(s, cfg, job, self.clock(), PRINCIPLES):
+            return messages
         body = json.loads(job["body_json"])
         text = body.get("text", "")
         rules = PRINCIPLES + self.expression.instruction()
@@ -897,7 +900,7 @@ class Core(Runtime):
                 ):
                     reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"
                 else:
-                    if self.settings.memory_enabled:
+                    if self.settings.memory_enabled and notices.reference(job) is None:
                         hits, paused_memory = await self.recall_for_reply(job)
                         if captured_epoch != epoch(self.store):
                             raise CoreError("PRIVACY_CHANGED", 503)
@@ -961,14 +964,27 @@ class Core(Runtime):
                 should_send = reply.strip() not in {"[SKIP]", ""} and proactive_allowed(
                     self.store, self.settings, now
                 )
-                if job["kind"] != "activity" or should_send:
+                notice_parts = notices.parts(self.store, self.settings, job, reply, now)
+                if notice_parts == []:
+                    notices.record(self.store, self.settings, job, [], now)
+                if job["kind"] != "activity" or should_send or notices.required(
+                    self.store, job["job_id"]
+                ):
                     policy = self.settings.segmented_reply
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
                         and self.settings.expression_enabled else None
                     )
-                    if policy and generated_reply and job["kind"] == "chat" and (
+                    if notice_parts is not None:
+                        action = ("qq.private.reply" if notices.required(self.store, job["job_id"])
+                                  else "qq.private.proactive")
+                        message_ids = enqueue_reply_parts(
+                            self.store, job, notice_parts, policy.interval_ms if policy else 0,
+                            now, action=action,
+                        ) if notice_parts else []
+                        notices.record(self.store, self.settings, job, message_ids, now)
+                    elif policy and generated_reply and job["kind"] == "chat" and (
                         intent is None or intent.image is None
                     ):
                         parts = split_text(intent.text if intent else reply, policy)
@@ -998,7 +1014,7 @@ class Core(Runtime):
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
-                    if bounded_text:
+                    if bounded_text and message_ids:
                         live_text.record_replies(
                             self.store, self.settings, self.clock, job, message_ids,
                         )
@@ -1035,6 +1051,18 @@ class Core(Runtime):
     def fail_job(self, job, code):
         now = self.clock()
         with self.store.transaction():
+            if notices.reference(job) is not None and code in {
+                "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
+                "DAILY_BUDGET_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
+            } and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+                                     (job["job_id"],)):
+                self.store.execute(
+                    "UPDATE jobs SET state='RETRY_WAIT',attempts=MAX(0,attempts-1),"
+                    "last_error_code=?,next_attempt_at=?,lease_token=NULL,updated_at=? "
+                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    (code, after(now, 60), now, job["job_id"], job["lease_token"]),
+                )
+                return
             bounded_text = live_text.active(self.store, self.settings)
             if bounded_text:
                 live_text.record_failure(self.store, self.settings, code)

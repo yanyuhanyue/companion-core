@@ -12,7 +12,7 @@ from companion.contracts import CoreError, StrictModel
 from companion.observation import expired_sources
 from companion.privacy import epoch, redact
 from companion.store import after, encode, uid
-from companion.transport import digest, enqueue
+from companion.transport import digest, reply_group
 
 TERMINAL = {"DONE", "FAILED", "CANCELLED"}
 
@@ -86,12 +86,16 @@ class GoalDecision(StrictModel):
 
 def acknowledge_commitment_delivery(store, message_id, state, now):
     if state == "SENT" and store.one("SELECT 1 FROM sqlite_master WHERE name='commitments'"):
-        store.execute(
-            "UPDATE commitments SET state=feedback_outcome,updated_at=? "
-            "WHERE feedback_message_id=? AND state<>'ERASED' "
-            "AND feedback_outcome IN ('FULFILLED','EXPLAINED_FAILURE')",
-            (now, message_id),
-        )
+        for row in store.rows(
+            "SELECT c.commitment_id,c.feedback_message_id FROM commitments c JOIN outbox o "
+            "ON o.message_id=c.feedback_message_id WHERE c.state<>'ERASED' AND "
+            "c.feedback_outcome IN ('FULFILLED','EXPLAINED_FAILURE') AND (o.message_id=? OR "
+            "o.reply_group_id=(SELECT reply_group_id FROM outbox WHERE message_id=?))",
+            (message_id, message_id),
+        ):
+            if reply_group(store, row["feedback_message_id"], require_sent=True):
+                store.execute("UPDATE commitments SET state=feedback_outcome,updated_at=? "
+                              "WHERE commitment_id=?", (now, row["commitment_id"]))
 
 
 def erase_goals(store, event_ids):
@@ -438,44 +442,16 @@ class GoalEngine:
         )
         if not row:
             return
-        goal = self.get(goal_id)
-        if outcome == "FULFILLED":
-            result = self.store.one(
-                "SELECT e.body_json,o.canonical_url FROM events e JOIN observations o "
-                "USING(event_id) WHERE e.event_id=? AND e.redacted=0 AND o.redacted=0",
-                (result_event_id,),
-            )
-            if not result:
-                raise CoreError("GOAL_RESULT_UNAVAILABLE", 409)
-            text = (
-                "关于“"
-                + goal["topic"]
-                + "”，我获取到这些内容：\n"
-                + json.loads(result["body_json"])["text"][:600]
-            )
-            if result["canonical_url"]:
-                text += "\n" + result["canonical_url"]
-        else:
-            reason = {
-                "OWNER_CANCELLED": "你已取消",
-                "DEADLINE_EXCEEDED": "超过约定的截止时间",
-                "GOAL_LEASE_EXPIRED": "处理过程中断，已达到重试上限",
-            }.get(code, "执行未成功（" + str(code) + "）")
-            text = "“" + goal["topic"] + "”尚未完成：" + reason + "。"
-        message_id = enqueue(
-            self.store,
-            row["accepted_event_id"],
-            row["conversation_id"],
-            text,
-            self.clock(),
-            key="commitment:" + row["commitment_id"] + ":result",
-        )
         self.store.execute(
             "UPDATE commitments SET state='IN_PROGRESS',result_event_id=?,"
-            "feedback_message_id=?,feedback_outcome=?,failure_code=?,updated_at=? WHERE "
+            "feedback_outcome=?,failure_code=?,updated_at=? WHERE "
             "goal_id=?",
-            (result_event_id, message_id, outcome, code, self.clock(), goal_id),
+            (result_event_id, outcome, code, self.clock(), goal_id),
         )
+        from companion.notices import schedule
+
+        schedule(self.store, self.settings, "commitment", row["commitment_id"],
+                 row["conversation_id"], self.clock())
 
     def expire_commitments(self):
         for row in self.store.rows(

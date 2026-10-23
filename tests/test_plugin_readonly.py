@@ -2,6 +2,8 @@ import copy
 import hashlib
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 
 import httpx
@@ -17,6 +19,7 @@ from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from source_reader.accounts import BILIBILI_COMMIT, HEYBOX_COMMIT, account_grant
 from source_reader.bili_tools import TOOLS, BilibiliAccountHTTP, BilibiliToolReader, BilibiliTools
+from source_reader.bilibili import BilibiliReader
 from source_reader.heybox import HeyboxReader
 from source_reader.heybox_signing import generate_hkey
 from source_reader.heybox_source import NativeHeyboxSource
@@ -30,6 +33,33 @@ from tests.test_source_reader import META, NOW, PLAYER, SUBTITLE, response
 
 NOW_DT = datetime.fromisoformat(NOW)
 SECRET = "fixture-only-isolated-account-cookie"
+
+
+def test_native_bili_account_cli_accepts_explicit_grant_and_fails_before_io_if_missing(tmp_path):
+    result = subprocess.run([
+        sys.executable, "-B", "-m", "source_reader", "--source", "bilibili",
+        "--account-file", str(tmp_path / "absent-account.json"), "--probe", BILI_ITEM["url"],
+    ], capture_output=True, text=True, timeout=15, check=True)
+    payload = json.loads(result.stdout)
+    assert payload["error_code"] == "OWNER_ACCOUNT_AUTHORIZATION_REQUIRED"
+    assert payload["used_requests"] == 0 and not payload["items"]
+
+
+def test_native_bili_account_reader_keeps_popular_discovery(tmp_path):
+    async def scenario():
+        pool, backend = mock_pool(response({"code": 0, "data": {"list": [{
+            "bvid": "BV1xx411c7mD", "title": "真实返回的热门标题",
+        }]}}))
+        async with BilibiliAccountHTTP(grant(tmp_path, "bilibili"), pool,
+                                       clock=lambda: NOW_DT) as public:
+            reader = BilibiliReader(public)
+            result = await reader.read({"operation": "discover", "max_items": 1},
+                                       ReadBudget(4096, 1))
+        assert result == [{"url": BILI_ITEM["url"], "title": "真实返回的热门标题", "text": ""}]
+        assert b"/x/web-interface/popular?" in backend.requests[0]
+        assert SECRET.encode() in backend.requests[0]
+
+    run(scenario())
 
 
 def grant(tmp_path, source="heybox", now=NOW_DT, **updates):

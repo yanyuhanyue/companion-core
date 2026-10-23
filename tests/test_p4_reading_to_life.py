@@ -228,14 +228,21 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             assert run(active.run_once("p4-simulated-chat"))
             assert acknowledge_one(active)["action_type"] == "qq.private.reply"
             assert active.social.flush()
+            assert run(active.run_once("p4-share-wording"))
             assert not active.social.flush()
             assert not active.schedule_proactive()  # One common daily allowance.
-            message = active.store.one("SELECT * FROM outbox WHERE origin_event_id=?", (fetched,))
+            message = active.store.one(
+                "SELECT o.* FROM outbox o JOIN social_candidates c "
+                "ON c.message_id=o.message_id WHERE c.event_id=?", (fetched,),
+            )
             assert message["action_type"] == "qq.private.proactive"
-            assert item.text in json.loads(message["content_json"])["text"]
+            assert json.loads(message["content_json"])["text"] == core.model.activity
+            assert any(json.loads(messages[-1]["content"]).get("text") == item.text
+                       for messages, scenario in core.model.calls if scenario == "activity")
             assert "看完" not in message["content_json"]
             if day < 6:
                 assert acknowledge_one(active)["message_id"] == message["message_id"]
+                assert acknowledge_one(active)["content"]["text"] == item.url
 
             active.clock.now = started + timedelta(days=day + 1)
             active.consolidation.schedule_day(local_day)

@@ -41,7 +41,7 @@ def _group_manifest(job_id, parts, interval_ms):
             "interval_ms": interval_ms, "total_chars": sum(map(len, parts))}
 
 
-def enqueue_reply_parts(store, job, parts, interval_ms, now):
+def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.private.reply"):
     """Freeze all parts atomically; a retried job cannot recut or duplicate its reply."""
     if (
         not isinstance(parts, list) or not 1 <= len(parts) <= 2**31 - 1
@@ -55,13 +55,16 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now):
             "SELECT j.job_id,j.kind,e.event_id,e.conversation_id,e.redacted "
             "FROM jobs j JOIN events e USING(event_id) WHERE j.job_id=?", (job["job_id"],),
         )
-        if not source or source["kind"] != "chat" or source["redacted"] or any(
+        if (not source or source["kind"] not in {"chat", "activity"}
+            or action not in {"qq.private.reply", "qq.private.proactive"}
+            or (source["kind"] == "chat" and action != "qq.private.reply")
+            or source["redacted"] or any(
             source[key] != job[key] for key in ("event_id", "conversation_id")
-        ):
+        )):
             raise CoreError("REPLY_GROUP_SOURCE_CHANGED", 409)
         existing = store.rows(
-            "SELECT * FROM outbox WHERE origin_event_id=? AND action_type='qq.private.reply' "
-            "ORDER BY rowid", (job["event_id"],),
+            "SELECT * FROM outbox WHERE origin_event_id=? AND action_type=? "
+            "ORDER BY rowid", (job["event_id"], action),
         )
         if existing:
             group = reply_group(store, existing[0]["message_id"])
@@ -76,12 +79,13 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now):
                 raise CoreError("REPLY_GROUP_CHANGED", 409)
             return [row["message_id"] for row in group["rows"]]
         if len(parts) == 1:
-            return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now)]
+            return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now,
+                            action=action)]
         group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms))
         ids = []
         for index, text in enumerate(parts):
             message_id = enqueue(store, job["event_id"], job["conversation_id"], text, now,
-                                 key=f"reply:{job['event_id']}:v2:{index}")
+                                 key=f"reply:{job['event_id']}:v2:{index}", action=action)
             store.execute(
                 "UPDATE outbox SET reply_group_id=?,segment_index=?,segment_count=?,"
                 "reply_group_sha256=?,segment_interval_ms=? WHERE message_id=?",
@@ -111,9 +115,10 @@ def reply_group(store, message_id, *, require_sent=False):
             "JOIN events e USING(event_id) WHERE j.job_id=?", (row["reply_group_id"],),
         )
         if (
-            not source or source["redacted"] or source["kind"] != "chat"
+            not source or source["redacted"] or source["kind"] not in {"chat", "activity"}
             or not 2 <= len(rows) <= 2**31 - 1 or row["segment_count"] != len(rows)
-            or row["action_type"] != "qq.private.reply"
+            or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
+            or (source["kind"] == "chat" and row["action_type"] != "qq.private.reply")
             or (source["event_id"], source["conversation_id"]) != (
                 row["origin_event_id"], row["conversation_id"])
             or type(row["segment_interval_ms"]) is not int
@@ -225,6 +230,8 @@ def cancel_proactive_work(store, now):
     store.execute(
         "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
         "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
+        "AND event_id NOT IN (SELECT event_id FROM events WHERE "
+        "json_extract(body_json,'$.notice.kind')='commitment') "
         "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
         (now,),
     )
@@ -258,13 +265,6 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
-            if row.get("reply_group_id"):
-                try:
-                    check_segment_ready(store, row["message_id"], now)
-                except CoreError as error:
-                    if error.code == "REPLY_SEGMENT_NOT_READY":
-                        continue
-                    raise
             problem = share_delivery_problem(store, settings, row["message_id"], now)
             if problem:
                 store.execute(
@@ -272,7 +272,15 @@ def lease_deliveries(store, settings, request, now):
                     "last_error_code=? WHERE message_id=?",
                     (now, problem, row["message_id"]),
                 )
+                _cancel_segment_tails(store, now)
                 continue
+            if row.get("reply_group_id"):
+                try:
+                    check_segment_ready(store, row["message_id"], now)
+                except CoreError as error:
+                    if error.code == "REPLY_SEGMENT_NOT_READY":
+                        continue
+                    raise
             token = uid("lease")
             store.execute(
                 "UPDATE outbox SET state='LEASED',lease_owner=?,lease_token=?,"
@@ -321,18 +329,19 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
         if pending:
             from companion.social import proactive_allowed, share_delivery_problem
 
-            if pending["reply_group_id"]:
+            problem = share_delivery_problem(store, settings, message_id, now)
+            if not problem and pending["reply_group_id"]:
                 check_segment_ready(store, message_id, now)
             if pending["action_type"] == "qq.private.proactive" and not proactive_allowed(
                 store, settings, now
             ):
                 raise CoreError("PROACTIVE_SEND_PAUSED", 409)
-            problem = share_delivery_problem(store, settings, message_id, now)
         if problem:
             store.execute(
                 "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"
                 "last_error_code=? WHERE message_id=?", (now, problem, message_id)
             )
+            _cancel_segment_tails(store, now)
         else:
             changed = store.execute(
                 "UPDATE outbox SET state='SENDING',attempt_count=attempt_count+1,updated_at=? "
