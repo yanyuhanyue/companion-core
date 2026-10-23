@@ -293,6 +293,10 @@ def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(core,
 def test_downgrade_refuses_to_discard_existing_segment_group(core):
     _, ids = freeze(core)
     before = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
+    removed_defaults = {"delivery_lane": "owner_private", "native_ack_json": None}
+    assert all(
+        {key: row[key] for key in removed_defaults} == removed_defaults for row in before
+    )
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations"),
@@ -300,8 +304,11 @@ def test_downgrade_refuses_to_discard_existing_segment_group(core):
     config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
     with pytest.raises(RuntimeError, match="SEGMENTED_REPLIES_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW"):
         command.downgrade(config, "0018_reflection_goal_lineage")
-    assert core.store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+    assert core.store.rows("SELECT * FROM outbox ORDER BY rowid") == [
+        {key: value for key, value in row.items() if key not in removed_defaults} for row in before
+    ]
     assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
         "0019_segmented_replies"
     )
     assert reply_group(core.store, ids[0])["text"] == "".join(PARTS)
+    assert not core.store.rows("PRAGMA foreign_key_check")

@@ -349,8 +349,6 @@ class VoiceFlow:
         # Source authentication also applies to a valid TTS-only installation.
         # ASR availability controls upload/admission, not whether chat may proceed.
         self.jobs._node()
-        if not self.settings.voice.asr.enabled:
-            raise CoreError("VOICE_ASR_DISABLED", 403)
         approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
         if approval.rich_input_scope != "references_v1":
             raise CoreError("VOICE_ASR_SCOPE_REQUIRED", 403)
@@ -372,8 +370,9 @@ class VoiceFlow:
         return event, body, job
 
     def _asr_available(self):
-        return any(node.enabled and "asr" in node.capabilities
-                   for node in self.settings.voice.nodes.values())
+        return self.settings.voice.asr.enabled and any(
+            node.enabled and "asr" in node.capabilities
+            for node in self.settings.voice.nodes.values())
 
     def _input_authority(self, event):
         return {
@@ -562,6 +561,8 @@ class VoiceFlow:
         except (ValueError, TypeError):
             raise CoreError("VOICE_ASR_UPLOAD_PROOF_REQUIRED", 403) from None
         event, body, job = self._input_source(owner_event_id)
+        if not self.settings.voice.asr.enabled:
+            raise CoreError("VOICE_ASR_DISABLED", 403)
         records = _records(body)[: self.settings.voice.asr.max_records]
         if proof.event_id != owner_event_id or proof.source_segment_index not in records:
             raise CoreError("VOICE_ASR_SOURCE_INVALID", 403)

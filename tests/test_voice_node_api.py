@@ -1,6 +1,7 @@
 """Node boundary tests and real TLS/WS/Core entrypoint with independent local processes."""
 
 import asyncio
+import base64
 import hashlib
 import ipaddress
 import json
@@ -217,6 +218,51 @@ def test_boundary_auth_precedes_body_read_and_stream_limit_is_enforced(core, mon
     run(scenario())
 
 
+@pytest.mark.parametrize("change", ["cancelled", "revision", "source", "scope", "fenced_epoch"])
+def test_disabled_asr_input_state_preserves_source_authority(core, monkeypatch, change):
+    _, _, event_id, _ = prepared(core, monkeypatch, asr=VoiceASRPolicy(enabled=False))
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app_for(core)), base_url="http://test",
+            headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
+        ) as client:
+            path = f"/internal/v1/voice-inputs/{event_id}/state"
+            initial = await client.get(path)
+            assert initial.status_code == 200, initial.text
+            assert initial.json()["state"] == "FALLBACK"
+            assert not initial.json()["records"][0]["upload_allowed"]
+            if change == "cancelled":
+                core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE event_id=?",
+                                   (event_id,))
+            elif change == "revision":
+                core.store.execute("UPDATE conversations SET reply_revision=reply_revision+1")
+            elif change == "source":
+                event = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))
+                body = json.loads(event["body_json"])
+                body["text"] = "source changed after capture"
+                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                                   (encode(body), event_id))
+            elif change == "scope":
+                core.settings.live_text_window = core.settings.live_text_window.model_copy(
+                    update={"voice_scope": "none"})
+            else:
+                event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
+                value = core.voice._input_authority(event) | {"state": "FENCED"}
+                core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                                   ("voice_input:" + event_id, encode(value)))
+                core.store.execute(
+                    "INSERT OR REPLACE INTO runtime_meta VALUES ('privacy_epoch','1')")
+            before = core.store.db.total_changes
+            denied = await client.get(path)
+            assert denied.status_code in {403, 409}, denied.text
+            assert core.store.db.total_changes == before
+            assert not core.store.rows("SELECT * FROM voice_jobs")
+            assert not core.store.rows("SELECT * FROM model_usage")
+
+    run(scenario())
+
+
 def tls_material(tmp_path):
     private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "synthetic voice core")])
@@ -401,7 +447,44 @@ def test_real_core_tls_native_authority_and_independent_node(
                     await window.approve_captured(client, capture_approval(window))
                     event = core.store.one("SELECT * FROM events WHERE source='qq.onebot'")
                     jobs = VoiceJobs(core.store, core.settings, core.clock)
+                    data = wav_bytes(0.125)
+                    proof = sign_asr_proof(
+                        Ed25519PrivateKey.from_private_bytes(bytes.fromhex(cfg.capture_signing_key)),
+                        plan_sha256=plan.sha256,
+                        event_id=event["event_id"],
+                        source_event_id=event["source_event_id"],
+                        source_input_sha256=input_digest(json.loads(event["body_json"])),
+                        source_segment_index=1,
+                        audio_sha256=hashlib.sha256(data).hexdigest(),
+                        audio_bytes=len(data),
+                        source_partial=True,
+                    )
                     if operation == "tts":
+                        path = f"/internal/v1/voice-inputs/{event['event_id']}"
+                        state_before = core.store.db.total_changes
+                        receipt = await client.get(path + "/state")
+                        assert receipt.status_code == 200, receipt.text
+                        assert receipt.json()["state"] == "FALLBACK"
+                        assert receipt.json()["records"] == [{
+                            "index": 1, "state": "MISSING", "job_id": None,
+                            "input_sha256": None, "source_proof_sha256": None,
+                            "upload_allowed": False,
+                        }]
+                        assert core.store.db.total_changes == state_before
+                        unauthorized = await client.get(path + "/state", headers={
+                            "Authorization": "Bearer wrong-token",
+                        })
+                        assert unauthorized.status_code == 401
+                        proof_header = base64.urlsafe_b64encode(canonical_bytes(proof)).decode()
+                        rejected = await client.post(path, content=data, headers={
+                            "Content-Type": "audio/wav",
+                            "x-voice-proof": proof_header,
+                        })
+                        assert rejected.status_code == 403, rejected.text
+                        assert "VOICE_ASR_DISABLED" in rejected.text
+                        assert core.store.db.total_changes == state_before
+                        assert not core.store.rows("SELECT * FROM voice_jobs")
+                        assert not core.store.rows("SELECT * FROM model_usage")
                         with Core(
                             core.settings, ModelClient(core.settings, model_http), core.clock
                         ) as worker:
@@ -413,20 +496,6 @@ def test_real_core_tls_native_authority_and_independent_node(
                                 outbox["message_id"], json.loads(outbox["content_json"])["text"]
                             )
                     else:
-                        data = wav_bytes(0.125)
-                        proof = sign_asr_proof(
-                            Ed25519PrivateKey.from_private_bytes(
-                                bytes.fromhex(cfg.capture_signing_key)
-                            ),
-                            plan_sha256=plan.sha256,
-                            event_id=event["event_id"],
-                            source_event_id=event["source_event_id"],
-                            source_input_sha256=input_digest(json.loads(event["body_json"])),
-                            source_segment_index=1,
-                            audio_sha256=hashlib.sha256(data).hexdigest(),
-                            audio_bytes=len(data),
-                            source_partial=True,
-                        )
                         with core.store.transaction():
                             job = jobs.create_asr(
                                 event["event_id"],
@@ -460,7 +529,16 @@ def test_real_core_tls_native_authority_and_independent_node(
                     assert not sends and len(model_calls) == int(operation == "tts")
                     assert len(child_receipts(counter)) == 1
                     assert child_receipts(counter)[0]["pid"] != os.getpid()
+                    assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                                           (event["event_id"],))["body_json"] == event["body_json"]
                     window.verify()
+                    if operation == "tts":
+                        core.clock.advance((plan.end - core.clock.now).total_seconds() + 1)
+                        # The independent node may outlive the original HTTP keep-alive.
+                        async with private_http_client(cfg.core_url, cfg.bridge_token) as resumed:
+                            expired = await resumed.get(path + "/state")
+                        assert expired.status_code == 503, expired.text
+                        assert expired.json() == {"error": "LIVE_TEXT_APPROVAL_EXPIRED"}
 
     run(scenario())
 

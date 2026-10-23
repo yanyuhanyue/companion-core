@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from companion_onebot_bridge.capture import capacity
 from companion_onebot_bridge.network import private_http_client
+from companion_onebot_bridge.outbound import validate_item
 from companion_onebot_bridge.spool import Spool, encode
 from companion_onebot_bridge.window import (
     HANDOFF_DOMAIN,
@@ -258,11 +259,15 @@ def test_completed_rounds_keep_global_dedup_but_successor_caps_start_at_zero(tmp
                     event = normalized(raw, cfg)
                     await old.ingest(http, raw, input_approval(plan, raw))
                     item = {
-                        "message_id": f"msg_{number}",
+                        "message_id": f"msg_{number:032x}",
+                        "action_type": "qq.private.reply",
+                        "conversation_platform_session_key": cfg.origin,
+                        "lease_token": f"lease_{number:032x}",
                         "delivery_key": f"reply:{event['event_id']}:v1",
                         "content": {"text": "synthetic reply"},
                         "lease_until": plan.end.isoformat(),
                     }
+                    validate_item(item, cfg)
                     operation = SendOperation(
                         old,
                         http,

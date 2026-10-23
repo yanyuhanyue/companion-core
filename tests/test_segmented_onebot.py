@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from companion_onebot_bridge.onebot_client import OneBotClient
-from companion_onebot_bridge.outbound import deliver_tick
+from companion_onebot_bridge.outbound import deliver_tick, validate_item
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
@@ -530,8 +530,12 @@ def test_stopped_v1_handoff_prepares_segment_schema_without_rewriting_prior_atte
                 incoming = normalized(raw, cfg)
                 await old.ingest(client, raw, input_approval(plan, raw))
                 item = {"message_id": "msg_" + "9" * 32,
+                        "action_type": "qq.private.reply",
+                        "conversation_platform_session_key": cfg.origin,
+                        "lease_token": "lease_" + "9" * 32,
                         "delivery_key": f"reply:{incoming['event_id']}:v1",
                         "content": {"text": "原有单条回复"}, "lease_until": plan.end.isoformat()}
+                validate_item(item, cfg)
                 operation = SendOperation(old, client, approve_fragment(plan, item))
                 operation.reserve(item)
                 operation.complete(item, "synthetic-ack")
