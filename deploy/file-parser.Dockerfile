@@ -7,7 +7,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv export --frozen --only-group file-parser --no-emit-project --format requirements-txt \
       --output-file /tmp/file-parser.txt && \
     uv pip install --system --require-hashes -r /tmp/file-parser.txt && \
-    useradd -m -u 10003 companion-parser && mkdir /scratch && chown 10003:10003 /scratch
+    useradd -m -u 10003 companion-parser && mkdir -p /scratch && chown 10003:10003 /scratch
 # The worker image contains no Core, transport, storage or provider credential code.
 COPY companion/file_parser.py /app/file_parser.py
 RUN chmod a+r /app/file_parser.py && soffice --version > /app/libreoffice-version.txt
