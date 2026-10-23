@@ -1590,7 +1590,8 @@ class SendOperation:
             (event_id, self.window.plan.sha256),
         ).fetchone() and not (
             self.window.plan.value.get("live_text", {}).get("companion_scope") == "owner_private_v1"
-            and item.get("action_type") == "qq.private.proactive"
+            and (item.get("action_type") == "qq.private.proactive"
+                 or item.get("window_notice") == "commitment")
         ):
             raise ValueError("UNAPPROVED_DELIVERY_INPUT")
         attempts = self.window.count("window_attempts")

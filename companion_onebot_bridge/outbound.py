@@ -28,6 +28,11 @@ def validate_item(item, config, *, companion=False):
             {"qq.private.reply", "qq.private.proactive"} if companion else {"qq.private.reply"})
     ):
         raise ValueError("OWNER_REPLY_REQUIRED")
+    if "window_notice" in item and (
+        not companion or item["window_notice"] != "commitment"
+        or item["action_type"] != "qq.private.reply"
+    ):
+        raise ValueError("INVALID_NOTICE_SCOPE")
     content = item.get("content")
     if (
         not isinstance(content, dict)
