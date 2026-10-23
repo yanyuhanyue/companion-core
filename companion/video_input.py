@@ -7,6 +7,7 @@ import math
 import re
 import warnings
 from dataclasses import dataclass
+from fractions import Fraction
 from urllib.parse import urlsplit
 
 from PIL import Image
@@ -101,7 +102,7 @@ def preview(data, mime, policy):
                     if (not isinstance(value, (int, float)) or not math.isfinite(value)
                         or value <= 0):
                         raise ValueError()
-                    duration += round(value)
+                    duration += Fraction(str(value))
                 image.seek(start)
                 frame = image.convert("RGBA")
                 frame.thumbnail((512, 512), Image.Resampling.LANCZOS)
@@ -111,7 +112,7 @@ def preview(data, mime, policy):
                 background.save(output, format="PNG")
                 if len(output.getvalue()) > policy.max_bytes_per_image:
                     raise ValueError()
-                note = (f"[动图首帧预览：{count - start}帧，时长{duration}ms。"
+                note = (f"[动图首帧预览：{count - start}帧，时长{float(duration):g}ms。"
                         "预览不能显示动作；要确认动作、时序或表情变化时调用 understand_video。]")
                 return PreparedImage(output.getvalue(), "image/png", note), True
     except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError, Warning):
@@ -154,7 +155,7 @@ def encode_animation(data, mime, image_policy, video_policy):
                         if (not isinstance(duration, (int, float)) or not math.isfinite(duration)
                             or duration <= 0):
                             raise ValueError()
-                        elapsed += round(duration)
+                        elapsed += Fraction(str(duration))
                         if elapsed > video_policy.max_seconds * 1000:
                             raise ValueError()
                         rgba = image.convert("RGBA").resize((width, height))

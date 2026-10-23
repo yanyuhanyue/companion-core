@@ -73,6 +73,24 @@ def test_video_limits_and_remote_urls_are_rejected_locally():
         ]}])
 
 
+def test_fractional_apng_frame_durations_do_not_accumulate_rounding_drift():
+    from PIL import Image
+
+    frames = [Image.new("RGB", (4, 4), color) for color in ("red", "green", "blue")]
+    data = io.BytesIO()
+    frames[0].save(data, format="PNG", save_all=True,
+                   append_images=[frames[index % 3] for index in range(1, 200)], duration=1.4)
+    original = data.getvalue()
+    duration = 0
+    with Image.open(io.BytesIO(original)) as animation:
+        for index in range(animation.n_frames):
+            animation.seek(index)
+            animation.load()
+            duration += animation.info["duration"]
+    encoded = encode_animation(original, "image/apng", policy(), video_policy())
+    assert abs(encoded.seconds - duration / 1000) <= 0.040001
+
+
 def scope_options(core, *, model):
     options, image = companion_options(core), image_options()
     options.update(image_scope=image["image_scope"],
