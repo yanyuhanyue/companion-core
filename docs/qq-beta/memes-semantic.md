@@ -77,6 +77,12 @@ embedding 接口不接受任意调用方文本；Core 使用持久化成功 capt
 许可文件、固定版本、实际 acquisition/hash 检查保持。caption 的置信度或内容判断
 永远不能批准来源。下载费用必须已结算，下载结果 UNKNOWN 不会继续发起付费识图。
 
+社区来源在配置本地可信规则后，按规则固定的仓库和 40 位 revision 获取 manifest、
+实际许可文件、类别 contents listing 和最多 3 张候选原图。所有请求沿用
+`PublicFetcher` 和原 12 请求、16 MiB 下载、4 MiB 新增素材预算；文件限额及审核细节见
+[素材审核与来源证据](next-memes.md#素材审核与来源证据)。此路径不读取上游
+`semantic_metadata.json`，类别说明只用于发现；图片描述和标签由 Core caption 产生。
+
 原 catalog 的类别/标签挑图路径跳过所有已托管素材，即使它是启用语义门之前创建的实例。
 语义候选、`prepare_selection` 和 `mark_sending` 均检查当前来源、模型版本、成功的 Core
 绑定和冻结候选证据。`PENDING/QUARANTINED/INVALID` 素材不能选发，找不到就继续文字。
@@ -102,6 +108,15 @@ usage 或描述替代原 admission。worker 先持久绑定预分配的 usage re
 `usage_basis`、`fetched_at`、`revision`、`acquisition`（解析后的对象）。时间戳保留来源完成
 回执原值；不包含 caption/tags。规范 JSON 使用 UTF-8、`ensure_ascii=False`、排序键、
 紧凑分隔符、`allow_nan=False`，拒绝重复键。不得对任意原 JSON 字符串直接做来源指纹。
+
+按文件导入的 `acquisition.fetch` 是实际原图凭证，`archive_member=""`；
+`acquisition.source_files` 是严格三键对象，`manifest/license/listing` 各映射到
+`FetchEvidence={requested_url,final_url,hops,body_sha256,fetched_at}`。Bridge 核验实际
+manifest、许可文件及 listing 字节，并将 listing 的图片路径、长度和 Git blob SHA
+绑定到原图。Core 校验四份获取凭证的仓库、固定 revision、预期 URL、单跳 200 和
+无重定向关系，核对原图 SHA-256，以及许可摘要与 `usage_basis` 中许可见证的一致性。
+本地可信规则和实际文件审核由 Bridge 负责。旧获取路径完全省略 `source_files`，
+不能补 `null` 或空对象，以保持原来源指纹及缓存身份。
 
 `CaptionOutcome` 的唯一合法状态为 `QUEUED/RUNNING/SUCCEEDED/FAILED/CANCELLED/UNKNOWN`。
 它必须绑定 request/asset/source/model/prompt 和 job ID；仅 `SUCCEEDED` 携带结构化结果。

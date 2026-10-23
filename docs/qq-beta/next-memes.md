@@ -86,7 +86,8 @@ Core 迁移 `0023_meme_discovery_reservations` 保存每个 job 的单次消费�
 Runtime 每次请求固定默认 `DiscoveryLimits`：1 次查询、12 次 HTTP 请求、16 MiB 下载、
 4 MiB 新增素材、最多 3 张图、`model_cost=0`。HTTP 合同允许的最高单次值分别为
 1、20、32 MiB、16 MiB、8、0；这些上界不会自动扩大 Runtime 的默认请求。
-当前不调用视觉或 embedding 模型，也没有搜索服务货币账单的自动对账器。
+发现任务本身不调用视觉或 embedding 模型，也没有搜索服务货币账单的自动对账器。
+可选的入库识图使用独立 Core job 与费用预留，见[表情语义](memes-semantic.md)。
 
 外部 I/O 前必须预留完整单次上限。因此默认每日 16 MiB 下载预算可能在一次 UNKNOWN
 后全部占用，即使查询次数上限为 2。SETTLED 使用实际量；RESERVED/UNKNOWN 按预留与
@@ -110,15 +111,31 @@ Bridge 在 Core 确认返回后与图库事务提交前再次检查租约截止�
 `repo/revision/license/license_path/license_sha256/asset_prefix/usage_basis`；revision 为
 固定 40 位提交 SHA，许可摘要为实际许可文件的 SHA-256。空规则不会自动接纳素材。
 
-当前审核器只接纳规则匹配的社区包：核对真实 ZIP 请求和最终来源、固定版本、实际许可
+当前审核器只接纳规则匹配的社区素材。启用语义且有本地可信规则时，`CommunityPacks`
+从固定索引中选择已批准仓库，直接使用规则中的 40 位 revision，依次获取该版本的
+manifest、实际许可文件、匹配类别的 GitHub contents listing 和最多 3 张候选原图。
+manifest 上限 512 KiB、许可文件 64 KiB、单个类别 listing 256 KiB；全部经
+`PublicFetcher`，仍共用每次 12 请求、16 MiB 下载和 4 MiB 新增素材的预算。
+Bridge 校验 manifest 类别、许可摘要、受限图片路径，以及 listing 中的路径、长度和
+Git blob SHA 与实际原图字节的绑定。此路径不下载整包或 `semantic_metadata.json`；
+通过来源审核的素材进入待识图状态，由 Core caption 生成描述和标签后才可参与选图。
+
+未启用语义时保留原 ZIP 路径：核对真实 ZIP 请求和最终来源、固定版本、实际许可
 文件字节、包内成员路径、原图片哈希与语义条目一致性，并要求可用的描述/标签。
 只有审核确认后才写入 catalog。Brave 的 SafeSearch、上游 `verified` 或许可字符串均
 不能替代这些证据；仅配置 Brave key 不足以让普通搜索结果通过当前审核器，缺证据返回
 `SOURCE_EVIDENCE_REQUIRED`。支持更广的来源需要独立实现并验证审核合同。
 
 `ReviewEvidence` 保存实际初始/最终 URL、每跳 URL/公网地址/HTTP 状态、响应体和图片
-SHA-256、抓取时间、来源网页/版本声明及 ZIP 成员路径。获取凭证由本次 `PublicFetcher`
-产生并按对象身份验证，provider 不能伪造凭证或替换包内字节。审核返回
+SHA-256、抓取时间、来源网页/版本声明及 ZIP 成员路径。按文件路径的主 `fetch` 对应
+实际原图，`archive_member=""`，另含 `source_files` 对象：严格只有
+`manifest/license/listing` 三键，每个值均为 `FetchEvidence`，包含
+`requested_url/final_url/hops/body_sha256/fetched_at`。四份获取记录必须对应同一仓库和
+固定 revision，均为无重定向的单跳 200；许可文件摘要必须匹配本地规则。
+旧路径完全省略 `source_files` 字段，保持历史凭证与缓存哈希不变。
+
+获取凭证由本次 `PublicFetcher` 产生并按对象身份验证，provider 不能伪造凭证或替换
+实际获取的字节。审核返回
 `ReviewApproval(metadata, evidence.sha256)`，来源、版本、时间与实际获取记录必须一致；
 `acquisition_json` 持久保存同一凭证。来源网页仍是来源声明，不因被记录就成为许可证明。
 
@@ -129,7 +146,8 @@ SHA-256、抓取时间、来源网页/版本声明及 ZIP 成员路径。获取�
 
 公共下载只允许公网 HTTPS；每跳校验全部 DNS 答案、数值地址连接并保留 Host/SNI。
 拒绝私网、URL 凭据、非标准端口、压缩 HTTP 响应、超限头部/字节、超时和过多跳转。
-Brave 凭据只发往固定搜索主机且禁止重定向；社区索引、提交解析、按 SHA 下载包也禁止重定向。
+Brave 凭据只发往固定搜索主机且禁止重定向；社区索引、提交解析、按 SHA 下载包及
+按文件导入的 manifest、许可、listing 和原图请求也禁止重定向。
 ZIP 在内存中检查：压缩最多 8 MiB、展开 16 MiB、1024 项、单项 4 MiB及压缩比上限；
 拒绝路径穿越、重复大小写路径、反斜杠、盘符、链接、特殊文件和加密项，不执行包内代码。
 
