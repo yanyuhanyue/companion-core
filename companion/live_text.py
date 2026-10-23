@@ -18,7 +18,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, Field
 
-from companion import cumulative, image_spool, paid_budget, private_life, qq_images
+from companion import cumulative, image_spool, input_recall, paid_budget, private_life, qq_images
 from companion.contracts import CoreError, StrictModel
 from companion.expression import MemeOffer
 from companion.privacy import ErasureLedger, epoch
@@ -38,6 +38,10 @@ LEGACY_STOP = "live_text_legacy_stop"
 
 class WindowReference(StrictModel):
     window_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AbortHandoffReference(WindowReference):
+    bridge_journal_head_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class HandoffReceipt(WindowReference):
@@ -461,15 +465,30 @@ def _handoff_custody(store, settings, approval, old):
         if value.get("window_sha256") != old["plan_sha256"]:
             continue
         capture = value.get("capture")
-        if not store.one("SELECT 1 FROM events WHERE event_id=?", (value["event_id"],)) or (
-            capture and (capture["identity_sha256"] != scope.identity_sha256
-                         or capture["protocol_epoch"] != scope.protocol_epoch)
-        ):
+        present = store.one("SELECT 1 FROM events WHERE event_id=?", (value["event_id"],))
+        recalled = False
+        if not present:
+            previous = _meta(store, HISTORY + old["plan_sha256"])
+            try:
+                original = type(approval).model_validate(previous["approval"])
+            except (KeyError, ValueError, TypeError):
+                original = None
+            recalled = bool(original and original.plan_sha256 == old["plan_sha256"]
+                            and original.window_id == old["window_id"]
+                            and input_recall.verified_before_ingest(
+                                store, settings, original, value,
+                            ))
+        if ((not present and not recalled)
+            or capture and (capture["identity_sha256"] != scope.identity_sha256
+                            or capture["protocol_epoch"] != scope.protocol_epoch)):
             raise CoreError("LIVE_TEXT_HANDOFF_INPUT_UNRESOLVED", 409)
 
 
 def prepare_handoff(store, settings, clock, reference):
     with store.transaction():
+        history = _meta(store, HISTORY + reference.window_sha256)
+        if history and history["state"] == "ABORTED":
+            raise CoreError("LIVE_TEXT_HANDOFF_ALREADY_USED", 409)
         approval, binding, _ = guard(store, settings, clock, preparing=True)
         scope = approval.handoff
         if not scope or reference.window_sha256 != approval.plan_sha256:
@@ -522,6 +541,76 @@ def prepare_handoff(store, settings, clock, reference):
              "successor_plan_sha256": approval.plan_sha256})
         _put(store, HISTORY + approval.plan_sha256, {"state": "PREPARED", "binding": binding,
              "approval": approval.model_dump(mode="json"), "prepared_receipt": receipt})
+        return receipt
+
+
+def abort_handoff(store, settings, clock, reference):
+    """Revoke one unprepared successor; never open a window or repair a ledger.
+
+    Like STOP, revocation remains possible after code drift or expiry. A repeated
+    native window_stop advances the independent head, permanently fencing the
+    rejected successor even if a stale database loses its ABORTED projection.
+    """
+    with store.transaction():
+        approval = settings.live_text_window
+        scope = approval.handoff if approval else None
+        old = _meta(store, BINDING)
+        previous = _meta(store, HISTORY + scope.predecessor_plan_sha256) if scope else None
+        if (not scope or reference.window_sha256 != approval.plan_sha256 or not old
+            or (old["window_id"], old["plan_sha256"]) != (
+                scope.predecessor_window_id, scope.predecessor_plan_sha256)
+            or not previous or previous["state"] != "STOPPED" or previous["binding"] != old
+            or not stopped(store, old["plan_sha256"])):
+            raise CoreError("LIVE_TEXT_HANDOFF_ABORT_UNPROVEN", 409)
+        _idle(store)
+        _handoff_custody(store, settings, approval, old)
+        if store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?",
+                     (approval.window_id,)) or store.one(
+            "SELECT 1 FROM model_admissions WHERE window_id=?", (approval.window_id,),
+        ) or store.one(
+            "SELECT 1 FROM runtime_meta WHERE key LIKE ? "
+            "AND json_extract(value,'$.window_sha256')=?", (INPUT + "%", approval.plan_sha256),
+        ):
+            raise CoreError("LIVE_TEXT_HANDOFF_ABORT_UNPROVEN", 409)
+        existing = _meta(store, HISTORY + approval.plan_sha256)
+        custody = paid_budget.journal(store, SimpleNamespace(
+            journal_path=old["budget_journal_path"],
+        ), allow_settlement=True, initialize=False)
+        lifecycle = custody["lifecycle"]
+        if (not lifecycle or lifecycle["state"] != "STOPPED"
+            or lifecycle["plan_sha256"] != old["plan_sha256"]
+            or lifecycle["window_id"] != old["window_id"]):
+            raise CoreError("LIVE_TEXT_HANDOFF_ABORT_UNPROVEN", 409)
+        if existing:
+            if (existing.get("state") != "ABORTED"
+                or existing.get("approval") != approval.model_dump(mode="json")
+                or existing.get("abort_request") != reference.model_dump()
+                or existing["aborted_receipt"]["budget_journal_head_sha256"]
+                != custody["head_sha256"]):
+                raise CoreError("LIVE_TEXT_HANDOFF_ABORT_CONFLICT", 409)
+            return existing["aborted_receipt"]
+        if custody["head_sha256"] != scope.budget_journal_head_sha256:
+            raise CoreError("LIVE_TEXT_HANDOFF_ABORT_UNPROVEN", 409)
+        fenced = paid_budget.journal(store, SimpleNamespace(
+            journal_path=old["budget_journal_path"],
+        ), {"kind": "window_stop", "window_id": old["window_id"],
+            "plan_sha256": old["plan_sha256"]}, allow_settlement=True, initialize=False)
+        receipt = {
+            "state": "ABORTED_BEFORE_PREPARE", "window_sha256": approval.plan_sha256,
+            "predecessor_window_sha256": old["plan_sha256"],
+            "handoff_sha256": paid_budget.sha(scope.model_dump(mode="json")),
+            "predecessor_budget_journal_head_sha256": scope.budget_journal_head_sha256,
+            "budget_journal_head_sha256": fenced["head_sha256"],
+            "privacy_epoch": scope.privacy_epoch,
+            "erasure_ledger_sha256": scope.erasure_ledger_sha256,
+            "bridge_journal_head_sha256": reference.bridge_journal_head_sha256,
+        }
+        _put(store, HISTORY + approval.plan_sha256, {
+            "state": "ABORTED", "approval": approval.model_dump(mode="json"),
+            "abort_request": reference.model_dump(), "aborted_receipt": receipt,
+        })
+        store.audit("live_text.handoff_aborted", approval.window_id, "handoff", clock(),
+                    receipt_sha256=paid_budget.sha(receipt))
         return receipt
 
 

@@ -79,6 +79,60 @@ def require_not_recalled(store, source_event_id):
         raise CoreError("EVENT_ERASED", 410)
 
 
+def verified_before_ingest(store, settings, approval, receipt):
+    """Recognize a closed captured input without reconstructing an erased event.
+
+    The caller separately checks complete external-ledger custody. A source-only
+    marker or ordinary erasure is insufficient for this narrow handoff exception.
+    """
+    from companion import input_protocol
+    from companion.privacy import ErasureLedger
+
+    capture = receipt.get("capture")
+    if not isinstance(capture, dict):
+        return False
+    try:
+        source = canonical_source(
+            bot_qq_id=settings.bot_qq_id, owner_qq_id=settings.owner_qq_id,
+            protocol_epoch=capture["protocol_epoch"],
+            provider_message_id=capture["source_event_id"].rsplit(":", 1)[-1],
+        )
+        event_id = "evt_" + hashlib.sha256(source["source_event_id"].encode()).hexdigest()
+        if (receipt.get("event_id") != event_id
+            or capture["source_event_id"] != source["source_event_id"]):
+            return False
+        ledger = ErasureLedger(settings.erasure_ledger)
+        records = [row for row in ledger.read()[1:] if row.get("target_type") == "input_recall"
+                   and row.get("state") == "RECALLED" and row.get("event_id") == event_id
+                   and row.get("recall_source") == source and event_id in row["event_ids"]]
+        if len(records) != 1:
+            return False
+        record = records[0]
+        marker = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                           (marker_key(source["source_event_id"]),))
+        erased = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                           ("erased_event:" + event_id,))
+        complete = store.one("SELECT state,restore_min_replay_version "
+                             "FROM privacy_erasure_ledger WHERE erasure_id=?",
+                             (record["erasure_id"],))
+        if (not marker or json.loads(marker["value"]) != {
+            **source, "erasure_id": record["erasure_id"], "state": "RECALLED",
+            "occurred_at": record["occurred_at"], "event_id": event_id,
+        } or not erased or erased["value"] != record["erasure_id"]
+            or complete != {"state": "COMPLETE", "restore_min_replay_version": record["seq"]}):
+            return False
+        for table, field in (("events", "event_id"), ("jobs", "event_id"),
+                             ("outbox", "origin_event_id"), ("content_items", "owner_event_id"),
+                             ("job_sources", "event_id")):
+            if store.one(f"SELECT 1 FROM {table} WHERE {field}=? LIMIT 1", (event_id,)):
+                return False
+        return input_protocol._capture_matches(
+            store, settings, approval, source, event_id, record["occurred_at"],
+        )
+    except (CoreError, ValueError, TypeError, KeyError, OSError):
+        return False
+
+
 def matching_events(store, source):
     return {row["event_id"] for row in store.rows(
         "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "

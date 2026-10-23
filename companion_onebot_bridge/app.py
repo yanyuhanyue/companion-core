@@ -178,6 +178,7 @@ def main():
             "daemon",
             "window-open",
             "window-handoff",
+            "window-abort-handoff",
             "window-ingest",
             "window-capture-once",
             "window-approve-input",

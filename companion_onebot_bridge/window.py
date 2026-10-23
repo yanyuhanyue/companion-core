@@ -32,12 +32,52 @@ from .spool import Spool, encode
 SHA = re.compile(r"[a-f0-9]{64}")
 ACTIVE = {"PENDING", "LEASED", "SENDING", "RETRY_WAIT", "DELIVERY_UNCERTAIN"}
 HANDOFF_DOMAIN = b"companion-core/window-handoff/v1\x00"
+HANDOFF_FIELDS = {"predecessor_plan_sha256", "predecessor_window_id",
+                  "budget_journal_head_sha256", "bridge_journal_head_sha256",
+                  "identity_sha256", "protocol_epoch", "privacy_epoch",
+                  "erasure_ledger_sha256", "evidence_sha256"}
 INPUT_STATE_FIELDS = {"window_sha256", "event_id", "input_sha256", "reply_revision", "state",
                       "unsettled_model", "unsettled_delivery"}
 
 
 def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
+
+
+def handoff_abort_proof(plan, successor, scope, requested, receipt):
+    """An abort fences one exact proposal without authorizing its replacement."""
+    fields = {"state", "window_sha256", "predecessor_window_sha256", "handoff_sha256",
+              "predecessor_budget_journal_head_sha256", "budget_journal_head_sha256",
+              "privacy_epoch", "erasure_ledger_sha256", "bridge_journal_head_sha256"}
+    if (not isinstance(scope, dict) or set(scope) != HANDOFF_FIELDS
+        or any(not isinstance(scope[key], str) or not SHA.fullmatch(scope[key])
+               for key in HANDOFF_FIELDS if key.endswith("_sha256"))
+        or scope["predecessor_plan_sha256"] != plan.sha256
+        or scope["predecessor_window_id"] != plan.value["window_id"]
+        or scope["identity_sha256"] != plan.value["identity_sha256"]
+        or scope["protocol_epoch"] != plan.value["protocol_epoch"]
+        or type(scope["privacy_epoch"]) is not int or scope["privacy_epoch"] < 0
+        or not isinstance(successor, str) or not SHA.fullmatch(successor)
+        or successor == plan.sha256
+        or requested["kind"] != "HANDOFF_REQUESTED"
+        or requested["previous"] != scope["bridge_journal_head_sha256"]
+        or requested["data"] != {"successor_window_sha256": successor,
+                                 "handoff_sha256": digest(scope)}
+        or not isinstance(receipt, dict) or set(receipt) != fields
+        or receipt["state"] != "ABORTED_BEFORE_PREPARE"
+        or receipt["window_sha256"] != successor
+        or receipt["predecessor_window_sha256"] != plan.sha256
+        or receipt["handoff_sha256"] != digest(scope)
+        or receipt["predecessor_budget_journal_head_sha256"]
+        != scope["budget_journal_head_sha256"]
+        or receipt["privacy_epoch"] != scope["privacy_epoch"]
+        or type(receipt["privacy_epoch"]) is not int
+        or receipt["erasure_ledger_sha256"] != scope["erasure_ledger_sha256"]
+        or receipt["bridge_journal_head_sha256"] != digest(requested)
+        or not isinstance(receipt["budget_journal_head_sha256"], str)
+        or not SHA.fullmatch(receipt["budget_journal_head_sha256"])
+        or receipt["budget_journal_head_sha256"] == scope["budget_journal_head_sha256"]):
+        raise ValueError("WINDOW_HANDOFF_ABORT_CORE_UNCONFIRMED")
 
 
 def cancelled_input_proof(row, value):
@@ -749,6 +789,7 @@ class TestWindow:
         if not records or head != row["journal_head"]:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
         history = self.verify_history(records)
+        self.check_handoff_aborts(history)
         self.check_cancelled_inputs(history)
         self.check_terminal_inputs(history)
         self.check_recalls(history)
@@ -771,6 +812,21 @@ class TestWindow:
             if not self.plan.start <= self.clock() < self.plan.end:
                 raise ValueError("WINDOW_OUTSIDE_INTERVAL")
         return row
+
+    def check_handoff_aborts(self, history):
+        for plan, records in history:
+            seen = set()
+            for index, record in enumerate(records):
+                if record["kind"] != "HANDOFF_ABORTED":
+                    continue
+                data = record["data"]
+                if (not index or not isinstance(data, dict)
+                    or set(data) != {"successor_window_sha256", "handoff", "core_receipt"}
+                    or data["successor_window_sha256"] in seen):
+                    raise ValueError("WINDOW_HANDOFF_ABORT_JOURNAL_REQUIRED")
+                handoff_abort_proof(plan, data["successor_window_sha256"], data["handoff"],
+                                    records[index - 1], data["core_receipt"])
+                seen.add(data["successor_window_sha256"])
 
     def check_cancelled_inputs(self, history):
         journals = {plan.sha256: records for plan, records in history}
@@ -1326,6 +1382,104 @@ class TestWindow:
                 ),
             )
         return self.status()
+
+    def handoff_abort_source(self):
+        # Only revocation uses stored authority after code drift/expiry. Neither
+        # this path nor its receipt can open the old or proposed window.
+        scope = self.plan.value.get("live_text", {}).get("handoff")
+        if (self.plan.mode != "live_text" or not scope
+            or digest(self.plan.value) != self.plan.sha256):
+            raise ValueError("WINDOW_HANDOFF_ABORT_SOURCE_MISMATCH")
+        current = self.db.execute("SELECT plan_json FROM test_window WHERE singleton=1").fetchone()
+        if not current:
+            raise ValueError("WINDOW_NOT_FOUND")
+        old = TestWindow(self.spool, stored_plan(current[0], self.plan.config), clock=self.clock)
+        source = old.verify(active=False)
+        records, _ = old.read_journal()
+        aborted = records[-1]["kind"] == "HANDOFF_ABORTED"
+        requested = records[-2] if aborted and len(records) > 1 else records[-1]
+        if (source["state"] != ("STOPPED" if aborted else "HANDOFF_UNCONFIRMED")
+            or old.plan.mode != "live_text" or not isinstance(scope, dict)
+            or set(scope) != HANDOFF_FIELDS
+            or scope["predecessor_plan_sha256"] != old.plan.sha256
+            or scope["predecessor_window_id"] != old.plan.value["window_id"]
+            or self.plan.value["identity_sha256"] != old.plan.value["identity_sha256"]
+            or self.plan.value["protocol_epoch"] != old.plan.value["protocol_epoch"]
+            or self.plan.value["live_text"]["budget_journal_id"]
+            != old.plan.value["live_text"]["budget_journal_id"]
+            or self.plan.value["window_id"] == old.plan.value["window_id"]
+            or requested["kind"] != "HANDOFF_REQUESTED"
+            or requested["previous"] != scope["bridge_journal_head_sha256"]
+            or requested["data"] != {"successor_window_sha256": self.plan.sha256,
+                                     "handoff_sha256": digest(scope)}
+            or sum(r["kind"] == "HANDOFF_REQUESTED" and r["data"].get(
+                "successor_window_sha256") == self.plan.sha256 for r in records) != 1
+            or self.plan.journal == old.plan.journal or self.plan.journal.exists()
+            or self.plan.journal.is_symlink()
+            or not any(r["kind"] == "CORE_STOP_CONFIRMED" for r in records)
+            or old.stop_path.is_symlink() or not old.stop_path.is_file()
+            or old.stop_path.read_bytes() != b"OWNER_STOP\n"
+            or self.db.execute("SELECT 1 FROM window_history WHERE plan_hash=? OR successor_hash=?",
+                               (self.plan.sha256, self.plan.sha256)).fetchone()):
+            raise ValueError("WINDOW_HANDOFF_ABORT_SOURCE_MISMATCH")
+        identity = self.db.execute("SELECT value FROM identity").fetchall()
+        if len(identity) != 1 or identity[0][0] != encode([
+            self.plan.config.owner_qq_id, self.plan.config.bot_qq_id,
+            self.plan.config.origin, self.plan.config.protocol_epoch,
+        ]):
+            raise ValueError("BRIDGE_IDENTITY_CHANGED")
+        old.check_spool()
+        if (self.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN "
+                            "('ACK','CANCELLED','SUPERSEDED','RECALLED') LIMIT 1").fetchone()
+            or self.db.execute("SELECT 1 FROM window_attempts WHERE state NOT IN "
+                               "('ACK','NOT_SENT') LIMIT 1").fetchone()
+            or self.db.execute("SELECT 1 FROM results WHERE state!='accepted' OR "
+                               "json_extract(body,'$.result') NOT IN ('SENT','NOT_SENT') "
+                               "LIMIT 1").fetchone()):
+            raise ValueError("WINDOW_HANDOFF_RECONCILIATION_REQUIRED")
+        for table, condition in (("automatic_recalls", "state!='ACCEPTED'"),
+                                 ("automatic_media", "state NOT IN ('DONE','CANCELLED')")):
+            if (self.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()
+                and self.db.execute(f"SELECT 1 FROM {table} WHERE {condition} LIMIT 1").fetchone()):
+                raise ValueError("WINDOW_HANDOFF_RECONCILIATION_REQUIRED")
+        return old, scope, records, requested, aborted
+
+    async def abort_handoff(self, client):
+        old, scope, records, requested, aborted = self.handoff_abort_source()
+        if aborted:
+            data = records[-1]["data"]
+            if data["successor_window_sha256"] != self.plan.sha256 or data["handoff"] != scope:
+                raise ValueError("WINDOW_HANDOFF_ABORT_SOURCE_MISMATCH")
+            return data["core_receipt"]
+        requested_head = digest(requested)
+        body = {"window_sha256": self.plan.sha256,
+                "bridge_journal_head_sha256": requested_head}
+        path = "/internal/v1/live-text/handoff/abort"
+        self.check_core_client(client)
+
+        async def boundary(request):
+            await self.check_core_request(request)
+            if (request.method != "POST" or request.url.path != path
+                or decode(request.content, 65536) != body):
+                raise ValueError("WINDOW_HANDOFF_ABORT_SOURCE_MISMATCH")
+            _, _, _, current, completed = self.handoff_abort_source()
+            if completed or digest(current) != requested_head:
+                raise ValueError("WINDOW_HANDOFF_ABORT_SOURCE_MISMATCH")
+            seal_protocol_content(request, request.content)
+
+        async with checked_http_client(client, boundary) as scoped:
+            result = await bounded_post(scoped, path, body)
+        handoff_abort_proof(old.plan, self.plan.sha256, scope, requested, result)
+        _, _, _, current, completed = self.handoff_abort_source()
+        if completed or digest(current) != requested_head:
+            raise ValueError("WINDOW_HANDOFF_ABORT_SOURCE_MISMATCH")
+        head = old.append("HANDOFF_ABORTED", {"successor_window_sha256": self.plan.sha256,
+                                             "handoff": scope, "core_receipt": result})
+        with self.db:
+            self.db.execute("UPDATE test_window SET state='STOPPED',journal_head=?,reason=?",
+                            (head, "HANDOFF_ABORTED_BEFORE_PREPARE"))
+        old.verify(active=False)
+        return result
 
     async def open_successor(self, client):
         row = self.verify(active=False)
@@ -2117,6 +2271,14 @@ def check_protocol_request(window, request, *, reference_read=False):
 async def command(config, args):
     if args.command == "window-status":
         return read_status(config)
+    if args.command == "window-abort-handoff":
+        if args.window is None:
+            raise ValueError("WINDOW_REQUIRED")
+        plan = stored_plan(encode(private_json(args.window)), config)
+        with Spool(config) as spool:
+            window = TestWindow(spool, plan)
+            async with private_http_client(config.core_url, config.bridge_token) as client:
+                return await window.abort_handoff(client)
     if args.command in {"window-stop", "window-quota-inventory"}:
         database = Path(config.data_dir) / "spool.sqlite3"
         if not database.is_file() or database.is_symlink():
