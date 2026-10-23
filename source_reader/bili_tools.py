@@ -200,8 +200,8 @@ class BilibiliTools:
 class BilibiliToolReader(BilibiliReader):
     """Lease-compatible reader; discovery uses only an operator-configured keyword."""
 
-    def __init__(self, public, keyword=None):
-        super().__init__(public)
+    def __init__(self, public, keyword=None, *, discussion=False):
+        super().__init__(public, discussion=discussion)
         self.tools, self.keyword = BilibiliTools(public), keyword
 
     async def read(self, item, budget):

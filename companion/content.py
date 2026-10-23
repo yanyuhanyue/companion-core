@@ -28,6 +28,7 @@ CONTEXT_RULES = (
     "没有视频分析证据时不能声称看过视频。图像分析可能有误，区分观察与推测。"
     "等待、失败、未知或未配置时明确说明尚未读到相应内容，不编造正文或截图内容。"
     "评论是来源用户的观点，与原帖正文分开；partial或excerpt表示只读到部分，不能概括成全部评论。"
+    "弹幕是带视频时间的用户留言样本，不是字幕，也不能作为看过画面的证据。"
 )
 
 
@@ -464,6 +465,16 @@ class ContentService:
                             "reported_total": comments["reported_total"],
                             "partial": comments["partial"], "images_analyzed": False},
                     })
+                danmaku = evidence.get("danmaku")
+                if danmaku is not None:
+                    result.append({
+                        **status, "kind": "danmaku", "source_kind": "danmaku",
+                        "owner_event_id": root["event_id"], "url": item["url"],
+                        "event_id": item["event_id"], "result_status": item["result_status"],
+                        "trust": "external_untrusted", "text": encode(danmaku["items"]),
+                        "danmaku_scope": {"captured": len(danmaku["items"]),
+                            "cid": danmaku["cid"], "scope": danmaku["scope"], "partial": True},
+                    })
         # Reserve room for each source and image instead of dropping the article after six images.
         root_order = {root["event_id"]: index for index, root in enumerate(roots)}
         result.sort(
@@ -473,7 +484,7 @@ class ContentService:
         wanted = {
             root["event_id"]: sum(
                 min(len(row.get("text", "")),
-                    6000 if row["kind"] in {"link", "comments"} else 600)
+                    6000 if row["kind"] in {"link", "comments", "danmaku"} else 600)
                 for row in result
                 if row["owner_event_id"] == root["event_id"]
             )
@@ -482,7 +493,8 @@ class ContentService:
         for item in result:
             text = item.get("text", "")
             if text:
-                cap = min(len(text), 6000 if item["kind"] in {"link", "comments"} else 600)
+                cap = min(len(text),
+                          6000 if item["kind"] in {"link", "comments", "danmaku"} else 600)
                 owner = item["owner_event_id"]
                 allowance = min(cap, remaining * cap // max(1, wanted[owner]))
                 item = {**item, "text": text[:allowance], "excerpt": allowance < len(text)}
@@ -515,6 +527,8 @@ class ContentService:
                 item["reading"] = {
                     key: reading[key] for key in ("level", "part", "subtitle_status", "truncated")
                 }
+                if reading.get("discussion_status"):
+                    item["reading"]["discussion_status"] = reading["discussion_status"]
             if row.get("article"):
                 article = row["article"]
                 item["article"] = {
@@ -537,6 +551,8 @@ class ContentService:
                     item[key] = row[key]
             if row.get("comment_scope") is not None:
                 item["comment_scope"] = row["comment_scope"]
+            if row.get("danmaku_scope") is not None:
+                item["danmaku_scope"] = row["danmaku_scope"]
             if row.get("error_code"):
                 item["error_code"] = row["error_code"]
             if row.get("image_progress"):

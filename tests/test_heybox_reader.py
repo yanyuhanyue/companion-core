@@ -325,6 +325,25 @@ def test_comments_are_bounded_and_empty_is_distinct_from_unavailable():
     assert len(backend.requests) == 1
 
 
+@pytest.mark.parametrize("field", ["text", "author"])
+def test_comment_credentials_use_the_existing_observation_rejection(core, field):
+    configure(core)
+    core.settings.content_enabled = True
+    ingest(core, text=URL)
+    lease = core.exploration.lease("heybox")
+    post = copy.deepcopy(POST)
+    row = {"commentid": 101, "text": "普通评论。", "user": {"username": "读者"}}
+    if field == "text":
+        row["text"] = "token=synthetic-secret"
+    else:
+        row["user"]["username"] = "token=synthetic-secret"
+    post["result"]["comments"] = [{"comment": [row]}]
+    result, _ = run(read(response(post), item=lease))
+    with pytest.raises(CoreError, match="OBSERVATION_CONTAINS_CREDENTIALS"):
+        core.exploration.complete("heybox", lease["request_id"], ReadResult.model_validate(result))
+    assert not core.store.rows("SELECT * FROM observations")
+
+
 def test_discovery_uses_only_the_feed_get_route_and_deduplicates_titles():
     feed = {
         "status": "ok",

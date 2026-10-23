@@ -61,9 +61,9 @@ async def main(args):
             None if args.source == "web"
             else HeyboxReader(public, source)
             if args.source == "heybox"
-            else BilibiliToolReader(public, args.search_keyword)
+            else BilibiliToolReader(public, args.search_keyword, discussion=args.discussion)
             if args.bili_tools
-            else BilibiliReader(public, renderer)
+            else BilibiliReader(public, renderer, discussion=args.discussion)
         )
         if args.probe:
             result = await read_result(
@@ -73,7 +73,7 @@ async def main(args):
                     "operation": "read",
                     "url": args.probe,
                     "max_bytes": 524288,
-                    "max_requests": 4,
+                    "max_requests": 8 if args.discussion else 4,
                     "max_items": 1,
                 },
             )
@@ -120,6 +120,8 @@ if __name__ == "__main__":
                         help="Optional web host restriction; can only narrow the Core lease")
     parser.add_argument("--source-url", help="Explicit two-GET Heybox service origin")
     parser.add_argument("--heybox-native", action="store_true", help="Enable pinned two-GET source")
+    parser.add_argument("--discussion", action="store_true",
+                        help="Read bounded Bilibili comments/danmaku")
     parser.add_argument("--bili-tools", action="store_true", help="Enable bounded Bilibili tools")
     parser.add_argument("--search-keyword", help="Operator-selected Bilibili discovery keyword")
     parser.add_argument("--account-file", help="Explicit expiring read-only account grant file")
@@ -143,6 +145,8 @@ if __name__ == "__main__":
                 exact_hosts(args.allow_host)
             except ValueError as error:
                 parser.error(str(error))
+        if args.discussion and args.source != "bilibili":
+            parser.error("--discussion requires --source bilibili")
         if args.browser and args.source not in {"bilibili", "web"}:
             parser.error("--browser requires Bilibili or reading-v1 web")
         if args.heybox_native and (args.source != "heybox" or args.source_url):

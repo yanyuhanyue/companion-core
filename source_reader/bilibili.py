@@ -103,10 +103,13 @@ class BilibiliReader:
         return snapshot(required=required) if snapshot else None
 
     def __init__(
-        self, public, renderer=None, clock=lambda: datetime.now(UTC).isoformat(), subtitles=True
+        self, public, renderer=None, clock=lambda: datetime.now(UTC).isoformat(), subtitles=True,
+        discussion=False,
     ):
         self.public, self.renderer, self.clock = public, renderer, clock
         self.subtitles = subtitles
+        self.discussion = discussion
+        self.parser_version = "bilibili/2" if discussion else "bilibili/1"
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
@@ -281,6 +284,10 @@ class BilibiliReader:
                 evidence["subtitle_status"] = "unavailable"
         else:
             evidence["subtitle_status"] = "unavailable"
+        if self.discussion:
+            from source_reader.bili_discussion import read_discussion
+
+            evidence.update(await read_discussion(self.public, data, budget))
         access = "账号授权" if method == "account_api" else "公开"
         scope = (
             f"读取范围：{access}元数据及第1分P的部分字幕；未分析画面或音频，未完整观看。"

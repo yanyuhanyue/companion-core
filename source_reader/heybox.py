@@ -299,6 +299,7 @@ class HeyboxReader:
 
     def __init__(self, public, source=None, clock=lambda: datetime.now(UTC).isoformat()):
         self.public, self.source, self.clock = public, source, clock
+        self.parser_version = "heybox/2"
 
     async def read(self, item, budget):
         discover = item["operation"] == "discover"
