@@ -675,7 +675,9 @@ async def approve_captured(window, client, approval, *, image_transport=None, im
                     response = await scoped.post(
                         prefix,
                         content=data,
-                        timeout=40,
+                        # Native analysis may include a primary-model decision and
+                        # a bounded video call. Core retains the source/window fences.
+                        timeout=300,
                         headers={
                             "Content-Type": mime,
                             "X-Content-Key": key,

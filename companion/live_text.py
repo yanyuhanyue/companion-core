@@ -98,6 +98,10 @@ def config_sha256(settings):
     value["model_credential"] = hashlib.sha256(
         settings.model_key.get_secret_value().encode()
     ).hexdigest()
+    if settings.paid_model and settings.paid_model.video_input:
+        value["video_credential"] = hashlib.sha256(
+            settings.video_model_key.get_secret_value().encode()
+        ).hexdigest()
     return hmac.new(settings.bridge_token.get_secret_value().encode(),
                     encode(value).encode(), hashlib.sha256).hexdigest()
 
@@ -213,7 +217,7 @@ def guard(
             paid.window_id != approval.window_id
             or paid.concurrency != 1
             or paid.per_request_calls
-            != (3 if private_life.enabled(settings) else
+            != (3 + int(paid.video_input is not None) if private_life.enabled(settings) else
                 1 + int(approval.memory_scope == "approved_facts") + int(images))
             or paid.window_calls > approval.max_model_attempts
             or paid.starts_at > approval.starts_at

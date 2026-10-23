@@ -134,5 +134,10 @@ def contract(settings, job_id, logical_request_id):
         raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
     approval = settings.live_text_window
     calls = 3 if approval and approval.memory_scope != "none" else 2
+    if settings.paid_model.video_input:
+        from companion.video_input import contract as video_contract
+
+        video_contract(settings, job_id, logical_request_id)
+        calls += 1
     if settings.paid_model.per_request_calls != calls:
         raise CoreError("MODEL_IMAGE_TWO_CALL_CONTRACT_REQUIRED", 503)

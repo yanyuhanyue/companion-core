@@ -17,7 +17,10 @@ def token_upper_bound(messages):
     return sum(len(m["content"].encode("utf-8")) + 24 for m in messages) + 32
 
 
-def cost(settings, input_tokens, output_tokens, cached=0):
+def cost(settings, input_tokens, output_tokens, cached=0, *, scenario=None):
+    if scenario == "content_video" and settings.paid_model and settings.paid_model.video_input:
+        settings = SimpleNamespace(pricing_known=True,
+                                   **settings.paid_model.video_input.model_dump())
     if not settings.pricing_known:
         return 0
     numerator = (
@@ -59,7 +62,12 @@ def reserve(
 ):
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
-    if scenario == "content_vision" or any(
+    if scenario == "content_video":
+        from companion.video_input import contract as video_contract
+
+        logical_request_id = logical_request_id or job_id
+        video_contract(settings, job_id, logical_request_id)
+    elif scenario == "content_vision" or any(
         isinstance(message, dict) and isinstance(message.get("content"), list)
         for message in messages
     ):
@@ -88,7 +96,7 @@ def reserve(
             raise CoreError("MODEL_INPUT_LIMIT", 429)
         if output_tokens > approval.max_output_tokens:
             raise CoreError("MODEL_OUTPUT_LIMIT", 429)
-    estimate = cost(settings, estimated_input, output_tokens)
+    estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
         from companion import live_text
 
@@ -108,11 +116,11 @@ def reserve(
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
-        if scenario == "content_vision":
+        if scenario in {"content_vision", "content_video"}:
             if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
                 raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
             if store.one(
-                "SELECT 1 FROM model_usage WHERE job_id=? AND scenario='content_vision'", (job_id,),
+                "SELECT 1 FROM model_usage WHERE job_id=? AND scenario=?", (job_id, scenario),
             ):
                 raise CoreError("MODEL_IMAGE_ALREADY_ATTEMPTED", 409)
         if scenario == "activity":
@@ -132,8 +140,8 @@ def reserve(
             elif scenario == "diary":
                 scenarios = ("diary",)
                 limit = settings.diary_daily_micro_usd
-            elif scenario == "content_vision":
-                scenarios = ("content_vision",)
+            elif scenario in {"content_vision", "content_video"}:
+                scenarios = ("content_vision", "content_video")
                 limit = settings.content.image_daily_micro_usd
             elif scenario == "activity":
                 scenarios = ("activity",)
@@ -178,8 +186,10 @@ def reserve(
             request_id=request_id,
             job_id=job_id,
             scenario=scenario,
-            provider=settings.provider,
-            model=settings.model_name,
+            provider=(approval.video_input.provider if scenario == "content_video"
+                      else settings.provider),
+            model=(approval.video_input.model if scenario == "content_video"
+                   else settings.model_name),
             input_tokens=estimated_input,
             output_tokens=output_tokens,
             billed_micro_usd=estimate,
@@ -215,7 +225,7 @@ def reserve(
                     "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
                 )["value"],
                 lease_token=uid("model_lease"),
-                lease_until=after(now, settings.timeout_seconds + 10),
+                lease_until=after(now, settings.model_timeout(scenario) + 10),
             )
             paid_budget.journal(
                 store,
@@ -358,9 +368,10 @@ def _settle_paid(store, settings, admission, response):
             True,
         )
         return
+    rates = snapshot["video_input"] if usage["scenario"] == "content_video" else snapshot
     pricing = SimpleNamespace(
         pricing_known=True,
-        **{name: snapshot[name] for name in ("input_rate", "cached_input_rate", "output_rate")},
+        **{name: rates[name] for name in ("input_rate", "cached_input_rate", "output_rate")},
     )
     valid = (
         response is not None
@@ -626,13 +637,15 @@ async def _dispatch(model, store, settings, request_id, messages, scenario, cloc
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
-    if live_text.active(store, settings) or scenario == "content_vision":
+    if live_text.active(store, settings) or scenario in {"content_vision", "content_video"}:
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
+        target_url = (settings.paid_model.video_input.endpoint if scenario == "content_video"
+                      else settings.model_url)
         if live_text.active(store, settings) and (
             settings.live_text_window.execution == "local_synthetic"
         ) and not isinstance(
-            model.client._transport_for_url(httpx.URL(settings.model_url)), httpx.MockTransport
+            model.client._transport_for_url(httpx.URL(target_url)), httpx.MockTransport
         ):
             raise CoreError("LIVE_TEXT_SYNTHETIC_MODEL_TRANSPORT_REQUIRED", 503)
     if isinstance(model, ModelClient) and model.settings is not settings:
@@ -653,10 +666,14 @@ async def _dispatch(model, store, settings, request_id, messages, scenario, cloc
             raise CoreError("MODEL_REQUEST_ALREADY_STARTED", 409)
         if row["usage_scenario"] != scenario:
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        if scenario == "content_vision":
+        if scenario in {"content_vision", "content_video"}:
             from companion.image_input import contract as image_contract
 
             image_contract(settings, row["usage_job_id"], row["logical_request_id"])
+            if scenario == "content_video":
+                from companion.video_input import contract as video_contract
+
+                video_contract(settings, row["usage_job_id"], row["logical_request_id"])
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(now):
             raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
         snapshot = paid_budget.snapshot(settings)
@@ -721,7 +738,7 @@ async def _dispatch(model, store, settings, request_id, messages, scenario, cloc
                     or current["io_started_at"] != now
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
-                    or (scenario == "content_vision" and (
+                    or (scenario in {"content_vision", "content_video"} and (
                         current["scenario"] != scenario
                         or current["usage_job_id"] != row["usage_job_id"]
                         or current["logical_request_id"] != row["logical_request_id"]
@@ -732,8 +749,10 @@ async def _dispatch(model, store, settings, request_id, messages, scenario, cloc
                              "('model_budget_blocked','model_budget_restore_required')"):
                     raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
             paid_budget.contract(settings, clock())
-            if scenario == "content_vision":
+            if scenario in {"content_vision", "content_video"}:
                 image_contract(settings, row["usage_job_id"], row["logical_request_id"])
+                if scenario == "content_video":
+                    video_contract(settings, row["usage_job_id"], row["logical_request_id"])
             if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                 raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
             if row["payload_sha256"] != paid_budget.sha(
