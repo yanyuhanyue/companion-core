@@ -38,6 +38,20 @@ def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
+def cancelled_input_proof(row, value):
+    fields = {"window_sha256", "event_id", "input_sha256", "state", "event_sha256",
+              "job_sha256", "privacy_epoch", "model_attempts", "send_attempts"}
+    if (not isinstance(value, dict) or set(value) != fields or value["state"] != "CANCELLED"
+        or value["window_sha256"] != row["plan_hash"] or value["event_id"] != row["event_id"]
+        or value["input_sha256"] != row["input_hash"]
+        or any(not isinstance(value[name], str) or not SHA.fullmatch(value[name])
+               for name in ("event_sha256", "job_sha256"))
+        or type(value["privacy_epoch"]) is not int or value["privacy_epoch"] < 0
+        or any(type(value[name]) is not int or value[name] != 0
+               for name in ("model_attempts", "send_attempts"))):
+        raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
+
+
 def bridge_code_sha256():
     package = Path(__file__).parent
     return digest([[p.name, hashlib.sha256(p.read_bytes()).hexdigest()]
@@ -662,7 +676,9 @@ class TestWindow:
         records, head = self.read_journal()
         if not records or head != row["journal_head"]:
             raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
-        quota = cumulative.fold(self, self.verify_history(records))
+        history = self.verify_history(records)
+        self.check_cancelled_inputs(history)
+        quota = cumulative.fold(self, history)
         if active or dispatch:
             cumulative.check(self, quota, self.clock())
         if active:
@@ -678,6 +694,50 @@ class TestWindow:
             if not self.plan.start <= self.clock() < self.plan.end:
                 raise ValueError("WINDOW_OUTSIDE_INTERVAL")
         return row
+
+    def check_cancelled_inputs(self, history):
+        journals = {plan.sha256: records for plan, records in history}
+        for row in self.db.execute("SELECT * FROM window_inputs WHERE state='CANCELLED'"):
+            entries = [entry for entry in journals.get(row["plan_hash"], [])
+                       if entry["kind"] == "INPUT_CANCELLED"
+                       and entry["data"].get("event_hash") == digest(row["event_id"])]
+            if len(entries) != 1:
+                raise ValueError("CANCELLED_INPUT_JOURNAL_REQUIRED")
+            cancelled_input_proof(row, entries[0]["data"].get("core_receipt"))
+
+    async def reconcile_cancelled_inputs(self, client):
+        """Retire known zero-attempt inputs; never turn failure into a delivery ACK."""
+        row = self.verify(active=False)
+        records, _ = self.read_journal()
+        if (row["state"] != "STOPPED" or self.plan.mode != "live_text"
+            or not any(entry["kind"] == "CORE_STOP_CONFIRMED" for entry in records)
+            or not self.stop_path.is_file() or self.stop_path.is_symlink()
+            or self.stop_path.read_bytes() != b"OWNER_STOP\n"):
+            raise ValueError("STOPPED_INPUT_RECONCILIATION_REQUIRED")
+        changed = 0
+        for source in self.db.execute("SELECT * FROM window_inputs WHERE plan_hash=? "
+                                      "AND state NOT IN ('ACK','CANCELLED')",
+                                      (self.plan.sha256,)).fetchall():
+            if (source["state"] != "APPROVED" or not source["capture_json"]
+                or self.db.execute("SELECT 1 FROM window_attempts WHERE event_id=?",
+                                   (source["event_id"],)).fetchone()):
+                raise ValueError("INPUT_ATTEMPT_RECONCILIATION_REQUIRED")
+            before = self.row()["journal_head"]
+            result = await self.core_post(client, "/internal/v1/live-text/inputs/cancelled", {
+                "window_sha256": self.plan.sha256, "event_id": source["event_id"],
+            })
+            cancelled_input_proof(source, result)
+            current = self.verify(active=False)
+            if current["state"] != "STOPPED" or current["journal_head"] != before:
+                raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
+            head = self.append("INPUT_CANCELLED", {"event_hash": digest(source["event_id"]),
+                                                   "core_receipt": result})
+            with self.db:
+                self.db.execute("UPDATE window_inputs SET state='CANCELLED' WHERE event_id=?",
+                                (source["event_id"],))
+                self.db.execute("UPDATE test_window SET journal_head=?", (head,))
+            changed += 1
+        return self.status() | {"cancelled_inputs": changed}
 
     def read_journal(self):
         path = self.plan.journal
@@ -988,7 +1048,8 @@ class TestWindow:
         ):
             raise ValueError("WINDOW_ALREADY_REGISTERED")
         old.check_spool()
-        if self.db.execute("SELECT 1 FROM window_inputs WHERE state!='ACK' LIMIT 1").fetchone() or (
+        if self.db.execute("SELECT 1 FROM window_inputs WHERE state NOT IN ('ACK','CANCELLED') "
+                           "LIMIT 1").fetchone() or (
             self.db.execute("SELECT 1 FROM window_attempts WHERE state!='ACK' LIMIT 1").fetchone()
         ) or self.db.execute(
             "SELECT 1 FROM results WHERE state!='accepted' "

@@ -74,6 +74,10 @@ class InputApproval(WindowReference):
     capture: CaptureReceipt | None = None
 
 
+class CancelledInputReference(WindowReference):
+    event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
+
+
 class SendCheck(WindowReference):
     event_id: str = Field(pattern=r"^[A-Za-z0-9_:-]{8,128}$")
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
@@ -498,6 +502,45 @@ def prepare_handoff(store, settings, clock, reference):
         _put(store, HISTORY + approval.plan_sha256, {"state": "PREPARED", "binding": binding,
              "approval": approval.model_dump(mode="json"), "prepared_receipt": receipt})
         return receipt
+
+
+def cancelled_input(store, settings, clock, reference):
+    """Read-only proof of a stopped, cancelled job with no model or send attempt."""
+    with store.transaction():
+        approval, binding = settings.live_text_window, _meta(store, BINDING)
+        allowed = {approval.plan_sha256} if approval else set()
+        if approval and approval.handoff:
+            allowed.add(approval.handoff.predecessor_plan_sha256)
+        receipt = _meta(store, INPUT + reference.event_id)
+        event = store.one("SELECT * FROM events WHERE event_id=?", (reference.event_id,))
+        job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'",
+                        (reference.event_id,))
+        if (reference.window_sha256 not in allowed or not binding
+            or binding["plan_sha256"] != reference.window_sha256
+            or not stopped(store, reference.window_sha256) or not receipt or not event or not job
+            or receipt.get("window_sha256") != reference.window_sha256
+            or receipt.get("privacy_epoch") != epoch(store) or not receipt.get("capture")
+            or receipt["capture"].get("source_event_id") != event["source_event_id"]
+            or event["source"] != "qq.onebot" or event["actor_id"] != "owner"
+            or event["privacy_scope"] != "private" or event["redacted"]
+            or _input_digest(json.loads(event["body_json"])) != receipt.get("input_sha256")
+            or job["state"] != "CANCELLED"
+            or job["last_error_code"] != "LIVE_WINDOW_STOPPED"):
+            raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
+        if (store.one("SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],))
+            or store.one("SELECT 1 FROM model_admissions WHERE logical_request_id=?",
+                         (job["job_id"],))
+            or store.one("SELECT 1 FROM outbox WHERE origin_event_id=?", (reference.event_id,))
+            or store.one("SELECT 1 FROM content_items WHERE owner_event_id=? AND "
+                         "(usage_request_id IS NOT NULL OR output_event_id IS NOT NULL "
+                         "OR media_sha256!='' OR lease_until>?)",
+                         (reference.event_id, clock()))):
+            raise CoreError("LIVE_TEXT_CANCELLED_INPUT_ATTEMPTED", 409)
+        _idle(store)
+        return {"window_sha256": reference.window_sha256, "event_id": reference.event_id,
+                "input_sha256": receipt["input_sha256"], "state": "CANCELLED",
+                "event_sha256": paid_budget.sha(event), "job_sha256": paid_budget.sha(job),
+                "privacy_epoch": epoch(store), "model_attempts": 0, "send_attempts": 0}
 
 
 def _verify_handoff_receipt(approval, history, receipt):

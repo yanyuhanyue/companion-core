@@ -130,11 +130,52 @@ async def resolve_public(host, port):
     return values
 
 
+async def _connect_image(delegate, target, pin, check):
+    request = httpx.Request(
+        "GET", target.copy_with(host=pin),
+        headers={"Host": target.host, "Accept-Encoding": "identity"},
+        extensions={"sni_hostname": target.host,
+                    "timeout": {key: 5.0 for key in ("connect", "read", "write", "pool")}},
+    )
+    await check()
+    dispatched = connect_failed = False
+
+    def destination():
+        if (request.method != "GET" or request.url != target.copy_with(host=pin)
+            or not global_address(request.url.host) or request.headers.get("Host") != target.host
+            or request.extensions.get("sni_hostname") != target.host
+            or "Authorization" in request.headers or "Cookie" in request.headers):
+            raise ValueError("IMAGE_DESTINATION_CHANGED")
+
+    async def trace(name, info):
+        nonlocal dispatched, connect_failed
+        if name in {"connection.connect_tcp.failed", "connection.start_tls.failed"}:
+            connect_failed = True
+        if name.endswith("send_request_headers.started"):
+            # Mark before awaiting the guard: once dispatch might have begun,
+            # this request can never be repeated, including after a late error.
+            dispatched = True
+            await check()
+            destination()
+
+    request.extensions["trace"] = trace
+    destination()
+    try:
+        return await delegate.handle_async_request(request)
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        if dispatched or not connect_failed:
+            raise
+        # The trusted transport proved TCP/TLS failed before HTTP headers.
+        return None
+
+
 async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resolve_public):
     """The Core check runs after DNS, then actual destination/Host/SNI are rechecked.
 
     Use the transport directly: HTTPX's client request logger would print signed URLs.
-    No Authorization/Cookie headers, redirect following, retries or disk writes exist here.
+    A proven pre-HTTP connect failure may try another validated address within the
+    same ten-second lease. No dispatched GET is repeated; there are no redirects,
+    Authorization/Cookie headers or disk writes here.
     """
     if type(max_bytes) is not int or not 1 <= max_bytes <= 4_000_000 or not callable(check):
         raise ValueError("INVALID_IMAGE_DOWNLOAD_GRANT")
@@ -148,43 +189,13 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
             addresses = await resolver(target.host, 443)
             if not addresses or any(not global_address(ip) for ip in addresses):
                 raise ValueError("IMAGE_NONPUBLIC_ADDRESS")
-            pin = addresses[0]
-            request = httpx.Request(
-                "GET",
-                target.copy_with(host=pin),
-                headers={
-                    "Host": target.host,
-                    "Accept-Encoding": "identity",
-                },
-                extensions={
-                    "sni_hostname": target.host,
-                    "timeout": {key: 5.0 for key in ("connect", "read", "write", "pool")},
-                },
-            )
-            await check()
-
-            def destination():
-                if (
-                    request.method != "GET"
-                    or request.url != target.copy_with(host=pin)
-                    or not global_address(request.url.host)
-                    or request.headers.get("Host") != target.host
-                    or request.extensions.get("sni_hostname") != target.host
-                    or "Authorization" in request.headers
-                    or "Cookie" in request.headers
-                ):
-                    raise ValueError("IMAGE_DESTINATION_CHANGED")
-
-            async def trace(name, info):
-                if name.endswith("send_request_headers.started"):
-                    # Connect/TLS may await. Recheck the same lease/source immediately
-                    # before the actual GET headers, without another download attempt.
-                    await check()
-                    destination()
-
-            request.extensions["trace"] = trace
-            destination()
-            response = await delegate.handle_async_request(request)
+            candidates = addresses[:3] if len(addresses) > 1 else addresses * 2
+            for pin in candidates:
+                response = await _connect_image(delegate, target, pin, check)
+                if response is not None:
+                    break
+            if response is None:
+                raise ValueError("IMAGE_CONNECTION_FAILED")
             if response.status_code != 200:
                 raise ValueError("IMAGE_FETCH_REJECTED")
             if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
@@ -206,6 +217,8 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
             if not body:
                 raise ValueError("IMAGE_EMPTY")
             return bytes(body), mime
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        raise ValueError("IMAGE_CONNECTION_FAILED") from None
     except (httpx.HTTPError, OSError):
         raise ValueError("IMAGE_FETCH_FAILED") from None
     finally:
