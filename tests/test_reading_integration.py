@@ -222,6 +222,7 @@ class Boundary(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, Boundary())
 import httpcore
+import ssl
 from source_reader import network
 
 payloads = [bytes.fromhex(value) for value in json.loads(sys.stdin.read())['payloads']]
@@ -255,8 +256,18 @@ async def public_addresses(host, port):
     return ['93.184.216.34']
 
 backend = Backend()
-public_network = network.PublicNetwork
-network.PublicNetwork = lambda: public_network(resolver=public_addresses, backend=backend)
+
+class ProviderHTTP(network.PublicHTTP):
+    def __init__(self, pool=None):
+        # Mock TLS must not synchronously scan host CA files on each fake connection.
+        pool = pool or httpcore.AsyncConnectionPool(
+            ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+            network_backend=network.PublicNetwork(resolver=public_addresses, backend=backend),
+            max_connections=1, max_keepalive_connections=0, retries=0,
+        )
+        super().__init__(pool)
+
+network.PublicHTTP = ProviderHTTP
 origin = sys.argv[2]
 sys.argv = ['source_reader', '--source', 'bilibili', '--protocol', 'reading-v1',
             '--core-url', origin, '--adapter-id', 'bili', '--discussion', '--once']
@@ -301,9 +312,18 @@ print(json.dumps({'provider_requests': backend.requests, 'server_names': backend
                     ))
                 assert snapshots[0] == snapshots[1]  # Restart cannot reread or charge again.
                 requests = children[0]["provider_requests"]
-                assert len(requests) == 5 and children[0]["unused_responses"] == 0
+                diagnostic = {
+                    "provider": children[0],
+                    "attempts": [{key: row[key] for key in (
+                        "state", "observed_requests", "observed_bytes",
+                    )} for row in snapshots[0][0]],
+                    "settlement": [{key: row[key] for key in (
+                        "state", "used_requests", "used_bytes", "last_error_code",
+                    )} for row in snapshots[0][1]],
+                }
+                assert len(requests) == 5 and children[0]["unused_responses"] == 0, diagnostic
                 assert [request.split("?", 1)[0] for request in requests] == [
-                    "GET /x/web-interface/view", "GET /x/player/v2",
+                    "GET /x/web-interface/view", "GET /x/player/wbi/v2",
                     "GET /bfs/subtitle/example.json", "GET /x/v2/reply", "GET /x/v1/dm/list.so",
                 ]
                 assert children[1]["provider_requests"] == []
@@ -320,7 +340,7 @@ print(json.dumps({'provider_requests': backend.requests, 'server_names': backend
                     len(raw) for raw in payloads
                 )
                 stored = json.loads(observations[0]["evidence_json"])["read_observation"]
-                assert stored["parser_version"] == "bilibili/2"
+                assert stored["parser_version"] == "bilibili/3"
                 assert stored["provenance"]["source_event_ids"] == ["evt_test_1"]
                 assert stored["coverage"]["scope"] == "first_part_subtitles"
                 assert stored["coverage"]["complete_video"] is False

@@ -57,7 +57,7 @@ def test_bilibili_envelope_separates_subtitle_spans_from_video_analysis():
     assert result["status"] == "SUCCESS" and result["used_requests"] == 3
     row = result["observations"][0]
     assert row["original_url"] == ITEM["url"] and row["fetched_at"] == NOW
-    assert row["parser_version"] == "bilibili/1"
+    assert row["parser_version"] == "bilibili/3"
     assert row["result_status"] == "FETCHED" and row["trust"] == "untrusted_external"
     assert row["provenance"] == {
         "root_task_id": "root_read_1", "source": "bilibili",
