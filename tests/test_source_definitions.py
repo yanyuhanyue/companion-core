@@ -30,13 +30,19 @@ HEYBOX = "https://www.xiaoheihe.cn/app/bbs/link/123456"
 
 
 def test_fixed_definitions_and_protocol_source_types_cannot_enable_third_platform():
-    assert source_names("get") == source_names("source_grant") == ("bilibili", "heybox")
+    assert source_names("get") == source_names("read") == ("bilibili", "heybox", "web")
+    assert source_names("source_grant") == ("bilibili", "heybox")
     assert source_names("reading") == ("bilibili",)
     assert source_names("article") == ("heybox",)
     assert observation_sources("share") == ("observation.bilibili", "observation.heybox")
     assert not supports("third-platform", "get")
     assert not supports("simulation", "share")
     assert not supports("web", "source_grant")
+    assert not supports("web", "discover") and not supports("web", "share")
+    url = "https://articles.example/story"
+    with pytest.raises(CoreError, match="CONTENT_URL_NOT_ALLOWED"):
+        content_target(url)
+    assert content_target(url, web_hosts=("articles.example",)) == ("web", url)
     with pytest.raises(CoreError, match="SOURCE_NOT_ALLOWED"):
         source_definition("third-platform")
     with pytest.raises(FrozenInstanceError):

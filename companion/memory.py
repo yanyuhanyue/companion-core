@@ -175,12 +175,12 @@ class Memory:
         return current
 
     def validate_candidate(self, candidate, confirmed=False, *, now=None):
-        event = MemorySources(self, now).event(candidate.evidence_event_id)
+        event = MemorySources(self, now).event(candidate.evidence_event_id, require_text=False)
         if not event:
             raise CoreError("MISSING_MEMORY_EVIDENCE")
         body = json.loads(event["body_json"])
         text = body.get("text", "")
-        if candidate.evidence_quote not in text:
+        if not text.strip() or candidate.evidence_quote not in text:
             raise CoreError("UNSUPPORTED_MEMORY_EVIDENCE")
         if not confirmed and self.store.one(
             "SELECT 1 FROM memories newer JOIN memories older "

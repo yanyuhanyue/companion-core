@@ -8,12 +8,15 @@ from unittest.mock import patch
 import pytest
 
 from companion.store import migrate
+from scripts import benchmark_p8b_context as benchmark_module
 from scripts.benchmark_p8b_context import (
     FIXTURE,
+    NOW,
     SCENARIOS,
     aggregate,
     benchmark,
     eligible,
+    one_case,
     planned_load,
     quantiles,
     synthetic_units,
@@ -30,6 +33,7 @@ def evidence(benchmark_workspace):
     dataset = json.loads(FIXTURE.read_text(encoding="utf-8"))
     with (
         patch("companion.retrieval.SemanticIndex.warmup", side_effect=AssertionError("encoder")),
+        patch("companion.retrieval.SemanticIndex.scores", side_effect=AssertionError("retrieval")),
         patch("httpx.Client.send", side_effect=AssertionError("network")),
         patch("httpx.AsyncClient.send", side_effect=AssertionError("network")),
         patch("socket.create_connection", side_effect=AssertionError("network")),
@@ -47,6 +51,46 @@ def test_benchmark_cases_cannot_contaminate_the_shared_empty_schema(evidence, be
         for (name,) in tables:
             if name != "alembic_version" and not name.startswith("memories_fts_"):
                 assert template.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] == 0
+
+
+def test_fixture_facts_and_positive_sources_share_the_frozen_core_clock(
+    evidence, benchmark_workspace,
+):
+    dataset = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    tea = next(row for row in dataset["memories"] if row["memory_id"] == "tea")
+    with closing(sqlite3.connect(benchmark_workspace / "baseline/indirect/core.sqlite3")) as store:
+        store.row_factory = sqlite3.Row
+        fact = store.execute("SELECT * FROM memories WHERE memory_id='tea'").fetchone()
+        assert fact["content"] == tea["content"]
+        assert fact["created_at"] == fact["updated_at"] == NOW
+        assert fact["valid_from"] is fact["valid_to"] is None
+        sources = store.execute(
+            "SELECT e.*,v.polarity FROM memory_evidence v JOIN events e USING(event_id) "
+            "WHERE v.memory_id='tea' ORDER BY event_id",
+        ).fetchall()
+        assert [row["event_id"] for row in sources] == sorted(tea["evidence_ids"])
+        assert all(row["polarity"] == 1 and row["actor_id"] == "owner"
+                   and row["privacy_scope"] == "private" and row["redacted"] == 0
+                   and row["occurred_at"] == row["ingested_at"] == NOW for row in sources)
+
+
+def test_fixture_retrieval_cannot_bypass_missing_native_evidence(
+    tmp_path, migrated_database, monkeypatch,
+):
+    dataset = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    catalog = {row["memory_id"]: {"subject": "user", "needs_review": False, **row}
+               for row in dataset["memories"]}
+    case = next(row for row in dataset["cases"] if row["id"] == "indirect")
+    original = benchmark_module.seed_evidence
+
+    def missing_evidence(core, catalog):
+        original(core, catalog)
+        core.store.execute("DELETE FROM memory_evidence WHERE memory_id='tea'")
+
+    monkeypatch.setattr(benchmark_module, "seed_evidence", missing_evidence)
+    result = asyncio.run(one_case(tmp_path, "baseline", case, catalog, migrated_database))
+    assert result["selected_ids"] == [] and result["missing_ids"] == ["tea"]
+    assert [row["scenario"] for row in result["usage_records"]] == ["chat"]
 
 
 def test_same_eleven_groups_have_raw_records_and_six_scenario_aggregates(evidence):
