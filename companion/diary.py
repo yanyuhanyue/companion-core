@@ -17,6 +17,10 @@ from companion.privacy import advance_epoch, diary_copies, epoch, redact, sensit
 from companion.store import after, encode, uid, utcnow
 
 GENERATOR_VERSION = "diary-1"
+ADMISSION_RETRY_CODES = {
+    "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
+    "MODEL_MONTHLY_BUDGET_EXHAUSTED",
+}
 UNSUPPORTED_ACTIVITY = (
     r"我.{0,8}(?:去了|去过|看了|看过|读完|看完|玩了|玩过|打开了|执行了|"
     r"发布了|发了说说|上学|散步|吃了|听到了|看到了|浏览了|完成了任务)"
@@ -466,11 +470,15 @@ class DiaryRepository:
                     (row["model_request_id"],),
                 )
                 stale = row["captured_privacy_epoch"] != epoch(s)
+                unknown = s.one("SELECT 1 FROM model_usage WHERE request_id=? AND state='UNKNOWN'",
+                                (row["model_request_id"],))
                 state = (
                     "CANCELLED"
                     if stale
+                    else "FAILED"
+                    if unknown
                     else "RETRY_WAIT"
-                    if row["attempts"] < row["max_attempts"]
+                    if row["model_request_id"] is None or row["attempts"] < row["max_attempts"]
                     else "FAILED"
                 )
                 s.execute(
@@ -495,7 +503,8 @@ class DiaryRepository:
             token, captured = uid("diary_lease"), epoch(s)
             s.execute(
                 "UPDATE diary_runs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-                "attempts=attempts+1,source_set_sha256=?,captured_privacy_epoch=?,updated_at=? "
+                "attempts=attempts+1,model_request_id=NULL,source_set_sha256=?,"
+                "captured_privacy_epoch=?,updated_at=? "
                 "WHERE run_id=?",
                 (
                     worker_id,
@@ -535,7 +544,7 @@ class DiaryRepository:
         ):
             raise CoreError("DIARY_SOURCES_CHANGED", 409)
 
-    def finish(self, run, state, code=None, draft=None, body=None):
+    def finish(self, run, state, code=None, draft=None, body=None, *, retry_at=None):
         s, now = self.store, self.clock()
         with s.transaction():
             if state in {"COMMITTED", "SKIPPED"}:
@@ -547,7 +556,7 @@ class DiaryRepository:
                     state,
                     code,
                     now,
-                    after(now, 30) if state == "RETRY_WAIT" else None,
+                    (retry_at or after(now, 30)) if state == "RETRY_WAIT" else None,
                     run["run_id"],
                     run["lease_token"],
                 ),
@@ -616,6 +625,7 @@ class DiaryService:
         run = self.repo.claim(worker_id)
         if run is None:
             return False
+        request_id = None
         try:
             count = sum(
                 source["kind"] == "owner_message"
@@ -689,19 +699,35 @@ class DiaryService:
                 if isinstance(error, ValidationError)
                 else "DIARY_INTERNAL_ERROR"
             )
-            state = "FAILED"
-            if code in {
+            state, retry_at = "FAILED", None
+            unknown = self.store.one(
+                "SELECT 1 FROM model_usage WHERE request_id=? AND state='UNKNOWN'", (request_id,),
+            )
+            if request_id is None and code in ADMISSION_RETRY_CODES:
+                # Claims are counted, but a refused admission consumes no model
+                # attempt. Keep waiting even after many temporary contentions.
+                state = "RETRY_WAIT"
+                local = datetime.fromisoformat(self.clock()).astimezone(
+                    ZoneInfo(self.settings.timezone),
+                )
+                if "DAILY" in code:
+                    retry_at = day_bounds(
+                        local.date() + timedelta(days=1), self.settings.timezone,
+                    )[0]
+                elif "MONTHLY" in code:
+                    day = (local.date().replace(day=28) + timedelta(days=4)).replace(day=1)
+                    retry_at = day_bounds(day, self.settings.timezone)[0]
+            elif code in {
                 "PRIVACY_CHANGED",
                 "DIARY_DISABLED",
                 "DIARY_STALE_LEASE",
                 "DIARY_SOURCES_CHANGED",
             }:
                 state = "CANCELLED"
-            elif code in {"MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE"} or isinstance(
-                error, ValidationError
-            ):
+            elif not unknown and (code in {"MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE"}
+                                  or isinstance(error, ValidationError)):
                 state = "RETRY_WAIT" if run["attempts"] < run["max_attempts"] else "FAILED"
-            self.repo.finish(run, state, code)
+            self.repo.finish(run, state, code, retry_at=retry_at)
         return True
 
     def authorize(self, requester):
@@ -761,7 +787,11 @@ class DiaryService:
                 after(self.clock(), -86400 * self.settings.raw_event_retention_days),
             )
             if expired:
-                self.ledger.expire_events(self.store, expired, self.clock())
+                self.ledger.expire_events(
+                    self.store, expired, self.clock(), retention_cutoff=after(
+                        self.clock(), -86400 * self.settings.raw_event_retention_days,
+                    ),
+                )
 
         if self.store.db.in_transaction:
             expire()

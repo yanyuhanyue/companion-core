@@ -386,7 +386,11 @@ class GoalEngine:
                 after(self.clock(), -86400 * self.settings.raw_event_retention_days),
             )
             if expired:
-                self.ledger.expire_events(self.store, expired, self.clock())
+                self.ledger.expire_events(
+                    self.store, expired, self.clock(), retention_cutoff=after(
+                        self.clock(), -86400 * self.settings.raw_event_retention_days,
+                    ),
+                )
 
     def pause_autonomy(self, paused):
         with self.store.transaction():
