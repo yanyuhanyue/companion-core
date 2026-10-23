@@ -232,8 +232,30 @@ def public_transport(calls, *, semantic=True, license_bytes=LICENSE_BYTES, brave
         if brave:
             return httpx.Response(200, content=png(), headers={"content-type": "image/png"})
         if host == "raw.githubusercontent.com":
-            return httpx.Response(200, json={"schema_version": "1.0.0", "packs": [PACK]})
+            if request.url.path.endswith("/community-index.json"):
+                return httpx.Response(200, json={"schema_version": "1.0.0", "packs": [PACK]})
+            root = f"/example/fixture/{REVISION}/"
+            if request.url.path == root + "manifest.json":
+                return httpx.Response(200, json={
+                    "schema_version": 1, "id": "fixture-pack", "version": "1.0",
+                    "license": RULE["license"],
+                    "categories": {"happy": {"description": "庆祝 celebrate 成功"}},
+                })
+            if request.url.path == root + "LICENSE":
+                return httpx.Response(200, content=license_bytes)
+            assert request.url.path == root + "memes/happy/a.png"
+            return httpx.Response(200, content=png(), headers={"content-type": "image/png"})
         if host == "api.github.com":
+            if "/contents/" in request.url.path:
+                assert request.url.path == "/repos/example/fixture/contents/memes/happy"
+                assert request.url.query == ("ref=" + REVISION).encode()
+                data = png()
+                blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+                return httpx.Response(200, json=[{
+                    "name": "a.png", "path": "memes/happy/a.png", "type": "file",
+                    "size": len(data),
+                    "sha": blob,
+                }])
             return httpx.Response(200, json={"sha": REVISION})
         assert host == "codeload.github.com"
         return httpx.Response(

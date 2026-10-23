@@ -240,7 +240,7 @@ def test_new_discovery_indexes_ready_caption_with_current_turn_and_original_paid
 
     run(scenario())
     assert len(core.caption.submissions) == len(core.caption.model_calls) == 1
-    assert len(public_calls) == 6
+    assert len(public_calls) == 10
 
 
 def test_unknown_download_never_submits_paid_caption(make_runtime):

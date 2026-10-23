@@ -116,6 +116,15 @@ class ArchiveMember:
 
 
 @dataclass(frozen=True, slots=True)
+class RepositoryImage:
+    resource: FetchedResource
+    manifest: FetchedResource
+    license: FetchedResource
+    listing: FetchedResource
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReviewEvidence:
     source_page: str  # Discovery claim, not a fetched licensing attestation.
     discovered_asset_url: str
@@ -123,10 +132,14 @@ class ReviewEvidence:
     fetch: FetchEvidence
     image_sha256: str
     archive_member: str = ""
+    source_files: dict[str, FetchEvidence] | None = None
 
     @property
     def json(self):
-        return json.dumps(asdict(self), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        value = asdict(self)
+        if self.source_files is None:
+            del value["source_files"]  # Preserve every historical source/cache identity.
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @property
     def sha256(self):
@@ -179,6 +192,8 @@ class PublicFetcher:
                         raise ValueError("MEME_REQUEST_LIMIT")
                     self.usage.requests += 1
                     headers = {"Host": target.host, "Accept-Encoding": "identity"}
+                    if target.host == "api.github.com":
+                        headers["User-Agent"] = "Companion-Core-meme-discovery/1"
                     if token:
                         headers["X-Subscription-Token"] = token
                     request = httpx.Request(
@@ -304,6 +319,7 @@ async def run_discovery(job_key, intent, provider, catalog, *, budget, check, re
             if number > limits.max_images:
                 break
             await fence()
+            source_files = None
             if supplied is None:
                 resource = await fetcher.get(
                     candidate.asset_url, catalog.library.max_bytes
@@ -312,6 +328,16 @@ async def run_discovery(job_key, intent, provider, catalog, *, budget, check, re
                     rejected += 1
                     continue
                 data, member_path = resource.data, ""
+            elif isinstance(supplied, RepositoryImage):
+                from .meme_packs import verify_repository_image
+
+                resource = fetcher.verify(supplied.resource)
+                for witness in (supplied.manifest, supplied.license, supplied.listing):
+                    fetcher.verify(witness)
+                verify_repository_image(candidate, supplied)
+                data, member_path = resource.data, ""
+                source_files = {role: getattr(supplied, role).evidence
+                                for role in ("manifest", "license", "listing")}
             else:
                 if not isinstance(supplied, ArchiveMember):
                     raise ValueError("MEME_FETCH_EVIDENCE_REQUIRED")
@@ -330,7 +356,7 @@ async def run_discovery(job_key, intent, provider, catalog, *, budget, check, re
                 continue
             evidence = ReviewEvidence(
                 candidate.source_page, candidate.asset_url, candidate.revision,
-                resource.evidence, image.sha256, member_path,
+                resource.evidence, image.sha256, member_path, source_files,
             )
             reviewed_candidate = replace(candidate, asset_url=resource.evidence.final_url)
             await fence()

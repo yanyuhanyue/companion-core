@@ -9,13 +9,15 @@ import zipfile
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
+from .meme_caption import strict_json
 from .meme_catalog import INTENTS
-from .meme_discovery import ArchiveMember, SearchImage
+from .meme_discovery import ArchiveMember, RepositoryImage, SearchImage
 from .meme_library import CATEGORY
 
 INDEX_REVISION = "2f173ca5dc0b460d9c6408a4f7f0e9a83371677f"
 INDEX_URL = ("https://raw.githubusercontent.com/anka-afk/astrbot-meme-pack-index/"
              + INDEX_REVISION + "/community-index.json")
+IMAGE_LIMIT = 4 * 1024 * 1024
 
 
 def relative_path(value):
@@ -196,8 +198,28 @@ class CommunityPacks:
             if score:
                 ranked.append((score, pack))
         ranked.sort(key=lambda row: (-row[0], row[1]["id"]))
+        supplied_count = 0
+        file_sources = {key: value for key, value in self.license_files.items()
+                        if isinstance(value, dict)}
+        if file_sources:
+            # Source-only reviewers supply exact approved revisions, never a mutable ref.
+            ranked = [(score, pack) for score, pack in ranked
+                      if any(repo == pack["source"]["repo"] for repo, _ in file_sources)]
         for _, pack in ranked[:2]:
             source = pack["source"]
+            approved = [(revision, rule) for (repo, revision), rule in file_sources.items()
+                        if repo == source["repo"]]
+            if approved:
+                # Ambiguous local revision policy fails closed rather than choosing a ref.
+                if len(approved) != 1:
+                    raise ValueError("MEME_PACK_REVISION_AMBIGUOUS")
+                revision, rule = approved[0]
+                async for candidate in self._files(pack, revision, rule, intent, fetcher):
+                    yield candidate
+                    supplied_count += 1
+                    if supplied_count >= fetcher.limits.max_images:
+                        return
+                continue
             revision = source["ref"]
             if not re.fullmatch(r"[0-9a-f]{40}", revision):
                 endpoint = f"https://api.github.com/repos/{source['repo']}/commits/"
@@ -216,3 +238,118 @@ class CommunityPacks:
             ):
                 await fetcher.check()
                 yield candidate, ArchiveMember(resource, path)
+
+    async def _files(self, pack, revision, rule, intent, fetcher):
+        repo, subpath = pack["source"]["repo"], pack["source"]["subpath"]
+        if (not re.fullmatch(r"[a-f0-9]{40}", revision)
+            or rule["repo"] != repo or rule["revision"] != revision
+            or rule["license"] != pack["license"]):
+            raise ValueError("MEME_PACK_SOURCE_INVALID")
+        root = "" if subpath == "." else relative_path(subpath).as_posix() + "/"
+        prefix = f"https://raw.githubusercontent.com/{repo}/{revision}/"
+        manifest = await fetcher.get(prefix + quote(root + "manifest.json"),
+                                     512 * 1024, redirects=False)
+        categories = file_manifest(manifest.data, pack["id"], rule["license"])["categories"]
+        license_path = relative_path(rule["license_path"]).as_posix()
+        license_file = await fetcher.get(prefix + quote(license_path), 64 * 1024, redirects=False)
+        if hashlib.sha256(license_file.data).hexdigest() != rule["license_sha256"]:
+            raise ValueError("MEME_PACK_LICENSE_MISMATCH")
+        ranked = []
+        for category, value in categories.items():
+            words = (category + " " + value["description"]).casefold()
+            score = sum(term in words for term in INTENTS[intent])
+            if score:
+                ranked.append((score, category))
+        ranked.sort(key=lambda row: (-row[0], row[1]))
+        for _, category in ranked[:2]:
+            directory = root + "memes/" + category
+            if not directory.startswith(relative_path(rule["asset_prefix"]).as_posix() + "/"):
+                continue
+            endpoint = f"https://api.github.com/repos/{repo}/contents/{quote(directory)}"
+            listing = await fetcher.get(endpoint + "?ref=" + revision, 256 * 1024, redirects=False)
+            for entry in file_entries(listing.data, directory):
+                resource = await fetcher.get(prefix + quote(entry["path"]),
+                                             IMAGE_LIMIT, redirects=False)
+                candidate = SearchImage(
+                    f"https://github.com/{repo}/tree/{revision}",
+                    prefix + quote(entry["path"]), categories[category]["description"],
+                    license=rule["license"], revision=revision,
+                    license_sha256=rule["license_sha256"],
+                )
+                image = RepositoryImage(resource, manifest, license_file, listing, entry["path"])
+                verify_repository_image(candidate, image)
+                yield candidate, image
+
+
+def file_manifest(data, pack_id=None, license_label=None):
+    """The original upstream manifest omits schema_version and includes a UTF-8 BOM."""
+    if not 0 < len(data) <= 512 * 1024:
+        raise ValueError("MEME_PACK_FILE_INVALID")
+    manifest = strict_json(data)
+    if (not isinstance(manifest, dict)
+        or "schema_version" in manifest and (
+            type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1)
+        or not isinstance(manifest.get("id"), str)
+        or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", manifest["id"])
+        or pack_id is not None and manifest["id"] != pack_id
+        or not isinstance(manifest.get("version"), str)
+        or not 1 <= len(manifest["version"]) <= 64
+        or not isinstance(manifest.get("license"), str)
+        or license_label is not None and manifest["license"] != license_label
+        or not isinstance(manifest.get("categories"), dict)
+        or not 1 <= len(manifest["categories"]) <= 128):
+        raise ValueError("MEME_PACK_MANIFEST_INVALID")
+    for category, value in manifest["categories"].items():
+        if (not isinstance(category, str) or not CATEGORY.fullmatch(category)
+            or not isinstance(value, dict) or not isinstance(value.get("description"), str)
+            or not 1 <= len(value["description"]) <= 2000):
+            raise ValueError("MEME_PACK_CATEGORY_INVALID")
+    return manifest
+
+
+def file_entries(data, directory):
+    if not 0 < len(data) <= 256 * 1024:
+        raise ValueError("MEME_PACK_LISTING_INVALID")
+    entries = strict_json(data)
+    if not isinstance(entries, list) or len(entries) > 1000:
+        raise ValueError("MEME_PACK_LISTING_INVALID")
+    selected, seen = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("MEME_PACK_LISTING_INVALID")
+        path = relative_path(entry.get("path")).as_posix()
+        if (path in seen or str(PurePosixPath(path).parent) != directory
+            or entry.get("name") != PurePosixPath(path).name):
+            raise ValueError("MEME_PACK_LISTING_INVALID")
+        seen.add(path)
+        if (entry.get("type") != "file" or entry.get("submodule_git_url") is not None
+            or entry.get("target") is not None
+            or PurePosixPath(path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif"}):
+            continue
+        if (type(entry.get("size")) is not int or not 0 < entry["size"] <= IMAGE_LIMIT
+            or not isinstance(entry.get("sha"), str)
+            or not re.fullmatch(r"[a-f0-9]{40}", entry["sha"])):
+            continue
+        selected.append(entry)
+    return sorted(selected, key=lambda row: row["path"])
+
+
+def verify_repository_image(candidate, image):
+    """Revalidate actual fetched documents, never provider-authored member claims."""
+    path = relative_path(image.path).as_posix()
+    parts = path.split("/")
+    if len(parts) < 3 or parts[-3] != "memes":
+        raise ValueError("MEME_PACK_IMAGE_PATH_INVALID")
+    manifest = file_manifest(image.manifest.data, license_label=candidate.license)
+    if parts[-2] not in manifest["categories"]:
+        raise ValueError("MEME_PACK_CATEGORY_INVALID")
+    if (not 0 < len(image.license.data) <= 64 * 1024
+        or hashlib.sha256(image.license.data).hexdigest() != candidate.license_sha256):
+        raise ValueError("MEME_PACK_LICENSE_MISMATCH")
+    entry = next((row for row in file_entries(image.listing.data, "/".join(parts[:-1]))
+                  if row["path"] == path), None)
+    data = image.resource.data
+    blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+    if (entry is None or entry["size"] != len(data) or entry["sha"] != blob
+        or image.resource.mime not in {"image/png", "image/jpeg", "image/gif"}):
+        raise ValueError("MEME_PACK_HASH_MISMATCH")

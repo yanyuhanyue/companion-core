@@ -1,0 +1,30 @@
+[
+  {
+    "file": "semantic-LICENSE.md",
+    "bytes": 786,
+    "sha256": "666d6e2c129f08d0bdec2bf75c6a7c793a6729cc66adbfd2af13cf4440574f7e",
+    "git_blob_sha1_verified": "d69b89e90335869f29678acd6893456b0fd20d55",
+    "url": "https://raw.githubusercontent.com/DDZS987/astrbot-meme-pack-semantic-01/8a50106a7e5948546eec73f73e1e2b747ff0302f/LICENSE.md"
+  },
+  {
+    "file": "official-manifest.json",
+    "bytes": 2677,
+    "sha256": "9bf5765bd06865393fc052db5b3306a54d173767c719e5a2f7ab8e3273e4acc5",
+    "git_blob_sha1_verified": "d373c360a9ef5486e6ce1af8c10ad73e23e318ce",
+    "url": "https://raw.githubusercontent.com/anka-afk/astrbot-meme-pack-official-01/77f976826f058e566b7a84035774192871b6baac/manifest.json"
+  },
+  {
+    "file": "semantic-manifest.json",
+    "bytes": 3146,
+    "sha256": "3185bb91a5f650b17d166fb347e448720427ca006672a7b5a5eb4a9df7811ba3",
+    "git_blob_sha1_verified": "9168a798438c30df84c4e2b0feb6bdc8532a4906",
+    "url": "https://raw.githubusercontent.com/DDZS987/astrbot-meme-pack-semantic-01/8a50106a7e5948546eec73f73e1e2b747ff0302f/manifest.json"
+  },
+  {
+    "file": "semantic-NOTICE.md",
+    "bytes": 724,
+    "sha256": "59ab94b5b886e7c05b96f5a091f2fd33c5dab5ec029f312f425e4ddaccdd3708",
+    "git_blob_sha1_verified": "ad669b15bd63a1605094bd9e471a5a039f75ad0a",
+    "url": "https://raw.githubusercontent.com/DDZS987/astrbot-meme-pack-semantic-01/8a50106a7e5948546eec73f73e1e2b747ff0302f/NOTICE.md"
+  }
+]

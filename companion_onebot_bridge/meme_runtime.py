@@ -120,9 +120,40 @@ class TrustedReviewer:
             ):
                 raise ValueError("MEME_TRUST_RULE_INVALID")
             identity = rule["repo"], rule["revision"]
-            if self.license_files.get(identity, rule["license_path"]) != rule["license_path"]:
+            policy = rule["license_path"] if self.require_semantics else dict(rule)
+            if self.license_files.get(identity, policy) != policy:
                 raise ValueError("MEME_TRUST_RULE_INVALID")
-            self.license_files[identity] = rule["license_path"]
+            self.license_files[identity] = policy
+
+    @staticmethod
+    def _exact_fetch(fetch, url):
+        return (fetch.requested_url == fetch.final_url == url and len(fetch.hops) == 1
+                and fetch.hops[0].url == url and fetch.hops[0].status == 200)
+
+    def _file_source(self, rule, evidence, path):
+        from urllib.parse import quote
+
+        files = evidence.source_files
+        parts = path.split("/")
+        if (not isinstance(files, dict) or set(files) != {"manifest", "license", "listing"}
+            or len(parts) < 3 or parts[-3] != "memes" or evidence.archive_member):
+            return False
+        prefix = f"https://raw.githubusercontent.com/{rule['repo']}/{rule['revision']}/"
+        root = "/".join(parts[:-3])
+        manifest_path = (root + "/" if root else "") + "manifest.json"
+        expected = {
+            "manifest": prefix + quote(manifest_path),
+            "license": prefix + quote(relative_path(rule["license_path"]).as_posix()),
+            "listing": f"https://api.github.com/repos/{rule['repo']}/contents/"
+                       + quote("/".join(parts[:-1])) + "?ref=" + rule["revision"],
+        }
+        return (
+            evidence.discovered_asset_url == prefix + quote(path)
+            and self._exact_fetch(evidence.fetch, evidence.discovered_asset_url)
+            and evidence.fetch.body_sha256 == evidence.image_sha256
+            and all(self._exact_fetch(files[role], url) for role, url in expected.items())
+            and files["license"].body_sha256 == rule["license_sha256"]
+        )
 
     async def __call__(self, candidate, image, evidence):
         for rule in self.rules:
@@ -135,12 +166,7 @@ class TrustedReviewer:
                 or not evidence.discovered_asset_url.startswith(prefix)
                 or asset.query
                 or asset.fragment
-                or candidate.asset_url != archive_url
-                or evidence.fetch.final_url != archive_url
-                or evidence.fetch.requested_url != archive_url
-                or len(evidence.fetch.hops) != 1
-                or evidence.fetch.hops[0].url != archive_url
-                or evidence.fetch.hops[0].status != 200
+                or candidate.asset_url != evidence.fetch.final_url
                 or candidate.revision != rule["revision"]
                 or candidate.license != rule["license"]
                 or candidate.license_sha256 != rule["license_sha256"]
@@ -163,8 +189,13 @@ class TrustedReviewer:
             except ValueError:
                 continue
             member = rule["repo"].split("/")[-1] + "-" + rule["revision"] + "/" + path
-            if evidence.archive_member != member or not path.startswith(
-                relative_path(rule["asset_prefix"]).as_posix() + "/"
+            if not path.startswith(relative_path(rule["asset_prefix"]).as_posix() + "/"):
+                continue
+            if evidence.source_files is not None:
+                if not self._file_source(rule, evidence, path):
+                    continue
+            elif evidence.archive_member != member or not self._exact_fetch(
+                evidence.fetch, archive_url
             ):
                 continue
             description = candidate.description if self.require_semantics else "待理解素材"
