@@ -1659,7 +1659,11 @@ class SendOperation:
         cause = pending_input(self.window, reply_segments.event_id(item))
         revision = item.get("reply_revision")
         if item.get("action_type") == "qq.private.reply":
-            if type(revision) is not int or revision < 0:
+            if item.get("window_notice") == "commitment" and "reply_revision" not in item:
+                # A new conversational turn does not revoke an accepted task.
+                # Core must establish that this exact notice's source is invalid.
+                cause = None
+            elif type(revision) is not int or revision < 0:
                 return False
         elif (item.get("action_type") != "qq.private.proactive" or not cause
               or "reply_revision" in item):
@@ -1670,6 +1674,8 @@ class SendOperation:
                     "window_sha256": self.window.plan.sha256, "message_id": item["message_id"],
                     "lease_token": item["lease_token"],
                 } | ({"reply_revision": revision} if revision is not None else {})
+                | ({"content_sha256": digest(item["content"])}
+                   if item.get("window_notice") == "commitment" else {})
                 | ({"cause": "OWNER_INPUT_PENDING", "pending_event_id": cause} if cause else {}))
         except httpx.HTTPError:
             return False

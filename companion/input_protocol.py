@@ -37,6 +37,8 @@ class CancelBeforeSend(live_text.WindowReference):
     lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
     reply_revision: int | None = Field(default=None, ge=0, strict=True,
                                        exclude_if=lambda value: value is None)
+    content_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$",
+                                      exclude_if=lambda value: value is None)
     cause: Literal["OWNER_INPUT_PENDING"] | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -315,18 +317,38 @@ def cancel_before_send(store, settings, clock, body):
                        and row["state"] in {"LEASED", "SENDING"})
             if (body.cause is None) != (body.pending_event_id is None):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
+            record = live_text._meta(store, private_life.DELIVERY + body.message_id)
+            expected = {"plan_sha256": body.window_sha256,
+                        "message_id": body.message_id, "event_id": row["origin_event_id"],
+                        "action_type": row["action_type"],
+                        "content_sha256": row["content_sha256"],
+                        "delivery_key": row["delivery_key"]}
+            bound_delivery = record and all(record.get(key) == value
+                                            for key, value in expected.items())
             if row["action_type"] == "qq.private.reply":
-                if row["reply_revision"] != body.reply_revision:
+                if not reply_revision.owner_input(store, row["origin_event_id"]):
+                    # Required notices have no owner-input revision. Their original
+                    # Core authorization survives source erasure as a narrow proof
+                    # of identity, never as renewed permission to dispatch.
+                    erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                                             ("erased_event:" + row["origin_event_id"],)))
+                    notice_identity = record and all(record.get(key) == value
+                        for key, value in expected.items() if key != "content_sha256")
+                    if (body.reply_revision is not None or not notice_identity
+                        or record.get("window_notice") != "commitment"
+                        or body.content_sha256 != record.get("content_sha256")
+                        or (row["content_sha256"] != body.content_sha256
+                            and not (erased and row["content_sha256"] == ""))
+                        or body.cause is not None
+                        or (row["state"] == "DELIVERY_UNCERTAIN"
+                            and (not erased or row["last_error_code"]))
+                        or store.one("SELECT 1 FROM audit_log WHERE action='delivery.result' "
+                                     "AND entity_id=?", (body.message_id,))):
+                        raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
+                elif row["reply_revision"] != body.reply_revision:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             elif row["action_type"] == "qq.private.proactive":
-                record = live_text._meta(store, private_life.DELIVERY + body.message_id)
-                expected = {"plan_sha256": body.window_sha256,
-                            "message_id": body.message_id, "event_id": row["origin_event_id"],
-                            "action_type": row["action_type"],
-                            "content_sha256": row["content_sha256"],
-                            "delivery_key": row["delivery_key"]}
-                if (not pending or body.reply_revision is not None or not record
-                    or any(record.get(key) != value for key, value in expected.items())):
+                if not pending or body.reply_revision is not None or not bound_delivery:
                     raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             else:
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)

@@ -313,7 +313,10 @@ def record_replies(store, settings, clock, job, message_ids):
 
 
 def delivery_material(store, settings, row):
+    from companion import notices
+
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
+    notice = notices.delivery_job(store, row["message_id"])
     return {
         "plan_sha256": settings.live_text_window.plan_sha256,
         "privacy_epoch": epoch(store),
@@ -323,6 +326,8 @@ def delivery_material(store, settings, row):
         "content_sha256": row["content_sha256"],
         "delivery_key": row["delivery_key"],
         "action_type": row["action_type"],
+        **({"window_notice": "commitment"} if notice
+           and notices.required(store, notice["job_id"]) else {}),
     }
 
 

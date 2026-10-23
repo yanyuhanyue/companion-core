@@ -71,7 +71,7 @@ Core 校验签名和源身份；标准 notice 不含消息方向，因此必须�
 | `POST /internal/v1/live-text/inputs/approve` | 原有输入审批与签名捕获；精确重放保留首次审批的内部隐私 epoch，无关撤回不改变审批正文 |
 | `POST /internal/v1/live-text/inputs/recall` | 接收签名 `RecallReceipt`；返回 `recall_id/target_event_id/state/duplicate/reply_revision`，state 为 `PENDING_TARGET` 或 `RECALLED` |
 | `GET /internal/v1/live-text/inputs/{event_id}/state` | 返回当前窗口内已批准输入的状态与未结算责任；未找到对应审批返回 404 |
-| `POST /internal/v1/live-text/cancel-before-send` | 当前未派发回复提交 `window_sha256/message_id/lease_token/reply_revision`，取得可核验的 NOT_SENT 证明；主动消息仅适用下述新输入抢占分支 |
+| `POST /internal/v1/live-text/cancel-before-send` | 未派发主人回复提交窗口、消息、租约和 `reply_revision`；必需任务通知改用原 `content_sha256`，由 Core 核对原通知授权及来源失效；主动消息仅适用下述新输入抢占分支 |
 | `POST /internal/v1/live-text/send-check` | 在原发送合同上核对 `reply_revision`；成功回执不越过最终本地 STOP/租约/新输入检查 |
 
 输入状态回执固定包含 `window_sha256`、`event_id`、`input_sha256`、`reply_revision`、
@@ -99,6 +99,11 @@ Bridge 只有持有当前未进入传输 delegate 的操作，且操作、内容
 继续处理新输入，并终结同一旧回复的所有未发尾段。替代输入自身在入库前被撤回时，
 旧回复凭持久取消证明进入 SUPERSEDED，不等待新版本、不恢复旧尾段；已发送前缀保留。
 进入实际发送后的异常不能走这条路径；缺少有效证明时仍保留不确定性。
+
+必需任务通知没有主人输入版本。Bridge 必须证明本次 delegate 尚未调用，Core 必须匹配
+原冻结通知的窗口、消息、租约、内容摘要和交付键，并确认来源已失效。来源擦除产生的
+保守不确定投影可以凭此证明转为 NOT_SENT；已有实际发送结果或租约超时的不确定记录
+不能降级。原尝试和模型用量继续保留，普通新输入也不能撤销已接受任务的通知责任。
 
 ## 验收与接续
 
