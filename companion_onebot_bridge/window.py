@@ -1586,13 +1586,14 @@ class SendOperation:
             check_protocol_request(self.window, request)
             expected = {"user_id": int(self.window.plan.config.owner_qq_id),
                         "message": getattr(self, "prepared_message", None) or [
-                            {"type": "text", "data": {"text": item["content"]["text"]}}],
+                            {"type": "text", "data": {"text": reply_segments.wire_text(item)}}],
                         "auto_escape": True}
             content = request.content
             body = decode(content, 6000000 if getattr(self, "prepared_message", None) else 65536)
             if (
                 body != expected or not attempt
-                or digest(body["message"][0]["data"]["text"]) != attempt["text_hash"]
+                or body["message"][0]["data"]["text"] != reply_segments.wire_text(item)
+                or digest(item["content"]["text"]) != attempt["text_hash"]
             ):
                 raise ValueError("WINDOW_SEND_FENCED")
         if (
@@ -1688,7 +1689,7 @@ class WindowOneBot:
 
     async def send_text(self, text):
         self.operation.before_io(text)
-        return await self.delegate.send_text(text)
+        return await self.delegate.send_text(reply_segments.wire_text(self.operation.current_item))
 
     async def send_content(self, content):
         if "image" not in content:

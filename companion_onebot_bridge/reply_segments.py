@@ -9,6 +9,20 @@ FIELDS = {"version", "group_id", "index", "count", "group_sha256", "total_chars"
           "interval_ms", "part_sha256s"}
 
 
+def wire_text(item):
+    """Omit outer blank lines in a bubble; retain the lossless source for its receipt."""
+    text = item["content"]["text"]
+    if envelope(item) is None:
+        return text
+    lines = text.splitlines(keepends=True)
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "".join(lines[start:end]).rstrip("\r\n")
+
+
 def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
