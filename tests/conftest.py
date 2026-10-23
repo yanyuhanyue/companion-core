@@ -32,6 +32,7 @@ class FakeModel:
         self.extraction = '{"memories":[]}'
         self.review = None
         self.recall = None
+        self.activity = "这段内容挺有意思，想和你聊聊。"
 
     async def complete(self, messages, scenario):
         self.calls.append((messages, scenario))
@@ -61,6 +62,8 @@ class FakeModel:
                         }
                     )
                 )
+        elif scenario == "activity":
+            text = self.activity
         else:
             text = "回复：" + messages[-1]["content"]
         return ModelResponse(text, 100, 20, 40)

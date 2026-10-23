@@ -11,6 +11,10 @@ from companion.contracts import CoreError
 SUPERSEDED = "REPLY_SUPERSEDED"
 SOURCE_RECALLED = "REPLY_SOURCE_RECALLED"
 CANCELLED = "REPLY_CANCELLED"
+OWNER_INPUT = (
+    "source='qq.onebot' AND actor_id='owner' AND privacy_scope='private' "
+    "AND event_type IN ('message.received','message.media_received')"
+)
 
 
 def source_active(store, event_id):
@@ -18,6 +22,21 @@ def source_active(store, event_id):
         "SELECT 1 FROM events e WHERE e.event_id=? AND e.redacted=0 "
         "AND NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='erased_event:' || e.event_id)",
         (event_id,),
+    ))
+
+
+def owner_input(store, event_id):
+    """Only owner inbound events participate in conversational reply supersession."""
+    return bool(store.one("SELECT 1 FROM events WHERE event_id=? AND " + OWNER_INPUT,
+                          (event_id,)))
+
+
+def control_job(store, job):
+    """Server-classified controls own an action independently of their reply bubble."""
+    return bool(job["kind"] == "chat" and store.one(
+        "SELECT 1 FROM events WHERE event_id=? AND " + OWNER_INPUT + " AND ("
+        "json_extract(body_json,'$.control_command')=1 "
+        "OR json_extract(body_json,'$.diary_command')=1)", (job["event_id"],),
     ))
 
 
@@ -38,6 +57,14 @@ def require_current(store, event_id, expected_revision=None):
         raise CoreError(SUPERSEDED, 409)
 
 
+def require_reply_source(store, event_id, expected_revision=None):
+    """Keep source revocation universal; only owner input replies have a revision."""
+    if not source_active(store, event_id):
+        raise CoreError(SOURCE_RECALLED, 409)
+    if owner_input(store, event_id):
+        require_current(store, event_id, expected_revision)
+
+
 def check_sources(store, job_id):
     if store.one(
         "SELECT 1 FROM job_sources s JOIN events e USING(event_id) WHERE s.job_id=? "
@@ -52,15 +79,20 @@ def check_job(store, job):
     if not persisted or persisted["state"] == "CANCELLED":
         raise CoreError(CANCELLED, 409)
     if job["kind"] == "chat":
-        require_current(store, job["event_id"], job.get("reply_revision"))
+        if control_job(store, job):
+            if not source_active(store, job["event_id"]):
+                raise CoreError(SOURCE_RECALLED, 409)
+        else:
+            require_reply_source(store, job["event_id"], job.get("reply_revision"))
     check_sources(store, job["job_id"])
 
 
 def check_delivery(store, message_id):
     row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     if row and row["action_type"] == "qq.private.reply":
-        require_current(store, row["origin_event_id"])
-        for job in store.rows("SELECT job_id FROM jobs WHERE event_id=? AND kind='chat'",
+        require_reply_source(store, row["origin_event_id"])
+        for job in store.rows("SELECT job_id FROM jobs WHERE event_id=? "
+                              "AND kind IN ('chat','activity')",
                               (row["origin_event_id"],)):
             check_sources(store, job["job_id"])
 
@@ -84,13 +116,16 @@ def advance(store, conversation_id, event_id, now):
     store.execute(
         "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,updated_at=? "
         "WHERE kind='chat' AND state IN ('QUEUED','RUNNING','RETRY_WAIT') AND event_id IN "
-        "(SELECT event_id FROM events WHERE conversation_id=? AND event_id!=?)",
+        "(SELECT event_id FROM events WHERE conversation_id=? AND event_id!=? AND "
+        + OWNER_INPUT + " AND COALESCE(json_extract(body_json,'$.control_command'),0)!=1 "
+        "AND COALESCE(json_extract(body_json,'$.diary_command'),0)!=1)",
         (SUPERSEDED, now, conversation_id, event_id),
     )
     store.execute(
         "UPDATE outbox SET state='CANCELLED',last_error_code=?,updated_at=? "
         "WHERE conversation_id=? AND action_type='qq.private.reply' AND origin_event_id!=? "
-        "AND state IN ('PENDING','LEASED','RETRY_WAIT')",
+        "AND state IN ('PENDING','LEASED','RETRY_WAIT') AND origin_event_id IN "
+        "(SELECT event_id FROM events WHERE " + OWNER_INPUT + ")",
         (SUPERSEDED, now, conversation_id, event_id),
     )
     store.audit("reply.superseded", event_id, source["trace_id"], now, reply_revision=revision)

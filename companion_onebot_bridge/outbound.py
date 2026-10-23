@@ -33,6 +33,11 @@ def validate_item(item, config, *, companion=False):
         type(item["reply_revision"]) is not int or item["reply_revision"] < 0
     ):
         raise ValueError("INVALID_REPLY_REVISION")
+    if "window_notice" in item and (
+        not companion or item["window_notice"] != "commitment"
+        or item["action_type"] != "qq.private.reply" or "reply_revision" in item
+    ):
+        raise ValueError("INVALID_NOTICE_SCOPE")
     if (
         not isinstance(content, dict)
         or set(content) not in ({"text"}, {"text", "image"})

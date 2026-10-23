@@ -114,7 +114,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
     from companion import core as core_module
 
     core.clock = AdvancingClock(core.clock.now)
-    calls, instances, sends_seen = [], [], []
+    calls, instances, sends_seen, downloads = [], [], [], []
     original = animation(size=(12, 8))
 
     async def source(ws):
@@ -163,20 +163,18 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
         return httpx.Response(200, json={"choices": [{"message": message}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
-    async def resolve(*_):
-        return ["1.1.1.1"]
-
     async def fetch(image, *_args, **_kwargs):
+        downloads.append(image.slot)
         if image.slot == 1:
             return png(), "image/png"
         return original, "image/gif"
 
     async def scenario():
-        from companion_onebot_bridge import images
+        from companion_onebot_bridge import pending_media
 
         monkeypatch.setattr(api, "Core", construct)
         monkeypatch.setattr(core_module, "Core", construct)
-        monkeypatch.setattr(images, "fetch_image", fetch)
+        monkeypatch.setattr(pending_media, "fetch_image", fetch)
         monkeypatch.setattr(api, "AsyncClient", lambda **kwargs: httpx.AsyncClient(
             **kwargs, transport=httpx.MockTransport(respond)), raising=False)
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model_http:
@@ -212,6 +210,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
         assert len(instances) == 2 and instances[0].store is not instances[1].store
+        assert downloads == ([0, 1] if extra_static else [0])
         assert len(calls) == (3 if selected else 2) and len(sends_seen) == 1
         usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
         assert [row["scenario"] for row in usages] == (

@@ -122,8 +122,8 @@ if __name__ == "__main__":
             parser.error("--heybox-native requires Heybox without --source-url")
         if args.bili_tools and (args.source != "bilibili" or args.browser):
             parser.error("--bili-tools requires Bilibili API mode")
-        if args.account_file and not (args.heybox_native or args.bili_tools):
-            parser.error("--account-file requires an explicit native/tool reader")
+        if args.account_file and args.source != "bilibili" and not args.heybox_native:
+            parser.error("--account-file requires Bilibili or the native Heybox reader")
         if args.search_keyword and not args.bili_tools:
             parser.error("--search-keyword requires --bili-tools")
         asyncio.run(main(args))

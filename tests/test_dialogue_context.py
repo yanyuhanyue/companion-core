@@ -5,7 +5,7 @@ from cryptography.fernet import Fernet
 
 from companion import budget
 from companion.backup import backup, restore
-from companion.contracts import Candidate
+from companion.contracts import Candidate, CoreError
 from companion.core import Core
 from companion.store import encode
 from companion.transport import enqueue
@@ -182,7 +182,10 @@ def test_current_and_future_inputs_are_not_history_even_if_they_have_a_sent_repl
 
 def test_optional_reference_is_removed_as_a_block_before_recent_turns(core, monkeypatch):
     sent_history(core, 1, "之前的输入", "之前的回复")
-    monkeypatch.setattr(core.life, "context", lambda: {"goal": "可选目标资料" * 1000})
+    monkeypatch.setattr(core.life, "context", lambda: [{
+        "topic": "可选目标资料" * 1000, "state": "COMPLETE", "commitment_state": None,
+        "result_event_id": "evt_test_1",
+    }])
     messages = core.context(current_job(core))
     assert messages[1:-1] == [
         {"role": "user", "content": "之前的输入"},
@@ -260,14 +263,25 @@ def test_sent_history_does_not_revive_after_memory_decision_and_reopen(core, dec
     job = current_job(core)
     assert "旧事实只喝绿茶" in encode(core.context(job, memories=[]))
     core.memory.decide(memory_id, decision, core.clock(), "新事实改喝红茶")
-    assert "旧事实只喝绿茶" not in encode(core.context(job, memories=[]))
+    if decision == "forget":
+        with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
+            core.context(job, memories=[])
+        independent_job = current_job(core, number=100, text="新的独立话题")
+    else:
+        independent_job = job
+    assert "旧事实只喝绿茶" not in encode(core.context(independent_job, memories=[]))
     reopened = Core(
         core.settings.model_copy(update={"memory_enabled": False}),
         core.model,
         core.clock,
     )
     try:
-        assert len(reopened.context(job)) == 2
+        if decision == "forget":
+            with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
+                reopened.context(job)
+        messages = reopened.context(independent_job)
+        assert len(messages) == 2
+        assert "旧事实只喝绿茶" not in encode(messages)
         assert core.model.calls == []
     finally:
         reopened.close()

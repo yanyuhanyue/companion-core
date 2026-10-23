@@ -220,9 +220,14 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tm
             assert len(calls) == len(sends) == 1
             assert changed == [kind]
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
-            assert core.store.one("SELECT state FROM jobs ORDER BY rowid DESC LIMIT 1")[
-                "state"
-            ] == "FAILED"
+            job = core.store.one(
+                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1",
+            )
+            if kind == "redacted":
+                assert job == {"state": "CANCELLED", "last_error_code": "REPLY_SOURCE_RECALLED"}
+                assert live_text.status(core.store, core.settings, core.clock)["approved"]
+            else:
+                assert job["state"] == "FAILED"
             frozen = json.loads(core.store.one(
                 "SELECT value FROM runtime_meta WHERE key LIKE ? ORDER BY rowid DESC LIMIT 1",
                 (live_text.CONTEXT + "%",),

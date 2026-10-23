@@ -12,6 +12,7 @@ from companion import (
     input_protocol,
     input_recall,
     live_text,
+    notices,
     private_life,
     qq_images,
     qq_rich,
@@ -174,6 +175,7 @@ class Core(Runtime):
                 diary_command = native_controls and is_diary_command(body["text"])
                 control_command = native_controls and (
                     is_life_command(body["text"]) or is_memory_command(body["text"])
+                    or command in {"发送状态", "核对发送", "暂停主动分享", "恢复主动分享"}
                 )
                 if control_command:
                     body["control_command"] = True
@@ -383,6 +385,12 @@ class Core(Runtime):
     def context(self, job, memories=None, memory_paused=False):
         s, cfg = self.store, self.settings
         reply_revision.check_job(s, job)
+        if job["kind"] == "chat":
+            reply_revision.require_reply_source(s, job["event_id"], job.get("reply_revision"))
+        if messages := notices.messages(s, cfg, job, self.clock(), PRINCIPLES):
+            material = notices.validate(s, cfg, job, self.clock())
+            reply_revision.remember_sources(s, job, material["source_events"])
+            return messages
         body = json.loads(job["body_json"])
         text = body.get("text", "")
         rules = PRINCIPLES + self.expression.instruction(job["event_id"])
@@ -974,7 +982,7 @@ class Core(Runtime):
                 ):
                     reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"
                 else:
-                    if self.settings.memory_enabled:
+                    if self.settings.memory_enabled and notices.reference(job) is None:
                         hits, paused_memory = await self.recall_for_reply(job)
                         self._check_reply_epoch(job, captured_epoch)
                         messages = self.context(job, hits, paused_memory)
@@ -1034,17 +1042,34 @@ class Core(Runtime):
                     return True
                 self._check_reply_epoch(job, captured_epoch)
                 now = self.clock()
+                reply_is_current = not reply_revision.owner_input(
+                    self.store, job["event_id"],
+                ) or reply_revision.current(self.store, job["event_id"])
                 should_send = reply.strip() not in {"[SKIP]", ""} and proactive_allowed(
                     self.store, self.settings, now
                 )
-                if job["kind"] != "activity" or should_send:
+                notice_parts = notices.parts(self.store, self.settings, job, reply, now)
+                if notice_parts == []:
+                    notices.record(self.store, self.settings, job, [], now)
+                if reply_is_current and (
+                    job["kind"] != "activity" or should_send
+                    or notices.required(self.store, job["job_id"])
+                ):
                     policy = self.settings.segmented_reply
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
                         and self.settings.expression_enabled else None
                     )
-                    if policy and generated_reply and job["kind"] == "chat" and (
+                    if notice_parts is not None:
+                        action = ("qq.private.reply" if notices.required(self.store, job["job_id"])
+                                  else "qq.private.proactive")
+                        message_ids = enqueue_reply_parts(
+                            self.store, job, notice_parts, policy.interval_ms if policy else 0,
+                            now, action=action,
+                        ) if notice_parts else []
+                        notices.record(self.store, self.settings, job, message_ids, now)
+                    elif policy and generated_reply and job["kind"] == "chat" and (
                         intent is None or intent.image is None
                     ):
                         parts = split_text(intent.text if intent else reply, policy)
@@ -1074,7 +1099,7 @@ class Core(Runtime):
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
-                    if bounded_text:
+                    if bounded_text and message_ids:
                         live_text.record_replies(
                             self.store, self.settings, self.clock, job, message_ids,
                         )
@@ -1083,7 +1108,8 @@ class Core(Runtime):
                     "WHERE job_id=?",
                     (now, job["job_id"]),
                 )
-                self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now)
+                self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
+                                 **({"reply_suppressed": True} if not reply_is_current else {}))
             emit(
                 "t_job_done",
                 job["trace_id"],
@@ -1121,6 +1147,18 @@ class Core(Runtime):
                 self.store.execute(
                     "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
                     "updated_at=? WHERE job_id=?", (code, now, job["job_id"]),
+                )
+                return
+            if notices.reference(job) is not None and code in {
+                "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
+                "DAILY_BUDGET_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
+            } and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
+                                     (job["job_id"],)):
+                self.store.execute(
+                    "UPDATE jobs SET state='RETRY_WAIT',attempts=MAX(0,attempts-1),"
+                    "last_error_code=?,next_attempt_at=?,lease_token=NULL,updated_at=? "
+                    "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                    (code, after(now, 60), now, job["job_id"], job["lease_token"]),
                 )
                 return
             if (code == "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"

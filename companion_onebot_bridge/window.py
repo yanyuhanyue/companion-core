@@ -1792,7 +1792,8 @@ class SendOperation:
             (event_id, self.window.plan.sha256),
         ).fetchone() and not (
             self.window.plan.value.get("live_text", {}).get("companion_scope") == "owner_private_v1"
-            and item.get("action_type") == "qq.private.proactive"
+            and (item.get("action_type") == "qq.private.proactive"
+                 or item.get("window_notice") == "commitment")
         ):
             raise ValueError("UNAPPROVED_DELIVERY_INPUT")
         attempts = self.window.count("window_attempts")
@@ -1991,7 +1992,9 @@ class WindowOneBot:
             self.operation.lease_until = datetime.fromisoformat(receipt["lease_until"])
             # Core's await is the final asynchronous approval boundary. Rebind
             # the actual pending request as well as the local operation after it.
-            if pending_input(self.window, reply_segments.event_id(item)):
+            if (item["action_type"] == "qq.private.proactive" or "reply_revision" in item) and (
+                pending_input(self.window, reply_segments.event_id(item))
+            ):
                 raise ValueError("OWNER_INPUT_PENDING")
         if self.operation.meme_prepared:
             self.window.memes.mark_sending(

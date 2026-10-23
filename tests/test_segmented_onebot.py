@@ -46,9 +46,13 @@ def test_v2_fragment_trace_retains_original_input_identity(tmp_path):
     incoming = normalized()
     with Spool(cfg) as spool:
         spool.put(incoming)
-        assert spool.trace_for(f"reply:{incoming['event_id']}:v2:0") == incoming["trace_id"]
-        assert spool.trace_for(f"reply:{incoming['event_id']}:v1") == incoming["trace_id"]
-        assert spool.trace_for(f"reply:{incoming['event_id']}:v2:3") is None
+        # Per-group count is checked by the delivery manifest; trace lookup only
+        # extracts the original input from a syntactically valid fragment key.
+        for suffix in ("v1", "v2:0", "v2:3", "v2:10", "v2:2147483646"):
+            assert spool.trace_for(f"reply:{incoming['event_id']}:{suffix}") == incoming["trace_id"]
+        for suffix in ("v2:-1", "v2:+1", "v2:01", "v2:", "v2:10000000000", "v3:0"):
+            assert spool.trace_for(f"reply:{incoming['event_id']}:{suffix}") is None
+        assert spool.trace_for("reply:evt_" + "0" * 64 + ":v2:3") is None
 
 
 @pytest.mark.parametrize("damage", [None, "missing", "index", "count", "hash", "text", "total"])

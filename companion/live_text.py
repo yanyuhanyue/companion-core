@@ -1440,14 +1440,14 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
 
 def _check_delivery(store, settings, clock, message_id, *, check):
     from companion.reply_revision import check_delivery as check_reply_delivery
-    from companion.reply_revision import require_current
+    from companion.reply_revision import require_reply_source
 
     check_reply_delivery(store, message_id)
     if check and check.reply_revision is not None and store.one(
         "SELECT 1 FROM outbox WHERE message_id=? AND action_type='qq.private.reply'",
         (message_id,),
     ):
-        require_current(store, check.event_id, check.reply_revision)
+        require_reply_source(store, check.event_id, check.reply_revision)
     if private_life.enabled(settings):
         row = private_life.check_delivery(store, settings, clock, message_id, check)
         if check and (row["state"] != "SENDING" or row["lease_until"] <= clock()):

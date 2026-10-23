@@ -532,6 +532,11 @@ class MemeRuntime:
             raise ValueError("MEME_LEASE_EXPIRED")
         return value
 
+    def _claim_check(self, claim):
+        self._event_check(claim["event_id"])
+        if self.window.clock() >= datetime.fromisoformat(claim["lease_until"]):
+            raise ValueError("MEME_LEASE_EXPIRED")
+
     async def _flush_result(self, client, row):
         body = json.loads(row[2])
         response = await self.window.core_post(client, BASE + "/" + row[1] + "/result", body)
@@ -582,9 +587,7 @@ class MemeRuntime:
             limits = DiscoveryLimits()
 
             async def check():
-                self._event_check(claim["event_id"])
-                if datetime.fromisoformat(claim["lease_until"]) <= self.window.clock():
-                    raise ValueError("MEME_LEASE_EXPIRED")
+                self._claim_check(claim)
 
             if claim["provider"] == "brave" and not self.config.meme_search_api_key:
                 reservation = await budget.reserve(claim["attempt_key"], limits)
@@ -611,7 +614,7 @@ class MemeRuntime:
                 budget=budget,
                 check=check,
                 review=review,
-                commit_check=lambda: self._event_check(claim["event_id"]),
+                commit_check=lambda: self._claim_check(claim),
                 limits=limits,
                 transport=self.transport,
                 resolver=self.resolver,
@@ -664,7 +667,7 @@ class _Budget:
     async def reserve(self, job_key, limits):
         if job_key != self.claim["attempt_key"] or self.state is not None:
             raise ValueError("MEME_RESERVATION_REPLAY")
-        self.runtime._event_check(self.claim["event_id"])
+        self.runtime._claim_check(self.claim)
         body = {**self.witness, "limits": asdict(limits)}
         self.state = "RESERVING"
         result = await self.runtime.window.core_post(
@@ -707,8 +710,9 @@ class _Budget:
             }
         ):
             raise ValueError("MEME_CHECK_RECEIPT_INVALID")
-        # The network check itself awaited. Sample the local source/STOP fence again.
-        self.runtime._event_check(self.claim["event_id"])
+        # The Core ACK can arrive after expiry. Recheck locally before returning
+        # to the final request-header hook, with no later await before dispatch.
+        self.runtime._claim_check(self.claim)
 
     async def _result(self, outcome, usage):
         runtime, attempt = self.runtime, self.claim["attempt_key"]

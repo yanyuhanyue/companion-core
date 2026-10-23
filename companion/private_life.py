@@ -186,10 +186,11 @@ def check_job(store, settings, approval, job):
 
 
 def admit_model(store, settings, clock, job_id, scenario):
-    from companion import live_text
+    from companion import live_text, notices
 
     approval, _, attempts = live_text.guard(store, settings, clock)
-    feature = SCENARIOS.get(scenario)
+    feature = ("goals" if scenario == "activity" and notices.required(store, job_id)
+               else SCENARIOS.get(scenario))
     if feature is None or not getattr(settings, feature + "_enabled"):
         raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     if attempts >= approval.max_model_attempts:
@@ -344,7 +345,7 @@ def settled_usage_unchanged(store, request_id, plan_sha256):
 
 
 def check_delivery(store, settings, clock, message_id, check=None):
-    from companion import live_text
+    from companion import live_text, notices
     from companion.social import proactive_allowed, share_delivery_problem
 
     approval, _, _ = live_text.guard(store, settings, clock, current_delivery=message_id)
@@ -361,6 +362,8 @@ def check_delivery(store, settings, clock, message_id, check=None):
         or row["content_sha256"] != paid_budget.sha(json.loads(row["content_json"]))
     ):
         raise CoreError("COMPANION_PRIVATE_DELIVERY_REQUIRED", 403)
+    if problem := notices.delivery_problem(store, settings, message_id, clock()):
+        raise CoreError(problem, 403)
     expected = delivery_material(store, settings, row)
     record = live_text._meta(store, DELIVERY + message_id)
     if record is None and row["action_type"] == "qq.private.proactive":

@@ -253,7 +253,7 @@ def input_state(store, settings, event_id):
         raise CoreError("LIVE_TEXT_APPROVED_INPUT_REQUIRED", 404)
     event = store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
     job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
-    deliveries = store.rows("SELECT state FROM outbox WHERE origin_event_id=? "
+    deliveries = store.rows("SELECT message_id,state FROM outbox WHERE origin_event_id=? "
                             "AND action_type='qq.private.reply'", (event_id,))
     erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                             ("erased_event:" + event_id,)))
@@ -263,6 +263,11 @@ def input_state(store, settings, event_id):
         state = "ACK"
     elif (event and not reply_revision.current(store, event_id)) or (
         job and job["last_error_code"] in {reply_revision.SUPERSEDED, "REPLY_INTERRUPTED"}
+    ) or (
+        deliveries and all(item["state"] in {"SENT", "CANCELLED"} for item in deliveries)
+        and any(item["state"] == "CANCELLED" and live_text._meta(
+            store, "input_cancel_before_send:" + item["message_id"],
+        ) for item in deliveries)
     ):
         state = "SUPERSEDED"
     elif job and job["state"] == "CANCELLED":
@@ -343,6 +348,14 @@ def cancel_before_send(store, settings, clock, body):
                           "attempt_count=MAX(attempt_count,1),"
                           "last_error_code='REPLY_NOT_DISPATCHED' WHERE message_id=?",
                           (clock(), body.message_id))
+            if row["action_type"] == "qq.private.reply":
+                # The queued replacement may itself be recalled before ingestion.
+                # Once interrupted, no unsent tail of this reply may resume.
+                store.execute("UPDATE outbox SET state='CANCELLED',updated_at=?,"
+                              "last_error_code='REPLY_SUPERSEDED' WHERE origin_event_id=? "
+                              "AND action_type='qq.private.reply' "
+                              "AND state IN ('PENDING','LEASED','RETRY_WAIT')",
+                              (clock(), row["origin_event_id"]))
             live_text._put(store, key, material)
         return {"cancelled": True, "message_id": body.message_id,
                 "state": "CANCELLED", "send_attempt_retained": True}

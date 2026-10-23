@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import closing
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -19,7 +20,8 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DIARY_RULES, DiaryDraft, day_bounds
 from companion.model import ModelClient, ModelResponse
-from companion.store import encode, migrate
+from companion.privacy import ErasureLedger
+from companion.store import Store, encode, migrate
 from companion.transport import enqueue
 from companion.worker_lock import single_worker
 from tests.conftest import FakeModel, ingest, run
@@ -539,13 +541,42 @@ def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core,
     cfg = core.settings.model_copy(
         update={"database": str(path), "erasure_ledger": str(tmp_path / "m1.jsonl")}
     )
+    # Historical rows use the historical schema. Current Core opens only after
+    # upgrade; its job/source writes intentionally require current columns.
+    with closing(Store(str(path))) as legacy:
+        ErasureLedger(cfg.erasure_ledger).initialize(legacy)
+        now = core.clock()
+        with legacy.transaction():
+            legacy.insert("principals", actor_id="owner", kind="owner", created_at=now)
+            legacy.insert(
+                "conversations", conversation_id="conv_legacy", platform="qq.onebot",
+                platform_session_key="qq:FriendMessage:10001", scope="private",
+                owner_actor_id="owner", last_event_at=now, created_at=now,
+            )
+            legacy.insert(
+                "events", event_id="evt_legacy", schema_version=1, source="qq.onebot",
+                source_event_id="10002:qq:FriendMessage:10001:100",
+                conversation_id="conv_legacy", actor_id="owner", event_type="message.received",
+                occurred_at=now, ingested_at=now, privacy_scope="private",
+                body_json=encode({"text": "已有私聊数据", "media": []}), trace_id="trace_legacy",
+                idempotency_key="inbox_legacy", fingerprint="legacy-fingerprint",
+            )
+            legacy.insert(
+                "jobs", job_id="job_legacy", event_id="evt_legacy", kind="chat",
+                state="SUCCEEDED", idempotency_key="reply:evt_legacy", created_at=now,
+                updated_at=now,
+            )
+        original = {table: legacy.one(f"SELECT * FROM {table}")
+                    for table in ("conversations", "events", "jobs")}
+    migrate(str(path))
+    migrate(str(path))
     old = Core(cfg, FakeModel(), core.clock)
     try:
-        ingest(old, 100, "已有私聊数据")
-        original = old.store.one("SELECT * FROM events")
-        migrate(str(path))
-        migrate(str(path))
-        assert old.store.one("SELECT * FROM events") == original
+        for table, added in (
+            ("conversations", {"reply_revision": 0}), ("events", {"reply_revision": 0}),
+            ("jobs", {"context_tracked": 0}),
+        ):
+            assert old.store.one(f"SELECT * FROM {table}") == {**original[table], **added}
         assert old.store.schema_capabilities()
         seed_day(old)
         assert generate(old)["state"] == "COMMITTED"

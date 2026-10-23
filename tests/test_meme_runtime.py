@@ -654,6 +654,91 @@ def test_background_revocation_and_unknown_never_claim_success_or_stop_chat(runt
         assert runtime.db.execute("SELECT COUNT(*) FROM meme_assets").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("late_seconds", [0, 1])
+def test_expired_claim_ack_blocks_final_public_dispatch(runtime_factory, late_seconds):
+    dispatched, phase = [], {"headers": False}
+
+    class HeaderTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            phase["headers"] = True
+            try:
+                await request.extensions["trace"]("http11.send_request_headers.started", {})
+            finally:
+                phase["headers"] = False
+            dispatched.append(request)
+            return httpx.Response(200, json={"schema_version": "1.0.0", "packs": []})
+
+    runtime, event = runtime_factory(public=HeaderTransport())
+    core = CoreHTTP(runtime, event)
+    deadline = datetime.fromisoformat(core.claim["lease_until"])
+    original = core.handle
+
+    def delayed_ack(request):
+        response = original(request)
+        if request.url.path.endswith("/check") and phase["headers"]:
+            runtime.window.now = deadline + timedelta(seconds=late_seconds)
+        return response
+
+    core.handle = delayed_ack
+
+    async def scenario():
+        async with core.client() as client:
+            assert (await runtime.run_once(client))["status"] == "UNKNOWN"
+
+    run(scenario())
+    assert dispatched == []
+    assert len(core.results) == 1 and core.results[0]["outcome"] == "UNKNOWN"
+    assert core.results[0]["usage"] == {
+        "queries": 1, "requests": 1, "download_bytes": 0, "storage_bytes": 0, "model_cost": 0,
+    }
+
+
+@pytest.mark.parametrize("boundary", ["validation", "commit"])
+@pytest.mark.parametrize("late_seconds", [0, 1])
+def test_claim_expiry_during_catalog_validation_or_commit_rolls_back(
+    runtime_factory, boundary, late_seconds,
+):
+    public_calls, inserts = [], []
+    runtime, event = runtime_factory(public=public_transport(public_calls))
+    core = CoreHTTP(runtime, event)
+    expired = datetime.fromisoformat(core.claim["lease_until"]) + timedelta(seconds=late_seconds)
+    validate, validations = runtime.library.validate_bytes, 0
+
+    def cross_deadline_during_validation(data):
+        nonlocal validations
+        validations += 1
+        image = validate(data)
+        if boundary == "validation" and validations == 2:
+            runtime.window.now = expired
+        return image
+
+    def cross_deadline_during_transaction(sql):
+        if sql.startswith("INSERT INTO meme_assets"):
+            inserts.append(sql)
+            if boundary == "commit":
+                runtime.window.now = expired
+
+    runtime.library.validate_bytes = cross_deadline_during_validation
+    runtime.db.set_trace_callback(cross_deadline_during_transaction)
+
+    async def scenario():
+        async with core.client() as client:
+            assert (await runtime.run_once(client))["status"] == "UNKNOWN"
+
+    try:
+        run(scenario())
+    finally:
+        runtime.db.set_trace_callback(None)
+    assert validations == 2 and len(public_calls) == 3
+    assert len(inserts) == (1 if boundary == "commit" else 0)
+    assert runtime.db.execute("SELECT COUNT(*) FROM meme_assets").fetchone()[0] == 0
+    assert len(core.results) == 1 and core.results[0]["outcome"] == "UNKNOWN"
+    assert core.results[0]["usage"]["queries"] == 1
+    assert core.results[0]["usage"]["requests"] == 3
+    assert core.results[0]["usage"]["download_bytes"] > 0
+    assert core.results[0]["usage"]["storage_bytes"] == 0
+
+
 def test_runtime_claim_budget_checks_and_results_use_real_core_api(core, tmp_path, monkeypatch):
     calls = []
 
