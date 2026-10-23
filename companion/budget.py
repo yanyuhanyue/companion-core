@@ -493,12 +493,14 @@ def _settle_paid(store, settings, admission, response):
         }
         if limits:
             amount, state, blocked = max(actual, admission["reserved_micro_usd"]), "UNKNOWN", True
-    if (settings.input_rate, settings.cached_input_rate, settings.output_rate) != (
-        pricing.input_rate,
-        pricing.cached_input_rate,
-        pricing.output_rate,
-    ):
+    current_pricing = settings
+    if usage["scenario"] == "content_video":
+        current_pricing = settings.paid_model.video_input if settings.paid_model else None
+    if current_pricing is None or (
+        current_pricing.input_rate, current_pricing.cached_input_rate, current_pricing.output_rate,
+    ) != (pricing.input_rate, pricing.cached_input_rate, pricing.output_rate):
         amount, state, blocked = max(amount, admission["reserved_micro_usd"]), "UNKNOWN", True
+        diagnostic["code"] = "PRICING_CONFIG_CHANGED"
     if usage["state"] == "UNKNOWN":
         amount, state = max(amount, usage["billed_micro_usd"]), "UNKNOWN"
     # Mutable enabling approval is deliberately irrelevant to accounting custody.
@@ -596,7 +598,9 @@ def usage_diagnostics(db):
         "COALESCE(SUM(m.cached_input_tokens),0) AS cached_input_tokens,"
         "COALESCE(SUM(a.reserved_micro_usd),0) AS reserved_micro_usd,"
         "COALESCE(SUM(m.billed_micro_usd),0) AS usage_priced_micro_usd "
-        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE m.state='SETTLED'"
+        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE m.state='SETTLED' "
+        "AND NOT EXISTS (SELECT 1 FROM audit_log x WHERE x.action='model.video_rate_correction' "
+        "AND x.entity_id=m.request_id)"
     )
     row = dict(zip((column[0] for column in cursor.description), cursor.fetchone(), strict=True))
     # Diagnostics never reinterpret the reserved tokens of an UNKNOWN as observed usage.

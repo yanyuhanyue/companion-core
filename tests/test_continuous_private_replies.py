@@ -564,6 +564,9 @@ def test_segment_waits_for_bridge_ack_interval_after_core_result_response_delay(
                 await continuous.pump_private(window, client, protocol)
                 assert len(sends) == 2
                 assert window.status()["attempt_states"] == {"ACK": 2}
+                assert not core.store.one(
+                    "SELECT 1 FROM outbox WHERE state IN ('LEASED','SENDING')",
+                )
                 return
 
             pause, stop_worker = asyncio.Event(), asyncio.Event()

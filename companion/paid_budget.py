@@ -225,7 +225,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             store.insert("runtime_meta", key="model_budget_journal_id", value=journal_id)
             identity = {"value": journal_id}
         lines = path.read_text("utf-8").splitlines()
-        previous, latest, blocked = "0" * 64, {}, False
+        previous, latest, blocked = "0" * 64, {}, {}
+        corrections = {}
         heads = set()
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
@@ -251,8 +252,19 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     lifecycle = _live_record(row, digest, lifecycle, seen)
                     managed |= row["kind"] != "window_stop"
                     continue
+                if row["kind"] == "video_rate_correction":
+                    from companion.video_accounting import validate_record
+
+                    request_id = row["request_id"]
+                    validate_record(store, row, latest.get(request_id), blocked.get(request_id),
+                                    identity["value"])
+                    if set(blocked) != {request_id} or row["idempotency_key"] in corrections:
+                        raise ValueError("unrelated block or correction replay")
+                    blocked.pop(request_id)
+                    corrections[row["idempotency_key"]] = row
+                elif row["kind"] == "blocked":
+                    blocked[row["request_id"]] = digest
                 latest[row["request_id"]] = row
-                blocked |= row["kind"] == "blocked"
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
         expected = cumulative.binding(account, path)
@@ -306,6 +318,20 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         if set(latest) - ({record.get("request_id")} if record else set()) != ids:
             raise ValueError("journal behind DB")
         if record is not None:
+            if record.get("kind") == "video_rate_correction":
+                from companion.video_accounting import validate_record
+
+                existing = corrections.get(record["idempotency_key"])
+                if existing:
+                    if record != {k: v for k, v in existing.items() if k != "previous"}:
+                        raise ValueError("correction idempotency conflict")
+                    return {"head_sha256": previous, "lifecycle": lifecycle,
+                            "cumulative": account, "blocked_request_ids": sorted(blocked)}
+                request_id = record["request_id"]
+                validate_record(store, {**record, "previous": previous}, latest.get(request_id),
+                                blocked.get(request_id), identity["value"])
+                if set(blocked) != {request_id}:
+                    raise ValueError("unrelated independent block")
             row = {**record, "previous": previous}
             row["sha256"] = sha(row)
             cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
@@ -316,6 +342,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 stream.write(encode(row) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
+            if record["kind"] == "video_rate_correction":
+                blocked.pop(record["request_id"])
             previous = row["sha256"]
             if record["kind"] == "quota_pause":
                 store.retain_budget_stop(identity["value"], previous)
@@ -327,6 +355,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               (cumulative.PROJECTION,
                                encode(cumulative.binding(account, path, previous))))
-        return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account}
+        return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account,
+                "blocked_request_ids": sorted(blocked)}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error

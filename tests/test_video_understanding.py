@@ -91,27 +91,32 @@ def test_fractional_apng_frame_durations_do_not_accumulate_rounding_drift():
     assert abs(encoded.seconds - duration / 1000) <= 0.040001
 
 
-def scope_options(core, *, model):
+def scope_options(core, *, model, different_rates=False):
     options, image = companion_options(core), image_options()
     options.update(image_scope=image["image_scope"],
                    image_approval_sha256=image["image_approval_sha256"])
     options["core_options"].update(image["core_options"], video_model_key=SecretStr(
         "synthetic-video-provider-key-12345",
     ))
-    options["paid_options"].update(image_input=image["paid_options"]["image_input"],
-                                   video_input=video_policy(model=model), per_request_calls=4)
+    prices = ({"input_rate": 8990, "cached_input_rate": 899, "output_rate": 44949,
+               "max_output_tokens": 1000} if different_rates else {})
+    options["paid_options"].update(
+        image_input=image["paid_options"]["image_input"],
+        video_input=video_policy(model=model, **prices), per_request_calls=4,
+    )
     return options
 
 
-@pytest.mark.parametrize("selected,model,extra_static,tool_index", [
-    (True, "configurable-video-one", False, None),
-    (True, "configurable-video-two", False, None),
-    (False, "configurable-video-one", False, None),
-    (True, "configurable-video-one", True, None),
-    (True, "configurable-video-one", False, 0),
+@pytest.mark.parametrize("selected,model,extra_static,tool_index,different_rates", [
+    (True, "configurable-video-one", False, None, False),
+    (True, "configurable-video-two", False, None, False),
+    (False, "configurable-video-one", False, None, False),
+    (True, "configurable-video-one", True, None, False),
+    (True, "configurable-video-one", False, 0, False),
+    (True, "configurable-video-one", False, 0, True),
 ])
 def test_deepseek_selects_video_tool_then_independent_worker_chats(
-    core, tmp_path, monkeypatch, selected, model, extra_static, tool_index,
+    core, tmp_path, monkeypatch, selected, model, extra_static, tool_index, different_rates,
 ):
     from companion import __main__, api
     from companion import core as core_module
@@ -140,6 +145,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
     def respond(request):
         body = json.loads(request.content)
         calls.append((request, body))
+        output = 20
         message = {"content": "画面是一个红色区域，只查看了首帧。"}
         if "tools" in body and selected:
             message = {"content": None, "tool_calls": [{
@@ -150,6 +156,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
             if tool_index is not None:
                 message["tool_calls"][0]["index"] = tool_index
         elif body["model"] == model:
+            output = 895 if different_rates else 20
             assert str(request.url) == "https://video.example.test/v1/chat/completions"
             assert request.headers["Authorization"] == "Bearer synthetic-video-provider-key-12345"
             assert "thinking" not in body and "tools" not in body
@@ -166,7 +173,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
             assert body["model"] == core.settings.model_name
             message = {"content": "它先变绿，再变蓝。" if selected else "我只看到了红色首帧。"}
         return httpx.Response(200, json={"choices": [{"message": message}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+            "usage": {"prompt_tokens": 100, "completion_tokens": output}})
 
     async def fetch(image, *_args, **_kwargs):
         downloads.append(image.slot)
@@ -185,7 +192,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model_http:
             monkeypatch.setattr(__main__, "ModelClient", lambda settings, _: ModelClient(
                 settings, model_http))
-            options = scope_options(core, model=model)
+            options = scope_options(core, model=model, different_rates=different_rates)
             if extra_static:
                 image = options["paid_options"]["image_input"]
                 options["paid_options"]["image_input"] = image.model_copy(
@@ -224,7 +231,8 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
         assert all(row["state"] == "SETTLED" for row in usages)
         if selected:
             assert usages[1]["provider"] == "synthetic-video" and usages[1]["model"] == model
-            assert usages[1]["billed_micro_usd"] == 140
+            assert usages[1]["billed_micro_usd"] == (42 if different_rates else 140)
+            assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
         final = calls[-1][1]
         assert "tools" not in final and final["model"] == core.settings.model_name
         assert ("连续发生" in json.dumps(final, ensure_ascii=False)) is selected
@@ -241,6 +249,7 @@ def test_deepseek_selects_video_tool_then_independent_worker_chats(
 @pytest.mark.parametrize("boundary", [
     "stop", "key", "payload", "unknown", "missing_usage", "invalid_tool",
     "invalid_index", "boolean_index", "unknown_field",
+    "video_price", "video_disabled",
 ])
 def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
     core, tmp_path, boundary,
@@ -272,6 +281,17 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
             result = {"choices": [{"message": {"content": "分析结果。"}}]}
             if boundary != "missing_usage":
                 result["usage"] = {"prompt_tokens": 100, "completion_tokens": 20}
+            if boundary == "video_price":
+                current = core.settings.paid_model.video_input
+                core.settings.paid_model = core.settings.paid_model.model_copy(update={
+                    "video_input": current.model_copy(update={
+                        "input_rate": current.input_rate + 1,
+                    }),
+                })
+            elif boundary == "video_disabled":
+                core.settings.paid_model = core.settings.paid_model.model_copy(
+                    update={"video_input": None},
+                )
             return httpx.Response(200, json=result)
         result = {
             "choices": [{"message": {"content": None, "tool_calls": [{
@@ -319,13 +339,22 @@ def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
                     )
                     item = core.store.one("SELECT state,error_code FROM content_items")
                     assert item == {"state": "UNKNOWN", "error_code": "CONTENT_VIDEO_TOOL_INVALID"}
-                expected_calls = 2 if boundary in {"unknown", "missing_usage"} else 1
+                expected_calls = 2 if boundary in {
+                    "unknown", "missing_usage", "video_price", "video_disabled",
+                } else 1
                 assert len(calls) == expected_calls and sends == []
                 usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
                 assert usages[0]["state"] == "SETTLED"
                 if not invalid_tool:
                     assert len(usages) == 2 and usages[1]["state"] == "UNKNOWN"
                     assert usages[1]["billed_micro_usd"] > 0
+                    if boundary in {"video_price", "video_disabled"}:
+                        detail = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
+                            "action='model.usage_diagnostic' AND entity_id=?",
+                            (usages[1]["request_id"],))
+                        assert json.loads(detail["safe_detail_json"])["code"] == (
+                            "PRICING_CONFIG_CHANGED"
+                        )
                 assert not core.store.rows("SELECT * FROM outbox")
                 assert window.status()["state"] == "STOPPED"
                 assert not await core.run_once()
