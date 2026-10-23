@@ -44,8 +44,13 @@ def cancelled_input_proof(row, value):
     fields = {"window_sha256", "event_id", "input_sha256", "state", "event_sha256",
               "job_sha256", "privacy_epoch", "model_attempts", "send_attempts"}
     paid_fields = {"settled_model_usage_sha256", "billed_micro_usd"}
-    if (not isinstance(value, dict) or set(value) not in (fields, fields | paid_fields)
-        or value["state"] != "CANCELLED"
+    failure_fields = {"resolution", "failure_code", "failure_phase", "failure_evidence_sha256",
+                      "reply_revision", "input_privacy_epoch"}
+    failed = isinstance(value, dict) and value.get("state") == "FAILED"
+    permitted = ((fields | paid_fields | failure_fields,) if failed
+                 else (fields, fields | paid_fields))
+    if (not isinstance(value, dict) or set(value) not in permitted
+        or value["state"] not in {"CANCELLED", "FAILED"}
         or value["window_sha256"] != row["plan_hash"] or value["event_id"] != row["event_id"]
         or value["input_sha256"] != row["input_hash"]
         or any(not isinstance(value[name], str) or not SHA.fullmatch(value[name])
@@ -54,8 +59,20 @@ def cancelled_input_proof(row, value):
         or type(value["send_attempts"]) is not int or value["send_attempts"] != 0
         or type(value["model_attempts"]) is not int or value["model_attempts"] < 0):
         raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
+    if failed and (
+        value["resolution"] != "SETTLED_NO_DELIVERY"
+        or value["failure_code"] != "MEMORY_REVIEW_INVALID"
+        or value["failure_phase"] != "memory_recall"
+        or not isinstance(value["failure_evidence_sha256"], str)
+        or not SHA.fullmatch(value["failure_evidence_sha256"])
+        or type(value["reply_revision"]) is not int or value["reply_revision"] < 0
+        or type(value["input_privacy_epoch"]) is not int
+        or not 0 <= value["input_privacy_epoch"] <= value["privacy_epoch"]
+        or value["model_attempts"] != 1
+    ):
+        raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
     if value["model_attempts"]:
-        if (set(value) != fields | paid_fields
+        if (set(value) != fields | paid_fields | (failure_fields if failed else set())
             or not isinstance(value["settled_model_usage_sha256"], str)
             or not SHA.fullmatch(value["settled_model_usage_sha256"])
             or type(value["billed_micro_usd"]) is not int or value["billed_micro_usd"] < 0):

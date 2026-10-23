@@ -561,6 +561,51 @@ def _cancelled_model_usage(store, settings, approval, job, now):
             "billed_micro_usd": sum(row["billed_micro_usd"] for row in usage)}
 
 
+def _failed_memory_input(store, approval, event, job, now):
+    """Recognize the historical failed recall without changing its terminal record."""
+    usage = store.rows("SELECT * FROM model_usage WHERE job_id=?", (job["job_id"],))
+    evidence = store.rows(
+        "SELECT * FROM audit_log WHERE action='memory.recall_invalid' AND entity_id=?",
+        (job["job_id"],),
+    )
+    conversation = store.one("SELECT * FROM conversations WHERE conversation_id=?",
+                             (event["conversation_id"],))
+    body = json.loads(event["body_json"])
+    if (not approval or approval.companion_scope != "owner_private_v1"
+        or approval.automatic_reply is not True
+        or job["state"] != "FAILED" or job["last_error_code"] != "MEMORY_REVIEW_INVALID"
+        or job["lease_token"] is not None
+        or event["event_type"] not in {"message.received", "message.media_received"}
+        or body.get("control_command") or body.get("diary_command")
+        or not conversation or conversation["scope"] != "private"
+        or conversation["owner_actor_id"] != "owner"
+        or event["reply_revision"] != conversation["reply_revision"]
+        or len(usage) != 1 or usage[0]["scenario"] != "memory_review"
+        or usage[0]["state"] != "SETTLED"
+        or len(evidence) != 1 or evidence[0]["actor_id"] != "system"
+        or evidence[0]["trace_id"] != event["trace_id"]
+        or store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                     ("erased_event:" + event["event_id"],))
+        or store.one("SELECT 1 FROM content_items WHERE owner_event_id=?",
+                                     (event["event_id"],))):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409)
+    try:
+        times = [datetime.fromisoformat(value) for value in (
+            usage[0]["occurred_at"], evidence[0]["created_at"], job["updated_at"], now,
+        )]
+        lease = datetime.fromisoformat(job["lease_until"]) if job["lease_until"] else None
+        if (any(value.tzinfo is None for value in times)
+            or not times[0] <= times[1] <= times[2] <= times[3]
+            or lease and (lease.tzinfo is None or lease > times[-1])):
+            raise ValueError("FAILED_RECALL_TIMELINE_UNPROVEN")
+    except (ValueError, TypeError):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409) from None
+    return {"state": "FAILED", "resolution": "SETTLED_NO_DELIVERY",
+            "failure_code": "MEMORY_REVIEW_INVALID", "failure_phase": "memory_recall",
+            "failure_evidence_sha256": paid_budget.sha(evidence[0]),
+            "reply_revision": event["reply_revision"]}
+
+
 def cancelled_input(store, settings, clock, reference):
     """Prove stopped generation never sent; preserve every settled model attempt and fee."""
     with store.transaction():
@@ -572,24 +617,38 @@ def cancelled_input(store, settings, clock, reference):
         event = store.one("SELECT * FROM events WHERE event_id=?", (reference.event_id,))
         job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'",
                         (reference.event_id,))
+        failed = bool(job and job["state"] == "FAILED")
+        input_epoch = receipt.get("privacy_epoch") if receipt else None
+        # Upgrading COMPLETE erasure projections can advance the epoch for an
+        # unrelated source. Only this read-only failed-input proof may cross it;
+        # source digest, erasure tombstone and all delivery/admission fences remain.
+        epoch_matches = input_epoch == epoch(store) or (
+            failed and type(input_epoch) is int and 0 <= input_epoch < epoch(store)
+        )
         if (reference.window_sha256 not in allowed or not binding
             or binding["plan_sha256"] != reference.window_sha256
             or not stopped(store, reference.window_sha256) or not receipt or not event or not job
             or receipt.get("window_sha256") != reference.window_sha256
-            or receipt.get("privacy_epoch") != epoch(store) or not receipt.get("capture")
+            or not epoch_matches or not receipt.get("capture")
             or receipt["capture"].get("source_event_id") != event["source_event_id"]
             or event["source"] != "qq.onebot" or event["actor_id"] != "owner"
             or event["privacy_scope"] != "private" or event["redacted"]
-            or _input_digest(json.loads(event["body_json"])) != receipt.get("input_sha256")
-            or job["state"] != "CANCELLED"
-            or job["last_error_code"] != "LIVE_WINDOW_STOPPED"):
+            or _input_digest(json.loads(event["body_json"])) != receipt.get("input_sha256")):
+            raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
+        failed = _failed_memory_input(store, approval, event, job, clock()) if (
+            failed
+        ) else None
+        if failed:
+            failed["input_privacy_epoch"] = input_epoch
+        if not failed and (job["state"] != "CANCELLED"
+                           or job["last_error_code"] != "LIVE_WINDOW_STOPPED"):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
         if store.one("SELECT 1 FROM outbox WHERE origin_event_id=?", (reference.event_id,)):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_ATTEMPTED", 409)
         usage = _cancelled_model_usage(store, settings, approval, job, clock())
         _idle(store)
         return {"window_sha256": reference.window_sha256, "event_id": reference.event_id,
-                "input_sha256": receipt["input_sha256"], "state": "CANCELLED",
+                "input_sha256": receipt["input_sha256"], **(failed or {"state": "CANCELLED"}),
                 "event_sha256": paid_budget.sha(event), "job_sha256": paid_budget.sha(job),
                 "privacy_epoch": epoch(store), **usage, "send_attempts": 0}
 
