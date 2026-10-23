@@ -1,8 +1,12 @@
 import argparse
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import sys
+from contextlib import ExitStack
+from pathlib import Path
 
 import httpx
 import uvicorn
@@ -75,6 +79,9 @@ def main():
     recovery = sub.add_parser("restore")
     recovery.add_argument("source")
     recovery.add_argument("destination")
+    correction = sub.add_parser("reconcile-video-rates")
+    correction.add_argument("--request", required=True)
+    correction.add_argument("--request-sha256", required=True)
     args = parser.parse_args()
     try:
         settings = Settings.load()
@@ -161,6 +168,19 @@ def main():
                 settings.erasure_ledger,
             )
             print("Restored to a new database; erasure ledger replay complete.")
+        elif args.command == "reconcile-video-rates":
+            from companion.video_accounting import reconcile
+
+            raw = Path(args.request).read_bytes()
+            if len(raw) > 4096 or hashlib.sha256(raw).hexdigest() != args.request_sha256:
+                raise CoreError("VIDEO_RATE_CORRECTION_INVALID", 400)
+            with ExitStack() as locks:
+                for kind in (
+                    "worker", "diary-worker", "life-worker", "executive-worker", "content-worker",
+                ):
+                    locks.enter_context(single_worker(settings.database, kind))
+                with Runtime(settings) as runtime:
+                    print(encode(reconcile(runtime.store, settings, json.loads(raw))))
     except ValidationError as error:
         # Do not print Pydantic input values, which may contain secrets.
         print(
