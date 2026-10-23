@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import Field
 
+from companion import cloud_budget
 from companion.budget import total_monthly
 from companion.contracts import CoreError, StrictModel
 from companion.media_provider import HTTPMediaProvider, MediaResult
@@ -330,6 +331,15 @@ class MediaService:
                 ):
                     raise CoreError("MEDIA_COST_BUDGET_EXHAUSTED", 429)
                 usage_id = uid("media_cost")
+                cloud_budget.reserve(
+                    store, self.settings, reference_type="model", reference_id=usage_id,
+                    estimated_micro_usd=price, now=now,
+                    task_kind="asr" if chunk.operation == "audio" else "model",
+                    task_id="media-session:" + row["session_id"] if chunk.operation == "audio"
+                    else "media-request:" + row["session_id"] + ":" + chunk.request_key,
+                    pricing={"pricing_known": True, "provider": "media-http",
+                             "model": endpoint.model, "request_estimate_micro_usd": price},
+                )
                 store.insert(
                     "model_usage",
                     usage_id=uid("usage"),
@@ -380,6 +390,9 @@ class MediaService:
         task = asyncio.current_task()
         self.inflight.setdefault(session_id, set()).add(task)
         try:
+            if usage_id:
+                with self.store.transaction():
+                    cloud_budget.mark_dispatched(self.store, "model", usage_id, self.clock())
             async with asyncio.timeout(self.options.provider_timeout_seconds):
                 result = (
                     MediaResult(text=extracted)
@@ -464,6 +477,7 @@ class MediaService:
                     self.store.execute(
                         "UPDATE model_usage SET state='SETTLED' WHERE request_id=?", (usage_id,)
                     )
+                    cloud_budget.sync_reference(self.store, "model", usage_id)
             return response
         except BaseException as error:
             with self.store.transaction():
@@ -474,6 +488,7 @@ class MediaService:
                     self.store.execute(
                         "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?", (usage_id,)
                     )
+                    cloud_budget.sync_reference(self.store, "model", usage_id)
             if isinstance(error, TimeoutError):
                 raise CoreError("MEDIA_PROVIDER_UNCERTAIN", 502) from error
             raise

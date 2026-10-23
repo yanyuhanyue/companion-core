@@ -46,6 +46,8 @@ REVISION_CHAIN = (
     "0023_meme_discovery_reservations",
     "0024_reading_attempts",
     "0025_meme_captions",
+    "0026_cloud_budget",
+    "0027_owner_console",
 )
 LEGACY_TABLES = (
     "principals",
@@ -317,9 +319,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0025_meme_captions"]
+    assert scripts.get_heads() == ["0027_owner_console"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0025_meme_captions")
+    revisions, current = [], scripts.get_revision("0027_owner_console")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -376,8 +378,12 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
             "SELECT * FROM runtime_meta WHERE key='memory_control_restore_generation'"
         )
         assert generation and re.fullmatch(r"restore_[a-f0-9]{32}", generation["value"])
+        restore_block = restored.one(
+            "SELECT * FROM runtime_meta WHERE key='cloud_budget_restore_required'"
+        )
+        assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0025_meme_captions"}
+            {"version_num": "0027_owner_console"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
@@ -438,7 +444,8 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 if table not in {"outbox", "model_usage"}
             }
             unchanged["runtime_meta"] = {
-                **before["runtime_meta"], "rows": before["runtime_meta"]["rows"] + [generation]
+                **before["runtime_meta"],
+                "rows": before["runtime_meta"]["rows"] + [generation, restore_block],
             }
             assert_old_columns_unchanged(restored, unchanged)
 

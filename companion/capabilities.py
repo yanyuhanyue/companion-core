@@ -8,7 +8,7 @@ source checks and budgets at dispatch. No guard that writes state is called here
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from companion import live_text, paid_budget, private_life, qq_images, video_input
+from companion import cloud_budget, live_text, paid_budget, private_life, qq_images, video_input
 from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.exploration import METERED_READS_SQL
@@ -60,6 +60,7 @@ def _live_blocks(store, settings, now):
 
 def _model_blocks(store, settings, now):
     reasons = _live_blocks(store, settings, now)
+    reasons += cloud_budget.capacity_blocks(store, settings, now)
     if settings.mode == "live":
         try:
             approval = paid_budget.contract(settings, now)

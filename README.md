@@ -77,6 +77,7 @@ uv run python -m companion diary-worker
 - [P11 核心体验前置交付与后续验收](docs/qq-beta/p11-unattended-delivery.md)、[私人 Beta 观测与反馈](docs/qq-beta/p11-beta-observation.md)
 - [72 小时私人连续运行](docs/qq-beta/continuous-private-beta.md)
 - [VPS / AstrBot 部署](docs/deployment.md)
+- [主人控制台、配置版本与统一云预算](docs/owner-console.md)
 - [模块边界与设计取舍](docs/architecture.md)
 - [验收结果与限制](docs/validation.md)、[回放数据](docs/replay-report.json)
 - [原始设计合同](docs/design-v0.3/implementation-m0-m1.md)、[接口合同](contracts/openapi.v1.yaml)

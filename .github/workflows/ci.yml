@@ -134,6 +134,11 @@ jobs:
       - run: chmod 755 migrations/versions
       - run: docker build -f deploy/executor.Dockerfile -t companion-executor:test .
       - run: docker build -f deploy/source-reader.Dockerfile -t companion-source-reader:test .
+      - run: docker build -f deploy/file-parser.Dockerfile -t companion-file-parser:test .
+      - name: Parse synthetic documents in the isolated native worker
+        run: |
+          image_id=$(docker image inspect --format '{{.Id}}' companion-file-parser:test)
+          python scripts/smoke_file_parser.py --image "$image_id"
       - run: docker compose -f deploy/compose.onebot-build.yaml build onebot-bridge
       - name: Import the shared contract from the isolated Bridge image
         run: >-

@@ -9,11 +9,12 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from companion import cloud_budget
 from companion.budget import total_monthly
 from companion.contracts import CoreError
 from companion.executive_protocol import ExecutionEnvelope, ToolReceipt
 from companion.privacy import epoch, redact
-from companion.store import after, encode, uid
+from companion.store import after, encode, uid, utcnow
 from companion.transport import digest
 
 CAPABILITIES = {"windows.read_text": 0, "windows.write_text": 2, "dsh.run": 2}
@@ -32,15 +33,29 @@ def erase_executive(store, event_ids):
                 (event_id, event_id),
             )
         )
-    for task_id in tasks:
-        store.execute(
-            "UPDATE tool_tasks SET state='CANCELLED',scope_json='{}',scope_sha256='',"
-            "lease_token=NULL,lease_until=NULL,result_event_id=NULL,redacted=1,"
-            "last_error_code='PRIVACY_CHANGED' WHERE task_id=?",
-            (task_id,),
-        )
-        store.execute("DELETE FROM tool_approvals WHERE task_id=?", (task_id,))
-        store.execute("DELETE FROM tool_evidence WHERE task_id=?", (task_id,))
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        cloud = store.one("SELECT 1 FROM sqlite_master WHERE name='cloud_cost_snapshots'")
+        for task_id in tasks:
+            held = store.one(
+                "SELECT 1 FROM cloud_cost_snapshots c JOIN tool_tasks t "
+                "ON c.reference_type='tool' AND c.reference_id=t.task_id WHERE t.task_id=? "
+                "AND t.state='RUNNING' AND c.state='RESERVED' AND c.legacy=0 "
+                "AND c.dispatched_at IS NULL", (task_id,),
+            ) if cloud else None
+            if held:
+                store.execute("UPDATE tool_tasks SET billed_micro_usd=0 WHERE task_id=?",
+                              (task_id,))
+                store.audit("tool.cancelled_before_dispatch", task_id, task_id, utcnow())
+            store.execute(
+                "UPDATE tool_tasks SET state='CANCELLED',scope_json='{}',scope_sha256='',"
+                "lease_token=NULL,lease_until=NULL,result_event_id=NULL,redacted=1,"
+                "last_error_code='PRIVACY_CHANGED' WHERE task_id=?",
+                (task_id,),
+            )
+            store.execute("DELETE FROM tool_approvals WHERE task_id=?", (task_id,))
+            store.execute("DELETE FROM tool_evidence WHERE task_id=?", (task_id,))
+            if cloud:
+                cloud_budget.sync_reference(store, "tool", task_id)
 
 
 def restore_executive(store, now):
@@ -348,6 +363,12 @@ class Executive:
                 or (shared_monthly + cost > self.settings.monthly_limit_micro_usd)
             ):
                 raise CoreError("TOOL_BUDGET_EXHAUSTED", 429)
+            cloud_budget.reserve(
+                s, self.settings, reference_type="tool", reference_id=current["task_id"],
+                estimated_micro_usd=cost, now=now, task_kind="tool", task_id=current["task_id"],
+                pricing={"pricing_known": True, "executor_id": current["executor_id"],
+                         "request_estimate_micro_usd": cost},
+            )
             s.execute(
                 "UPDATE tool_tasks SET state='RUNNING',reserved_micro_usd=?,"
                 "billed_micro_usd=?,dispatched_at=?,updated_at=? WHERE task_id=?",
@@ -439,6 +460,7 @@ class Executive:
             s.audit(
                 "tool.finished", current["task_id"], current["task_id"], now, status=receipt.status
             )
+            cloud_budget.sync_reference(s, "tool", current["task_id"])
             return self.get(current["task_id"])
 
     async def run_one(self):
@@ -456,6 +478,8 @@ class Executive:
                 )
             return True
         try:
+            with self.store.transaction():
+                cloud_budget.mark_dispatched(self.store, "tool", task["task_id"], self.clock())
             receipt = await self.adapter.execute(endpoint, request)
             self.finish(task, receipt)
         except Exception:
@@ -466,4 +490,5 @@ class Executive:
                     "state='RUNNING' AND lease_token=?",
                     (task["task_id"], task["lease_token"]),
                 )
+                cloud_budget.sync_reference(self.store, "tool", task["task_id"])
         return True

@@ -7,12 +7,22 @@ from typing import Annotated, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SecretStr,
+    TypeAdapter,
+    model_validator,
+)
 
+from companion.cloud_budget import CloudBudgetConfig
 from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.image_input import ImageInputPolicy
 from companion.media_config import ContentConfig, MediaConfig
+from companion.operator_config import ConsoleConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.sources import ObservationSource
 from companion.trial_limits import TrialCount, TrialText
@@ -295,6 +305,9 @@ class LiveTextWindowApproval(BaseModel):
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    _operator_config_version: int = PrivateAttr(default=0)
+    console: ConsoleConfig = Field(default_factory=ConsoleConfig)
+    cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)
     owner_qq_id: str
     bot_qq_id: str
     bridge_token: SecretStr
@@ -511,6 +524,10 @@ class Settings(BaseModel):
                     data[field] = MediaConfig.model_validate_json(value)
                 elif field == "content":
                     data[field] = ContentConfig.model_validate_json(value)
+                elif field == "console":
+                    data[field] = ConsoleConfig.model_validate_json(value)
+                elif field == "cloud_budget":
+                    data[field] = CloudBudgetConfig.model_validate_json(value)
                 elif field == "paid_model":
                     data[field] = PaidModelApproval.model_validate_json(value)
                 elif field == "live_text_window":
@@ -519,4 +536,6 @@ class Settings(BaseModel):
                     data[field] = SegmentedReplyConfig.model_validate_json(value)
                 else:
                     data[field] = value
-        return cls.model_validate(data)
+        from companion.operator_config import load
+
+        return load(cls.model_validate(data))

@@ -73,6 +73,11 @@ def restore(source, destination, key, ledger_path):
                 # This marker is deliberately independent of model/window counters.
                 store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                               ("memory_control_restore_generation", uid("restore")))
+                # The backup cannot prove completeness of model, ASR or tool
+                # charges incurred after it. No cloud admission until an
+                # independent complete accounting baseline is recovered.
+                store.execute("INSERT OR REPLACE INTO runtime_meta VALUES "
+                              "('cloud_budget_restore_required','1')")
                 if store.one("SELECT 1 FROM model_admissions LIMIT 1") or store.one(
                     "SELECT 1 FROM runtime_meta WHERE key IN "
                     "('live_text_window','model_budget_live_lifecycle') LIMIT 1"

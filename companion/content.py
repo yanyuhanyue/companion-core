@@ -15,6 +15,7 @@ import httpx
 
 from companion import (
     budget,
+    cloud_budget,
     image_spool,
     live_text,
     private_life,
@@ -134,6 +135,12 @@ def erase_content(store, event_ids):
             "(SELECT 1 FROM model_admissions a WHERE a.request_id=model_usage.request_id)",
             (event_id, event_id, event_id),
         )
+        for usage in store.rows(
+            "SELECT usage_request_id FROM content_items WHERE usage_request_id IS NOT NULL "
+            "AND (owner_event_id=? OR source_event_id=? OR output_event_id=?)",
+            (event_id, event_id, event_id),
+        ):
+            cloud_budget.sync_reference(store, "model", usage["usage_request_id"])
         # A paid request may still return known usage. Preserve its reservation
         # until that callback settles it, or cancelled-job lease recovery records
         # UNKNOWN through the independent budget journal. Erasure never refunds it.
@@ -862,6 +869,13 @@ class ContentService:
             ):
                 raise CoreError("CONTENT_IMAGE_TRAFFIC_EXHAUSTED", 429)
             usage_id = uid("content_cost")
+            cloud_budget.reserve(
+                s, self.settings, reference_type="model", reference_id=usage_id,
+                estimated_micro_usd=price, now=now, task_kind="model",
+                task_id="content:" + row["item_id"], pricing={"pricing_known": True,
+                    "request_estimate_micro_usd": price, "provider": "media-http",
+                    "model": endpoint.model},
+            )
             s.insert(
                 "model_usage",
                 usage_id=uid("usage"),
@@ -1122,6 +1136,10 @@ class ContentService:
         if duplicate:
             return {"state": "SUCCEEDED", "event_id": row["output_event_id"], "duplicate": True}
         try:
+            with self.store.transaction():
+                cloud_budget.mark_dispatched(
+                    self.store, "model", row["usage_request_id"], self.clock(),
+                )
             async with asyncio.timeout(self.options.provider_timeout_seconds):
                 result = await self.provider.process("camera", data, mime, self.options.vision)
             text = redact(result.text, self.settings)
@@ -1161,6 +1179,7 @@ class ContentService:
                     "UPDATE model_usage SET state='SETTLED' WHERE request_id=?",
                     (row["usage_request_id"],),
                 )
+                cloud_budget.sync_reference(self.store, "model", row["usage_request_id"])
             return {"state": "SUCCEEDED", "event_id": event_id, "duplicate": False}
         except BaseException as error:
             with self.store.transaction():
@@ -1168,6 +1187,7 @@ class ContentService:
                     "UPDATE model_usage SET state='UNKNOWN' WHERE request_id=?",
                     (row["usage_request_id"],),
                 )
+                cloud_budget.sync_reference(self.store, "model", row["usage_request_id"])
                 self.store.execute(
                     "UPDATE content_items SET state='UNKNOWN',"
                     "error_code='CONTENT_VISION_UNCERTAIN',"
