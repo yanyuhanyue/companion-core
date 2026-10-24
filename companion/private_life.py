@@ -72,8 +72,11 @@ def ensure_active(store, settings, clock):
 
 
 def owner_waiting(store, settings, now):
+    from companion import owner_authority
     from companion.budget import chat_pending
 
+    if owner_authority.required(store, settings):
+        return owner_authority.owner_waiting(store, settings, now)
     return chat_pending(store, now) or bool(
         store.one(
             "SELECT 1 FROM runtime_meta r LEFT JOIN events e "

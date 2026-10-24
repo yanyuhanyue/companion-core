@@ -222,12 +222,34 @@ def model_purpose(store, scenario, job_id):
     return purpose
 
 
+def owner_waiting(store, settings, now, *, authority=None):
+    """Native accepted captures preempt background work before event ingestion too."""
+    from companion.budget import chat_pending
+
+    if chat_pending(store, now):
+        return True
+    ref = authority or current(store, settings, lambda: now).authority.as_dict()
+    return bool(store.one(
+        "SELECT 1 FROM runtime_meta r LEFT JOIN events e "
+        "ON e.event_id=json_extract(r.value,'$.event_id') "
+        "WHERE r.key LIKE 'owner_input:%' AND e.event_id IS NULL "
+        "AND json_extract(r.value,'$.authority')=? "
+        "AND NOT EXISTS(SELECT 1 FROM runtime_meta erased "
+        "WHERE erased.key='erased_event:' || json_extract(r.value,'$.event_id')) LIMIT 1",
+        (encode(ref),),
+    ))
+
+
 def admit_model(store, settings, clock, job_id, scenario):
     """Check the model's independent purpose and its native task before budget admission."""
     from companion import owner_input, reply_revision
 
     purpose = model_purpose(store, scenario, job_id)
     view = current(store, settings, clock, purpose=purpose)
+    background = scenario in {"activity", "social_autonomy", "memory_extract", "diary",
+                              "reflection"} or scenario == "memory_review" and job_id is None
+    if background and owner_waiting(store, settings, clock(), authority=view.authority.as_dict()):
+        raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     if job_id is not None:
         job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
         if job is None:
