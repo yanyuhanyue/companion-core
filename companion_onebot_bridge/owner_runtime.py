@@ -188,7 +188,8 @@ class OwnerRuntime:
                     or value["plan_hash"] != journal.digest(current)):
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 attempts[value["message_id"]] = {
-                    key: item for key, item in value.items() if key != "delivery_binding"}
+                    key: item for key, item in value.items()
+                    if key not in {"delivery_binding", "reply_segment"}}
                 bindings[value["message_id"]] = value.get("delivery_binding", {})
             elif record["kind"] == "CAPTURED":
                 value = record["data"]

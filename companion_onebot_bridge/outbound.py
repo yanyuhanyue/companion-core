@@ -93,6 +93,9 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
         return True
     if not onebot.config.delivery_enabled and guard is None:
         return False
+    if (delivery_lane == "owner_private" and guard is not None
+        and hasattr(guard, "waiting_for_segment") and guard.waiting_for_segment()):
+        return False
     request = {"worker_id": getattr(onebot, "worker_id", "onebot-direct"), "limit": 1}
     if guard is not None and getattr(guard, "authority", None) is not None:
         request["authority"] = validate_authority_ref(guard.authority)

@@ -2,7 +2,7 @@
 
 import base64
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -29,6 +29,42 @@ class OwnerSendGuard:
         self.lease_until = None
         self.meme_prepared = self.meme_sending = False
         self.message_hash = None
+        self.segment_not_before = None
+
+    def _segment_deadline(self, *, event_id=None):
+        records = self.runtime.verify()
+        prior = self.db.execute("SELECT message_id,event_id,state FROM window_attempts "
+            "WHERE plan_hash=? ORDER BY fence DESC LIMIT 1",
+            (journal.digest(self.authority),)).fetchone()
+        if not prior or prior[2] != "ACK" or event_id is not None and event_id != prior[1]:
+            return None
+        latest = self.db.execute("SELECT event_id FROM window_inputs WHERE plan_hash=? "
+            "AND json_extract(capture_json,'$.kind')='authenticated_onebot_ws' "
+            "ORDER BY rowid DESC LIMIT 1", (journal.digest(self.authority),)).fetchone()
+        if latest and latest[0] != prior[1]:
+            return None
+        if (self.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'").fetchone()
+            and self.db.execute("SELECT 1 FROM automatic_recalls WHERE target_event_id=? LIMIT 1",
+                                (prior[1],)).fetchone()):
+            return None
+        reserved = next(record for record in reversed(records) if record["kind"] == "RESERVED"
+                        and record["data"]["message_id"] == prior[0])
+        ack = next(record for record in reversed(records) if record["kind"] == "ACK"
+                   and record["data"]["message_id"] == prior[0])
+        if "reply_segment" not in reserved["data"]:
+            # Pre-migration ACKs lack a manifest; the established maximum interval
+            # bounds this conservative wait without inventing a success receipt.
+            interval = 3000
+        else:
+            segment = reserved["data"]["reply_segment"]
+            if segment is None or segment["index"] >= segment["count"] - 1:
+                return None
+            interval = segment["interval_ms"]
+        return datetime.fromisoformat(ack["at"]) + timedelta(milliseconds=interval)
+
+    def waiting_for_segment(self):
+        deadline = self._segment_deadline()
+        return deadline is not None and self.runtime.clock() < deadline
 
     def reserve(self, item):
         from .owner_native_resolution import binding
@@ -46,6 +82,10 @@ class OwnerSendGuard:
             raise ValueError("OWNER_DELIVERY_LEASE_LOST")
         event_id = (item["content"]["plan_id"] if account_actions.is_account(item)
                     else reply_segments.event_id(item))
+        self.segment_not_before = self._segment_deadline(event_id=event_id)
+        if self.segment_not_before is not None and self.runtime.clock() < self.segment_not_before:
+            raise ValueError("REPLY_SEGMENT_INTERVAL_REQUIRED")
+        segment = reply_segments.envelope(item) if not account_actions.is_account(item) else None
         value = {"message_id": item["message_id"], "event_id": event_id,
             "fence": self.db.execute("SELECT COALESCE(MAX(fence),0)+1 FROM window_attempts"
                                      ).fetchone()[0],
@@ -55,19 +95,26 @@ class OwnerSendGuard:
         self.delivery_binding = binding(self, item)
         self.message_hash = journal.digest(self.prepared_message)
         with self.db:
-            self.runtime.append("RESERVED", value | {"delivery_binding": self.delivery_binding})
+            self.runtime.append("RESERVED", value | {"delivery_binding": self.delivery_binding,
+                "reply_segment": reply_segments.journal_value(segment, item["content"]["text"])
+                if segment is not None else None})
             self.db.execute("INSERT INTO window_attempts VALUES(?,?,?,?,?,?,?,?,?)",
                             tuple(value.values()))
         self.current_item, self.item_hash, self.lease_until = item, value["item_hash"], lease_until
 
     def _local(self):
         self.runtime.verify()
+        if (self.runtime.row()["state"] != "ACTIVE" or self.runtime.stop_path.exists()
+            or self.runtime.stop_path.is_symlink()):
+            raise ValueError("OWNER_RUNTIME_STOPPED")
         if (self.current_item is None or self.item_hash != journal.digest(self.current_item)
             or self.dispatched or self.runtime.clock() >= self.lease_until
             or journal.digest(self.prepared_message) != self.message_hash):
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
         if self.pending_input():
             raise ValueError("OWNER_INPUT_PENDING")
+        if self.segment_not_before is not None and self.runtime.clock() < self.segment_not_before:
+            raise ValueError("REPLY_SEGMENT_INTERVAL_REQUIRED")
 
     def pending_input(self):
         item = self.current_item

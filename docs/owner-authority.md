@@ -78,6 +78,16 @@ STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送�
 输入和最终发送校验响应均为 `Cache-Control: no-store`。签名有效、Bridge 登录成功或
 持有一个旧引用，均不替代最终授权、来源和有限租约校验。
 
+原生分段回复沿用 `continuous.segment_pacing_pending` 的本地 ACK 计时原则：
+RESERVED 保存既有 `reply_segments.journal_value`，下一次领取租约前读取原 ACK
+journal 时间并等待该段间隔，重启后仍使用同一证据。缺少分段元数据的历史 ACK
+保守等待现有协议允许的最大 3000 ms；新非分段记录显式保存空值，不增加等待。
+新主人输入或召回不受旧轮次间隔阻挡，实际发送仍复核 Core 当前来源和租约。
+最终本地校验还在 journal 读取返回后重读 ACTIVE/STOP 标志，避免 STOP 后追加
+IO_STARTED。实现复用了已检查的 DSH QQ
+[串行出站发送](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/outbound-buffer.ts)
+的发送完成顺序，间隔沿用本项目原有 journal 与 envelope，不增加外部协议。
+
 `POST /owner-authority/inputs/recall` 接收原签名 transport identity 绑定的
 `OwnerRecall`，使用 `recall_signing_payload` 和独立 `owner-recall/v2` 签名域。
 它沿用原 ErasureLedger 的 PENDING_TARGET / RECALLED、幂等及恢复重放。
