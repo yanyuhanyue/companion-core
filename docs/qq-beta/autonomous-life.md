@@ -155,6 +155,27 @@ recreate a consumed item or repeat an uncertain send.
 
 ## Recovery and erasure
 
+Life decision material includes bounded views of explicit owner feedback, completed self-reading
+interests, and native Goal outcomes. It reads only the activity's approved source set. Affect and
+memory retain their independent purpose switches. A completed plan contributes one interest
+result; execution success is not a positive owner rating, and silence is not negative feedback.
+One terminal reading failure may reopen the original topic for one further decision within its
+existing decision, cooldown and source limits. An uncertain read cannot trigger continuation.
+
+The original activity event pins the complete material under its existing material hash. Retained
+wording revalidates the evidence view before consumption, including feedback reset. Actual Life
+reading results carry their original source roots into private/public destination checks and
+erasure dependencies. No separate feedback database or action queue is introduced.
+
+Public Social decisions can use up to three original action receipts for exactly matching public
+sources and the same owner revision. Only outcome, public source references and native error/code
+reach the prompt. A known rejection can inform a later bounded choice; an unresolved native send
+blocks new Social model planning. Neither state is interpreted as a person's opinion.
+
+This reuses DSH's [explicit message-feedback evidence](https://github.com/deepseek-ai/deepseek-harness/tree/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/feedback/message-feedback)
+principle and [LangGraph's raw-state/derived-view separation](https://docs.langchain.com/oss/javascript/langgraph/thinking-in-langgraph).
+Core's original event, authority, Goal, receipt and erasure mechanisms remain authoritative.
+
 Migration `0037_life_topics` adds only topics, topic source links and activity results keyed by
 original job ID. Jobs own leases, attempts and unique execution identity. Model usage and the
 original independent journal own all actual costs. Failure, UNKNOWN or a lost response never

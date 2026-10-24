@@ -56,6 +56,9 @@ RULES = """只根据给出的公开资料、已有公开账号资料和已审核
 {kind:'nickname'|'signature',value:'新值'}，或 {kind:'avatar',asset_id:'提供的asset_id'}。
 只选择 allowed_proposals 中的种类。不要输出目标、权限、接口、路径、图片URL或其他字段。
 发表想法需引用公开资料ref；明确区分资料内容和自己的感想，不泄露凭据或他人隐私。
+execution_outcomes仅是当前公开来源对应的原生动作回执，不是主人反馈。
+SUCCEEDED只证明执行成功；REJECTED可以据明确错误作有限调整或选择skip；
+UNKNOWN表示待核对，不能当作失败、成功或任何人的好恶，也不能重复发送。
 """
 PROFILE_RULES = """只根据 owner_confirmed_material 中主人明确确认的身份或偏好，
 决定是否调整昵称或签名。
@@ -312,7 +315,54 @@ class SocialAutonomy:
                 if profile_memory_ids else []))
             for item in context["profile_material"]:
                 _safe_text(item["content"], self.settings)
+        else:
+            context["execution_outcomes"] = self._execution_outcomes(context, ignore_plan)
         return context
+
+    def _execution_outcomes(self, context, ignore_plan):
+        """Bounded native receipts for these same public sources and owner revision."""
+        sources = {source["ref"]: source for source in context["sources"]}
+        if not sources:
+            return []
+        outcomes = []
+        for row in self.store.rows(
+            "SELECT p.plan_id,p.input_snapshot_json,p.payload_sha256,r.message_id,"
+            "r.receipt_json,r.receipt_sha256,o.state,o.authority_json,o.lease_token "
+            "FROM social_autonomy_plans p JOIN social_autonomy_reservations r USING(plan_id) "
+            "JOIN outbox o USING(message_id) WHERE p.redacted=0 AND p.plan_id<>? "
+            "AND r.dispatched_at IS NOT NULL AND r.receipt_sha256<>'' "
+            "AND o.action_type='qzone.publish' ORDER BY r.dispatched_at DESC,p.plan_id LIMIT 20",
+            (ignore_plan or "",),
+        ):
+            try:
+                previous = json.loads(row["input_snapshot_json"])
+                refs = [item["ref"] for item in previous["sources"]]
+                if not refs or any(sources.get(item["ref"]) != item
+                                   for item in previous["sources"]):
+                    continue
+                if context.get("authority") != previous.get("authority"):
+                    continue
+                if context.get("authority") is not None and (
+                    json.loads(row["authority_json"]) != context["authority"]
+                ):
+                    continue
+                receipt = ActionReceipt.model_validate_json(row["receipt_json"])
+                native_state = {"SUCCEEDED": "SENT", "REJECTED": "FAILED",
+                                "UNKNOWN": "DELIVERY_UNCERTAIN"}[receipt.result]
+                if (row["state"] != native_state or receipt.message_id != row["message_id"]
+                    or receipt.payload_sha256 != row["payload_sha256"]
+                    or receipt.action_type != "qzone.publish"
+                    or _sha(receipt.model_dump(mode="json")) != row["receipt_sha256"]):
+                    continue
+            except (ValueError, TypeError, KeyError, ValidationError):
+                continue
+            outcomes.append({"plan_id": row["plan_id"], "source_refs": sorted(refs),
+                             "result": receipt.result, "error_code": receipt.error_code,
+                             "native_retcode": receipt.native_retcode,
+                             "receipt_sha256": row["receipt_sha256"]})
+            if len(outcomes) == 3:
+                break
+        return outcomes
 
     def register_asset(self, asset):
         """Caller authenticates the reviewer; this interface cannot be invoked by a model."""
@@ -394,6 +444,8 @@ class SocialAutonomy:
         )
         if unresolved:
             raise CoreError("SOCIAL_MODEL_RECONCILIATION_REQUIRED", 409)
+        if s.one("SELECT 1 FROM outbox WHERE state IN ('SENDING','DELIVERY_UNCERTAIN') LIMIT 1"):
+            raise CoreError("SOCIAL_DELIVERY_RECONCILIATION_REQUIRED", 409)
         start = _instant(now).astimezone(ZoneInfo(timezone)).replace(
             hour=0, minute=0, second=0, microsecond=0,
         ).astimezone(UTC).isoformat(timespec="microseconds")
@@ -428,6 +480,11 @@ class SocialAutonomy:
             "current_profile": [{key: row[key] for key in ("field", "value")}
                                 for row in context["profiles"]],
             "profile_observation_scope": "recent_account_api_observation_may_be_cached",
+            "execution_outcomes": [
+                {key: item[key] for key in
+                 ("source_refs", "result", "error_code", "native_retcode")}
+                for item in context.get("execution_outcomes", [])
+            ],
             "allowed_proposals": ["skip"] + (["qzone_publish"] if cfg.qzone_enabled
                                              and context["sources"] else [])
             + [row["field"] for row in context["profiles"]

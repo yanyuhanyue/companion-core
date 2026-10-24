@@ -146,11 +146,14 @@ def schedule(store, settings, kind, ref, conversation_id, now):
             raise CoreError("NOTICE_PRIVATE_OWNER_REQUIRED", 403)
         data = _material(store, settings, kind, ref, now)
         event_id = "evt_" + sha(key)
+        body = {"text": "", "notice": {
+            "kind": kind, "ref": ref, "material_sha256": sha(data)}}
+        if kind == "life":
+            body["life_material"] = data
         store.insert("events", event_id=event_id, schema_version=1, source="system.timer",
             source_event_id=key, conversation_id=conversation_id, actor_id="system",
             event_type="activity.tick", occurred_at=now, ingested_at=now, privacy_scope="private",
-            body_json=encode({"text": "", "notice": {
-                "kind": kind, "ref": ref, "material_sha256": sha(data)}}),
+            body_json=encode(body),
             trace_id=event_id, memory_processed=1)
         for source_id in data["source_events"]:
             store.execute("INSERT INTO event_dependencies(event_id,source_event_id) VALUES (?,?)",

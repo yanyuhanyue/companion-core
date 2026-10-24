@@ -43,6 +43,7 @@ def authorize(core, tmp_path, *, life=None, account=True, module=None, additiona
         authorization_sha256="d" * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
         capability_policies=capability, life_shadow=life,
+        memory_scope="owner_private" if "memory" in purposes else "none",
     )
     result, _ = activate(core, policy)
     target = module if module is not None else core
