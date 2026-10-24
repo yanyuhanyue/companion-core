@@ -169,7 +169,7 @@ const SHOW_IMPLEMENTATION_STATUS = true;
 const CAPABILITY_IMPLEMENTATION = {
   "memory.manage": ["已实现", "可查询、确认、纠正和忘记记忆。"],
   "memory.recall": ["已实现", "已有来源约束的检索；控制台尚无原话摘录和召回解释。"],
-  diary: ["已实现", "已有日记读取、纠正、忘记与暂停；不包含未来睡眠阶段或梦境。"],
+  diary: ["已实现", "已有日记读取、纠正、忘记与暂停；此处展示日记能力的操作范围。"],
   consolidation: ["已实现", "已有夜间整理；尚无 N1/N2/N3 阶段观察。"],
   reflection: ["已实现", "已有来源支持的反思；控制台尚不能接受或拒绝建议。"],
   goals: ["已实现", "已有目标与承诺；控制台目前只读，尚无逐步执行视图。"],
