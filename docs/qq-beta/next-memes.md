@@ -9,6 +9,14 @@
 中 transport/media 与入口组装的职责分离；当前权限与能力元数据分离参考
 [RFC 7662 §2.2](https://datatracker.ietf.org/doc/html/rfc7662#section-2.2)。
 候选、预算和不可重放发送继续使用项目既有目录、Core job、Outbox 与 Bridge journal。
+
+原生宿主由 `app.run` 组装 `owner_memes.MemePump`。输入 ACK 后立即启动最多 1.5 秒的
+语义检索，使用原签名 input-state 的实际回复版本；输入上传不等待检索。
+静态目录在输入审批前冻结候选。后台发现等待原回复完成，并让位于待提交主人输入、
+媒体和资料观测；已有发现任务的恢复由原 Core 租约及预算控制。
+`OwnerOneBot` 在准备阶段固定候选图片字节与消息摘要，最终 transport 边界复核授权、
+来源与消息后再记录素材 `SENDING`。实际发送成功／不确定分别保存原 `SENT`／`UNKNOWN`；
+只有 Core 确认取消且原发送 journal 已提交 `NOT_SENT` 后才释放未发送素材。
 当前状态为 **implemented / mock-verified**；本轮未完成真实搜索、生产素材审核、
 QQ 实机选发或线上启用，不能标记为 **configured / live-verified**。
 输入中断、撤回和重放合同见[输入生命周期](input-lifecycle.md)。

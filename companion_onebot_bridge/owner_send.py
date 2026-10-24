@@ -1,5 +1,6 @@
 """Native authority guard for the common leased-item dispatch lifecycle."""
 
+import base64
 from dataclasses import replace
 from datetime import datetime
 
@@ -26,6 +27,8 @@ class OwnerSendGuard:
         self.item_hash = None
         self.delivery_binding = None
         self.lease_until = None
+        self.meme_prepared = self.meme_sending = False
+        self.message_hash = None
 
     def reserve(self, item):
         from .owner_native_resolution import binding
@@ -50,6 +53,7 @@ class OwnerSendGuard:
             "approval_hash": journal.digest(self.authority), "provider_ack_hash": None,
             "item_hash": journal.digest(item), "plan_hash": journal.digest(self.authority)}
         self.delivery_binding = binding(self, item)
+        self.message_hash = journal.digest(self.prepared_message)
         with self.db:
             self.runtime.append("RESERVED", value | {"delivery_binding": self.delivery_binding})
             self.db.execute("INSERT INTO window_attempts VALUES(?,?,?,?,?,?,?,?,?)",
@@ -59,7 +63,8 @@ class OwnerSendGuard:
     def _local(self):
         self.runtime.verify()
         if (self.current_item is None or self.item_hash != journal.digest(self.current_item)
-            or self.dispatched or self.runtime.clock() >= self.lease_until):
+            or self.dispatched or self.runtime.clock() >= self.lease_until
+            or journal.digest(self.prepared_message) != self.message_hash):
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
         if self.pending_input():
             raise ValueError("OWNER_INPUT_PENDING")
@@ -154,8 +159,13 @@ class OwnerSendGuard:
         if expiry.utcoffset() is None:
             raise ValueError("OWNER_DELIVERY_LEASE_LOST")
         self.lease_until = min(self.lease_until, expiry)
+        if item["content"].get("image") is not None:
+            await self.runtime.check(self.client, purpose="meme")
         self._request(request)
         self._local()
+        if self.meme_prepared:
+            self.runtime.memes.mark_sending(item, check=self._local)
+            self.meme_sending = True
         with self.db:
             self.runtime.append("IO_STARTED", {"message_id": item["message_id"],
                                                 "provider_ack_hash": None})
@@ -208,6 +218,8 @@ class OwnerSendGuard:
             self.db.execute("UPDATE window_attempts SET state='NOT_SENT' WHERE message_id=?",
                             (item["message_id"],))
             self.runtime.spool.cancel_delivery(item, receipt)
+        if self.meme_prepared:
+            self.runtime.memes.confirm_not_sent(item, self, receipt)
         self.runtime.verify(active=False)
         return True
 
@@ -266,6 +278,24 @@ class OwnerOneBot:
             permission = await self.guard.runtime.check(self.guard.client, purpose="voice")
             self.guard.prepared_voice = prepare_delivery(self.guard.runtime, item,
                 voice_policy_sha256=permission["capability_policies"]["voice"])
+        elif item["content"].get("image") is not None:
+            await self.guard.runtime.check(self.guard.client, purpose="meme")
+            original = journal.digest(item)
+
+            def fence():
+                self.guard.runtime.verify()
+                if journal.digest(item) != original:
+                    raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
+
+            image = self.guard.runtime.memes.prepare(item, check=fence)
+            self.guard.meme_prepared = image is not None
+            message = [{"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            if image is None:
+                self.guard.runtime.memes.cancel(reply_segments.event_id(item))
+            else:
+                message.append({"type": "image", "data": {
+                    "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
+            self.guard.prepared_message = message
 
     async def send_content(self, content):
         item = self.guard.current_item
@@ -280,5 +310,15 @@ class OwnerOneBot:
                 raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
             return await self.delegate.send_message(self.guard.prepared_voice.message)
         if "image" in content:
-            raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
+            if self.guard.prepared_message is None:
+                raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
+            try:
+                provider_id = await self.delegate.send_message(self.guard.prepared_message)
+            except BaseException:
+                if self.guard.meme_sending and self.guard.dispatched:
+                    self.guard.runtime.memes.receipt(item, "UNKNOWN")
+                raise
+            if self.guard.meme_sending:
+                self.guard.runtime.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
+            return provider_id
         return await self.delegate.send_text(reply_segments.wire_text(item))

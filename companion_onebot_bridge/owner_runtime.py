@@ -135,6 +135,14 @@ class OwnerRuntime:
         return None if row is None else dict(zip(("authority_json", "state", "journal_head"),
                                                 row, strict=True))
 
+    @property
+    def memes(self):
+        from .meme_runtime import MemeRuntime
+
+        if not hasattr(self, "_memes"):
+            self._memes = MemeRuntime(self)
+        return self._memes
+
     def verify(self, *, active=True):
         row = self.row()
         if row is None or json.loads(row["authority_json"]) != self.authority:
@@ -423,7 +431,8 @@ class OwnerRuntime:
         while await owner_notices.flush_one(self, client):
             pass
         self.verify()
-        row = self.db.execute("SELECT i.key,w.capture_json FROM inbox i JOIN window_inputs w "
+        row = self.db.execute(
+            "SELECT i.key,w.capture_json,i.body FROM inbox i JOIN window_inputs w "
             "ON w.event_id=i.key WHERE i.state='pending' AND w.plan_hash=? "
             "ORDER BY i.rowid LIMIT 1", (journal.digest(self.authority),)).fetchone()
         if row is None:
@@ -433,8 +442,17 @@ class OwnerRuntime:
             from . import owner_pokes
 
             return await owner_pokes.flush(self, client, receipt)
+        approval = receipt
+        if self.config.meme_enabled and not self.config.meme_semantics_enabled:
+            permission = await self.check(client)
+            if "meme" in permission["capability_policies"]:
+                await self.check(client, purpose="meme")
+                await self.check(client, purpose="expression")
+                offer = self.memes.prepare_offer(json.loads(row[2]), receipt)
+                if offer is not None:
+                    approval = {**receipt, "meme_offer": offer}
         response = await bounded_post(
-            client, "/internal/v1/owner-authority/inputs/approve", receipt)
+            client, "/internal/v1/owner-authority/inputs/approve", approval)
         if (set(response) != {"approved", "duplicate"} or response["approved"] is not True
             or type(response["duplicate"]) is not bool):
             raise ValueError("OWNER_CAPTURE_APPROVAL_REJECTED")

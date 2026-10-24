@@ -125,13 +125,15 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
         delay = min(delay * 2, 30)
 
 
-async def upload(client, spool, wake, stop, metrics, *, runtime=None):
+async def upload(client, spool, wake, stop, metrics, *, runtime=None, memes=None):
     while not stop.is_set():
         wake.clear()
         try:
             flush = runtime.flush_one if runtime is not None else spool.flush_one
             while payload := await flush(client):
                 metrics.accepted(payload)
+                if memes is not None:
+                    memes.admitted(payload["event_id"])
         except httpx.TransportError:
             metrics.emit("core_unavailable")
             await pause(stop, 1)
@@ -200,6 +202,15 @@ async def observe_profile(pump, stop):
         await pump.close()
 
 
+async def discover_memes(pump, stop, profile):
+    try:
+        while not stop.is_set():
+            pump.tick(idle=profile.task is None or profile.task.done())
+            await pause(stop, pump.owner.config.poll_seconds)
+    finally:
+        await pump.close()
+
+
 async def run(config):
     if config.owner_authority is None:
         raise ValueError("OWNER_AUTHORITY_REQUIRED")
@@ -222,11 +233,13 @@ async def run(config):
             private_http_client(config.onebot_http_url, config.onebot_token) as protocol,
         ):
             onebot = OneBotClient(config, protocol)
+            from .owner_memes import MemePump
             from .pending_media import MediaPump
             from .profile_probe import ProfilePump
 
             media = MediaPump(runtime, core, protocol=onebot)
             profile = ProfilePump(runtime, core, protocol)
+            memes = MemePump(runtime, core)
             status = await runtime.probe(core, protocol)
             if not status["connection_ready"]:
                 raise ValueError("ONEBOT_NOT_READY")
@@ -234,11 +247,13 @@ async def run(config):
                 tasks = [
                     group.create_task(receive(config, spool, wake, stop, metrics, onebot,
                                               runtime=runtime, core=core)),
-                    group.create_task(upload(core, spool, wake, stop, metrics, runtime=runtime)),
+                    group.create_task(upload(core, spool, wake, stop, metrics,
+                                             runtime=runtime, memes=memes)),
                     group.create_task(deliver(core, onebot, spool, stop, metrics,
                                               runtime=runtime, protocol=protocol)),
                     group.create_task(transfer_media(media, stop)),
                     group.create_task(observe_profile(profile, stop)),
+                    group.create_task(discover_memes(memes, stop, profile)),
                 ]
                 await stop.wait()
                 for task in tasks:
