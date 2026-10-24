@@ -701,6 +701,10 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
 
 
 def prompt(summary, *, compact=False):
+    return "".join(prompt_parts(summary, compact=compact))
+
+
+def prompt_parts(summary, *, compact=False):
     """Render only the safe capability projection already used by the console."""
     labels = {"READY": "可用", "PAUSED": "暂缓", "UNAVAILABLE": "不可用"}
     routes = {"automatic": "系统流程", "owner_command": "主人指令", "model_callable": "本轮工具"}
@@ -718,18 +722,18 @@ def prompt(summary, *, compact=False):
              "UNOBSERVED 只表示没有进程运行观测，不等于功能关闭；实际素材和覆盖以回执为准。"]
     tools = [row["id"] for row in summary["capabilities"]
              if row["state"] == "READY" and "model_callable" in row["invocation"]]
-    lines.append("本轮可调用工具：" + ("、".join(tools) if tools else "无") + "。")
+    dynamic = ["本轮可调用工具：" + ("、".join(tools) if tools else "无") + "。"]
     if compact:
         # Keep the full state inventory without displacing current reading evidence.
         lines = ["\n能力状态是本地接纳条件，不是已执行或远端在线；"
                  "进程观测与本次任务回执各自独立，以本轮回执确认结果。",
                  answer_rules,
-                 "系统流程和主人指令不等于模型工具；本轮工具："
-                 + ("、".join(tools) if tools else "无") + "。",
+                 "系统流程和主人指令不等于模型工具。",
                  "B站字幕不代表看过完整视频；画面结论仅覆盖回执中的采样帧/短片段。"
                  "文档以解析文本/表格/页码为准，语音转写不等于主人原话或授权。"
                  "小黑盒正文/图片引用/部分评论、图片/动图/表情以回执为准。"
                  "账号资料API观测可能来自缓存，观测时刻不证明网络刷新。"]
+        dynamic = ["本轮工具：" + ("、".join(tools) if tools else "无") + "。"]
         for state, label in labels.items():
             names = [row["id"] for row in summary["capabilities"] if row["state"] == state]
             if names:
@@ -737,13 +741,13 @@ def prompt(summary, *, compact=False):
                 omitted = "部分能力未列出；未列出的能力不推定可用。"
                 for name in names:
                     line = label + "：" + ",".join([*selected, name]) + "。"
-                    if len("\n".join([*lines, line, omitted]).encode()) > 3000:
+                    if len("\n".join([*lines, *dynamic, line, omitted]).encode()) > 3000:
                         if selected:
-                            lines.append(label + "：" + ",".join(selected) + "。")
-                        return "\n".join([*lines, omitted])
+                            dynamic.append(label + "：" + ",".join(selected) + "。")
+                        return "\n".join(lines), "\n" + "\n".join([*dynamic, omitted])
                     selected.append(name)
-                lines.append(label + "：" + ",".join(selected) + "。")
-        return "\n".join(lines)
+                dynamic.append(label + "：" + ",".join(selected) + "。")
+        return "\n".join(lines), "\n" + "\n".join(dynamic)
     omitted = "部分能力未列出；未列出的能力不推定可用。"
     for row in summary["capabilities"]:
         line = f"- {row['id']}：{labels[row['state']]}"
@@ -753,8 +757,8 @@ def prompt(summary, *, compact=False):
             line += "（" + row["reason_codes"][0] + "）"
         if row["state"] == "READY" and row["runtime_observation"] != "OBSERVED":
             line += " [" + row["runtime_observation"] + "]"
-        if len(("\n".join([*lines, line, omitted])).encode("utf-8")) > 6000:
-            lines.append(omitted)
+        if len(("\n".join([*lines, *dynamic, line, omitted])).encode("utf-8")) > 6000:
+            dynamic.append(omitted)
             break
-        lines.append(line)
-    return "\n".join(lines)
+        dynamic.append(line)
+    return "\n".join(lines), "\n" + "\n".join(dynamic)

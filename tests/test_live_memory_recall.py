@@ -5,6 +5,7 @@ import json
 import sqlite3
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import numpy as np
@@ -66,7 +67,7 @@ async def readonly_window(
 ):
     memory_id, outsider, pins = scope_facts(core)
     calls, sends, scores = [], [], []
-    original_scores = core.memory.index.scores
+    original_scores = core.memory.index.scores_async
     # An existing out-of-scope fact with missing evidence must remain untouched.
     core.store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (outsider,))
     core.memory.observe_trait(
@@ -76,11 +77,11 @@ async def readonly_window(
     )
     core.store.execute("UPDATE traits SET confidence=1")
 
-    def semantic(query, rows):
+    async def semantic(query, rows, **kwargs):
         scores.append([r["memory_id"] for r in rows])
-        return original_scores(query, rows)
+        return await original_scores(query, rows, **kwargs)
 
-    core.memory.index.scores = semantic
+    core.memory.index.scores_async = semantic
     number = 0
 
     async def source(ws):
@@ -458,8 +459,9 @@ def test_no_candidates_dispatches_only_chat_without_a_review(core, tmp_path, mon
             # Substitute only relevance scores; the actual scoped SQL/FTS search still runs.
             monkeypatch.setattr(
                 core.memory.index,
-                "scores",
-                lambda query, rows: {row["memory_id"]: -1 for row in rows},
+                "scores_async",
+                AsyncMock(side_effect=lambda query, rows, **kw: {
+                    row["memory_id"]: -1 for row in rows}),
             )
             await capture()
             assert await core.run_once()
@@ -599,8 +601,9 @@ def test_selected_approved_facts_survive_the_soft_bound(core, tmp_path, monkeypa
         ):
             monkeypatch.setattr(
                 core.memory.index,
-                "scores",
-                lambda query, rows: {row["memory_id"]: 1.0 for row in rows},
+                "scores_async",
+                AsyncMock(side_effect=lambda query, rows, **kw: {
+                    row["memory_id"]: 1.0 for row in rows}),
             )
             await capture()
             assert await core.run_once()

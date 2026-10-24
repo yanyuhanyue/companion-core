@@ -38,13 +38,13 @@ def test_references_only_without_owner_or_history_text_freezes_no_facts_and_call
             raw_messages=[[card(text=REFERENCE)]],
         ) as (_, _, capture, send, calls, sends, scores, _, _):
             queries = []
-            original = core.memory.search
+            original = core.memory.search_async
 
-            def search(query, *args, **kwargs):
+            async def search(query, *args, **kwargs):
                 queries.append(query)
-                return original(query, *args, **kwargs)
+                return await original(query, *args, **kwargs)
 
-            monkeypatch.setattr(core.memory, "search", search)
+            monkeypatch.setattr(core.memory, "search_async", search)
             await capture()
             assert await core.run_once()
             assert queries == scores == []
@@ -86,13 +86,13 @@ def test_rich_history_review_chat_and_delivery_preserve_source_and_owner_boundar
             raw_messages=[mixed(), [{"type": "text", "data": {"text": OWNER_NOW}}]],
         ) as (_, _, capture, send, calls, sends, _, memory_id, _):
             queries = []
-            original = core.memory.search
+            original = core.memory.search_async
 
-            def search(query, *args, **kwargs):
+            async def search(query, *args, **kwargs):
                 queries.append(query)
-                return original(query, *args, **kwargs)
+                return await original(query, *args, **kwargs)
 
-            core.memory.search = search
+            core.memory.search_async = search
             await capture()
             assert await core.run_once()
             assert await send()

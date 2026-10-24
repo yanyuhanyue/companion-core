@@ -190,6 +190,21 @@ class MemoryContext:
         if not isinstance(query, str) or not query.strip():
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         rows = self.memory.search(query, actor=actor, memory_ids=memory_ids, limit=6, now=now)
+        return self._recall_result(rows, version, query, now, memory_ids, project_query)
+
+    async def recall_async(self, query, now, *, actor="owner", memory_ids=None,
+                           project_query=None, source_check=None, clock=None):
+        version = self._begin(actor)
+        if not isinstance(query, str) or not query.strip():
+            raise CoreError("INVALID_MEMORY_QUERY", 400)
+        rows = await self.memory.search_async(
+            query, actor=actor, memory_ids=memory_ids, limit=6, now=now,
+            source_check=source_check, clock=clock,
+        )
+        return self._recall_result(rows, version, query, clock() if clock else now,
+                                   memory_ids, project_query)
+
+    def _recall_result(self, rows, version, query, now, memory_ids, project_query):
         if not rows and project_query is not None:
             rows = self.memory.project_recall_candidates(
                 project_query, memory_ids=memory_ids, limit=6, now=now,
