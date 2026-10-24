@@ -283,7 +283,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     from companion.executive_protocol import ToolDecision, ToolRequest
     from companion.exploration import ReadResult
-    from companion.goals import CommitmentRequest, GoalDecision, GoalProposal
+    from companion.goals import (
+        CommitmentRequest,
+        GoalContinuationDecision,
+        GoalDecision,
+        GoalProposal,
+    )
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
@@ -451,6 +456,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def decide_goal(goal_id: str, body: GoalDecision):
         engine = app.state.core.goals
         return engine.accept(goal_id) if body.decision == "ACCEPT" else engine.cancel(goal_id)
+
+    @app.post("/internal/v2/goals/{goal_id}/continuation", dependencies=control_auth)
+    async def continue_goal(goal_id: str, body: GoalContinuationDecision):
+        return app.state.core.goals.continue_plan(goal_id, body)
 
     @app.post("/internal/v2/commitments", dependencies=control_auth, status_code=202)
     async def accept_commitment(body: CommitmentRequest):

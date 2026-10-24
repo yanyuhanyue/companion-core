@@ -44,8 +44,11 @@ def upgrade():
     op.execute("""CREATE TABLE goal_step_evidence (
         step_id TEXT NOT NULL REFERENCES goal_steps(step_id),
         event_id TEXT NOT NULL REFERENCES events(event_id), PRIMARY KEY(step_id,event_id))""")
-    op.execute("INSERT INTO goal_step_evidence SELECT s.step_id,e.event_id "
-               "FROM goal_steps s JOIN goal_evidence e USING(goal_id)")
+    op.execute("""WITH RECURSIVE sources(step_id,event_id) AS (
+        SELECT s.step_id,e.event_id FROM goal_steps s JOIN goal_evidence e USING(goal_id)
+        UNION SELECT s.step_id,d.source_event_id FROM sources s
+            JOIN event_dependencies d ON d.event_id=s.event_id)
+        INSERT INTO goal_step_evidence SELECT step_id,event_id FROM sources""")
     op.execute("CREATE INDEX idx_goal_step_evidence_event ON goal_step_evidence(event_id)")
 
 

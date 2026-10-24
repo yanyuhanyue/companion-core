@@ -19,7 +19,7 @@
 ## 有限多步阅读
 
 self Goal 可使用 `scope={"operation":"read_plan","urls":[...1–3 个准确 HTTPS URL...]}`。
-每个目标对应原 `goal_steps` 一行；最初只排队第一步，其余为 WAITING_DECISION。
+每个 URL 对应原 `goal_steps` 一行；最初只排队第一步，其余为 WAITING_DECISION。
 Reader 仍使用原单次 read_content 传输合同，每步绑定原授权、准确 URL 和完整来源闭包。
 旧 read_content/investigate 的序列化与既有承诺 scope/hash 不改变；承诺暂不接受 read_plan。
 

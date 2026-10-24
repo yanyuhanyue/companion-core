@@ -35,12 +35,23 @@ def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path
             captured_privacy_epoch=4, outcome_event_id="original-event", last_error_code="ORIGINAL",
             created_at=now, updated_at=now)
         store.insert("goal_evidence", goal_id="original-goal", event_id="original-event")
+        for event_id in ("middle-source", "root-source"):
+            store.insert("events", event_id=event_id, schema_version=1, source="qq.onebot",
+                source_event_id=event_id, conversation_id="conversation", actor_id="owner",
+                event_type="message", occurred_at=now, ingested_at=now, privacy_scope="private",
+                body_json='{"text":"retained original source"}', trace_id=event_id)
+        for event_id, source_id in (("original-event", "middle-source"),
+            ("middle-source", "root-source"), ("original-event", "root-source"),
+            ("root-source", "original-event")):
+            store.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
         store.insert("commitments", commitment_id="original-commitment", goal_id="original-goal",
             accepted_event_id="original-event", state="IN_PROGRESS", deadline=now,
             scope_sha256="a" * 64, created_at=now, updated_at=now)
         old_goal = store.one("SELECT * FROM goals")
         old_step = store.one("SELECT * FROM goal_steps")
         old_commitment = store.one("SELECT * FROM commitments")
+        originals = {table: store.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in (
+            "goal_evidence", "event_dependencies", "events")}
     migrate(path)
     with closing(Store(path)) as store:
         migrated = store.one("SELECT * FROM goal_steps")
@@ -48,8 +59,11 @@ def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path
         assert migrated["position"] == 1 and migrated["scope_json"] == scope
         assert store.one("SELECT * FROM goals") == old_goal
         assert store.one("SELECT * FROM commitments") == old_commitment
-        assert store.rows("SELECT * FROM goal_step_evidence") == [
-            {"step_id": "original-step", "event_id": "original-event"}]
+        assert store.rows("SELECT * FROM goal_step_evidence ORDER BY event_id") == [
+            {"step_id": "original-step", "event_id": key}
+            for key in ("middle-source", "original-event", "root-source")]
+        assert originals == {table: store.rows(f"SELECT * FROM {table} ORDER BY rowid")
+                             for table in originals}
         assert store.schema_capabilities()
         assert store.rows("PRAGMA foreign_key_check") == []
         store.insert("goal_steps", step_id="next-step", goal_id="original-goal", position=2,

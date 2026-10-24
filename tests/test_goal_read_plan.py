@@ -180,9 +180,17 @@ def test_real_goal_http_and_independent_reader_complete_two_step_plan(core, tmp_
             assert core.exploration.schedule_goal()
             await tick(client, URLS[0])
             step = decision(core, goal_id)
+            path = f"/internal/v2/goals/{goal_id}/continuation"
+            before = core.store.rows("SELECT * FROM goal_steps ORDER BY step_id")
+            denied = await client.post(path, json=step.model_dump(mode="json"), headers={
+                "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()})
+            assert denied.status_code == 401
+            assert core.store.rows("SELECT * FROM goal_steps ORDER BY step_id") == before
             reply = await client.post(f"/internal/v2/goals/{goal_id}/continuation",
                                       json=step.model_dump(mode="json"))
             assert reply.status_code == 200, reply.text
+            stale = await client.post(path, json=step.model_dump(mode="json"))
+            assert stale.status_code == 409 and stale.json()["error"] == "GOAL_VERSION_CHANGED"
             assert core.exploration.schedule_goal()
             await tick(client, URLS[1])
             assert core.goals.get(goal_id)["state"] == "DONE"
