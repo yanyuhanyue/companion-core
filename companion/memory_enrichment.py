@@ -54,20 +54,34 @@ def _record(memory, source_ids, request_id, content, now):
             "source_event_ids": proof["source_event_ids"], "at": now}
 
 
-def validate_summaries(memory, events, summaries):
-    groups = {}
-    for event in events:
-        if json.loads(event["body_json"]).get("text", "").strip():
-            groups.setdefault(event["conversation_id"], set()).add(event["event_id"])
+def summary_groups(memory, events, now):
+    """Use the exact original Episode partition, including N2 before late input."""
+    text_events = {event["event_id"]: event for event in events
+                   if json.loads(event["body_json"]).get("text", "").strip()}
+    if not text_events:
+        return []
+    coverage = memory.episode_coverage(list(text_events), now)
+    covered = {key for row in coverage for key in row["source_event_ids"]}
+    groups = [row["source_event_ids"] for row in coverage
+              if set(row["source_event_ids"]) <= text_events.keys()]
+    new = {}
+    for key, event in text_events.items():
+        if key not in covered:
+            new.setdefault(event["conversation_id"], []).append(key)
+    return [sorted(group) for group in [*groups, *new.values()]]
+
+
+def validate_summaries(memory, events, summaries, now):
+    groups = {tuple(group) for group in summary_groups(memory, events, now)}
     seen = set()
     for item in summaries:
         ids = set(item.source_event_ids)
-        conversation = next((key for key, values in groups.items() if values == ids), None)
-        if (conversation is None or conversation in seen or len(ids) != len(item.source_event_ids)
+        group = tuple(sorted(ids))
+        if (group not in groups or group in seen or len(ids) != len(item.source_event_ids)
             or any(sensitive(text) or redact(text, memory.settings) != text
                    for text in (item.title, item.summary))):
             raise CoreError("MEMORY_SUMMARY_SOURCES_INVALID", 502)
-        seen.add(conversation)
+        seen.add(group)
 
 
 def _importance(store, memory_id, records):
@@ -116,7 +130,7 @@ def record(memory, candidates, memory_ids, events, summaries, request_id, now):
         raise CoreError("MEMORY_ENRICHMENT_ERASURE_REQUIRED", 503)
     if not _settled(store, request_id):
         raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
-    validate_summaries(memory, events, summaries)
+    validate_summaries(memory, events, summaries, now)
     for candidate, memory_id in zip(candidates, memory_ids, strict=True):
         if candidate.salience is None:
             continue

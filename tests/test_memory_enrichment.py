@@ -15,7 +15,8 @@ from companion.memory_work import checkpoint_state
 from companion.model import ModelResponse
 from companion.store import Store, after, encode
 from tests.conftest import ingest, run
-from tests.test_nightly_stages import staged
+from tests.test_diary import DAY
+from tests.test_nightly_stages import staged, step
 
 IDS = [f"evt_test_{number}" for number in (1, 2, 3)]
 
@@ -195,3 +196,53 @@ def test_salience_does_not_replace_relevance_or_confirm_a_fact(core):
     assert core.memory.search("海水温度与珊瑚礁白化", now=core.clock()) == []
     assert core.store.one("SELECT status,importance FROM memories WHERE memory_id=?",
                           (fact["memory_id"],)) == {"status": "HYPOTHESIS", "importance": 0.8}
+
+
+def test_late_input_gets_its_own_summary_without_replacing_the_n2_episode(core):
+    model, draft = prepared(core)
+    core.consolidation.schedule_day(DAY)
+    assert step(core).progressed and step(core).progressed
+    original = core.store.one("SELECT * FROM episodes")
+    text = "还想比较不同译本。"
+    ingest(core, 4, text, at=DAY.isoformat() + "T04:01:00+00:00")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    draft["episode_summaries"].append({
+        "title": "比较译本", "summary": "用户另提出比较不同译本的计划。",
+        "source_event_ids": ["evt_test_4"],
+    })
+    model.extraction = encode(draft)
+    assert run(core.extract_once())
+    events = json.loads(model.calls[0][0][-1]["content"])
+    assert {row["event_id"]: row["episode_source_event_ids"] for row in events} == {
+        **dict.fromkeys(IDS, IDS), "evt_test_4": ["evt_test_4"]}
+    episodes = core.store.rows("SELECT * FROM episodes")
+    assert len(episodes) == 2 and original["episode_id"] in {
+        row["episode_id"] for row in episodes}
+    for row in episodes:
+        ids = [item["event_id"] for item in core.store.rows(
+            "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id",
+            (row["episode_id"],))]
+        assert core.memory.episode_summary(row["episode_id"], ids, core.clock())
+    assert all(row["n"] == 1 for row in core.store.rows(
+        "SELECT COUNT(*) AS n FROM episode_events GROUP BY event_id"))
+    assert [kind for _, kind in model.calls] == ["memory_extract"]
+
+
+def test_prior_episode_with_unprovided_source_cannot_be_resummarized(core):
+    model, draft = prepared(core)
+    prior = core.store.rows("SELECT * FROM events WHERE event_id IN (?,?)", IDS[:2])
+    old_id = core.memory.episodes(prior, core.clock(), mark_processed=False)
+    core.store.execute("UPDATE events SET memory_processed=1 WHERE event_id='evt_test_1'")
+    core.settings.extraction_min_events = 1
+    draft["episode_summaries"] = [{
+        "title": "阅读习惯", "summary": "用户喜欢在阅读前先列出章节。",
+        "source_event_ids": ["evt_test_3"],
+    }]
+    model.extraction = encode(draft)
+    assert run(core.extract_once())
+    events = json.loads(model.calls[0][0][-1]["content"])
+    assert {row["event_id"]: row["episode_source_event_ids"] for row in events} == {
+        "evt_test_2": [], "evt_test_3": ["evt_test_3"]}
+    assert core.memory.episode_summary(old_id, IDS[:2], core.clock()) is None
+    latest = core.store.one("SELECT episode_id FROM episode_events WHERE event_id='evt_test_3'")
+    assert core.memory.episode_summary(latest["episode_id"], ["evt_test_3"], core.clock())

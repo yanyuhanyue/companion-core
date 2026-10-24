@@ -489,8 +489,11 @@ async def extraction_step(core, local_day, lease, batch, persist):
                      request_id=request_id)
         persist()
         if previous_phase == "EXTRACT":
+            groups = memory_enrichment.summary_groups(core.memory, events, core.clock())
             data = [{"event_id": event["event_id"], "conversation_id": event["conversation_id"],
                      "occurred_at": event["occurred_at"],
+                     "episode_source_event_ids": next((group for group in groups
+                         if event["event_id"] in group), []),
                      "text": json.loads(event["body_json"]).get("text", "")} for event in events]
             messages = [{"role": "system", "content": EXTRACT_RULES},
                         {"role": "user", "content": encode(data)}]
@@ -506,7 +509,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
             _settled(s, request_id)
             extraction = Extraction.model_validate_json(response.text)
             _validate_batch(core, lease, batch)
-            memory_enrichment.validate_summaries(core.memory, events, extraction.episode_summaries)
+            memory_enrichment.validate_summaries(
+                core.memory, events, extraction.episode_summaries, core.clock())
             candidates = []
             for candidate in extraction.memories:
                 if candidate.evidence_event_id not in batch["event_ids"]:
