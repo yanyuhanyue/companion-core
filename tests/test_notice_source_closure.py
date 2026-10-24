@@ -74,7 +74,9 @@ def test_additional_goal_evidence_recall_cancels_notice_and_keeps_window_open(
                     await recall()
                 with Core(core.settings, core.model, core.clock) as worker:
                     assert worker.store is not core.store
-                    assert await worker.run_once("notice-source-closure") is (recall_at != "queued")
+                    assert await worker.run_once(
+                        "notice-source-closure", job_id=job["job_id"],
+                    ) is (recall_at != "queued")
                 if recall_at == "ready":
                     assert core.store.one("SELECT state FROM outbox WHERE origin_event_id=?",
                                           (job["event_id"],)) == {"state": "PENDING"}
@@ -110,7 +112,9 @@ def test_additional_goal_evidence_recall_cancels_notice_and_keeps_window_open(
                     commitment["commitment_id"], conversation_id, core.clock()) == (
                         job["job_id"])
                 with Core(core.settings, core.model, core.clock) as worker:
-                    assert await worker.run_once("notice-recall-replay") is False
+                    assert await worker.run_once(
+                        "notice-recall-replay", job_id=job["job_id"],
+                    ) is False
                 assert core.store.one("SELECT COUNT(*) AS n FROM jobs WHERE kind='activity'")[
                     "n"] == 1
                 assert not live_text.stopped(core.store, plan.sha256)
