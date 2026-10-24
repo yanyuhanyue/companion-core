@@ -18,10 +18,12 @@ GOAL_ATTENTION = (
     "(c.state IS NULL OR c.state NOT IN ('FULFILLED','EXPLAINED_FAILURE') "
     "OR NOT EXISTS (SELECT 1 FROM outbox o WHERE o.message_id=c.feedback_message_id "
     "AND o.state='SENT' AND o.action_type='qq.private.reply'))) "
-    "OR (g.state='DONE' AND NOT EXISTS (SELECT 1 FROM observations o "
-    "WHERE o.event_id=g.result_event_id AND o.redacted=0 "
-    "AND o.result_status IN ('FETCHED','WATCHED') AND s.state='DONE' "
-    "AND s.outcome_event_id=g.result_event_id)) "
+    "OR (g.state='DONE' AND (NOT EXISTS (SELECT 1 FROM goal_steps done "
+    "WHERE done.goal_id=g.goal_id AND done.state='DONE' "
+    "AND done.outcome_event_id=g.result_event_id) OR EXISTS (SELECT 1 FROM goal_steps unfinished "
+    "LEFT JOIN observations o ON o.event_id=unfinished.outcome_event_id "
+    "WHERE unfinished.goal_id=g.goal_id AND (unfinished.state<>'DONE' OR o.event_id IS NULL "
+    "OR o.redacted<>0 OR o.result_status NOT IN ('FETCHED','WATCHED'))))) "
     "OR EXISTS (SELECT 1 FROM exploration_requests r "
     "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
     "AND r.operation='read' AND json_extract(r.goal_step_json,'$.goal_id')=g.goal_id "
@@ -178,7 +180,8 @@ class MemoryProjections:
             if (not 1 <= len(roots) <= 100 or allowed is not None and not set(roots) <= allowed
                 or any(not self._goal_source(key, sources) for key in roots)):
                 continue
-            step = self.store.one("SELECT * FROM goal_steps WHERE goal_id=?", (goal["goal_id"],))
+            steps = self.store.rows("SELECT * FROM goal_steps WHERE goal_id=? "
+                                    "ORDER BY position LIMIT 4", (goal["goal_id"],))
             state = "discussed"
             if goal["state"] in ACTIVE:
                 state = "running" if goal["state"] == "RUNNING" else "planned"
@@ -187,11 +190,22 @@ class MemoryProjections:
             elif goal["state"] == "CANCELLED":
                 state = "closed"
             elif goal["state"] == "DONE":
-                completed = self._completed(goal, step, roots, sources, allowed)
+                completed = (1 <= len(steps) <= 3 and goal["result_event_id"] in {
+                    step["outcome_event_id"] for step in steps} and all(
+                        self._completed(goal, step, roots, sources, allowed) for step in steps))
                 state = "done" if completed else "UNKNOWN"
-            if step and step["state"] == "EXECUTION_UNCERTAIN":
+            if any(step["state"] == "EXECUTION_UNCERTAIN" for step in steps):
                 state = "UNKNOWN"
-            executions, executions_truncated = self._executions(goal, step, sources, allowed)
+            executions, executions_truncated = [], len(steps) > 3
+            for step in steps[:3]:
+                found, truncated = self._executions(goal, step, sources, allowed)
+                executions.extend(found)
+                executions_truncated |= truncated
+            executions.sort(key=lambda item: (
+                item["state"] != "UNKNOWN" and item["attempt_state"] != "UNKNOWN",
+                item["request_id"]))
+            executions_truncated |= len(executions) > 20
+            executions = executions[:20]
             if any(item["state"] == "UNKNOWN" or item["attempt_state"] == "UNKNOWN"
                    for item in executions):
                 state = "UNKNOWN"
@@ -207,6 +221,8 @@ class MemoryProjections:
             )
             result.append({"goal_id": goal["goal_id"], "kind": goal["kind"],
                            "native_state": goal["state"], "state": state,
+                           "steps": [{key: step[key] for key in (
+                               "step_id", "position", "state")} for step in steps[:3]],
                            "executions": executions, "executions_truncated": executions_truncated,
                            "told": told, "closed": closed, "source_event_ids": roots})
         return result, len(rows) > 20
@@ -246,8 +262,8 @@ class MemoryProjections:
         return executions, len(rows) > 20
 
     def _completed(self, goal, step, roots, sources, allowed):
-        key = goal["result_event_id"]
-        if not key or not step or step["state"] != "DONE" or step["outcome_event_id"] != key:
+        key = step["outcome_event_id"] if step else None
+        if not key or step["state"] != "DONE":
             return False
         if allowed is not None and key not in allowed:
             return False
@@ -257,7 +273,9 @@ class MemoryProjections:
         if not receipt or receipt["result_status"] not in {"FETCHED", "WATCHED"}:
             return False
         lineage = list(sources._lineage(key))
-        if not set(roots) <= {event["source_id"] for event in lineage}:
+        required = set(roots) | {row["event_id"] for row in self.store.rows(
+            "SELECT event_id FROM goal_step_evidence WHERE step_id=?", (step["step_id"],))}
+        if not required <= {event["source_id"] for event in lineage}:
             return False
         return self._live_lineage(lineage, sources)
 

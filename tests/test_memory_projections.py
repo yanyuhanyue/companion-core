@@ -192,6 +192,8 @@ def test_goal_done_label_alone_is_insufficient(core, damage):
         core.store.execute("UPDATE events SET source='observation.simulation' WHERE event_id=?",
                            (result,))
     elif damage == "missing_step":
+        core.store.execute("DELETE FROM goal_step_evidence WHERE step_id IN "
+                           "(SELECT step_id FROM goal_steps WHERE goal_id=?)", (goal,))
         core.store.execute("DELETE FROM goal_steps WHERE goal_id=?", (goal,))
     elif damage == "unrelated":
         core.store.execute("DELETE FROM event_dependencies WHERE event_id=?", (result,))
@@ -255,28 +257,28 @@ def timed_out_reads(core):
     core.settings.exploration_daily_bytes = 100 * core.settings.exploration_max_response_bytes
     core.goals.accept(goal)
     requests = []
-    for _ in range(3):
-        assert core.exploration.schedule_goal()
-        leased = core.exploration.lease("reader", reading=True)
-        assert leased
-        requests.append(leased["request_id"])
-        core.clock.advance(31)
-        core.exploration.recover()
-        core.clock.advance(300)
-    assert core.goals.get(goal)["state"] == "FAILED"
+    assert core.exploration.schedule_goal()
+    leased = core.exploration.lease("reader", reading=True)
+    assert leased
+    requests.append(leased["request_id"])
+    core.clock.advance(31)
+    core.exploration.recover()
+    core.clock.advance(300)
+    assert not core.exploration.schedule_goal()
+    assert core.goals.get(goal)["state"] == "WAITING_INPUT"
     assert {row["state"] for row in core.store.rows("SELECT state FROM exploration_requests")} == {
         "UNKNOWN"}
     return eid, goal, requests
 
 
 @pytest.mark.parametrize("boundary", ["valid", "withdrawn", "ttl", "allowlist"])
-def test_native_reader_retry_exhaustion_preserves_unknown_and_accounting(core, boundary):
+def test_native_reader_no_replay_preserves_unknown_and_accounting(core, boundary):
     eid, goal, requests = timed_out_reads(core)
     view = MemoryProjections(core.memory)
     before = core.store.rows("SELECT * FROM exploration_requests")
     snapshot = view.snapshot(core.clock(), episode_ids=[eid])
     projected = snapshot["episodes"][0]["goals"][0]
-    assert projected["goal_id"] == goal and projected["native_state"] == "FAILED"
+    assert projected["goal_id"] == goal and projected["native_state"] == "WAITING_INPUT"
     assert projected["state"] == "UNKNOWN" and not projected["closed"]
     assert snapshot["episodes"][0]["temperature"] == "Hot"
     assert {row["request_id"] for row in projected["executions"]} == set(requests)

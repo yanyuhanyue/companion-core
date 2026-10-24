@@ -154,13 +154,16 @@ def test_failed_fetch_never_completes_goal_and_expired_lease_not_replayed(core):
             lease_token=item["lease_token"], status="FAILED", error_code="UPSTREAM_ACCESS_LIMIT"
         ),
     )
-    assert core.goals.get(goal["goal_id"])["state"] == "RETRY_WAIT"
+    assert core.goals.get(goal["goal_id"])["state"] == "FAILED"
     assert (
         core.store.one("SELECT COUNT(*) n FROM observations WHERE result_status='FETCHED'")["n"]
         == 0
     )
     core.clock.advance(120)
-    assert core.exploration.schedule_goal()
+    assert not core.exploration.schedule_goal()
+    with core.store.transaction():
+        core.exploration.create("bili", "read", "independent-stale-read", URL,
+                                source_event_ids=core.goals.source_ids(goal["goal_id"]))
     second = core.exploration.lease("bili")
     assert second["request_id"] != item["request_id"]
     core.clock.advance(31)

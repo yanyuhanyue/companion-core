@@ -180,7 +180,7 @@ class ExplorationService:
         previous = s.one("SELECT request_id FROM exploration_requests WHERE request_key=?", (key,))
         if previous:
             return previous["request_id"]
-        sources = self.goals.source_ids(step["goal_id"]) if step else source_event_ids or []
+        sources = self.goals.step_source_ids(step["step_id"]) if step else source_event_ids or []
         self.goals.validate_sources(sources)
         from companion import owner_authority
 
@@ -303,7 +303,7 @@ class ExplorationService:
                 self.goals.fail(
                     step,
                     "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
-                    retryable=was_started,
+                    execution_uncertain=was_started,
                     resource=not was_started,
                 )
 
@@ -681,7 +681,8 @@ class ExplorationService:
                 ),
             )
         if failed_step and not reading:
-            self.goals.fail(failed_step, result.error_code or "READ_FAILED", retryable=True)
+            self.goals.fail(failed_step, result.error_code or "READ_FAILED",
+                            execution_uncertain=state == "UNKNOWN")
         if step and step["kind"] == "self" and not reading:
             for event_id in result_ids:
                 self.social.consider(event_id)
