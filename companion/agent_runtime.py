@@ -1,0 +1,163 @@
+"""Pydantic AI runs the conversation; Core owns each actual paid request.
+
+The runtime accepts native Toolsets and Conversation objects. It does not implement
+a second tool registry, loop, checkpoint protocol, delivery path or database store.
+Native hooks checkpoint SDK results against the original leased Core job;
+unknown provider or tool effects stop recovery instead of repeating I/O.
+"""
+
+from collections.abc import Awaitable, Callable
+
+from pydantic_ai import Agent, Conversation, DeferredToolRequests
+from pydantic_ai.capabilities import Hooks
+from pydantic_ai.models import Model
+from pydantic_ai.usage import UsageLimits
+
+from companion import budget, owner_authority, owner_input
+from companion.agent_messages import (
+    from_wire_messages,
+    to_runtime_response,
+    to_wire_messages,
+)
+from companion.contracts import CoreError
+from companion.model import ModelResponse
+
+
+class ControlledModel(Model):
+    """Map the mature Model interface to an injected completion, without authority."""
+
+    def __init__(self, model_name: str, complete: Callable[..., Awaitable[ModelResponse]], *,
+                 image_input: bool = False):
+        super().__init__(profile={
+            "supports_tools": True, "supports_text_output": True,
+            "supports_inline_system_prompts": True,
+            "supports_image_input": image_input,
+            "supports_document_input": False, "supports_audio_input": False,
+            "supports_audio_file_input": False, "supports_video_input": False,
+            "supports_json_schema_output": False, "supports_json_object_output": False,
+            "supports_thinking": False,
+        })
+        self._model_name = model_name
+        self._complete = complete
+
+    @property
+    def model_name(self):
+        return self._model_name
+
+    @property
+    def system(self):
+        return "companion-controlled"
+
+    async def request(self, messages, model_settings, model_request_parameters):
+        settings, parameters = self.prepare_request(model_settings, model_request_parameters)
+        if (settings or parameters.native_tools or parameters.output_tools
+            or parameters.output_mode != "text"):
+            raise CoreError("CORE_MODEL_CONFIGURATION_REQUIRED", 503)
+        # Pydantic AI prepares histories before invoking Model.request, including
+        # retry feedback and ordered tool results. Request instructions are also
+        # provided by its resolved parameters, not rebuilt from our own state.
+        wire = [*({"role": "system", "content": part.content}
+                  for part in parameters.instruction_parts or []), *to_wire_messages(messages)]
+        response = await self._complete(wire, tools=parameters.function_tools)
+        return to_runtime_response(response, model_name=self.model_name, provider_name=self.system)
+
+
+def check_conversation(core, job, snapshots=(), *, current_request=None, purpose="chat"):
+    """Recheck the original job lease and Core's existing source/snapshot contracts."""
+    if job["kind"] != "chat":
+        raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
+    view = owner_authority.check_job(
+        core.store, core.settings, core.clock, job, purpose="chat", executing=True,
+    )
+    if purpose != "chat":
+        owner_authority.check_job(
+            core.store, core.settings, core.clock, job, purpose=purpose, executing=True,
+        )
+    owner_input.source(core.store, core.settings, view, job["event_id"], core.clock())
+    core._check_context_snapshots(job, snapshots, current_request=current_request)
+    from companion import agent_images
+
+    agent_images.inputs(core.store, core.settings, core.clock, job)
+    return view
+
+
+async def run_conversation(core, job, messages, *, toolsets=(), conversation=None,
+                           deferred_tool_results=None, snapshots=(), persistence=None):
+    """Run or resume a mature conversation over the same leased job and paid ledger.
+
+    The caller provides trusted tool handlers and any externally obtained results.
+    Conversation persistence is caller-owned: this entry point stores no new state.
+    Native handlers must retain their existing source and permission checks.
+    """
+    if job["kind"] != "chat":
+        raise CoreError("CONVERSATION_CHAT_JOB_REQUIRED", 403)
+    if conversation is not None and not isinstance(conversation, Conversation):
+        raise TypeError("expected a Pydantic AI Conversation")
+    if conversation is not None and conversation.conversation_id != job["job_id"]:
+        raise CoreError("CONVERSATION_JOB_MISMATCH", 403)
+    def check(*, current_request=None):
+        check_conversation(core, job, snapshots, current_request=current_request)
+
+    check()
+
+    async def complete(wire, *, tools):
+        check()
+        try:
+            request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat", wire,
+                                        core.clock(), clock=core.clock, tools=tools)
+        except Exception:
+            if persistence is not None:
+                persistence.not_admitted()
+            raise
+        registered = False
+
+        def check_request():
+            nonlocal registered
+            check(current_request=request_id)
+            from companion.agent_images import check_payload
+
+            check_payload(core.store, core.settings, core.clock, job, wire)
+            if persistence is not None and not registered:
+                persistence.admitted(request_id)
+                registered = True
+
+        response = await budget.complete(
+            core.model, core.store, core.settings, request_id, wire, "chat", core.clock,
+            tools=tools, source_check=check_request,
+        )
+        usage = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        if usage is None or usage["state"] != "SETTLED":
+            # An SDK usage counter cannot turn an unmeasured provider outcome into
+            # a settled one, nor authorize the next model or tool side effect.
+            raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
+        check()
+        return response
+
+    paid = core.settings.paid_model
+    async def before_tool_execute(ctx, *, call, tool_def, args):
+        check()
+        return args
+
+    hooks = {"before_tool_execute": before_tool_execute}
+    if persistence is not None:
+        hooks.update(before_model_request=persistence.before_model_request,
+                     after_model_request=persistence.after_model_request,
+                     tool_execute=persistence.wrap_tool_execute)
+    agent = Agent(
+        ControlledModel(core.settings.model_name, complete,
+                        image_input=bool(paid and paid.image_input)),
+        output_type=[str, DeferredToolRequests], toolsets=toolsets,
+        retries=1, name="companion", deps_type=object,
+        capabilities=[Hooks(**hooks)],
+    )
+    history = from_wire_messages(messages) if conversation is None else None
+    result = await agent.run(
+        message_history=history, conversation=conversation,
+        conversation_id=job["job_id"] if conversation is None else None,
+        deferred_tool_results=deferred_tool_results,
+        usage_limits=UsageLimits(request_limit=paid.per_request_calls if paid else 1),
+        infer_name=False,
+    )
+    if persistence is not None:
+        persistence.save_result(result)
+    return result
