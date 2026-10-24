@@ -49,8 +49,9 @@ async def start(
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-B",
-        "-m",
-        "tests.worker_wakeup_process",
+        "-c",
+        # Load SDK type declarations before the child instruments provider HTTP.
+        "import pydantic_ai; from tests.worker_wakeup_process import main; main()",
         str(config),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

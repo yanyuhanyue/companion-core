@@ -11,16 +11,17 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from companion import life_worker, live_text
+from companion import life_worker, owner_authority
 from companion.api import create_app
 from companion.core import Core
 from companion.diary import DIARY_RULES, DiaryService
 from companion.model import ModelClient
-from companion_onebot_bridge import continuous, network
+from companion_onebot_bridge import owner_notices
 from tests.conftest import run
+from tests.native_continuous_support import host
+from tests.support.native_context import Capture
 from tests.test_diary import DAY
 from tests.test_next_life_diary import seed, withdraw
-from tests.test_onebot_capture import capture_approval, real_core_http, source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_owner_recall_bridge import recall_frame
 from tests.test_private_companion import companion_options
@@ -175,39 +176,39 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
     async def scenario():
         nonlocal next_text
         options = companion_options(core)
-        async with real_core_http(core) as port, source_window(
-            core, tmp_path, source, live=True, approved=True, scope_options=options,
-            bridge_options={"core_url": f"http://127.0.0.1:{port}"},
-        ) as (window, _, protocol, _, sends), network.private_http_client(
-            window.plan.config.core_url, window.plan.config.bridge_token,
-        ) as client, httpx.AsyncClient(
-            base_url=window.plan.config.core_url,
+        async with host(core, tmp_path, source, ticking=False,
+            purposes=("chat", "diary", "memory", "history"),
+            core_options=options["core_options"],
+            paid_options={"per_request_calls": 3, "window_calls": 100},
+        ) as (window, _, sends, _), httpx.AsyncClient(
+            base_url=window.config.core_url,
             headers={"Authorization": "Bearer " + ADMIN_TOKEN}, trust_env=False,
         ) as owner, httpx.AsyncClient(transport=httpx.MockTransport(provider)) as model:
+            client = window.client
             core.model = ModelClient(core.settings, model)
 
             async def capture(text):
                 nonlocal next_text
                 next_text = text
-                status = live_text.status(core.store, core.settings, core.clock)
-                assert status["approved"], status
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                owner_authority.current(core.store, core.settings, core.clock, purpose="chat")
+                await Capture(core, window.spool, window.runtime).capture_once(
+                    client, window.protocol)
+                await window.flush()
                 return core.store.one("SELECT event_id FROM events WHERE actor_id='owner' "
                                       "ORDER BY rowid DESC LIMIT 1")["event_id"]
 
             async def recall(message_id):
-                receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
-                receiver.put_recall(recall_frame(message_id, time=int(core.clock.now.timestamp())),
-                                    core.clock.now, ("127.0.0.1", 12345))
-                assert await continuous.flush_recalls(window, client)
-                assert not await continuous.flush_recalls(window, client)
+                assert owner_notices.put(window.runtime,
+                    recall_frame(message_id, time=int(core.clock.now.timestamp())),
+                    core.clock.now, ("127.0.0.1", 12345))
+                assert await owner_notices.flush_one(window.runtime, client)
+                assert not await owner_notices.flush_one(window.runtime, client)
 
             originals = []
             for text in source_texts:
                 originals.append(await capture(text))
                 assert await core.run_once()
-                await continuous.pump_private(window, client, protocol)
+                assert await window.pump()
             local = core.clock.now.astimezone(ZoneInfo(core.settings.timezone))
             day = local.date()
             core.clock.now = (local + timedelta(days=1)).replace(hour=4).astimezone(UTC)
@@ -245,7 +246,7 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
                 assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
                                       (later_event,))["state"] == "QUEUED"
                 assert await core.run_once("new-owner-input-worker")
-                await continuous.pump_private(window, client, protocol)
+                assert await window.pump()
 
             async def revoke_in_flight():
                 try:
@@ -279,10 +280,12 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
             assert len(diary_usage) == 2 and all(item["state"] == "SETTLED" for item in diary_usage)
             assert core.store.one("SELECT attempts FROM diary_runs WHERE local_date=?",
                                   (day.isoformat(),))["attempts"] == 2
-            assert live_text.status(core.store, core.settings, core.clock)["approved"]
-            assert window.status()["state"] == "OPEN"
+            assert owner_authority.status(
+                core.store, core.settings, core.clock)["state"] == "ACTIVE"
+            window.runtime.verify()
 
     try:
         run(scenario())
     except httpx.HTTPStatusError as error:
-        raise AssertionError(f"{error.request.url.path}: {error.response.text}") from error
+        raise AssertionError(
+            f"{error.request.url.path}: HTTP {error.response.status_code}") from error
