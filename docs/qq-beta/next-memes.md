@@ -62,6 +62,9 @@ Core 字段位于 `companion.config.Settings`，可从 Core TOML 或对应
 Core 对话频率与 Bridge 图片冷却分别执行，不自动相互换算。实际回复还要求
 `automatic_reply=true`、`companion_scope="owner_private_v1"`、有效签名窗口与原发送权限。
 启用开关不会补齐窗口批准、搜索订阅或素材许可。
+历史候选容量已满时，新输入使用文字路径；已冻结的候选仍按原身份重放。
+发现结果或语义来源容量已满时，先补交原待确认结果，再推迟新任务领取，避免取得费用责任后无处保存回执。
+容量降级不会删除历史记录、重置冷却或释放 UNKNOWN。
 
 ## HTTP v1 与持久预算
 

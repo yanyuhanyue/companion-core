@@ -287,6 +287,43 @@ def test_disabled_by_default_and_missing_intent_never_contacts_core(runtime_fact
     assert core.calls == []
 
 
+@pytest.mark.parametrize("table", ["meme_runtime_offers", "meme_offers"])
+def test_old_window_offer_capacity_does_not_block_new_text(runtime_factory, table):
+    runtime, event = runtime_factory()
+    runtime.catalog.max_bindings = 1
+    with runtime.db:
+        if table == "meme_runtime_offers":
+            runtime.db.execute("INSERT INTO meme_runtime_offers VALUES (?,?,?,?)",
+                               ("old-event", "a" * 64, "b" * 64, "null"))
+        else:
+            runtime.db.execute("INSERT INTO meme_offers VALUES (?,?,NULL,?)",
+                               ("old-key", "celebrate", "[]"))
+    before = runtime.db.execute(f"SELECT * FROM {table}").fetchall()
+    assert runtime.prepare_offer(event) is None
+    assert runtime.prepare_offer(event) is None
+    assert runtime.db.execute(f"SELECT * FROM {table}").fetchall() == before
+    assert runtime.window.state == "OPEN"
+
+
+def test_result_capacity_is_checked_before_claim_or_external_cost(runtime_factory):
+    runtime, event = runtime_factory(public=httpx.MockTransport(
+        lambda _: httpx.Response(503)))
+    runtime.catalog.max_bindings = 1
+    with runtime.db:
+        runtime.db.execute("INSERT INTO meme_runtime_results VALUES (?,?,?,'SETTLED')",
+                           ("old-attempt", "old-job", "{}"))
+    core = CoreHTTP(runtime, event)
+
+    async def scenario():
+        async with core.client() as client:
+            assert await runtime.run_once(client) == {
+                "status": "DEFERRED", "code": "MEME_BINDING_LIMIT"}
+    run(scenario())
+    assert core.calls == []
+    assert runtime.db.execute("SELECT * FROM meme_runtime_results").fetchall() == [
+        ("old-attempt", "old-job", "{}", "SETTLED")]
+
+
 def test_optional_offer_and_discovery_cancellation_do_not_interrupt_new_owner_input(
     runtime_factory,
 ):

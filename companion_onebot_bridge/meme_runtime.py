@@ -393,7 +393,10 @@ class MemeRuntime:
                 if self.db.execute("SELECT COUNT(*) FROM meme_runtime_offers").fetchone()[0] >= (
                     self.catalog.max_bindings
                 ):
-                    raise ValueError("MEME_BINDING_LIMIT")
+                    # Capacity is monotonic within this frozen window: no receipt
+                    # pruning or configuration changes can make a later replay
+                    # select an offer. Optional media must not stop owner text.
+                    return None
                 self.db.execute(
                     "INSERT INTO meme_runtime_offers VALUES (?,?,?,?)",
                     (event_id, event_sha256, self.window.plan.sha256, encode(offer)),
@@ -412,6 +415,8 @@ class MemeRuntime:
         except ValueError as error:
             if error.args == ("MEME_INPUT_CANCELLED",):
                 return freeze(None, self._window_check)
+            if error.args == ("MEME_BINDING_LIMIT",):
+                return freeze(None, check)
             raise
 
     def missing_offer(self, event_id):
@@ -793,6 +798,14 @@ class MemeRuntime:
                     return semantic
             if not getattr(self.config, "meme_discovery_enabled", False):
                 return {"status": "DISABLED"}
+            # The original result must have room before claiming/reserving any
+            # new work. Existing PENDING results above always reconcile first.
+            tables = ["meme_runtime_results"]
+            if self.semantics_enabled:
+                tables.append("meme_runtime_sources")
+            if any(self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                   >= self.catalog.max_bindings for table in tables):
+                return {"status": "DEFERRED", "code": "MEME_BINDING_LIMIT"}
             response = await self.window.core_post(
                 client,
                 BASE + "/lease",

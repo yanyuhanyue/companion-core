@@ -349,7 +349,7 @@ def test_regular_onebot_guard_never_acquires_private_file_action_permission(tmp_
     ("claim_lost", None), ("native_lost", "FILE_FETCH_TIMEOUT"),
     ("download_lost", "FILE_FETCH_TIMEOUT"), ("upload_unknown", None),
 ])
-def test_restart_never_repeats_an_uncertain_file_operation(tmp_path, failure, code):
+def test_restart_file_read_resumes_but_uncertain_claim_and_upload_do_not(tmp_path, failure, code):
     async def scenario():
         async with file_window(tmp_path) as (window, client, protocol, contract):
             row = await capture_and_queue(window, client, protocol)
@@ -358,13 +358,24 @@ def test_restart_never_repeats_an_uncertain_file_operation(tmp_path, failure, co
                 await pump(window, client, protocol, contract).execute(row)
             before = len(contract.lookups), len(contract.downloads), len(contract.uploads)
             row = window.db.execute("SELECT * FROM automatic_media").fetchone()
+            claims = sum(path.endswith("/claim") for path, _ in contract.calls)
             contract.failure = None
-            with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED"):
+            resumed = failure in {"native_lost", "download_lost"}
+            if resumed:
                 await pump(window, client, protocol, contract).execute(row)
-            assert (len(contract.lookups), len(contract.downloads), len(contract.uploads)) == before
+                assert len(contract.lookups) == before[0] + 1
+                assert len(contract.downloads) == before[1] + 1
+                assert len(contract.uploads) == 1
+                assert sum(path.endswith("/claim") for path, _ in contract.calls) == claims
+            else:
+                with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED"):
+                    await pump(window, client, protocol, contract).execute(row)
+                assert (len(contract.lookups), len(contract.downloads),
+                        len(contract.uploads)) == before
             await window.stop_live(client)
             stopped = window.db.execute("SELECT * FROM automatic_media").fetchone()
-            assert stopped["state"] == "CANCELLED" and stopped["manifest_json"] is None
+            assert stopped["state"] == ("DONE" if resumed else "CANCELLED")
+            assert stopped["manifest_json"] is None
             window.verify(active=False)
 
     run(scenario())

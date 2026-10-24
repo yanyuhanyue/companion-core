@@ -220,11 +220,11 @@ def stop(window):
 
 
 async def upload(window, client, event_id, images, *, files=(), records=(), start_slot=0,
-                 check=None, stage=None,
+                 check=None, stage=None, resume_claim=None,
                  image_transport=None, image_resolver=None, protocol=None,
                  file_transport=None, file_resolver=None, voice_transport=None, voice_resolver=None,
                  set_phase=lambda phase: None):
-    """Shared one-shot transfer, with every external boundary revalidating the source."""
+    """Transfer with source checks; resume only an unuploaded read under its original lease."""
     check = check or (lambda: window.verify())
 
     async def guard():
@@ -247,9 +247,13 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     prefix = "/internal/v2/content/" + event_id + "/image"
     for image in images[start_slot:]:
         await guard()
-        await progress("CLAIMING", image.slot)
-        claim = await window.core_post(client, prefix + "/claim",
-            {"request_key": f"image:{image.slot}", "source_sha256": image.source_sha256})
+        if resume_claim is not None and image.slot == start_slot:
+            claim = resume_claim
+        else:
+            await progress("CLAIMING", image.slot)
+            claim = await window.core_post(client, prefix + "/claim",
+                {"request_key": f"image:{image.slot}", "source_sha256": image.source_sha256})
+        _download_claim(claim, window, kind="IMAGE")
         await progress("DOWNLOADING", image.slot, claim)
 
         async def check_image(*, image=image, claim=claim):
@@ -291,12 +295,15 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     for original in files[max(0, start_slot - len(images)):]:
         position = len(images) + original.slot
         await guard()
-        await progress("CLAIMING", position)
         prefix = "/internal/v2/content/" + event_id + "/file"
-        claim = await window.core_post(client, prefix + "/claim", {
-            "request_key": f"file:{original.slot}", "source_sha256": original.source_sha256,
-        })
-        _file_claim(claim, window)
+        if resume_claim is not None and position == start_slot:
+            claim = resume_claim
+        else:
+            await progress("CLAIMING", position)
+            claim = await window.core_post(client, prefix + "/claim", {
+                "request_key": f"file:{original.slot}", "source_sha256": original.source_sha256,
+            })
+        _download_claim(claim, window)
         await progress("DOWNLOADING", position, claim)
 
         async def check_file(*, original=original, claim=claim, prefix=prefix):
@@ -375,7 +382,7 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
                        else "PENDING", position + 1, result)
 
 
-def _file_claim(value, window):
+def _download_claim(value, window, *, kind="FILE"):
     try:
         if (not isinstance(value, dict)
             or set(value) != {"state", "lease_token", "lease_until", "max_bytes"}
@@ -390,7 +397,7 @@ def _file_claim(value, window):
         if not until.tzinfo or not window.clock() < until:
             raise ValueError()
     except (TypeError, ValueError):
-        raise ValueError("FILE_DOWNLOAD_CLAIM_REJECTED") from None
+        raise ValueError(kind + "_DOWNLOAD_CLAIM_REJECTED") from None
 
 
 class MediaPump:
@@ -423,6 +430,25 @@ class MediaPump:
             images = [item for item in media if isinstance(item, OriginalImage)]
             files = [item for item in media if isinstance(item, OriginalFile)]
             records = [item for item in media if isinstance(item, OriginalRecord)]
+            if row["state"] == "DOWNLOADING":
+                if not 0 <= row["next_slot"] < len(media):
+                    raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
+                original = media[row["next_slot"]]
+                claim = None
+                if not isinstance(original, OriginalRecord):
+                    claim = json.loads(row["receipt_json"]) if row["receipt_json"] else None
+                    _download_claim(claim, self.window, kind=(
+                        "FILE" if isinstance(original, OriginalFile) else "IMAGE"))
+                # No upload can have started before the durable UPLOADING marker.
+                # Recheck the same source and lease before GET; never issue another
+                # claim, extend its deadline, or replay a Core/provider effect.
+                await upload(self.window, self.client, row["event_id"], images, files=files,
+                    records=records, start_slot=row["next_slot"], resume_claim=claim,
+                    check=lambda: self.check_source(row),
+                    stage=lambda state, slot, receipt: transition(
+                        self.window, row["event_id"], state, slot, receipt),
+                    **self.image_options, **self.file_options)
+                return
             if row["state"] != "PENDING":
                 if not 0 <= row["next_slot"] < len(media):
                     raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
@@ -484,8 +510,8 @@ class MediaPump:
         if self.task is not None:
             if not self.task.done():
                 return
-            self.task.result()
-            self.task = None
+            task, self.task = self.task, None
+            task.result()
         if exists(self.window):
             row = self.window.db.execute("SELECT * FROM automatic_media WHERE plan_hash=? "
                 "AND state NOT IN ('DONE','CANCELLED') ORDER BY rowid LIMIT 1",
@@ -501,8 +527,9 @@ class MediaPump:
 
     async def close(self):
         if self.task is not None:
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
+            task, self.task = self.task, None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 class SourceCancelled(Exception):
