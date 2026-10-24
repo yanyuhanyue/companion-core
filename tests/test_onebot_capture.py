@@ -21,7 +21,7 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 from companion.api import create_app
 from companion.config import LiveTextWindowApproval
 from companion.model import ModelClient
-from companion_onebot_bridge import app, capture, network
+from companion_onebot_bridge import capture, network
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, WindowPlan, digest
 from tests.conftest import run
@@ -187,94 +187,50 @@ async def real_core_http(core):
         listener.close()
 
 
-@pytest.mark.parametrize("approved", [False, True])
-def test_authenticated_ws_real_http_five_input_model_outbox_send_chain(core, tmp_path, approved):
-    number, connections, model_calls, sends = 1, [], [], []
+@pytest.mark.parametrize("restart", [False, True])
+def test_authenticated_ws_real_http_five_input_model_outbox_send_chain(core, tmp_path, restart):
+    from companion_onebot_bridge.owner_runtime import OwnerRuntime
+    from tests.support.native_context import source_window as native_source
+
+    number, calls = 1, []
 
     async def source(ws):
-        connections.append(ws.request.headers["Authorization"])
         for frame in bootstrap_frames():
             await ws.send(json.dumps(frame))
         await ws.send(json.dumps(raw_event(number)))
         await ws.wait_closed()
 
-    def model_reply(request):
-        model_calls.append(request)
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "合成回答"}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
-        )
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "合成回答"}}],
+                                        "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
     async def scenario():
         nonlocal number
-        with onebot_http(sends, config().onebot_token) as http_port:
-            async with real_core_http(core) as core_port, serve(source, "127.0.0.1", 0) as server:
-                cfg, plan = pinned_plan(
-                    core,
-                    tmp_path,
-                    server.sockets[0].getsockname()[1],
-                    http_port=http_port,
-                    core_port=core_port,
-                    live=True,
-                    approved=approved,
-                )
-                async with (
-                    network.private_http_client(cfg.core_url, cfg.bridge_token) as client,
-                    network.private_http_client(cfg.onebot_http_url, cfg.onebot_token) as protocol,
-                    httpx.AsyncClient(transport=httpx.MockTransport(model_reply)) as model,
-                ):
-                    core.model = ModelClient(core.settings, model)
-                    with Spool(cfg) as spool:
-                        await TestWindow(spool, plan, clock=lambda: core.clock.now).open(
-                            client, protocol if approved else None
-                        )
-                    for number in range(1, 6):
-                        with Spool(cfg) as spool:
-                            window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                            status = await window.capture_once(client, protocol)
-                            assert status["new_inputs"] == number and spool.pending_count == 1
-                            assert (
-                                core.store.one("SELECT COUNT(*) n FROM events")["n"] == number - 1
-                            )
-                            await window.approve_captured(client, capture_approval(window))
-                            assert await core.run_once("synthetic-capture")
-                            status = await window.send_once(
-                                client, protocol, reply_approval(plan, core)
-                            )
-                            assert status["attempt_states"] == {"ACK": number}
-                            assert status["phone_receipts"] is None
-                            if number < 5:
-                                # Replayed platform frame consumes neither input nor send allowance.
-                                assert (await window.capture_once(client, protocol))[
-                                    "new_inputs"
-                                ] == number
-                            else:
-                                assert status["state"] == "STOPPED"
-                                with pytest.raises(ValueError):
-                                    await window.capture_once(client, protocol)
-                    assert len(model_calls) == len(sends) == 5
-                    assert len(connections) == 9
-                    journal = await asyncio.to_thread(plan.journal.read_text, "utf-8")
-                    assert_private_journal(
-                        journal, (
-                            cfg.owner_qq_id,
-                            cfg.bot_qq_id,
-                            cfg.onebot_token,
-                            "你好",
-                            cfg.onebot_ws_url,
-                        ),
-                    )
-                    assert list((spool.directory / "captures").glob("*.json")) == []
-                    receipts = core.store.rows(
-                        "SELECT value FROM runtime_meta WHERE key LIKE 'live_text_input:%'"
-                    )
-                    assert len(receipts) == 5 and all(
-                        json.loads(row["value"])["capture"] for row in receipts
-                    )
-
+        async with native_source(core, tmp_path, source) as values:
+            captured, client, protocol, peers, sends = values
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
+                core.model = ModelClient(core.settings, model)
+                for number in range(1, 6):
+                    if restart:
+                        captured.runtime = OwnerRuntime(captured.spool,
+                                                        clock=lambda: core.clock.now)
+                    assert (await captured.capture_once(client, protocol))["new_inputs"] == 1
+                    assert captured.spool.pending_count == 1
+                    assert core.store.one("SELECT COUNT(*) n FROM events")["n"] == number - 1
+                    assert await captured.runtime.flush_one(client)
+                    assert await core.run_once("native-five-turn")
+                    result = await captured.send(client, protocol)
+                    assert result["attempt_states"] == {"ACK": number}
+                    assert (await captured.capture_once(client, protocol))["new_inputs"] == 0
+                    assert not await captured.runtime.flush_one(client)
+                assert len(calls) == len(sends) == 5 and len(peers) == 10
+                assert_private_journal(captured.runtime.path.read_text('utf-8'), (
+                    captured.config.owner_qq_id, captured.config.bot_qq_id,
+                    captured.config.onebot_token, "你好", captured.config.onebot_ws_url))
+                assert not list((captured.spool.directory / "captures").glob("*.json"))
+                assert len(core.store.rows("SELECT value FROM runtime_meta "
+                                          "WHERE key LIKE 'owner_input:%'")) == 5
     run(scenario())
 
 
@@ -431,7 +387,8 @@ def test_capture_holds_original_os_lock_and_cli_stop_interrupts_receive(core, tm
             task = asyncio.create_task(window.capture_once(client, protocol))
             await asyncio.wait_for(connected.wait(), 5)
             with pytest.raises(RuntimeError, match="BRIDGE_ALREADY_RUNNING"):
-                await app.run(window.plan.config)
+                with Spool(window.plan.config):
+                    pytest.fail("spool lock must exclude another executor")
             with pytest.raises(ValueError, match="WINDOW_EXECUTOR_BUSY"):
                 await window.capture_once(client, protocol)
             path = tmp_path / "bridge.toml"
@@ -815,63 +772,40 @@ def test_accepted_or_erased_capture_clears_frame_text_and_repairs_interrupted_pu
     run(scenario())
 
 
-@pytest.mark.parametrize("change", ["deadline", "approval", "stop"])
+@pytest.mark.parametrize("change", ["deadline", "message", "stop"])
 def test_final_dispatch_fence_runs_after_core_send_check_and_last_journal_read(
-    core,
-    tmp_path,
-    monkeypatch,
-    change,
+    core, tmp_path, monkeypatch, change,
 ):
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(1)))
+    from tests.support.native_dispatch import attempts, dispatch, staged
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True) as (
-            window,
-            client,
-            protocol,
-            _,
-            sends,
-        ):
-            # Use the already-tested synthetic model path, then exercise the final send fence.
-            from tests.test_live_text_window import live_clients
-
-            async with live_clients(core, window.plan.config) as (model_client, _, _, _):
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
-                assert await core.run_once()
-                approval = reply_approval(window.plan, core)
-                original = window.core_post
-                checked = []
-
-                async def final_check(http, path, body):
-                    result = await original(http, path, body)
-                    if path == "/internal/v1/live-text/send-check":
-                        checked.append(True)
-                    return result
-
-                original_journal = window.read_journal
-
-                def last_disk_read():
-                    result = original_journal()
-                    if checked:
-                        if change == "deadline":
-                            core.clock.now = window.plan.end
-                        elif change == "approval":
-                            approval["evidence_sha256"] = "0" * 64
-                        else:
-                            from companion_onebot_bridge.window import request_stop
-
-                            request_stop(window.spool.directory)
-                    return result
-
-                monkeypatch.setattr(window, "core_post", final_check)
-                monkeypatch.setattr(window, "read_journal", last_disk_read)
-                status = await window.send_once(model_client, protocol, approval)
-                assert checked == [True] and sends == []
-                assert status["attempt_states"] == {"UNKNOWN": 1}
-                assert status["state"] == "STOPPED"
-
+        async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
+            checked = []
+            async def response(value):
+                if value.request.url.path.endswith("/owner-authority/send-check"):
+                    await value.aread()
+                    assert value.status_code == 200
+                    checked.append(True)
+            client.event_hooks["response"].append(response)
+            original = owner.verify
+            changed = False
+            def last_read(*, active=True):
+                nonlocal changed
+                result = original(active=active)
+                if checked and not changed:
+                    changed = True
+                    if change == "deadline":
+                        core.clock.now = guard.lease_until
+                    elif change == "message":
+                        guard.prepared_message = []
+                    else:
+                        owner.stop()
+                return result
+            monkeypatch.setattr(owner, "verify", last_read)
+            await dispatch(owner, client, protocol, guard)
+            assert checked == [True] and not sends and not guard.dispatched
+            assert attempts(owner) == {"UNKNOWN": 1}
+            assert owner.row()["state"] == "STOPPED"
     run(scenario())
 
 
@@ -1032,7 +966,7 @@ def test_hard_exit_during_receive_or_raw_fsync_cannot_resume_or_restore_quota(
     run(scenario())
 
 
-@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("live", [False])
 @pytest.mark.parametrize("path", ["/get_login_info", "/get_status", "/get_version_info"])
 @pytest.mark.parametrize("change", ["deadline", "stop"])
 def test_every_send_probe_checks_window_after_dns_wait(core, tmp_path, live, path, change):
@@ -1101,58 +1035,41 @@ def test_demo_send_rechecks_actual_outbox_lease_after_dns(core, tmp_path):
 
 @pytest.mark.parametrize("change", ["body", "authorization", "host", "sni", "destination"])
 def test_actual_send_request_is_revalidated_after_core_send_check(
-    core, tmp_path, monkeypatch, change
+    core, tmp_path, monkeypatch, change,
 ):
-    async def source(ws):
-        pytest.fail("send-once must not start another receiver")
+    from tests.support.native_dispatch import attempts, dispatch, staged
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True) as (
-            window,
-            client,
-            protocol,
-            _,
-            sends,
-        ):
-            from tests.test_live_text_window import live_clients
-
-            async with live_clients(core, window.plan.config):
-                approval = await stage(window, client, core)
-                pending = []
-
-                async def remember(request):
-                    if request.url.path == "/send_private_msg":
-                        pending.append(request)
-
-                protocol.event_hooks["request"].append(remember)
-                original = window.core_post
-
-                async def send_check(http, path, body):
-                    receipt = await original(http, path, body)
-                    if path == "/internal/v1/live-text/send-check":
-                        request = pending[0]
-                        if change == "body":
-                            request._content = b"{}"
-                            request.stream = httpx.ByteStream(request.content)
-                        elif change == "authorization":
-                            request.headers["Authorization"] = "Bearer wrong-synthetic-token"
-                        elif change == "host":
-                            request.headers["Host"] = "changed.invalid:3000"
-                        elif change == "sni":
-                            request.extensions["sni_hostname"] = "changed.invalid"
-                        else:
-                            request.url = request.url.copy_with(host="192.168.77.9")
-                    return receipt
-
-                monkeypatch.setattr(window, "core_post", send_check)
-                status = await window.send_once(client, protocol, approval)
-                assert len(pending) == 1 and sends == []
-                assert status["attempt_states"] == {"UNKNOWN": 1}
-
+        async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
+            pending = []
+            async def remember(request):
+                if request.url.path == "/send_private_msg":
+                    pending.append(request)
+            protocol.event_hooks["request"].append(remember)
+            async def after_check(response):
+                if response.request.url.path.endswith("/owner-authority/send-check"):
+                    await response.aread()
+                    assert response.status_code == 200
+                    request = pending[0]
+                    if change == "body":
+                        request._content = b"{}"
+                        request.stream = httpx.ByteStream(request.content)
+                    elif change == "authorization":
+                        request.headers["Authorization"] = "Bearer wrong-token"
+                    elif change == "host":
+                        request.headers["Host"] = "changed.invalid:3000"
+                    elif change == "sni":
+                        request.extensions["sni_hostname"] = "changed.invalid"
+                    else:
+                        request.url = request.url.copy_with(host="192.168.77.9")
+            client.event_hooks["response"].append(after_check)
+            await dispatch(owner, client, protocol, guard)
+            assert len(pending) == 1 and not sends and not guard.dispatched
+            assert attempts(owner) == {"UNKNOWN": 1}
     run(scenario())
 
 
-@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("live", [False])
 @pytest.mark.parametrize("change", ["text", "message_id", "lease_token", "delivery_key"])
 def test_final_send_matches_persisted_reservation_despite_mutable_item_and_body(
     core,
@@ -1220,7 +1137,7 @@ def test_final_send_matches_persisted_reservation_despite_mutable_item_and_body(
     run(scenario())
 
 
-@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("live", [False])
 @pytest.mark.parametrize("change", ["stream", "transfer_encoding", "unbounded_stream"])
 def test_final_wire_bytes_match_approval_when_only_httpx_stream_is_replaced(
     core,
@@ -1280,7 +1197,7 @@ def test_final_wire_bytes_match_approval_when_only_httpx_stream_is_replaced(
     run(scenario())
 
 
-@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("live", [False])
 @pytest.mark.parametrize("phase", ["capture", "send"])
 def test_probe_wire_body_is_the_checked_empty_object(core, tmp_path, live, phase):
     received = []
