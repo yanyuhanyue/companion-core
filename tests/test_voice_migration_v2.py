@@ -97,7 +97,7 @@ def test_v1_running_job_becomes_content_free_unknown_with_original_stop_capabili
     _, response = claim(jobs)
     jobs.input("local", VoiceLeaseRef.from_lease(response.lease))
     path = old_database(core, tmp_path)
-    migrate(path)
+    migrate(path, NEW)
     with closing(Store(path)) as upgraded:
         row = upgraded.one("SELECT * FROM voice_jobs")
         assert upgraded.one("SELECT version_num FROM alembic_version")["version_num"] == NEW
@@ -141,7 +141,7 @@ def test_v1_unknown_preflight_failure_leaves_old_revision_and_all_data_untouched
     path = old_database(core, tmp_path)
     before = dump(path)
     with pytest.raises((RuntimeError, ValueError, InvalidSignature, CoreError)):
-        migrate(path)
+        migrate(path, NEW)
     assert dump(path) == before
     with closing(Store(path)) as unchanged:
         assert unchanged.one("SELECT version_num FROM alembic_version")["version_num"] == OLD
@@ -152,7 +152,7 @@ def test_v1_signed_unknown_converts_once_and_original_owner_resolution_still_wor
     env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
     put(core.store, reconciliation.PREPARED + env.message_id, env.proof)
     path = old_database(core, tmp_path)
-    migrate(path)
+    migrate(path, NEW)
     original_store = core.store
     with closing(Store(path)) as upgraded:
         core.store = upgraded
@@ -199,7 +199,7 @@ def test_v1_migration_independent_of_current_dto_and_service(core, tmp_path, mon
         "companion.voice_protocol.LegacyVoiceDeliveryBinding.model_validate", unavailable)
     monkeypatch.setattr(cumulative, "fold", unavailable)
     monkeypatch.setattr(wire, "validate_receipt", unavailable)
-    migrate(path)
+    migrate(path, NEW)
     with closing(Store(path)) as upgraded:
         assert upgraded.one("SELECT version_num FROM alembic_version")["version_num"] == NEW
         assert reconciliation._meta(upgraded, "voice_reply:" + env.message_id)["retired"]
@@ -216,7 +216,7 @@ def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, mo
     assert core.store.one("SELECT lease_token FROM outbox WHERE message_id=?",
                           (env.message_id,))["lease_token"] is None
     path = old_database(core, tmp_path)
-    migrate(path)
+    migrate(path, NEW)
     original_store = core.store
     with closing(Store(path)) as upgraded:
         core.store = upgraded
@@ -262,7 +262,7 @@ def test_v1_rehashed_invalid_financial_record_fails_before_writes(
     path = old_database(core, tmp_path)
     before = dump(path)
     with pytest.raises(ValueError, match=error):
-        migrate(path)
+        migrate(path, NEW)
     assert dump(path) == before
 
 
@@ -272,7 +272,7 @@ def test_v1_upgrade_preserves_json_constraints_and_allows_retired_null_lease(
     jobs, message_id, _, _ = prepared(core, monkeypatch)
     create_tts(core, jobs, message_id)
     path = old_database(core, tmp_path)
-    migrate(path)
+    migrate(path, NEW)
     with closing(Store(path)) as upgraded:
         for column in ("config_json", "lease_json"):
             with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
