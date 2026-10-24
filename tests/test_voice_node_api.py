@@ -1,8 +1,6 @@
 """Node boundary tests and real TLS/WS/Core entrypoint with independent local processes."""
 
 import asyncio
-import base64
-import hashlib
 import ipaddress
 import json
 import os
@@ -22,21 +20,15 @@ import uvicorn
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import NameOID
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from websockets.asyncio.server import serve
 
 from companion.api import create_app
 from companion.contracts import CoreError
-from companion.core import Core
-from companion.model import ModelClient
-from companion.qq_rich import input_digest
-from companion.retrieval import SemanticIndex
 from companion.store import encode
-from companion.voice_config import VoiceASRPolicy, VoiceNode
-from companion.voice_jobs import VoiceJobs, sign_asr_proof
+from companion.voice_config import VoiceASRPolicy
+from companion.voice_jobs import VoiceJobs
 from companion.voice_node_api import register_voice_node_routes
 from companion.voice_protocol import (
     MAX_RESULT_BODY_BYTES,
@@ -44,20 +36,11 @@ from companion.voice_protocol import (
     VoiceClaimResponse,
     VoiceLeaseRef,
     canonical_bytes,
-    digest,
 )
-from companion_onebot_bridge.network import private_http_client
-from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow
-from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest
+from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker
 from tests.conftest import run
-from tests.support.onebot import provider
-from tests.test_local_voice_providers import wav_bytes
-from tests.test_onebot_capture import capture_approval, pinned_plan, real_core_http
-from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
-from tests.test_voice_jobs import TOKEN, create_tts, prepared, result, voice_config
-from tests.test_voice_node_worker import child_receipts, factory
+from tests.test_voice_jobs import TOKEN, create_tts, prepared, result
+from tests.test_voice_node_worker import factory
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
@@ -228,7 +211,8 @@ def test_boundary_auth_precedes_body_read_and_stream_limit_is_enforced(core, mon
 
 @pytest.mark.parametrize("change", ["cancelled", "revision", "source", "scope", "fenced_epoch"])
 def test_disabled_asr_input_state_preserves_source_authority(core, monkeypatch, change):
-    _, _, event_id, _ = prepared(core, monkeypatch, asr=VoiceASRPolicy(enabled=False))
+    _, _, event_id, _ = prepared(core, monkeypatch, make_reply=False,
+                                asr=VoiceASRPolicy(enabled=False))
 
     async def scenario():
         async with httpx.AsyncClient(
@@ -252,8 +236,8 @@ def test_disabled_asr_input_state_preserves_source_authority(core, monkeypatch, 
                 core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
                                    (encode(body), event_id))
             elif change == "scope":
-                core.settings.live_text_window = core.settings.live_text_window.model_copy(
-                    update={"voice_scope": "none"})
+                core.settings.voice = core.settings.voice.model_copy(
+                    update={"job_ttl_seconds": 91})
             else:
                 event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
                 value = core.voice._input_authority(event) | {"state": "FENCED"}
@@ -389,185 +373,6 @@ async def independent_node(config, certificate, counter, tmp_path, timestamp, sc
         config_path.unlink(missing_ok=True)
 
 
-@pytest.mark.parametrize("operation", ["tts", "asr"])
-def test_real_core_tls_native_authority_and_independent_node(
-    core, tmp_path, monkeypatch, node, operation
-):
-    config, signing_key, counter = node
-    config = config.model_copy(
-        update={
-            "node_id": "local",
-            "request_timeout_seconds": 10.0,
-            "heartbeat_seconds": 0.5,
-            "execution_timeout_seconds": 20.0,
-        }
-    )
-    core_voice = voice_config(
-        signing_private_key=signing_key.private_bytes_raw().hex(),
-        asr=VoiceASRPolicy(enabled=operation != "tts"),
-        nodes={
-            "local": VoiceNode(
-                token=config.credential, manifest_sha256=digest(local_manifest(config))
-            )
-        },
-    )
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    sends, model_calls = [], []
-
-    async def source(ws):
-        await ws.send(
-            encode(
-                raw_event(
-                    1,
-                    time=int(core.clock.now.timestamp()),
-                    message=[
-                        {"type": "text", "data": {"text": "请听这段话"}},
-                        {"type": "record", "data": {"file": "native-opaque-record"}},
-                    ],
-                )
-            )
-        )
-        await ws.wait_closed()
-
-    def model(request):
-        model_calls.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": "合成语音链路回复。"}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
-        )
-
-    async def scenario():
-        options = companion_options(core)
-        options["core_options"]["voice"] = core_voice
-        options.update(
-            voice_scope="owner_voice_v1", voice_policy_sha256=core_voice.authority_sha256()
-        )
-        async with real_core_http(core) as port, serve(source, "127.0.0.1", 0) as server:
-            cfg, plan = pinned_plan(
-                core,
-                tmp_path,
-                server.sockets[0].getsockname()[1],
-                core_port=port,
-                live=True,
-                approved=True,
-                rich_input_scope="references_v1",
-                scope_options=options,
-            )
-            async with (
-                private_http_client(cfg.core_url, cfg.bridge_token) as client,
-                (
-                    private_http_client(
-                        cfg.onebot_http_url,
-                        cfg.onebot_token,
-                        transport=httpx.MockTransport(lambda r: provider(r, sends)),
-                    )
-                ) as protocol,
-                httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http,
-            ):
-                with Spool(cfg) as spool:
-                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                    await window.open(client, protocol)
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(client, capture_approval(window))
-                    event = core.store.one("SELECT * FROM events WHERE source='qq.onebot'")
-                    jobs = VoiceJobs(core.store, core.settings, core.clock)
-                    data = wav_bytes(0.125)
-                    proof = sign_asr_proof(
-                        Ed25519PrivateKey.from_private_bytes(bytes.fromhex(cfg.capture_signing_key)),
-                        plan_sha256=plan.sha256,
-                        event_id=event["event_id"],
-                        source_event_id=event["source_event_id"],
-                        source_input_sha256=input_digest(json.loads(event["body_json"])),
-                        source_segment_index=1,
-                        audio_sha256=hashlib.sha256(data).hexdigest(),
-                        audio_bytes=len(data),
-                        source_partial=True,
-                    )
-                    if operation == "tts":
-                        path = f"/internal/v1/voice-inputs/{event['event_id']}"
-                        state_before = core.store.db.total_changes
-                        receipt = await client.get(path + "/state")
-                        assert receipt.status_code == 200, receipt.text
-                        assert receipt.json()["state"] == "FALLBACK"
-                        assert receipt.json()["records"] == [{
-                            "index": 1, "state": "MISSING", "job_id": None,
-                            "input_sha256": None, "source_proof_sha256": None,
-                            "upload_allowed": False,
-                        }]
-                        assert core.store.db.total_changes == state_before
-                        unauthorized = await client.get(path + "/state", headers={
-                            "Authorization": "Bearer wrong-token",
-                        })
-                        assert unauthorized.status_code == 401
-                        proof_header = base64.urlsafe_b64encode(canonical_bytes(proof)).decode()
-                        rejected = await client.post(path, content=data, headers={
-                            "Content-Type": "audio/wav",
-                            "x-voice-proof": proof_header,
-                        })
-                        assert rejected.status_code == 403, rejected.text
-                        assert "VOICE_ASR_DISABLED" in rejected.text
-                        assert core.store.db.total_changes == state_before
-                        assert not core.store.rows("SELECT * FROM voice_jobs")
-                        assert not core.store.rows("SELECT * FROM model_usage")
-                        with Core(
-                            core.settings, ModelClient(core.settings, model_http), core.clock
-                        ) as worker:
-                            assert worker.store is not core.store
-                            assert await worker.run_once("voice-native-chat")
-                        outbox = core.store.one("SELECT * FROM outbox")
-                        with core.store.transaction():
-                            job = jobs.create_tts(
-                                outbox["message_id"], json.loads(outbox["content_json"])["text"]
-                            )
-                    else:
-                        with core.store.transaction():
-                            job = jobs.create_asr(
-                                event["event_id"],
-                                data,
-                                source_segment_index=1,
-                                upload_proof=proof,
-                                source_partial=True,
-                            )
-                    before = core.store.rows("SELECT request_id,state FROM model_usage")
-                    async with tls_core(core, tmp_path) as (origin, certificate):
-                        await independent_node(
-                            config.model_copy(update={"core_origin": origin}),
-                            certificate,
-                            counter,
-                            tmp_path,
-                            core.clock.now.timestamp(),
-                            "large-result" if operation == "tts" else "success",
-                        )
-                    assert jobs.status(job["job_id"])["state"] == (
-                        "READY" if operation == "tts" else "TRANSCRIBED"
-                    )
-                    assert jobs.result(job["job_id"]).kind == operation
-                    assert core.store.rows("SELECT request_id,state FROM model_usage") == before
-                    if operation == "tts":
-                        assert len(jobs.result(job["job_id"]).audio_bytes()) > 131072
-                        assert len(before) == 1 and before[0]["state"] == "SETTLED"
-                        assert core.store.one("SELECT state FROM outbox")["state"] == "PENDING"
-                    else:
-                        assert jobs.untrusted_transcription(job["job_id"])["partial"] is True
-                        assert before == []
-                    assert not sends and len(model_calls) == int(operation == "tts")
-                    assert len(child_receipts(counter)) == 1
-                    assert child_receipts(counter)[0]["pid"] != os.getpid()
-                    assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
-                                           (event["event_id"],))["body_json"] == event["body_json"]
-                    window.verify()
-                    if operation == "tts":
-                        core.clock.advance((plan.end - core.clock.now).total_seconds() + 1)
-                        # The independent node may outlive the original HTTP keep-alive.
-                        async with private_http_client(cfg.core_url, cfg.bridge_token) as resumed:
-                            expired = await resumed.get(path + "/state")
-                        assert expired.status_code == 503, expired.text
-                        assert expired.json() == {"error": "LIVE_TEXT_APPROVAL_EXPIRED"}
-
-    run(scenario())
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--node-fixture"]:

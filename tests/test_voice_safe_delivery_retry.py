@@ -6,27 +6,18 @@ from datetime import datetime
 
 import httpx
 import pytest
-from websockets.asyncio.server import serve
 
-from companion import transport
+from companion import transport, voice_authority
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.core import Core
 from companion.model import ModelClient
-from companion.retrieval import SemanticIndex
 from companion.store import Store, encode
 from companion.voice_config import VoiceNode, VoiceReplyPolicy
 from companion.voice_flow import VoiceFlow
 from companion.voice_jobs import VoiceJobs, erase_voice_jobs
 from companion.voice_protocol import digest
-from companion_onebot_bridge.network import private_http_client
-from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
-from tests.support.onebot import provider
-from tests.test_onebot_capture import capture_approval, pinned_plan, real_core_http
-from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
 from tests.test_voice_flow import finish_node, flow_fixture, leased, prepare
 from tests.test_voice_jobs import TEXT, claim, voice_config
 from tests.test_voice_node_api import independent_node, tls_core
@@ -126,7 +117,7 @@ def test_safe_retry_does_not_restore_expired_changed_or_unproven_audio(core, mon
     assert row["result_blob"] is None
     assert jobs.result(row["job_id"]) is None
     assert core.store.one("SELECT COUNT(*) n FROM voice_jobs")["n"] == 1
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
     assert core.model.calls == []
 
 
@@ -157,8 +148,10 @@ def test_failure_after_begin_send_stays_uncertain_without_audio_retry(core, monk
         error_code="SYNTHETIC_AFTER_SEND"), core.clock())
     assert claim(jobs)[1].lease is None
     core.clock.advance(6)
+    authority = voice_authority.current(core.store, core.settings, core.clock).authority.as_dict()
     assert transport.lease_deliveries(core.store, core.settings,
-        LeaseRequest(worker_id="uncertain-retry-test"), core.clock())["items"] == []
+        LeaseRequest(worker_id="uncertain-retry-test", authority=authority),
+        core.clock())["items"] == []
     assert core.store.one("SELECT state,provider_message_id FROM outbox") == {
         "state": "DELIVERY_UNCERTAIN", "provider_message_id": None,
     }
@@ -169,7 +162,7 @@ def test_failure_after_begin_send_stays_uncertain_without_audio_retry(core, monk
                              ("voice_reply:" + message_id,))
     assert json.loads(receipt["value"])["state"] != "TEXT"
     assert core.store.one("SELECT COUNT(*) n FROM voice_jobs")["n"] == 1
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
     assert core.model.calls == []
 
 
@@ -187,14 +180,10 @@ def test_real_http_retry_preserves_independent_node_result_and_paid_usage(
         nodes={"local": VoiceNode(token=config.credential, manifest_sha256=manifest_sha256)},
         reply=VoiceReplyPolicy(mode="auto"),
     )
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    sends, calls = [], []
+    from tests.voice_owner_fixtures import native_voice
 
-    async def source(ws):
-        await ws.send(encode(raw_event(1, time=int(core.clock.now.timestamp()), message=[
-            {"type": "text", "data": {"text": "Please reply briefly."}},
-        ])))
-        await ws.wait_closed()
+    capture, _, _ = native_voice(core, tmp_path, record=False, config=core_voice)
+    calls = []
 
     def model(request):
         calls.append(json.loads(request.content)["messages"])
@@ -204,86 +193,76 @@ def test_real_http_retry_preserves_independent_node_result_and_paid_usage(
         })
 
     async def scenario():
-        options = companion_options(core)
-        options["core_options"]["voice"] = core_voice
-        options.update(voice_scope="owner_voice_v1",
-                       voice_policy_sha256=core_voice.authority_sha256())
-        async with real_core_http(core) as port, serve(source, "127.0.0.1", 0) as server:
-            cfg, plan = pinned_plan(core, tmp_path, server.sockets[0].getsockname()[1],
-                core_port=port, live=True, approved=True, scope_options=options)
-            async with (
-                private_http_client(cfg.core_url, cfg.bridge_token) as client,
-                private_http_client(cfg.onebot_http_url, cfg.onebot_token,
-                    transport=httpx.MockTransport(lambda request: provider(request, sends)))
-                    as protocol,
-                httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http,
-            ):
-                with Spool(cfg) as spool:
-                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                    await window.open(client, protocol)
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(client, capture_approval(window))
-                    with Core(core.settings, ModelClient(core.settings, model_http), core.clock
-                              ) as worker:
-                        assert worker.store is not core.store
-                        assert await worker.run_once("safe-retry-worker")
-                    assert len(calls) == 1
-                    usage = core.store.rows("SELECT * FROM model_usage")
-                    charges = core.store.rows("SELECT * FROM cloud_cost_snapshots")
-                    assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
-                    lease_path = "/internal/v1/deliveries/lease"
-                    waiting = await client.post(lease_path, json={"worker_id": "retry-bridge"})
-                    assert waiting.status_code == 200 and waiting.json()["items"] == []
-                    async with tls_core(core, tmp_path) as (origin, certificate):
-                        await independent_node(config.model_copy(update={"core_origin": origin}),
-                            certificate, counter, tmp_path, core.clock.now.timestamp())
-                    leased_reply = await client.post(lease_path, json={"worker_id": "retry-bridge"})
-                    assert leased_reply.status_code == 200, leased_reply.text
-                    first = leased_reply.json()["items"][0]
-                    original = core.store.one("SELECT * FROM voice_jobs")
-                    delivery_path = f"/internal/v1/deliveries/{first['message_id']}"
-                    failed = await client.post(delivery_path + "/result", json={
-                        "lease_token": first["lease_token"], "result": "RETRYABLE_FAILURE",
-                        "error_code": "SYNTHETIC_BEFORE_SEND",
-                    })
-                    assert failed.status_code == 200 and failed.json()["state"] == "RETRY_WAIT"
-                    session = (await client.get("/internal/v2/voice-node/session", headers={
-                        "Authorization": "Bearer " + config.credential.get_secret_value()})).json()
-                    sequence = session["last_sequence"] + 1
-                    request_id = f"voice-claim:{session['incarnation']}:{sequence}"
-                    idle = await client.post(
-                        "/internal/v2/voice-node/claim",
-                        json={
-                            "node_id": "local",
-                            "incarnation": session["incarnation"],
-                            "sequence": sequence,
-                            "manifest_sha256": manifest_sha256,
-                            "resource_state": "READY",
-                        },
-                        headers={
-                            "Authorization": "Bearer " + config.credential.get_secret_value(),
-                            "Idempotency-Key": request_id,
-                        },
-                    )
-                    assert idle.status_code == 200 and idle.json()["lease"] is None, idle.text
-                    assert core.store.one("SELECT * FROM voice_jobs") == original
-                    core.clock.advance(6)
-                    again = await client.post(lease_path, json={"worker_id": "retry-bridge"})
-                    assert again.status_code == 200, again.text
-                    second = again.json()["items"][0]
-                    assert second["lease_token"] != first["lease_token"]
-                    assert second["voice"] == first["voice"]
-                    stale = await client.post(delivery_path + "/begin-send", json={
-                        "lease_token": first["lease_token"],
-                    })
-                    assert stale.status_code == 409
-                    assert core.store.one(
-                        "SELECT state,attempt_count,provider_message_id FROM outbox") == {
-                        "state": "LEASED", "attempt_count": 1, "provider_message_id": None,
-                    }
-                    assert core.store.one("SELECT COUNT(*) n FROM voice_jobs")["n"] == 1
-                    assert core.store.rows("SELECT * FROM model_usage") == usage
-                    assert core.store.rows("SELECT * FROM cloud_cost_snapshots") == charges
-                    assert len(child_receipts(counter)) == 1 and len(calls) == 1 and not sends
+        import ssl
+
+        async with tls_core(core, tmp_path) as (origin, certificate), httpx.AsyncClient(
+            base_url=origin, verify=ssl.create_default_context(cafile=str(certificate)),
+            trust_env=False, headers={"Authorization": "Bearer "
+                + core.settings.bridge_token.get_secret_value()}) as client, \
+                httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
+            with Core(core.settings, ModelClient(core.settings, model_http), core.clock
+                      ) as worker:
+                assert worker.store is not core.store
+                assert await worker.run_once("safe-retry-worker")
+            assert len(calls) == 1
+            usage = core.store.rows("SELECT * FROM model_usage")
+            charges = core.store.rows("SELECT * FROM cloud_cost_snapshots")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+            lease_path = "/internal/v1/deliveries/lease"
+            waiting = await client.post(lease_path, json={
+                "worker_id": "retry-bridge", "authority": capture.authority})
+            assert waiting.status_code == 200 and waiting.json()["items"] == []
+            await independent_node(config.model_copy(update={"core_origin": origin}),
+                certificate, counter, tmp_path, core.clock.now.timestamp())
+            leased_reply = await client.post(lease_path, json={
+                "worker_id": "retry-bridge", "authority": capture.authority})
+            assert leased_reply.status_code == 200, leased_reply.text
+            first = leased_reply.json()["items"][0]
+            original = core.store.one("SELECT * FROM voice_jobs")
+            delivery_path = f"/internal/v1/deliveries/{first['message_id']}"
+            failed = await client.post(delivery_path + "/result", json={
+                "lease_token": first["lease_token"], "result": "RETRYABLE_FAILURE",
+                "error_code": "SYNTHETIC_BEFORE_SEND",
+            })
+            assert failed.status_code == 200 and failed.json()["state"] == "RETRY_WAIT"
+            session = (await client.get("/internal/v2/voice-node/session", headers={
+                "Authorization": "Bearer " + config.credential.get_secret_value()})).json()
+            sequence = session["last_sequence"] + 1
+            request_id = f"voice-claim:{session['incarnation']}:{sequence}"
+            idle = await client.post(
+                "/internal/v2/voice-node/claim",
+                json={
+                    "node_id": "local",
+                    "incarnation": session["incarnation"],
+                    "sequence": sequence,
+                    "manifest_sha256": manifest_sha256,
+                    "resource_state": "READY",
+                },
+                headers={
+                    "Authorization": "Bearer " + config.credential.get_secret_value(),
+                    "Idempotency-Key": request_id,
+                },
+            )
+            assert idle.status_code == 200 and idle.json()["lease"] is None, idle.text
+            assert core.store.one("SELECT * FROM voice_jobs") == original
+            core.clock.advance(6)
+            again = await client.post(lease_path, json={
+                "worker_id": "retry-bridge", "authority": capture.authority})
+            assert again.status_code == 200, again.text
+            second = again.json()["items"][0]
+            assert second["lease_token"] != first["lease_token"]
+            assert second["voice"] == first["voice"]
+            stale = await client.post(delivery_path + "/begin-send", json={
+                "lease_token": first["lease_token"],
+            })
+            assert stale.status_code == 409
+            assert core.store.one(
+                "SELECT state,attempt_count,provider_message_id FROM outbox") == {
+                "state": "LEASED", "attempt_count": 1, "provider_message_id": None,
+            }
+            assert core.store.one("SELECT COUNT(*) n FROM voice_jobs")["n"] == 1
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            assert core.store.rows("SELECT * FROM cloud_cost_snapshots") == charges
+            assert len(child_receipts(counter)) == 1 and len(calls) == 1
 
     run(scenario())

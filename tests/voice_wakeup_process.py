@@ -100,11 +100,11 @@ def main():
         report["provider_calls"] += 1
         return httpx.Response(503, json={"error": "unexpected synthetic external call"})
 
-    def client(**kw):
-        kw["transport"] = httpx.MockTransport(provider)
-        return native_client(**kw)
+    class SyntheticClient(native_client):
+        def __init__(self, **kw):
+            super().__init__(**(kw | {"transport": httpx.MockTransport(provider)}))
 
-    httpx.AsyncClient = client
+    httpx.AsyncClient = SyntheticClient
     native_worker = __main__.worker
 
     async def bounded(config):

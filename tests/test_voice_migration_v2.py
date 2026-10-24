@@ -11,17 +11,43 @@ import pytest
 from cryptography.exceptions import InvalidSignature
 
 import companion_delivery_protocol as wire
-from companion import cumulative
+from companion import cumulative, paid_budget
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError
 from companion.store import Store, encode, migrate
 from companion.voice_jobs import VoiceJobs
 from companion.voice_protocol import VoiceLeaseRef
-from tests.test_delivery_reconciliation import decide, native, prepare, put, signed
+from tests.test_delivery_reconciliation import decide, prepare, put, signed
+from tests.test_delivery_reconciliation import native as current_fixture
 from tests.test_voice_jobs import claim, create_tts, prepared
 
 OLD = "0033_model_usage_job_index"
-NEW = "0034_voice_retention_v2"
+NEW = "0044_voice_owner_authority"
+
+
+def native(core, tmp_path, **options):
+    """Construct a pre-0035 reserve before hashing, using its frozen field set.
+
+    The migration source predates measurement_json. New measurement evidence
+    must never be written and then dropped while copying that historical schema.
+    Financial reservation, settlement, signature and reconciliation stay real.
+    """
+    insert, journal = core.store.insert, paid_budget.journal
+
+    def historical_insert(table, **values):
+        if table == "model_admissions":
+            values.pop("measurement_json", None)
+        return insert(table, **values)
+
+    def historical_journal(store, approval, record=None, **kwargs):
+        if record and record.get("kind") == "reserve":
+            record = {k: v for k, v in record.items() if k != "measurement"}
+        return journal(store, approval, record, **kwargs)
+
+    with pytest.MonkeyPatch.context() as frozen_schema:
+        frozen_schema.setattr(core.store, "insert", historical_insert)
+        frozen_schema.setattr(paid_budget, "journal", historical_journal)
+        return current_fixture(core, tmp_path, **options)
 
 
 def old_database(core, tmp_path):
@@ -49,6 +75,9 @@ def old_database(core, tmp_path):
                         lease.pop(field, None)
                     lease["schema_version"] = 1
                     row["lease_json"] = encode(lease)
+                if table == "voice_jobs" and row["window_sha256"] is None:
+                    # Frozen v1 schema material, never a current execution permission.
+                    row["window_sha256"] = "a" * 64
                 dest.execute(f'INSERT INTO "{table}" ({",".join(columns)}) '
                              f'VALUES ({",".join("?" for _ in columns)})',
                              tuple(row[c] for c in columns))
@@ -165,7 +194,9 @@ def test_v1_migration_independent_of_current_dto_and_service(core, tmp_path, mon
         raise AssertionError("historical migration called current runtime")
 
     monkeypatch.setattr(reconciliation, "_binding", unavailable)
-    monkeypatch.setattr(reconciliation.VoiceDeliveryBinding, "model_validate", unavailable)
+    monkeypatch.setattr("companion.voice_protocol.VoiceDeliveryBinding.model_validate", unavailable)
+    monkeypatch.setattr(
+        "companion.voice_protocol.LegacyVoiceDeliveryBinding.model_validate", unavailable)
     monkeypatch.setattr(cumulative, "fold", unavailable)
     monkeypatch.setattr(wire, "validate_receipt", unavailable)
     migrate(path)

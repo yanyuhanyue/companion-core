@@ -147,7 +147,7 @@ def test_forget_scrubs_voice_content_but_random_stop_capability_only_closes_cust
     assert status.custody_closed and status.cleanup_confirmed
     assert jobs.stop("local", completed) == status
     assert core.store.one("SELECT state FROM voice_jobs")["state"] == "UNKNOWN"
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
 
 
 def test_restore_changes_incarnation_and_requires_owner_stopped_confirmation(core, monkeypatch):

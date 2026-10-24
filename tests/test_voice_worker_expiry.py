@@ -17,7 +17,8 @@ from tests.test_voice_jobs import claim, control, create_asr, create_tts, prepar
 
 
 def test_chat_claim_after_voice_expiry_uses_unavailable_fallback(core, monkeypatch):
-    flow, jobs, _, event_id, key = flow_fixture(core, monkeypatch, job_ttl_seconds=5)
+    flow, jobs, _, event_id, key = flow_fixture(
+        core, monkeypatch, make_reply=False, job_ttl_seconds=5)
     assert flow.input_status(event_id).state == "WAITING"
     upload(core, flow, event_id, key)
     _, active = claim(jobs)
@@ -32,7 +33,8 @@ def test_chat_claim_after_voice_expiry_uses_unavailable_fallback(core, monkeypat
 
 
 def test_expired_voice_projection_is_read_only_and_source_erasure_still_blocks(core, monkeypatch):
-    flow, jobs, _, event_id, key = flow_fixture(core, monkeypatch, job_ttl_seconds=5)
+    flow, jobs, _, event_id, key = flow_fixture(
+        core, monkeypatch, make_reply=False, job_ttl_seconds=5)
     flow.input_status(event_id)
     upload(core, flow, event_id, key)
     core.clock.advance(6)

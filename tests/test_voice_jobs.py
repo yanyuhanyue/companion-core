@@ -1,12 +1,12 @@
 import base64
 import hashlib
 import json
-from datetime import timedelta, timezone
+from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
 
-from companion import live_text, private_life, transport
+from companion import owner_delivery, owner_input, voice_authority
 from companion.contracts import CoreError
 from companion.qq_rich import input_digest
 from companion.store import encode
@@ -32,7 +32,6 @@ from companion.voice_protocol import (
 )
 from companion_voice_node.providers import validate_wav
 from tests.test_local_voice_providers import wav_bytes
-from tests.test_qq_files import prepared as file_source
 
 TOKEN = "independent-voice-node-credential-" + "x" * 32
 TEXT = "这是一条待发送的回复。"
@@ -49,53 +48,19 @@ def voice_config(**updates):
     )
 
 
-def prepared(core, monkeypatch, **updates):
-    _, approval, capture_key, event_id, _ = file_source(core, monkeypatch)
-    # Unit fixture keeps the actual signed-source, native delivery and revision checks.
-    # The real entrypoint test separately runs the real window guard and capture ingest.
-    row = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
-    body = json.loads(row["body_json"])
-    body.pop("shared_content", None)
-    body["rich"] = {
-        "version": "references_v1",
-        "coverage": "PARTIAL",
-        "segment_count": 1,
-        "owner_text_positions": [],
-        "segments": [
-            {"index": 0, "type": "record", "actor": "UNVERIFIED", "coverage": "UNSUPPORTED"}
-        ],
-    }
-    core.store.execute("UPDATE events SET body_json=? WHERE event_id=?", (encode(body), event_id))
-    receipt = json.loads(
-        core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,)
-        )["value"]
+def prepared(core, monkeypatch, *, make_reply=True, record_count=1,
+             expires_seconds=None, **updates):
+    from pathlib import Path
+
+    from tests.voice_owner_fixtures import native_reply, native_voice
+
+    capture, capture_key, _ = native_voice(
+        core, Path(core.settings.database).parent, config=voice_config(**updates),
+        record=bool(record_count), record_count=record_count, expires_seconds=expires_seconds,
     )
-    receipt["input_sha256"] = receipt["capture"]["input_sha256"] = input_digest(body)
-    receipt["capture"].pop("signature")
-    receipt["capture"]["signature"] = capture_key.sign(
-        live_text.CAPTURE_SIGNATURE_DOMAIN + encode(receipt["capture"]).encode()
-    ).hex()
-    core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?",
-        (encode(receipt), "live_text_input:" + event_id),
-    )
-    core.settings.voice = voice_config(**updates)
-    core.settings.live_text_window = approval.model_copy(
-        update={
-            "voice_scope": "owner_voice_v1",
-            "voice_policy_sha256": core.settings.voice.authority_sha256(),
-        }
-    )
-    message_id = transport.enqueue(core.store, event_id, row["conversation_id"], TEXT, core.clock())
-    outbox = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
-    core.store.insert(
-        "runtime_meta",
-        key=private_life.DELIVERY + message_id,
-        value=encode(private_life.delivery_material(core.store, core.settings, outbox)),
-    )
-    jobs = VoiceJobs(core.store, core.settings, core.clock)
-    return jobs, message_id, event_id, capture_key
+    message_id = native_reply(core, TEXT) if make_reply else None
+    return (VoiceJobs(core.store, core.settings, core.clock),
+            message_id, capture.event_id, capture_key)
 
 
 def create_tts(core, jobs, message_id):
@@ -108,7 +73,8 @@ def create_asr(core, jobs, event_id, key, *, data=None, partial=False, proof_cha
     event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
     proof = sign_asr_proof(
         key,
-        plan_sha256=core.settings.live_text_window.plan_sha256,
+        authority=voice_authority.current(
+            core.store, core.settings, core.clock).authority.as_dict(),
         event_id=event_id,
         source_event_id=event["source_event_id"],
         source_input_sha256=input_digest(json.loads(event["body_json"])),
@@ -215,7 +181,7 @@ def test_tts_real_delivery_guards_idempotent_claim_result(core, monkeypatch):
     assert control(jobs, ref, "RESULT_LOST", "READY").action == "COMMITTED"
     assert jobs.result(job["job_id"]) == value.payload
     assert core.store.one("SELECT state FROM outbox")["state"] == "PENDING"
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
     assert core.store.one("SELECT input_blob FROM voice_jobs")["input_blob"] is None
     with pytest.raises(CoreError, match="VOICE_RESULT_CONFLICT"):
         jobs.submit("local", result(ref, seconds=0.25))
@@ -232,9 +198,9 @@ def test_tts_requires_transaction_and_exact_pending_outbox(core, monkeypatch):
         create_tts(core, jobs, message_id)
     core.store.execute("UPDATE outbox SET attempt_count=0")
     core.store.execute(
-        "DELETE FROM runtime_meta WHERE key=?", (private_life.DELIVERY + message_id,)
+        "DELETE FROM runtime_meta WHERE key=?", (owner_delivery.DELIVERY + message_id,)
     )
-    with pytest.raises(CoreError, match="COMPANION_DELIVERY_SOURCE_CHANGED"):
+    with pytest.raises(CoreError, match="OWNER_DELIVERY_BINDING_REQUIRED"):
         create_tts(core, jobs, message_id)
 
 
@@ -250,7 +216,7 @@ def test_running_fences_wipe_and_commit_before_rejecting_input(core, monkeypatch
         core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?", (event_id,))
     elif change == "receipt":
         core.store.execute(
-            "DELETE FROM runtime_meta WHERE key=?", (private_life.DELIVERY + message_id,)
+            "DELETE FROM runtime_meta WHERE key=?", (owner_delivery.DELIVERY + message_id,)
         )
     elif change == "config":
         core.settings.voice = voice_config(job_ttl_seconds=91)
@@ -393,14 +359,13 @@ def test_wrong_ref_does_not_mutate_job_and_quota_precedes_storage(core, monkeypa
 
 def test_tts_requires_intact_native_capture_and_voice_scope(core, monkeypatch):
     jobs, message_id, event_id, _ = prepared(core, monkeypatch)
-    core.store.execute("DELETE FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,))
-    with pytest.raises(CoreError, match="LIVE_SOURCE_CHANGED"):
+    core.store.execute("DELETE FROM runtime_meta WHERE key=?", (owner_input.INPUT + event_id,))
+    with pytest.raises(CoreError, match="OWNER_SOURCE_CHANGED"):
         create_tts(core, jobs, message_id)
-    core.settings.live_text_window = core.settings.live_text_window.model_copy(
-        update={"voice_scope": "none", "voice_policy_sha256": None}
-    )
-    with pytest.raises(CoreError, match="VOICE_SCOPE_REQUIRED"):
+    core.settings.voice = voice_config(job_ttl_seconds=91)
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_CAPABILITY_CHANGED"):
         create_tts(core, jobs, message_id)
+
 
 
 @pytest.mark.parametrize("started", [False, True])
@@ -411,7 +376,7 @@ def test_rotated_policy_claim_persists_revocation(core, monkeypatch, started):
     if started:
         jobs.input("local", VoiceLeaseRef.from_lease(response.lease))
     core.settings.voice = voice_config(lease_ttl_seconds=31)
-    with pytest.raises(CoreError, match="VOICE_SCOPE_REQUIRED"):
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_CAPABILITY_CHANGED"):
         claim(jobs)
     row = core.store.one(
         "SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=?", (job["job_id"],)
@@ -442,12 +407,10 @@ def test_erasure_withdraws_completed_audio_and_keeps_only_metadata(core, monkeyp
         jobs.submit("local", value)
 
 
-def test_lease_deadline_uses_actual_window_end_across_timezones(core, monkeypatch):
-    jobs, message_id, _, _ = prepared(core, monkeypatch)
+def test_lease_deadline_uses_original_grant_expiry(core, monkeypatch):
+    wait = voice_config().asr.wait_seconds
+    jobs, message_id, _, _ = prepared(core, monkeypatch, expires_seconds=wait + 8)
     end = core.clock.now + timedelta(seconds=7)
-    core.settings.live_text_window = core.settings.live_text_window.model_copy(
-        update={"ends_at": end.astimezone(timezone(timedelta(hours=8)))}
-    )
     job = create_tts(core, jobs, message_id)
     _, claimed = claim(jobs)
     assert claimed.lease.job_deadline_at == end

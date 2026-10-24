@@ -2,8 +2,9 @@
 
 This candidate replaces live-window execution checks in `VoiceFlow` and
 `VoiceJobs` with the existing OwnerAuthority, signed owner-input and native
-Outbox checks. It is not runtime acceptance and must not be activated before the
-shared migration and Bridge consumer integration below are complete.
+Outbox checks. Native Core/API and independent voice-worker acceptance use
+synthetic providers. Production activation still requires the separately owned
+Bridge consumer integration and its final combined verification.
 
 ## Binding and deadlines
 
@@ -29,10 +30,10 @@ of active execution permission.
 
 ## Required shared integration
 
-R1 owns migration `0044_voice_owner_authority`, after the reserved Reader 0043
-revision, and the Store schema-capability declaration. The registered request is
+R1 supplied migration `0044_voice_owner_authority` after `0043_reader_authority`
+and the Store schema-capability declaration in `7cc2a48`. The registered contract is
 `voice-owner-authority-interface.json` in the shared next-features handoff folder.
-The requested additive column is:
+The additive column is:
 
 ```sql
 authority_json TEXT NOT NULL DEFAULT '{}'
@@ -78,10 +79,24 @@ Four native-source checks pass through real signed owner capture and Core ingest
 window-free ASR waiting, original-expiry bound, STOP rejection and chat-only
 permission separation. No guard replacement or real voice node is used.
 
-ASR/TTS task creation, actual API plus independent voice worker, byte/hash and
-transcript preservation, cleanup/UNKNOWN recovery and Bridge delivery acceptance
-remain pending the shared schema and consumer integration. Existing window-based
-voice fixtures also require migration before they can validate the new entry.
+ASR/TTS creation and real TLS API plus independent voice-worker checks pass.
+The complete native chain checks ASR evidence, settled SDK wording, large TTS
+payloads, unchanged original source/Outbox content, native send-check and ACK.
+Original job/flow/retention/retry/maintenance fixtures use signed owner inputs and
+real SDK admission/settlement with a synthetic model provider. ASR-only cases
+retain a pending source job instead of inventing an already-approved reply.
+
+STOP, replacement attempts, expiry, source withdrawal and restore retain
+UNKNOWN and random cleanup custody without replay. Cleanup after restore does
+not restore authority to claim new work. Historical v1 migration fixtures freeze
+the pre-measurement reservation field set before hashing; they never discard an
+existing measurement journal proof. Migration 0044 preserves existing job,
+lease, node, Outbox and accounting rows and adds an empty authority reference.
+Native UNKNOWN reconciliation reuses the original proof validator via R1's
+`e9df94b`, including erasure-retired voice bindings and unchanged usage.
+
+Bridge consumers and final service activation remain the integration owner's
+scope. No real provider, QQ sender or device was activated by these checks.
 
 ## Reuse
 

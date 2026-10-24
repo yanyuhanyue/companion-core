@@ -482,7 +482,7 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
             assert detail["incarnation"] == current.incarnation
             assert detail["operator"] == record["operator"] == "synthetic-owner"
             assert detail["service_instance"] == record["service_instance"]
-            assert not restored.store.rows("SELECT * FROM model_usage")
+            assert restored.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
             following = state.next_claim("local", "b" * 64)
             assert following.sequence == current.last_sequence + 1
 
@@ -494,12 +494,12 @@ def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node
                     reply = await client.post(ROUTE_PREFIX + "/claim",
                         json=following.model_dump(), headers={"Authorization": "Bearer " + TOKEN,
                             "Idempotency-Key": following.request_id})
-                    assert reply.status_code == 200, reply.text
-                    assert reply.json()["lease"] is None
+                    assert reply.status_code == 403, reply.text
+                    assert reply.json() == {"error": "OWNER_AUTHORITY_DISABLED"}
 
             asyncio.run(claim_after_recovery())
             state.clear_claim()
-            assert restored_jobs.session("local").last_sequence == following.sequence
+            assert restored_jobs.session("local").last_sequence == current.last_sequence
 
 
 def test_process_identity_is_durable_before_ready_wait_and_startup_failure_cleanup(node):
