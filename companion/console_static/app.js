@@ -114,7 +114,7 @@ const CAP_NAMES = {
   wake: "自主活动调度", affect: "情绪观察", expression: "表情回应", expression_learning: "表达习惯学习", goals: "目标与承诺",
   proactive: "主动私聊", social: "社交语义判断", "reading.bilibili": "B 站内容读取", "reading.heybox": "小黑盒内容读取",
   "reading.web": "网页阅读", exploration: "内容发现", "bilibili.video": "B 站视频分析", "qq.files": "私人文件",
-  "qq.voice.asr": "语音转写", "qq.voice.tts": "语音回复", "qq.poke": "拍一拍", "qq.poke.native": "原生拍一拍",
+  "qq.voice.asr": "语音转写", "qq.voice.tts": "语音回复", "qq.poke": "回应拍一拍", "qq.poke.native": "回拍一下",
   "qq.account.qzone_publish": "QQ 空间发布", "qq.account.nickname": "改昵称", "qq.account.signature": "改签名",
   "qq.account.avatar": "改头像", "qq.profile.observe": "资料观测", "qq.images": "私聊图片理解", "qq.animation": "私聊动图理解",
   "model.understand_video": "视频理解模型", "unicode.emoji": "Unicode 表情", "qq.face_names": "QQ 表情名称",
@@ -201,7 +201,7 @@ const LIMIT_NAMES = {
   max_daily_images: "每日图片", max_daily_files: "每日文件", daily_requests: "每日请求", monthly_requests: "每月请求", daily_bytes: "每日流量",
   max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
 };
-const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子", semantic: "按语义", unlimited: "不限",
+const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子长度分段", semantic: "按语义分段（由她写的换行决定）", unlimited: "不限",
   happy: "开心", like: "喜欢", surprised: "惊讶", morning: "早安", sleep: "晚安", sad: "难过", angry: "生气", shy: "害羞", tired: "困了", thinking: "思考", love: "爱心", cry: "哭哭" };
 function limitValue(k, v) {
   if (v === null || v === undefined) return "未设置";
@@ -1035,6 +1035,7 @@ PAGES.memes = data => {
 };
 
 /* ================= 语音与节点 ================= */
+const mmss = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
 PAGES.voice = data => {
   const meta = data.meta || {}, items = data.items || [], nodes = items.filter(i => i.kind === "voice_node"), jobs = items.filter(i => i.kind === "voice_job");
   const policy = meta.reply_policy || {}, out = state.voiceTab === "out";
@@ -1052,13 +1053,17 @@ PAGES.voice = data => {
     el("section", { class: "sheet" }, el("div", { class: "sheet-head" }, el("div", { class: "seg", role: "tablist" },
         el("button", { type: "button", "aria-pressed": String(!out), onclick: () => { state.voiceTab = "in"; rerender(); } }, "你发的", el("span", { class: "count" }, String(mine.length))),
         el("button", { type: "button", "aria-pressed": String(out), onclick: () => { state.voiceTab = "out"; rerender(); } }, "她发的", el("span", { class: "count" }, String(hers.length))))),
-      list.length ? el("ul", { class: "vlist" }, list.map(j => el("li", { class: "vrow" + (out ? " out" : "") },
-        el("span", { class: "vplay", title: "录音不在控制台保留", "aria-hidden": "true" }, icon(out ? "send" : "mic")),
-        el("div", { class: "vmain" }, el("div", { class: "vtop" }, el("b", {}, out ? "她的语音回复" : "你发的语音"),
-          j.detail?.input_duration_seconds ? el("span", { class: "num vdur" }, duration(j.detail.input_duration_seconds)) : null),
-          el("div", { class: "vmeta" }, el("span", {}, fmtDate(j.occurred_at)), tag(j.status, j.detail?.state_label), j.detail?.node_id ? el("span", {}, "节点 " + j.detail.node_id) : null,
-            j.detail?.delivery_state ? tag(j.detail.delivery_state) : null, j.detail?.partial ? el("span", { class: "note" }, "音频不完整") : null),
-          j.summary ? el("p", { class: "note" }, j.summary) : null))))
+      list.length ? el("ul", { class: "vlist" }, list.map(j => {
+        const secs = j.detail?.input_duration_seconds, seed = [...String(j.id)].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7);
+        const wave = Array.from({ length: 40 }, (_, k) => 4 + Math.round(Math.abs(Math.sin(k * 1.37 + seed % 97) * Math.cos(k * .31 + seed % 13)) * 22));
+        return el("li", { class: "vrow gone" + (out ? " out" : "") },
+          el("span", { class: "vplay", title: "录音不在控制台保留", "aria-label": "录音不在控制台保留" }, icon("lock")),
+          el("div", { class: "vmain" }, el("div", { class: "vtop" }, el("span", { class: "vwave", "aria-hidden": "true" }, wave.map(h => el("i", { style: { height: h + "px" } }))),
+              el("span", { class: "vtime num" }, typeof secs === "number" ? mmss(secs) : "—")),
+            el("p", { class: "vtext" }, j.summary || (out ? "她的语音回复" : "你发的语音")),
+            el("div", { class: "vmeta" }, el("span", {}, fmtDate(j.occurred_at)), j.detail?.node_id ? el("span", {}, j.detail.node_id) : null, tag(j.status, j.detail?.state_label),
+              j.detail?.delivery_state ? tag(j.detail.delivery_state) : null, j.detail?.partial ? el("span", {}, "音频不完整") : null, el("span", { class: "muted" }, "录音不保留"))));
+      }))
         : el("p", { class: "sheet-body note" }, out ? "还没有她的语音回复。" : "还没有你发的语音。"),
       el("p", { class: "sheet-body note vnote" }, "录音和转写文字不会出现在控制台：任务结束后录音即清除，转写只进入对话。")));
 };
@@ -1133,7 +1138,11 @@ const cfgFields = () => (state.data?.configuration?.fields || []).filter(f => ty
 const CAP_KEYS = new Set(Object.values(CAP_FIELDS).flat());
 const capOfKey = key => Object.keys(CAP_FIELDS).find(id => CAP_FIELDS[id].includes(key));
 /* 未配置的对象型设置开启时使用的默认值，与 reply_segments.SegmentedReplyConfig 的默认值一致 */
-const NULL_DEFAULTS = { segmented_reply: { max_segments: 3, min_chars: 12, interval_ms: 1500 } };
+const NULL_DEFAULTS = { segmented_reply: { max_segments: 3, min_chars: 12, interval_ms: 1500, mode: "semantic" } };
+/* 后端在默认值时会省略的子项，编辑时补出来显示（按句子模式时 mode 不写入） */
+const SHOW_DEFAULTS = { segmented_reply: { mode: "sentence" } };
+/* 常见表情分类。实际可用的分类取决于 Bridge 里导入的表情包，可以另外添加 */
+const MEME_CATEGORY_PRESETS = ["happy", "like", "surprised", "morning", "sleep", "sad", "angry", "shy", "tired", "thinking", "love", "cry", "thanks", "sorry", "hug", "ok"];
 function searchBox(id, value, placeholder, onValue) {
   // 输入法组字期间不重绘页面，否则中文无法输入。
   const input = el("input", { class: "input", id, type: "search", placeholder, value,
@@ -1202,6 +1211,7 @@ function numberInput({ id, key, type, value, nullable, lo, hi, onValue }) {
 }
 function control(f) {
   const v = draftVal(f), id = "cf-" + f.key.replace(/[^a-z0-9_]/gi, "-");
+  if (f.key === "expression_meme_categories") return categoryPicker(f, v || []);
   if (f.type === "boolean") return el("button", { type: "button", class: "switch", role: "switch", id, "aria-checked": String(Boolean(v)), "data-k": id, "aria-label": f.label, onclick: () => setDraft(f, !draftVal(f)) });
   if (enumOf(f)) return el("select", { class: "input", id, "data-k": id, onchange: e => setDraft(f, JSON.parse(e.target.value)) },
     enumOf(f).map(o => el("option", { value: JSON.stringify(o), selected: same(o, v) }, VALUE_NAMES[o] || String(o))));
@@ -1211,8 +1221,13 @@ function control(f) {
   if (f.type === "secret") return el("input", { class: "input", type: "password", id, "data-k": id, autocomplete: "new-password",
     placeholder: f.configured ? "已设置，留空保持不变" : "未设置", onchange: e => setDraft(f, e.target.value) });
   if (f.type === "array" && (Array.isArray(v) ? v.every(x => typeof x === "string") : true)) return listControl(id, v || [], list => setDraft(f, list));
-  if (f.type === "object" && v === null && NULL_DEFAULTS[f.key]) return el("div", { class: "row-gap" }, el("span", { class: "note" }, "没有开启"),
-    btn("开启", () => setDraft(f, { ...NULL_DEFAULTS[f.key] }), { cls: "sm" }));
+  if (f.type === "object" && NULL_DEFAULTS[f.key]) {
+    const on = v !== null && v !== undefined;
+    const sw = el("div", { class: "kv toggle-row" }, el("span", {}, on ? "已开启" : "没有开启"),
+      el("button", { type: "button", class: "switch", role: "switch", id, "data-k": id, "aria-checked": String(on), "aria-label": f.label,
+        onclick: () => setDraft(f, on ? null : { ...NULL_DEFAULTS[f.key] }) }));
+    return on ? el("div", { class: "obj" }, sw, objectEditor(f, { ...SHOW_DEFAULTS[f.key], ...v }, [], true)) : sw;
+  }
   if (f.type === "object" && v === null) return el("span", { class: "note" }, "未配置，在部署配置里设置");
   if (["object", "array"].includes(f.type)) return state.jsonEdit?.has(f.key) || Array.isArray(v) ? jsonControl(f, id, v) : objectEditor(f, v, []);
   return el("input", { class: "input", id, "data-k": id, value: v ?? "", onchange: e => setDraft(f, e.target.value) });
@@ -1226,7 +1241,7 @@ function jsonControl(f, id, v) {
   } });
 }
 /* 对象配置按子项显示：开关、数字、文字、名单，嵌套的设置组缩进显示 */
-function objectEditor(f, value, path) {
+function objectEditor(f, value, path, bare = false) {
   const parent = path.length ? path.at(-1) : f.key;
   const rows = Object.entries(value || {}).map(([k, v]) => {
     const p = [...path, k], id = "cf-" + [f.key, ...p].join("-").replace(/[^a-z0-9_-]/gi, "-"), label = subLabel(k);
@@ -1244,9 +1259,22 @@ function objectEditor(f, value, path) {
     else ctl = el("span", { class: "note" }, v === null ? "未配置" : "在部署配置里设置");
     return el("div", { class: "sub-row" }, el("span", { class: "sub-l" }, label), el("span", { class: "sub-c" }, ctl), el("p", { class: "pf-err", role: "alert", hidden: true }));
   });
-  if (path.length) return el("div", { class: "sub-list" }, rows);
+  if (path.length || bare) return el("div", { class: "sub-list" }, rows);
   return el("div", { class: "obj" }, el("div", { class: "sub-list" }, rows),
     btn("以 JSON 编辑", () => { state.jsonEdit = state.jsonEdit || new Set(); state.jsonEdit.add(f.key); rerender(); }, { cls: "sm quiet" }));
+}
+function categoryPicker(f, list) {
+  const all = [...new Set([...MEME_CATEGORY_PRESETS, ...list])];
+  const input = el("input", { class: "input", id: "cf-meme-cat", placeholder: "其他分类，例如 hungry", maxlength: "32" });
+  const err = el("p", { class: "list-err", role: "alert", hidden: true });
+  const add = () => { const x = input.value.trim().toLowerCase(); if (!x) return;
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(x)) { err.textContent = "分类名只能用小写英文字母、数字、短横线和下划线，并以字母开头。"; err.hidden = false; return; }
+    if (!list.includes(x)) setDraft(f, [...list, x]); };
+  input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+  return el("div", { class: "cats" }, el("div", { class: "cat-grid" }, all.map(c => el("button", { type: "button", class: "cat" + (list.includes(c) ? " on" : ""), "aria-pressed": String(list.includes(c)),
+      onclick: () => setDraft(f, list.includes(c) ? list.filter(x => x !== c) : [...list, c]) }, list.includes(c) ? icon("check") : null, VALUE_NAMES[c] || c))),
+    el("div", { class: "list-add" }, input, btn("添加", add, { cls: "sm" })), err,
+    el("p", { class: "note" }, `已选 ${list.length} 个，最多 12 个生效。实际能用的分类取决于 Bridge 里导入的表情包。`));
 }
 function listControl(id, list, onList) {
   const input = el("input", { class: "input", id, "aria-label": "添加一项", placeholder: "输入后按回车添加", maxlength: "64" });
@@ -1263,7 +1291,7 @@ function fieldRow(f, label) {
   return el("div", { class: "pf" + (wide ? " wide" : "") + (changed ? " changed" : ""), id: "pf-" + f.key },
     el("div", { class: "pf-l" }, el("b", {}, label || f.label), f.description ? el("span", {}, f.description) : null,
       active ? el("span", { class: "pf-active" }, "当前生效：" + fmtField(f, f.active_value)) : null),
-    el("div", { class: "pf-c" }, control(f), f.nullable && f.type !== "secret" && draftVal(f) !== null ? btn("设为未配置", () => setDraft(f, null), { cls: "sm quiet" }) : null),
+    el("div", { class: "pf-c" }, control(f), f.nullable && f.type !== "secret" && !NULL_DEFAULTS[f.key] && draftVal(f) !== null ? btn("设为未配置", () => setDraft(f, null), { cls: "sm quiet" }) : null),
     el("p", { class: "pf-err", role: "alert", hidden: true }));
 }
 function currencySwitch() {
@@ -1323,7 +1351,7 @@ const capMain = id => capFieldsOf(id).find(f => f.type === "boolean" && /_enable
 const CAP_DEPLOY = {
   "media.voice": "网页语音会话的服务商地址、费用上限和会话时长在服务器部署配置的 [media] 段设置。",
   executive: "执行任务的端点和凭据在服务器部署配置的 [executive] 段设置，控制台不能修改。",
-  "reading.web": "允许读取的网站名单属于读取适配器配置（COMPANION_OBSERVATION_ADAPTERS），在部署环境里修改。",
+  "reading.web": "要读取的网站名单现在只能在服务器的部署环境里填写：读取适配器配置 COMPANION_OBSERVATION_ADAPTERS 里网页适配器的 allowed_hosts。控制台里填写需要后端先把名单从适配器凭据中拆出来。",
   "reading.bilibili": "B 站读取适配器和账号授权在部署环境里配置。", "reading.heybox": "小黑盒读取适配器在部署环境里配置。",
   "model.understand_video": "视频理解模型的审批窗口（paid_model）在部署配置里设置。",
   "qq.images": "付费图片理解的审批窗口（paid_model.image_input）在部署配置里设置。",
@@ -1417,15 +1445,15 @@ PAGES.configuration = data => {
   const rest = fields.filter(f => !special.has(f.key) && !CAP_KEYS.has(f.key));
   const groups = GROUPS.filter(([g]) => rest.some(f => (f.group || "system") === g));
   const extra = [...new Set(rest.map(f => f.group || "system"))].filter(g => !GROUPS.some(([k]) => k === g)).map(g => [g, "其他设置"]);
-  const sections = [["version", "版本"], ["model", "模型与计价"], ["money", "费用与预算"], ["secrets", "密钥"],
+  const sections = [["version", "版本"], ["model", "模型与密钥"], ["money", "费用与预算"],
     ...[...groups, ...extra].filter(([g]) => g !== "model")];
-  const dirtyIn = id => ({ model: [...RATE_KEYS, ...MODEL_TAIL, ...rest.filter(f => f.group === "model").map(f => f.key)],
-    money: fields.filter(f => isMoneyKey(f.key) && !CAP_KEYS.has(f.key)).map(f => f.key), secrets: fields.filter(f => f.type === "secret").map(f => f.key) }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
+  const dirtyIn = id => ({ model: [...RATE_KEYS, ...MODEL_TAIL, ...fields.filter(f => f.type === "secret").map(f => f.key), ...rest.filter(f => f.group === "model").map(f => f.key)],
+    money: fields.filter(f => isMoneyKey(f.key) && !CAP_KEYS.has(f.key)).map(f => f.key) }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
   return el("div", {}, top, el("div", { class: "cfg2" },
     el("nav", { class: "cfg-toc", "aria-label": "配置目录" }, sections.map(([id, n]) => el("a", { href: "#configuration/" + id, "data-toc": "cfg-" + id,
       onclick: e => { e.preventDefault(); history.replaceState(null, "", "#configuration/" + id); document.getElementById("cfg-" + id)?.scrollIntoView({ block: "start" }); } }, n,
       dirtyIn(id) || (id === "money" && state.budgetDraft.size) ? el("span", { class: "dirty", "aria-label": "有修改" }) : null))),
-    el("div", { class: "cfg-main" }, versionSection(c), modelSection(rest.filter(f => f.group === "model")), moneySection(c), secretsSection(fields.filter(f => f.type === "secret")),
+    el("div", { class: "cfg-main" }, versionSection(c), modelSection(rest.filter(f => f.group === "model")), moneySection(c),
       [...groups, ...extra].filter(([g]) => g !== "model").map(([g, n]) => el("section", { class: "sheet cfg-sec", id: "cfg-" + g }, el("div", { class: "sheet-head" }, el("h2", {}, n)),
         el("div", { class: "sheet-body pf-list" }, rest.filter(f => (f.group || "system") === g).map(f => fieldRow(f))))))));
 };
@@ -1450,8 +1478,16 @@ function modelSection(other) {
   const rate = k => fieldOf(k), rates = RATE_KEYS.map(rate).filter(Boolean);
   const ctx = fieldOf("context_soft_tokens"), out = fieldOf("max_output_tokens"), inR = rate("input_rate"), outR = rate("output_rate");
   const est = ctx && out && inR && outR ? (draftVal(ctx) * draftVal(inR) + draftVal(out) * draftVal(outR)) / 1e6 : null;
-  return el("section", { class: "sheet cfg-sec", id: "cfg-model" }, el("div", { class: "sheet-head" }, el("h2", {}, "模型与计价"), el("span", { class: "note" }, "主回复只使用这一个模型")),
-    el("div", { class: "sheet-body" }, el("div", { class: "pf-list" }, other.map(f => fieldRow(f))),
+  // 请求地址和密钥放在一起；视频模型的请求地址属于部署保管的 paid_model，这里只能换密钥。
+  const order = ["provider", "model_url", "model_name"], main = [...order.map(fieldOf), ...other.filter(f => !order.includes(f.key))].filter(Boolean);
+  const key = fieldOf("model_key"), videoKey = fieldOf("video_model_key");
+  return el("section", { class: "sheet cfg-sec", id: "cfg-model" }, el("div", { class: "sheet-head" }, el("h2", {}, "模型与密钥"), el("span", { class: "note" }, "主回复只使用这一个模型")),
+    el("div", { class: "sheet-body" }, el("h3", { class: "sub first" }, "对话模型"),
+      el("div", { class: "pf-list" }, main.map(f => fieldRow(f, f.key === "model_url" ? "请求地址" : f.key === "model_name" ? "模型名称" : f.key === "provider" ? "服务类型" : undefined)),
+        key ? fieldRow(key, "密钥") : null),
+      videoKey ? [el("h3", { class: "sub" }, "视频理解模型"), el("div", { class: "pf-list" }, fieldRow(videoKey, "密钥"),
+        el("div", { class: "pf" }, el("div", { class: "pf-l" }, el("b", {}, "请求地址"), el("span", {}, "在服务器部署配置的 paid_model.video_input 里设置，控制台不能修改。"))))] : null,
+      el("p", { class: "note mt" }, "密钥只能写入，任何地方都不会显示原值。传输令牌、主人控制令牌和读取适配器凭据在部署环境里更换；主人控制令牌同时用来加密配置版本，直接更换会导致旧版本无法解密。"),
       rates.length ? [el("h3", { class: "sub" }, "费率", el("span", {}, "按服务商公布的峰值价格填写，价格未知时会停止自主活动。")),
         el("div", { class: "prices" }, rates.map(f => el("div", { class: "price" + (state.draft.has(f.key) ? " changed" : "") }, el("span", {}, ({ input_rate: "输入", cached_input_rate: "缓存命中输入", output_rate: "输出" })[f.key]), control(f))))] : null,
       el("div", { class: "pf-list" }, MODEL_TAIL.map(fieldOf).filter(Boolean).map(f => fieldRow(f))),
@@ -1463,7 +1499,15 @@ function scheduleStrip() {
   const v = k => { const f = fieldOf(k); return f ? draftVal(f) : null; };
   const qs = v("quiet_start"), qe = v("quiet_end"), x = h => (h / 24 * 100) + "%";
   const bands = Number.isInteger(qs) && Number.isInteger(qe) ? (qs > qe ? [[qs, 24], [0, qe]] : qs < qe ? [[qs, qe]] : []) : [];
-  const pin = (k, name, cls, on) => Number.isInteger(v(k)) ? el("div", { class: "pin " + cls + (on === false ? " off" : ""), style: { left: x(v(k) + .5) } }, el("i"), el("span", {}, name + " " + String(v(k)).padStart(2, "0") + ":00")) : null;
+  // 标记按时间排开，相隔不到 4 小时的错开到下一行，文字不压线也不互相重叠。
+  const rowsUsed = [];
+  const pin = (k, name, cls, on) => {
+    if (!Number.isInteger(v(k))) return null;
+    const h = v(k); let row = 0; while (rowsUsed.some(([r, at]) => r === row && Math.abs(at - h) < 4)) row++; rowsUsed.push([row, h]);
+    const right = h >= 19;
+    return el("div", { class: "pin " + cls + (on === false ? " off" : "") + (right ? " right" : ""), style: { left: x(h + .5), top: (10 + row * 26) + "px" } },
+      el("i"), el("span", {}, name + " " + String(h).padStart(2, "0") + ":00"));
+  };
   const now = localMinutes(new Date().toISOString());
   return el("div", { class: "cd-clock" }, el("div", { class: "clock", role: "img", "aria-label": "免打扰与整理时间" },
       bands.map(([a, z]) => el("div", { class: "cband", style: { left: x(a), width: x(z - a) } })), el("div", { class: "cnow", style: { left: (now / 1440 * 100) + "%" } }),
