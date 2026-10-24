@@ -760,6 +760,56 @@ def _failed_memory_input(store, approval, event, job, now):
             "reply_revision": event["reply_revision"]}
 
 
+def _rejected_budget_input(store, settings, approval, event, job, now):
+    """Prove an unadmitted monthly-budget refusal without rewriting the failed job."""
+    evidence = store.rows("SELECT * FROM audit_log WHERE action='job.failed' AND entity_id=?",
+                          (job["job_id"],))
+    conversation = store.one("SELECT * FROM conversations WHERE conversation_id=?",
+                             (event["conversation_id"],))
+    body = json.loads(event["body_json"])
+    if (not approval or approval.companion_scope != "owner_private_v1"
+        or approval.automatic_reply is not True
+        or job["state"] != "FAILED" or job["last_error_code"] != "MONTHLY_BUDGET_EXHAUSTED"
+        or job["lease_token"] is not None or job["attempts"] != 1
+        or event["event_type"] != "message.received"
+        or body.get("control_command") or body.get("diary_command")
+        or body.get("media") or body.get("shared_content") or body.get("rich")
+        or not conversation or conversation["scope"] != "private"
+        or conversation["owner_actor_id"] != "owner"
+        or event["reply_revision"] != conversation["reply_revision"]
+        or len(evidence) != 1 or evidence[0]["actor_id"] != "system"
+        or evidence[0]["trace_id"] != event["trace_id"]
+        or json.loads(evidence[0]["safe_detail_json"]) != {
+            "code": "MONTHLY_BUDGET_EXHAUSTED", "state": "FAILED"}
+        or store.one("SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],))
+        or store.one("SELECT 1 FROM model_admissions WHERE logical_request_id=?", (job["job_id"],))
+        or store.one("SELECT 1 FROM content_items WHERE owner_event_id=?", (event["event_id"],))
+        or store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                     ("erased_event:" + event["event_id"],))):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409)
+    try:
+        times = [datetime.fromisoformat(value) for value in (
+            job["created_at"], evidence[0]["created_at"], job["updated_at"], now,
+        )]
+        lease = datetime.fromisoformat(job["lease_until"]) if job["lease_until"] else None
+        if (any(value.tzinfo is None for value in times)
+            or not times[0] <= times[1] == times[2] <= times[3]
+            or lease and (lease.tzinfo is None or lease > times[-1])):
+            raise ValueError("REJECTED_INPUT_TIMELINE_UNPROVEN")
+    except (ValueError, TypeError):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409) from None
+    custody = paid_budget.journal(
+        store, settings.paid_model, initialize=False, allow_settlement=True,
+    )
+    if (not custody["lifecycle"] or custody["lifecycle"]["state"] != "STOPPED"
+        or custody["lifecycle"]["plan_sha256"] != approval.plan_sha256):
+        raise CoreError("LIVE_TEXT_FAILED_INPUT_UNPROVEN", 409)
+    return {"state": "FAILED", "resolution": "REJECTED_BEFORE_DISPATCH",
+            "failure_code": "MONTHLY_BUDGET_EXHAUSTED", "failure_phase": "model_admission",
+            "failure_evidence_sha256": paid_budget.sha(evidence[0]),
+            "reply_revision": event["reply_revision"]}
+
+
 def cancelled_input(store, settings, clock, reference):
     """Prove stopped generation never sent; preserve every settled model attempt and fee."""
     with store.transaction():
@@ -789,9 +839,12 @@ def cancelled_input(store, settings, clock, reference):
             or event["privacy_scope"] != "private" or event["redacted"]
             or _input_digest(json.loads(event["body_json"])) != receipt.get("input_sha256")):
             raise CoreError("LIVE_TEXT_CANCELLED_INPUT_UNPROVEN", 409)
-        failed = _failed_memory_input(store, approval, event, job, clock()) if (
-            failed
-        ) else None
+        if failed:
+            failed = (_rejected_budget_input(store, settings, approval, event, job, clock())
+                      if job["last_error_code"] == "MONTHLY_BUDGET_EXHAUSTED"
+                      else _failed_memory_input(store, approval, event, job, clock()))
+        else:
+            failed = None
         if failed:
             failed["input_privacy_epoch"] = input_epoch
         if not failed and (job["state"] != "CANCELLED"
