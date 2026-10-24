@@ -575,6 +575,8 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         unavailable = list(unavailable) + ([] if enabled else ["FEATURE_DISABLED"])
         if native and identifier in purpose_by_feature:
             unavailable += _owner_blocks(store, cfg, now, purpose_by_feature[identifier])
+        if native and identifier == "tool.analyze_shared_video":
+            unavailable += _owner_blocks(store, cfg, now, "content")
         custody_blocks = [code for code in unavailable
                           if code == "MODEL_BUDGET_RECONCILIATION_REQUIRED"]
         unavailable = [code for code in unavailable if code not in custody_blocks]
@@ -701,7 +703,9 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
         image_errors.append(error.code)
     add("qq.images", "分析本次主人发送且已认证捕获的图片。", unavailable=image_errors,
         paused=model_blocks)
-    video_errors = []
+    video_errors = _owner_blocks(store, cfg, now, "content") if native else []
+    if native and not cfg.content_enabled:
+        video_errors.append("CONTENT_DISABLED")
     try:
         video_input.contract(cfg, "capability-check", "capability-check")
     except CoreError as error:

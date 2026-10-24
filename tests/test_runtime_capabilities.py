@@ -249,7 +249,17 @@ def test_tools_argument_never_bypasses_native_video_approval(core):
 
 
 def test_native_video_requires_actual_tool_exposure(core, tmp_path):
+    from companion import owner_authority
+    from tests.test_owner_authority import activate
+
     private_images(core, tmp_path)
+    denied = rows(core, model_tools=("understand_video",))
+    for feature in ("qq.animation", "model.understand_video"):
+        assert denied[feature]["state"] == "UNAVAILABLE"
+        assert "OWNER_AUTHORITY_PURPOSE_REQUIRED" in denied[feature]["reason_codes"]
+    view = owner_authority.current(core.store, core.settings, core.clock)
+    policy = view.policy.model_copy(update={"purposes": [*view.policy.purposes, "content"]})
+    activate(core, policy, revision=view.authority.revision, operation="video-content-permission")
     chat = rows(core)
     assert chat["qq.animation"]["state"] == "READY"
     assert chat["bilibili.video"]["state"] == "UNAVAILABLE"
@@ -267,6 +277,20 @@ def test_native_bili_tool_requires_current_permission_and_actual_exposure(core, 
     core.settings.bili_video = core.settings.bili_video.model_copy(update={"enabled": False})
     current = rows(core, model_tools=("analyze_shared_video",))
     assert current["tool.analyze_shared_video"]["state"] == "UNAVAILABLE"
+
+
+def test_native_bili_tool_requires_content_even_when_given_as_exposed(core, tmp_path):
+    from companion import owner_authority
+    from tests.test_owner_authority import activate
+
+    native_capabilities(core, tmp_path)
+    view = owner_authority.current(core.store, core.settings, core.clock)
+    policy = view.policy.model_copy(update={
+        "purposes": [name for name in view.policy.purposes if name != "content"]})
+    activate(core, policy, revision=view.authority.revision, operation="bili-content-withdrawal")
+    fact = rows(core, model_tools=("analyze_shared_video",))["tool.analyze_shared_video"]
+    assert fact["state"] == "UNAVAILABLE"
+    assert "OWNER_AUTHORITY_PURPOSE_REQUIRED" in fact["reason_codes"]
 
 
 def test_retired_fact_window_does_not_claim_native_memory_admission(core, tmp_path):
