@@ -784,6 +784,35 @@ svg.dragging .gn { cursor: grabbing; }
   .qarrow { transform: rotate(90deg); margin: 0 auto; }
 }
 
+/* ===== 思考与决策 ================================================= */
+.dk-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
+.dk-stats div { padding: 14px 18px; display: grid; } .dk-stats div + div { border-left: 1px solid var(--line); }
+.dk-stats b { font-size: 24px; color: var(--ink); } .dk-stats span { font-size: 12px; color: var(--muted); }
+.dk-wrap { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 18px; align-items: start; }
+.dk-list { display: grid; gap: 6px; }
+.dk-list button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); text-align: left; }
+.dk-list button:hover { border-color: var(--line-strong); }
+.dk-list button.sel { background: var(--raised); border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
+.dk-list .ic { width: 30px; height: 30px; border-radius: 9px; background: #eceef6; color: var(--ink-soft); display: grid; place-items: center; flex: none; }
+.dk-l { flex: 1; min-width: 0; display: grid; } .dk-l b { font-size: 13.5px; } .dk-l small { font-size: 12px; color: var(--muted); }
+.dk-card { background: var(--raised); border: 1px solid var(--line); border-radius: 18px; padding: 22px 24px; box-shadow: var(--shadow); }
+.dk-head { display: flex; justify-content: space-between; align-items: flex-start; }
+.dk-head h2 { font-family: var(--serif); font-size: 20px; color: var(--ink); }
+.dk-ic { color: var(--muted); }
+.dk-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin: 16px 0 18px; }
+.dk-tabs button { border: 0; background: transparent; height: 34px; border-radius: 17px; font-size: 14px; color: var(--muted); }
+.dk-tabs button[aria-selected="true"] { background: #f0f1f6; color: var(--text); font-weight: 600; }
+.dk-title { font-size: 15px; font-weight: 700; display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.dk-rows div { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 16px; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.dk-rows dt { color: var(--muted); } .dk-rows dd { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.dk-meta { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+.dk-meta b { color: var(--text); font-weight: 600; }
+.dk-ctx li { display: grid; grid-template-columns: 160px 110px minmax(0, 1fr); gap: 12px; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.dk-debug { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-top: 14px; padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 10px; }
+.dk-debug b { display: block; font-size: 13.5px; } .dk-debug span { font-size: 12px; color: var(--muted); }
+@media (max-width: 1100px) { .dk-wrap { grid-template-columns: minmax(0, 1fr); } .dk-stats { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 860px) { .dk-rows div, .dk-ctx li { grid-template-columns: minmax(0, 1fr); gap: 4px; } }
+
 /* ===== Drawer / dialog / toast / palette ========================== */
 dialog { border: 0; padding: 0; border-radius: 16px; width: min(520px, calc(100vw - 32px)); box-shadow: 0 30px 80px -20px rgba(35,38,74,.5); color: var(--text); }
 dialog::backdrop { background: rgba(35,38,74,.38); backdrop-filter: blur(2px); }
@@ -1272,7 +1301,7 @@ const MONTH_USD = 6_420_000;
 
 /* ================= 外壳：导航、路由、通用组件 ================= */
 const ROUTES = [
-  ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"]]],
+  ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["thinking", "思考与决策", "spark"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"]]],
   ["内容", [["content", "阅读与文件", "book"], ["memes", "表情素材", "smile"], ["voice", "语音与节点", "mic"], ["account", "QQ 资料行为", "qq"]]],
   ["管理", [["caps", "能力与开关", "toggle"], ["diagnostics", "运行诊断", "pulse"], ["config", "配置", "gear"]]],
 ];
@@ -1823,6 +1852,67 @@ function acctDo(id, op) {
   }
 }
 document.addEventListener("click", e => { const t = e.target.closest("[data-acct]"); if (t) acctDo(t.dataset.acct, t.dataset.do); });
+
+/* ================= 思考与决策 =================
+   每条记录是一次真实的决策：触发原因、可选行动、她的决定、说明与执行结果；
+   “上下文”只列本轮实际可用的信息，区分已采用与未采用；
+   “原始推理”只显示服务商实际返回的推理字段，没有就明确写“未生成或未采集”，不根据最终回答虚构。 */
+const DECISIONS = [
+  { id: "dec_31", kind: "proactive", at: "今天 21:12", title: "主动消息候选", decision: "DEFER", decisionText: "暂时不发",
+    trigger: "昨天的项目 Bug 尚未解决", options: ["私聊", "延后", "跳过"], why: "缺少新的进展，当前主动询问可能造成打扰", result: "未发送，保留待评估线索", resultTag: "WAITING",
+    model: "DeepSeek Flash", tokens: "1,820 / 96", cost: "¥0.003", latency: "1.4 秒",
+    context: [["近期会话", "已采用", "最近 12 条，含你 20:40 说“今晚先不想工作的事”"], ["项目进展记忆", "已采用", "“你在修一个登录页的 Bug”，10月23日 确认"], ["自主兴趣记录", "无匹配证据", ""], ["免打扰时段", "已采用", "23:00 开始，还剩 1 小时 48 分"], ["今日主动次数", "已采用", "已用 2 / 3 次"], ["本次工具调用", "无", ""]] },
+  { id: "dec_30", kind: "reply", at: "今天 21:38", title: "回复你的消息", decision: "REPLY", decisionText: "回复并附表情",
+    trigger: "你说“到家了，今天地铁上人好多，晚上想吃碗面”", options: ["文字回复", "文字加表情", "语音回复"], why: "轻松话题，最近表情回应反馈好；你发的是文字，不用语音", result: "已送达", resultTag: "ACK",
+    model: "DeepSeek Flash", tokens: "3,104 / 142", cost: "¥0.006", latency: "2.1 秒",
+    context: [["近期会话", "已采用", "最近 12 条"], ["记忆检索", "已采用", "3 条：通勤坐地铁、喜欢面食、周末骑车计划"], ["记忆检索", "未采用", "1 条“下周去杭州出差”仍待确认，按规则不用"], ["表情候选", "已采用", "6 个候选，选中“好耶”"], ["本次工具调用", "无", ""]] },
+  { id: "dec_29", kind: "wake", at: "今天 20:05", title: "自主活动调度", decision: "SKIP", decisionText: "这一轮不安排",
+    trigger: "定时醒来（每 180 分钟）", options: ["读一篇收藏", "发现新内容", "休息"], why: "今天已运行 3 次，到达每日上限", result: "未运行", resultTag: "SKIPPED",
+    model: "不调用模型", tokens: "—", cost: "¥0", latency: "—",
+    context: [["每日次数", "已采用", "3 / 3"], ["待处理目标", "已采用", "“读完 3 篇骑行文章”到期"], ["自主活动暂停", "未触发", ""]] },
+  { id: "dec_28", kind: "account", at: "今天 11:20", title: "QQ 资料改动", decision: "PLAN", decisionText: "改签名",
+    trigger: "这周反复聊到手冲咖啡", options: ["改签名", "改昵称", "不改"], why: "签名能反映近况，昵称一周内改过一次", result: "平台回执与观测一致", resultTag: "MATCHED",
+    model: "DeepSeek Flash", tokens: "2,410 / 88", cost: "¥0.004", latency: "1.8 秒",
+    context: [["资料观测", "已采用", "当前签名“今天也在认真生活”，5 分钟内观测"], ["次数与冷却", "已采用", "签名今日 0 / 1，昵称冷却到 10月30日"], ["公开来源", "无", "签名不引用外部内容"]] },
+  { id: "dec_27", kind: "reflection", at: "今天 02:10", title: "每日反思", decision: "SUGGEST", decisionText: "提出 2 条建议",
+    trigger: "10月23日 的日记已保存", options: ["提出建议", "不提出"], why: "当天有 14 条互动，满足至少 3 条来源", result: "2 条建议等你查看", resultTag: "PROPOSED",
+    model: "DeepSeek Flash", tokens: "4,980 / 410", cost: "¥0.012", latency: "6.3 秒",
+    context: [["当天互动", "已采用", "14 条，均为私聊原话"], ["日记正文", "未采用", "日记不是事实证据，按规则只作参考"], ["她可调整的项目", "已采用", "自主活动调度：每日次数 1–3、暂停"]] },
+];
+Object.assign(ST, { WAITING: ["等待中", "run"], SKIPPED: ["未运行", "off"], ACK: ["已送达", "ok"] });
+const DEC_KIND = { proactive: ["主动消息", "spark"], reply: ["对话回复", "send"], wake: ["自主活动", "timeline"], account: ["QQ 资料", "qq"], reflection: ["反思", "memory"] };
+const DEC_TAG = { DEFER: ["暂缓", "warn"], REPLY: ["已回复", "ok"], SKIP: ["跳过", "off"], PLAN: ["已执行", "ok"], SUGGEST: ["已提出", "run"] };
+const CTX_TAG = { "已采用": "ok", "未采用": "warn", "无匹配证据": "off", "无": "off", "未触发": "off" };
+PAGES.thinking = () => {
+  state.decSel = state.decSel || DECISIONS[0].id; state.decTab = state.decTab || "record"; state.decKind = state.decKind || "all";
+  const list = DECISIONS.filter(d => state.decKind === "all" || d.kind === state.decKind);
+  const d = DECISIONS.find(x => x.id === state.decSel) || list[0];
+  const count = k => DECISIONS.filter(x => x.decision === k).length;
+  const tab = k => `<button role="tab" data-dec-tab="${k}" aria-selected="${state.decTab === k}">${{ record: "决策记录", context: "上下文", reasoning: "原始推理" }[k]}</button>`;
+  const body = state.decTab === "record" ? `<h3 class="dk-title">${d.title}<span class="note">${d.at}</span></h3>
+      <dl class="dk-rows"><div><dt>触发原因</dt><dd>${esc(d.trigger)}</dd></div><div><dt>可选行动</dt><dd>${d.options.map(esc).join(" / ")}</dd></div>
+      <div><dt>她的决定</dt><dd><b>${d.decisionText}</b> <span class="tag ${(DEC_TAG[d.decision] || ["", "off"])[1]}">${(DEC_TAG[d.decision] || ["其他"])[0]}</span></dd></div><div><dt>决策说明</dt><dd>${esc(d.why)}</dd></div>
+      <div><dt>执行结果</dt><dd>${esc(d.result)} ${tag(d.resultTag)}</dd></div></dl>
+      <div class="dk-meta"><span>模型 <b>${d.model}</b></span><span>输入 / 输出 <b class="num">${d.tokens}</b></span><span>费用 <b class="num">${d.cost}</b></span><span>耗时 <b class="num">${d.latency}</b></span></div>`
+    : state.decTab === "context" ? `<h3 class="dk-title">本轮实际可用信息</h3><p class="note">展示经过权限和来源校验的上下文，区分已采用与未采用。</p>
+      <ul class="dk-ctx">${d.context.map(([n, s, x]) => `<li><span class="dk-n">${n}</span><span class="tag ${CTX_TAG[s] || "off"}">${s}</span><span class="note">${esc(x)}</span></li>`).join("")}</ul>`
+    : `<h3 class="dk-title">模型推理诊断</h3><div class="alert">${ic("warn")}<span>当前配置关闭了 DeepSeek 思考模式，这一轮没有生成推理内容。</span></div>
+      <p class="note">这里只显示服务商实际返回的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。</p>
+      <div class="dk-debug"><div><b>短期诊断模式</b><span>开启后的 30 分钟内，向服务商请求并保存推理字段，只供你查看，到期自动清除。需要后端支持，属于新机制提案。</span></div><button class="switch" role="switch" aria-checked="false" disabled aria-label="短期诊断模式"></button></div>`;
+  return head("思考与决策", "她每一次决定发不发、做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。") +
+    `<div class="dk-stats"><div><b class="num">${DECISIONS.length}</b><span>今天的决策</span></div><div><b class="num">${count("REPLY") + count("PLAN")}</b><span>已执行</span></div><div><b class="num">${count("DEFER")}</b><span>暂缓</span></div><div><b class="num">${count("SKIP")}</b><span>跳过</span></div><div><b class="num">${count("SUGGEST")}</b><span>等你查看</span></div></div>` +
+    `<div class="toolbar"><div class="seg">${[["all", "全部"], ...Object.entries(DEC_KIND).map(([k, [n]]) => [k, n])].map(([k, n]) => `<button data-dec-kind="${k}" aria-pressed="${state.decKind === k}">${n}</button>`).join("")}</div></div>` +
+    `<div class="dk-wrap"><ul class="dk-list">${list.map(x => `<li><button data-dec="${x.id}" class="${x.id === d.id ? "sel" : ""}"><span class="ic">${ic(DEC_KIND[x.kind][1])}</span><span class="dk-l"><b>${x.title}</b><small>${x.at}，${DEC_KIND[x.kind][0]}</small></span><span class="tag ${(DEC_TAG[x.decision] || ["", "off"])[1]}">${(DEC_TAG[x.decision] || [x.decision])[0]}</span></button></li>`).join("")}</ul>
+      <section class="dk-card"><div class="dk-head"><div><h2>思考与决策</h2><p class="note">${d.title}，${d.at}</p></div><span class="dk-ic">${ic("spark")}</span></div>
+        <div class="dk-tabs" role="tablist">${tab("record")}${tab("context")}${tab("reasoning")}</div><div class="dk-body">${body}</div></section></div>`;
+};
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-dec],[data-dec-tab],[data-dec-kind]"); if (!t) return;
+  if (t.dataset.dec) state.decSel = t.dataset.dec;
+  if (t.dataset.decTab) state.decTab = t.dataset.decTab;
+  if (t.dataset.decKind) { state.decKind = t.dataset.decKind; const first = DECISIONS.find(x => state.decKind === "all" || x.kind === state.decKind); if (first) state.decSel = first.id; }
+  go({ keepScroll: true });
+});
 
 /* ================= 运行诊断 ================= */
 PAGES.diagnostics = () => {
