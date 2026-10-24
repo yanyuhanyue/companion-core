@@ -133,10 +133,14 @@ def check_input(store, settings, clock, event):
     return view
 
 
-def source(store, settings, view, event_id, now, *, allow_commands=False, history=False):
+def source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
+           purpose="chat"):
     """Read an admitted private source; history requires an explicit current source scope."""
     view = owner_authority.current(store, settings, lambda: now,
-        purpose="history" if history else "chat", authority=view.authority)
+        purpose=purpose, authority=view.authority)
+    if history:
+        view = owner_authority.current(store, settings, lambda: now,
+            purpose="history", authority=view.authority)
     event = store.one("SELECT e.*,c.scope,c.owner_actor_id FROM events e "
                       "JOIN conversations c USING(conversation_id) WHERE event_id=?", (event_id,))
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event_id,))
