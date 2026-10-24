@@ -1,8 +1,10 @@
 """Local Chinese embeddings; SQLite remains the only memory/index store."""
 
+import asyncio
 import hashlib
 from functools import lru_cache
 from pathlib import Path
+from threading import Lock
 
 from companion.contracts import CoreError
 from companion.store import encode
@@ -11,6 +13,12 @@ MODEL = "BAAI/bge-small-zh-v1.5"
 REPOSITORY = "Qdrant/bge-small-zh-v1.5"
 REVISION = "46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59"
 INDEX_VERSION = f"{MODEL}@{REVISION}"
+
+
+@lru_cache(maxsize=2)
+def _inference_lock(cache_dir):
+    # Keep one inference per cached model, including cancelled callers still finishing CPU work.
+    return Lock()
 
 
 @lru_cache(maxsize=2)
@@ -54,12 +62,9 @@ class SemanticIndex:
         except Exception as error:
             raise CoreError("MEMORY_INDEX_UNAVAILABLE", 503) from error
 
-    def scores(self, query, rows):
-        if not rows:
-            return {}
+    def _prepare(self, rows):
         import numpy as np
 
-        model = self.warmup()
         cached = {
             row["memory_id"]: row
             for row in self.store.rows(
@@ -76,8 +81,23 @@ class SemanticIndex:
                 vectors[row["memory_id"]] = np.frombuffer(old["vector"], dtype="<f4")
             else:
                 missing.append((row, key))
+        return vectors, missing
+
+    def _infer(self, query, contents):
+        """Pure inference only; fully consume lazy generators before leaving the thread."""
+        import numpy as np
+
+        with _inference_lock(str(Path(self.settings.embedding_cache_dir).resolve())):
+            model = self.warmup()
+            encoded = tuple(np.asarray(v, dtype="<f4") for v in
+                            model.passage_embed(contents, batch_size=32)) if contents else ()
+            return encoded, next(model.query_embed(query))
+
+    def _finish(self, vectors, missing, inferred):
+        import numpy as np
+
+        encoded, question = inferred
         if missing:
-            encoded = model.passage_embed([row["content"] for row, _ in missing], batch_size=32)
             for (row, key), vector in zip(missing, encoded, strict=True):
                 vector = np.asarray(vector, dtype="<f4")
                 vectors[row["memory_id"]] = vector
@@ -88,9 +108,26 @@ class SemanticIndex:
                     "AND status IN ('HYPOTHESIS','CONFIRMED') AND confidence>0",
                     (INDEX_VERSION, key, vector.tobytes(), row["memory_id"], row["content"]),
                 )
-        question = next(model.query_embed(query))
         # ponytail: exact scan suits a single owner's memories; use an ANN index at larger scale.
         return {key: float(np.dot(value, question)) for key, value in vectors.items()}
+
+    def scores(self, query, rows):
+        if not rows:
+            return {}
+        vectors, missing = self._prepare(rows)
+        return self._finish(vectors, missing,
+                            self._infer(query, tuple(row["content"] for row, _ in missing)))
+
+    async def scores_async(self, query, rows, *, revalidate):
+        if not rows:
+            return {}
+        vectors, missing = self._prepare(rows)
+        inferred = await asyncio.to_thread(
+            self._infer, query, tuple(row["content"] for row, _ in missing),
+        )
+        # No Store access occurs in the worker. Cancellation never reaches cache writes.
+        revalidate()
+        return self._finish(vectors, missing, inferred)
 
 
 def fuse(lexical, semantic):

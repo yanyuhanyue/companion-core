@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -116,7 +117,8 @@ def test_empty_scoped_search_combines_history_with_one_chat_per_input(core, tmp_
         ) as (_, _, capture, send, calls, sends, _, _, _):
             # Only semantic scores are substituted; native scoped SQL and all receipts remain real.
             monkeypatch.setattr(
-                core.memory.index, "scores", lambda q, rows: {r["memory_id"]: -1 for r in rows}
+                core.memory.index, "scores_async",
+                AsyncMock(side_effect=lambda q, rows, **kw: {r["memory_id"]: -1 for r in rows})
             )
             for _ in range(2):
                 await capture()

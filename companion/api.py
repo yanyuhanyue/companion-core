@@ -756,12 +756,15 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/memories/search", dependencies=auth)
     async def search(body: SearchRequest):
-        if live_text.active(app.state.core.store, settings):
-            raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
+        def check_scope():
+            if live_text.active(app.state.core.store, settings):
+                raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
+
+        check_scope()
         return {
-            "items": app.state.core.memory.search(
+            "items": await app.state.core.memory.search_async(
                 body.query, body.requester_actor_id, body.subject_filter, body.limit,
-                now=app.state.core.clock(),
+                now=app.state.core.clock(), source_check=check_scope, clock=app.state.core.clock,
             )
         }
 

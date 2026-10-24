@@ -53,15 +53,15 @@ async def image_memory_window(
         stream = io.BytesIO()
         Image.new("RGB", (3, 2), color).save(stream, format="PNG")
         originals.append(stream.getvalue())
-    original_scores = core.memory.index.scores
+    original_scores = core.memory.index.scores_async
 
-    def scores(query, rows):
+    async def scores(query, rows, **kwargs):
         queries.append((query, [row["memory_id"] for row in rows]))
         if no_candidates:
             return {row["memory_id"]: -1 for row in rows}
-        return original_scores(query, rows)
+        return await original_scores(query, rows, **kwargs)
 
-    core.memory.index.scores = scores
+    core.memory.index.scores_async = scores
 
     number = 0
 
@@ -144,7 +144,7 @@ async def image_memory_window(
             window, client, protocol, sends, calls, downloads, queries, originals,
             memory_id, outsider, job,
         )
-    core.memory.index.scores = original_scores
+    core.memory.index.scores_async = original_scores
 
 
 @pytest.mark.parametrize("no_candidates", [False, True])

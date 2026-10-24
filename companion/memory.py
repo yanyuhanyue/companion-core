@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from companion.commands import command_parts
 from companion.contracts import CoreError
-from companion.memory_context import MemorySources, check_version, read_version
+from companion.memory_context import MemoryContext, MemorySources, check_version, read_version
 from companion.privacy import advance_epoch, redact, sensitive
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
@@ -71,12 +71,50 @@ class Memory:
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None):
+        version, sources, rows, lexical = self._prepare_search(
+            query, actor, subjects, limit, memory_ids=memory_ids, now=now,
+        )
+        similarities = self.index.scores(query, rows) if query != "*" and rows else {}
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+
+    async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
+                           memory_ids=None, now=None, source_check=None, clock=None):
+        if source_check:
+            source_check()
+        version, sources, rows, lexical = self._prepare_search(
+            query, actor, subjects, limit, memory_ids=memory_ids, now=now,
+        )
+        similarities = {}
+        if query != "*" and rows:
+            context = MemoryContext(self)
+            proof = context.pin(now, rows=[
+                {**row, "evidence_ids": [e["event_id"] for e in sources.evidence(row["memory_id"])]}
+                for row in rows
+            ])
+
+            def revalidate():
+                if source_check:
+                    source_check()
+                check_version(self, version)
+                context.revalidate(proof, clock() if clock else now)
+                for row in rows:
+                    if self.store.one("SELECT * FROM memories WHERE memory_id=?",
+                                      (row["memory_id"],)) != row:
+                        raise CoreError("PRIVACY_CHANGED", 409)
+
+            similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
+        if clock:
+            sources = MemorySources(self, clock())
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+
+    def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
+                        memory_ids=None, now=None):
         self.require_owner(actor)
         s = self.store
         version = read_version(self)
         sources = MemorySources(self, now)
         if memory_ids is not None and not memory_ids:
-            return []
+            return version, sources, [], []
         allowed_sql = ""
         if memory_ids is not None:
             allowed_sql = " AND memory_id IN (" + ",".join("?" for _ in memory_ids) + ")"
@@ -105,6 +143,7 @@ class Memory:
         base += "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,m.updated_at DESC"
         rows = [row for row in s.rows(base, params)
                 if sources.current(row) and sources.evidence(row["memory_id"])]
+        lexical = []
         if query != "*" and rows:
             allowed = {row["memory_id"] for row in rows}
             if len(query) < 3:
@@ -134,7 +173,11 @@ class Memory:
                     if match
                     else []
                 )
-            similarities = self.index.scores(query, rows)
+        return version, sources, rows, lexical
+
+    def _finish_search(self, query, rows, lexical, similarities, limit, version, sources):
+        s = self.store
+        if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
             # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
             lexical = [
