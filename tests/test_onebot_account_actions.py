@@ -1,30 +1,39 @@
-"""Frozen account plans use the existing Bridge window, Spool and Core Outbox."""
+"""Frozen account plans use native owner custody, Spool and original Core Outbox."""
 
 import hashlib
 import io
 import json
+from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from PIL import Image
 
+from companion import cumulative, paid_budget
 from companion.model import ModelClient
+from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.social_autonomy import SocialAutonomy
 from companion.social_autonomy_protocol import ProfileBaseline, SocialAutonomyConfig
 from companion.store import encode
-from companion_onebot_bridge import account_actions, account_assets, continuous
+from companion_onebot_bridge import account_actions, account_assets
 from companion_onebot_bridge.native_actions import content_hash
-from companion_onebot_bridge.outbound import validate_item
-from companion_onebot_bridge.window import request_stop
+from companion_onebot_bridge.network import private_http_client
+from companion_onebot_bridge.outbound import deliver_tick, validate_item
+from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from tests.conftest import ingest, run
+from tests.native_continuous_support import Host
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_onebot_capture import source_window
+from tests.support.onebot import provider
+from tests.test_cumulative_budget import policy as quota_policy
+from tests.test_cumulative_budget import view
+from tests.test_native_account_host import configure_host
+from tests.test_onebot_capture import real_core_http
 from tests.test_onebot_direct import config
-from tests.test_onebot_pokes import silent
 from tests.test_private_companion import companion_options
 from tests.test_social_autonomy import avatar, read_public
+from tests.test_social_owner_authority import authorize
 
 
 def fixture(core, kind="qzone_publish"):
@@ -49,6 +58,56 @@ def fixture(core, kind="qzone_publish"):
                 if kind == "avatar" else {"kind": kind, "value": "观星" if kind == "nickname"
                                          else "保持好奇"})
     return ref, conversation, options, proposal
+
+
+def native_fixture(core, kind="qzone_publish"):
+    core.clock.now = datetime.now(UTC).replace(microsecond=0)
+    ref, conversation, options, proposal = fixture(core, kind)
+    options["core_options"]["social_autonomy"] = options["core_options"][
+        "social_autonomy"].model_copy(update={"max_output_tokens": 512})
+    return ref, conversation, options, proposal
+
+
+
+@asynccontextmanager
+async def account_host(core, tmp_path, *, social_policy, bridge_options=None,
+                       protocol_reply=None, quota=None):
+    core.settings.social_autonomy = social_policy
+    core.settings.content_enabled = False
+    core.settings.observation_adapters = {}
+    policy, _ = authorize(core, tmp_path)
+    if quota is not None:
+        quota_policy(core, account=quota)
+        with core.store.transaction():
+            cumulative.activate(core.store, core.settings, core.clock())
+        policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
+            "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings))})
+    cfg = replace(configure_host(core, tmp_path, policy), **(bridge_options or {}))
+    sends = []
+
+    async def native(request):
+        result = protocol_reply(request) if protocol_reply else None
+        if hasattr(result, "__await__"):
+            result = await result
+        return result if result is not None else provider(request, sends)
+
+    async with real_core_http(core) as port:
+        cfg = replace(cfg, core_url=f"http://127.0.0.1:{port}")
+        async with private_http_client(cfg.core_url, cfg.bridge_token) as client, (
+            private_http_client(cfg.onebot_http_url, cfg.onebot_token,
+                                transport=httpx.MockTransport(native))
+        ) as protocol:
+            active = Host(core, cfg, client, protocol)
+            try:
+                yield active, client, protocol, sends
+            finally:
+                active.spool.close()
+
+
+async def pump_account(active):
+    guard = OwnerSendGuard(active.runtime, active.client)
+    return await deliver_tick(active.client, OwnerOneBot(guard, active.protocol),
+                              active.spool, guard=guard, delivery_lane="qq_account")
 
 
 def model_response(proposal):
@@ -97,7 +156,7 @@ async def plan_action(core, ref, conversation, proposal, *, review=None):
 def test_frozen_account_actions_keep_native_receipts_without_owner_input_or_message_id(
     core, tmp_path, kind, path, data,
 ):
-    ref, conversation, options, proposal = fixture(core, kind)
+    ref, conversation, options, proposal = native_fixture(core, kind)
     sends, checks = [], []
 
     async def scenario():
@@ -110,22 +169,24 @@ def test_frozen_account_actions_keep_native_receipts_without_owner_input_or_mess
                 sends.append(request)
                 return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": data})
 
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-            scope_options=options, bridge_options=bridge_options, protocol_reply=native) as (
-            window, client, protocol, _, private_sends,
+        async with account_host(core, tmp_path,
+            social_policy=options["core_options"]["social_autonomy"],
+            bridge_options=bridge_options, protocol_reply=native) as (
+            window, client, protocol, private_sends,
         ), httpx.AsyncClient(transport=httpx.MockTransport(
             lambda _: model_response(proposal))) as model:
             core.model = ModelClient(core.settings, model)
             review, picture, _ = (catalog(core, directory) if kind == "avatar"
                                   else (None, None, None))
             frozen = await plan_action(core, ref, conversation, proposal, review=review)
+            usage = core.store.rows("SELECT * FROM model_usage")
 
             async def checked(request):
                 if request.url.path.endswith("/account-actions/send-check"):
                     checks.append(json.loads(request.content))
 
             client.event_hooks["request"].append(checked)
-            await continuous.pump_private(window, client, protocol)
+            await pump_account(window)
             assert len(sends) == len(checks) == 1 and private_sends == []
             row = core.store.one("SELECT * FROM outbox")
             assert row["state"] == "SENT" and row["provider_message_id"] is None
@@ -135,9 +196,9 @@ def test_frozen_account_actions_keep_native_receipts_without_owner_input_or_mess
             assert receipt["native_receipt_sha256"] == content_hash(
                 {"status": "ok", "retcode": 0, "data": data})
             assert receipt["resource_id"] == (data["tid"] if kind == "qzone_publish" else None)
-            assert window.count("window_inputs") == 0
-            attempt = window.db.execute("SELECT * FROM window_attempts").fetchone()
-            assert attempt["event_id"] == frozen.plan_id and attempt["state"] == "ACK"
+            assert window.captures() == 0
+            attempt = window.db.execute("SELECT event_id,state FROM window_attempts").fetchone()
+            assert attempt == (frozen.plan_id, "ACK")
             body = json.loads(sends[0].content)
             if kind == "qzone_publish":
                 assert body == {"content": proposal["text"], "ugc_right": 16,
@@ -150,7 +211,8 @@ def test_frozen_account_actions_keep_native_receipts_without_owner_input_or_mess
                 import base64
 
                 assert body == {"file": "base64://" + base64.b64encode(picture).decode()}
-            window.verify()
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            window.runtime.verify()
 
     run(scenario())
 
@@ -159,7 +221,7 @@ def test_frozen_account_actions_keep_native_receipts_without_owner_input_or_mess
 def test_account_unknown_retains_responsibility_and_never_repeats_native_io(
     core, tmp_path, failure,
 ):
-    ref, conversation, options, proposal = fixture(core)
+    ref, conversation, options, proposal = native_fixture(core)
     calls = []
 
     def native(request):
@@ -172,22 +234,25 @@ def test_account_unknown_retains_responsibility_and_never_repeats_native_io(
                                             "data": None if failure == "negative" else {}})
 
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-            scope_options=options, protocol_reply=native) as (window, client, protocol, _, _), \
+        async with account_host(core, tmp_path,
+            social_policy=options["core_options"]["social_autonomy"],
+            protocol_reply=native) as (window, client, protocol, _), \
             httpx.AsyncClient(transport=httpx.MockTransport(
                 lambda _: model_response(proposal))) as model:
             core.model = ModelClient(core.settings, model)
             await plan_action(core, ref, conversation, proposal)
-            await continuous.pump_private(window, client, protocol)
-            assert len(calls) == 1 and window.row()["state"] == "STOPPED"
-            assert window.count("window_attempts", "state='UNKNOWN'") == 1
+            await pump_account(window)
+            assert len(calls) == 1 and window.runtime.row()["state"] == "STOPPED"
+            assert window.attempts() == {"UNKNOWN": 1}
             row = core.store.one("SELECT * FROM outbox")
             assert row["state"] == "DELIVERY_UNCERTAIN" and row["attempt_count"] == 1
             receipt = json.loads(core.store.one("SELECT receipt_json FROM "
                                                  "social_autonomy_reservations")["receipt_json"])
             assert receipt["result"] == "UNKNOWN" and receipt["resource_id"] is None
             assert (receipt["native_receipt_sha256"] is None) == (failure == "timeout")
-            assert (await continuous.run(window, client, protocol))["state"] == "STOPPED"
+            window.restart()
+            with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                await pump_account(window)
             assert len(calls) == 1
 
     run(scenario())
@@ -197,7 +262,7 @@ def test_account_unknown_retains_responsibility_and_never_repeats_native_io(
 def test_account_stop_boundary_distinguishes_proven_not_sent_from_marked_unknown(
     core, tmp_path, phase,
 ):
-    ref, conversation, options, proposal = fixture(core)
+    ref, conversation, options, proposal = native_fixture(core)
     native_calls, check_calls = [], []
 
     def native(request):
@@ -207,8 +272,9 @@ def test_account_stop_boundary_distinguishes_proven_not_sent_from_marked_unknown
                                             "data": {"tid": "unexpected"}})
 
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-            scope_options=options, protocol_reply=native) as (window, client, protocol, _, _), \
+        async with account_host(core, tmp_path,
+            social_policy=options["core_options"]["social_autonomy"],
+            protocol_reply=native) as (window, client, protocol, _), \
             httpx.AsyncClient(transport=httpx.MockTransport(
                 lambda _: model_response(proposal))) as model:
             core.model = ModelClient(core.settings, model)
@@ -216,23 +282,23 @@ def test_account_stop_boundary_distinguishes_proven_not_sent_from_marked_unknown
 
             async def before(request):
                 if request.url.path == "/send_qzone_msg" and phase == "before_core_mark":
-                    request_stop(window.spool.directory, plan=window.plan)
+                    window.runtime.stop()
 
             async def after(response):
                 if response.request.url.path.endswith("/account-actions/send-check"):
                     check_calls.append(response.request)
                     if phase == "after_core_mark":
-                        request_stop(window.spool.directory, plan=window.plan)
+                        window.runtime.stop()
 
             protocol.event_hooks["request"].append(before)
             client.event_hooks["response"].append(after)
-            await continuous.pump_private(window, client, protocol)
+            await pump_account(window)
             assert native_calls == [] and len(check_calls) == int(phase == "after_core_mark")
             state = "NOT_SENT" if phase == "before_core_mark" else "UNKNOWN"
-            assert window.count("window_attempts", "state='" + state + "'") == 1
+            assert window.attempts() == {state: 1}
             assert core.store.one("SELECT state FROM outbox")["state"] == (
                 "CANCELLED" if phase == "before_core_mark" else "DELIVERY_UNCERTAIN")
-            window.verify(active=False)
+            window.runtime.verify(active=False)
 
     run(scenario())
 
@@ -290,7 +356,7 @@ def test_account_scope_and_envelope_reject_caller_chosen_targets():
 def test_actual_account_request_and_asset_are_rechecked_after_core_await(core, tmp_path, mutation):
     kind = "avatar" if mutation == "review" else "qzone_publish"
     path = account_actions.PATHS["qq.profile.avatar" if kind == "avatar" else "qzone.publish"]
-    ref, conversation, options, proposal = fixture(core, kind)
+    ref, conversation, options, proposal = native_fixture(core, kind)
     requests, wire, checks = [], [], []
 
     async def native(request):
@@ -304,9 +370,10 @@ def test_actual_account_request_and_asset_are_rechecked_after_core_await(core, t
         bridge_options = {"account_asset_directory": str(directory),
                           "account_asset_policy_sha256": "e" * 64} if kind == "avatar" else {}
         # The normal fixture's synchronous responder delegates async native I/O unchanged.
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-            scope_options=options, bridge_options=bridge_options) as (
-            window, client, protocol, _, private_sends,
+        async with account_host(core, tmp_path,
+            social_policy=options["core_options"]["social_autonomy"],
+            bridge_options=bridge_options) as (
+            window, client, protocol, private_sends,
         ), httpx.AsyncClient(transport=httpx.MockTransport(
             lambda _: model_response(proposal))) as model:
             core.model = ModelClient(core.settings, model)
@@ -341,15 +408,15 @@ def test_actual_account_request_and_asset_are_rechecked_after_core_await(core, t
 
             protocol.event_hooks["request"].append(remember)
             client.event_hooks["response"].append(changed)
-            await continuous.pump_private(window, client, protocol)
+            await pump_account(window)
             assert len(checks) == 1 and private_sends == []
             if mutation == "stream":
                 assert len(wire) == 1
                 assert json.loads(wire[0]) == {"content": proposal["text"], "ugc_right": 16,
                                               "target_uins": [10001]}
-                assert window.count("window_attempts", "state='ACK'") == 1
+                assert window.attempts() == {"ACK": 1}
             else:
-                assert wire == [] and window.count("window_attempts", "state='UNKNOWN'") == 1
+                assert wire == [] and window.attempts() == {"UNKNOWN": 1}
                 assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
 
     run(scenario())
@@ -358,19 +425,7 @@ def test_actual_account_request_and_asset_are_rechecked_after_core_await(core, t
 def test_account_only_spends_existing_send_quota_with_zero_owner_input_allowance(
     core, tmp_path, monkeypatch,
 ):
-    from companion_onebot_bridge import cumulative
-    from tests import test_onebot_capture
-    from tests.test_cumulative_budget import view
-    from tests.test_cumulative_window import bind_policy
-
-    ref, conversation, options, proposal = fixture(core)
-    original = test_onebot_capture.pinned_plan
-
-    def pinned(*args, **kwargs):
-        cfg, plan = original(*args, **kwargs)
-        return cfg, bind_policy(core, plan, account={"owner_inputs": 0, "send_attempts": 1})
-
-    monkeypatch.setattr(test_onebot_capture, "pinned_plan", pinned)
+    ref, conversation, options, proposal = native_fixture(core)
 
     def native(request):
         if request.url.path == "/send_qzone_msg":
@@ -378,17 +433,17 @@ def test_account_only_spends_existing_send_quota_with_zero_owner_input_allowance
                                             "data": {"tid": "quota-tid"}})
 
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-            scope_options=options, protocol_reply=native) as (window, client, protocol, _, _), \
+        async with account_host(core, tmp_path,
+            social_policy=options["core_options"]["social_autonomy"], protocol_reply=native,
+            quota={"owner_inputs": 0, "send_attempts": 1}) as (window, client, protocol, _), \
             httpx.AsyncClient(transport=httpx.MockTransport(
                 lambda _: model_response(proposal))) as model:
             core.model = ModelClient(core.settings, model)
             await plan_action(core, ref, conversation, proposal)
-            await continuous.pump_private(window, client, protocol)
-            assert window.count("window_inputs") == 0
-            ledger = cumulative.inspect(window)["items"]
-            assert len(ledger) == 1 and next(iter(ledger)).startswith("send_attempts:")
+            await pump_account(window)
+            assert window.captures() == 0
             operations = view(core)["operations"]
             assert len(operations) == 1 and next(iter(operations.values()))["state"] == "SENT"
+            assert next(iter(operations)).startswith("send:")
 
     run(scenario())
