@@ -2,18 +2,17 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from companion import live_text
+from companion import owner_authority
 from companion.core import Core
 from companion.model import REVIEW_RULES, ModelClient
 from tests.conftest import FakeModel, run
-from tests.test_input_protocol import environment, notice
+from tests.native_input_protocol_fixture import notice
+from tests.support.native_control_input import admit, environment
 from tests.test_m1 import remember
-from tests.test_reply_revision_api import admit
 
 
 def seed_memory(core):
@@ -29,22 +28,23 @@ def test_superseded_forget_executes_once_without_old_reply(core, tmp_path, monke
 
     async def scenario():
         async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            first, admitted = await admit(client, config, plan, 1, "/忘记这一条 " + target)
+            first, admitted = await admit(
+                client, config, plan, core.clock.now, 1, "/忘记这一条 " + target)
             latest = None
             model = FakeModel()
-            with Core(core.settings, model) as worker:
+            with Core(core.settings, model, core.clock) as worker:
                 assert worker.store is not core.store
                 original = worker.command_reply
 
                 async def continue_before_action(job):
                     nonlocal latest
-                    latest, _ = await admit(client, config, plan, 2, "/发送状态")
+                    latest, _ = await admit(client, config, plan, core.clock.now, 2, "/发送状态")
                     return await original(job)
 
                 if timing == "running":
                     monkeypatch.setattr(worker, "command_reply", continue_before_action)
                 else:
-                    latest, _ = await admit(client, config, plan, 2, "/发送状态")
+                    latest, _ = await admit(client, config, plan, core.clock.now, 2, "/发送状态")
                     assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
                                           (admitted["job_id"],))["state"] == "QUEUED"
                 assert await worker.run_once("control-action")
@@ -68,7 +68,8 @@ def test_superseded_forget_executes_once_without_old_reply(core, tmp_path, monke
                 {"origin_event_id": latest["event_id"]},
             ]
             assert model.calls == [] and core.store.rows("SELECT * FROM model_usage") == []
-            assert not live_text.stopped(core.store, plan.sha256)
+            assert owner_authority.status(
+                core.store, core.settings, core.clock)["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -78,15 +79,16 @@ def test_recalled_control_source_cancels_action_even_after_new_input(core, tmp_p
 
     async def scenario():
         async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            first, admitted = await admit(client, config, plan, 1, "/忘记这一条 " + target)
-            latest, _ = await admit(client, config, plan, 2, "/发送状态")
+            first, admitted = await admit(
+                client, config, plan, core.clock.now, 1, "/忘记这一条 " + target)
+            latest, _ = await admit(client, config, plan, core.clock.now, 2, "/发送状态")
             recalled = await client.post(
-                "/internal/v1/live-text/inputs/recall",
-                json=notice(config, plan, datetime.now(UTC)),
+                "/internal/v1/owner-authority/inputs/recall",
+                json=notice(config, plan, core.clock.now),
             )
             assert recalled.status_code == 200, recalled.text
             assert recalled.json()["state"] == "RECALLED"
-            with Core(core.settings, FakeModel()) as worker:
+            with Core(core.settings, FakeModel(), core.clock) as worker:
                 assert await worker.run_once("latest-after-recall")
                 assert not await worker.run_once("cancelled-control")
             assert core.store.one("SELECT status FROM memories WHERE memory_id=?",
@@ -101,7 +103,8 @@ def test_recalled_control_source_cancels_action_even_after_new_input(core, tmp_p
                 headers={"X-Idempotency-Key": first["event_id"]},
             )
             assert duplicate.status_code == 410 and duplicate.json()["error"] == "EVENT_ERASED"
-            assert not live_text.stopped(core.store, plan.sha256)
+            assert owner_authority.status(
+                core.store, core.settings, core.clock)["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -133,20 +136,25 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
         async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _), (
             httpx.AsyncClient(transport=httpx.MockTransport(provider))
         ) as transport:
-            first, admitted = await admit(client, config, plan, 1, "/记住这个 " + content)
-            with Core(core.settings, ModelClient(core.settings, transport)) as worker:
+            first, admitted = await admit(
+                client, config, plan, core.clock.now, 1, "/记住这个 " + content)
+            with Core(core.settings, ModelClient(core.settings, transport), core.clock) as worker:
                 existing = worker.store.one("SELECT * FROM memories WHERE memory_id=?", (target,))
                 existing["evidence_ids"] = ["evt_test_99"]
                 # Force the semantic-review branch; provider I/O and accounting remain real.
-                monkeypatch.setattr(worker.memory, "search", lambda *_, **__: [existing])
+                async def existing_matches(*_, source_check, **__):
+                    source_check()
+                    return [existing]
+
+                monkeypatch.setattr(worker.memory, "search_async", existing_matches)
                 task = asyncio.create_task(worker.run_once("paid-control"))
                 try:
                     await asyncio.wait_for(entered.wait(), 5)
-                    latest, _ = await admit(client, config, plan, 2, "/发送状态")
+                    latest, _ = await admit(client, config, plan, core.clock.now, 2, "/发送状态")
                     if recall:
                         receipt = await client.post(
-                            "/internal/v1/live-text/inputs/recall",
-                            json=notice(config, plan, datetime.now(UTC)),
+                            "/internal/v1/owner-authority/inputs/recall",
+                            json=notice(config, plan, core.clock.now),
                         )
                         assert receipt.status_code == 200, receipt.text
                     release.set()
@@ -168,7 +176,8 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
             assert usage[0]["billed_micro_usd"] > 0
             assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
                                       (first["event_id"],))
-            assert not live_text.stopped(core.store, plan.sha256)
+            assert owner_authority.status(
+                core.store, core.settings, core.clock)["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -176,12 +185,14 @@ def test_running_control_review_settles_before_action_or_source_cancellation(
 def test_queued_diary_pause_resume_controls_keep_order_before_latest_reply(
     core, tmp_path, monkeypatch,
 ):
+    core.settings.diary_enabled = True
+
     async def scenario():
         async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            paused, _ = await admit(client, config, plan, 1, "/暂停写日记")
-            resumed, _ = await admit(client, config, plan, 2, "/恢复写日记")
-            latest, _ = await admit(client, config, plan, 3, "/发送状态")
-            with Core(core.settings, FakeModel()) as worker:
+            paused, _ = await admit(client, config, plan, core.clock.now, 1, "/暂停写日记")
+            resumed, _ = await admit(client, config, plan, core.clock.now, 2, "/恢复写日记")
+            latest, _ = await admit(client, config, plan, core.clock.now, 3, "/发送状态")
+            with Core(core.settings, FakeModel(), core.clock) as worker:
                 assert await worker.run_once("pause")
                 assert core.store.one("SELECT value FROM runtime_meta WHERE key='diary_paused'")[
                     "value"] == "1"
@@ -195,7 +206,8 @@ def test_queued_diary_pause_resume_controls_keep_order_before_latest_reply(
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": latest["event_id"]},
             ]
-            assert not live_text.stopped(core.store, plan.sha256)
+            assert owner_authority.status(
+                core.store, core.settings, core.clock)["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -203,9 +215,9 @@ def test_queued_diary_pause_resume_controls_keep_order_before_latest_reply(
 def test_unknown_slash_input_keeps_ordinary_reply_supersession(core, tmp_path, monkeypatch):
     async def scenario():
         async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            first, _ = await admit(client, config, plan, 1, "/普通聊天 想聊聊配色")
-            latest, _ = await admit(client, config, plan, 2, "/发送状态")
-            with Core(core.settings, FakeModel()) as worker:
+            first, _ = await admit(client, config, plan, core.clock.now, 1, "/普通聊天 想聊聊配色")
+            latest, _ = await admit(client, config, plan, core.clock.now, 2, "/发送状态")
+            with Core(core.settings, FakeModel(), core.clock) as worker:
                 assert await worker.run_once("only-latest")
                 assert not await worker.run_once("no-old-chat")
             assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
