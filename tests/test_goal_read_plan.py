@@ -294,3 +294,40 @@ def test_reorder_sql_failure_rolls_back_parking_positions_and_step_identities(co
             assert core.goals.get(goal_id) == parent
             assert not core.store.one("SELECT 1 FROM goal_steps WHERE position>3")
     run(scenario())
+
+
+def test_completed_plan_projection_requires_final_result_and_committed_positions(core, tmp_path):
+    async def scenario():
+        async with prepared(core, tmp_path) as (client, source, _):
+            goal_id = await create(client, source)
+            for index, url in enumerate(URLS):
+                assert core.exploration.schedule_goal()
+                assert await read(client, core.clock(), url) == (True, 3)
+                if index < 2:
+                    core.goals.continue_plan(goal_id, decision(core, goal_id))
+            steps = core.store.rows("SELECT * FROM goal_steps WHERE goal_id=? ORDER BY position",
+                                   (goal_id,))
+            assert len(steps) == 3 and all(step["state"] == "DONE" for step in steps)
+            eid = core.memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id=?",
+                                                       (source,)), core.clock())
+            view = MemoryProjections(core.memory)
+            assert view.snapshot(core.clock(), episode_ids=[eid])["episodes"][0]["goals"][0][
+                "state"] == "done"
+            retained = {table: core.store.rows(f"SELECT * FROM {table}") for table in (
+                "memories", "model_usage", "model_admissions", "exploration_requests",
+                "reading_attempts", "observations")}
+            for damage in ("first_result", "parking_position"):
+                core.store.execute("UPDATE goals SET result_event_id=? WHERE goal_id=?",
+                    (steps[0 if damage == "first_result" else -1]["outcome_event_id"], goal_id))
+                if damage == "parking_position":
+                    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?",
+                                       (steps[-1]["step_id"],))
+                before = core.store.db.total_changes
+                snapshot = view.snapshot(core.clock(), episode_ids=[eid])
+                projected = snapshot["episodes"][0]["goals"][0]
+                assert projected["native_state"] == "DONE" and projected["state"] == "UNKNOWN"
+                assert not projected["closed"]
+                assert core.store.db.total_changes == before
+                assert retained == {table: core.store.rows(f"SELECT * FROM {table}")
+                                    for table in retained}
+    run(scenario())

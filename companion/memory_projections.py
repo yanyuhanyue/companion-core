@@ -20,9 +20,14 @@ GOAL_ATTENTION = (
     "AND o.state='SENT' AND o.action_type='qq.private.reply'))) "
     "OR (g.state='DONE' AND (NOT EXISTS (SELECT 1 FROM goal_steps done "
     "WHERE done.goal_id=g.goal_id AND done.state='DONE' "
-    "AND done.outcome_event_id=g.result_event_id) OR EXISTS (SELECT 1 FROM goal_steps unfinished "
+    "AND done.outcome_event_id=g.result_event_id AND done.position="
+    "(SELECT MAX(last.position) FROM goal_steps last WHERE last.goal_id=g.goal_id)) "
+    "OR (SELECT COUNT(*) FROM goal_steps counted WHERE counted.goal_id=g.goal_id)<>"
+    "(SELECT MAX(last.position) FROM goal_steps last WHERE last.goal_id=g.goal_id) "
+    "OR EXISTS (SELECT 1 FROM goal_steps unfinished "
     "LEFT JOIN observations o ON o.event_id=unfinished.outcome_event_id "
-    "WHERE unfinished.goal_id=g.goal_id AND (unfinished.state<>'DONE' OR o.event_id IS NULL "
+    "WHERE unfinished.goal_id=g.goal_id AND (unfinished.position NOT BETWEEN 1 AND 3 "
+    "OR unfinished.state<>'DONE' OR o.event_id IS NULL "
     "OR o.redacted<>0 OR o.result_status NOT IN ('FETCHED','WATCHED'))))) "
     "OR EXISTS (SELECT 1 FROM exploration_requests r "
     "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
@@ -182,6 +187,8 @@ class MemoryProjections:
                 continue
             steps = self.store.rows("SELECT * FROM goal_steps WHERE goal_id=? "
                                     "ORDER BY position LIMIT 4", (goal["goal_id"],))
+            valid_positions = (1 <= len(steps) <= 3 and [step["position"] for step in steps]
+                               == list(range(1, len(steps) + 1)))
             state = "discussed"
             if goal["state"] in ACTIVE:
                 state = "running" if goal["state"] == "RUNNING" else "planned"
@@ -190,10 +197,12 @@ class MemoryProjections:
             elif goal["state"] == "CANCELLED":
                 state = "closed"
             elif goal["state"] == "DONE":
-                completed = (1 <= len(steps) <= 3 and goal["result_event_id"] in {
-                    step["outcome_event_id"] for step in steps} and all(
+                completed = (valid_positions and goal["result_event_id"]
+                    == steps[-1]["outcome_event_id"] and all(
                         self._completed(goal, step, roots, sources, allowed) for step in steps))
                 state = "done" if completed else "UNKNOWN"
+            if steps and not valid_positions:
+                state = "UNKNOWN"
             if any(step["state"] == "EXECUTION_UNCERTAIN" for step in steps):
                 state = "UNKNOWN"
             executions, executions_truncated = [], len(steps) > 3
