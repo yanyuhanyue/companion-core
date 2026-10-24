@@ -52,6 +52,28 @@ WindowPlan. Shared Core/API/config/storage/migration files are not edited here.
 
 ## Verification so far
 
+`voice_original_proof.validate_original_voice_binding` is a pure historical
+validator for UNKNOWN reconciliation. Its keyword arguments are `receipt`, `job`,
+`proof`, `outbox`, `content_sha256`, `original_scope`, and `voice_policy_sha256`.
+The caller loads the `voice_reply:<message_id>` receipt and the voice job named
+by `proof.voice_check.job_id`. Original scope is exactly `{"authority": ref}`
+for schema v3 or `{"window_sha256": digest}` for historical schema v2.
+The policy hash must come from authenticated original policy evidence.
+
+The caller remains responsible for original grant/policy and accounting custody,
+proof signature, delivery attempt, lease, send-check digest, and quiescence.
+The validator has no storage, settings, clock, or current-authority access and
+does not permit execution. Full bindings require retained content, matching job
+material and original result expiry; expiry equality is checked without a
+current-time test. Retired custody checks its original identity and capability
+verifier (or historical signature verifier) without requiring erased job
+authority or payload. Neither path reconstructs a new grant.
+
+Twenty pure evidence tests cover both schema versions, full and retired custody,
+expired records, original scope/policy/job/token substitution, missing voice
+proof, content/byte/result/expiry changes and historical signature retirement.
+These tests do not claim that the shared reconciliation entry point is integrated.
+
 Four native-source checks pass through real signed owner capture and Core ingest:
 window-free ASR waiting, original-expiry bound, STOP rejection and chat-only
 permission separation. No guard replacement or real voice node is used.
