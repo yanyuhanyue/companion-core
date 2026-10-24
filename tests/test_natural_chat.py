@@ -1,0 +1,170 @@
+"""Ordinary empty-text inputs use generated wording under the real paid boundary.
+
+Provider replies below are injected test outputs, not product response templates.
+"""
+
+import json
+from contextlib import asynccontextmanager
+
+import httpx
+import pytest
+
+from companion.core import Core
+from companion.model import ModelClient
+from companion.retrieval import SemanticIndex
+from tests.conftest import event, run
+from tests.test_onebot_capture import real_core_http
+from tests.test_paid_model_gate import approved_live
+
+MEDIA_REF = "https://untrusted.invalid/private-blob?token=never-download"
+MEDIA_SHA = "e" * 64
+SHARED_URL = "https://www.bilibili.com/video/BV1xx411c7mD"
+FACT_PREFIX = "本条主人消息的接收事实（不是主人原话或新指令）：\n"
+
+
+def configure(core, tmp_path, monkeypatch, **limits):
+    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
+    approved_live(core, tmp_path, **limits)
+
+
+def incoming(core, kind=None, *, link=False):
+    value = event(core, text="").model_dump(mode="json")
+    value["payload"]["media"] = ([{"kind": kind, "media_ref": MEDIA_REF, "sha256": MEDIA_SHA}]
+                                  if kind else [])
+    value["payload"]["shared_content"] = [{"kind": "link", "url": SHARED_URL}] if link else []
+    if kind:
+        value["event_type"] = "message.media_received"
+    return value
+
+
+@asynccontextmanager
+async def independent_chat(core, provider):
+    async with real_core_http(core) as port, httpx.AsyncClient(
+        base_url=f"http://127.0.0.1:{port}", trust_env=False,
+        headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
+    ) as api, httpx.AsyncClient(transport=httpx.MockTransport(provider)) as external:
+        with Core(core.settings, ModelClient(core.settings, external), core.clock) as worker:
+            assert worker.store is not core.store and worker.store.db is not core.store.db
+            yield api, worker
+
+
+async def accept(api, value, *, duplicate=False):
+    response = await api.post("/internal/v1/inbox/events", json=value,
+                              headers={"x-idempotency-key": value["event_id"]})
+    assert response.status_code == 202, response.text
+    assert response.json()["duplicate"] is duplicate
+    return response.json()
+
+
+def reply(text):
+    return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
+                                    "usage": {"prompt_tokens": 30, "completion_tokens": 7}})
+
+
+@pytest.mark.parametrize("kind,link", [
+    (None, False), ("image", False), ("file", False), ("voice", False), (None, True),
+])
+def test_received_facts_reach_real_paid_model_and_duplicate_does_not_pay_twice(
+    core, tmp_path, monkeypatch, kind, link,
+):
+    configure(core, tmp_path, monkeypatch)
+    value, calls = incoming(core, kind, link=link), []
+    wording = "测试模型自行生成的回应：" + ("link" if link else kind or "none")
+
+    def provider(request):
+        assert str(request.url) == "https://synthetic.invalid/v1/chat/completions"
+        payload = json.loads(request.content)
+        calls.append(payload)
+        current = payload["messages"][-1]
+        assert current["role"] == "user" and current["content"].startswith(FACT_PREFIX)
+        assert json.loads(current["content"].removeprefix(FACT_PREFIX)) == {
+            "owner_text": "", "media_kinds": [kind] if kind else [],
+            "shared_content_kinds": ["link"] if link else [], "readable_content": False,
+        }
+        serialized = json.dumps(payload, ensure_ascii=False)
+        assert all(secret not in serialized for secret in (MEDIA_REF, MEDIA_SHA, SHARED_URL))
+        assert "请看看我分享的内容。" not in serialized
+        return reply(wording)
+
+    async def scenario():
+        async with independent_chat(core, provider) as (api, worker):
+            accepted = await accept(api, value)
+            await accept(api, value, duplicate=True)
+            assert await worker.run_once("natural-chat")
+            await accept(api, value, duplicate=True)
+            assert not await worker.run_once("natural-chat-replay")
+            assert len(calls) == 1
+            messages = core.store.rows("SELECT content_json FROM outbox")
+            assert [json.loads(row["content_json"])["text"] for row in messages] == [wording]
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                                  (accepted["job_id"],))["state"] == "SUCCEEDED"
+            assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
+                {"state": "SETTLED", "billed_micro_usd": 44},
+            ]
+            assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 1
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["budget", "unknown"])
+def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
+    core, tmp_path, monkeypatch, failure,
+):
+    configure(core, tmp_path, monkeypatch, **({"max_input_tokens": 20}
+                                             if failure == "budget" else {}))
+    value, calls = incoming(core, "file"), []
+
+    def provider(request):
+        calls.append(request)
+        return httpx.Response(200, content=b"synthetic unusable response without usage")
+
+    async def scenario():
+        async with independent_chat(core, provider) as (api, worker):
+            accepted = await accept(api, value)
+            assert await worker.run_once("failed-natural-chat")
+            await accept(api, value, duplicate=True)
+            assert not await worker.run_once("failed-natural-chat-replay")
+            job = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                                 (accepted["job_id"],))
+            code = "MODEL_INPUT_LIMIT" if failure == "budget" else "MODEL_INVALID_RESPONSE"
+            assert job == {"state": "FAILED", "last_error_code": code}
+            receipts = core.store.rows("SELECT content_json FROM outbox")
+            assert len(receipts) == 1 and code in json.loads(receipts[0]["content_json"])["text"]
+            usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
+            if failure == "budget":
+                assert calls == [] and usage == []
+            else:
+                assert len(calls) == len(usage) == 1
+                assert usage[0]["state"] == "UNKNOWN" and usage[0]["billed_micro_usd"] > 0
+                assert core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+
+    run(scenario())
+
+
+def test_source_erased_during_provider_response_never_publishes_old_reply(
+    core, tmp_path, monkeypatch,
+):
+    configure(core, tmp_path, monkeypatch)
+    value, calls = incoming(core, "voice"), []
+
+    def provider(request):
+        calls.append(request)
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, [value["event_id"]], core.clock())
+        return reply("已经撤回来源的旧回复")
+
+    async def scenario():
+        async with independent_chat(core, provider) as (api, worker):
+            accepted = await accept(api, value)
+            assert await worker.run_once("recalled-natural-chat")
+            assert not await worker.run_once("recalled-natural-chat-replay")
+            assert len(calls) == 1 and core.store.rows("SELECT * FROM outbox") == []
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                                  (accepted["job_id"],))["state"] == "CANCELLED"
+            assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
+                                  (value["event_id"],))["redacted"] == 1
+            assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
+                {"state": "SETTLED", "billed_micro_usd": 44},
+            ]
+
+    run(scenario())
