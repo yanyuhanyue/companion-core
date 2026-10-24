@@ -153,4 +153,22 @@ def test_stop_does_not_remove_valid_historical_steps(core, tmp_path):
 def test_committed_temporary_reorder_positions_are_not_a_valid_visible_plan(core):
     goal, steps = retained_plan(core)
     core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?", (steps[0],))
-    assert read(core, goal) == []
+    item = read(core, goal)[0]
+    assert item["execution"]["state"] == "UNKNOWN"
+    assert all(step["execution"]["state"] == "UNKNOWN" for step in item["steps"])
+
+
+def test_three_completed_steps_with_last_parked_position_cannot_report_completion(core):
+    goal, steps = retained_plan(core)
+    outcomes = [finish_record(core, step, i) for i, step in enumerate(steps, 1)]
+    core.store.execute("UPDATE goals SET state='DONE',result_event_id=? WHERE goal_id=?",
+                        (outcomes[-1], goal))
+    assert read(core, goal)[0]["execution"]["state"] == "done"
+    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?", (steps[-1],))
+    before = core.store.db.total_changes
+    item = read(core, goal)[0]
+    assert item["execution"]["state"] == "UNKNOWN"
+    assert item["verified_completed_steps"] == 0
+    assert [step["position"] for step in item["steps"]] == [1, 2, 4]
+    assert all(step["execution"]["state"] == "UNKNOWN" for step in item["steps"])
+    assert core.store.db.total_changes == before

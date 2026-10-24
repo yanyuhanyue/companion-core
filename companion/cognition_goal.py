@@ -8,8 +8,9 @@ def record(reader, goal, sources):
 
     rows = reader.store.rows("SELECT * FROM goal_steps WHERE goal_id=? "
                              "ORDER BY position,step_id LIMIT 4", (goal["goal_id"],))
-    if len(rows) > 3 or [step["position"] for step in rows] != list(range(1, len(rows) + 1)):
+    if len(rows) > 3:
         return None
+    valid_positions = [step["position"] for step in rows] == list(range(1, len(rows) + 1))
     steps, receipts, truncated, unknown, completed = [], [], False, False, 0
     for step in rows:
         roots = [r["event_id"] for r in reader.store.rows(
@@ -32,8 +33,9 @@ def record(reader, goal, sources):
             "AND json_extract(r.goal_step_json,'$.step_id')=? "
             "AND (r.state='UNKNOWN' OR a.state='UNKNOWN') LIMIT 1",
             (goal["goal_id"], step["step_id"])))
-        done = reader.projections._completed(goal, step, roots, sources, None)
-        state = ("UNKNOWN" if uncertain or step["state"] == "DONE" and not done else
+        done = valid_positions and reader.projections._completed(goal, step, roots, sources, None)
+        state = ("UNKNOWN" if not valid_positions or uncertain
+                 or step["state"] == "DONE" and not done else
                  "done" if done else "failed" if step["state"] == "FAILED" else
                  "closed" if step["state"] == "CANCELLED" else
                  "running" if step["state"] == "RUNNING" else "planned")
