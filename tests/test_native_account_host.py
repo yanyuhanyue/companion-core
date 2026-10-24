@@ -31,7 +31,7 @@ def configure_host(core, tmp_path, policy):
                   onebot_ws_url="ws://127.0.0.1:3001",
                   bridge_token=core.settings.bridge_token.get_secret_value())
     policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
-        "purposes": ["chat", "account_actions", "social"], "capture": {
+        "purposes": ["chat", *policy.purposes], "capture": {
             "public_key": cfg.capture_public_key, "protocol_epoch": cfg.protocol_epoch,
             "identity_sha256": paid_budget.sha([cfg.owner_qq_id, cfg.bot_qq_id])}})
     result, _ = activate(core, policy, revision=1, operation="account-host-capture")

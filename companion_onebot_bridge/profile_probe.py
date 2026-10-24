@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import time
 from datetime import datetime
 from urllib.parse import urlencode
 
@@ -223,13 +224,14 @@ async def collect(window, client, protocol, *, transport=None, resolver=resolve_
     if not due(window):
         return {"status": "IDLE"}
     local(window)
-    record(window, "PROFILE_PROBE_STARTED", {"authority": window.authority})
     permission = await window.check(client)
     if "account_actions" not in permission["capability_policies"]:
         return {"status": "DISABLED"}
     approved = await grant(window, client)
     if not approved["fields"]:
         return {"status": "DISABLED"}
+    local(window)
+    record(window, "PROFILE_PROBE_STARTED", {"authority": window.authority})
 
     async def check():
         if await grant(window, client) != approved:
@@ -273,6 +275,7 @@ class ProfilePump:
     def __init__(self, window, client, protocol, *, transport=None, resolver=resolve_public):
         self.window, self.client, self.protocol = window, client, protocol
         self.transport, self.resolver, self.task = transport, resolver, None
+        self.next_run = 0
 
     async def execute(self):
         from .continuous import emit
@@ -288,6 +291,8 @@ class ProfilePump:
             # Read failure cannot prevent an authorized private reply; no baseline
             # is invented and Core still requires a valid one before profile writes.
             emit("account_profile_probe", status="DEFERRED")
+        finally:
+            self.next_run = time.monotonic() + COOLDOWN_SECONDS
 
     def interrupt(self):
         if self.running and not self.task.cancelling():
@@ -300,7 +305,7 @@ class ProfilePump:
     def tick(self, *, idle):
         if not idle:
             self.interrupt()
-        elif not self.running and due(self.window):
+        elif not self.running and time.monotonic() >= self.next_run and due(self.window):
             self.task = asyncio.create_task(self.execute())
 
     async def close(self):

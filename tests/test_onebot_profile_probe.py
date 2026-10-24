@@ -32,14 +32,14 @@ from tests.test_social_owner_authority import authorize, close_provider_clients 
 
 @asynccontextmanager
 async def source_window(core, tmp_path, source, *, live, approved, scope_options,
-                        protocol_reply, bridge_options=None):
+                        protocol_reply, bridge_options=None, account_scope=True):
     from dataclasses import replace
 
     from companion.api import create_app
     from tests.test_onebot_capture import provider
 
     core.settings.social_autonomy = scope_options["core_options"]["social_autonomy"]
-    policy, _ = authorize(core, tmp_path)
+    policy, _ = authorize(core, tmp_path, account=account_scope)
     cfg = configure_host(core, tmp_path, policy)
     if bridge_options:
         cfg = replace(cfg, **bridge_options)
@@ -157,6 +157,46 @@ def picture():
     output = io.BytesIO()
     Image.new("RGB", (100, 100), "navy").save(output, format="PNG")
     return output.getvalue()
+
+
+@pytest.mark.parametrize("account_scope", [False, True])
+def test_disabled_profile_pump_is_read_only_and_throttled(core, tmp_path, monkeypatch,
+                                                        account_scope):
+    scope, calls = options(core, ()), []
+    moment = [100.0]
+    monkeypatch.setattr(profile_probe.time, "monotonic", lambda: moment[0])
+
+    def qq(request):
+        pytest.fail("disabled profile probe must not call OneBot")
+
+    async def scenario():
+        async with source_window(core, tmp_path, silent, live=True, approved=True,
+            scope_options=scope, protocol_reply=qq, account_scope=account_scope) as (
+                runtime, client, protocol, _, _):
+            async def observe(request):
+                calls.append(request.url.path)
+
+            client.event_hooks["request"].append(observe)
+            before = runtime.path.read_bytes()
+            projection = list(runtime.db.iterdump())
+            pump = profile_probe.ProfilePump(runtime, client, protocol)
+            pump.tick(idle=True)
+            await pump.task
+            first = len(calls)
+            assert first > 0
+            for _ in range(4):
+                pump.tick(idle=True)
+            assert len(calls) == first and not pump.running
+            moment[0] += 60
+            pump.tick(idle=True)
+            await pump.task
+            assert len(calls) == first * 2
+            assert runtime.path.read_bytes() == before
+            assert list(runtime.db.iterdump()) == projection
+            runtime.verify()
+            await pump.close()
+
+    run(scenario())
 
 
 async def public(host, port):
