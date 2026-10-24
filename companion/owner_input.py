@@ -194,19 +194,19 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
     return event, body, jobs[0]
 
 
-def history_sources(store, settings, clock, job):
+def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None):
     """Apply explicit current history bounds to native source-bound dialogue turns."""
     from companion.dialogue_history import recent_context_sources, turn_messages
 
-    view = owner_authority.check_job(store, settings, clock, job, purpose="chat")
+    view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
     if "history" not in view.policy.purposes:
         return []
     scope = view.policy.history
     result = []
     for item in recent_context_sources(store, job["conversation_id"], job["event_id"],
-                                       scope.max_turns):
+                                       scope.max_turns, cutoff_rowid=cutoff_rowid):
         try:
-            source(store, settings, view, item["event_id"], clock(), history=True)
+            source(store, settings, view, item["event_id"], clock(), purpose=purpose, history=True)
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
                 sent = store.one("SELECT sent_at FROM outbox WHERE message_id=?",
