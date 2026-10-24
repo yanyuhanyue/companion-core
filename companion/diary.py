@@ -94,7 +94,7 @@ def erase_diary_projections(store, record, *, conservative=True):
             row["entry_id"]
             for row in store.rows(
                 "SELECT d.entry_id FROM diary_entries d WHERE status='COMMITTED' AND "
-                "(generator_version<>'diary-1' OR NOT EXISTS "
+                "(generator_version NOT IN ('diary-1','life-expression-1') OR NOT EXISTS "
                 "(SELECT 1 FROM diary_evidence e WHERE e.entry_id=d.entry_id))"
             )
         )
@@ -628,6 +628,12 @@ class DiaryService:
         self.store, self.settings, self.model, self.ledger = store, settings, model, ledger
         self.clock = clock
         self.repo = DiaryRepository(store, settings, clock)
+
+    def save_life_expression(self, job_id, *, expected_content_sha256, authority):
+        from companion.diary_life import save
+
+        return save(self, job_id, expected_content_sha256=expected_content_sha256,
+                    authority=authority)
 
     def schedule_day(self, day):
         return self.repo.schedule(day)

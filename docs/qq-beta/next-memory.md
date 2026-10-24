@@ -231,3 +231,21 @@ SDK 读取既有 Diary 时使用 `context_proof(entry)` / `revalidate_context(pr
 
 验证覆盖用途缺失、检查点换版、旧签名证据只读、原文撤回、长期事实保留，以及真实签名 TCP
 入口、原生 chat 结算、独立 Life worker 提取/复核/日记/反思和进程恢复。所有外部模型传输为 MockTransport。
+
+## 已结算私人 Life 表达保存为日记
+
+`DiaryService.save_life_expression(job_id, expected_content_sha256=..., authority=...)`
+只接收原任务、正文摘要与原授权引用。正文由 `LifeTopics.retained_result` 从原生已结算的
+`PRIVATE_DIARY` 结果取得，重新检查 life/diary 用途、原来源、有效期、模式和暂停状态。
+保存不生成新文本、不调用模型，也不写入 Outbox 或 Memory。REM fiction 不属于该结果类型。
+
+新随记复用 Diary run/entry/evidence；同一天已有正文时追加独立随记段，原文（包括主人编辑）
+保持不变，原生 revision 的修改者记录为 companion。运行中的日记或未结算请求不能被覆盖。
+`runtime_meta` 的 `diary_life:<job_id>` 只保留原任务、entry、日期和版本等幂等元数据，不存正文。
+该回执与正文、证据在原 `Store.transaction` 内一起提交，重试返回原 entry，不能重复追加。
+删除和来源撤回仍由原 Diary/外部 ErasureLedger 处理；删除日期的 tombstone 可回放到保存前备份。
+
+实施对照：检查过 [DSH jobs-local 的 start/settle](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/jobs/jobs-local/src/index.ts)
+对 owner 和首个终态的约束；这里复用已存在的 Life 结算事实，没有额外执行器。
+并复用项目已有的 `BEGIN IMMEDIATE` 写事务，使消费回执与 Diary 变更串行、原子提交，见
+[SQLite 事务文档](https://www.sqlite.org/lang_transaction.html)。
