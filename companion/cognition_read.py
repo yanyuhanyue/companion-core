@@ -5,6 +5,7 @@ import json
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources, check_version, read_version
 from companion.memory_projections import ACTIVE, MemoryProjections
+from companion.privacy import redact, sensitive
 
 KINDS = {
     "wake": ("wake_decisions", "decision_id"),
@@ -48,6 +49,20 @@ def measurement(value):
     return result
 
 
+def decision_reason(row, settings):
+    result = {"kind": "decision_reason", "state": "NOT_RECORDED"}
+    reason = row.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        return result
+    # Require the original structured proposal and persisted projection to agree.
+    if object_value(row.get("proposal_json")).get("reason") != reason:
+        return {**result, "state": "UNKNOWN"}
+    if redact(reason, settings) != reason or sensitive(reason):
+        return {**result, "state": "REDACTED"}
+    return {**result, "state": "RECORDED", "text": reason[:160],
+            "truncated": len(reason) > 160}
+
+
 class CognitionRead:
     def __init__(self, core):
         self.core, self.store = core, core.store
@@ -79,7 +94,7 @@ class CognitionRead:
         )
         items = []
         for row in rows[:limit]:
-            item = self._record(kind, row, sources, version[0])
+            item = self._record(kind, row, sources)
             if item is not None:
                 items.append(item)
         check_version(self.core.memory, version)
@@ -103,7 +118,9 @@ class CognitionRead:
                 roots.extend(evidence)
             return list(dict.fromkeys(roots))
         if kind == "life":
-            query, identifier = "life_topic_sources WHERE topic_id=?", row["topic_id"]
+            # Topic sources may evolve after a decision; only the saved source
+            # identities describe that decision's original candidate.
+            return list(object_value(row["source_fingerprints_json"]))
         elif kind == "goal":
             query, identifier = "goal_evidence WHERE goal_id=?", row["goal_id"]
         elif kind == "diary":
@@ -121,17 +138,29 @@ class CognitionRead:
             (identifier,),
         )]
 
-    def _record(self, kind, row, sources, current_epoch):
+    def _record(self, kind, row, sources):
         roots = self._roots(kind, row)
         if (row.get("redacted") or len(roots) > 100 or any(
             not key or not self.projections._goal_source(key, sources) for key in roots
         )):
             return None
-        captured = row.get("captured_privacy_epoch")
-        if captured is not None and captured != current_epoch:
-            return None
+        # Execution leases require an equal captured epoch; historical observation
+        # requires current source custody instead. Ordinary memory writes also bump
+        # the epoch and do not erase independently valid completed records.
         if kind in {"goal", "life"} and not roots:
             return None
+        if kind == "diary" and row["state"] == "COMMITTED" and not roots:
+            return None
+        if kind == "life":
+            from companion.life_topics import _source
+
+            fingerprints = object_value(row["source_fingerprints_json"])
+            try:
+                if any(_source(self.store, self.core.settings, key, sources.now)["source_sha256"]
+                       != fingerprints[key] for key in roots):
+                    return None
+            except CoreError:
+                return None
         key = KINDS[kind][1]
         item = {"id": row[key], "state": symbol(row.get("state"), STATES),
                 "source_event_ids": roots,
@@ -145,11 +174,16 @@ class CognitionRead:
         elif kind == "life":
             item.update(topic_id=row["topic_id"], choice=symbol(row["action"], {
                 "SKIP", "CONTINUE", "EXPLORE", "FOLLOW_UP", "SHARE", "DEFER"}),
-                reason_code="NOT_EXPOSED")
+                reason_code="NOT_RECORDED")
+            item["decision_reason"] = decision_reason(row, self.core.settings)
             item["destination"] = symbol(row["destination"], {
                 "NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"})
             item["candidate_reference"] = {"topic_id": row["topic_id"],
-                                           "topic_revision": row["topic_revision"]}
+                                           "topic_revision": row["topic_revision"],
+                                           "source_event_ids": roots,
+                                           "source_snapshot_sha256": row["source_sha256"],
+                                           "authority_sha256": row["authority_sha256"],
+                                           "allowed_items": {"state": "NOT_RECORDED"}}
             job = self.store.one("SELECT job_id,state FROM jobs WHERE job_id=?", (row["job_id"],))
             item["job"] = ({"job_id": job["job_id"], "state": symbol(job["state"], STATES)}
                            if job else {"state": "NOT_RECORDED"})

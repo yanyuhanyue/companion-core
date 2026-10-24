@@ -20,7 +20,7 @@ before and after reads. Invalid, expired or erased source chains are suppressed.
 Goal execution metadata reuses the existing source-backed completion and execution-receipt
 checks. Native UNKNOWN and execution uncertainty remain visible.
 
-Free-form reasons, prompt bodies, topics, diary text, reflection suggestions,
+Prompt bodies, topics, diary text, reflection suggestions,
 credentials, model endpoints and raw reasoning are excluded. Reason codes and
 states use explicit allowlists. Measurement exposes the recorded count kind and
 numeric input, reservation margin and output allowance. Missing measurements are
@@ -56,7 +56,11 @@ must test the registered `create_app` with its real control token, STOP state an
 an independent worker using mocked provider transport. No live acceptance was run.
 
 This is the initial native-record projection. Historical candidate alternatives
-are `NOT_RECORDED`; Life's free-form reason is `NOT_EXPOSED`. N1/N2/N3 are read directly from the stable `steps_json` fields inspected at
+are `NOT_RECORDED`; Life's saved structured reason is returned as `decision_reason` with
+`kind=decision_reason`, distinct from raw reasoning. It must agree with the saved
+proposal, is capped at 160 characters, and applies the existing secret-redaction
+and sensitive-content rules. Missing reasons are `NOT_RECORDED`, disagreement is
+`UNKNOWN`, and sensitive reasons are `REDACTED` without their text. N1/N2/N3 are read directly from the stable `steps_json` fields inspected at
 `7b8def23`; missing fields remain `NOT_RECORDED`. REM waits for the final Life
 interface. Life exposes the native topic/revision candidate reference, destination
 and job state. It does not reconstruct unrecorded alternative candidates. Model usage
@@ -72,3 +76,21 @@ Goal pages project the selected native goal directly, reusing execution and resu
 validators without querying a second truncated same-source goal list. Regression
 coverage includes 25 same-source historical goals and timer-triggered wake records
 whose selected goal source is subsequently erased.
+
+
+Historical observations do not require their execution epoch to equal the current
+privacy epoch: ordinary Memory additions advance that epoch too. They retain
+current source/retention/custody validation plus the request-wide before/after
+version check. A committed Diary without valid original evidence is suppressed.
+Life uses the decision's saved source fingerprints, not the topic's current source
+membership, and verifies them against the native Life source codec. The candidate
+reference exposes the original topic/revision, saved source IDs, material hash and
+authority hash. The full historical allowed-item list was not persisted and is
+explicitly `NOT_RECORDED`; current permissions are not substituted for it.
+
+The reason/epoch follow-up passed 30 focused cases across `test_cognition_read.py`
+and `test_cognition_reason.py`. Native Life decisions and a generated Diary remain
+observable after an unrelated real Memory addition; source erasure retracts them.
+Saved credential-like and sensitive reasons do not appear in responses. Pending
+records do not acquire an inferred reason. These are module-level checks; real
+entry registration remains the integration owner's responsibility.
