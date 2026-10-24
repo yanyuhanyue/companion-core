@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from cryptography.exceptions import InvalidSignature
 
+import companion_delivery_protocol as wire
+from companion import cumulative
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError
 from companion.store import Store, encode, migrate
@@ -153,7 +155,10 @@ def historical_migration():
 
 def test_v1_migration_independent_of_current_dto_and_service(core, tmp_path, monkeypatch):
     env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
-    put(core.store, reconciliation.PREPARED + env.message_id, env.proof)
+    with monkeypatch.context() as old_runtime:
+        old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
+        prepare(env)
+        decide(env, "CANCELLED")
     path = old_database(core, tmp_path)
 
     def unavailable(*args, **kwargs):
@@ -161,14 +166,17 @@ def test_v1_migration_independent_of_current_dto_and_service(core, tmp_path, mon
 
     monkeypatch.setattr(reconciliation, "_binding", unavailable)
     monkeypatch.setattr(reconciliation.VoiceDeliveryBinding, "model_validate", unavailable)
+    monkeypatch.setattr(cumulative, "fold", unavailable)
+    monkeypatch.setattr(wire, "validate_receipt", unavailable)
     migrate(path)
     with closing(Store(path)) as upgraded:
         assert upgraded.one("SELECT version_num FROM alembic_version")["version_num"] == NEW
         assert reconciliation._meta(upgraded, "voice_reply:" + env.message_id)["retired"]
 
 
-def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, monkeypatch):
-    env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
+@pytest.mark.parametrize("quota", [False, True])
+def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, monkeypatch, quota):
+    env = native(core, tmp_path, quota=quota, action="qq.private.reply", voice=True, voice_v1=True)
     # Build a real native v1 owner resolution using its frozen historical voice validator.
     with monkeypatch.context() as old_runtime:
         old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
@@ -187,3 +195,58 @@ def test_v1_closed_resolution_keeps_original_financial_record(core, tmp_path, mo
             assert actual == original_receipt["receipt"]
         finally:
             core.store = original_store
+
+
+@pytest.mark.parametrize("field,error", [
+    ("source_sha256", "DELIVERY_RESOLUTION_RECEIPT_INVALID"),
+    ("core_stop_sha256", "original stopped execution required"),
+    ("prior_liability_sha256", "unbound owner send resolution"),
+    ("policy_sha256", "unbound owner send resolution"),
+    ("prior_quota_state", "unbound owner send resolution"),
+])
+def test_v1_rehashed_invalid_financial_record_fails_before_writes(
+    core, tmp_path, monkeypatch, field, error,
+):
+    env = native(core, tmp_path, action="qq.private.reply", voice=True, voice_v1=True)
+    with monkeypatch.context() as old_runtime:
+        old_runtime.setattr(reconciliation, "_voice_binding", historical_migration()._voice_binding)
+        prepare(env)
+        original = decide(env, "CANCELLED")["receipt"]
+    journal = Path(core.settings.paid_model.journal_path)
+    rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+    previous, replacement = "0" * 64, None
+    for row in rows:
+        old_hash = row.pop("sha256")
+        row["previous"] = previous
+        if old_hash == original["record_sha256"]:
+            row[field] = "RESERVED" if field == "prior_quota_state" else "f" * 64
+        row["sha256"] = wire.digest(row)
+        previous = row["sha256"]
+        if old_hash == original["record_sha256"]:
+            replacement = row["sha256"]
+            assert row["quiescence"] == env.proof
+    assert replacement and replacement != original["record_sha256"]
+    journal.write_text("".join(encode(row) + "\n" for row in rows), encoding="utf-8")
+    put(core.store, reconciliation.PROJECTION + env.message_id, replacement)
+    path = old_database(core, tmp_path)
+    before = dump(path)
+    with pytest.raises(ValueError, match=error):
+        migrate(path)
+    assert dump(path) == before
+
+
+def test_v1_upgrade_preserves_json_constraints_and_allows_retired_null_lease(
+    core, tmp_path, monkeypatch,
+):
+    jobs, message_id, _, _ = prepared(core, monkeypatch)
+    create_tts(core, jobs, message_id)
+    path = old_database(core, tmp_path)
+    migrate(path)
+    with closing(Store(path)) as upgraded:
+        for column in ("config_json", "lease_json"):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+                upgraded.execute(f"UPDATE voice_jobs SET {column}=?", ("invalid-json",))
+        upgraded.execute("UPDATE voice_jobs SET config_json='{}',lease_json=NULL")
+        assert upgraded.one("SELECT lease_json,content_retired FROM voice_jobs") == {
+            "lease_json": None, "content_retired": 1,
+        }
