@@ -4,7 +4,7 @@ import json
 
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources, check_version, read_version
-from companion.memory_projections import ACTIVE, MemoryProjections
+from companion.memory_projections import MemoryProjections
 from companion.privacy import redact, sensitive
 
 KINDS = {
@@ -18,7 +18,8 @@ KINDS = {
     "rem": ("rem_records", "rem_id"),
 }
 STATES = frozenset("PENDING SHADOW SKIPPED DEFERRED INVALIDATED CANDIDATE ACCEPTED QUEUED "
-                   "RUNNING DONE WAITING WAITING_INPUT WAITING_RESOURCE RETRY_WAIT FAILED "
+                   "RUNNING DONE WAITING WAITING_INPUT WAITING_RESOURCE WAITING_DECISION "
+                   "RETRY_WAIT FAILED "
                    "CANCELLED EXECUTION_UNCERTAIN COMMITTED SCHEDULED LEASED PARTIAL COMPLETE "
                    "RESERVED SUCCEEDED UNKNOWN SETTLED".split())
 REASONS = frozenset("NO_CANDIDATE PAUSED QUIET_HOURS OWNER_REQUESTED_PAUSE RESOURCE_UNAVAILABLE "
@@ -193,25 +194,12 @@ class CognitionRead:
             item["job"] = ({"job_id": job["job_id"], "state": symbol(job["state"], STATES)}
                            if job else {"state": "NOT_RECORDED"})
         elif kind == "goal":
-            step = self.store.one("SELECT * FROM goal_steps "
-                                  "WHERE goal_id=?", (row["goal_id"],))
-            executions, truncated = self.projections._executions(row, step, sources, None)
-            state = "discussed"
-            if row["state"] in ACTIVE:
-                state = "running" if row["state"] == "RUNNING" else "planned"
-            elif row["state"] in {"FAILED", "CANCELLED"}:
-                state = "failed" if row["state"] == "FAILED" else "closed"
-            elif row["state"] == "DONE":
-                state = "done" if self.projections._completed(
-                    row, step, roots, sources, None) else "UNKNOWN"
-            if step and step["state"] == "EXECUTION_UNCERTAIN" or any(
-                e["state"] == "UNKNOWN" or e["attempt_state"] == "UNKNOWN" for e in executions
-            ):
-                state = "UNKNOWN"
-            item["execution"] = {"state": state, "receipts": executions,
-                                 "truncated": truncated}
-            item["step"] = {key: step[key] for key in (
-                "step_id", "state", "attempts", "max_attempts")} if step else None
+            from companion.cognition_goal import record
+
+            projected = record(self, row, sources)
+            if projected is None:
+                return None
+            item.update(projected)
         elif kind == "nightly":
             steps = object_value(row["steps_json"])
             item["steps"] = {name: symbol(steps.get(name), STATES) for name in (

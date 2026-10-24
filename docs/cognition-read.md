@@ -20,6 +20,24 @@ before and after reads. Invalid, expired or erased source chains are suppressed.
 Goal execution metadata reuses the existing source-backed completion and execution-receipt
 checks. Native UNKNOWN and execution uncertainty remain visible.
 
+Goal records expose an ordered `steps` array instead of a single `step`. Each of
+at most three steps carries its native ID, position, state, attempt counts,
+operation, original source IDs and bounded execution receipts. Raw scope URLs
+remain excluded. `WAITING_DECISION` is a recorded step state, not an execution
+permission. Each step is limited to 20 original receipts, prioritizing UNKNOWN;
+the parent includes their bounded aggregate. `verified_completed_steps` counts
+only DONE steps with live, related FETCHED/WATCHED evidence. The parent is `done`
+only when its own state is DONE, every step is verified, the original final
+result matches, and no step or Reader attempt remains uncertain. A completed
+first step with later waiting steps leaves the parent planned.
+
+The reader checks complete step-source sets up to 256 IDs and withholds a plan
+when a step's source set is missing, excessive or withdrawn. It uses read-only
+native records and the existing MemorySources lineage validators, not
+`GoalEngine.plan`, whose current-authority check serves execution controls.
+STOP therefore does not erase valid historical visibility. Migration 0045 and
+the matching Life domain/projection implementation are integration prerequisites.
+
 Prompt bodies, topics, diary text, reflection suggestions,
 credentials, model endpoints and raw reasoning are excluded. Reason codes and
 states use explicit allowlists. Measurement exposes the recorded count kind and
@@ -39,6 +57,13 @@ evidence; it labels such evidence `NOT_RECORDED`.
 - Existing repository `memory_projection_api.py`, `memory_context.py` and
   `memory_projections.py`: reused owner route registration, source custody,
   erasure/retention checks and actual execution-result semantics.
+- Installed `deepseek-harness-sdk` 0.2.1rc2 `api.py::finish_reason` and
+  `companion/dsh_job.py::run_job`: inspected root-run termination separately from
+  tool-result failures; one successful child result does not establish overall
+  success. The Goal reader reuses native Goal/step states rather than DSH events.
+- [SQLite SELECT](https://www.sqlite.org/lang_select.html): reuse explicit
+  ORDER BY and LIMIT for bounded original rows, with an extra row detecting
+  overflow; the query itself does not modify stored state.
 
 ## Integration handoff and limits
 

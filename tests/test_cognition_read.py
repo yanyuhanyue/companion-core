@@ -122,10 +122,10 @@ def test_native_goal_wait_and_cancel(core):
     assert core.goals.fail(step, "RESOURCE_UNAVAILABLE", resource=True)
     view = CognitionRead(core)
     item = view.page("goal", record_id=goal)["items"][0]
-    assert item["state"] == item["step"]["state"] == "WAITING_RESOURCE"
+    assert item["state"] == item["steps"][0]["state"] == "WAITING_RESOURCE"
     core.goals.cancel(goal)
     item = view.page("goal", record_id=goal)["items"][0]
-    assert item["state"] == item["step"]["state"] == "CANCELLED"
+    assert item["state"] == item["steps"][0]["state"] == "CANCELLED"
 
 
 @pytest.mark.parametrize("response_usage", [True, False])
