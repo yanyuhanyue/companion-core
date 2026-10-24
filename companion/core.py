@@ -273,7 +273,10 @@ class Core(Runtime):
         return job_id
 
     def recover(self, now):
+        from companion.evaluation import recover as recover_evaluation
+
         s = self.store
+        recover_evaluation(s, now)
         image_spool.cleanup(s, now)
         expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' "
                          "AND kind IN ('chat','activity') AND lease_until<=?", (now,))
@@ -308,12 +311,13 @@ class Core(Runtime):
                 "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
                 "FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
-                "AND j.kind IN ('chat','activity') "
+                "AND j.kind IN ('chat','activity','evaluation') "
                 "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
                 "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
                 "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
                 "AND b.kind IN ('chat','activity') "
-                "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) ORDER BY j.rowid LIMIT 1",
+                "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) "
+                "ORDER BY CASE WHEN j.kind='evaluation' THEN 1 ELSE 0 END,j.rowid LIMIT 1",
                 (now,),
             )
             if not row:
@@ -1209,6 +1213,10 @@ class Core(Runtime):
 
     async def run_once(self, worker_id="worker"):
         job = self.claim_job(worker_id)
+        if job is not None and job["kind"] == "evaluation":
+            from companion.evaluation import run as run_evaluation
+
+            return await run_evaluation(self, job)
         if job is None:
             if await self._run_poke_once(worker_id):
                 return True

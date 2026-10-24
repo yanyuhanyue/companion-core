@@ -390,6 +390,7 @@ class Settings(BaseModel):
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
     memory_enabled: bool = False
+    evaluation_enabled: bool = False
     diary_enabled: bool = False
     diary_generate_hour: int = Field(default=2, ge=0, le=23)
     diary_min_source_events: int = Field(default=3, ge=1, le=40)
