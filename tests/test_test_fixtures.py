@@ -11,9 +11,12 @@ from tests.conftest import ingest
 
 
 def assert_schema_metadata(db):
-    rows = db.execute("SELECT key,value FROM runtime_meta").fetchall()
-    assert len(rows) == 1 and rows[0][0] == "voice_incarnation"
-    assert re.fullmatch(r"[a-f0-9]{32}", rows[0][1])
+    rows = dict(db.execute("SELECT key,value FROM runtime_meta").fetchall())
+    assert set(rows) == {"voice_incarnation", "owner_authority_restore_generation",
+                         "owner_authority_mode"}
+    assert re.fullmatch(r"[a-f0-9]{32}", rows["voice_incarnation"])
+    assert rows["owner_authority_restore_generation"] == "initial"
+    assert rows["owner_authority_mode"] == "OFF"
 
 
 def historical_database(source, path, revision):
@@ -32,6 +35,15 @@ def historical_database(source, path, revision):
             columns = [row[1] for row in target.execute(f'PRAGMA table_info("{table}")')]
             for row in source.rows(f'SELECT * FROM "{table}" ORDER BY rowid'):
                 if table == "runtime_meta" and row["key"] == "voice_incarnation":
+                    continue
+                if table == "runtime_meta" and row["key"] in {
+                    "owner_authority_restore_generation", "owner_authority_mode",
+                }:
+                    # A historical fixture retains actual custody rather than a fresh
+                    # migration's bootstrap marker; no runtime grant is synthesized.
+                    target.execute("INSERT INTO runtime_meta(key,value) VALUES (?,?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (row["key"], row["value"]))
                     continue
                 target.execute(f'INSERT INTO "{table}" ({",".join(columns)}) '
                                f'VALUES ({",".join("?" for _ in columns)})',
@@ -52,7 +64,7 @@ def test_core_fixture_keeps_runtime_data_out_of_the_template(core, migrated_data
     assert len(core.store.rows("SELECT event_id FROM events")) == 1
 
     with closing(sqlite3.connect(migrated_database)) as template:
-        # Only the migration-owned incarnation and FTS internal rows may exist;
+        # Only migration-owned identity/OFF markers and FTS internal rows may exist;
         # identities, privacy epochs, leases, erasure and budget state stay empty.
         assert_schema_metadata(template)
         tables = template.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()

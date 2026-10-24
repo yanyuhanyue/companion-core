@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 import pytest
@@ -10,35 +11,35 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from companion import agent_images, image_spool, qq_images
 from companion.contracts import CoreError
 from companion.core import Core
-from companion.store import after, encode, migrate, uid
+from companion.store import Store, after, encode, migrate, uid
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
-from tests.test_agent_migration import downgrade
 from tests.test_live_image_input import options as legacy_image_options
 from tests.test_native_image_pipeline import pixels
 from tests.test_onebot_capture import pinned_plan
 from tests.test_onebot_direct import raw_event
 from tests.test_prepare_owner_input import window
+from tests.test_test_fixtures import historical_database
 
 
 @pytest.mark.parametrize("retire", ["expiry", "recall"])
 def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(core, tmp_path, retire):
-    database = tmp_path / "legacy-image.db"
-    migrate(str(database))
-    settings = core.settings.model_copy(update={"database": str(database)})
-    with Core(settings, clock=core.clock) as legacy:
+    settings = core.settings.model_copy(update={"database": str(tmp_path / "fixture-current.db")})
+    migrate(settings.database)
+    with Core(settings, clock=core.clock) as legacy, ExitStack() as cleanup:
         config, _ = pinned_plan(legacy, tmp_path / "legacy-plan", 3001,
                                  live=True, approved=True, rich_input_scope="references_v1",
                                  scope_options=legacy_image_options())
         approval = legacy.settings.live_text_window
-        downgrade(database)
+        database = historical_database(legacy.store, tmp_path / "legacy-image.db",
+                                        "0040_owner_authority")
         now, item_id, job_id = legacy.clock(), uid("content"), uid("job")
         frame = encode(raw_event(time=int(legacy.clock.now.timestamp()), message=[
             {"type": "image", "data": {"url": "https://gchat.qpic.cn/legacy-original"}}]))
         event = normalize(frame, config, now=legacy.clock.now.timestamp(),
                           rich_input_scope="references_v1", image_scope="owner_image_v1")
         image = event["payload"]["rich"]["segments"][0]
-        store = legacy.store
+        store = cleanup.enter_context(closing(Store(database)))
         conversation = uid("conversation")
         store.insert("conversations", conversation_id=conversation, platform="qq",
             platform_session_key=config.origin, scope="private", owner_actor_id="owner",

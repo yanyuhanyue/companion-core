@@ -21,6 +21,7 @@ from companion.privacy import ErasureLedger
 from companion.store import Store, encode, migrate
 from companion.transport import digest
 from tests.conftest import Clock
+from tests.test_test_fixtures import historical_database
 
 REVISION_CHAIN = (
     "0001_m0",
@@ -63,6 +64,10 @@ REVISION_CHAIN = (
     "0039_evaluation",
     "0040_owner_authority",
     "0041_agent_conversations",
+    "0042_rem",
+    "0043_reader_authority",
+    "0044_voice_owner_authority",
+    "0045_goal_read_plan",
 )
 LEGACY_TABLES = (
     "principals",
@@ -344,24 +349,27 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
     assert tuple(reversed(revisions)) == REVISION_CHAIN
 
 
-def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core):
+@pytest.mark.parametrize("revision,code", [
+    ("0040_owner_authority", "OWNER_AUTHORITY_DOWNGRADE"),
+    ("0043_reader_authority", "OWNER_AUTHORITY_DOWNGRADE"),
+    ("0044_voice_owner_authority", "VOICE_AUTHORITY_DOWNGRADE"),
+    ("0045_goal_read_plan", "GOAL_PLAN_DOWNGRADE"),
+])
+def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core, tmp_path, revision, code):
     tables = ("runtime_meta", "voice_jobs", "voice_node_state", "model_usage", "outbox")
-    before = table_snapshot(core.store, tables)
+    path = historical_database(core.store, tmp_path / "authority-custody.db", revision)
+    with closing(Store(path)) as original:
+        before = table_snapshot(original, tables)
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.store.path).as_posix())
-    with pytest.raises(
-        RuntimeError, match="OWNER_AUTHORITY_DOWNGRADE_REQUIRES_EXPLICIT_CUSTODY_RECONCILIATION"
-    ):
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
+    with pytest.raises(RuntimeError, match=code + "_REQUIRES_EXPLICIT_CUSTODY_RECONCILIATION"):
         command.downgrade(config, "0033_model_usage_job_index")
-    assert table_snapshot(core.store, tables) == before
-    # Empty newer custody tables can be removed before the authority migration's
-    # permanent downgrade fence. Its original state and accounting still survive.
-    assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-        "0040_owner_authority"
-    )
+    with closing(Store(path)) as original:
+        assert table_snapshot(original, tables) == before
+        assert original.one("SELECT version_num FROM alembic_version")["version_num"] == revision
 
 
 @pytest.mark.parametrize("revision", ["0003_memory_index", "0004_diary"])

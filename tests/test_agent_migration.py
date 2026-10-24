@@ -9,6 +9,7 @@ from alembic.config import Config
 
 from companion.store import Store, migrate
 from tests.conftest import ingest
+from tests.test_test_fixtures import historical_database
 from tests.test_token_measurement_migration import historical_admission, snapshot
 
 PRIOR = "0040_owner_authority"
@@ -50,7 +51,7 @@ def test_upgrade_preserves_original_accounting_and_unrelated_metadata(tmp_path):
 
 
 @pytest.mark.parametrize("custody", ["conversation", "image"])
-def test_native_custody_blocks_evidence_losing_downgrade(core, custody):
+def test_native_custody_blocks_evidence_losing_downgrade(core, tmp_path, custody):
     ingest(core)
     now = core.clock()
     if custody == "conversation":
@@ -68,7 +69,9 @@ def test_native_custody_blocks_evidence_losing_downgrade(core, custody):
                           expires_at=now)
         table = "captured_images"
     before = core.store.rows(f"SELECT * FROM {table}")
+    path = historical_database(core.store, tmp_path / "agent-custody.db", REVISION)
     with pytest.raises(RuntimeError, match="AGENT_CONVERSATION_DOWNGRADE_REQUIRES"):
-        downgrade(core.settings.database)
-    assert core.store.rows(f"SELECT * FROM {table}") == before
-    assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == REVISION
+        downgrade(path)
+    with closing(Store(path)) as original:
+        assert original.rows(f"SELECT * FROM {table}") == before
+        assert original.one("SELECT version_num FROM alembic_version")["version_num"] == REVISION

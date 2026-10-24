@@ -9,6 +9,7 @@ from alembic.config import Config
 
 from companion.store import Store, migrate
 from tests.conftest import ingest
+from tests.test_test_fixtures import historical_database
 from tests.test_token_measurement_migration import historical_admission, snapshot
 
 
@@ -36,7 +37,7 @@ def test_rem_migration_preserves_unknown_costs_and_empty_downgrade(tmp_path):
         assert snapshot(store) == before
 
 
-def test_retained_rem_artifact_blocks_destructive_downgrade(core):
+def test_retained_rem_artifact_blocks_destructive_downgrade(core, tmp_path):
     ingest(core)
     job = core.store.one("SELECT job_id FROM jobs")
     core.store.insert("rem_records", rem_id="schema-fixture", job_id=job["job_id"],
@@ -45,6 +46,9 @@ def test_retained_rem_artifact_blocks_destructive_downgrade(core):
         output_json='{"kind":"FICTION","text":"retained fiction"}',
         created_at=core.clock(), expires_at="2027-01-01T00:00:00+00:00")
     before = core.store.rows("SELECT * FROM rem_records")
+    path = historical_database(core.store, tmp_path / "rem-custody.db", "0042_rem")
     with pytest.raises(RuntimeError, match="REM_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
-        downgrade(core.settings.database)
-    assert core.store.rows("SELECT * FROM rem_records") == before
+        downgrade(path)
+    with closing(Store(path)) as original:
+        assert original.rows("SELECT * FROM rem_records") == before
+        assert original.one("SELECT version_num FROM alembic_version")["version_num"] == "0042_rem"
