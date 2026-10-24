@@ -19,8 +19,9 @@ generation. No eligible source means no Life model call. PREVIEW makes no new ta
   Preview does not mutate state. Source fingerprints allow a reviewer to bind an exact source.
 - `POST /internal/v2/life/topics/{topic_id}/close`, with `source_event_id` of an owner event in
   that conversation, explicitly closes the topic. The control token is required.
-- Owner commands `/结束话题 [topic_id]` and `/不再跟进 [topic_id]` close matching active topics;
-  omission closes the active topics in that conversation. The command itself is not a candidate.
+- Owner commands `/结束话题 [topic_id]` and `/不再跟进 [topic_id]` close matching topics and
+  withdraw their current drafts; omission applies to the current conversation. The command itself
+  is not a candidate.
 
 Topic candidacy means there is an actual experience to consider, not that a model has established
 an unresolved fact. One active conversational topic groups up to eight actual inputs. A newer
@@ -75,6 +76,9 @@ owner ID, text, content hash, source snapshot hash, source grants and effective 
 the project's canonical `paid_budget.sha`: content is `{"text": text}`; source snapshot is the map
 `{event_id: source_sha256}`. The DTO lives in `companion/life_protocol.py`. It is an activity SHADOW
 artifact; it is never a SocialAutonomy READY plan and cannot be passed to reserve/send.
+Readback revalidates the DTO, native successful job and settled usage, retained text, both hashes,
+exact current unique source grants, audience/owner and effective expiry. A malformed or changed
+artifact is hidden individually without writing during GET or failing the whole view.
 
 Lane C can validate this DTO offline. A future authorized publication must revalidate current
 grants and exact content/source snapshot through the existing account-action path. Current code
@@ -92,6 +96,9 @@ Source fingerprints and conversation input identity pin a decision. Readback sup
 when its source changes, expires or its purpose grant is revoked. The registered derived cleanup
 erases result prose, rationale and JSON and cancels pending work; latest-ledger restore applies
 the same erasure to old backups. No cleanup refunds an actual model call or resets UNKNOWN.
+Owner input supersession and pause cancel only the stale Life job through the existing reply
+lifecycle; they do not stop the live conversation window. Actual UNKNOWN and authority failures
+retain the original global accounting/authorization guards.
 
 ## Validation boundaries
 

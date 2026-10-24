@@ -109,8 +109,11 @@ registry. `LiveTextWindowApproval.life_shadow` owns the implemented scope.
 
 Proposed strict action union: SKIP, CONTINUE, EXPLORE, FOLLOW_UP, SHARE, DEFER. A proposal contains
 only bounded source/topic/goal references and action-specific arguments. Core resolves references
-and decides admissibility. CONTINUE/EXPLORE delegate to existing Goal/Reader paths; SHARE delegates
-to existing SocialPlanner. DEFER is bounded by expiry and cannot erase a consumption marker.
+and decides admissibility. The current candidate records CONTINUE/EXPLORE as SHADOW intentions;
+it does not dispatch a read. The subsequent authorized integration must connect these choices
+to existing Goal/Reader gates and prove decision -> read -> result -> next decision with a mock
+end-to-end case. SHARE currently reuses SocialPlanner evidence validation for its review artifact.
+DEFER is bounded by expiry and cannot erase a consumption marker.
 
 OFF performs no new scheduling or model calls. Read-only preview reconstructs evidence without
 creating topics, jobs or send reservations. SHADOW generates reviewable prose through the existing
@@ -211,7 +214,9 @@ and migration numbering are routine implementation details and do not need owner
 Keep SKIP/CONTINUE/EXPLORE/FOLLOW_UP/SHARE/DEFER. Treat destination as a typed parameter of an
 expressive action rather than add WRITE_DIARY or PRIVATE_MESSAGE_DRAFT action types:
 
-- CONTINUE and EXPLORE refer to existing goals and actual Reader execution.
+- CONTINUE and EXPLORE are bounded SHADOW proposals in this candidate. Original independently
+  authorized reading still runs through Goal/Reader; new model-selected read dispatch remains
+  subsequent MVP work. The current Reader-to-SHARE test starts with a prior mock reading result.
 - FOLLOW_UP targets a source-bound private topic, with private draft output initially.
 - SHARE proposes expressing supported experience; its destination is PRIVATE_DIARY,
   PRIVATE_MESSAGE_DRAFT or QZONE_DRAFT. PRIVATE_DIARY means retaining a private reflection,

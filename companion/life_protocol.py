@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import AwareDatetime, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
 from companion.contracts import StrictModel
 
@@ -105,3 +105,10 @@ class LifeQZoneDraft(StrictModel):
     source_snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     sources: list[LifeQZoneSourceGrant] = Field(min_length=1, max_length=8)
     expires_at: AwareDatetime
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int:
+            raise ValueError("version must be an integer")
+        return value

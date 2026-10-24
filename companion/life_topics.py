@@ -7,11 +7,11 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, private_life
+from companion import budget, private_life, reply_revision
 from companion.affect import AffectEngine
 from companion.contracts import CoreError
 from companion.diary import DiaryDraft, is_management_command, render_draft
-from companion.life_protocol import LifeDecision, LifeQZoneDraft
+from companion.life_protocol import LifeDecision, LifeQZoneDraft, LifeQZoneSourceGrant
 from companion.observation import expired_sources
 from companion.paid_budget import sha
 from companion.privacy import epoch, redact, sensitive
@@ -50,6 +50,62 @@ def _uncertain(store):
         store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN' LIMIT 1")
         or store.one("SELECT 1 FROM outbox WHERE state IN ('SENDING','DELIVERY_UNCERTAIN') LIMIT 1")
     )
+
+
+def _qzone_readback(store, settings, result, topic, sources, approved, now):
+    """Validate one retained review artifact against native state without writing."""
+    from companion.notices import _settled
+
+    try:
+        proposal = json.loads(result["proposal_json"])
+        value = proposal["qzone_draft"]
+        if not isinstance(value, dict) or set(value) != set(LifeQZoneDraft.model_fields):
+            return None
+        draft = LifeQZoneDraft.model_validate_json(encode(value))
+        decision = LifeDecision.model_validate(
+            {k: v for k, v in proposal.items() if k != "qzone_draft"}
+        )
+        grants = [LifeQZoneSourceGrant.model_validate(g) for g in approved["qzone"]]
+        expected = {g.event_id: g for g in grants}
+        actual = {g.event_id: g for g in draft.sources}
+        fingerprints = {source["event_id"]: source["source_sha256"] for source in sources}
+        expires = min(
+            datetime.fromisoformat(topic["expires_at"]),
+            *(datetime.fromisoformat(source["expires_at"]) for source in sources),
+            *(grant.expires_at for grant in grants),
+        )
+        if (
+            not grants
+            or result["state"] != "SHADOW"
+            or result["action"] != "SHARE"
+            or result["destination"] != "QZONE_DRAFT"
+            or decision.action != "SHARE"
+            or decision.destination != "QZONE_DRAFT"
+            or decision.text != result["text"]
+            or decision.reason != result["reason"]
+            or not set(decision.source_event_ids) <= set(fingerprints)
+            or draft.draft_id != result["job_id"]
+            or draft.text != result["text"]
+            or draft.owner_qq_id != settings.owner_qq_id
+            or draft.audience != "owner_only"
+            or draft.purpose != "qzone_draft"
+            or draft.content_sha256 != sha({"text": result["text"]})
+            or draft.source_snapshot_sha256 != sha(fingerprints)
+            or len(actual) != len(draft.sources)
+            or actual != expected
+            or set(actual) != set(fingerprints)
+            or draft.expires_at != expires
+            or draft.expires_at <= datetime.fromisoformat(now)
+            or not store.one(
+                "SELECT 1 FROM jobs WHERE job_id=? AND kind='activity' AND state='SUCCEEDED'",
+                (result["job_id"],),
+            )
+            or not _settled(store, result["job_id"])
+        ):
+            return None
+        return draft.model_dump(mode="json")
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return None
 
 
 def _source(store, settings, event_id, now):
@@ -236,8 +292,13 @@ class LifeTopics:
                     fingerprints = {
                         source["event_id"]: source["source_sha256"] for source in sources
                     }
-                    if json.loads(result["source_fingerprints_json"]) != fingerprints:
+                    try:
+                        retained = json.loads(result["source_fingerprints_json"])
+                    except (TypeError, ValueError):
                         continue
+                    if retained != fingerprints:
+                        continue
+                    approved = None
                     if self.settings.mode == "live":
                         try:
                             approved = authority(
@@ -267,7 +328,12 @@ class LifeTopics:
                         )
                     }
                     if result["destination"] == "QZONE_DRAFT":
-                        visible["qzone_draft"] = json.loads(result["proposal_json"])["qzone_draft"]
+                        draft = _qzone_readback(
+                            self.store, self.settings, result, row, sources, approved, now
+                        )
+                        if draft is None:
+                            continue
+                        visible["qzone_draft"] = draft
                     results.append(visible)
             items.append(
                 {**row, "state": state, "sources": sources if valid else [], "results": results}
@@ -516,12 +582,18 @@ class LifeTopics:
             or topic["expires_at"] <= now
             or not self.settings.wake_enabled
             or _paused(s, self.settings, now)
-            or _uncertain(s)
         ):
-            raise CoreError("LIFE_TOPIC_UNAVAILABLE", 409)
-        sources = self.sources(topic_id)
+            raise CoreError(reply_revision.CANCELLED, 409)
+        if _uncertain(s):
+            raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
+        try:
+            sources = self.sources(topic_id)
+        except CoreError as error:
+            if error.code not in {"LIFE_SOURCE_UNAVAILABLE", "PRIVACY_CHANGED"}:
+                raise
+            raise CoreError(reply_revision.SOURCE_RECALLED, 409) from error
         if not sources:
-            raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
+            raise CoreError(reply_revision.SOURCE_RECALLED, 409)
         approved = authority(
             s, self.settings, topic["conversation_id"], sources, now, topic_id=topic_id
         )
@@ -529,7 +601,7 @@ class LifeTopics:
             "SELECT * FROM conversations WHERE conversation_id=?", (topic["conversation_id"],)
         )
         if conversation["last_event_at"] > after(now, -self.settings.proactive_idle_seconds):
-            raise CoreError("LIFE_OWNER_ACTIVE", 409)
+            raise CoreError(reply_revision.SUPERSEDED, 409)
         latest_owner = s.one(
             "SELECT event_id FROM events WHERE conversation_id=? AND source='qq.onebot' "
             "AND actor_id='owner' AND event_type IN ('message.received','message.media_received') "
@@ -542,7 +614,7 @@ class LifeTopics:
         ):
             # Do not ask the model about an old bug while a bounded-out newer input
             # may have closed it. The owner can close the topic or supply a fresh one.
-            raise CoreError("LIFE_LATEST_INPUT_NOT_INCLUDED", 409)
+            raise CoreError(reply_revision.SUPERSEDED, 409)
         goals = s.rows(
             "SELECT DISTINCT g.goal_id,g.state FROM goals g JOIN goal_evidence e "
             "USING(goal_id) WHERE e.event_id IN (SELECT event_id FROM life_topic_sources "
@@ -630,8 +702,16 @@ class LifeTopics:
         proposal = decision.model_dump(mode="json")
         if decision.destination == "QZONE_DRAFT":
             expires = min(
-                datetime.fromisoformat(x["expires_at"])
-                for x in [*data["sources"], *data["qzone_grants"]]
+                datetime.fromisoformat(
+                    s.one(
+                        "SELECT expires_at FROM life_topics WHERE topic_id=?",
+                        (data["topic_id"],),
+                    )["expires_at"]
+                ),
+                *(
+                    datetime.fromisoformat(x["expires_at"])
+                    for x in [*data["sources"], *data["qzone_grants"]]
+                ),
             )
             proposal["qzone_draft"] = LifeQZoneDraft(
                 draft_id=job["job_id"],

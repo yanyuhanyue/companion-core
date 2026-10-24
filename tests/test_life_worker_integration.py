@@ -28,6 +28,7 @@ from companion.life_topics import _source
 from companion.model import ModelClient
 from tests.conftest import event, run
 from tests.test_exploration import URL, configure
+from tests.test_input_protocol import admit
 from tests.test_live_text_window import live_fixture
 from tests.test_onebot_capture import real_core_http
 from tests.test_private_companion import companion_options
@@ -68,21 +69,37 @@ async def native_worker(core, provider, monkeypatch):
                 await asyncio.gather(worker, waiter, return_exceptions=True)
 
 
-@pytest.mark.parametrize("scenario", ["bug", "reading", "qzone", "qzone_revoked"])
+@pytest.mark.parametrize(
+    "scenario",
+    ["bug", "reading", "qzone", "qzone_revoked", "preempt", "pause", "reading_preempt", "unknown"],
+)
 def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypatch, scenario):
     calls = []
     source_id = "evt_test_1"
+    live_client = live_config = live_plan = None
+    next_owner = None
+    reading = scenario in {"reading", "reading_preempt"}
+    preempt = scenario in {"preempt", "reading_preempt"}
+    interrupted = preempt or scenario == "pause"
     core.settings.control_token = SecretStr("synthetic-life-control-" * 3)
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW")
-    if scenario == "reading":
+    if reading:
         configure(core)
         core.settings.content_enabled = True
 
-    def provider(request):
+    async def provider(request):
+        nonlocal next_owner
         payload = json.loads(request.content)
         material = json.loads(payload["messages"][-1]["content"])
         assert material["kind"] == "life"
         calls.append(material)
+        if preempt:
+            next_owner, response = await admit(
+                live_client, live_config, live_plan, core.clock.now, number=2
+            )
+            assert response.status_code == 202, response.text
+        elif scenario == "pause":
+            core.goals.pause_autonomy(True)
         if scenario == "qzone_revoked":
             approval = core.settings.live_text_window
             core.settings.live_text_window = approval.model_copy(
@@ -92,7 +109,7 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                     ),
                 }
             )
-        return httpx.Response(
+        response = httpx.Response(
             200,
             json={
                 "choices": [
@@ -100,7 +117,9 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                         "message": {
                             "content": json.dumps(
                                 {
-                                    "action": "FOLLOW_UP" if scenario == "bug" else "SHARE",
+                                    "action": "FOLLOW_UP"
+                                    if scenario in {"bug", "preempt", "pause"}
+                                    else "SHARE",
                                     "destination": "QZONE_DRAFT"
                                     if scenario.startswith("qzone")
                                     else "PRIVATE_MESSAGE_DRAFT",
@@ -120,9 +139,14 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                 "usage": {"prompt_tokens": 180, "completion_tokens": 60},
             },
         )
+        if scenario == "unknown":
+            body = response.json()
+            del body["usage"]
+            return httpx.Response(200, json=body)
+        return response
 
     async def exercise():
-        nonlocal source_id
+        nonlocal source_id, live_client, live_config, live_plan, next_owner
         async with (
             real_core_http(core) as port,
             httpx.AsyncClient(
@@ -131,7 +155,11 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
             ) as http,
         ):
             inbound = event(
-                core, text=URL if scenario == "reading" else "导出Bug还没解决，明天接着看"
+                core,
+                text=URL if reading else "导出Bug还没解决，明天接着看",
+                origin=f"onebot-direct:FriendMessage:{core.settings.owner_qq_id}"
+                if interrupted
+                else None,
             )
             response = await http.post(
                 "/internal/v1/inbox/events",
@@ -142,7 +170,7 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                 },
             )
             assert response.status_code == 202, response.text
-            if scenario == "reading":
+            if reading:
                 headers = {
                     "Authorization": "Bearer "
                     + core.settings.observation_adapters["bili"].token.get_secret_value()
@@ -166,7 +194,7 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                 "UPDATE jobs SET state='CANCELLED',last_error_code='SYNTHETIC_BACKGROUND_ONLY'"
             )
             core.life_topics.synchronize()
-            if scenario == "reading":
+            if reading:
                 conversation_topic = core.store.one(
                     "SELECT topic_id FROM life_topics WHERE kind='conversation'"
                 )
@@ -175,9 +203,11 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                 "SELECT conversation_id FROM events WHERE event_id='evt_test_1'"
             )["conversation_id"]
             options = companion_options(core)
-            if scenario == "reading":
+            if reading:
                 options.update(rich_input_scope="references_v1", link_scope="owner_links_v1")
                 options["core_options"]["rich_input_scope"] = "references_v1"
+            if preempt:
+                options["core_options"]["proactive_idle_seconds"] = 0
             options["bridge_options"] = {
                 "capture_signing_key": Ed25519PrivateKey.generate().private_bytes_raw().hex(),
             }
@@ -223,7 +253,11 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                 options["life_shadow"] = LifeShadowApproval.model_validate(
                     options["life_shadow"].model_dump(),
                 )
-            _, plan = live_fixture(core, tmp_path, **options)
+            live_config, plan = live_fixture(core, tmp_path, **options)
+            live_plan, live_client = plan, http
+            http.headers["Authorization"] = (
+                "Bearer " + core.settings.bridge_token.get_secret_value()
+            )
             live_text.open_window(
                 core.store,
                 core.settings,
@@ -234,13 +268,14 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
             assert live_text.status(core.store, core.settings, core.clock)["approved"]
             await native_worker(core, provider, monkeypatch)
             result = core.store.one("SELECT * FROM life_activity_results")
-            if scenario == "qzone_revoked":
+            if scenario in {"qzone_revoked", "unknown"} or interrupted:
                 assert result["text"] == ""
             else:
                 assert result["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
             assert len(calls) == 1 and calls[0]["sources"][0]["event_id"] == source_id
             usage = core.store.one("SELECT * FROM model_usage WHERE job_id=?", (result["job_id"],))
-            assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
+            assert usage["state"] == ("UNKNOWN" if scenario == "unknown" else "SETTLED")
+            assert usage["billed_micro_usd"] > 0
             assert core.store.one(
                 "SELECT io_started_at FROM model_admissions WHERE request_id=?",
                 (usage["request_id"],),
@@ -251,6 +286,8 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
             visible = [r for t in preview.json()["items"] for r in t["results"]]
             if scenario == "qzone_revoked":
                 assert not visible
+            elif interrupted or scenario == "unknown":
+                assert not any(row["state"] == "SHADOW" for row in visible)
             else:
                 assert visible
             if scenario == "qzone":
@@ -260,5 +297,46 @@ def test_real_http_source_to_independent_worker_shadow(core, tmp_path, monkeypat
                 assert draft.sources[0].revision == 1
             assert core.store.rows("SELECT * FROM outbox") == []
             assert core.store.rows("SELECT * FROM social_autonomy_plans") == []
+            if scenario == "unknown":
+                assert live_text.stopped(core.store, plan.sha256)
+                assert not live_text.status(core.store, core.settings, core.clock)["approved"]
+            if interrupted:
+                assert (
+                    core.store.one("SELECT state FROM jobs WHERE job_id=?", (result["job_id"],))[
+                        "state"
+                    ]
+                    == "CANCELLED"
+                )
+                assert not live_text.stopped(core.store, plan.sha256)
+                if next_owner is None:
+                    next_owner, response = await admit(
+                        http, live_config, plan, core.clock.now, number=3
+                    )
+                    assert response.status_code == 202, response.text
+                assert live_text.status(core.store, core.settings, core.clock)["approved"]
+                async with httpx.AsyncClient(
+                    transport=httpx.MockTransport(
+                        lambda request: httpx.Response(
+                            200,
+                            json={
+                                "choices": [{"message": {"content": "收到，我们接着聊。"}}],
+                                "usage": {"prompt_tokens": 180, "completion_tokens": 60},
+                            },
+                        )
+                    )
+                ) as foreground:
+                    core.model = ModelClient(core.settings, foreground)
+                    assert await core.run_once("next-foreground")
+                assert (
+                    core.store.one(
+                        "SELECT state FROM jobs WHERE event_id=?", (next_owner["event_id"],)
+                    )["state"]
+                    == "SUCCEEDED"
+                )
+                assert not live_text.stopped(core.store, plan.sha256)
+                assert all(
+                    row["origin_event_id"] == next_owner["event_id"]
+                    for row in core.store.rows("SELECT * FROM outbox")
+                )
 
     run(exercise())
