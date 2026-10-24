@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from pydantic import SecretStr
 
 from companion import paid_budget, rem
 from companion.backup import backup, restore
@@ -19,6 +20,7 @@ from companion.rem_protocol import RemConfig
 from tests.conftest import run
 from tests.support.owner_memory import environment
 from tests.test_evaluation_process import process_config
+from tests.test_onebot_capture import real_core_http
 
 FACT = "青禾项目下一步检查配色"
 DREAM = {"decision": "DREAM", "title": "纸上的花园", "text": "虚构：配色化成了纸上的花园。",
@@ -66,6 +68,7 @@ def test_rem_default_off_and_empty_material_are_quiet(core, tmp_path):
 @pytest.mark.parametrize("draft", [DREAM, {"decision": "SKIP"}])
 def test_rem_native_success_is_private_fiction_with_one_settlement(core, tmp_path, draft):
     calls = []
+    core.settings.control_token = SecretStr("synthetic-rem-control-token")
 
     def provider(request):
         calls.append(json.loads(request.content))
@@ -83,6 +86,27 @@ def test_rem_native_success_is_private_fiction_with_one_settlement(core, tmp_pat
                     assert await worker.run_once(job_id=job)
                     assert not await worker.run_once(job_id=job)
                     record = rem.records(worker)[0]
+            before_read = core.store.db.total_changes
+            async with real_core_http(core) as port, httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{port}", trust_env=False,
+            ) as client:
+                observed = await client.post("/internal/v2/cognition",
+                    json={"kind": "rem", "record_id": record["rem_id"]},
+                    headers={"Authorization": "Bearer synthetic-rem-control-token"})
+            assert observed.status_code == 200, observed.text
+            assert observed.headers["cache-control"] == "no-store"
+            items = observed.json()["items"]
+            assert len(items) == 1 and items[0]["id"] == record["rem_id"]
+            item = items[0]
+            assert item["kind"] == "FICTION" and item["decision"] == draft["decision"]
+            assert item["questions"] == {"state": "UNVERIFIED",
+                                         "count": len(draft.get("questions", []))}
+            assert item["usage"] == record["usage"]
+            assert item["source_available"] and item["audience"] == "owner_only"
+            assert "title" not in item and "text" not in item
+            assert all(secret not in observed.text for secret in (
+                FACT, DREAM["title"], DREAM["text"], *DREAM["questions"]))
+            assert core.store.db.total_changes == before_read
             assert record["state"] == "SUCCEEDED"
             assert record["kind"] == "FICTION" and record["decision"] == draft["decision"]
             assert all(q["state"] == "UNVERIFIED" for q in record["questions"])
