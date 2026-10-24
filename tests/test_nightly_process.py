@@ -1,19 +1,26 @@
 """Authenticated TCP input -> original chat settlement -> separate Life process/restart."""
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from companion import paid_budget
 from companion.memory_context import MemoryContext
 from companion.model import ModelClient
+from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
 from companion.store import encode
+from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import event, run
 from tests.test_diary import DAY
 from tests.test_onebot_capture import real_core_http
+from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 
@@ -28,6 +35,18 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
     cfg.consolidation_catchup_days = 1
     cfg.reflection_daily_micro_usd = 50000
     cfg.reflection_monthly_micro_usd = 100000
+    later = core.clock.now
+    core.clock.now = datetime.fromisoformat(DAY.isoformat() + "T04:00:00+00:00")
+    key = Ed25519PrivateKey.generate()
+    cfg.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    policy = OwnerGrantPolicy(owner_qq_id=cfg.owner_qq_id,
+        purposes=["chat", "memory", "diary", "consolidation", "reflection"],
+        authorization_sha256="d" * 64, memory_scope="owner_private",
+        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(cfg)),
+        capture=dict(public_key=key.public_key().public_bytes_raw().hex(),
+                     identity_sha256=paid_budget.sha([cfg.owner_qq_id, cfg.bot_qq_id]),
+                     protocol_epoch="nightly-test-epoch"))
+    granted, _ = activate(core, policy)
 
     def chat_response(request):
         assert request.url.host == "synthetic.invalid"
@@ -48,12 +67,32 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
             core.model = ModelClient(cfg, transport)
             texts = ("青禾项目先检查配色", "松林项目整理阅读笔记", "周末再核对资料")
             for number, text in enumerate(texts, 1):
-                payload = event(core, number, text, at=DAY.isoformat() + "T04:00:00+00:00")
+                payload = event(core, number, text,
+                    origin="onebot-direct:FriendMessage:" + cfg.owner_qq_id)
+                source = (f"{cfg.bot_qq_id}:{payload.conversation.platform_session_key}:"
+                          f"epoch:nightly-test-epoch:{number}")
+                payload = payload.model_copy(update={"source_event_id": source,
+                    "event_id": "evt_" + hashlib.sha256(source.encode()).hexdigest()})
+                from companion.qq_rich import input_digest
+
+                capture = dict(authority=granted["authority"], kind="authenticated_onebot_ws",
+                    source_event_id=source, event_id=payload.event_id,
+                    input_sha256=input_digest(payload.payload.model_dump(mode="json")),
+                    frame_sha256="b" * 64, evidence_sha256="c" * 64,
+                    identity_sha256=policy.capture.identity_sha256,
+                    protocol_epoch=policy.capture.protocol_epoch,
+                    occurred_at=payload.occurred_at.isoformat(),
+                    received_at=payload.occurred_at.isoformat())
+                capture["signature"] = key.sign(capture_signing_payload(capture)).hex()
+                approved = await client.post("/internal/v1/owner-authority/inputs/approve",
+                                              json=capture)
+                assert approved.status_code == 200, approved.text
                 accepted = await client.post("/internal/v1/inbox/events",
                     headers={"X-Idempotency-Key": payload.event_id},
                     json=payload.model_dump(mode="json"))
                 assert accepted.status_code == 202, accepted.text
                 assert await core.run_once()
+            core.clock.now = later
             queued_before = core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"]
             config = cfg.model_dump(mode="json")
             config.update(model_key=cfg.model_key.get_secret_value(),

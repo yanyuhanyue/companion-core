@@ -50,10 +50,10 @@ Nightly 与独立记忆 lane 共用 `Core.extract_step()`、原跨进程提取�
 
 ## N1–N3 接线与依据
 
-本片的 Core 与 erasure 注册由共享文件负责人接入独立补丁；本分支不修改这两个文件。
-过渡验证显式加载 `tests.support.nightly_core_patch`，只安装补丁对应的方法委托、构造绑定及
-擦除注册，原 DB、admission、模型客户端和 worker 实现均未替换。组合候选接线后应去掉该测试插件，
-重验真实入口；测试插件不能当作产品接线。无需 0041 migration。
+Core 的 `extract_once`、`extract_step` 和 `prepare_memories` 委托原生 `memory_work`，
+Nightly 直接绑定 `extract_step`。原 `erase_derivatives` 注册 `memory-work` 清理。
+测试使用这些真实入口与擦除合同；仅替换外部 provider 传输并控制时钟、进程退出和观测。
+无需 0041 migration。
 
 `tests/test_nightly_process.py` 从真实认证 TCP inbox 进入原聊天提交，再运行独立 Life worker。
 provider 仅用 HTTP MockTransport；第一次进程在提取检查点退出，第二次复核并完成整理，

@@ -1,4 +1,4 @@
-"""Independent native Life worker; provider HTTP and pending Core delegates are test seams."""
+"""Independent native Life worker with synthetic provider HTTP and controlled time."""
 
 import asyncio
 import json
@@ -8,9 +8,8 @@ from pathlib import Path
 
 import httpx
 
-from companion import erasure, life_worker, memory_work
+from companion import life_worker, memory_work
 from companion.config import Settings
-from companion.consolidation import NightlyConsolidator
 from companion.core import Core
 from companion.diary import DIARY_RULES
 from companion.model import EXTRACT_RULES, REVIEW_RULES
@@ -62,40 +61,31 @@ def run_worker(settings_path, now, stop_after_extract):
         kwargs["transport"] = httpx.MockTransport(provider)
         return original_client(**kwargs)
 
-    original_step = NightlyConsolidator.run_step
+    original_selector = life_worker.native_selector
 
-    async def measured(self, worker_id):
-        before = self.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"]
-        result = await original_step(self, worker_id)
-        admitted = self.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] - before
-        assert admitted <= 1
-        units.append({"progressed": result.progressed, "admissions": admitted})
-        rows = self.store.rows("SELECT steps_json FROM consolidation_runs")
-        if stop_after_extract and any(json.loads(row["steps_json"]).get(
-            "memory_batch", {}).get("phase") == "REVIEW" for row in rows):
-            raise Finished
-        return result
+    def observed_selector(core, worker_id):
+        selector = original_selector(core, worker_id)
+        original_step = selector.step
+
+        async def measured():
+            before = core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"]
+            selected = await original_step()
+            admitted = core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] - before
+            assert admitted <= 1
+            units.append({"lane": selected.lane, "progressed": selected.result.progressed,
+                          "admissions": admitted})
+            record = memory_work.checkpoint_state(core.store)
+            if stop_after_extract and record and record["batch"].get("phase") == "REVIEW":
+                raise Finished
+            return selected
+
+        selector.step = measured
+        return selector
 
     async def stop(*args, **kwargs):
         raise asyncio.CancelledError
 
-    # Exactly the delegates/constructor binding and cleanup registration in the
-    # separate Core-owner patches. No native persistence/accounting is mocked.
-    Core.extract_once = memory_work.extract_once
-    Core.extract_step = memory_work.extract_step
-    Core.prepare_memories = memory_work.prepare_memories
-    original_init = Core.__init__
-
-    def initialize(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        self.consolidation.extract_step = self.extract_step
-
-    Core.__init__ = initialize
-    contracts = erasure.cleanup_contracts
-    erasure.cleanup_contracts = lambda: (
-        *contracts(), erasure.event_cleanup("memory-work", memory_work.erase_memory_work),
-    )
-    NightlyConsolidator.run_step = measured
+    life_worker.native_selector = observed_selector
     life_worker.Core = partial(Core, clock=lambda: now)
     life_worker.httpx.AsyncClient = offline_client
     life_worker.Wakeup.wait = stop

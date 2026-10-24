@@ -28,8 +28,8 @@ from companion.affect import NEUTRAL, AffectEngine
 from companion.commands import command_parts, is_memory_command
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES, ContentService
-from companion.contracts import Candidate, CoreError, Extraction, MemoryReview, MemorySelection
-from companion.diary import DiaryService, day_bounds, is_diary_command
+from companion.contracts import Candidate, CoreError, MemorySelection
+from companion.diary import DiaryService, is_diary_command
 from companion.executive import Executive
 from companion.exploration import ExplorationService
 from companion.expression import ExpressionEngine
@@ -40,7 +40,7 @@ from companion.media import MediaService
 from companion.meme_core import MemeCaptionService
 from companion.memory import Memory
 from companion.memory_context import MemoryContext
-from companion.model import EXTRACT_RULES, PRINCIPLES, RECALL_RULES, REVIEW_RULES
+from companion.model import PRINCIPLES, RECALL_RULES
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
 from companion.reading import ReadingService
@@ -83,7 +83,7 @@ class Core(Runtime):
             self.goals = GoalEngine(self.store, settings, self.ledger, clock)
             self.consolidation = NightlyConsolidator(
                 self.store, settings, self.diary, self.reflections, self.goals,
-                self.extract_once, clock,
+                self.extract_step, clock,
             )
             self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
             self.life = LifeService(
@@ -1014,131 +1014,12 @@ class Core(Runtime):
             raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
 
     async def prepare_memories(
-        self, candidates, confirmed=False, job_id=None, logical_request_id=None
+        self, candidates, confirmed=False, job_id=None, logical_request_id=None, request_id=None
     ):
-        """Plan semantic matches without holding a SQLite transaction across model I/O."""
-        if private_life.strict(self.store, self.settings):
-            raise CoreError("LIVE_TEXT_MEMORY_READ_ONLY", 403)
-        s, cfg = self.store, self.settings
-        candidates = [
-            candidate
-            for candidate in candidates
-            if self.memory.validate_candidate(candidate, confirmed, now=self.clock()) is not None
-        ]
-        if not candidates:
-            return [], []
-        job = s.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)) if job_id else None
-        if job:
-            reply_revision.remember_sources(s, job, {row.evidence_event_id for row in candidates})
-        existing = {}
-        candidate_proof = self.memory_context.pin(
-            self.clock(), event_ids={row.evidence_event_id for row in candidates},
-        )
+        from companion.memory_work import prepare_memories
 
-        def check_candidates():
-            if job:
-                reply_revision.check_job(s, job)
-            self.memory_context.revalidate(candidate_proof, self.clock())
-
-        for candidate in candidates:
-            for row in await self.memory.search_async(
-                candidate.content, subjects=[candidate.subject], limit=6, now=self.clock(),
-                source_check=check_candidates, clock=self.clock,
-            ):
-                existing[row["memory_id"]] = row
-        catalog = {f"m{i}": row for i, row in enumerate(existing.values())}
-        if len(candidates) == 1:
-            same = next(
-                (row for row in catalog.values() if row["content"] == candidates[0].content), None
-            )
-            if same or not catalog:
-                return candidates, [{"same": same["memory_id"] if same else None, "conflicts": []}]
-        payload = {
-            "existing": [
-                {"ref": ref, "subject": row["subject"], "content": row["content"]}
-                for ref, row in catalog.items()
-            ],
-            "candidates": [
-                {"ref": f"c{i}", "subject": row.subject, "content": row.content}
-                for i, row in enumerate(candidates)
-            ],
-        }
-        messages = [
-            {"role": "system", "content": REVIEW_RULES},
-            {"role": "user", "content": encode(payload)},
-        ]
-        proof = self.memory_context.pin(self.clock(), rows=list(catalog.values()),
-                                        event_ids={row.evidence_event_id for row in candidates})
-        if job:
-            reply_revision.remember_sources(s, job, proof["source_event_ids"])
-        request_id = budget.reserve(
-            s,
-            cfg,
-            job_id,
-            "memory_review",
-            messages,
-            self.clock(),
-            logical_request_id=logical_request_id,
-            clock=self.clock,
-        )
-        response = await budget.complete(
-            self.model,
-            self.store,
-            self.settings,
-            request_id,
-            messages,
-            "memory_review",
-            self.clock,
-            source_check=lambda: self.memory_context.revalidate(proof, self.clock()),
-        )
-        # Preserve the existing write-reconciliation failure contract. A real input
-        # recall already cancelled the tracked job; a concurrent explicit forget
-        # remains PRIVACY_CHANGED and cannot commit the old review result.
-        self.memory_context.revalidate(proof, self.clock())
-        if job:
-            reply_revision.check_job(s, job)
-        validation_reason = "schema"
-        try:
-            review = MemoryReview.model_validate_json(response.text)
-            if len(review.relations) != len(candidates):
-                validation_reason = "relation_count"
-                raise ValueError("relation count mismatch")
-            resolutions = []
-            for i, relation in enumerate(review.relations):
-                refs = ([relation.same] if relation.same else []) + relation.conflicts
-                if len(refs) != len(set(refs)):
-                    validation_reason = "duplicate_relation"
-                    raise ValueError("duplicate relation")
-                allowed = {
-                    **catalog,
-                    **{f"c{j}": {"subject": candidates[j].subject} for j in range(i)},
-                }
-                if any(
-                    ref not in allowed or allowed[ref]["subject"] != candidates[i].subject
-                    for ref in refs
-                ):
-                    validation_reason = "invalid_reference"
-                    raise ValueError("invalid memory reference")
-
-                def resolve(ref):
-                    return catalog[ref]["memory_id"] if ref in catalog else ref
-
-                resolutions.append(
-                    {
-                        "same": resolve(relation.same) if relation.same else None,
-                        "conflicts": [resolve(ref) for ref in relation.conflicts],
-                    }
-                )
-            return candidates, resolutions
-        except ValueError as error:
-            s.audit(
-                "memory.review_invalid",
-                request_id,
-                "memory",
-                self.clock(),
-                reason=validation_reason,
-            )
-            raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
+        return await prepare_memories(self, candidates, confirmed, job_id, logical_request_id,
+                                      request_id)
 
     def add_memories(self, candidates, resolutions, now, confirmed=False):
         """Caller owns the transaction and checks the captured privacy revision first."""
@@ -1683,37 +1564,14 @@ class Core(Runtime):
                     )
 
     async def extract_once(self, local_day=None):
-        if private_life.strict(self.store, self.settings) or (
-            not self.settings.memory_enabled or not self.settings.pricing_known
-        ):
-            return False
-        s, now = self.store, self.clock()
-        lease = encode(
-            {"token": uid("memory_lease"), "until": after(now, self.settings.lease_seconds)}
-        )
-        with s.transaction():
-            if private_life.enabled(self.settings):
-                live_text.guard(s, self.settings, self.clock)
-                if (private_life.busy(s, now)
-                    or private_life.owner_waiting(s, self.settings, now)):
-                    return False
-            old = s.one("SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'")
-            if old and json.loads(old["value"])["until"] > now:
-                return False
-            if old:
-                s.execute(
-                    "UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id "
-                    "IS NULL AND scenario IN ('memory_extract','memory_review')"
-                )
-            s.execute(
-                "INSERT OR REPLACE INTO runtime_meta VALUES ('memory_extraction_lease',?)", (lease,)
-            )
-        try:
-            return await self._extract_claimed_once(local_day, lease)
-        finally:
-            s.execute(
-                "DELETE FROM runtime_meta WHERE key='memory_extraction_lease' AND value=?", (lease,)
-            )
+        from companion.memory_work import extract_once
+
+        return await extract_once(self, local_day)
+
+    async def extract_step(self, local_day=None, *, on_checkpoint=None):
+        from companion.memory_work import extract_step
+
+        return await extract_step(self, local_day, on_checkpoint=on_checkpoint)
 
     def _owns_memory_lease(self, lease):
         current = self.store.one(
@@ -1723,117 +1581,6 @@ class Core(Runtime):
             current and current["value"] == lease and json.loads(lease)["until"] > self.clock()
         )
 
-    async def _extract_claimed_once(self, local_day, lease):
-        if not self.settings.memory_enabled or not self.settings.pricing_known:
-            return False
-        s, cfg, now = self.store, self.settings, self.clock()
-        day_filter = " AND e.occurred_at>=? AND e.occurred_at<? " if local_day else ""
-        bounds = day_bounds(local_day, cfg.timezone) if local_day else ()
-        events = s.rows(
-            "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
-            "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
-            "AND e.source='qq.onebot' AND j.kind='chat' "
-            "AND (j.state='SUCCEEDED' OR (j.state='CANCELLED' AND j.last_error_code=?)) "
-            "AND NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id) "
-            "AND e.ingested_at>=? AND e.ingested_at<=? AND e.occurred_at<=? "
-            + day_filter + " ORDER BY e.rowid LIMIT 20",
-            (reply_revision.SUPERSEDED, after(now, -cfg.raw_event_retention_days * 86400),
-             after(now, -cfg.extraction_idle_seconds), now, *bounds),
-        )
-        if len(events) < cfg.extraction_min_events:
-            return False
-        captured_epoch = epoch(s)
-        data = [
-            {"event_id": e["event_id"], "text": json.loads(e["body_json"]).get("text", "")}
-            for e in events
-        ]
-        messages = [
-            {"role": "system", "content": EXTRACT_RULES},
-            {"role": "user", "content": encode(data)},
-        ]
-        attempt_key = "extract_attempts:" + events[0]["event_id"]
-        attempts = s.one("SELECT value FROM runtime_meta WHERE key=?", (attempt_key,))
-        attempts = int(attempts["value"]) if attempts else 0
-        try:
-            proof = self.memory_context.pin(now, event_ids={row["event_id"] for row in events})
-            request_id = budget.reserve(
-                s, cfg, None, "memory_extract", messages, now, logical_request_id=attempt_key,
-                clock=self.clock,
-            )
-            try:
-                attempts += 1
-                s.execute(
-                    "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (attempt_key, str(attempts))
-                )
-            except BaseException:
-                budget.settle(s, cfg, request_id)
-                raise
-            response = await budget.complete(
-                self.model,
-                self.store,
-                self.settings,
-                request_id,
-                messages,
-                "memory_extract",
-                self.clock,
-                source_check=lambda: self.memory_context.revalidate(proof, self.clock()),
-            )
-            extraction = Extraction.model_validate_json(response.text)
-            if (captured_epoch != epoch(s) or not self._owns_memory_lease(lease)
-                or (private_life.enabled(cfg)
-                    and private_life.owner_waiting(s, cfg, self.clock()))):
-                return False
-            self.memory_context.revalidate(proof, self.clock())
-            valid_ids = {e["event_id"] for e in events}
-            candidates = []
-            for candidate in extraction.memories:
-                if candidate.evidence_event_id in valid_ids:
-                    try:
-                        if self.memory.validate_candidate(candidate, now=self.clock()) is not None:
-                            candidates.append(candidate)
-                    except CoreError:
-                        s.audit(
-                            "memory.candidate_rejected", candidate.evidence_event_id, "memory", now
-                        )
-            candidates, resolutions = await self.prepare_memories(
-                candidates, logical_request_id=attempt_key
-            )
-            with s.transaction():
-                if (captured_epoch != epoch(s) or not self._owns_memory_lease(lease)
-                    or (private_life.enabled(cfg)
-                        and private_life.owner_waiting(s, cfg, self.clock()))):
-                    return False
-                self.memory_context.revalidate(proof, self.clock())
-                committed_at = self.clock()
-                self.add_memories(candidates, resolutions, committed_at)
-                # Keep episodes scoped to a single conversation.
-                for conv_id in dict.fromkeys(e["conversation_id"] for e in events):
-                    self.memory.episodes(
-                        [e for e in events if e["conversation_id"] == conv_id], committed_at
-                    )
-                s.execute("DELETE FROM runtime_meta WHERE key=?", (attempt_key,))
-            return True
-        except Exception as error:
-            if isinstance(error, CoreError) and error.code in {
-                "BACKGROUND_YIELD_TO_CHAT",
-                "DAILY_BUDGET_EXHAUSTED",
-                "MONTHLY_BUDGET_EXHAUSTED",
-                "UNKNOWN_PRICING",
-            }:
-                return False
-            # Retry at most three times across restarts; budget rejections never consume the batch.
-            with s.transaction():
-                if attempts >= cfg.max_attempts:
-                    for event in events:
-                        s.execute(
-                            "UPDATE events SET memory_processed=1 WHERE event_id=?",
-                            (event["event_id"],),
-                        )
-                    s.execute("DELETE FROM runtime_meta WHERE key=?", (attempt_key,))
-                s.audit(
-                    "memory.batch_failed", events[0]["event_id"], "memory", now, attempts=attempts
-                )
-            return False
 
     def status(self):
         from companion.ops_status import snapshot

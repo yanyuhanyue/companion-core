@@ -53,6 +53,7 @@ def cleanup_contracts():
     from companion.life_topics import erase_topics
     from companion.media import erase_media_links
     from companion.meme_core import erase_captions
+    from companion.memory_work import erase_memory_work
     from companion.observation import erase_observations
     from companion.owner_authority import erase_sources as erase_owner_authority
     from companion.owner_input import erase as erase_owner_inputs
@@ -74,6 +75,7 @@ def cleanup_contracts():
             ),
         ),
         event_cleanup("consolidation", erase_consolidation),
+        event_cleanup("memory-work", erase_memory_work),
         event_cleanup("goals", erase_goals),
         event_cleanup("life-topics", erase_topics),
         event_cleanup("reading", erase_reading),
