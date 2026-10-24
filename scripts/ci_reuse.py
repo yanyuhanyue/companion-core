@@ -17,7 +17,7 @@ RECORD = "verified-tree.json"
 REQUIRED_JOBS = {
     "preflight", "quality", "ci", "container", "browser-reader", "plugin-native",
     *(f"test ({platform}-latest, {shard})" for platform in ("ubuntu", "windows")
-      for shard in (0, 1)),
+      for shard in range(4)),
 }
 
 
@@ -80,8 +80,9 @@ def verified_run(run, repo, head, target, read, now):
         f"repos/{repo}/actions/artifacts/{matches[0]['id']}/zip", binary=True,
     ))
     if (
-        type(record.get("version")) is not int or record["version"] != 1
+        type(record.get("version")) is not int or record["version"] != 2
         or record.get("profile") != "full"
+        or record.get("coverage") != {"windows_product": True, "windows_browser": True}
         or record.get("repository") != repo or record.get("event") != "pull_request"
         or record.get("run_id") != run["id"] or record.get("attempt") != run["run_attempt"]
         or record.get("tree") != target["tree"]
@@ -159,9 +160,15 @@ def main():
             summary.write(f"Reused [full CI]({url}) for identical tree `{proof['tree']}`.\n")
     else:
         target = checkout()
+        windows = json.loads(os.environ.get("CI_WINDOWS", "null"))
         if os.environ["CI_PROFILE"] != "full" or target["commit"] != os.environ["GITHUB_SHA"]:
             raise ValueError("Only a complete checked-out full run can record verification")
-        record = {"version": 1, "profile": "full", **target,
+        if not isinstance(windows, dict) or windows.get("product") is not True or (
+            windows.get("browser") is not True
+        ):
+            raise ValueError("Full Windows product and browser coverage required")
+        record = {"version": 2, "profile": "full", **target,
+                  "coverage": {"windows_product": True, "windows_browser": True},
                   "repository": os.environ["GITHUB_REPOSITORY"],
                   "event": os.environ["GITHUB_EVENT_NAME"],
                   "run_id": int(os.environ["GITHUB_RUN_ID"]),

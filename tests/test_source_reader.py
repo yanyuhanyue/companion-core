@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import json
@@ -21,7 +22,14 @@ from companion.observation import ReadingEvidence
 from companion.store import Store, migrate
 from companion.transport import digest
 from source_reader.bilibili import BilibiliReader, VideoPage, subtitle_excerpt
-from source_reader.network import PublicHTTP, PublicNetwork, ReadBudget, ReadFailure, permitted_url
+from source_reader.network import (
+    PublicHTTP,
+    PublicNetwork,
+    ReadBudget,
+    ReadFailure,
+    permitted_url,
+    public_addresses,
+)
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
 from tests.test_exploration import URL, configure, discover
@@ -229,6 +237,44 @@ def test_any_private_dns_answer_blocks_the_connection(addresses):
         with pytest.raises(ReadFailure, match="NONPUBLIC"):
             await PublicNetwork(resolver, backend).connect_tcp("api.bilibili.com", 443)
         assert not backend.hosts
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("address", [
+    "224.0.0.1", "239.255.255.250", "ff02::1", "ff0e::1", "ff02::1%12",
+    "::ffff:8.8.8.8", "2002:0808:0808::1", "2002:7f00:0001::1",
+    "2001:0000:4136:e378:8000:63bf:3fff:fdd2", "malformed-address",
+])
+@pytest.mark.parametrize("system_resolver", [False, True])
+def test_special_dns_answer_never_reaches_socket(address, system_resolver, monkeypatch):
+    async def scenario():
+        async def resolver(host, port):
+            return ["1.1.1.1", address]
+
+        async def getaddrinfo(host, port, **kwargs):
+            return [(None, socket.SOCK_STREAM, None, "", (value, port))
+                    for value in await resolver(host, port)]
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", getaddrinfo)
+        backend = Responses(response(b"synthetic"))
+        network = PublicNetwork(public_addresses if system_resolver else resolver, backend)
+        with pytest.raises(ReadFailure, match="READER_NONPUBLIC_ADDRESS"):
+            await network.connect_tcp("api.bilibili.com", 443)
+        assert not backend.hosts and not backend.requests
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("address", ["8.8.8.8", "2606:4700:4700::1111"])
+def test_native_public_address_remains_usable(address):
+    async def scenario():
+        async def resolver(host, port):
+            return [address]
+
+        backend = Responses(response(b"synthetic"))
+        await PublicNetwork(resolver, backend).connect_tcp("api.bilibili.com", 443)
+        assert backend.hosts == [address]
 
     run(scenario())
 
