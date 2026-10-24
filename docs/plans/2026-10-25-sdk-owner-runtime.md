@@ -257,3 +257,9 @@ and actual local media extraction. Its short pytest temporary-directory name kee
 Windows child TEMP below the platform [GetTempPath limit](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppathw).
 A minimal launch probe reproduced a startup timeout with a 277-character TEMP and successful
 startup with a 74-character TEMP; the native extraction timeout was not relaxed.
+
+Reader completion passes `execution_uncertain` to Life for UNKNOWN results, UNKNOWN
+accounting outcomes, and cancellations whose settled usage is unavailable. The original
+request, observed counters and reservations remain intact; duplicate receipts do not call
+Life again. Native goal/Reader checks cover UNKNOWN, uncertain cancellation and a known
+failure against the shared Goal continuation contract.

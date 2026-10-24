@@ -353,7 +353,10 @@ class ReadingService:
                             s.audit("bili_video.unavailable", content["item_id"], request_id,
                                     self.clock(), error_code=error.code)
         if step and result.status != "SUCCESS":
-            self.exploration.goals.fail(step, code or "READ_FAILED", retryable=True)
+            self.exploration.goals.fail(step, code or "READ_FAILED", retryable=True,
+                execution_uncertain=(result.status == "UNKNOWN" or outcome["state"] == "UNKNOWN"
+                    or result.status == "CANCELLED"
+                    and (used_requests is None or used_bytes is None)))
         if step and step["kind"] == "self":
             for event_id in outcome["event_ids"]:
                 self.exploration.social.consider(event_id)
