@@ -140,50 +140,50 @@ const CAPABILITIES = {
   executive: "执行任务", "media.voice": "网页语音会话", "media.camera": "摄像头", "media.android": "安卓观察",
 };
 // Release removal point: this flag disables all implementation notes. These are
-// reviewed source/UI coverage, never runtime readiness, authorization or live acceptance.
+// reviewed backend execution coverage, separate from UI gaps and runtime authorization.
 const SHOW_IMPLEMENTATION_STATUS = true;
 const CAPABILITY_IMPLEMENTATION = {
   "memory.manage": ["已实现", "可查询、确认、纠正和忘记记忆。"],
-  "memory.recall": ["部分接入", "已有来源约束的检索；控制台尚无原话摘录和召回解释。"],
+  "memory.recall": ["已实现", "已有来源约束的检索；控制台尚无原话摘录和召回解释。"],
   diary: ["已实现", "已有日记读取、纠正、忘记与暂停；不包含未来睡眠阶段或梦境。"],
-  consolidation: ["部分接入", "已有夜间整理；尚无 N1/N2/N3 阶段观察。"],
-  reflection: ["部分接入", "已有来源支持的反思；控制台尚不能接受或拒绝建议。"],
-  goals: ["部分接入", "已有目标与承诺；控制台目前只读，尚无逐步执行视图。"],
-  wake: ["部分接入", "已有受限调度与暂停；尚未接入完整自主决策观察。"],
-  affect: ["部分接入", "已有反馈与衰减；控制台尚无来源、重置和撤销视图。"],
+  consolidation: ["已实现", "已有夜间整理；尚无 N1/N2/N3 阶段观察。"],
+  reflection: ["已实现", "已有来源支持的反思；控制台尚不能接受或拒绝建议。"],
+  goals: ["已实现", "已有目标与承诺；控制台目前只读，尚无逐步执行视图。"],
+  wake: ["已实现", "已有受限调度与暂停；尚未接入完整自主决策观察。"],
+  affect: ["已实现", "已有反馈与衰减；控制台尚无来源、重置和撤销视图。"],
   expression: ["已实现", "已有受限表情选择及投递流程；实际表达效果仍需体验验证。"],
-  expression_learning: ["部分接入", "已有有来源的表达偏好；尚无跨日变化与证据详情。"],
-  proactive: ["部分接入", "已有主动私聊和暂停；尚无逐轮发送或跳过的决策视图。"],
-  social: ["部分接入", "已有来源支持的分享候选；尚无统一表达意图视图。"],
-  "reading.web": ["部分接入", "已有授权网站读取；控制台只读任务，授权由部署保管。"],
-  "reading.bilibili": ["部分接入", "已有 B站读取回执；控制台尚无读取授权管理。"],
-  "reading.heybox": ["部分接入", "已有小黑盒读取回执；控制台尚无读取授权管理。"],
-  exploration: ["部分接入", "已有内容发现；控制台尚无逐步探索与来源授权操作。"],
-  "bilibili.video": ["部分接入", "已有受限视频分析；控制台尚无采样范围详情。"],
-  "model.understand_video": ["部分接入", "仅本轮实际开放工具时可调用；控制台尚无工具回执详情。"],
-  "qq.files": ["部分接入", "已有私人文件解析和任务记录；尚无页级证据详情。"],
-  "qq.images": ["部分接入", "已有认证图片理解；控制台尚无图像来源详情。"],
-  "qq.animation": ["部分接入", "已有受限动图理解；控制台尚无帧级证据详情。"],
-  "qq.voice.asr": ["部分接入", "已有语音转写与节点状态；控制台不提供字幕或音频回放。"],
-  "qq.voice.tts": ["部分接入", "已有语音合成及原投递回执；控制台不提供音频回放。"],
-  "qq.poke": ["部分接入", "已有受限拍一拍回应；控制台尚无批次详情。"],
-  "qq.poke.native": ["部分接入", "已有独立许可与原生回拍回执；控制台尚无操作详情。"],
-  "qq.account.qzone_publish": ["部分接入", "已有独立授权发布与回执；控制台尚不能审核草稿。"],
-  "qq.account.nickname": ["部分接入", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
-  "qq.account.signature": ["部分接入", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
-  "qq.account.avatar": ["部分接入", "已有审核素材与回执；控制台尚无头像预览或计划决定。"],
-  "qq.profile.observe": ["部分接入", "已有资料观测；缓存观测不能证明网络刷新或修改成功。"],
+  expression_learning: ["已实现", "已有有来源的表达偏好；尚无跨日变化与证据详情。"],
+  proactive: ["已实现", "已有主动私聊和暂停；尚无逐轮发送或跳过的决策视图。"],
+  social: ["已实现", "已有来源支持的分享候选；尚无统一表达意图视图。"],
+  "reading.web": ["已实现", "已有授权网站读取；控制台只读任务，授权由部署保管。"],
+  "reading.bilibili": ["已实现", "已有 B站读取回执；控制台尚无读取授权管理。"],
+  "reading.heybox": ["已实现", "已有小黑盒读取回执；控制台尚无读取授权管理。"],
+  exploration: ["已实现", "已有内容发现；控制台尚无逐步探索与来源授权操作。"],
+  "bilibili.video": ["已实现", "已有受限视频分析；控制台尚无采样范围详情。"],
+  "model.understand_video": ["已实现", "仅本轮实际开放工具时可调用；控制台尚无工具回执详情。"],
+  "qq.files": ["已实现", "已有私人文件解析和任务记录；尚无页级证据详情。"],
+  "qq.images": ["已实现", "已有认证图片理解；控制台尚无图像来源详情。"],
+  "qq.animation": ["已实现", "已有受限动图理解；控制台尚无帧级证据详情。"],
+  "qq.voice.asr": ["已实现", "已有语音转写与节点状态；控制台不提供字幕或音频回放。"],
+  "qq.voice.tts": ["已实现", "已有语音合成及原投递回执；控制台不提供音频回放。"],
+  "qq.poke": ["已实现", "已有受限拍一拍回应；控制台尚无批次详情。"],
+  "qq.poke.native": ["已实现", "已有独立许可与原生回拍回执；控制台尚无操作详情。"],
+  "qq.account.qzone_publish": ["已实现", "已有独立授权发布与回执；控制台尚不能审核草稿。"],
+  "qq.account.nickname": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
+  "qq.account.signature": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
+  "qq.account.avatar": ["已实现", "已有审核素材与回执；控制台尚无头像预览或计划决定。"],
+  "qq.profile.observe": ["已实现", "已有资料观测；缓存观测不能证明网络刷新或修改成功。"],
   "unicode.emoji": ["已实现", "保留输入中的 Unicode 表情原文。"],
   "qq.face_names": ["已实现", "在富媒体输入范围内识别 QQ 原生表情名称。"],
   "qq.face_images": ["已实现", "在图片许可内接收认证表情图；是否看过以本轮回执为准。"],
-  "memes.catalog": ["部分接入", "已有审核素材目录；控制台尚无编辑、上传或隔离操作。"],
-  "memes.community_import": ["部分接入", "已有受限素材导入；控制台尚无素材审核操作。"],
-  "memes.search": ["部分接入", "已有配置搜索服务的发现路径；控制台尚无搜索操作。"],
-  "memes.semantic": ["部分接入", "已有带来源的理解任务；控制台目前只读任务记录。"],
-  "media.voice": ["部分接入", "已有独立媒体会话；控制台尚无启动和关闭入口。"],
-  "media.camera": ["部分接入", "已有受限摄像头观察；控制台尚无会话控制。"],
-  "media.android": ["部分接入", "已有受限设备观察；不代表已实现设备操作。"],
-  executive: ["部分接入", "已有独立审批执行器；控制台尚无任务提交、审批和撤销入口。"],
+  "memes.catalog": ["已实现", "已有审核素材目录；控制台尚无编辑、上传或隔离操作。"],
+  "memes.community_import": ["已实现", "已有受限素材导入；控制台尚无素材审核操作。"],
+  "memes.search": ["已实现", "已有配置搜索服务的发现路径；控制台尚无搜索操作。"],
+  "memes.semantic": ["已实现", "已有带来源的理解任务；控制台目前只读任务记录。"],
+  "media.voice": ["已实现", "已有独立媒体会话；控制台尚无启动和关闭入口。"],
+  "media.camera": ["已实现", "已有受限摄像头观察；控制台尚无会话控制。"],
+  "media.android": ["已实现", "已有受限设备观察；不代表已实现设备操作。"],
+  executive: ["已实现", "已有独立审批执行器；控制台尚无任务提交、审批和撤销入口。"],
   // P1–P4 registration points: displayed only if a future backend publishes the
   // same capability ID. Update this map with that slice's source/test receipt.
   "conversation.evaluation": ["待实现", "自然度对照与有界评价尚未集成到当前版本。"],
@@ -196,7 +196,7 @@ const CAPABILITY_IMPLEMENTATION = {
 function implementationNote(id) {
   const entry = CAPABILITY_IMPLEMENTATION[id];
   return SHOW_IMPLEMENTATION_STATUS && entry
-    ? el("small", { class: "panel-note", "data-implementation": id, title: entry[1] }, " · 实现：" + entry[0])
+    ? el("small", { class: "panel-note", "data-implementation": id, title: entry[1] }, " · 后端：" + entry[0])
     : null;
 }
 const GROUPS = {
@@ -620,7 +620,7 @@ function renderOverview(data) {
       el("span", { title: typeof cap.summary === "string" ? cap.summary : "" }, CAPABILITIES[cap.id] || cap.label || cap.id,
         implementationNote(cap.id)), pill(cap.state))),
     el("p", { class: "panel-note" }, "可用表示可接纳任务，不代表已经执行或远端在线。",
-      SHOW_IMPLEMENTATION_STATUS ? " 实现标记说明已接入的功能与界面，不代表授权或实机验收；停留在标记上可查看范围。" : null))
+      SHOW_IMPLEMENTATION_STATUS ? " 后端标记说明代码接入范围；授权、当前可用状态和真人验收分别核对。停留在标记上可查看范围与界面缺口。" : null))
     : empty("尚无能力状态", "能力状态会随服务接入和运行配置更新。", { symbol: "pulse" });
   const problems = Array.isArray(data.diagnostics?.items)
     ? data.diagnostics.items.filter(item => ["danger", "pending"].includes(tone(item.status))) : [];
