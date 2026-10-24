@@ -106,6 +106,7 @@ class Store:
             "agent_tool_calls": {"job_id", "tool_call_id", "state", "request_id"},
             "captured_images": {"item_id", "proof_json", "mime", "expires_at"},
             "agent_image_inputs": {"job_id", "item_id", "position"},
+            "voice_jobs": {"job_id", "state", "generation", "authority_json"},
             "meme_discovery_reservations": {"job_id", "attempt_key", "state", "reserved_queries",
                                              "reserved_download_bytes", "reserved_storage_bytes"},
             "meme_captions": {"job_id", "request_sha256", "asset_data", "source_json",
