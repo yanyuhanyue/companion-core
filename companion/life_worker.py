@@ -47,8 +47,10 @@ async def life_worker(settings):
                     result = UnitResult(False)
                     if not budget.chat_pending(core.store, core.clock()):
                         pending = core.store.one(
-                            "SELECT j.job_id FROM jobs j JOIN life_activity_results r USING(job_id) "
-                            "WHERE j.state IN ('QUEUED','RETRY_WAIT','RUNNING') AND r.state='PENDING' "
+                            "SELECT j.job_id FROM jobs j "
+                            "JOIN life_activity_results r USING(job_id) "
+                            "WHERE j.state IN ('QUEUED','RETRY_WAIT','RUNNING') "
+                            "AND r.state='PENDING' "
                             "ORDER BY j.created_at LIMIT 1",
                         )
                         if pending:
