@@ -49,6 +49,26 @@ Account send/probe DTOs carry `authority`, not a window hash. STOP may clear an 
 lease; the retained lease receipt preserves its exact token for matching no-I/O cancellation.
 An old token, different authority or any recorded dispatch cannot use that cancellation path.
 
+The native Bridge host discovers the account policy fingerprint through its current authority
+check, then checks both `account_actions` and `social` before leasing the account lane. It uses
+the existing frozen account preparation and exact account send-check at the final HTTP boundary.
+Private replies retain priority. Profile observations use the same native runtime, checked
+private HTTP transport, public-avatar DNS pinning and durable 60-second cooldown; pending owner
+input interrupts the idle probe. Profile journal records retain hashes, not observed text.
+
+An ambiguous account write retains the original account payload, lease and send-check hashes
+in the existing attempt journal. After STOP, reconciliation validates the signed original
+authority revision, frozen social plan, reservation and UNKNOWN account receipt. It reuses
+the existing manual SENT/CANCELLED decision and explicit handoff; reconciliation does not
+consult a successor grant to authorize the old write.
+
+Host assembly follows the inspected DSH QQ plugin
+[gateway bootstrap](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/gateway/bootstrap.ts)
+separation of protocol sender and lifecycle. Current permission checks reuse
+[RFC 7662 section 2.2](https://datatracker.ietf.org/doc/html/rfc7662#section-2.2);
+the account plan, cancellation receipt, Spool journal and reconciliation protocol remain the
+existing Core/Bridge mechanisms.
+
 This migration reuses the existing Core journal, native jobs and Outbox. The boundary follows
 [RFC 7662 current-state and scope checks](https://www.rfc-editor.org/rfc/rfc7662.html#section-2.2)
 and [SQLite transaction isolation](https://sqlite.org/lang_transaction.html): pin under the native

@@ -44,6 +44,8 @@ def binding(store, proof, row, authority, recorded):
     from companion.private_life import event_digest
 
     original, policy = frozen(store, proof)
+    if proof["action_type"] in wire.ACCOUNT_ACTIONS:
+        return account_binding(store, proof, row, authority, recorded, original, policy)
     if (not authority or authority.get("authority") != proof["authority"]
         or json.loads(row["authority_json"]) != proof["authority"]
         or any(authority.get(k) != proof[k] for k in ("message_id", "event_id", "action_type"))
@@ -106,4 +108,46 @@ def binding(store, proof, row, authority, recorded):
     wire.validate_delivery(delivery)
     if recorded is not None and recorded != delivery:
         raise ValueError("retained native delivery binding changed")
+    return row, {"original": original, "policy": policy}, delivery
+
+
+def account_binding(store, proof, row, authority, recorded, original, policy):
+    from companion.account_original_proof import validate_original_account_send_check
+
+    reservation = store.one("SELECT * FROM social_autonomy_reservations WHERE message_id=?",
+                            (row["message_id"],))
+    plan = store.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?",
+                    (proof["account_plan_id"],))
+    check = validate_original_account_send_check(proof=proof, outbox=row, receipt=authority,
+        plan=plan, reservation=reservation, original_authority=proof["authority"],
+        original_policy=policy)
+    if (reservation["action_type"] != proof["action_type"]
+        or reservation["released_at"] is not None or reservation["dispatched_at"] is None
+        or row["attempt_count"] < 1 or row["provider_message_id"] is not None
+        or row["native_ack_json"] is not None
+        or proof["authorization_sha256"] != policy.capability_policies["account_actions"]):
+        raise ValueError("original native account attempt changed")
+    receipt = json.loads(reservation["receipt_json"])
+    if (reservation["receipt_sha256"] != (wire.digest(receipt) if receipt else None)
+        or receipt and (receipt.get("result") != "UNKNOWN"
+            or any(receipt.get(k) != v for k, v in {
+                "message_id": row["message_id"], "action_type": row["action_type"],
+                "payload_sha256": proof["payload_sha256"],
+                "lease_token": check["lease_token"]}.items()))):
+        raise ValueError("original native account receipt changed")
+    delivery = {"message_id": row["message_id"], "event_id": row["origin_event_id"],
+        "action_type": row["action_type"], "content_sha256": proof["content_sha256"],
+        "delivery_key_sha256": wire.digest(row["delivery_key"]),
+        "authority_sha256": wire.digest(authority), "attempt_count": row["attempt_count"],
+        "created_at": row["created_at"], "lease_until": row["lease_until"],
+        "original_state": recorded["original_state"] if recorded else row["state"],
+        "account_plan_id": proof["account_plan_id"],
+        "authorization_sha256": proof["authorization_sha256"],
+        "payload_sha256": proof["payload_sha256"],
+        "reservation_sha256": wire.digest({k: v for k, v in reservation.items()
+                                           if k not in {"receipt_json", "receipt_sha256"}}),
+        "account_receipt_sha256": reservation["receipt_sha256"]}
+    wire.validate_delivery(delivery)
+    if recorded is not None and recorded != delivery:
+        raise ValueError("retained native account binding changed")
     return row, {"original": original, "policy": policy}, delivery

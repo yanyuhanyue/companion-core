@@ -156,6 +156,7 @@ class OwnerRuntime:
         references = [current]
         state = "ACTIVE"
         attempts = {}
+        bindings = {}
         inputs = {}
         for record in records[1:]:
             if record["kind"] == "OWNER_STOPPED":
@@ -180,11 +181,19 @@ class OwnerRuntime:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 attempts[value["message_id"]] = {
                     key: item for key, item in value.items() if key != "delivery_binding"}
+                bindings[value["message_id"]] = value.get("delivery_binding", {})
             elif record["kind"] == "CAPTURED":
                 value = record["data"]
                 if value["event_id"] in inputs:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 inputs[value["event_id"]] = value["capture_sha256"]
+            elif record["kind"] == "PROFILE_PROBE_STARTED":
+                if state != "ACTIVE" or record["data"] != {"authority": current}:
+                    raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+            elif record["kind"] == "PROFILE_PROBE_ACCEPTED":
+                from .profile_probe import validate_record
+
+                validate_record(record["data"])
             elif record["kind"] in {"RECALL_RECEIVED", "RECALL_ACCEPTED",
                                     "CORE_STOP_CONFIRMED", "DELIVERY_QUIESCED", "OWNER_RECONCILED",
                                     "OWNER_INPUT_TERMINAL", "OWNER_HANDOFF_PREPARED",
@@ -206,6 +215,16 @@ class OwnerRuntime:
                     result = self.db.execute("SELECT body,state FROM results WHERE message_id=?",
                                               (value["message_id"],)).fetchone()
                     body = json.loads(result[0]) if result else {}
+                    binding = bindings[value["message_id"]]
+                    if binding.get("payload_kind") == "account_payload_sha256":
+                        from .account_actions import cancelled_proof
+
+                        receipt = cancelled_proof(value.get("core_receipt"),
+                            message_id=value["message_id"], lease_token=body.get("lease_token"),
+                            content_sha256=binding["content_sha256"],
+                            payload_sha256=binding["payload_sha256"])
+                        if journal.digest(body.get("lease_token")) != binding["lease_sha256"]:
+                            raise ValueError("OWNER_NOT_SENT_PROOF_REQUIRED")
                     if (value.get("core_receipt") != receipt
                         or not result or result[1] != "accepted"
                         or body.get("core_receipt") != receipt or body.get("result") != "NOT_SENT"

@@ -9,11 +9,20 @@ import companion_delivery_protocol as wire
 
 from . import reply_segments
 from .onebot_client import bounded_post
-from .owner_resolution import BINDING_FIELDS, TABLE, UNCERTAIN
+from .owner_resolution import ACCOUNT_BINDING_FIELDS, BINDING_FIELDS, TABLE, UNCERTAIN
 from .spool import encode
 
 
 def binding(guard, item):
+    if item["action_type"] in wire.ACCOUNT_ACTIONS:
+        from .account_actions import send_check_owner
+
+        return {"action_type": item["action_type"], "content_sha256": item["content_sha256"],
+            "payload_sha256": item["content"]["payload_sha256"],
+            "payload_kind": "account_payload_sha256", "account_plan_id": item["content"]["plan_id"],
+            "authorization_sha256": item["content"]["authorization_sha256"],
+            "lease_sha256": wire.digest(item["lease_token"]),
+            "send_check_sha256": wire.digest(send_check_owner(guard.authority, item))}
     event_id = reply_segments.event_id(item)
     native = item["action_type"] == "qq.private.poke"
     kind = "content_sha256" if native else "reply_sha256"
@@ -53,8 +62,11 @@ def _source(runtime, records, message_id):
         raise ValueError("DELIVERY_UNCERTAIN_SOURCE_REQUIRED")
     value = reserved[0]["data"]
     original = value.get("delivery_binding")
+    account = isinstance(original, dict) and original.get("action_type") in wire.ACCOUNT_ACTIONS
     if (not isinstance(original, dict)
-        or set(original) not in (BINDING_FIELDS, BINDING_FIELDS | {"voice_check"})
+        or set(original) not in ((ACCOUNT_BINDING_FIELDS,) if account else (
+            BINDING_FIELDS, BINDING_FIELDS | {"voice_check"}))
+        or account and original["account_plan_id"] != value["event_id"]
         or original["content_sha256"] != value["text_hash"]):
         raise ValueError("DELIVERY_ORIGINAL_BINDING_REQUIRED")
     result = runtime.db.execute("SELECT body FROM results WHERE message_id=?",
@@ -64,7 +76,17 @@ def _source(runtime, records, message_id):
         check = {"authority": runtime.authority, "event_id": value["event_id"],
             "message_id": message_id, "lease_token": body.get("lease_token"),
             "content_sha256": original["content_sha256"]}
-        if original["reply_revision"] is not None:
+        if account:
+            check.pop("event_id")
+            check["payload_sha256"] = original["payload_sha256"]
+            receipt = body.get("account_action_receipt")
+            if (not isinstance(receipt, dict) or receipt.get("result") != "UNKNOWN"
+                or any(receipt.get(k) != v for k, v in {
+                    "action_type": original["action_type"], "message_id": message_id,
+                    "lease_token": body.get("lease_token"),
+                    "payload_sha256": original["payload_sha256"]}.items())):
+                raise ValueError("DELIVERY_ORIGINAL_BINDING_REQUIRED")
+        elif original["reply_revision"] is not None:
             check["reply_revision"] = original["reply_revision"]
         if "voice_check" in original:
             check["voice"] = original["voice_check"]
@@ -74,7 +96,7 @@ def _source(runtime, records, message_id):
             or wire.digest(check) != original["send_check_sha256"]):
             raise ValueError("DELIVERY_ORIGINAL_BINDING_REQUIRED")
     return {"authority": runtime.authority, "message_id": message_id,
-        "event_id": value["event_id"], "fence": value["fence"],
+        **({} if account else {"event_id": value["event_id"]}), "fence": value["fence"],
         "item_sha256": value["item_hash"], "attempt_state": entries[-1]["kind"],
         "attempt_record_sha256": wire.digest(entries[-1]),
         "reserved_record_sha256": wire.digest(reserved[0]),

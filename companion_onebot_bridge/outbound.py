@@ -99,7 +99,13 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
     if delivery_lane == "qq_account":
         if guard is None or not getattr(onebot, "account_scope", False):
             raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
-        request = account_actions.lease_request(guard.window)
+        if getattr(guard, "authority", None) is not None:
+            permission = await guard.runtime.check(client, purpose="account_actions")
+            await guard.runtime.check(client, purpose="social")
+            request = account_actions.lease_request_owner(guard.authority,
+                permission["capability_policies"]["account_actions"])
+        else:
+            request = account_actions.lease_request(guard.window)
     elif delivery_lane != "owner_private":
         raise ValueError("INVALID_DELIVERY_LANE")
     voice_scope = bool(getattr(onebot, "voice_scope", False))

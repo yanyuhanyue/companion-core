@@ -7,7 +7,7 @@ import httpx
 
 from companion_delivery_protocol.authority import validate_authority_ref
 
-from . import journal, reply_segments
+from . import account_actions, journal, reply_segments
 from .event_normalizer import decode
 from .network import checked_http_client, private_request_matches
 from .onebot_client import OneBotClient, bounded_post
@@ -41,7 +41,9 @@ class OwnerSendGuard:
         lease_until = datetime.fromisoformat(item["lease_until"])
         if lease_until.utcoffset() is None or self.runtime.clock() >= lease_until:
             raise ValueError("OWNER_DELIVERY_LEASE_LOST")
-        value = {"message_id": item["message_id"], "event_id": reply_segments.event_id(item),
+        event_id = (item["content"]["plan_id"] if account_actions.is_account(item)
+                    else reply_segments.event_id(item))
+        value = {"message_id": item["message_id"], "event_id": event_id,
             "fence": self.db.execute("SELECT COALESCE(MAX(fence),0)+1 FROM window_attempts"
                                      ).fetchone()[0],
             "state": "RESERVED", "text_hash": journal.digest(item["content"]),
@@ -66,13 +68,16 @@ class OwnerSendGuard:
         item = self.current_item
         if not item or not ("reply_revision" in item
             or item.get("delivery_key", "").startswith("poke-response:")
-            or item.get("action_type") == "qq.private.proactive"):
+            or item.get("action_type") == "qq.private.proactive"
+            or account_actions.is_account(item)):
             return None
+        event_id = (item["content"]["plan_id"] if account_actions.is_account(item)
+                    else reply_segments.event_id(item))
         row = self.db.execute("SELECT i.key FROM inbox i JOIN window_inputs w ON w.event_id=i.key "
             "WHERE i.state='pending' AND w.plan_hash=? AND i.key!=? "
             "AND json_extract(w.capture_json,'$.kind')='authenticated_onebot_ws' "
             "ORDER BY i.rowid LIMIT 1", (journal.digest(self.authority),
-                                        reply_segments.event_id(item))).fetchone()
+                                        event_id)).fetchone()
         return row[0] if row else None
 
     def _request(self, request):
@@ -86,6 +91,14 @@ class OwnerSendGuard:
             if decode(request.content, 64) != {}:
                 raise ValueError("OWNER_PROTOCOL_REQUEST_CHANGED")
             return False
+        if account_actions.is_account(item):
+            prepared = self.prepared_account
+            expected = account_actions.prepare_owner(
+                self.runtime, item, item["content"]["authorization_sha256"])
+            if (prepared != expected or request.url.path != prepared.path
+                or request.content != prepared.body):
+                raise ValueError("OWNER_PROTOCOL_REQUEST_CHANGED")
+            return True
         if item["action_type"] == "qq.private.poke":
             from .native_actions import prepare
 
@@ -117,9 +130,11 @@ class OwnerSendGuard:
             seal_protocol_content(request, request.content)
             return
         item = self.current_item
-        check = {"authority": self.authority, "message_id": item["message_id"],
+        account = account_actions.is_account(item)
+        check = (account_actions.send_check_owner(self.authority, item) if account else {
+            "authority": self.authority, "message_id": item["message_id"],
             "event_id": reply_segments.event_id(item), "lease_token": item["lease_token"],
-            "content_sha256": journal.digest(item["content"])}
+            "content_sha256": journal.digest(item["content"])})
         if "reply_revision" in item:
             check["reply_revision"] = item["reply_revision"]
         if self.prepared_voice is not None:
@@ -127,8 +142,13 @@ class OwnerSendGuard:
             check["reply_revision"] = item["voice"]["binding"]["reply_revision"]
         if journal.digest(check) != self.delivery_binding["send_check_sha256"]:
             raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
-        result = await bounded_post(self.client, "/internal/v1/owner-authority/send-check", check)
-        if set(result) != {"approved", "lease_until"} or result["approved"] is not True:
+        path = "/internal/v1/" + ("account-actions" if account else "owner-authority")
+        result = await bounded_post(self.client, path + "/send-check", check)
+        fields = {"approved", "lease_until"} | ({"content_sha256", "payload_sha256"}
+                                               if account else set())
+        if (set(result) != fields or result["approved"] is not True
+            or account and any(result[k] != check[k]
+                               for k in ("content_sha256", "payload_sha256"))):
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
         expiry = datetime.fromisoformat(result["lease_until"])
         if expiry.utcoffset() is None:
@@ -157,17 +177,28 @@ class OwnerSendGuard:
         body = {"authority": self.authority, "message_id": item["message_id"],
                 "lease_token": item["lease_token"],
                 "content_sha256": journal.digest(item["content"])}
+        account = account_actions.is_account(item)
+        if account:
+            body = account_actions.send_check_owner(self.authority, item)
+            body["reason"] = "BRIDGE_PREFLIGHT_FAILED"
         if "reply_revision" in item:
             body["reply_revision"] = item["reply_revision"]
         if pending := self.pending_input():
-            body.update(cause="OWNER_INPUT_PENDING", pending_event_id=pending)
+            if account:
+                body["reason"] = "OWNER_INPUT_PENDING"
+            else:
+                body.update(cause="OWNER_INPUT_PENDING", pending_event_id=pending)
         try:
-            receipt = await bounded_post(self.client,
-                "/internal/v1/owner-authority/cancel-before-send", body)
+            path = "/internal/v1/" + ("account-actions" if account else "owner-authority")
+            receipt = await bounded_post(self.client, path + "/cancel-before-send", body)
         except httpx.HTTPError:
             return False
         expected = {"cancelled": True, "message_id": item["message_id"],
                     "state": "CANCELLED", "send_attempt_retained": True}
+        if account:
+            expected = account_actions.cancelled_proof(receipt,
+                message_id=item["message_id"], lease_token=item["lease_token"],
+                content_sha256=body["content_sha256"], payload_sha256=body["payload_sha256"])
         if receipt != expected or self.dispatched or self.item_hash != journal.digest(item):
             raise ValueError("OWNER_CANCEL_RECEIPT_INVALID")
         self.runtime.verify(active=False)
@@ -203,7 +234,7 @@ class OwnerOneBot:
     """Per-attempt protocol facade over the original checked HTTP transport."""
 
     companion = True
-    account_scope = False
+    account_scope = True
     voice_scope = True
 
     def __init__(self, guard, protocol):
@@ -218,7 +249,13 @@ class OwnerOneBot:
         return await self.delegate.probe()
 
     async def prepare_delivery(self, item):
-        if item["action_type"] == "qq.private.poke":
+        if account_actions.is_account(item):
+            permission = await self.guard.runtime.check(self.guard.client,
+                                                        purpose="account_actions")
+            await self.guard.runtime.check(self.guard.client, purpose="social")
+            self.guard.prepared_account = account_actions.prepare_owner(self.guard.runtime,
+                item, permission["capability_policies"]["account_actions"])
+        elif item["action_type"] == "qq.private.poke":
             from .native_actions import prepare
 
             self.guard.runtime.verify()
@@ -234,6 +271,8 @@ class OwnerOneBot:
         item = self.guard.current_item
         if content != item["content"]:
             raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
+        if account_actions.is_account(item):
+            return await self.delegate.send_account(self.guard.prepared_account, item)
         if item["action_type"] == "qq.private.poke":
             return await self.delegate.send_native(self.guard.prepared_native)
         if "voice" in item:

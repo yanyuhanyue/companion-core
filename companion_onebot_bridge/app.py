@@ -162,6 +162,11 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
                 guard = OwnerSendGuard(runtime, client)
                 onebot = OwnerOneBot(guard, protocol)
             worked = await deliver_tick(client, onebot, spool, metrics=metrics, guard=guard)
+            if not worked and runtime is not None:
+                permission = await runtime.check(client)
+                if "account_actions" in permission["capability_policies"]:
+                    worked = await deliver_tick(client, onebot, spool, metrics=metrics,
+                                                guard=guard, delivery_lane="qq_account")
         except httpx.HTTPError:
             metrics.emit("send_unavailable")
             await pause(stop, 1)
@@ -179,6 +184,18 @@ async def transfer_media(pump, stop):
                 await pump.task
             else:
                 await pause(stop, pump.window.config.poll_seconds)
+    finally:
+        await pump.close()
+
+
+async def observe_profile(pump, stop):
+    try:
+        while not stop.is_set():
+            pump.window.verify()
+            pending = pump.window.db.execute(
+                "SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
+            pump.tick(idle=pending is None)
+            await pause(stop, pump.window.config.poll_seconds)
     finally:
         await pump.close()
 
@@ -206,8 +223,10 @@ async def run(config):
         ):
             onebot = OneBotClient(config, protocol)
             from .pending_media import MediaPump
+            from .profile_probe import ProfilePump
 
             media = MediaPump(runtime, core, protocol=onebot)
+            profile = ProfilePump(runtime, core, protocol)
             status = await runtime.probe(core, protocol)
             if not status["connection_ready"]:
                 raise ValueError("ONEBOT_NOT_READY")
@@ -219,6 +238,7 @@ async def run(config):
                     group.create_task(deliver(core, onebot, spool, stop, metrics,
                                               runtime=runtime, protocol=protocol)),
                     group.create_task(transfer_media(media, stop)),
+                    group.create_task(observe_profile(profile, stop)),
                 ]
                 await stop.wait()
                 for task in tasks:

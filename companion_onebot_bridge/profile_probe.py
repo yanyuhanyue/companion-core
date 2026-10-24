@@ -7,6 +7,7 @@ recent API/CDN observation, not a fresh network read of QQ's profile database.
 import asyncio
 import hashlib
 import io
+import json
 import re
 from datetime import datetime
 from urllib.parse import urlencode
@@ -14,10 +15,9 @@ from urllib.parse import urlencode
 import httpx
 from PIL import Image
 
-from . import account_actions
 from .event_normalizer import decode, identifier
 from .files import _get
-from .images import _private_download, global_address, resolve_public
+from .images import _private_download, global_address, owner_media_request, resolve_public
 from .network import checked_http_client, private_request_matches
 from .onebot_client import bounded_post
 from .window import digest, seal_protocol_content
@@ -30,22 +30,41 @@ COOLDOWN_SECONDS = 60
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
 
 
-def local(window):
-    from .continuous import pending_input
+def validate_record(value):
+    if (not isinstance(value, dict) or set(value) != {"profiles"}
+        or not isinstance(value["profiles"], list) or not 1 <= len(value["profiles"]) <= 3):
+        raise ValueError("PROFILE_JOURNAL_CHANGED")
+    seen = set()
+    for row in value["profiles"]:
+        if (not isinstance(row, dict) or set(row) != {
+            "field", "observed_at", "value_sha256", "receipt_sha256"}
+            or row["field"] not in FIELDS or row["field"] in seen
+            or any(not isinstance(row[key], str) or not re.fullmatch(r"[a-f0-9]{64}", row[key])
+                   for key in ("value_sha256", "receipt_sha256"))
+            or datetime.fromisoformat(row["observed_at"]).utcoffset() is None):
+            raise ValueError("PROFILE_JOURNAL_CHANGED")
+        seen.add(row["field"])
 
-    if not account_actions.enabled(window):
-        raise ValueError("PROFILE_SCOPE_REQUIRED")
+
+def local(window):
     window.verify()
-    if pending_input(window, "") is not None:
+    if window.db.execute("SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone():
         raise ValueError("PROFILE_OWNER_INPUT_PENDING")
 
 
 async def grant(window, client):
     local(window)
-    expected = {"window_sha256": window.plan.sha256,
-        "authorization_sha256": window.plan.value["live_text"][
-            "account_actions_authorization_sha256"]}
-    value = await window.core_get(client, STATE + "?" + urlencode(expected))
+    permission = await window.check(client, purpose="account_actions")
+    expected = {"authority": window.authority,
+                "authorization_sha256": permission["capability_policies"]["account_actions"]}
+
+    async def check():
+        await window.check(client, purpose="social")
+        local(window)
+
+    query = {**expected, "authority": json.dumps(expected["authority"])}
+    value = await owner_media_request(window, client, STATE + "?" + urlencode(query),
+        purpose="account_actions", before=check, method="GET")
     local(window)
     if (not isinstance(value, dict)
         or set(value) != {*expected, "fields", "baseline_seconds"}
@@ -60,15 +79,12 @@ async def grant(window, client):
 
 
 def record(window, kind, material):
-    head = window.append(kind, material)
     with window.db:
-        window.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        window.append(kind, material)
 
 
 def due(window):
-    if not account_actions.enabled(window):
-        return False
-    records, _ = window.read_journal()
+    records = window.verify()
     previous = next((row for row in reversed(records)
                      if row["kind"] == "PROFILE_PROBE_STARTED"), None)
     return previous is None or (window.clock() - datetime.fromisoformat(
@@ -98,15 +114,14 @@ def _complete_profile(data):
 
 
 async def native_profile(window, protocol, check):
-    config = window.plan.config
+    config = window.config
     body = {"user_id": int(config.bot_qq_id)}
 
     async def boundary(request):
         await check()
         content = request.content
         if (request.method != "POST"
-            or not private_request_matches(request, config.onebot_http_url, ACTION,
-                synthetic=window.plan.value["execution"] == "local_synthetic")
+            or not private_request_matches(request, config.onebot_http_url, ACTION)
             or request.headers.get("Authorization") != "Bearer " + config.onebot_token
             or "Cookie" in request.headers or decode(content, 1024) != body):
             raise ValueError("PROFILE_ACTION_CHANGED")
@@ -149,7 +164,7 @@ def text_baselines(data, fields, bot, at, receipt):
 
 async def avatar_baseline(window, check, *, transport=None, resolver=resolve_public):
     """One exact public bot-avatar GET, with pinned DNS and no redirect or credentials."""
-    bot = window.plan.config.bot_qq_id
+    bot = window.config.bot_qq_id
     target = httpx.URL("https://q1.qlogo.cn/g?b=qq&nk=" + bot + "&s=100")
     delegate = transport or httpx.AsyncHTTPTransport(trust_env=False, retries=0)
     response = None
@@ -205,10 +220,13 @@ async def avatar_baseline(window, check, *, transport=None, resolver=resolve_pub
 
 
 async def collect(window, client, protocol, *, transport=None, resolver=resolve_public):
-    if not account_actions.enabled(window) or not due(window):
+    if not due(window):
         return {"status": "IDLE"}
     local(window)
-    record(window, "PROFILE_PROBE_STARTED", {"window_sha256": window.plan.sha256})
+    record(window, "PROFILE_PROBE_STARTED", {"authority": window.authority})
+    permission = await window.check(client)
+    if "account_actions" not in permission["capability_policies"]:
+        return {"status": "DISABLED"}
     approved = await grant(window, client)
     if not approved["fields"]:
         return {"status": "DISABLED"}
@@ -222,7 +240,7 @@ async def collect(window, client, protocol, *, transport=None, resolver=resolve_
         try:
             data, at, receipt = await native_profile(window, protocol, check)
             profiles.extend(text_baselines(data, approved["fields"],
-                window.plan.config.bot_qq_id, at, receipt))
+                window.config.bot_qq_id, at, receipt))
         except (ValueError, httpx.HTTPError):
             await check()
     if "avatar" in approved["fields"]:
@@ -234,22 +252,10 @@ async def collect(window, client, protocol, *, transport=None, resolver=resolve_
     if not profiles:
         return {"status": "UNAVAILABLE"}
     await check()
-    body = {key: approved[key] for key in ("window_sha256", "authorization_sha256")}
+    body = {key: approved[key] for key in ("authority", "authorization_sha256")}
     body["profiles"] = profiles
-    fingerprint = digest(body)
-
-    async def submit_boundary(request):
-        await check()
-        content = request.content
-        if (request.method != "POST" or request.url.path != SUBMIT
-            or digest(decode(content, 16384)) != fingerprint):
-            raise ValueError("PROFILE_SUBMISSION_CHANGED")
-        local(window)
-        seal_protocol_content(request, content)
-
-    async with window.core_http(client) as core_scoped:
-        async with checked_http_client(core_scoped, submit_boundary) as scoped:
-            response = await bounded_post(scoped, SUBMIT, body)
+    response = await owner_media_request(window, client, SUBMIT, body,
+                                         purpose="account_actions", before=check)
     expected = [{"field": item["field"], "observed_at": item["observed_at"]}
                 for item in profiles]
     if response != {"accepted": True, "profiles": expected}:

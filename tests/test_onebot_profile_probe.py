@@ -4,7 +4,8 @@ import asyncio
 import hashlib
 import io
 import json
-from datetime import timedelta
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -15,14 +16,46 @@ import companion_delivery_protocol
 from companion.core import Core
 from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
-from companion_onebot_bridge import continuous, profile_probe
+from companion_onebot_bridge import profile_probe
 from companion_onebot_bridge.network import private_http_client
-from companion_onebot_bridge.window import bridge_code_sha256, digest, request_stop
+from companion_onebot_bridge.owner_runtime import OwnerRuntime
+from companion_onebot_bridge.spool import Spool
+from companion_onebot_bridge.window import bridge_code_sha256, digest
 from tests.conftest import run
+from tests.test_native_account_host import configure_host
 from tests.test_onebot_account_actions import fixture
-from tests.test_onebot_capture import real_core_http, source_window
+from tests.test_onebot_capture import real_core_http
 from tests.test_onebot_direct import raw_event
 from tests.test_onebot_pokes import silent
+from tests.test_social_owner_authority import authorize, close_provider_clients  # noqa: F401
+
+
+@asynccontextmanager
+async def source_window(core, tmp_path, source, *, live, approved, scope_options,
+                        protocol_reply, bridge_options=None):
+    from dataclasses import replace
+
+    from companion.api import create_app
+    from tests.test_onebot_capture import provider
+
+    core.settings.social_autonomy = scope_options["core_options"]["social_autonomy"]
+    policy, _ = authorize(core, tmp_path)
+    cfg = configure_host(core, tmp_path, policy)
+    if bridge_options:
+        cfg = replace(cfg, **bridge_options)
+    app = create_app(core.settings)
+    app.state.core = core
+
+    def native(request):
+        return protocol_reply(request) or provider(request, [])
+
+    with Spool(cfg) as spool:
+        runtime = OwnerRuntime(spool, clock=lambda: datetime.fromisoformat(core.clock()))
+        async with private_http_client(cfg.core_url, cfg.bridge_token,
+            transport=httpx.ASGITransport(app)) as client, private_http_client(
+                cfg.onebot_http_url, cfg.onebot_token,
+                transport=httpx.MockTransport(native)) as protocol:
+            yield runtime, client, protocol, [], []
 
 
 def options(core, fields=("nickname", "signature", "avatar")):
@@ -77,7 +110,7 @@ def test_empty_uid_complete_native_profile_preserves_explicit_field_observations
             assert all(row["receipt_sha256"] == digest(response) for row in rows.values())
             assert not core.store.rows("SELECT * FROM model_usage")
             assert not core.store.rows("SELECT * FROM outbox")
-            assert window.count("window_attempts") == 0
+            assert window.db.execute("SELECT COUNT(*) FROM window_attempts").fetchone()[0] == 0
 
     run(scenario())
 
@@ -115,7 +148,7 @@ def test_empty_uid_does_not_bypass_full_native_profile_contract(core, tmp_path, 
             assert not core.store.rows("SELECT * FROM social_autonomy_profiles")
             assert not core.store.rows("SELECT * FROM model_usage")
             assert not core.store.rows("SELECT * FROM outbox")
-            assert window.row()["state"] == "OPEN"
+            assert window.row()["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -181,8 +214,9 @@ def test_authorized_profile_observations_keep_independent_receipts_and_restart_c
             assert (await profile_probe.collect(window, client, protocol, **kwargs))[
                 "status"] == "ACCEPTED"
             assert len(native) == len(downloads) == 2
-            assert window.count("window_inputs") == window.count("window_attempts") == 0
-            journal = window.plan.journal.read_text("utf-8")
+            assert window.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] == 0
+            assert window.db.execute("SELECT COUNT(*) FROM window_attempts").fetchone()[0] == 0
+            journal = window.path.read_text("utf-8")
             assert "当前名字" not in journal and "当前签名" not in journal
             window.verify()
 
@@ -230,7 +264,7 @@ def test_native_fallback_and_absent_fields_do_not_become_empty_baselines(core, t
             assert (await profile_probe.collect(window, client, protocol))["status"] == (
                 "UNAVAILABLE")
             assert not core.store.rows("SELECT * FROM social_autonomy_profiles")
-            assert window.row()["state"] == "OPEN"
+            assert window.row()["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -261,7 +295,7 @@ def test_avatar_failure_keeps_valid_authorized_text_baseline_only(core, tmp_path
             assert result == {"status": "ACCEPTED", "fields": ["nickname", "signature"]}
             assert len(downloads) == (0 if failure == "private_dns" else 1)
             assert not core.store.one("SELECT 1 FROM social_autonomy_profiles WHERE field='avatar'")
-            assert window.row()["state"] == "OPEN"
+            assert window.row()["state"] == "ACTIVE"
 
     run(scenario())
 
@@ -298,12 +332,15 @@ def test_native_profile_final_guard_runs_after_core_await_and_seals_stream(core,
                 elif change == "stream":
                     request.stream = Changed()
                 elif change == "stop":
-                    request_stop(window.spool.directory, plan=window.plan)
+                    window.stop()
                 else:
-                    source = continuous.OwnerSource(window, protocol, asyncio.Event())
-                    frame = json.dumps(raw_event(2, text="先回应这里"))
-                    event = continuous.capture.input_event(window, frame, window.clock())[1]
-                    source.put(frame, window.clock(), ("127.0.0.1", 9000), event["event_id"])
+                    from companion_onebot_bridge.event_normalizer import normalize
+
+                    frame = json.dumps(raw_event(2, text="先回应这里",
+                        time=int(window.clock().timestamp())))
+                    event = normalize(frame, window.config)
+                    window.persist_capture(event, frame, received_at=window.clock(),
+                                           peer=("127.0.0.1", 9000))
 
             protocol.event_hooks["request"].append(hold)
             client.event_hooks["response"].append(mutate)
@@ -335,7 +372,7 @@ def test_observation_submission_cannot_be_changed_by_request_hook(core, tmp_path
                     request._content = json.dumps(material).encode()
 
             client.event_hooks["request"].append(mutate)
-            with pytest.raises(ValueError, match="PROFILE_SUBMISSION_CHANGED"):
+            with pytest.raises(ValueError, match="ACCOUNT_ACTIONS_CORE_REQUEST_CHANGED"):
                 await profile_probe.collect(window, client, protocol)
             assert not core.store.rows("SELECT * FROM social_autonomy_profiles")
 
@@ -348,6 +385,9 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
 ):
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     scope, native, model_calls = options(core, ("nickname",)), [], []
+    from tests.social_profile_support import confirmed_profile_material
+
+    memory = confirmed_profile_material(core)
     policy = scope["core_options"]["social_autonomy"]
     scope["core_options"]["social_autonomy"] = policy.model_copy(update={"qzone_enabled": False})
 
@@ -362,8 +402,9 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
     def answer(request):
         body = json.loads(request.content)
         model_calls.append(body)
-        assert "当前名字" in request.content.decode()
-        assert "recent_account_api_observation_may_be_cached" in request.content.decode()
+        material = json.loads(body["messages"][-1]["content"])
+        assert material["purpose"] == "owner_confirmed_profile"
+        assert material["owner_confirmed_material"][0]["content"] == "我偏爱星空与简洁的表达。"
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
             {"kind": "nickname", "value": "观星"}, ensure_ascii=False)}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
@@ -374,8 +415,8 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
             live=True, approved=True, scope_options=scope, protocol_reply=qq,
             bridge_options={"core_url": f"http://127.0.0.1:{port}"}) as (
             window, _, protocol, handshakes, _,
-        ), private_http_client(window.plan.config.core_url,
-            window.plan.config.bridge_token) as client, httpx.AsyncClient(
+        ), private_http_client(window.config.core_url,
+            window.config.bridge_token) as client, httpx.AsyncClient(
             transport=httpx.MockTransport(answer)) as external:
             async def observe(response):
                 if (response.status_code == 200
@@ -390,19 +431,34 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
 
                 async def execute():
                     await ready.wait()
-                    assert await worker.run_once("independent-profile-worker")
+                    from companion.social_autonomy import SocialAutonomy
+                    from tests.test_social_autonomy import queue
+
+                    module = SocialAutonomy(worker.store, worker.settings,
+                        model=worker.model, clock=worker.clock)
+                    planned = await module.plan("native-profile-worker",
+                        profile_fields=["nickname"], profile_memory_ids=[memory])
+                    conversation = worker.store.one("SELECT conversation_id FROM conversations "
+                        "WHERE platform_session_key=?", (window.config.origin,))
+                    queue(module, planned, conversation["conversation_id"])
 
                 async with asyncio.timeout(20):
-                    await asyncio.gather(continuous.run(window, client, protocol, pause=pause),
-                                         execute())
-            assert handshakes == ["Bearer " + window.plan.config.onebot_token]
+                    from companion_onebot_bridge.app import deliver, observe_profile
+                    from companion_onebot_bridge.metrics import Metrics
+
+                    pump = profile_probe.ProfilePump(window, client, protocol)
+                    await asyncio.gather(observe_profile(pump, pause), execute(),
+                        deliver(client, None, window.spool, pause, Metrics(),
+                                runtime=window, protocol=protocol))
+            assert handshakes == []
             assert native == [(profile_probe.ACTION, {"user_id": 10002}),
                               ("/set_qq_profile", {"nickname": "观星"})]
             assert len(model_calls) == 1
             row = core.store.one("SELECT state,provider_message_id,attempt_count FROM outbox")
             assert row == {"state": "SENT", "provider_message_id": None, "attempt_count": 1}
-            assert window.count("window_inputs") == 0
-            assert window.count("window_attempts", "state='ACK'") == 1
+            assert window.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] == 0
+            assert window.db.execute(
+                "SELECT COUNT(*) FROM window_attempts WHERE state='ACK'").fetchone()[0] == 1
             window.verify()
 
     run(scenario())
