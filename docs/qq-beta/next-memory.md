@@ -211,3 +211,23 @@ N3 经提取和冲突复核提交的事实仍走原 FTS5+BGE，温度不屏蔽�
 将已使用历史和情景一并计入条数及 UTF-8 字节上限，沿用 pin、实际 job_sources 和最终上下文复核。
 如果最终预算裁剪移除了用于激活的事实，调用方也须移除依赖该事实的接续。
 本片定向测试见 `tests/test_memory_temperature_context.py`；真实入口与独立 worker 验收待 R1 接线。
+
+## 后台用途与原始证据读取
+
+Memory 提取/复核、Diary、Reflection、Consolidation 分别检查当前原生 OwnerAuthority 的独立用途。
+夜间协调器不借 consolidation 授权自动启用 memory、diary、reflection 或 goals；缺少用途的子阶段跳过。
+整合的 `steps_json` 和已有提取检查点保存原授权引用，版本变化后终止旧工作，保留已发生的费用责任。
+Diary/Reflection 完成写入时重新核对原 model admission 的授权引用，不能提交授权已变更后的结果。
+
+`memory_authority.source_allowed` 只路由原始证据读取，复用 R1 的 `owner_input.source` 和
+`legacy_owner_input.source`。当前 v2 原文按执行域 purpose 检查；跨 v2 版本读取还需要显式 history
+范围。合法 v1 原文供 memory 使用时走旧证据读取器的 memory 范围，原 job 凭据不升级。
+签名、原始 job 绑定、保留期、撤回与历史范围仍由原校验器负责。这个过滤器不用于长期事实检索；
+合法保留的 Memory 继续使用自身的证据及擦除合同，不因原文读取为空而被丢弃。
+主人控制台的查看/删除不被后台模型授权开关取代。
+
+SDK 读取既有 Diary 时使用 `context_proof(entry)` / `revalidate_context(proof)`：固定原 entry
+版本、内容摘要和证据 ID，提交模型上下文前后复验当前性。该读取不创建 Diary，也不调用生成器。
+
+验证覆盖用途缺失、检查点换版、旧签名证据只读、原文撤回、长期事实保留，以及真实签名 TCP
+入口、原生 chat 结算、独立 Life worker 提取/复核/日记/反思和进程恢复。所有外部模型传输为 MockTransport。

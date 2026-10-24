@@ -3,16 +3,25 @@
 from contextlib import nullcontext
 from datetime import date, datetime
 
-from companion import budget
+from companion import budget, owner_authority
 from companion.contracts import CoreError
 from companion.diary import day_bounds
 from companion.goals import GoalProposal
 from companion.memory import Memory
+from companion.memory_authority import source_allowed
 from companion.memory_work import TERMINAL_PHASES, checkpoint_state, extraction_sources
 from companion.store import after
 from companion.worker_schedule import UnitResult
 
 TERMINAL = {"COMPLETE", "COMMITTED", "SKIPPED", "FAILED", "CANCELLED", "UNKNOWN"}
+
+
+def _permitted(nightly, purpose):
+    if not owner_authority.required(nightly.store, nightly.settings):
+        return True
+    view = owner_authority.current(nightly.store, nightly.settings, nightly.clock,
+                                   purpose="consolidation")
+    return purpose in view.policy.purposes
 
 
 def _yield(nightly, run, *, waiting=False, code=None, due=None):
@@ -33,7 +42,7 @@ def _next(nightly):
 
 def _episodes(nightly, run, memory):
     steps = run["steps"]
-    if not nightly.settings.memory_enabled:
+    if not nightly.settings.memory_enabled or not _permitted(nightly, "memory"):
         steps["n2"] = "SKIPPED"
         return _yield(nightly, run)
     start, end = day_bounds(date.fromisoformat(run["local_date"]), run["timezone"])
@@ -52,6 +61,8 @@ def _episodes(nightly, run, memory):
     for key in pending:
         event = nightly.store.one("SELECT * FROM events WHERE event_id=?", (key,))
         if event and first and event["conversation_id"] == first["conversation_id"]:
+            if not source_allowed(nightly.store, nightly.settings, nightly.clock, key, "memory"):
+                raise CoreError("PRIVACY_CHANGED", 409)
             events.append(event)
         if len(events) == 20:
             break
@@ -69,7 +80,7 @@ def _episodes(nightly, run, memory):
 
 async def _memory(nightly, run, day):
     steps = run["steps"]
-    if not nightly.settings.memory_enabled:
+    if not nightly.settings.memory_enabled or not _permitted(nightly, "memory"):
         steps["memory"] = "SKIPPED"
         return _yield(nightly, run)
     def persist(record):
@@ -130,6 +141,9 @@ async def _memory(nightly, run, day):
 
 async def _diary(nightly, run, day, worker_id):
     steps = run["steps"]
+    if not _permitted(nightly, "diary"):
+        steps["diary"] = "SKIPPED"
+        return _yield(nightly, run)
     diary_id = nightly.diary.schedule_day(day)
     if not diary_id:
         steps["diary"] = "SKIPPED"
@@ -148,7 +162,8 @@ async def _diary(nightly, run, day, worker_id):
 
 
 async def _reflection(nightly, run, day):
-    result = await nightly.reflections.run_day(day) if nightly.settings.reflection_enabled else None
+    result = await nightly.reflections.run_day(day) if (
+        nightly.settings.reflection_enabled and _permitted(nightly, "reflection")) else None
     run["steps"]["reflection"] = result["state"] if result else "SKIPPED"
     if result and result["state"] in {"RUNNING", "RETRY_WAIT"}:
         return _yield(nightly, run, waiting=True, code="REFLECTION_PENDING",
@@ -157,7 +172,7 @@ async def _reflection(nightly, run, day):
 
 
 def _goals(nightly, run, day):
-    if not nightly.settings.goals_enabled:
+    if not nightly.settings.goals_enabled or not _permitted(nightly, "goals"):
         run["steps"]["goals"] = "SKIPPED"
         return _yield(nightly, run)
     proposals = nightly.store.rows(

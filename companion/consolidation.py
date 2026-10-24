@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from companion import private_life
+from companion import owner_authority, private_life
 from companion.contracts import CoreError
 from companion.diary import source_hash
 from companion.privacy import epoch
@@ -43,7 +43,11 @@ class NightlyConsolidator:
 
     def enabled(self):
         try:
-            private_life.ensure_active(self.store, self.settings, self.clock)
+            if owner_authority.required(self.store, self.settings):
+                owner_authority.current(self.store, self.settings, self.clock,
+                                        purpose="consolidation")
+            else:
+                private_life.ensure_active(self.store, self.settings, self.clock)
         except CoreError:
             return False
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
@@ -68,7 +72,7 @@ class NightlyConsolidator:
                     and steps.get("reflection") in {"FAILED", "RETRY_WAIT", "CANCELLED"}
                     and retryable_admission(reflection, self.clock())
                     and existing["source_set_sha256"] == reflection["source_set_sha256"]
-                    == source_hash(self.diary.repo.sources(day))
+                    == source_hash(self.diary.repo.sources(day, purpose="consolidation"))
                 ):
                     steps["reflection"] = "WAITING"
                     steps.pop("goals", None)
@@ -83,6 +87,11 @@ class NightlyConsolidator:
                     )
                 return existing["run_id"]
             run_id, now = uid("nightly"), self.clock()
+            steps = {}
+            if owner_authority.required(self.store, self.settings):
+                steps["authority"] = owner_authority.current(
+                    self.store, self.settings, self.clock, purpose="consolidation",
+                ).authority.as_dict()
             self.store.insert(
                 "consolidation_runs",
                 run_id=run_id,
@@ -91,7 +100,7 @@ class NightlyConsolidator:
                 timezone=self.settings.timezone,
                 config_version=CONFIG_VERSION,
                 state="SCHEDULED",
-                steps_json="{}",
+                steps_json=encode(steps),
                 captured_privacy_epoch=epoch(self.store),
                 created_at=now,
                 updated_at=now,
@@ -142,7 +151,17 @@ class NightlyConsolidator:
             )
             if not row:
                 return None
-            sources = self.diary.repo.sources(date.fromisoformat(row["local_date"]))
+            steps = json.loads(row["steps_json"])
+            if owner_authority.required(s, self.settings):
+                view = owner_authority.current(s, self.settings, self.clock,
+                                                purpose="consolidation")
+                if steps.get("authority") != view.authority.as_dict():
+                    s.execute("UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
+                              "steps_json='{}',last_error_code='OWNER_AUTHORITY_REVISION_CHANGED' "
+                              "WHERE run_id=?", (row["run_id"],))
+                    return None
+            sources = self.diary.repo.sources(date.fromisoformat(row["local_date"]),
+                                              purpose="consolidation")
             # Erasure cancels leased/partial coordinators in the same DB transaction.
             # Benign Memory writes may advance the epoch before a crashed coordinator
             # checkpoints. Resume against fresh state only when its sources are unchanged;
@@ -178,7 +197,7 @@ class NightlyConsolidator:
                 "lease_token": token,
                 "captured_privacy_epoch": epoch(s),
                 "sources": sources,
-                "steps": json.loads(row["steps_json"]),
+                "steps": steps,
                 "erasure_version": s.one(
                     "SELECT COALESCE(MAX(restore_min_replay_version),0) AS n "
                     "FROM privacy_erasure_ledger"
@@ -205,7 +224,8 @@ class NightlyConsolidator:
                 raise CoreError("CONSOLIDATION_STALE_LEASE", 409)
             if erasure_version != run["erasure_version"] or source_hash(
                 run["sources"]
-            ) != source_hash(self.diary.repo.sources(date.fromisoformat(run["local_date"]))):
+            ) != source_hash(self.diary.repo.sources(date.fromisoformat(run["local_date"]),
+                                                     purpose="consolidation")):
                 raise CoreError("PRIVACY_CHANGED", 409)
             run["captured_privacy_epoch"] = epoch(self.store)
             self.store.execute(
@@ -215,6 +235,9 @@ class NightlyConsolidator:
 
     def checkpoint(self, run, state="LEASED", code=None, waiting=False, next_attempt_at=None):
         s, now = self.store, self.clock()
+        if owner_authority.required(s, self.settings):
+            owner_authority.current(s, self.settings, self.clock, purpose="consolidation",
+                                    authority=run["steps"].get("authority"))
         with nullcontext() if s.db.in_transaction else s.transaction():
             current = s.one("SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],))
             if (

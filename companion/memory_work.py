@@ -9,9 +9,10 @@ import json
 from contextlib import nullcontext
 from datetime import date, datetime
 
-from companion import budget, live_text, private_life, reply_revision
+from companion import budget, live_text, owner_authority, private_life, reply_revision
 from companion.contracts import Candidate, CoreError, Extraction, MemoryReview
 from companion.diary import day_bounds
+from companion.memory_authority import source_allowed
 from companion.model import EXTRACT_RULES, REVIEW_RULES
 from companion.privacy import epoch
 from companion.store import after, encode, uid
@@ -51,13 +52,17 @@ async def prepare_memories(
     self, candidates, confirmed=False, job_id=None, logical_request_id=None, request_id=None
 ):
     """Plan semantic matches without holding a SQLite transaction across model I/O."""
-    if private_life.strict(self.store, self.settings):
+    authority = owner_authority.current(self.store, self.settings, self.clock, purpose="memory") \
+        if owner_authority.required(self.store, self.settings) else None
+    if authority is None and private_life.strict(self.store, self.settings):
         raise CoreError("LIVE_TEXT_MEMORY_READ_ONLY", 403)
     s, cfg = self.store, self.settings
     candidates = [
         candidate
         for candidate in candidates
         if self.memory.validate_candidate(candidate, confirmed, now=self.clock()) is not None
+        and source_allowed(s, cfg, self.clock, candidate.evidence_event_id, "memory",
+                           allow_commands=True)
     ]
     if not candidates:
         return [], []
@@ -70,9 +75,15 @@ async def prepare_memories(
     )
 
     def check_candidates():
+        if authority:
+            owner_authority.current(s, cfg, self.clock, purpose="memory",
+                                    authority=authority.authority)
         if job:
             reply_revision.check_job(s, job)
         self.memory_context.revalidate(candidate_proof, self.clock())
+        if not all(source_allowed(s, cfg, self.clock, item.evidence_event_id, "memory",
+                                  allow_commands=True) for item in candidates):
+            raise CoreError("PRIVACY_CHANGED", 409)
 
     for candidate in candidates:
         for row in await self.memory.search_async(
@@ -115,6 +126,10 @@ async def prepare_memories(
         logical_request_id=logical_request_id, request_id=request_id,
         clock=self.clock,
     )
+    def check_review():
+        self.memory_context.revalidate(proof, self.clock())
+        check_candidates()
+
     response = await budget.complete(
         self.model,
         self.store,
@@ -123,13 +138,14 @@ async def prepare_memories(
         messages,
         "memory_review",
         self.clock,
-        source_check=lambda: self.memory_context.revalidate(proof, self.clock()),
+        source_check=check_review,
     )
     _settled(s, request_id)
     # Preserve the existing write-reconciliation failure contract. A real input
     # recall already cancelled the tracked job; a concurrent explicit forget
     # remains PRIVACY_CHANGED and cannot commit the old review result.
     self.memory_context.revalidate(proof, self.clock())
+    check_candidates()
     if job:
         reply_revision.check_job(s, job)
     validation_reason = "schema"
@@ -181,17 +197,32 @@ def extraction_sources(core, local_day):
     cfg, now = core.settings, core.clock()
     day_filter = " AND e.occurred_at>=? AND e.occurred_at<? " if local_day else ""
     bounds = day_bounds(local_day, cfg.timezone) if local_day else ()
-    return core.store.rows(
+    authority_filter, authority_params = "", ()
+    if owner_authority.required(core.store, cfg):
+        view = owner_authority.current(core.store, cfg, core.clock, purpose="memory")
+        # Scope nomination precedes LIMIT: an earlier revision without a history
+        # grant must not permanently hide eligible current-revision work.
+        authority_filter = (
+            " AND (EXISTS (SELECT 1 FROM runtime_meta r WHERE r.key='owner_input:'||e.event_id "
+            "AND (json_extract(r.value,'$.authority')=json(?) OR (? AND e.occurred_at>=?))) "
+            "OR EXISTS (SELECT 1 FROM runtime_meta r WHERE r.key='live_text_input:'||e.event_id)) "
+        )
+        authority_params = (encode(view.authority.as_dict()), "history" in view.policy.purposes,
+                            view.policy.history.not_before.isoformat()
+                            if view.policy.history.not_before else now)
+    rows = core.store.rows(
         "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
         "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
         "AND e.source='qq.onebot' AND j.kind='chat' "
         "AND (j.state='SUCCEEDED' OR (j.state='CANCELLED' AND j.last_error_code=?)) "
         "AND NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id) "
         "AND e.ingested_at>=? AND e.ingested_at<=? AND e.occurred_at<=? "
-        + day_filter + " ORDER BY e.rowid LIMIT 20",
+        + day_filter + authority_filter + " ORDER BY e.rowid LIMIT 20",
         (reply_revision.SUPERSEDED, after(now, -cfg.raw_event_retention_days * 86400),
-         after(now, -cfg.extraction_idle_seconds), now, *bounds),
+         after(now, -cfg.extraction_idle_seconds), now, *bounds, *authority_params),
     )
+    return [row for row in rows if source_allowed(
+        core.store, cfg, core.clock, row["event_id"], "memory")]
 
 
 def _input_deadline(core, local_day):
@@ -216,9 +247,15 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
     source-linked checkpoint across phases. The optional callback only joins a
     natural-day coordinator checkpoint to the same transaction, never owns a copy.
     """
-    if private_life.strict(core.store, core.settings) or (
-        not core.settings.memory_enabled or not core.settings.pricing_known
-    ):
+    authority = None
+    if owner_authority.required(core.store, core.settings):
+        try:
+            authority = owner_authority.current(core.store, core.settings, core.clock,
+                                                purpose="memory")
+        except CoreError:
+            return UnitResult(False)
+    if (authority is None and private_life.strict(core.store, core.settings)
+        or not core.settings.memory_enabled or not core.settings.pricing_known):
         return UnitResult(False)
     from companion.erasure import cleanup_contracts
 
@@ -228,7 +265,10 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
     lease = encode({"token": uid("memory_lease"),
                     "until": after(now, core.settings.lease_seconds)})
     with s.transaction():
-        if private_life.enabled(core.settings):
+        if authority:
+            if private_life.busy(s, now) or budget.chat_pending(s, now):
+                return UnitResult(False)
+        elif private_life.enabled(core.settings):
             live_text.guard(s, core.settings, core.clock)
             if (private_life.busy(s, now)
                 or private_life.owner_waiting(s, core.settings, now)):
@@ -240,13 +280,16 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
         record = json.loads(row["value"]) if row else None
         expected = row["value"] if row else None
         if record and record["batch"].get("phase") not in TERMINAL_PHASES:
-            if record["timezone"] != core.settings.timezone:
+            changed_authority = authority and record["batch"].get("authority") != \
+                authority.authority.as_dict()
+            if record["timezone"] != core.settings.timezone or changed_authority:
                 batch = record["batch"]
                 usage = s.one("SELECT state FROM model_usage WHERE request_id=?",
                               (batch.get("request_id"),))
                 unknown = usage and usage["state"] in {"RESERVED", "UNKNOWN"}
                 batch.update(phase="UNKNOWN" if unknown else "CANCELLED",
-                             error="MEMORY_TIMEZONE_CHANGED")
+                             error="OWNER_AUTHORITY_REVISION_CHANGED" if changed_authority
+                             else "MEMORY_TIMEZONE_CHANGED")
                 if unknown:
                     s.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? "
                               "AND state='RESERVED'", (batch["request_id"],))
@@ -268,7 +311,8 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                 return UnitResult(False, _input_deadline(core, local_day))
             record = {"batch_id": uid("memory_batch"), "timezone": core.settings.timezone,
                       "local_day": local_day.isoformat() if local_day else None,
-                      "batch": {}, "source_event_ids": [], "next_attempt_at": None}
+                      "batch": {"authority": authority.authority.as_dict()} if authority else {},
+                      "source_event_ids": [], "next_attempt_at": None}
             expected = encode(record)
             s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
                       (CHECKPOINT_KEY, expected))
@@ -345,12 +389,21 @@ async def extract_once(core, local_day=None):
 
 
 def _validate_batch(core, lease, batch):
+    if owner_authority.required(core.store, core.settings):
+        owner_authority.current(core.store, core.settings, core.clock, purpose="memory",
+                                authority=batch.get("authority"))
+        if budget.chat_pending(core.store, core.clock()):
+            raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     if not core._owns_memory_lease(lease):
         raise CoreError("MEMORY_STALE_LEASE", 409)
-    if (private_life.enabled(core.settings)
+    if (not owner_authority.required(core.store, core.settings)
+        and private_life.enabled(core.settings)
         and private_life.owner_waiting(core.store, core.settings, core.clock())):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     core.memory_context.revalidate(batch["proof"], core.clock())
+    if not all(source_allowed(core.store, core.settings, core.clock, key, "memory")
+               for key in batch["event_ids"]):
+        raise CoreError("PRIVACY_CHANGED", 409)
     if batch.get("phase_epoch") != epoch(core.store):
         raise CoreError("PRIVACY_CHANGED", 409)
 
@@ -396,7 +449,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
         return _recover_phase(core, batch, persist)
     if batch.get("phase") in {"COMPLETE", "SKIPPED", "FAILED", "UNKNOWN"}:
         return UnitResult(False)
-    if not batch:
+    if not batch.get("phase"):
         events = extraction_sources(core, local_day)
         if len(events) < cfg.extraction_min_events:
             batch["phase"] = "SKIPPED"

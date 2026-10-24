@@ -506,6 +506,7 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     assert row["output_tokens"] == 350
     # Finish the no-I/O Demo probe before entering a separately approved mock-live scope.
     budget.settle(core.store, core.settings, request_id, ModelResponse("demo", 0, 0))
+    assert generate(core)["state"] == "COMMITTED"
     captured = []
 
     def respond(request):
@@ -518,9 +519,10 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
         )
 
     async def execute():
-        from tests.test_paid_model_gate import approved_live
+        from tests.test_owner_authority import activate, prepare
 
-        approved_live(core, tmp_path)
+        policy = prepare(core, tmp_path).model_copy(update={"purposes": ["diary"]})
+        activate(core, policy)
         cfg = core.settings
         reserved = budget.reserve(core.store, cfg, None, "diary", [], core.clock())
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -532,8 +534,6 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     assert (
         captured[0]["max_tokens"] == 350 and captured[0]["response_format"]["type"] == "json_object"
     )
-    core.settings.mode = "demo"
-    assert generate(core)["state"] == "COMMITTED"
 
 
 def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core, tmp_path):
@@ -575,7 +575,7 @@ def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core,
     try:
         for table, added in (
             ("conversations", {"reply_revision": 0}), ("events", {"reply_revision": 0}),
-            ("jobs", {"context_tracked": 0}),
+            ("jobs", {"context_tracked": 0, "authority_json": "{}"}),
         ):
             assert old.store.one(f"SELECT * FROM {table}") == {**original[table], **added}
         assert old.store.schema_capabilities()
