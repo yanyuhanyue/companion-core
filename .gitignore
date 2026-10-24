@@ -10,6 +10,7 @@ privacy/
 backups/
 dist/
 .local/
+.codex-remote-attachments/
 .playwright-cli/
 output/playwright/
 *.sqlite*
