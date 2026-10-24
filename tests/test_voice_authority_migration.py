@@ -37,7 +37,7 @@ def test_0044_preserves_old_job_and_stop_custody_without_backfilling(core, tmp_p
     with closing(Store(path)) as prior:
         before = {table: prior.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in (
             "voice_jobs", "voice_node_state", "outbox", "model_usage", "runtime_meta")}
-    migrate(path)
+    migrate(path, "0044_voice_owner_authority")
     with closing(Store(path)) as migrated:
         after = {table: migrated.rows(f"SELECT * FROM {table} ORDER BY rowid") for table in before}
         for row in after["voice_jobs"]:
