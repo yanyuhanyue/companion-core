@@ -42,6 +42,12 @@ def _latest(store):
     ) if pointer else None
 
 
+def required(store, settings):
+    """Live execution and persisted authority custody cannot fall back to mock admission."""
+    return bool(settings.mode == "live" or settings.owner_runtime.mode != "OFF"
+                or _meta(store, CURRENT))
+
+
 def reference(row):
     return AuthorityRef(version=2, **{k: row[k] for k in (
         "grant_id", "revision", "policy_sha256", "restore_generation",
@@ -123,8 +129,13 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         or row["restore_generation"] != _meta(store, GENERATION)):
         raise CoreError("OWNER_AUTHORITY_REQUIRED", 403)
     ref = reference(row)
-    if authority is not None and AuthorityRef.from_dict(authority) != ref:
-        raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
+    if authority is not None:
+        try:
+            supplied = AuthorityRef.from_dict(authority)
+        except (ValueError, TypeError):
+            raise CoreError("OWNER_AUTHORITY_REFERENCE_INVALID", 403) from None
+        if supplied != ref:
+            raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
     policy = OwnerGrantPolicy.model_validate_json(row["policy_json"])
     _check_policy(settings, policy)
     if settings.paid_model is None or policy.paid_contract_sha256 != _sha(
@@ -191,6 +202,78 @@ def check_job(store, settings, clock, job, *, purpose, executing=False):
     ):
         raise CoreError("JOB_LEASE_LOST", 409)
     return view
+
+
+def model_purpose(store, scenario, job_id):
+    from companion import notices
+
+    if scenario == "activity":
+        job = store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
+                        "WHERE job_id=?", (job_id,)) if job_id else None
+        return "life" if notices.shadow(job) else (
+            "goals" if notices.required(store, job_id) else "proactive")
+    purpose = {"chat": "chat", "memory_extract": "memory", "memory_review": "memory",
+               "diary": "diary", "reflection": "reflection", "qq_poke": "poke",
+               "social_autonomy": "social", "content_vision": "image",
+               "content_video": "content", "content_video_preview": "bili_video",
+               "meme_caption": "meme", "evaluation": "evaluation"}.get(scenario)
+    if purpose is None:
+        raise CoreError("OWNER_AUTHORITY_MODEL_PURPOSE_REQUIRED", 403)
+    return purpose
+
+
+def admit_model(store, settings, clock, job_id, scenario):
+    """Check the model's independent purpose and its native task before budget admission."""
+    from companion import owner_input, reply_revision
+
+    purpose = model_purpose(store, scenario, job_id)
+    view = current(store, settings, clock, purpose=purpose)
+    if job_id is not None:
+        job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+        if job is None:
+            raise CoreError("OWNER_AUTHORITY_JOB_BINDING_REQUIRED", 403)
+        check_job(store, settings, clock, job, purpose=purpose,
+                  executing=scenario not in {"content_vision", "content_video",
+                                             "content_video_preview"})
+        reply_revision.check_job(store, job)
+        reply_revision.check_sources(store, job_id)
+        if job["kind"] == "chat":
+            owner_input.source(store, settings, view, job["event_id"], clock(),
+                               allow_commands=True)
+        allowed = {"chat": {"chat", "memory_review", "content_vision", "content_video",
+                             "content_video_preview"},
+                   "activity": {"activity", "memory_review"}, "poke": {"qq_poke"},
+                   "meme_caption": {"meme_caption"}, "social_plan": {"social_autonomy"},
+                   "evaluation": {"evaluation"}}
+        if scenario not in allowed.get(job["kind"], set()):
+            raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
+    elif scenario not in {"memory_extract", "memory_review", "diary", "reflection",
+                          "social_autonomy"}:
+        raise CoreError("COMPANION_BACKGROUND_SCOPE_REQUIRED", 403)
+    return view
+
+
+def check_model(store, settings, clock, request_id):
+    """Recheck a reserved admission; historical references never renew an execution lease."""
+    row = store.one("SELECT a.*,m.job_id,m.scenario,m.state FROM model_admissions a "
+                    "JOIN model_usage m USING(request_id) WHERE request_id=?", (request_id,))
+    if not row or row["state"] != "RESERVED":
+        raise CoreError("OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED", 403)
+    view = current(store, settings, clock, purpose=model_purpose(
+        store, row["scenario"], row["job_id"]), authority=json.loads(row["authority_json"]))
+    admit_model(store, settings, clock, row["job_id"], row["scenario"])
+    deadlines = [datetime.fromisoformat(row["lease_until"])]
+    if view.policy.expires_at:
+        deadlines.append(view.policy.expires_at)
+    if row["job_id"] and row["scenario"] not in {
+        "content_vision", "content_video", "content_video_preview",
+    }:
+        job = store.one("SELECT lease_until FROM jobs WHERE job_id=?", (row["job_id"],))
+        deadlines.append(datetime.fromisoformat(job["lease_until"]))
+    deadline = min(deadlines)
+    if deadline <= datetime.fromisoformat(clock()):
+        raise CoreError("JOB_LEASE_LOST", 409)
+    return {"lease_until": deadline.isoformat()}
 
 
 def preview(store, settings, clock, request):
