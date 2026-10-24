@@ -874,3 +874,10 @@ h3.sub.first { margin-top: 0; }
 .sw-lock { width: 30px; display: inline-grid; place-items: center; color: var(--faint); }
 .sw-lock svg { width: 15px; height: 15px; }
 .cd-switch .note { font-size: 11.5px; }
+/* 能力页在宽屏上固定为两栏各自滚动，切换能力时整页高度不变，不会上下跳动 */
+@media (min-width: 861px) {
+  .caps2 { height: calc(100vh - 200px); min-height: 520px; align-items: stretch; }
+  .caps2 .cap-index { position: static; max-height: none; height: 100%; }
+  .caps2 .cap-detail { height: 100%; overflow-y: auto; overscroll-behavior: contain; }
+  .page.has-savebar .caps2 .cap-detail { padding-bottom: 90px; }
+}

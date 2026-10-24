@@ -1552,7 +1552,7 @@ PAGES.caps = data => {
         el("div", { class: "ci-filter", role: "group", "aria-label": "筛选" }, [["all", "全部"], ["on", "已开启"], ["off", "未开启"], ["warn", "需留意"]].map(([k, n]) =>
           el("button", { type: "button", "aria-pressed": String(state.capF === k), onclick: () => { state.capF = k; rerender(); } }, n + " ", el("span", { class: "num" }, String(filterCount(k)))))),
         el("div", { class: "ci-list", "data-keep-scroll": "caps" }, index.some(Boolean) ? index : el("div", { class: "empty" }, el("h3", {}, "没有符合条件的能力"), el("p", {}, "换个关键词，或选择“全部”。")))),
-      el("section", { class: "cap-detail" }, sel ? capDetail(sel) : el("p", { class: "note" }, "还没有能力状态。"))));
+      el("section", { class: "cap-detail", "data-keep-scroll": "cap-" + (sel ? sel.id : "") }, sel ? capDetail(sel) : el("p", { class: "note" }, "还没有能力状态。"))));
 };
 /* 只在第一次打开（例如从别处链接进来）时把选中的能力滚进列表可见范围，不移动整页 */
 PAGES.caps.after = () => {
