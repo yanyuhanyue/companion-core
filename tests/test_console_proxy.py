@@ -36,7 +36,7 @@ def test_serve_proxy_source_limits_and_untrusted_spoofing(core, tmp_path, proxy)
         COMPANION_ERASURE_LEDGER=core.settings.erasure_ledger,
         COMPANION_OWNER_QQ_ID="10001", COMPANION_BOT_QQ_ID="10002",
         COMPANION_BRIDGE_TOKEN="synthetic-bridge-token-" * 2,
-        COMPANION_CONTROL_TOKEN=PASSWORD,
+        COMPANION_CONTROL_TOKEN=PASSWORD, COMPANION_PROACTIVE_ENABLED="false",
         COMPANION_CONSOLE=json.dumps({"enabled": True, "public_origin": ORIGIN}),
         FORWARDED_ALLOW_IPS="*",  # An ambient Uvicorn variable must not enable trust.
     )
@@ -69,7 +69,21 @@ def test_serve_proxy_source_limits_and_untrusted_spoofing(core, tmp_path, proxy)
                 # Trusted proxy: a different peer is not locked out. Untrusted client:
                 # changing an arbitrary XFF header cannot reset its own socket's limit.
                 expected = 200 if proxy == "127.0.0.1" else 429
-                assert attempt("198.51.100.20", PASSWORD).status_code == expected
+                accepted = attempt("198.51.100.20", PASSWORD)
+                assert accepted.status_code == expected
+                if expected == 200:
+                    headers = {
+                        "Origin": ORIGIN, "X-CSRF-Token": accepted.json()["csrf_token"],
+                        "Cookie": "companion_owner_session="
+                        + accepted.cookies["companion_owner_session"],
+                        "Idempotency-Key": "tcp-definite-refusal",
+                    }
+                    for _ in range(2):
+                        refused = http.post("/v1/console/mode",
+                                            json={"target": "proactive", "enabled": True},
+                                            headers=headers)
+                        assert refused.status_code == 409
+                        assert refused.json() == {"error": "PROACTIVE_DISABLED_IN_CONFIG"}
                 assert http.get("/internal/v1/status").status_code in {401, 404}
         finally:
             process.terminate()

@@ -25,30 +25,38 @@ changes and PR102 remain untouched. No deployment, paid/QQ call, new full CI or 
    cache v4=0057852bfaa89a56745cba8c7296529d2fc39830,
    upload-artifact v4=ea165f8d65b6e75b540449e92b4886f43607fa02.
 
-## Confirmed receipt gap — narrow proposal for discussion
+## Confirmed receipt gap — approved finite repair
 
-Confirming a missing memory returns MEMORY_NOT_FOUND/404 but leaves console_operations.STARTED.
-An identical retry returns CONSOLE_OPERATION_RECONCILIATION_REQUIRED/409. The browser preserves
-its idempotency key on errors, so a definite pre-effect rejection becomes an uncertain operation.
-The local HTTP regression reproduces this; it is not yet repaired.
+The original HTTP probe reproduced MEMORY_NOT_FOUND/404 followed by a same-key
+CONSOLE_OPERATION_RECONCILIATION_REQUIRED/409: STARTED had been retained for a definite refusal.
+The user approved the limited durable refusal extension. Existing console_operations now records
+REJECTED with only code/status, and the same fingerprint replays that error without native effects.
+The existing state column is unconstrained TEXT, so no schema migration is needed.
 
-A crash after native commit but before receipt is genuinely different. Its STARTED row must stay
-fenced. Delivery reconciliation already has its native operation identity and recovery callback;
-there is no equally strong generic receipt for memory/diary correction.
+Caller-specific reviewed errors:
 
-Recommended small extension of the existing receipt table: REJECTED with only safe code/status
-for a finite reviewed set of native pre-effect errors; replay that rejection for the same key.
-All other exceptions and crash gaps remain STARTED. Alternative preflight validation risks
-validator drift and a validation/apply race. The durable rejection semantics are recorded for
-root discussion before implementation, without a second executor or blind retry/deletion.
+| Native call | Definite pre-effect errors | Proof boundary |
+|---|---|---|
+| Memory.decide | MEMORY_NOT_FOUND, MEMORY_NOT_ACTIVE, CORRECTION_REQUIRED, CREDENTIAL_MEMORY_DENIED | Before correction writes/ledger append; native transaction unwinds before receipt handling |
+| DiaryService.correct | INVALID_DIARY_CORRECTION | Before expire_evidence or its write transaction |
+| DiaryService.set_mode | DIARY_DISABLED_IN_CONFIG | Before the setter transaction |
+| Proactive mode setter | PROACTIVE_DISABLED_IN_CONFIG | Before its transaction |
+
+DIARY_NOT_FOUND is deliberately excluded because expiration cleanup can already have happened.
+Every unlisted CoreError, other exception, and process-death gap stays STARTED; no timer deletes it
+or infers safe replay. Delivery reconciliation retains its native receipt recovery callback.
+Tests verify each rejection leaves native state unchanged, replay never calls the service again,
+and an actual child-process exit after a native commit remains fenced after restart. Real serve/TCP
+checks verify terminal rejection behavior alongside trusted proxy attribution.
 
 ## Engineering evidence and limits
 
 The main Dockerfile copies sources before uv sync, invalidating the dependency layer on source
 changes. The source-reader image already separates dependencies. The official uv remedy is
 --no-install-project before source COPY, followed by the original project sync. Local Docker
-Desktop Linux engine is unavailable; Dockerfile is unchanged and no measured speedup/build pass
-is claimed. Fresh CI without persisted layers would not automatically get a warm-build benefit.
+Desktop Linux engine is unavailable. The user subsequently supplied a remote Docker host; it has
+running services, so only an isolated resource-limited build experiment is authorized. Dockerfile
+is unchanged until the measured candidate is validated; no speedup/build pass is yet claimed. Fresh CI without persisted layers would not automatically get a warm-build benefit.
 
 The session migrated_database fixture and SQLite backup already exist in tests/conftest.py.
 PR102 already measured full disjoint file shards and receipt reuse; neither is reimplemented.
