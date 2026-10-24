@@ -24,6 +24,23 @@ def close_provider_clients(core):
         run(client.aclose())
 
 
+async def native_child(core, tmp_path, source, destination, number):
+    config = tmp_path / f"life-{number}.json"
+    result = tmp_path / f"life-{number}-result.json"
+    config.write_text(json.dumps({
+        "settings": core.settings.model_dump(mode="python"), "now": core.clock(),
+        "source_id": source, "destination": destination, "result_path": str(result),
+    }, default=lambda value: value.get_secret_value()
+       if isinstance(value, SecretStr) else str(value)), encoding="utf-8")
+    process = await asyncio.to_thread(subprocess.run,
+        [sys.executable, "-B", "-m", "tests.life_expression_process", str(config)],
+        capture_output=True, timeout=60)
+    assert process.returncode == 0, process.stderr.decode(errors="replace")
+    outcome = json.loads(result.read_text(encoding="utf-8"))
+    assert outcome["pid"] != os.getpid()
+    return outcome
+
+
 @pytest.mark.parametrize("action,destination", [
     ("qq.private.proactive", "PRIVATE_MESSAGE_DRAFT"), ("qzone.publish", "QZONE_DRAFT"),
 ])
@@ -34,20 +51,7 @@ def test_native_life_result_consumed_once_over_actual_http(core, tmp_path, actio
     core.settings.control_token = SecretStr("synthetic-owner-life-consumption-control")
 
     async def child(number):
-        config = tmp_path / f"life-{number}.json"
-        result = tmp_path / f"life-{number}-result.json"
-        config.write_text(json.dumps({
-            "settings": core.settings.model_dump(mode="python"), "now": core.clock(),
-            "source_id": source, "destination": destination, "result_path": str(result),
-        }, default=lambda value: value.get_secret_value()
-           if isinstance(value, SecretStr) else str(value)), encoding="utf-8")
-        process = await asyncio.to_thread(subprocess.run,
-            [sys.executable, "-B", "-m", "tests.life_expression_process", str(config)],
-            capture_output=True, timeout=60)
-        assert process.returncode == 0, process.stderr.decode(errors="replace")
-        outcome = json.loads(result.read_text(encoding="utf-8"))
-        assert outcome["pid"] != os.getpid()
-        return outcome
+        return await native_child(core, tmp_path, source, destination, number)
 
     async def scenario():
         async with real_core_http(core) as port:
@@ -141,4 +145,69 @@ def test_native_life_result_consumed_once_over_actual_http(core, tmp_path, actio
                     assert core.store.one("SELECT state FROM outbox")["state"] == result["result"]
                 assert core.store.rows("SELECT * FROM model_usage") == usage
                 assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    run(scenario())
+
+
+@pytest.mark.parametrize("change", ["repeat", "correction", "delete", "erase", "stop"])
+def test_native_life_diary_save_over_http_preserves_original_custody(core, tmp_path, change):
+    core.settings.diary_enabled = True
+    _, _, authority, source = prepared(core, tmp_path, destination="PRIVATE_DIARY",
+                                      purposes=["diary"], execute=False)
+    core.settings.control_token = SecretStr("synthetic-owner-diary-consumption-control")
+    core.settings.diary_admin_token = SecretStr("synthetic-diary-admin-consumption-control")
+
+    async def scenario():
+        async with real_core_http(core) as port:
+            first = await native_child(core, tmp_path, source, "PRIVATE_DIARY", 1)
+            assert first["provider_calls"] == 1, first
+            rows = [row for row in first["results"] if row["state"] == "SHADOW"]
+            assert len(rows) == 1, first
+            job_id = rows[0]["job_id"]
+            body = request(core, job_id, authority, "diary.save").model_dump(mode="json")
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+            path = f"/internal/v2/life/results/{job_id}/consume"
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                headers={"Authorization": "Bearer "
+                         + core.settings.control_token.get_secret_value()}) as client:
+                saved = await client.post(path, json=body)
+                assert saved.status_code == 200, saved.text
+                receipt = saved.json()
+                assert receipt["source_job_id"] == job_id and not receipt["reused"]
+                entry = core.store.one("SELECT * FROM diary_entries")
+                assert entry["body_md"] == rows[0]["text"] and entry["version"] == 1
+                assert source in {r["event_id"] for r in core.store.rows(
+                    "SELECT event_id FROM diary_evidence")}
+                repeated = await client.post(path, json=body)
+                assert repeated.status_code == 200 and repeated.json() == {
+                    **receipt, "reused": True,
+                }
+                second = await native_child(core, tmp_path, source, "PRIVATE_DIARY", 2)
+                assert second["provider_calls"] == 0, second
+                diary_path = "/internal/v1/diary/" + receipt["local_date"]
+                diary_headers = {"Authorization": "Bearer "
+                                 + core.settings.diary_admin_token.get_secret_value()}
+                if change == "correction":
+                    corrected = await client.post(diary_path + "/correction",
+                        json={"text": "这是主人保留的修订。"}, headers=diary_headers)
+                    assert corrected.status_code == 200, corrected.text
+                elif change == "delete":
+                    deleted = await client.post(diary_path + "/forget", headers=diary_headers)
+                    assert deleted.status_code == 200, deleted.text
+                elif change == "erase":
+                    with core.store.transaction():
+                        core.ledger.expire_events(core.store, [source], core.clock())
+                elif change == "stop":
+                    stop(core, authority)
+                before_retry = core.store.rows("SELECT * FROM diary_entries")
+                retry = await client.post(path, json=body)
+                if change in {"repeat", "correction"}:
+                    assert retry.status_code == 200, retry.text
+                    assert retry.json()["entry_id"] == receipt["entry_id"]
+                    assert retry.json()["current_version"] == (2 if change == "correction" else 1)
+                else:
+                    assert retry.status_code >= 400, retry.text
+                assert core.store.rows("SELECT * FROM diary_entries") == before_retry
+                assert core.store.rows("SELECT * FROM model_usage") == usage
+                assert core.store.rows("SELECT * FROM outbox") == []
     run(scenario())
