@@ -183,8 +183,17 @@ owner 输入和真实 observation，后者仍保留 companion 身份，逐项核
 - [KI-CO recall gate 固定源码](https://github.com/Kisera001/KI-CO/blob/fe1672bc25e45506018d57fdead51d7ce6d3cc72/src/utils/memoryRecallGate.ts)
   提供有界关注条件的比较；本片使用明确的原生来源/目标关联，不复制词法阈值。
 - [YuriOS DreamConsolidator 固定源码](https://github.com/yuri-os/YuriOS/blob/cd4d1f16ae095f0f694dbbe7b1aac8e33db25367/yurios/mind/dream.py)
-  区分已结束日及原始经历。本片保留证据发生时间；夜间阶段与虚构 REM 属于后续片。
+  区分已结束日及原始经历。本片保留证据发生时间；夜间阶段见下节，虚构 REM 仍属于后续片。
 
 `tests/test_memory_projections.py` 验证冷记忆仍可召回、只读无状态写入、重复选择/重新打开 DB 等价、
 原 Goal 状态转换、投递不确定性与 SENT 闭合、模拟/缺失执行证据、来源过期/撤回/上游失效和备份擦除重放。
 该接口尚未接入产品页面；完整 HTTP + 独立 worker 合成验收在共享入口接线后由集成负责人执行。
+
+## N1–N3 与实际温记忆接续
+
+夜间阶段使用同一批原事件和已有 Episode，不建立温记忆副本。
+N2 只编码尚未被完整有效情景覆盖的来源，保留原摘要；N2 先发生时不更改
+`memory_processed`，后续提取复用已覆盖来源并只为新增来源创建情景。
+这些情景立即由原 `MemoryContext.continuation` 提供给有权限的上下文接续。
+N3 经提取和冲突复核提交的事实仍走原 FTS5+BGE，温度不屏蔽较早的有效事实。
+持久单步、共享检查点、预算与擦除合同见 [夜间整合](../design-v0.5/consolidation.md)。

@@ -280,6 +280,10 @@ class ReflectionService:
                 "reflection",
                 self.clock,
             )
+            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                                   (request_id,))
+            if not usage or usage["state"] != "SETTLED":
+                raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = ReflectionDraft.model_validate_json(response.text)
             if len(draft.suggestions) > self.settings.reflection_daily_max_suggestions:
                 raise CoreError("REFLECTION_TOO_MANY_SUGGESTIONS", 400)

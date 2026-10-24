@@ -24,10 +24,10 @@ def use_core(core, monkeypatch):
 
     monkeypatch.setattr(__main__.httpx, "AsyncClient", lambda **_: NoNetworkClient())
 
-    async def stop(_seconds):
+    async def stop(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(asyncio, "sleep", stop)
+    monkeypatch.setattr(__main__.Wakeup, "wait", stop)
 
 
 def test_chat_worker_never_runs_background_extraction(core, monkeypatch):
@@ -46,7 +46,7 @@ def test_chat_worker_never_runs_background_extraction(core, monkeypatch):
     monkeypatch.setattr(core, "extract_once", extract)
     with pytest.raises(asyncio.CancelledError):
         run(__main__.worker(core.settings))
-    assert calls == ["chat"]
+    assert calls and set(calls) == {"chat"}
 
 
 def test_chat_restart_does_not_reclassify_another_workers_reserved_request(core, monkeypatch):

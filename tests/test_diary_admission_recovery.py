@@ -97,8 +97,8 @@ def test_diary_admission_refusal_defers_without_losing_attempts_or_replaying_unk
             original = core.diary.repo.claim
             competing = []
 
-            def claim_then_compete(worker_id):
-                claimed = original(worker_id)
+            def claim_then_compete(worker_id, **kwargs):
+                claimed = original(worker_id, **kwargs)
                 if claimed:
                     request = budget.reserve(
                         core.store,

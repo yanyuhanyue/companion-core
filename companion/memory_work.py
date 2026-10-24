@@ -1,0 +1,510 @@
+"""Native memory extraction/review with one durable shared checkpoint.
+
+Core's batch entry and Nightly's single-admission entry share these operations.
+The original runtime_meta owns pending work; a nightly run records only native
+references in steps_json. Both use the original leases, facts and erasure closure.
+"""
+
+import json
+from contextlib import nullcontext
+from datetime import date, datetime
+
+from companion import budget, live_text, private_life, reply_revision
+from companion.contracts import Candidate, CoreError, Extraction, MemoryReview
+from companion.diary import day_bounds
+from companion.model import EXTRACT_RULES, REVIEW_RULES
+from companion.privacy import epoch
+from companion.store import after, encode, uid
+from companion.worker_schedule import UnitResult
+
+CHECKPOINT_KEY = "memory_extraction_checkpoint"
+TERMINAL_PHASES = {"COMPLETE", "SKIPPED", "FAILED", "UNKNOWN", "CANCELLED"}
+
+
+def checkpoint_state(store):
+    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+    return json.loads(row["value"]) if row else None
+
+
+def erase_memory_work(store, event_ids):
+    """Registered native erasure/replay cleanup; never touches accounting or leases."""
+    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+    if not row:
+        return
+    try:
+        record = json.loads(row["value"])
+        ids = set(record.get("source_event_ids", [])) | set(record["batch"].get("event_ids", []))
+        affected = bool(ids & set(event_ids))
+    except (ValueError, TypeError, KeyError, AttributeError):
+        affected = True  # An uninterpretable derived payload cannot prove independence.
+    if affected:
+        store.execute("DELETE FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+
+
+def _settled(store, request_id):
+    usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+    if not usage or usage["state"] != "SETTLED":
+        raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
+
+
+async def prepare_memories(
+    self, candidates, confirmed=False, job_id=None, logical_request_id=None, request_id=None
+):
+    """Plan semantic matches without holding a SQLite transaction across model I/O."""
+    if private_life.strict(self.store, self.settings):
+        raise CoreError("LIVE_TEXT_MEMORY_READ_ONLY", 403)
+    s, cfg = self.store, self.settings
+    candidates = [
+        candidate
+        for candidate in candidates
+        if self.memory.validate_candidate(candidate, confirmed, now=self.clock()) is not None
+    ]
+    if not candidates:
+        return [], []
+    job = s.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)) if job_id else None
+    if job:
+        reply_revision.remember_sources(s, job, {row.evidence_event_id for row in candidates})
+    existing = {}
+    candidate_proof = self.memory_context.pin(
+        self.clock(), event_ids={row.evidence_event_id for row in candidates},
+    )
+
+    def check_candidates():
+        if job:
+            reply_revision.check_job(s, job)
+        self.memory_context.revalidate(candidate_proof, self.clock())
+
+    for candidate in candidates:
+        for row in await self.memory.search_async(
+            candidate.content, subjects=[candidate.subject], limit=6, now=self.clock(),
+            source_check=check_candidates, clock=self.clock,
+        ):
+            existing[row["memory_id"]] = row
+    catalog = {f"m{i}": row for i, row in enumerate(existing.values())}
+    if len(candidates) == 1:
+        same = next(
+            (row for row in catalog.values() if row["content"] == candidates[0].content), None
+        )
+        if same or not catalog:
+            return candidates, [{"same": same["memory_id"] if same else None, "conflicts": []}]
+    payload = {
+        "existing": [
+            {"ref": ref, "subject": row["subject"], "content": row["content"]}
+            for ref, row in catalog.items()
+        ],
+        "candidates": [
+            {"ref": f"c{i}", "subject": row.subject, "content": row.content}
+            for i, row in enumerate(candidates)
+        ],
+    }
+    messages = [
+        {"role": "system", "content": REVIEW_RULES},
+        {"role": "user", "content": encode(payload)},
+    ]
+    proof = self.memory_context.pin(self.clock(), rows=list(catalog.values()),
+                                    event_ids={row.evidence_event_id for row in candidates})
+    if job:
+        reply_revision.remember_sources(s, job, proof["source_event_ids"])
+    request_id = budget.reserve(
+        s,
+        cfg,
+        job_id,
+        "memory_review",
+        messages,
+        self.clock(),
+        logical_request_id=logical_request_id, request_id=request_id,
+        clock=self.clock,
+    )
+    response = await budget.complete(
+        self.model,
+        self.store,
+        self.settings,
+        request_id,
+        messages,
+        "memory_review",
+        self.clock,
+        source_check=lambda: self.memory_context.revalidate(proof, self.clock()),
+    )
+    _settled(s, request_id)
+    # Preserve the existing write-reconciliation failure contract. A real input
+    # recall already cancelled the tracked job; a concurrent explicit forget
+    # remains PRIVACY_CHANGED and cannot commit the old review result.
+    self.memory_context.revalidate(proof, self.clock())
+    if job:
+        reply_revision.check_job(s, job)
+    validation_reason = "schema"
+    try:
+        review = MemoryReview.model_validate_json(response.text)
+        if len(review.relations) != len(candidates):
+            validation_reason = "relation_count"
+            raise ValueError("relation count mismatch")
+        resolutions = []
+        for i, relation in enumerate(review.relations):
+            refs = ([relation.same] if relation.same else []) + relation.conflicts
+            if len(refs) != len(set(refs)):
+                validation_reason = "duplicate_relation"
+                raise ValueError("duplicate relation")
+            allowed = {
+                **catalog,
+                **{f"c{j}": {"subject": candidates[j].subject} for j in range(i)},
+            }
+            if any(
+                ref not in allowed or allowed[ref]["subject"] != candidates[i].subject
+                for ref in refs
+            ):
+                validation_reason = "invalid_reference"
+                raise ValueError("invalid memory reference")
+
+            def resolve(ref):
+                return catalog[ref]["memory_id"] if ref in catalog else ref
+
+            resolutions.append(
+                {
+                    "same": resolve(relation.same) if relation.same else None,
+                    "conflicts": [resolve(ref) for ref in relation.conflicts],
+                }
+            )
+        return candidates, resolutions
+    except ValueError as error:
+        s.audit(
+            "memory.review_invalid",
+            request_id,
+            "memory",
+            self.clock(),
+            reason=validation_reason,
+        )
+        raise CoreError("MEMORY_REVIEW_INVALID", 502) from error
+
+
+def extraction_sources(core, local_day):
+    """The original bounded native eligibility query, shared by both entrypoints."""
+    cfg, now = core.settings, core.clock()
+    day_filter = " AND e.occurred_at>=? AND e.occurred_at<? " if local_day else ""
+    bounds = day_bounds(local_day, cfg.timezone) if local_day else ()
+    return core.store.rows(
+        "SELECT e.* FROM events e JOIN jobs j ON j.event_id=e.event_id "
+        "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
+        "AND e.source='qq.onebot' AND j.kind='chat' "
+        "AND (j.state='SUCCEEDED' OR (j.state='CANCELLED' AND j.last_error_code=?)) "
+        "AND NOT EXISTS (SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id) "
+        "AND e.ingested_at>=? AND e.ingested_at<=? AND e.occurred_at<=? "
+        + day_filter + " ORDER BY e.rowid LIMIT 20",
+        (reply_revision.SUPERSEDED, after(now, -cfg.raw_event_retention_days * 86400),
+         after(now, -cfg.extraction_idle_seconds), now, *bounds),
+    )
+
+
+def _input_deadline(core, local_day):
+    events = core.store.rows(
+        "SELECT e.ingested_at,e.occurred_at FROM events e JOIN jobs j USING(event_id) "
+        "WHERE e.memory_processed=0 AND e.redacted=0 AND e.actor_id='owner' "
+        "AND e.source='qq.onebot' AND j.kind='chat' AND (j.state='SUCCEEDED' OR "
+        "(j.state='CANCELLED' AND j.last_error_code=?)) AND e.ingested_at>? "
+        "ORDER BY e.ingested_at LIMIT 20",
+        (reply_revision.SUPERSEDED, after(core.clock(), -core.settings.extraction_idle_seconds)),
+    )
+    bounds = day_bounds(local_day, core.settings.timezone) if local_day else None
+    times = [after(event["ingested_at"], core.settings.extraction_idle_seconds) for event in events
+             if bounds is None or bounds[0] <= event["occurred_at"] < bounds[1]]
+    return datetime.fromisoformat(min(times)) if times else None
+
+
+async def extract_step(core, local_day=None, *, on_checkpoint=None):
+    """One shared persistent batch for standalone and natural-day extraction.
+
+    The existing global native lease serializes a phase; runtime_meta carries the
+    source-linked checkpoint across phases. The optional callback only joins a
+    natural-day coordinator checkpoint to the same transaction, never owns a copy.
+    """
+    if private_life.strict(core.store, core.settings) or (
+        not core.settings.memory_enabled or not core.settings.pricing_known
+    ):
+        return UnitResult(False)
+    from companion.erasure import cleanup_contracts
+
+    if not any(contract.name == "memory-work" for contract in cleanup_contracts()):
+        raise CoreError("MEMORY_ERASURE_CONTRACT_REQUIRED", 503)
+    s, now = core.store, core.clock()
+    lease = encode({"token": uid("memory_lease"),
+                    "until": after(now, core.settings.lease_seconds)})
+    with s.transaction():
+        if private_life.enabled(core.settings):
+            live_text.guard(s, core.settings, core.clock)
+            if (private_life.busy(s, now)
+                or private_life.owner_waiting(s, core.settings, now)):
+                return UnitResult(False)
+        old = s.one("SELECT value FROM runtime_meta WHERE key='memory_extraction_lease'")
+        if old and json.loads(old["value"])["until"] > now:
+            return UnitResult(False, datetime.fromisoformat(json.loads(old["value"])["until"]))
+        row = s.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+        record = json.loads(row["value"]) if row else None
+        expected = row["value"] if row else None
+        if record and record["batch"].get("phase") not in TERMINAL_PHASES:
+            if record["timezone"] != core.settings.timezone:
+                batch = record["batch"]
+                usage = s.one("SELECT state FROM model_usage WHERE request_id=?",
+                              (batch.get("request_id"),))
+                unknown = usage and usage["state"] in {"RESERVED", "UNKNOWN"}
+                batch.update(phase="UNKNOWN" if unknown else "CANCELLED",
+                             error="MEMORY_TIMEZONE_CHANGED")
+                if unknown:
+                    s.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? "
+                              "AND state='RESERVED'", (batch["request_id"],))
+                    for key in batch.get("event_ids", []):
+                        s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (key,))
+                batch.pop("candidates", None)
+                batch.pop("proof", None)
+                record["next_attempt_at"] = None
+                s.execute("UPDATE runtime_meta SET value=? WHERE key=?",
+                          (encode(record), CHECKPOINT_KEY))
+                return UnitResult(True)
+            if local_day is not None and record["local_day"] != local_day.isoformat():
+                return UnitResult(False, datetime.fromisoformat(after(now, 60)))
+            due = record.get("next_attempt_at")
+            if due and due > now:
+                return UnitResult(False, datetime.fromisoformat(due))
+        else:
+            if len(extraction_sources(core, local_day)) < core.settings.extraction_min_events:
+                return UnitResult(False, _input_deadline(core, local_day))
+            record = {"batch_id": uid("memory_batch"), "timezone": core.settings.timezone,
+                      "local_day": local_day.isoformat() if local_day else None,
+                      "batch": {}, "source_event_ids": [], "next_attempt_at": None}
+            expected = encode(record)
+            s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                      (CHECKPOINT_KEY, expected))
+        if old:
+            s.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED' AND job_id "
+                      "IS NULL AND scenario IN ('memory_extract','memory_review')")
+        s.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('memory_extraction_lease',?)",
+                  (lease,))
+
+    def persist():
+        nonlocal expected
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            current = s.one("SELECT value FROM runtime_meta WHERE key=?", (CHECKPOINT_KEY,))
+            if not current or current["value"] != expected:
+                raise CoreError("PRIVACY_CHANGED", 409)
+            batch = record["batch"]
+            record["source_event_ids"] = sorted(set(record["source_event_ids"])
+                | set(batch.get("event_ids", []))
+                | set(batch.get("proof", {}).get("source_event_ids", [])))
+            if batch.get("phase") in TERMINAL_PHASES:
+                if batch["phase"] in {"FAILED", "UNKNOWN"}:
+                    # A terminal failed/uncertain batch is exhausted work, not a fact.
+                    # Its usage remains charged; neither lane may silently replay it.
+                    for key in batch.get("event_ids", []):
+                        s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (key,))
+                batch.pop("candidates", None)
+                batch.pop("proof", None)
+                if batch.get("request_id") and not s.one(
+                    "SELECT 1 FROM model_usage WHERE request_id=?", (batch["request_id"],),
+                ):
+                    batch.pop("request_id", None)
+            value = encode(record)
+            s.execute("UPDATE runtime_meta SET value=? WHERE key=?", (value, CHECKPOINT_KEY))
+            if on_checkpoint:
+                on_checkpoint(record)
+            expected = value
+    try:
+        target_day = date.fromisoformat(record["local_day"]) if record["local_day"] else None
+        result = await extraction_step(core, target_day, lease, record["batch"], persist)
+        if not result.progressed and record["batch"].get("phase") not in TERMINAL_PHASES:
+            record["next_attempt_at"] = after(core.clock(), 60)
+            persist()
+            return UnitResult(False, datetime.fromisoformat(record["next_attempt_at"]))
+        record["next_attempt_at"] = None
+        persist()
+        return UnitResult(True) if record["batch"].get("phase") in TERMINAL_PHASES else result
+    except CoreError as error:
+        if error.code not in {"PRIVACY_CHANGED", "MEMORY_STALE_LEASE", "ERASURE_REPLAY_REQUIRED"}:
+            raise
+        if error.code == "PRIVACY_CHANGED":
+            s.execute("DELETE FROM runtime_meta WHERE key=? AND value=?",
+                      (CHECKPOINT_KEY, expected))
+        return UnitResult(False)
+    finally:
+        s.execute("DELETE FROM runtime_meta WHERE key='memory_extraction_lease' AND value=?",
+                  (lease,))
+
+
+async def extract_once(core, local_day=None):
+    """Batch convenience over the same persistent single-admission implementation."""
+    for _ in range(3):
+        try:
+            result = await extract_step(core, local_day)
+        except CoreError as error:
+            if error.code in {"PRIVACY_CHANGED", "MEMORY_STALE_LEASE", "ERASURE_REPLAY_REQUIRED"}:
+                return False
+            raise
+        if not result.progressed:
+            return False
+        record = checkpoint_state(core.store)
+        if record and record["batch"].get("phase") in TERMINAL_PHASES:
+            return record["batch"]["phase"] == "COMPLETE"
+    return False
+
+
+def _validate_batch(core, lease, batch):
+    if not core._owns_memory_lease(lease):
+        raise CoreError("MEMORY_STALE_LEASE", 409)
+    if (private_life.enabled(core.settings)
+        and private_life.owner_waiting(core.store, core.settings, core.clock())):
+        raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
+    core.memory_context.revalidate(batch["proof"], core.clock())
+    if batch.get("phase_epoch") != epoch(core.store):
+        raise CoreError("PRIVACY_CHANGED", 409)
+
+
+def _recover_phase(core, batch, persist):
+    """Unknown admissions stop; settled lost output uses the original bounded retry."""
+    request_id = batch.get("request_id")
+    usage = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+    if usage is None:
+        # Intent persisted before reserve: no reservation means no dispatched call.
+        batch["phase"] = "REVIEW" if batch["phase"] == "REVIEWING" else "EXTRACT"
+        batch.pop("request_id", None)
+    elif usage["state"] == "SETTLED":
+        previous = "REVIEW" if batch["phase"] == "REVIEWING" else "EXTRACT"
+        if previous == "REVIEW":
+            batch["review_attempts"] = batch.get("review_attempts", 0) + 1
+            attempts = batch["review_attempts"]
+        else:
+            row = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                 (batch["attempt_key"],))
+            attempts = int(row["value"]) if row else 0
+        batch["phase"] = "FAILED" if attempts >= core.settings.max_attempts else previous
+        batch["error"] = "MEMORY_RESULT_NOT_CHECKPOINTED"
+        if batch["phase"] == "FAILED":
+            batch.pop("candidates", None)
+        else:
+            batch.pop("request_id", None)
+    else:
+        if usage["state"] == "RESERVED":
+            core.store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE request_id=? "
+                               "AND state='RESERVED'", (request_id,))
+        batch["phase"] = "UNKNOWN" if usage["state"] in {"UNKNOWN", "RESERVED"} else "FAILED"
+        batch["error"] = "MEMORY_RESULT_NOT_CHECKPOINTED"
+        batch.pop("candidates", None)
+    persist()
+    return UnitResult(True)
+
+
+async def extraction_step(core, local_day, lease, batch, persist):
+    """One extraction admission OR one conflict-review admission and native commit."""
+    s, cfg, now = core.store, core.settings, core.clock()
+    if batch.get("phase") in {"EXTRACTING", "REVIEWING"}:
+        return _recover_phase(core, batch, persist)
+    if batch.get("phase") in {"COMPLETE", "SKIPPED", "FAILED", "UNKNOWN"}:
+        return UnitResult(False)
+    if not batch:
+        events = extraction_sources(core, local_day)
+        if len(events) < cfg.extraction_min_events:
+            batch["phase"] = "SKIPPED"
+            persist()
+            return UnitResult(True)
+        ids = [event["event_id"] for event in events]
+        batch.update(phase="EXTRACT", event_ids=ids, attempt_key="extract_attempts:" + ids[0],
+                     proof=core.memory_context.pin(now, event_ids=set(ids)))
+    events = [s.one("SELECT * FROM events WHERE event_id=?", (key,)) for key in batch["event_ids"]]
+    request_id = None
+    attempts = s.one("SELECT value FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
+    attempts = int(attempts["value"]) if attempts else 0
+    previous_phase = batch["phase"]
+    batch["phase_epoch"] = epoch(s)
+    try:
+        _validate_batch(core, lease, batch)
+        if any(event is None for event in events):
+            raise CoreError("PRIVACY_CHANGED", 409)
+        if all(event["memory_processed"] for event in events):
+            batch.update(phase="COMPLETE", independently_processed=True)
+            batch.pop("candidates", None)
+            persist()
+            return UnitResult(True)
+        # Persist a preallocated identity before any reservation or dispatch. The
+        # caller's source-linked run owns this intent even if the process dies.
+        request_id = uid("request")
+        batch.update(phase="EXTRACTING" if previous_phase == "EXTRACT" else "REVIEWING",
+                     request_id=request_id)
+        persist()
+        if previous_phase == "EXTRACT":
+            data = [{"event_id": event["event_id"],
+                     "text": json.loads(event["body_json"]).get("text", "")} for event in events]
+            messages = [{"role": "system", "content": EXTRACT_RULES},
+                        {"role": "user", "content": encode(data)}]
+            budget.reserve(s, cfg, None, "memory_extract", messages, now, request_id=request_id,
+                           logical_request_id=batch["attempt_key"], clock=core.clock)
+            attempts += 1
+            s.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                      (batch["attempt_key"], str(attempts)))
+            response = await budget.complete(
+                core.model, s, cfg, request_id, messages, "memory_extract", core.clock,
+                source_check=lambda: _validate_batch(core, lease, batch),
+            )
+            _settled(s, request_id)
+            extraction = Extraction.model_validate_json(response.text)
+            _validate_batch(core, lease, batch)
+            candidates = []
+            for candidate in extraction.memories:
+                if candidate.evidence_event_id not in batch["event_ids"]:
+                    continue
+                try:
+                    if core.memory.validate_candidate(candidate, now=core.clock()) is not None:
+                        candidates.append(candidate.model_dump(mode="json"))
+                except CoreError:
+                    s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory", now)
+            batch.update(phase="REVIEW", candidates=candidates,
+                         extraction_request_id=request_id)
+            batch.pop("request_id", None)
+            persist()
+            return UnitResult(True)
+        candidates = [Candidate.model_validate(value) for value in batch["candidates"]]
+        candidates, resolutions = await prepare_memories(
+            core, candidates, logical_request_id=batch["attempt_key"], request_id=request_id,
+        )
+        with s.transaction():
+            _validate_batch(core, lease, batch)
+            at = core.clock()
+            memory_ids = core.add_memories(candidates, resolutions, at)
+            episode_ids = []
+            for conv_id in dict.fromkeys(event["conversation_id"] for event in events):
+                episode_id = core.memory.episodes(
+                    [event for event in events if event["conversation_id"] == conv_id], at,
+                )
+                if episode_id:
+                    episode_ids.append(episode_id)
+            s.execute("DELETE FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
+            batch.update(phase="COMPLETE", committed=True, memory_ids=memory_ids,
+                         episode_ids=episode_ids)
+            batch.pop("candidates", None)
+            batch.pop("proof", None)
+            persist()
+        return UnitResult(True)
+    except Exception as error:
+        code = error.code if isinstance(error, CoreError) else "MEMORY_INVALID_OUTPUT"
+        if code in {"PRIVACY_CHANGED", "MEMORY_STALE_LEASE", "ERASURE_REPLAY_REQUIRED"}:
+            raise
+        usage = s.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        if previous_phase == "REVIEW" and usage:
+            batch["review_attempts"] = batch.get("review_attempts", 0) + 1
+        unknown = usage and usage["state"] in {"RESERVED", "UNKNOWN"}
+        blocked = code in {"BACKGROUND_YIELD_TO_CHAT", "DAILY_BUDGET_EXHAUSTED",
+                           "MONTHLY_BUDGET_EXHAUSTED", "UNKNOWN_PRICING"}
+        with s.transaction():
+            if unknown:
+                batch.update(phase="UNKNOWN", error=code)
+                batch.pop("candidates", None)
+            elif not blocked and max(attempts, batch.get("review_attempts", 0)) >= cfg.max_attempts:
+                for event in events:
+                    s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?",
+                              (event["event_id"],))
+                s.execute("DELETE FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
+                batch.update(phase="FAILED", error=code)
+                batch.pop("candidates", None)
+            else:
+                batch.update(phase=previous_phase, error=code)
+                batch.pop("request_id", None)
+            if not blocked:
+                s.audit("memory.batch_failed", events[0]["event_id"], "memory", now,
+                        attempts=attempts)
+            persist()
+        return UnitResult(False)

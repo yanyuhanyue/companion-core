@@ -601,13 +601,42 @@ class Memory:
             advance_epoch(s)
             return {"memory_id": new_id, "state": "CONFIRMED", "supersedes": memory_id}
 
-    def episodes(self, events, now):
+    def episodes(self, events, now, *, mark_processed=True):
         """Encode one bounded extraction batch atomically and idempotently."""
         s = self.store
         with nullcontext() if s.db.in_transaction else s.transaction():
-            return self._encode_episode(events, now)
+            return self._encode_episode(events, now, mark_processed=mark_processed)
 
-    def _encode_episode(self, events, now):
+    def episode_coverage(self, event_ids, now):
+        """Reuse only complete, still-private native episodes; never trust old summary text."""
+        version = read_version(self)
+        if not 1 <= len(event_ids) <= 20:
+            raise CoreError("INVALID_EPISODE_SOURCES", 400)
+        rows = self.store.rows(
+            "SELECT DISTINCT ep.episode_id,ep.conversation_id FROM episodes ep "
+            "JOIN episode_events ee USING(episode_id) WHERE ep.status='ACTIVE' "
+            "AND ep.privacy_scope='private' AND ee.event_id IN "
+            "(SELECT value FROM json_each(?)) ORDER BY ep.episode_id LIMIT 101",
+            (encode(sorted(set(event_ids))),),
+        )
+        if len(rows) > 100:
+            raise CoreError("EPISODE_COVERAGE_LIMIT", 409)
+        sources, result = MemorySources(self, now), []
+        for row in rows:
+            ids = [link["event_id"] for link in self.store.rows(
+                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id LIMIT 21",
+                (row["episode_id"],),
+            )]
+            if not 1 <= len(ids) <= 20:
+                continue
+            evidence = [sources.event(key, require_text=False) for key in ids]
+            if all(event is not None and event["conversation_id"] == row["conversation_id"]
+                   for event in evidence):
+                result.append({"episode_id": row["episode_id"], "source_event_ids": ids})
+        check_version(self, version)
+        return result
+
+    def _encode_episode(self, events, now, *, mark_processed=True):
         s = self.store
         version = read_version(self)
         if not 1 <= len(events) <= 20 or len({e["event_id"] for e in events}) != len(events):
@@ -633,8 +662,10 @@ class Memory:
         # An authentic image/voice/file with no owner text has no extractive summary.
         # Complete it in the same batch transaction; it must not roll back sibling facts
         # or become a permanently retried extraction job. It is not positive text evidence.
-        for event in events:
-            s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (event["event_id"],))
+        if mark_processed:
+            for event in events:
+                s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?",
+                          (event["event_id"],))
         events = [event for event in events if json.loads(event["body_json"])["text"].strip()]
         if not events:
             check_version(self, version)
@@ -645,6 +676,19 @@ class Memory:
         if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
             check_version(self, version)
             return episode_id
+        covered = {key for row in self.episode_coverage([e["event_id"] for e in events], now)
+                   for key in row["source_event_ids"]}
+        if covered:
+            events = [event for event in events if event["event_id"] not in covered]
+            if not events:
+                check_version(self, version)
+                return None
+            episode_id = "episode_" + hashlib.sha256(encode(
+                sorted(e["event_id"] for e in events),
+            ).encode()).hexdigest()[:32]
+            if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
+                check_version(self, version)
+                return episode_id
         excerpts = [json.loads(e["body_json"]).get("text", "")[:100] for e in events]
         summary = "资料摘录（不可信观察）：\n" + "\n".join(excerpts)
         s.insert(

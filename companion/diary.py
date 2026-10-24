@@ -455,7 +455,7 @@ class DiaryRepository:
             )
             return run_id
 
-    def claim(self, worker_id):
+    def claim(self, worker_id, *, run_id=None):
         s, now = self.store, self.clock()
         with s.transaction():
             if not self.enabled():
@@ -495,8 +495,8 @@ class DiaryRepository:
             row = s.one(
                 "SELECT * FROM diary_runs WHERE state IN ('PENDING','RETRY_WAIT') "
                 "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
-                "AND timezone=? ORDER BY local_date,created_at LIMIT 1",
-                (now, self.settings.timezone),
+                "AND timezone=? AND (? IS NULL OR run_id=?) ORDER BY local_date,created_at LIMIT 1",
+                (now, self.settings.timezone, run_id, run_id),
             )
             if not row:
                 return None
@@ -673,10 +673,10 @@ class DiaryService:
                 scheduled.append(result)
         return scheduled
 
-    async def generate_once(self, worker_id):
+    async def generate_once(self, worker_id, *, run_id=None):
         if not private_life.ready(self.store, self.settings, self.clock):
             return False
-        run = self.repo.claim(worker_id)
+        run = self.repo.claim(worker_id, run_id=run_id)
         if run is None:
             return False
         request_id = None
@@ -736,6 +736,10 @@ class DiaryService:
             response = await budget.complete(
                 self.model, self.store, self.settings, request_id, messages, "diary", self.clock
             )
+            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                                   (request_id,))
+            if not usage or usage["state"] != "SETTLED":
+                raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = DiaryDraft.model_validate_json(response.text)
             body = render_draft(draft, run["sources"], run["local_date"], self.settings)
             self.repo.finish(
