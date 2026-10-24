@@ -88,7 +88,8 @@ def _day(now, timezone):
 
 def _safe_text(value, settings):
     if (not value.strip() or redact(value, settings) != value
-        or any(ord(c) < 32 and c not in "\n\t" for c in value)
+        or any(ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+               or ord(c) < 32 and c not in "\n\t" for c in value)
         or any(identity in value for identity in (settings.owner_qq_id, settings.bot_qq_id))):
         raise CoreError("SOCIAL_PRIVATE_OR_INVALID_TEXT", 400)
     return value
