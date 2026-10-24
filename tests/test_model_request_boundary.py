@@ -124,7 +124,8 @@ def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutati
 
     run(scenario())
     assert received == []
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "SETTLED", "billed_micro_usd": 0}
 
 
 def test_scoped_clients_do_not_close_the_callers_transport_or_accumulate_hooks(core, tmp_path):
@@ -213,4 +214,5 @@ def test_final_sample_rechecks_paid_expiry_as_well_as_the_admission_lease(
     if boundary == "lease":
         assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
                               (job_id,))["lease_until"] > core.clock()
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "SETTLED", "billed_micro_usd": 0}

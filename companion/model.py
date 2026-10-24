@@ -72,14 +72,25 @@ class ModelAdmission:
         self.consumed = False
 
 
+class ModelDispatchRefused(CoreError):
+    """The controlled transport rejected this exact capability before its delegate."""
+
+    def __init__(self, error, admission):
+        super().__init__(error.code, error.status)
+        self.admission = admission
+
+
 class _AdmissionTransport(httpx.AsyncBaseTransport):
     """Borrow one client's transport after its hooks, without sharing hook mutations."""
 
-    def __init__(self, client, check):
-        self.client, self.check = client, check
+    def __init__(self, client, check, admission):
+        self.client, self.check, self.admission = client, check, admission
 
     async def handle_async_request(self, request):
-        await self.check(request)
+        try:
+            await self.check(request)
+        except CoreError as error:
+            raise ModelDispatchRefused(error, self.admission) from error
         return await self.client._transport_for_url(request.url).handle_async_request(request)
 
     async def aclose(self):
@@ -190,7 +201,7 @@ class ModelClient:
                 timeout=video.timeout_seconds if video else self.client.timeout,
                 follow_redirects=False, trust_env=False,
                 event_hooks={key: list(value) for key, value in self.client.event_hooks.items()},
-                transport=_AdmissionTransport(self.client, check),
+                transport=_AdmissionTransport(self.client, check, admission),
             ) as scoped:
                 request = scoped.build_request(
                     "POST", endpoint, headers={"Authorization": authorization}, json=payload,

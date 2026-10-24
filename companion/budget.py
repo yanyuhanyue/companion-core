@@ -795,7 +795,7 @@ def _check_measurement(settings, admission, messages, scenario, *, tools=()):
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
                    source_check=None, tools=()):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
-    from companion.model import ModelClient, ModelResponseError
+    from companion.model import ModelClient, ModelDispatchRefused, ModelResponseError
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
 
     response = None
@@ -809,8 +809,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         response = error.response
         raise
     except CoreError as error:
-        if (error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED}
-            and isinstance(model, ModelClient) and settings.mode == "live"):
+        known_not_sent = (isinstance(error, ModelDispatchRefused)
+                          and error.admission is dispatch.get("admission"))
+        if (isinstance(model, ModelClient) and (known_not_sent or settings.mode == "live"
+            and error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED})):
             _settle_unstarted_reply(store, request_id, dispatch, error.code, clock())
         raise
     finally:
@@ -1040,6 +1042,8 @@ async def _dispatch(
                 # this hook; no await separates the final proof from that handoff.
                 dispatch["dispatched"] = True
         admission = ModelAdmission(row["payload_sha256"], before_dispatch)
+        if dispatch is not None:
+            dispatch["admission"] = admission
     if isinstance(model, ModelClient):
         return await model.complete(messages, scenario, admission=admission,
                                     **({"tools": tools} if tools else {}))
