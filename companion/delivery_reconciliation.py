@@ -4,6 +4,8 @@ The Bridge proves that its old I/O process has stopped. This service records the
 owner's separate decision, never a provider acknowledgement or a new send.
 """
 
+import hashlib
+import hmac
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -160,13 +162,17 @@ def _voice_binding(store, proof, history, row, content_hash):
     value = _meta(store, "voice_reply:" + row["message_id"])
     given = proof.get("voice_check")
     if given is None:
-        if value and value.get("binding"):
+        if value and (value.get("binding") or value.get("retired")):
             raise ValueError("original voice send check missing")
         return
-    given = wire.validate_voice_check(given)
+    legacy_proof = bool(value and value.get("retired", {}).get("kind") == "legacy_signature")
+    given = wire.validate_voice_check(given, allow_legacy=legacy_proof)
     if not value or value.get("state") not in {"AUDIO", "FENCED"}:
         raise ValueError("original voice binding missing")
+    if value.get("retired"):
+        return _retired_voice_binding(store, value, given, proof, history, row)
     binding = VoiceDeliveryBinding.model_validate(value["binding"]).model_dump(mode="json")
+    fields = wire.VOICE_CHECK_FIELDS
     job = store.one("SELECT * FROM voice_jobs WHERE job_id=?", (given["job_id"],))
     approval = history["approval"]
     if (not job or job["operation"] != "tts"
@@ -176,7 +182,7 @@ def _voice_binding(store, proof, history, row, content_hash):
         or value.get("job_id") != job["job_id"]
         or value.get("binding_sha256") != wire.digest(binding)
         or given["binding_sha256"] != wire.digest(binding)
-        or any(given[k] != binding[k] for k in wire.VOICE_CHECK_FIELDS - {"binding_sha256"})
+        or any(given[k] != binding[k] for k in fields - {"binding_sha256"})
         or any(binding[k] != v for k, v in {
             "message_id": row["message_id"], "delivery_key": row["delivery_key"],
             "event_id": proof["event_id"], "window_sha256": proof["plan_sha256"],
@@ -197,6 +203,37 @@ def _voice_binding(store, proof, history, row, content_hash):
         }.items())
         or wire.timestamp(job["result_expires_at"]) != wire.timestamp(binding["expires_at"])):
         raise ValueError("original voice delivery changed")
+
+
+def _retired_voice_binding(store, value, given, proof, history, row):
+    retired = value["retired"]
+    required = {"kind", "verifier", "job_id", "generation", "message_id", "event_id",
+                "delivery_key", "window_sha256", "voice_policy_sha256", "reply_revision"}
+    if (not isinstance(retired, dict) or set(retired) != required
+        or retired["job_id"] != given["job_id"] or retired["generation"] != given["generation"]
+        or value.get("job_id") != retired["job_id"]
+        or any(retired[k] != v for k, v in {
+            "message_id": row["message_id"], "event_id": proof["event_id"],
+            "delivery_key": row["delivery_key"], "window_sha256": proof["plan_sha256"],
+            "reply_revision": proof["reply_revision"],
+            "voice_policy_sha256": history["approval"].get("voice_policy_sha256"),
+        }.items()) or history["approval"].get("voice_scope") != "owner_voice_v1"):
+        raise ValueError("retired voice identity changed")
+    job = store.one(
+        "SELECT job_id,generation,message_id,event_id,operation FROM voice_jobs WHERE job_id=?",
+        (retired["job_id"],),
+    )
+    if (not job or job["operation"] != "tts" or any(job[k] != retired[k]
+            for k in ("job_id", "generation", "message_id", "event_id"))):
+        raise ValueError("retired voice job changed")
+    if retired["kind"] == "capability" and "retirement_token" in given:
+        material = given["retirement_token"].encode()
+    elif retired["kind"] == "legacy_signature" and "retirement_token" not in given:
+        material = bytes.fromhex(proof["signature"])
+    else:
+        raise ValueError("retired voice proof kind changed")
+    if not hmac.compare_digest(retired["verifier"], hashlib.sha256(material).hexdigest()):
+        raise ValueError("retired voice proof changed")
 
 
 def _account_binding(store, proof, history, row, authority, recorded):

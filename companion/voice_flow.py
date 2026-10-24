@@ -1,6 +1,7 @@
 """Voice choices attached to native Outbox rows and current dialogue input only."""
 
 import json
+import secrets
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
@@ -218,6 +219,7 @@ class VoiceFlow:
         ):
             raise CoreError("VOICE_DELIVERY_FENCED", 409)
         binding = voice_protocol.VoiceDeliveryBinding(
+            retirement_token=secrets.token_urlsafe(32),
             job_id=job_id,
             generation=row["generation"],
             message_id=outbox["message_id"],

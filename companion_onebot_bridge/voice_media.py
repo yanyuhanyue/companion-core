@@ -405,10 +405,13 @@ def prepare_delivery(item, config, *, plan_sha256, voice_policy_sha256, now):
               "result_sha256", "audio_sha256"}
     _fields(binding, hashes | {"schema_version", "job_id", "generation", "message_id",
         "delivery_key", "event_id", "privacy_epoch", "reply_revision", "node_id",
-        "audio_bytes", "expires_at"})
+        "audio_bytes", "expires_at", "retirement_token"})
     for key in hashes:
         _sha(binding[key])
-    for key, low, high in (("schema_version", 1, 1), ("generation", 1, 2**63 - 1),
+    if not isinstance(binding["retirement_token"], str) or not re.fullmatch(
+        r"[a-zA-Z0-9_-]{32,256}", binding["retirement_token"]):
+        raise ValueError("VOICE_BINDING_INVALID")
+    for key, low, high in (("schema_version", 2, 2), ("generation", 1, 2**63 - 1),
                            ("privacy_epoch", 0, 2**63 - 1), ("reply_revision", 0, 2**63 - 1),
                            ("audio_bytes", 44, 4_000_000)):
         _integer(binding[key], low, high)

@@ -6,6 +6,7 @@ import os
 import ssl
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,7 +18,12 @@ from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from companion.store import encode
 from companion.voice_config import VoiceNode, VoiceReplyPolicy
-from companion.voice_protocol import VoiceControlRequest, VoiceProtocolError, digest
+from companion.voice_protocol import (
+    VoiceControlRequest,
+    VoiceProtocolError,
+    VoiceStopRequest,
+    digest,
+)
 from companion_onebot_bridge import continuous
 from companion_onebot_bridge.network import private_http_client
 from companion_voice_node.state import NodeState
@@ -26,6 +32,7 @@ from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_
 from tests.conftest import run
 from tests.test_onebot_capture import capture_approval, real_core_http, source_window
 from tests.test_onebot_direct import raw_event
+from tests.test_owner_recall_bridge_media import advance_clock
 from tests.test_private_companion import companion_options
 from tests.test_voice_jobs import voice_config
 from tests.test_voice_node_api import independent_node, tls_core
@@ -49,22 +56,22 @@ class CancelCore(FakeCore):
                 if self.claimed == self.cancel_at:
                     self.controls.append(body)
                     return httpx.Response(200, json={"action": "CANCEL"})
-            if body.phase == "CANCELLED":
-                self.terminal_controls.append(body)
-                for child in self.children:
-                    assert process_has_exited(child.process.pid, child.identity) or (
-                        self.allow_running and body.resource_state == "QUARANTINED")
-                if self.terminal_continue:
-                    return httpx.Response(200, json={"action": "CONTINUE",
-                        "renewed_lease": self.lease(body.ref.manifest_sha256)})
-                if self.loss == "before":
-                    self.loss = None
-                    raise httpx.ReadError("synthetic lost control request")
-                response = super().__call__(request)
-                if self.loss == "after":
-                    self.loss = None
-                    raise httpx.ReadError("synthetic lost control acknowledgment")
-                return response
+        if request.url.path.endswith("/stop"):
+            body = VoiceStopRequest.model_validate_json(request.content)
+            self.terminal_controls.append(body)
+            for child in self.children:
+                assert process_has_exited(child.process.pid, child.identity) or (
+                    self.allow_running and body.resource_state == "QUARANTINED")
+            if self.terminal_continue:
+                return httpx.Response(200, json={"action": "CONTINUE"})
+            if self.loss == "before":
+                self.loss = None
+                raise httpx.ReadError("synthetic lost stop request")
+            response = super().__call__(request)
+            if self.loss == "after":
+                self.loss = None
+                raise httpx.ReadError("synthetic lost stop acknowledgment")
+            return response
         return super().__call__(request)
 
     def supervisor(self, workspace, temporary, *, counter):
@@ -117,7 +124,7 @@ def test_cancel_control_continue_is_not_a_terminal_acknowledgment(node):
     async def scenario():
         worker = VoiceNodeWorker(config, transport=httpx.MockTransport(remote),
             supervisor_factory=lambda *_: pytest.fail("cancelled claim cannot start a child"))
-        with pytest.raises(VoiceProtocolError, match="VOICE_CANCEL_ACK_REQUIRED"):
+        with pytest.raises(VoiceProtocolError, match="VOICE_CORE_RESPONSE_INVALID"):
             await worker.run(once=True)
         with NodeState(config.state_directory) as state:
             assert state.active_job()["phase"] == "CANCELLED"
@@ -191,6 +198,17 @@ async def node_finished(process):
     return value["outcome"]
 
 
+@asynccontextmanager
+async def advancing_clock(core):
+    stop = asyncio.Event()
+    task = asyncio.create_task(advance_clock(core, stop))
+    try:
+        yield
+    finally:
+        stop.set()
+        await task
+
+
 @pytest.mark.parametrize("loss", [None, "before", "after"])
 def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
     core, node, tmp_path, monkeypatch, loss,
@@ -220,7 +238,8 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
 
     async def scenario():
         processes = []
-        async with real_core_http(core) as port, source_window(core, tmp_path, source,
+        async with advancing_clock(core), real_core_http(core) as port, source_window(
+            core, tmp_path, source,
             live=True, approved=True, scope_options=scope,
             bridge_options={"core_url": f"http://127.0.0.1:{port}"}) as (
             window, _, protocol, handshakes, sends,
@@ -323,8 +342,8 @@ async def independent_cancel_node():
     class LostControl(httpx.AsyncHTTPTransport):
         async def handle_async_request(self, request):
             nonlocal loss
-            cancel = (request.url.path.endswith("/control")
-                      and json.loads(request.content).get("phase") == "CANCELLED")
+            cancel = (request.url.path.endswith("/stop")
+                      and json.loads(request.content).get("outcome") == "CANCELLED")
             if cancel and loss == "before":
                 loss = "none"
                 raise httpx.ReadError("synthetic cancel request lost", request=request)

@@ -58,6 +58,7 @@ CLOSURE_DELIVERY_FIELDS = {
 }
 VOICE_CHECK_FIELDS = {
     "binding_sha256", "job_id", "generation", "result_sha256", "audio_sha256", "audio_bytes",
+    "retirement_token",
 }
 
 
@@ -133,17 +134,22 @@ def validate_quiescence(value, *, signed=True):
     if voice:
         if account or value["payload_kind"] != "reply_sha256" or value["reply_revision"] is None:
             raise ValueError("DELIVERY_QUIESCENCE_INVALID")
-        validate_voice_check(value["voice_check"])
+        validate_voice_check(value["voice_check"], allow_legacy=True)
     return dict(value)
 
 
-def validate_voice_check(value):
-    """The six exact voice delivery check fields, without importing runtime services."""
-    if (not isinstance(value, dict) or set(value) != VOICE_CHECK_FIELDS
+def validate_voice_check(value, *, allow_legacy=False):
+    """Current checks plus historical signed v1 proofs; live callers require v2 equality."""
+    if (not isinstance(value, dict) or set(value) not in (
+            VOICE_CHECK_FIELDS, VOICE_CHECK_FIELDS - {"retirement_token"}
+            if allow_legacy else VOICE_CHECK_FIELDS)
         or not identifier(value["job_id"], r"voice_[a-f0-9]{32}")
         or type(value["generation"]) is not int or not 1 <= value["generation"] <= 2**63 - 1
         or type(value["audio_bytes"]) is not int or not 44 <= value["audio_bytes"] <= 4_000_000
-        or any(not hash_value(value[k]) for k in VOICE_CHECK_FIELDS if k.endswith("_sha256"))):
+        or any(not hash_value(value[k]) for k in VOICE_CHECK_FIELDS if k.endswith("_sha256"))
+        or "retirement_token" in value and not identifier(value["retirement_token"],
+                                                          r"[a-zA-Z0-9_-]{32,256}")):
+
         raise ValueError("DELIVERY_VOICE_CHECK_INVALID")
     return dict(value)
 

@@ -10,7 +10,6 @@ import socket
 import ssl
 import subprocess
 import sys
-import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -61,10 +60,12 @@ from tests.test_voice_node_worker import child_receipts, factory
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
 
-def claim_body():
+def claim_body(core):
+    session = VoiceJobs(core.store, core.settings, core.clock).session("local")
     return {
         "node_id": "local",
-        "request_id": "claim_" + uuid.uuid4().hex,
+        "incarnation": session.incarnation,
+        "sequence": session.last_sequence + 1,
         "manifest_sha256": "b" * 64,
         "resource_state": "READY",
     }
@@ -81,7 +82,7 @@ def app_for(core, *, boundary_only=False):
         register_voice_node_routes(app)
     else:
         app = create_app(core.settings)
-        assert any(route.path == ROUTE_PREFIX + "/claim" for route in app.routes)
+        assert ROUTE_PREFIX + "/claim" in app.openapi()["paths"]
     app.state.core = core
     return app
 
@@ -94,8 +95,11 @@ def test_api_auth_idempotency_path_and_result_receipt(core, monkeypatch):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app_for(core)), base_url="http://test"
         ) as client:
-            body = claim_body()
-            headers = {"Authorization": "Bearer " + TOKEN, "Idempotency-Key": body["request_id"]}
+            body = claim_body(core)
+            headers = {
+                "Authorization": "Bearer " + TOKEN,
+                "Idempotency-Key": f"voice-claim:{body['incarnation']}:{body['sequence']}",
+            }
             for token in (
                 "wrong-credential-" + "x" * 32,
                 core.settings.bridge_token.get_secret_value(),
@@ -106,7 +110,7 @@ def test_api_auth_idempotency_path_and_result_receipt(core, monkeypatch):
                     headers=headers | {"Authorization": "Bearer " + token},
                 )
                 assert response.status_code == 401
-            assert core.store.rows("SELECT * FROM voice_claims") == []
+            assert core.store.rows("SELECT * FROM voice_node_state") == []
             assert (
                 await client.post(
                     ROUTE_PREFIX + "/claim", json=body, headers={"Authorization": "Bearer " + TOKEN}
@@ -171,14 +175,17 @@ def test_voice_credential_cannot_alias_owner_bridge_or_admin(core, monkeypatch, 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app_for(core)), base_url="http://test"
         ) as client:
-            body = claim_body()
+            body = claim_body(core)
             response = await client.post(
                 ROUTE_PREFIX + "/claim",
                 json=body,
-                headers={"Authorization": "Bearer " + TOKEN, "Idempotency-Key": body["request_id"]},
+                headers={
+                    "Authorization": "Bearer " + TOKEN,
+                    "Idempotency-Key": f"voice-claim:{body['incarnation']}:{body['sequence']}",
+                },
             )
             assert response.status_code == 401
-            assert core.store.rows("SELECT * FROM voice_claims") == []
+            assert core.store.rows("SELECT * FROM voice_node_state") == []
 
     run(scenario())
 

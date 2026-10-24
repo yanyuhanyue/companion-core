@@ -1,7 +1,6 @@
 """A known pre-send failure reuses selected audio without another local inference."""
 
 import json
-import uuid
 from contextlib import closing
 from datetime import datetime
 
@@ -248,14 +247,24 @@ def test_real_http_retry_preserves_independent_node_result_and_paid_usage(
                         "error_code": "SYNTHETIC_BEFORE_SEND",
                     })
                     assert failed.status_code == 200 and failed.json()["state"] == "RETRY_WAIT"
-                    request_id = "claim_" + uuid.uuid4().hex
-                    idle = await client.post("/internal/v1/voice-node/claim", json={
-                        "node_id": "local", "request_id": request_id,
-                        "manifest_sha256": manifest_sha256, "resource_state": "READY",
-                    }, headers={
-                        "Authorization": "Bearer " + config.credential.get_secret_value(),
-                        "Idempotency-Key": request_id,
-                    })
+                    session = (await client.get("/internal/v2/voice-node/session", headers={
+                        "Authorization": "Bearer " + config.credential.get_secret_value()})).json()
+                    sequence = session["last_sequence"] + 1
+                    request_id = f"voice-claim:{session['incarnation']}:{sequence}"
+                    idle = await client.post(
+                        "/internal/v2/voice-node/claim",
+                        json={
+                            "node_id": "local",
+                            "incarnation": session["incarnation"],
+                            "sequence": sequence,
+                            "manifest_sha256": manifest_sha256,
+                            "resource_state": "READY",
+                        },
+                        headers={
+                            "Authorization": "Bearer " + config.credential.get_secret_value(),
+                            "Idempotency-Key": request_id,
+                        },
+                    )
                     assert idle.status_code == 200 and idle.json()["lease"] is None, idle.text
                     assert core.store.one("SELECT * FROM voice_jobs") == original
                     core.clock.advance(6)

@@ -56,6 +56,10 @@ print('standalone voice delivery contracts loaded')
 def lease_values(**changes):
     now = datetime.now(UTC)
     return {
+        "incarnation": "c" * 32,
+        "claim_sequence": 1,
+        "stop_token": "s" * 48,
+        "privacy_epoch": 0,
         "job_id": "voice_" + "a" * 32,
         "generation": 1,
         "node_id": "local-gpu",

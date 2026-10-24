@@ -5,11 +5,10 @@ import asyncio
 import base64
 import hashlib
 import importlib.metadata
+import json
 import math
-import shutil
 import sys
 import time
-import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -37,7 +36,11 @@ from companion.voice_protocol import (
     VoiceLeaseRef,
     VoicePayload,
     VoiceProtocolError,
+    VoiceRecovery,
     VoiceResultReceipt,
+    VoiceSession,
+    VoiceStopRequest,
+    VoiceStopResponse,
     canonical_bytes,
     digest,
     make_voice_result,
@@ -248,6 +251,7 @@ class VoiceNodeWorker:
                 "manifest_sha256",
                 "issued_at",
                 "job_deadline_at",
+                "incarnation", "claim_sequence", "stop_token", "privacy_epoch",
             )
             if any(getattr(lease, name) != getattr(previous, name) for name in fields) or (
                 lease.server_time < previous.server_time
@@ -265,7 +269,7 @@ class VoiceNodeWorker:
         return time.monotonic() + remaining
 
     async def _request(self, client, method, suffix, value, model, *, budget_seconds=None):
-        data = canonical_bytes(value)
+        data = canonical_bytes(value) if value is not None else b""
         if len(data) > MAX_RESULT_BODY_BYTES:
             raise VoiceProtocolError("VOICE_CORE_REQUEST_TOO_LARGE")
         headers = {"Content-Type": "application/json"}
@@ -282,6 +286,12 @@ class VoiceNodeWorker:
                     headers=headers,
                     content=data,
                 ) as response:
+                    if response.status_code in {409, 410}:
+                        error = json.loads(await self._read(response, 65536)).get("error")
+                        if error in {"VOICE_CLAIM_RETIRED", "VOICE_CLAIM_EPOCH_RETIRED",
+                                     "VOICE_NODE_RECOVERY_REQUIRED", "VOICE_CLAIM_SEQUENCE_GAP",
+                                     "VOICE_LEASE_RETIRED", "VOICE_UPGRADE_REQUIRED"}:
+                            raise VoiceProtocolError(error)
                     self._check_response(response, "application/json")
                     raw = await self._read(response, 65536)
             return model.model_validate_json(raw), time.monotonic() - started
@@ -405,29 +415,42 @@ class VoiceNodeWorker:
             else:
                 state.quarantine("VOICE_NODE_RESTARTED_DURING_EXECUTION")
         job = state.active_job()
+        if job and job["phase"] in {"CLAIMED", "CANCELLED"} and job["temp_json"]:
+            # A restart after prepare/spawn must not overwrite the exact ownership
+            # record or create another child while the first exit is unproven.
+            state.phase(state.stop_ref(job), "CANCELLED",
+                        error_code="VOICE_NODE_RESTARTED_BEFORE_DISPATCH")
+            job = state.active_job()
+            if not state.cleanup_receipt(job).temp_removed:
+                state.quarantine("VOICE_PROCESS_EXIT_UNCONFIRMED")
         if job and job["phase"] == "RUNNING":
             state.phase(
-                SignedVoiceLease.model_validate_json(job["lease_json"]),
+                state.stop_ref(job),
                 "UNKNOWN",
                 error_code="VOICE_NODE_RESTARTED_DURING_EXECUTION",
             )
 
     async def _claim(self, client, state):
-        request = state.pending_claim()
-        if request is None:
-            request = VoiceClaimRequest(
-                node_id=self.config.node_id,
-                request_id="claim_" + uuid.uuid4().hex,
-                manifest_sha256=self.manifest_sha256,
-                resource_state=state.resource()["state"],
-            )
-            state.save_claim(request)
+        session, _ = await self._request(client, "GET", "/session", None, VoiceSession)
+        state.bind_session(session)
+        request = state.next_claim(self.config.node_id, self.manifest_sha256)
         if (
             request.node_id != self.config.node_id
             or request.manifest_sha256 != self.manifest_sha256
         ):
             raise VoiceProtocolError("VOICE_PENDING_CONFIG_CHANGED")
-        response, rtt = await self._request(client, "POST", "/claim", request, VoiceClaimResponse)
+        try:
+            response, rtt = await self._request(
+                client, "POST", "/claim", request, VoiceClaimResponse,
+            )
+        except VoiceProtocolError as error:
+            if error.code == "VOICE_CLAIM_RETIRED" and state.active_job() is None:
+                state.clear_claim()
+                return None, 1
+            raise
+        if response.lease and (response.lease.incarnation != request.incarnation
+                               or response.lease.claim_sequence != request.sequence):
+            raise VoiceProtocolError("VOICE_CLAIM_REPLAY_MISMATCH")
         if response.lease is None:
             state.clear_claim()
             return None, response.retry_after_seconds
@@ -449,48 +472,74 @@ class VoiceNodeWorker:
             job = state.job(response.lease.job_id, response.lease.generation)
         return job, 1
 
+    async def _stop_cleanup(self, client, state, job):
+        ref = state.stop_ref(job)
+        for _ in range(2):  # An erasure epoch may have advanced since this lease was issued.
+            job = state.job(ref.job_id, ref.generation)
+            cleanup = state.cleanup_receipt(job)
+            body = VoiceStopRequest(ref=ref, resource_state=state.resource()["state"],
+                outcome=job["terminal_outcome"] or "UNKNOWN", cleanup=cleanup,
+                cleanup_epoch=job["cleanup_epoch"])
+            response, _ = await self._request(client, "POST", f"/jobs/{ref.job_id}/stop",
+                                               body, VoiceStopResponse)
+            state.acknowledge_cleanup(job, response)
+            if state.job(ref.job_id, ref.generation) is None:
+                return "DISCARDED"
+            if response.cleanup_epoch == body.cleanup_epoch or not cleanup.complete():
+                break
+        return "RETRY"
+
     async def _upload(self, client, state, job, lease):
         result = state.cached_result(job)
         if result is None:
             state.phase(lease, "RESULT_LOST", error_code="VOICE_RESULT_CACHE_MISSING")
-            return "RETRY"
+            return await self._stop_cleanup(
+                client, state, state.job(lease.job_id, lease.generation),
+            )
         if result.ref != VoiceLeaseRef.from_lease(lease):
             raise VoiceProtocolError("VOICE_RESULT_CACHE_INVALID")
-        response, lease = await self._control(
-            client,
-            state,
-            lease,
-            "RESULT_READY",
-            result_sha=result.result_sha256,
-        )
+        try:
+            response, lease = await self._control(client, state, lease, "RESULT_READY",
+                                                   result_sha=result.result_sha256)
+        except VoiceProtocolError as error:
+            if error.code not in {"VOICE_LEASE_RETIRED", "VOICE_CORE_LEASE_REJECTED",
+                                  "VOICE_NODE_UNAUTHORIZED"}:
+                raise
+            state.phase(lease, "CANCELLED", error_code=error.code)
+            return await self._stop_cleanup(
+                client, state, state.job(lease.job_id, lease.generation),
+            )
         if response.action == "COMMITTED":
             if response.committed_result_sha256 != result.result_sha256:
-                state.finish(lease, error_code="VOICE_RESULT_CONFLICT")
+                state.finish(lease, error_code="VOICE_RESULT_CONFLICT", outcome="RESULT_LOST")
+                await self._stop_cleanup(client, state, state.job(lease.job_id, lease.generation))
                 raise VoiceProtocolError("VOICE_RESULT_CONFLICT")
-            state.finish(lease)
-            return "COMPLETED"
-        if response.action != "CONTINUE":
-            state.finish(lease, error_code="VOICE_LEASE_" + response.action)
-            return "DISCARDED"
-        remaining = self._lease_until - time.monotonic()
-        if remaining <= 0:
-            raise VoiceProtocolError("VOICE_LEASE_EXPIRED")
-        receipt, _ = await self._request(
-            client,
-            "PUT",
-            f"/jobs/{lease.job_id}/result",
-            result,
-            VoiceResultReceipt,
-            budget_seconds=min(remaining, self.config.request_timeout_seconds),
-        )
-        if (receipt.job_id, receipt.generation, receipt.result_sha256) != (
-            lease.job_id,
-            lease.generation,
-            result.result_sha256,
-        ):
-            raise VoiceProtocolError("VOICE_RESULT_RECEIPT_MISMATCH")
+        elif response.action != "CONTINUE":
+            state.phase(lease, "CANCELLED", error_code="VOICE_LEASE_" + response.action)
+            return await self._stop_cleanup(
+                client, state, state.job(lease.job_id, lease.generation),
+            )
+        else:
+            remaining = self._lease_until - time.monotonic()
+            if remaining <= 0:
+                raise VoiceProtocolError("VOICE_LEASE_EXPIRED")
+            try:
+                receipt, _ = await self._request(client, "PUT", f"/jobs/{lease.job_id}/result",
+                    result, VoiceResultReceipt,
+                    budget_seconds=min(remaining, self.config.request_timeout_seconds))
+            except VoiceProtocolError as error:
+                if error.code != "VOICE_LEASE_RETIRED":
+                    raise
+                state.phase(lease, "CANCELLED", error_code=error.code)
+                return await self._stop_cleanup(
+                    client, state, state.job(lease.job_id, lease.generation),
+                )
+            if (receipt.job_id, receipt.generation, receipt.result_sha256) != (
+                lease.job_id, lease.generation, result.result_sha256):
+                raise VoiceProtocolError("VOICE_RESULT_RECEIPT_MISMATCH")
         state.finish(lease)
-        return "COMPLETED"
+        outcome = await self._stop_cleanup(client, state, state.job(lease.job_id, lease.generation))
+        return "COMPLETED" if outcome == "DISCARDED" else outcome
 
     def _validated_payload(self, message, lease, data):
         if set(message) != {"status", "payload"}:
@@ -523,17 +572,8 @@ class VoiceNodeWorker:
         return payload
 
     async def _settle_cancel(self, client, state, lease, error_code):
-        # A stopped local process is not a Core resource receipt. Retain the
-        # CANCELLED job across timeout/ACK loss and replay this same reference.
-        response, lease = await self._control(
-            client, state, lease, "CANCELLED", error_code=error_code,
-        )
-        if response.action == "CONTINUE":
-            raise VoiceProtocolError("VOICE_CANCEL_ACK_REQUIRED")
-        if state.resource()["state"] != "READY":
-            return "RETRY"
-        state.finish(lease, error_code=error_code)
-        return "DISCARDED"
+        state.phase(lease, "CANCELLED", error_code=error_code)
+        return await self._stop_cleanup(client, state, state.job(lease.job_id, lease.generation))
 
     async def _cancel_claim(self, client, state, lease, action, *, supervisor=None):
         if supervisor is not None:
@@ -554,8 +594,9 @@ class VoiceNodeWorker:
         data = await self._input(client, lease)
         if digest(await asyncio.to_thread(local_manifest, self.config)) != self.manifest_sha256:
             raise VoiceProtocolError("VOICE_MANIFEST_CHANGED")
-        temporary = state.directory / "child-temp" / uuid.uuid4().hex
+        temporary = state.prepare_temp(lease)
         supervisor = self.supervisor_factory(self.config.workspace, temporary)
+        supervisor.on_started = lambda pid, identity: state.bind_process(lease, pid, identity)
         dispatched, cleared, execution = False, False, None
         try:
             remaining = self._lease_until - time.monotonic()
@@ -642,48 +683,33 @@ class VoiceNodeWorker:
                 execution.cancel()
                 await asyncio.gather(execution, return_exceptions=True)
             stopped = await supervisor.stop()
+            if stopped and supervisor.process is not None:
+                state.process_stopped(lease, supervisor.process.pid, supervisor.identity)
             if dispatched and not cleared:
                 if lease.operation == "tts" or not stopped:
                     state.quarantine("VOICE_PROVIDER_EXECUTION_UNCERTAIN")
                 else:
                     state.release_resource()
                 state.phase(lease, "UNKNOWN", error_code="VOICE_PROVIDER_EXECUTION_UNCERTAIN")
-            if stopped and temporary.exists():
-                if not temporary.resolve().is_relative_to(state.directory.resolve()):
-                    raise VoiceProtocolError("VOICE_TEMP_PATH_INVALID")
-                shutil.rmtree(temporary)
+            state.cleanup()
         return await self._upload(client, state, state.job(lease.job_id, lease.generation), lease)
 
     async def _cycle(self, client, state):
-        state.prune_cache()
+        state.cleanup()
+        pending = state.pending_cleanup()
+        if pending:
+            return await self._stop_cleanup(client, state, pending), 5
         job = state.active_job()
         retry_after = 1
         if job is None:
             job, retry_after = await self._claim(client, state)
         if job is None:
             return "IDLE", retry_after
+        if job["lease_json"] is None:
+            return await self._stop_cleanup(client, state, job), retry_after
         lease = SignedVoiceLease.model_validate_json(job["lease_json"])
         if job["phase"] == "RESULT_READY":
             return await self._upload(client, state, job, lease), retry_after
-        if job["phase"] == "CANCELLED":
-            return await self._settle_cancel(client, state, lease, job["error_code"]), retry_after
-        if job["phase"] in {"FAILED", "UNKNOWN", "RESULT_LOST", "TERMINAL"}:
-            response, lease = await self._control(
-                client,
-                state,
-                lease,
-                job["phase"] if job["phase"] != "TERMINAL" else "CANCELLED",
-                result_sha=job["result_sha"],
-                error_code=job["error_code"],
-            )
-            if (
-                response.action == "COMMITTED"
-                and job["result_sha"] is not None
-                and (response.committed_result_sha256 != job["result_sha"])
-            ):
-                raise VoiceProtocolError("VOICE_RESULT_CONFLICT")
-            state.finish(lease, error_code=job["error_code"])
-            return "DISCARDED", retry_after
         if job["phase"] != "CLAIMED":
             raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
         if state.resource()["state"] != "READY":
@@ -694,14 +720,20 @@ class VoiceNodeWorker:
         except Exception as error:
             code = getattr(error, "code", "VOICE_NODE_EXECUTION_FAILED")
             current = state.job(lease.job_id, lease.generation)
+            if code in {"VOICE_LEASE_RETIRED", "VOICE_CORE_LEASE_REJECTED"}:
+                if current["lease_json"] is not None:
+                    state.phase(lease, "CANCELLED", error_code=code)
+                return await self._stop_cleanup(
+                    client, state, state.job(lease.job_id, lease.generation),
+                ), retry_after
             if current["phase"] in {"CLAIMED", "RUNNING"} and code != "VOICE_CORE_UNAVAILABLE":
                 state.phase(lease, "FAILED", error_code=code)
             raise VoiceProtocolError(code) from None
 
     async def run(self, *, once: bool = False) -> str:
-        self.manifest_sha256 = digest(await asyncio.to_thread(local_manifest, self.config))
         with NodeState(self.config.state_directory) as state:
             self._startup(state)
+            self.manifest_sha256 = digest(await asyncio.to_thread(local_manifest, self.config))
             async with httpx.AsyncClient(
                 transport=self.transport,
                 timeout=self.config.request_timeout_seconds,
@@ -722,7 +754,8 @@ class VoiceNodeWorker:
                             raise
                         if error.code in {
                             "VOICE_NODE_UNAUTHORIZED",
-                            "VOICE_STATE_RECOVERY_REQUIRED",
+                            "VOICE_STATE_RECOVERY_REQUIRED", "VOICE_NODE_RECOVERY_REQUIRED",
+                            "VOICE_CLAIM_EPOCH_RETIRED", "VOICE_UPGRADE_REQUIRED",
                         }:
                             raise
                         outcome, retry_after = "RETRY", 5
@@ -736,6 +769,9 @@ def main(argv=None, *, transport=None, supervisor_factory=None) -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--print-manifest", action="store_true")
+    parser.add_argument("--cleanup-only", action="store_true")
+    parser.add_argument("--recover-claims", action="store_true")
+    parser.add_argument("--control-token-file", type=Path)
     parser.add_argument("--recover-resource", action="store_true")
     parser.add_argument("--quarantine-id")
     parser.add_argument("--operator")
@@ -748,6 +784,43 @@ def main(argv=None, *, transport=None, supervisor_factory=None) -> int:
         if len(raw) > 65536:
             raise VoiceProtocolError("VOICE_NODE_CONFIG_TOO_LARGE")
         config = VoiceNodeConfig.model_validate_json(raw)
+        if arguments.cleanup_only:
+            with NodeState(config.state_directory) as state:
+                print(json.dumps(state.cleanup(), sort_keys=True))
+            return 0
+        if arguments.recover_claims:
+            if (not arguments.control_token_file
+                or arguments.confirmation != "inflight-execution-stopped"
+                or not arguments.operator or not arguments.service_instance):
+                raise VoiceProtocolError("VOICE_RECOVERY_CONFIRMATION_REQUIRED")
+            async def recover():
+                async with httpx.AsyncClient(
+                    transport=transport, trust_env=False,
+                    headers={"Authorization": "Bearer " + config.credential.get_secret_value()},
+                ) as client:
+                    worker = VoiceNodeWorker(config)
+                    session, _ = await worker._request(
+                        client, "GET", "/session", None, VoiceSession,
+                    )
+                    token = arguments.control_token_file.read_text(encoding="utf-8").strip()
+                    body = VoiceRecovery(
+                        incarnation=session.incarnation, operator=arguments.operator,
+                        service_instance=arguments.service_instance,
+                        confirmation=arguments.confirmation,
+                    )
+                    response = await client.post(config.core_origin + ROUTE_PREFIX +
+                        f"/nodes/{config.node_id}/recover", content=canonical_bytes(body),
+                        headers={"Authorization": "Bearer " + token,
+                                 "Content-Type": "application/json"})
+                    worker._check_response(response, "application/json")
+                    return VoiceSession.model_validate_json(await worker._read(response, 65536))
+            with NodeState(config.state_directory) as state:
+                if (state.active_job() is not None or state.pending_cleanup() is not None
+                    or state.resource()["state"] != "READY"):
+                    raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+                session = asyncio.run(recover())
+                state.bind_session(session, recovered=True)
+            return 0
         if arguments.print_manifest:
             print(digest(local_manifest(config)))
             return 0

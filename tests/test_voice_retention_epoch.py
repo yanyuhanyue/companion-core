@@ -22,6 +22,7 @@ from companion.voice_protocol import (
     ROUTE_PREFIX,
     VoiceClaimResponse,
     VoiceLeaseRef,
+    VoiceStopRef,
     canonical_bytes,
     digest,
 )
@@ -74,11 +75,15 @@ async def start_asr(client, core, event, key, *, complete):
     uploaded = await client.post("/internal/v1/voice-inputs/" + event["event_id"],
                                  content=data, headers=headers)
     assert uploaded.status_code == 200, uploaded.text
-    body = claim_body()
-    node_headers = {"Authorization": "Bearer " + TOKEN, "Idempotency-Key": body["request_id"]}
+    body = claim_body(core)
+    node_headers = {
+        "Authorization": "Bearer " + TOKEN,
+        "Idempotency-Key": f"voice-claim:{body['incarnation']}:{body['sequence']}",
+    }
     response = await client.post(ROUTE_PREFIX + "/claim", json=body, headers=node_headers)
     assert response.status_code == 200, response.text
-    ref = VoiceLeaseRef.from_lease(VoiceClaimResponse.model_validate(response.json()).lease)
+    lease = VoiceClaimResponse.model_validate(response.json()).lease
+    ref = VoiceLeaseRef.from_lease(lease)
     assert ref.job_id == uploaded.json()["job_id"]
     path = ROUTE_PREFIX + "/jobs/" + ref.job_id
     released = await client.post(path + "/input", json=ref.model_dump(), headers=node_headers)
@@ -94,7 +99,7 @@ async def start_asr(client, core, event, key, *, complete):
             headers={**node_headers,
                      "Idempotency-Key": f"voice-result:{ref.job_id}:{ref.generation}"})
         assert accepted.status_code == 200, accepted.text
-    return ref, value, data, headers
+    return ref, value, data, headers, VoiceStopRef.from_lease(lease)
 
 
 @pytest.mark.parametrize("voice_state", ["missing", "running", "transcribed", "fallback",
@@ -242,43 +247,45 @@ def test_retention_epoch_keeps_active_source_usable_and_old_voice_unusable(
                         assert replacement["wait_until"] == receipt["wait_until"]
                         assert replacement["state"] == "FALLBACK"
                     if node:
-                        ref, value, audio, upload_headers = node
+                        ref, value, audio, upload_headers, stop = node
                         saved = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
                                                (ref.job_id,))
                         assert saved["state"] == ("CANCELLED" if voice_state == "transcribed"
                                                   else "UNKNOWN")
                         assert saved["input_blob"] is None and saved["result_blob"] is None
-                        for field in ("captured_privacy_epoch", "input_sha256", "result_sha256",
-                                      "generation", "started_at"):
+                        for field in ("captured_privacy_epoch", "generation", "started_at"):
                             assert saved[field] == old_node[field]
+                        assert saved["input_sha256"] is saved["result_sha256"] is None
                         node_path = ROUTE_PREFIX + "/jobs/" + ref.job_id
                         late = await client.put(node_path + "/result",
                             json=value.model_dump(mode="json"), headers={
                                 "Authorization": "Bearer " + TOKEN,
                                 "Idempotency-Key": f"voice-result:{ref.job_id}:{ref.generation}",
                             })
-                        assert late.status_code == 409, late.text
+                        assert late.status_code == 410, late.text
+                        assert late.json()["error"] == "VOICE_LEASE_RETIRED"
                         before_replay = core.store.db.total_changes
                         replayed = await client.post(path, content=audio, headers=upload_headers)
                         if voice_state == "source-erased":
                             assert replayed.status_code in {403, 409}, replayed.text
                         else:
-                            assert replayed.status_code == 200, replayed.text
-                            assert replayed.json()["job_id"] == ref.job_id
-                            assert replayed.json()["generation"] == ref.generation
-                            assert replayed.json()["state"] == saved["state"]
+                            assert replayed.status_code == 410, replayed.text
+                            assert replayed.json()["error"] == "VOICE_JOB_RETIRED"
                             assert core.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
                                                    (ref.job_id,)) == saved
                             assert core.store.db.total_changes == before_replay
                         if voice_state != "transcribed":
                             held = core.store.one("SELECT active_job_id FROM voice_node_state")
                             assert held["active_job_id"] == ref.job_id
-                            stopped = await client.post(node_path + "/control", json={
-                                "ref": ref.model_dump(), "phase": "CANCELLED",
-                                "resource_state": "READY",
+                            stopped = await client.post(node_path + "/stop", json={
+                                "ref": stop.model_dump(), "outcome": "CANCELLED",
+                                "resource_state": "READY", "cleanup_epoch": saved["cleanup_epoch"],
+                                "cleanup": {"cache_removed": True, "journal_removed": True,
+                                            "temp_removed": True},
                             }, headers={"Authorization": "Bearer " + TOKEN})
                             assert stopped.status_code == 200
-                            assert stopped.json()["action"] == "CANCEL"
+                            assert stopped.json()["custody_closed"]
+                            assert stopped.json()["cleanup_confirmed"]
                             assert core.store.one("SELECT active_job_id FROM voice_node_state")[
                                 "active_job_id"] is None
                         assert len(core.store.rows("SELECT * FROM voice_jobs")) == 1

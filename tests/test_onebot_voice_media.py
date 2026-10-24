@@ -434,16 +434,28 @@ def delivery():
             "conversation_platform_session_key": config().origin,
             "content": {"text": "a verified private reply"}, "reply_revision": 3}
     binding = {
-        "schema_version": 1, "job_id": "voice_" + "3" * 32, "generation": 1,
-        "message_id": message_id, "delivery_key": item["delivery_key"], "event_id": event_id,
-        "window_sha256": PLAN, "source_sha256": "4" * 64,
+        "schema_version": 2,
+        "retirement_token": "random-proof-" + "x" * 32,
+        "job_id": "voice_" + "3" * 32,
+        "generation": 1,
+        "message_id": message_id,
+        "delivery_key": item["delivery_key"],
+        "event_id": event_id,
+        "window_sha256": PLAN,
+        "source_sha256": "4" * 64,
         "identity_sha256": voice.digest([config().owner_qq_id, config().bot_qq_id]),
-        "privacy_epoch": 1, "reply_revision": 3, "node_id": "local_voice",
-        "manifest_sha256": "5" * 64, "node_config_sha256": "6" * 64,
-        "voice_policy_sha256": POLICY, "content_sha256": voice.digest(item["content"]),
+        "privacy_epoch": 1,
+        "reply_revision": 3,
+        "node_id": "local_voice",
+        "manifest_sha256": "5" * 64,
+        "node_config_sha256": "6" * 64,
+        "voice_policy_sha256": POLICY,
+        "content_sha256": voice.digest(item["content"]),
         "reply_sha256": voice.digest(item["content"]["text"]),
-        "result_sha256": voice.digest(audio), "audio_sha256": audio["audio_sha256"],
-        "audio_bytes": len(raw), "expires_at": (NOW + timedelta(seconds=30)).isoformat(),
+        "result_sha256": voice.digest(audio),
+        "audio_sha256": audio["audio_sha256"],
+        "audio_bytes": len(raw),
+        "expires_at": (NOW + timedelta(seconds=30)).isoformat(),
     }
     # Independently authored Core DTO produces the actual outbound serialization.
     bound = VoiceDeliveryBinding.model_validate(binding)
@@ -471,7 +483,7 @@ def test_outbound_record_uses_verified_inline_pcm_and_exact_final_delivery_check
     assert prepared.check == {"binding_sha256": item["voice"]["binding_sha256"],
         "job_id": binding["job_id"], "generation": binding["generation"],
         "result_sha256": binding["result_sha256"], "audio_sha256": binding["audio_sha256"],
-        "audio_bytes": binding["audio_bytes"]}
+        "audio_bytes": binding["audio_bytes"], "retirement_token": binding["retirement_token"]}
     assert prepared.body_sha256 == voice.digest({
         "user_id": int(config().owner_qq_id), "message": prepared.message, "auto_escape": True,
     })
