@@ -288,10 +288,14 @@ class MemoryContext:
                 excerpts.append({"event_id": event["event_id"],
                                  "occurred_at": event["occurred_at"], "excerpt": text[:200]})
             if excerpts:
-                items.append({"episode_id": row["episode_id"], "kind": "owner_observation",
-                              "temperature": temperature, "attention_reasons": reasons,
-                              "source_event_ids": ids,
-                              "excerpts": excerpts[-3:], "truncated": len(excerpts) > 3})
+                item = {"episode_id": row["episode_id"], "kind": "owner_observation",
+                        "temperature": temperature, "attention_reasons": reasons,
+                        "source_event_ids": ids,
+                        "excerpts": excerpts[-3:], "truncated": len(excerpts) > 3}
+                summary = self.memory.episode_summary(row["episode_id"], ids, now)
+                if summary is not None:
+                    item["summary"] = summary
+                items.append(item)
         items.sort(key=lambda item: item["temperature"] != "Hot")
         check_version(self.memory, version)
         return {"privacy_epoch": version[0], "as_of": now, "items": items[:3],
