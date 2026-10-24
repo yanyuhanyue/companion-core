@@ -96,3 +96,29 @@ content/executive 不重复业务扫描。墙钟跳变会重新核对；业务�
 实现使用该固定版本的 watchfiles 默认环境／WSL backend 选择；无法使用原生通知或显式启用
 WATCHFILES_FORCE_POLLING 时可能退化为库的文件轮询，不能宣称所有平台纯事件或零 OS 线程唤醒。
 源 Reader 网络限速、Bridge 发送节流、voice 租约、诊断采样以及协作性 sleep(0) 不属于这项改动。
+
+### 原生调度边界
+
+五个入口共用 `worker_schedule.ScanContext` 和 `UnitResult`。每轮先取得不可变的扫描起点、
+同连接 data_version 和单调时钟值，再调用一次原生业务操作。`run_native_unit` 只把现有的
+工作布尔值／完成数量转换成结果；不领取第二次、不重试异常，也不把取消转换成成功。
+等待必须使用本轮的 ScanContext，旧轮次的上下文会被拒绝。
+
+`worker_deadlines` 按 chat、content、executive、diary、life 提供只读期限投影，保留原有
+查询、日界、日记／巩固时点和 admission 租约。投影使用扫描开始时刻作下界，保留扫描期间
+刚到期的事项；下一轮移动下界，避免已到期但受限的事项自旋。领域可以返回 UnitResult 的
+`next_deadline` 提示；它只能提前重新检查，不能覆盖数据库期限或授予执行权限，扫描前已经
+过期的提示会忽略。已完成的原生工作仍立即进入下一轮。
+
+| 入口 | 恢复、领取与提交的责任方 |
+|---|---|
+| chat | `Core.run_once` / `claim_job` / `recover`；包括原有 voice 清理和投递恢复 |
+| content | `ContentService.run_batch` / `run_once`；保留原有批量上限 |
+| executive | `Executive.run_one` / `claim` / `recover`；开始执行后的超时仍为 UNKNOWN |
+| diary | `DiaryService.generate_once` / `DiaryRepository.claim`；保留日记启动恢复 |
+| life | 原有 Consolidator、Memory 和维护调用；检查点与来源仍由领域管理 |
+
+共享层不根据过期租约统一重排队，也不以数据库写入数量推断业务进展。领域若以后通过
+UnitResult 报告需要继续清理的有界恢复进展，必须确有原生状态变化；受限的过期记录本身不算
+进展。本片保留各入口的选择顺序、前台让路和维护节奏，不迁移自主任务生产者，也未实施
+每轮一次模型调用的后台公平轮转。后续迁移须在原有 admission、来源与投递边界内进行。

@@ -7,6 +7,7 @@ from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import uid
+from companion.worker_schedule import UnitResult, run_native_unit
 from companion.worker_wakeup import Maintenance, Wakeup
 
 
@@ -19,15 +20,15 @@ async def life_worker(settings):
             force_maintenance = False
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
                 while True:
-                    wake.before_scan()
+                    scan = wake.before_scan()
                     if private_life.enabled(settings):
                         try:
                             live_text.guard(core.store, settings, core.clock)
                         except CoreError:
-                            await wake.wait()
+                            await wake.wait(scan, UnitResult(False))
                             continue
                         if private_life.busy(core.store, core.clock()):
-                            await wake.wait()
+                            await wake.wait(scan, UnitResult(False))
                             continue
                     due = maintenance.due() or force_maintenance
                     if due:
@@ -40,12 +41,15 @@ async def life_worker(settings):
                         core.social.flush()
                         maintenance.completed()
                     force_maintenance = False
-                    worked = False
+                    result = UnitResult(False)
                     if not budget.chat_pending(core.store, core.clock()):
-                        worked = await core.consolidation.run_once(worker_id)
-                        if not worked and due and not budget.chat_pending(core.store, core.clock()):
-                            worked = await core.extract_once()
-                    if not worked:
-                        force_maintenance = await wake.wait(maintenance.next_at) == "deadline"
+                        result = await run_native_unit(core.consolidation.run_once, worker_id)
+                        if (not result.progressed and due
+                                and not budget.chat_pending(core.store, core.clock())):
+                            result = await run_native_unit(core.extract_once)
+                    if not result.progressed:
+                        force_maintenance = (
+                            await wake.wait(scan, result, maintenance.next_at) == "deadline"
+                        )
         finally:
             core.store.close()

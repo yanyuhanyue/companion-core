@@ -20,7 +20,9 @@ from tests.test_paid_model_gate import approved_live
 from tests.test_private_companion import companion_options
 
 
-async def start(core, directory, role="worker", *, duration=5, settle=0.4, baseline=False):
+async def start(
+    core, directory, role="worker", *, duration=5, settle=0.4, baseline=False, controlled=False,
+):
     directory.mkdir(parents=True)
     config, ready, report = (directory / name for name in ("config.json", "ready", "result.json"))
     config.write_text(
@@ -33,6 +35,8 @@ async def start(core, directory, role="worker", *, duration=5, settle=0.4, basel
                 "ready": str(ready),
                 "report": str(report),
                 "one_second_baseline": baseline,
+                "release": str(directory / "release") if controlled else None,
+                "scan_progress": str(directory / "scans") if controlled else None,
             },
             default=lambda v: v.get_secret_value() if isinstance(v, SecretStr) else str(v),
         ),
@@ -124,6 +128,26 @@ def test_five_process_idle_wake_and_sql_evidence(core, tmp_path):
     run(scenario())
 
 
+def test_five_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_path):
+    core.settings.content_enabled = True
+    core.settings.executive = core.settings.executive.model_copy(update={"enabled": True})
+    roles = ("worker", "content-worker", "executive-worker", "diary-worker", "life-worker")
+
+    async def scenario():
+        children = await asyncio.gather(*[
+            start(core, tmp_path / role, role, duration=3, settle=0.4) for role in roles
+        ])
+        rows = await asyncio.gather(*[finish(child) for child in children])
+        for row in rows:
+            assert row["total"]["scan_contexts"] > 0
+            assert row["total"]["native_units"] > 0
+            assert row["total"]["provider_calls"] == 0
+            assert row["watchers"] == row["closed_watchers"] == 1
+        receipt("shared-boundary-five-workers", rows)
+
+    run(scenario())
+
+
 def test_real_http_enqueue_new_owner_and_independent_worker_latency(core, tmp_path):
     core.clock = utcnow
     approved_live(core, tmp_path)
@@ -162,21 +186,28 @@ def test_independent_retry_due_without_new_write(core, tmp_path):
     core.clock = utcnow
     approved_live(core, tmp_path)
     item = ingest(core)
-    due = after(utcnow(), 3)
+    # Keep the job pending while the independent interpreter imports/starts.
+    due = after(utcnow(), 3600)
     core.store.execute(
         "UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=? WHERE job_id=?", (due, item["job_id"])
     )
 
     async def scenario():
         child = await start(core, tmp_path / "retry", duration=5)
-        await ready(child)
-        assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (item["job_id"],))[
-            "state"
-        ] == ("RETRY_WAIT")
-        await state(core, item["job_id"], seconds=5)
-        result = await finish(child)
-        assert result["total"]["provider_calls"] == 1
-        receipt("retry-without-writer", result)
+        try:
+            await ready(child)
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (item["job_id"],))[
+                "state"
+            ] == ("RETRY_WAIT")
+            core.store.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
+                               (after(utcnow(), 1), item["job_id"]))
+            # No writes after scheduling: only the native deadline can make it due.
+            await state(core, item["job_id"], seconds=5)
+            result = await finish(child)
+            assert result["total"]["provider_calls"] == 1
+            receipt("retry-without-writer", result)
+        finally:
+            await child[0].communicate()
 
     run(scenario())
 
@@ -259,15 +290,24 @@ def test_stop_api_wakes_independent_worker_and_lock_remains_exclusive(core, tmp_
                     "/internal/v1/live-text/open", json={"window_sha256": plan.sha256}
                 )
                 assert opened.status_code == 200, opened.text
-                child = await start(core, tmp_path / "stop", duration=4)
-                await ready(child)
-                duplicate = await start(core, tmp_path / "duplicate", duration=1)
-                denied = await finish(duplicate, code=2)
-                assert denied["watchers"] == 0
-                stopped = await api.post(
-                    "/internal/v1/live-text/stop", json={"window_sha256": plan.sha256}
-                )
-                assert stopped.status_code == 200, stopped.text
+                directory = tmp_path / "stop"
+                child = await start(core, directory, duration=30, controlled=True)
+                try:
+                    await ready(child)
+                    duplicate = await start(core, tmp_path / "duplicate", duration=1)
+                    denied = await finish(duplicate, code=2)
+                    assert denied["watchers"] == 0
+                    scans = (directory / "scans").read_text(encoding="utf-8")
+                    stopped = await api.post(
+                        "/internal/v1/live-text/stop", json={"window_sha256": plan.sha256}
+                    )
+                    assert stopped.status_code == 200, stopped.text
+                    async with asyncio.timeout(5):
+                        while (directory / "scans").read_text(encoding="utf-8") == scans:  # noqa: ASYNC110 - independent worker progress
+                            await asyncio.sleep(0.02)
+                finally:
+                    (directory / "release").touch()
+                    await child[0].communicate()
                 result = await finish(child)
                 assert result["steady"]["scans"] >= 1
                 assert result["total"]["provider_calls"] == 0

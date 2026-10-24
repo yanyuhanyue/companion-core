@@ -1,6 +1,7 @@
 from companion.content import ContentService
 from companion.observation import ObservationService
 from companion.runtime import Runtime
+from companion.worker_schedule import run_native_unit
 from companion.worker_wakeup import Wakeup
 
 
@@ -10,6 +11,7 @@ async def content_worker(settings):
         content = ContentService(runtime.store, settings, observations, clock=runtime.clock)
         with Wakeup(runtime.store, settings, "content-worker", runtime.clock) as wake:
             while True:
-                wake.before_scan()
-                if not await content.run_batch():
-                    await wake.wait()
+                scan = wake.before_scan()
+                result = await run_native_unit(content.run_batch)
+                if not result.progressed:
+                    await wake.wait(scan, result)

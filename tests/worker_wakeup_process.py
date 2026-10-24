@@ -14,6 +14,7 @@ from companion import __main__, worker_wakeup
 from companion.config import Settings
 from companion.retrieval import SemanticIndex
 from companion.store import Store
+from companion.worker_schedule import ScanContext, UnitResult
 
 
 def main():
@@ -58,6 +59,8 @@ def main():
         "recorder_writes": 0,
         "wait_entries": 0,
         "hints": 0,
+        "scan_contexts": 0,
+        "native_units": 0,
     }
     start, watchers, wakeups = {}, [], []
     original_store = Store.__init__
@@ -76,11 +79,38 @@ def main():
     service = getattr(importlib.import_module(service_module), service_class)
     native_scan = getattr(service, method)
 
+    def report_scan():
+        path = Path(args["scan_progress"])
+        pending = path.with_suffix(".next")
+        pending.write_text(str(stats["scans"]), encoding="utf-8")
+        pending.replace(path)
+
     async def scan(self, *a, **kw):
         stats["scans"] += 1
-        return await native_scan(self, *a, **kw)
+        result = await native_scan(self, *a, **kw)
+        if args.get("scan_progress"):
+            await asyncio.to_thread(report_scan)
+        return result
 
     setattr(service, method, scan)
+    native_unit = module.run_native_unit
+
+    async def unit(operation, *a):
+        result = await native_unit(operation, *a)
+        assert isinstance(result, UnitResult)
+        stats["native_units"] += 1
+        return result
+
+    module.run_native_unit = unit
+    native_before_scan = worker_wakeup.Wakeup.before_scan
+
+    def before_scan(self):
+        result = native_before_scan(self)
+        assert isinstance(result, ScanContext)
+        stats["scan_contexts"] += 1
+        return result
+
+    worker_wakeup.Wakeup.before_scan = before_scan
     native_enter = worker_wakeup.Wakeup.__enter__
 
     def enter(self):
@@ -157,6 +187,10 @@ def main():
             start["cpu"] = process_time()
             start["at"] = monotonic()
             await asyncio.to_thread(Path(args["ready"]).write_text, "ready", encoding="utf-8")
+            if args.get("release"):
+                while not await asyncio.to_thread(Path(args["release"]).exists):  # noqa: ASYNC110 - parent process owns release
+                    await asyncio.sleep(0.02)
+                task.cancel()
 
         signal = asyncio.create_task(ready())
         try:

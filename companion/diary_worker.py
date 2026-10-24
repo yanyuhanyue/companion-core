@@ -6,6 +6,7 @@ from companion.diary import DiaryService
 from companion.model import ModelClient
 from companion.runtime import Runtime
 from companion.store import uid
+from companion.worker_schedule import UnitResult, run_native_unit
 from companion.worker_wakeup import Maintenance, Wakeup
 
 
@@ -31,20 +32,23 @@ async def diary_worker(settings):
             force_maintenance = False
             with Wakeup(runtime.store, settings, "diary-worker", runtime.clock) as wake:
                 while True:
-                    wake.before_scan()
+                    scan = wake.before_scan()
                     if private_life.enabled(settings):
                         try:
                             live_text.guard(runtime.store, settings, runtime.clock)
                         except CoreError:
-                            await wake.wait()
+                            await wake.wait(scan, UnitResult(False))
                             continue
                         if private_life.busy(runtime.store, runtime.clock()):
-                            await wake.wait()
+                            await wake.wait(scan, UnitResult(False))
                             continue
                     if maintenance.due() or force_maintenance:
                         runtime.expire_raw_events()
                         diary.schedule_due()
                         maintenance.completed()
                     force_maintenance = False
-                    if not await diary.generate_once(worker_id):
-                        force_maintenance = await wake.wait(maintenance.next_at) == "deadline"
+                    result = await run_native_unit(diary.generate_once, worker_id)
+                    if not result.progressed:
+                        force_maintenance = (
+                            await wake.wait(scan, result, maintenance.next_at) == "deadline"
+                        )

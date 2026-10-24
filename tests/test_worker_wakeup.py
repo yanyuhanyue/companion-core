@@ -7,19 +7,20 @@ from time import monotonic
 
 import pytest
 
-from companion import worker_wakeup
+from companion import worker_deadlines, worker_wakeup
 from companion.store import Store, after, utcnow
 from companion.worker_loop import Recorder, project_public, snapshot
-from companion.worker_wakeup import Maintenance, Wakeup, next_deadline
+from companion.worker_schedule import UnitResult
+from companion.worker_wakeup import Maintenance, Wakeup
 from tests.conftest import ingest, run
 
 
-@pytest.mark.parametrize("kind", list(worker_wakeup.DEADLINES))
+@pytest.mark.parametrize("kind", list(worker_deadlines.PROVIDERS))
 def test_each_worker_can_subscribe_scan_and_wake_on_foreign_commit(core, kind):
     async def scenario():
         with Wakeup(core.store, core.settings, kind, utcnow) as wake:
-            wake.before_scan()
-            pending = asyncio.create_task(wake.wait())
+            scan = wake.before_scan()
+            pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.04)
             with closing(Store(core.settings.database)) as other:
                 other.execute("INSERT INTO runtime_meta VALUES ('foreign-write','1')")
@@ -34,7 +35,7 @@ def test_commit_around_subscription_and_scan_is_not_lost(core, timing):
             with closing(Store(core.settings.database)) as other:
                 if timing == "after_subscribe":
                     other.execute("INSERT INTO runtime_meta VALUES ('race','1')")
-                wake.before_scan()
+                scan = wake.before_scan()
                 if timing == "after_subscribe":
                     assert core.store.one("SELECT value FROM runtime_meta WHERE key='race'")
                     return
@@ -43,17 +44,17 @@ def test_commit_around_subscription_and_scan_is_not_lost(core, timing):
                 core.store.one("SELECT COUNT(*) FROM jobs")
                 if timing == "after_scan":
                     other.execute("INSERT INTO runtime_meta VALUES ('race','1')")
-            assert await asyncio.wait_for(wake.wait(), 1) == "commit"
+            assert await asyncio.wait_for(wake.wait(scan, UnitResult(False)), 1) == "commit"
     run(scenario())
 
 
 def test_recorder_self_writes_do_not_wake_business_scan(core):
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:
-            wake.before_scan()
+            scan = wake.before_scan()
             Recorder(core.store).completed(waiting=True)
             started = monotonic()
-            assert await wake.wait(started + 0.15) == "maintenance"
+            assert await wake.wait(scan, UnitResult(False), started + 0.15) == "maintenance"
             assert monotonic() - started >= 0.14
     run(scenario())
 
@@ -67,9 +68,9 @@ def test_due_retry_wakes_without_a_writer_and_native_claim_succeeds(core):
 
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:
-            wake.before_scan()
+            scan = wake.before_scan()
             assert core.claim_job("too-early") is None
-            assert await asyncio.wait_for(wake.wait(), 1) == "deadline"
+            assert await asyncio.wait_for(wake.wait(scan, UnitResult(False)), 1) == "deadline"
             assert core.claim_job("now-due")["job_id"] == job["job_id"]
     run(scenario())
 
@@ -91,8 +92,8 @@ def test_missed_notification_is_reconciled_without_repeated_business_scans(core,
                     real.close()
 
             wake.watcher = Missed()
-            wake.before_scan()
-            pending = asyncio.create_task(wake.wait())
+            scan = wake.before_scan()
+            pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.02)
             with closing(Store(core.settings.database)) as other:
                 other.execute("INSERT INTO runtime_meta VALUES ('missed','1')")
@@ -105,8 +106,8 @@ def test_cancel_joins_watch_before_releasing_native_watcher(core):
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:
             watcher = wake.watcher
-            wake.before_scan()
-            pending = asyncio.create_task(wake.wait())
+            scan = wake.before_scan()
+            pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.03)
             pending.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -122,8 +123,8 @@ def test_wall_clock_rollback_rechecks_without_stale_deadline(core, monkeypatch):
 
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", lambda: now[0]) as wake:
-            wake.before_scan()
-            pending = asyncio.create_task(wake.wait())
+            scan = wake.before_scan()
+            pending = asyncio.create_task(wake.wait(scan, UnitResult(False)))
             await asyncio.sleep(0.03)
             now[0] = after(now[0], -100)
             assert await asyncio.wait_for(pending, 1) == "clock"
@@ -156,8 +157,10 @@ def test_wait_record_is_not_health_and_expires_under_strict_public_projection(co
 
 
 def test_all_deadline_queries_use_existing_schema(core):
-    for kind in worker_wakeup.DEADLINES:
-        assert next_deadline(core.store, core.settings, kind, datetime.fromisoformat(utcnow()))
+    for kind in worker_deadlines.PROVIDERS:
+        assert worker_deadlines.PROVIDERS[kind](
+            core.store, core.settings, datetime.fromisoformat(utcnow()),
+        )
 
 
 @pytest.mark.parametrize("kind,table,field,state", [
@@ -178,7 +181,7 @@ def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
         return (start + timedelta(seconds=elapsed[0])).isoformat()
 
     with closing(Store(":memory:")) as store:
-        fields = {column for _, column, _ in worker_wakeup.DEADLINES[kind]}
+        fields = {"lease_until", "deadline"} if kind == "content-worker" else {"lease_until"}
         store.execute(f"CREATE TABLE {table} (state TEXT, "
                       + ", ".join(f"{column} TEXT" for column in fields) + ")")
         store.execute("CREATE TABLE model_admissions (request_id TEXT,lease_until TEXT)")
@@ -201,21 +204,21 @@ def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
         wake.watcher = watcher = TimeoutOnly()
 
         async def scenario():
-            wake.before_scan()
+            scan = wake.before_scan()
             # Native recovery sees no eligible lease before the boundary.
             if crossed_during_scan:
                 assert store.one(f"SELECT state FROM {table} WHERE {field}<=?",
                                  (clock(),)) is None
             elapsed[0] = 0.2
             if crossed_during_scan:
-                assert await wake.wait() == "deadline"
+                assert await wake.wait(scan, UnitResult(False)) == "deadline"
                 assert watcher.calls == 0
                 assert store.one(f"SELECT state FROM {table} WHERE {field}<=?", (clock(),))
                 # A subsequent scan can leave this row fenced. It must not cause
                 # repeated immediate wakeups simply because its lease is past due.
-                wake.before_scan()
+                scan = wake.before_scan()
             with pytest.raises(asyncio.CancelledError):
-                await wake.wait()
+                await wake.wait(scan, UnitResult(False))
             assert watcher.calls == 3
             assert elapsed[0] >= 180
 

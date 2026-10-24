@@ -21,6 +21,7 @@ from companion.runtime import Runtime
 from companion.store import encode, migrate, uid
 from companion.worker_lock import single_worker
 from companion.worker_loop import Recorder
+from companion.worker_schedule import run_native_unit
 from companion.worker_wakeup import Maintenance, Wakeup
 
 
@@ -35,16 +36,17 @@ async def worker(settings):
             maintenance_clock = Maintenance()
             with Wakeup(core.store, settings, "worker", core.clock) as wake:
                 while True:
-                    wake.before_scan()
-                    worked = await core.run_once(worker_id)
-                    maintenance = not worked and maintenance_clock.due()
+                    scan = wake.before_scan()
+                    result = await run_native_unit(core.run_once, worker_id)
+                    maintenance = not result.progressed and maintenance_clock.due()
                     if maintenance:
                         core.expire_raw_events()
                         core.schedule_proactive()
                         maintenance_clock.completed()
-                    loop.completed(maintenance=maintenance, waiting=not worked and not maintenance)
-                    if not worked and not maintenance:
-                        await wake.wait(maintenance_clock.next_at)
+                    loop.completed(maintenance=maintenance,
+                                   waiting=not result.progressed and not maintenance)
+                    if not result.progressed and not maintenance:
+                        await wake.wait(scan, result, maintenance_clock.next_at)
         finally:
             core.store.close()
 

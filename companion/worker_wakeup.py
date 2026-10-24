@@ -3,43 +3,18 @@
 import asyncio
 import math
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from time import monotonic
-from zoneinfo import ZoneInfo
 
 from watchfiles._rust_notify import RustNotify
 from watchfiles.main import _default_force_polling, _default_poll_delay_ms
 
+from companion.worker_deadlines import PROVIDERS
+from companion.worker_schedule import ScanContext, UnitResult
+
 # Existing once-per-minute scheduling/retention cadence, measured in elapsed time.
 MAINTENANCE_SECONDS = 60
-
-# Only future eligibility/expiry boundaries: already-due but fenced work must not spin.
-DEADLINES = {
-    "worker": [
-        ("jobs", "next_attempt_at", "state IN ('QUEUED','RETRY_WAIT')"),
-        ("jobs", "lease_until", "state='RUNNING'"),
-        ("outbox", "lease_until", "state IN ('LEASED','SENDING')"),
-        ("social_autonomy_plans", "expires_at", "state IN ('READY','PLANNING')"),
-    ],
-    "content-worker": [
-        ("content_items", "lease_until", "state IN ('FETCHING','RUNNING')"),
-        ("content_items", "deadline", "state IN ('WAITING','QUEUED','FETCHING','RUNNING')"),
-    ],
-    "executive-worker": [("tool_tasks", "lease_until", "state IN ('LEASED','RUNNING')")],
-    "diary-worker": [
-        ("diary_runs", "next_attempt_at", "state IN ('PENDING','RETRY_WAIT')"),
-        ("diary_runs", "lease_until", "state='RUNNING'"),
-    ],
-    "life-worker": [
-        ("consolidation_runs", "next_attempt_at", "state='PARTIAL'"),
-        ("consolidation_runs", "lease_until", "state='LEASED'"),
-        ("reflection_runs", "lease_until", "state='RUNNING'"),
-        ("goal_steps", "lease_until", "state='RUNNING'"),
-        ("goals", "next_due_at", "state IN ('ACCEPTED','QUEUED','RETRY_WAIT')"),
-        ("commitments", "deadline", "state IN ('ACKNOWLEDGED','IN_PROGRESS')"),
-    ],
-}
 
 
 class Maintenance:
@@ -53,34 +28,6 @@ class Maintenance:
         self.next_at = monotonic() + MAINTENANCE_SECONDS
 
 
-def next_deadline(store, settings, kind, now):
-    parts = [f"SELECT julianday({field}) AS at FROM {table} WHERE {condition}"
-             for table, field, condition in DEADLINES[kind]]
-    parts.append("SELECT julianday(a.lease_until) AS at FROM model_admissions a "
-                 "JOIN model_usage m USING(request_id) WHERE m.state='RESERVED'")
-    row = store.one("SELECT MIN(at) AS at FROM (" + " UNION ALL ".join(parts)
-                    + ") WHERE at>=julianday(?)", (now.isoformat(),))
-    dates = ([datetime.fromtimestamp((row["at"] - 2440587.5) * 86400 + 0.002, UTC)]
-             if row["at"] else [])
-    # Daily native schedulers and guard expiration do not require another writer.
-    local = now.astimezone(ZoneInfo(settings.timezone))
-    dates.append((local + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0).astimezone(UTC))
-    hour = (settings.diary_generate_hour if kind == "diary-worker" else
-            settings.consolidation_local_hour if kind == "life-worker" else None)
-    if hour is not None:
-        local = now.astimezone(ZoneInfo(settings.timezone))
-        due = local.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if due <= local:
-            due += timedelta(days=1)
-        dates.append(due.astimezone(UTC))
-    if settings.live_text_window:
-        end = settings.live_text_window.ends_at
-        if end > now:
-            dates.append(end)
-    return min(dates) if dates else None
-
-
 class Wakeup:
     """Subscribe synchronously, snapshot on the SAME Store, scan, then check before waiting.
 
@@ -90,13 +37,13 @@ class Wakeup:
     """
 
     def __init__(self, store, settings, kind, clock):
-        if kind not in DEADLINES:
+        if kind not in PROVIDERS:
             raise ValueError("UNKNOWN_WORKER_KIND")
         self.store, self.settings, self.kind, self.clock = store, settings, kind, clock
         self.stop = threading.Event()
         self.watcher = None
-        self.version = None
-        self.scan_started_at = None
+        self.scan = None
+        self.deadline_provider = PROVIDERS[kind]
         self.notifications = self.version_checks = 0
 
     def __enter__(self):
@@ -115,22 +62,26 @@ class Wakeup:
         self.version_checks += 1
         return self.store.one("PRAGMA data_version")["data_version"]
 
-    def before_scan(self):
-        self.scan_started_at = datetime.fromisoformat(self.clock())
-        self.version = self.data_version()
+    def before_scan(self) -> ScanContext:
+        started_at, started = datetime.fromisoformat(self.clock()), monotonic()
+        self.scan = ScanContext(started_at, self.data_version(), started)
+        return self.scan
 
-    async def wait(self, maintenance_at=None):
+    async def wait(self, scan: ScanContext, result: UnitResult, maintenance_at=None):
+        if scan is not self.scan:
+            raise ValueError("STALE_WORKER_SCAN")
+        if result.progressed:
+            return "progress"
         wall = datetime.fromisoformat(self.clock())
-        # Keep boundaries crossed during the native scan eligible for one rescan.
-        # The next before_scan advances this horizon, excluding past fenced rows.
-        deadline = next_deadline(self.store, self.settings, self.kind,
-                                 self.scan_started_at or wall)
+        deadline = self.deadline_provider(self.store, self.settings, scan.started_at)
+        if result.next_deadline is not None and result.next_deadline >= scan.started_at:
+            deadline = min(deadline, result.next_deadline)
         started = monotonic()
         # Reconcile potentially missed hints using the existing maintenance horizon;
         # a timeout with no commit/deadline does not run the business scan or Recorder.
         reconcile_at = started + MAINTENANCE_SECONDS
         while True:
-            if self.data_version() != self.version:
+            if self.data_version() != scan.data_version:
                 return "commit"
             now, mono = datetime.fromisoformat(self.clock()), monotonic()
             if deadline and now >= deadline:
