@@ -72,6 +72,10 @@ class AffectResetRequest(StrictModel):
     request_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
+class OwnerInputApproval(OwnerCapture):
+    meme_offer: meme_core.MemeOffer | None = None
+
+
 class BodyLimit:
     def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
                  voice_limit=131072, voice_input_limit=131072, video_limit=131072):
@@ -630,10 +634,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         return app.state.core.ingest(event, x_idempotency_key)
 
     @app.post(prefix + "/owner-authority/inputs/approve", dependencies=auth)
-    async def owner_input_approve(body: OwnerCapture, response: Response):
+    async def owner_input_approve(body: OwnerInputApproval, response: Response):
         core = app.state.core
         response.headers["Cache-Control"] = "no-store"
-        return owner_input.approve(core.store, settings, core.clock, body)
+        capture = OwnerCapture.model_validate(body.model_dump(exclude={"meme_offer"}))
+        return owner_input.approve(core.store, settings, core.clock, capture,
+                                   meme_offer=body.meme_offer)
 
     @app.post(prefix + "/owner-authority/check", dependencies=auth)
     async def owner_authority_check(body: OwnerAuthorityCheck, response: Response):

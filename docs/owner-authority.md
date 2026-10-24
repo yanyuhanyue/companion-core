@@ -58,6 +58,12 @@ STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送�
    `occurred_at`、`received_at` 和 Ed25519 `signature`。
    签名使用共享 `capture_signing_payload` 生成的规范字节，域为
    `companion-core/owner-capture/v2` 加 NUL。时间戳须带时区。
+   静态 Meme 目录可在同一请求附加可选 `meme_offer`，沿用严格 `MemeOffer`。
+   旁车独立于原始签名保存，`offer_key` 必须绑定本事件；重试同时比较原签名和
+   已冻结候选，包含有／无候选的变化。审批与后续选择要求当前 `meme` 和
+   `expression` 用途；选择还复核原始来源、job 和回复版本。
+   Meme capability 摘要包含 expression 开关、候选概率、冷却时间和类别，允许
+   discovery 与 semantics 均关闭的静态目录。语义候选继续走原查询绑定接口。
 2. `POST /inbox/events` 沿用原事件协议与幂等键。实际事件必须匹配已批准签名的
    主人私聊来源、时间和完整输入摘要；原事务保存事件及 job 授权引用。
 3. `POST /deliveries/lease` 的文字私聊请求包含 `worker_id`、`limit` 和 `authority`。
@@ -67,6 +73,7 @@ STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送�
    `authority`、`event_id`、`message_id`、`content_sha256`、`lease_token`、
    `reply_revision`，以及存在语音时的原 `voice` binding。
    返回有限 `lease_until`。共享发送器拒绝没有匹配授权 guard 的新投递项。
+   内容包含图片时，在同一事务内额外复核当前 `meme` 用途及 capability 摘要。
 
 输入和最终发送校验响应均为 `Cache-Control: no-store`。签名有效、Bridge 登录成功或
 持有一个旧引用，均不替代最终授权、来源和有限租约校验。

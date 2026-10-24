@@ -96,9 +96,27 @@ class ExpressionEngine:
                 return True, offer
             except (CoreError, ValidationError, ValueError, TypeError, KeyError):
                 return True, None
-        if event_id and self.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
-                                        ("owner_input:" + event_id,)):
-            return True, None
+        native = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                ("owner_input:" + event_id,)) if event_id else None
+        if native:
+            from companion import owner_authority, owner_input
+
+            try:
+                view = owner_authority.current(self.store, self.settings, self.clock,
+                                                purpose="meme")
+                owner_authority.current(self.store, self.settings, self.clock,
+                                         purpose="expression", authority=view.authority)
+                _, _, job = owner_input.source(self.store, self.settings, view, event_id,
+                                               self.clock(), purpose="meme")
+                reply_revision.check_job(self.store, job)
+                value = json.loads(native["value"])
+                offer = MemeOffer.model_validate(value["meme_offer"]) \
+                    if value.get("meme_offer") else None
+                if offer and offer.offer_key != "meme:" + event_id:
+                    return True, None
+                return True, offer
+            except (CoreError, ValidationError, ValueError, TypeError, KeyError):
+                return True, None
         row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
                              ("live_text_input:" + event_id,)) if event_id else None
         value = json.loads(row["value"]) if row else {}

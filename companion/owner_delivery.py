@@ -194,6 +194,11 @@ def send_check(store, settings, clock, body):
 
     with store.transaction():
         result = check_delivery(store, settings, clock, body.message_id, check=body)
+        content = json.loads(store.one("SELECT content_json FROM outbox WHERE message_id=?",
+                                        (body.message_id,))["content_json"])
+        if content.get("image") is not None:
+            owner_authority.current(store, settings, clock,
+                                     purpose="meme", authority=body.authority)
         if body.voice is not None or store.one(
             "SELECT 1 FROM runtime_meta WHERE key=? AND json_extract(value,'$.state')='AUDIO'",
             (REPLY_RECEIPT + body.message_id,),

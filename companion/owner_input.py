@@ -53,13 +53,24 @@ def verify(store, settings, value):
     return capture, view
 
 
-def approve(store, settings, clock, capture):
+def approve(store, settings, clock, capture, *, meme_offer=None):
     """Admit one authenticated frame through the original cumulative input accounting."""
     with store.transaction():
         view = owner_authority.current(store, settings, clock, purpose="chat",
                                        authority=capture.authority)
         value = capture.model_dump(mode="json")
         verify(store, settings, value)
+        offer = None
+        if meme_offer is not None:
+            from companion.expression import MemeOffer
+
+            offer = MemeOffer.model_validate(meme_offer).model_dump(mode="json")
+            if (not settings.expression_enabled or settings.meme_semantics_enabled
+                or offer["offer_key"] != "meme:" + capture.event_id):
+                raise CoreError("OWNER_MEME_OFFER_INVALID", 403)
+            for purpose in ("meme", "expression"):
+                owner_authority.current(store, settings, clock, purpose=purpose,
+                                         authority=capture.authority)
         now = datetime.fromisoformat(clock())
         if (capture.received_at - now).total_seconds() > 2:
             raise CoreError("OWNER_CAPTURE_FUTURE", 403)
@@ -75,7 +86,7 @@ def approve(store, settings, clock, capture):
         prior = store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
         if prior:
             recorded = json.loads(prior["value"])
-            if recorded.get("capture") != value:
+            if recorded.get("capture") != value or recorded.get("meme_offer") != offer:
                 raise CoreError("OWNER_INPUT_CONFLICT", 409)
             return {"approved": True, "duplicate": True}
         if store.one("SELECT 1 FROM events WHERE event_id=?", (capture.event_id,)):
@@ -86,6 +97,7 @@ def approve(store, settings, clock, capture):
             "authority": view.authority.as_dict(), "event_id": capture.event_id,
             "input_sha256": capture.input_sha256, "privacy_epoch": epoch(store),
             "capture": value,
+            **({"meme_offer": offer} if offer is not None else {}),
         }))
         return {"approved": True, "duplicate": False}
 

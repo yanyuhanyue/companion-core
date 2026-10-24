@@ -1,6 +1,14 @@
 # QQ 表情候选与后台找图
 
 本集成已接入 Core HTTP v1、回复规划、Outbox、Bridge `MemeRuntime` 和空闲调度。
+
+原生静态目录的输入审批沿用 `OwnerCapture`，通过独立 `meme_offer` 旁车冻结候选，
+不改变原签名或增加授权协议。审批与选择均要求当前 meme/expression 用途，图片最终
+发送复核 meme 用途。该接入复用已检查的 DSH QQ
+[gateway bootstrap](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/gateway/bootstrap.ts)
+中 transport/media 与入口组装的职责分离；当前权限与能力元数据分离参考
+[RFC 7662 §2.2](https://datatracker.ietf.org/doc/html/rfc7662#section-2.2)。
+候选、预算和不可重放发送继续使用项目既有目录、Core job、Outbox 与 Bridge journal。
 当前状态为 **implemented / mock-verified**；本轮未完成真实搜索、生产素材审核、
 QQ 实机选发或线上启用，不能标记为 **configured / live-verified**。
 输入中断、撤回和重放合同见[输入生命周期](input-lifecycle.md)。
