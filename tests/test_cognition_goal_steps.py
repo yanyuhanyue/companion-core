@@ -134,6 +134,11 @@ def test_original_receipts_are_per_step_bounded_and_prioritize_unknown(core):
     assert selected["receipts"][0]["request_id"] == unknown_id
     assert {r["step_id"] for r in selected["receipts"]} == {steps[1]}
     assert core.store.rows("SELECT * FROM exploration_requests") == before
+    core.store.execute("DELETE FROM exploration_evidence")
+    item = read(core, goal)[0]
+    assert item["execution"]["state"] == "UNKNOWN"
+    assert item["steps"][1]["execution"] == {
+        "state": "UNKNOWN", "receipts": [], "truncated": True}
 
 
 def test_stop_does_not_remove_valid_historical_steps(core, tmp_path):
@@ -143,3 +148,9 @@ def test_stop_does_not_remove_valid_historical_steps(core, tmp_path):
     owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
         operation_id="cognition-plan-stop", authority=grant["authority"]))
     assert read(core, goal)[0]["verified_completed_steps"] == 1
+
+
+def test_committed_temporary_reorder_positions_are_not_a_valid_visible_plan(core):
+    goal, steps = retained_plan(core)
+    core.store.execute("UPDATE goal_steps SET position=4 WHERE step_id=?", (steps[0],))
+    assert read(core, goal) == []

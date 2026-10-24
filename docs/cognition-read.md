@@ -30,6 +30,10 @@ only DONE steps with live, related FETCHED/WATCHED evidence. The parent is `done
 only when its own state is DONE, every step is verified, the original final
 result matches, and no step or Reader attempt remains uncertain. A completed
 first step with later waiting steps leaves the parent planned.
+Receipt `truncated` also indicates native receipts withheld by the existing
+provenance/receipt-source bound; an empty filtered list never clears a recorded
+UNKNOWN liability. Completion reuses the Life domain's per-step completion
+validator, including its complete original step evidence.
 
 The reader checks complete step-source sets up to 256 IDs and withholds a plan
 when a step's source set is missing, excessive or withdrawn. It uses read-only

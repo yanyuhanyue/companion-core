@@ -3,25 +3,12 @@
 from companion.memory_projections import ACTIVE
 
 
-def _completed(reader, step, roots, sources):
-    key = step["outcome_event_id"]
-    if step["state"] != "DONE" or not key:
-        return False
-    receipt = reader.store.one(
-        "SELECT result_status FROM observations WHERE event_id=? AND redacted=0", (key,))
-    if not receipt or receipt["result_status"] not in {"FETCHED", "WATCHED"}:
-        return False
-    lineage = list(sources._lineage(key))
-    return (set(roots) <= {event["source_id"] for event in lineage}
-            and reader.projections._live_lineage(lineage, sources))
-
-
 def record(reader, goal, sources):
     from companion.cognition_read import STATES, object_value, symbol
 
     rows = reader.store.rows("SELECT * FROM goal_steps WHERE goal_id=? "
                              "ORDER BY position,step_id LIMIT 4", (goal["goal_id"],))
-    if len(rows) > 3:
+    if len(rows) > 3 or [step["position"] for step in rows] != list(range(1, len(rows) + 1)):
         return None
     steps, receipts, truncated, unknown, completed = [], [], False, False, 0
     for step in rows:
@@ -33,13 +20,19 @@ def record(reader, goal, sources):
         ):
             return None
         executions, cut = reader.projections._executions(goal, step, sources, None)
+        available = reader.store.one(
+            "SELECT COUNT(*) n FROM (SELECT 1 FROM exploration_requests WHERE redacted=0 "
+            "AND operation='read' AND json_extract(goal_step_json,'$.goal_id')=? "
+            "AND json_extract(goal_step_json,'$.step_id')=? LIMIT 21)",
+            (goal["goal_id"], step["step_id"]))["n"]
+        cut |= len(executions) < min(available, 20)
         uncertain = step["state"] == "EXECUTION_UNCERTAIN" or bool(reader.store.one(
             "SELECT 1 FROM exploration_requests r LEFT JOIN reading_attempts a USING(request_id) "
             "WHERE json_extract(r.goal_step_json,'$.goal_id')=? "
             "AND json_extract(r.goal_step_json,'$.step_id')=? "
             "AND (r.state='UNKNOWN' OR a.state='UNKNOWN') LIMIT 1",
             (goal["goal_id"], step["step_id"])))
-        done = _completed(reader, step, roots, sources)
+        done = reader.projections._completed(goal, step, roots, sources, None)
         state = ("UNKNOWN" if uncertain or step["state"] == "DONE" and not done else
                  "done" if done else "failed" if step["state"] == "FAILED" else
                  "closed" if step["state"] == "CANCELLED" else

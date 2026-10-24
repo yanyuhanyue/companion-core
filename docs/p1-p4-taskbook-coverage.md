@@ -51,3 +51,19 @@ REM cognition 冻结提交 `8f073dfbe27b039e92eb98579145ec20d13f0fb6`，
 `79cd957` → `467b46b` → `15ec410`，最后一项保持回复 canonical 摘要一致。
 这两类回执只证明各自范围，最终引用一个集成 CI 摘要，不复制另一套组合验收身份。
 
+## 最终候选刷新结构
+
+以下字段须在最终组合后逐项核实；本节不改变上表基线的完成等级，也不要求重设计 UI。
+现有可移除实现标记继续与运行状态、实际授权和自主调整消费范围分开。
+
+| 范围 | 生产者与实际消费者 | 必查原始字段或证据 | UI 核对与未完成条件 |
+| --- | --- | --- | --- |
+| 有限多步 Goal | 原生 Goal 创建/续行、Reader、Life 续行消费者 | ordered steps、WAITING_DECISION、版本 CAS、逐步来源和结果、父状态、UNKNOWN、撤回/恢复 | cognition 只读不等于完整操作 UI；缺续行/等待/放弃入口时明确记录；普通多步规划不由 1–3 步 read_plan 推断 |
+| N2/N3 | 原模型输出、原生持久化、Core continuation/召回 | 来源快照、摘要资格、salience、资格失效、实际上下文引用及擦除回放 | 缺阶段/摘要来源解释时单列 UI 缺口；只有字段或读取代码不能算生成链已完成 |
+| 兴趣与反馈 | 真实完成探索、明确反馈、Life/QZone 后续选择 | 独立来源/日期、相反反馈、选择前后变化、原用途授权 | 区分主人偏好、自主兴趣与长期行为；未证明后续选择变化则保持部分实现 |
+| Cognition | 原生保存记录、owner 控制读取 | steps、verified_completed_steps、每步回执/截断、来源撤回、STOP 后读取 | console-v2 无实际请求/页面时保持 UI 缺口；不把后端 API 或占位能力 ID 写成页面已交付 |
+| REM | 独立默认关闭的生成、原账本、私人读取 | FICTION、未验证问题、有效来源、独立进程恢复与费用保留 | opt-in、记录与来源撤回展示分别核对；不得把虚构投影当事实或公开来源 |
+| 原生媒体/Voice | 原签名捕获、Core/独立 worker、OwnerOneBot host | schema3 binding、原 authority、最终 send-check、ACK/UNKNOWN、清理 | Core/Node 通过不代表 Bridge dispatch 或实机已通过；没有正向 dispatch 回执则继续标未验收 |
+
+每行最终只引用同一份集成 CI 回执，并分别记录“代码已接入”“UI 已接入”和“真人验收”。
+
