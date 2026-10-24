@@ -55,16 +55,44 @@ def test_goal_plan_migration_retains_original_step_promise_and_evidence(tmp_path
         store.insert("goal_steps", step_id="next-step", goal_id="original-goal", position=2,
             scope_json=scope, state="WAITING_DECISION", max_attempts=1,
             created_at=now, updated_at=now)
-        for position in (2, 4, 1.5):
+        for position in (2, 7, 1.5):
             with pytest.raises(sqlite3.IntegrityError):
                 store.insert("goal_steps", step_id="forbidden-step", goal_id="original-goal",
                     position=position, scope_json=scope, state="WAITING_DECISION", max_attempts=1,
                     created_at=now, updated_at=now)
+        store.insert("goal_steps", step_id="third-step", goal_id="original-goal", position=3,
+            scope_json=scope, state="WAITING_DECISION", max_attempts=1,
+            created_at=now, updated_at=now)
+        with store.transaction():
+            store.execute("UPDATE goal_steps SET position=position+3")
+            assert [r["position"] for r in store.rows(
+                "SELECT position FROM goal_steps ORDER BY position")] == [4, 5, 6]
+            with pytest.raises(sqlite3.IntegrityError, match="GOAL_STEP_LIMIT"):
+                store.insert("goal_steps", step_id="fourth-step", goal_id="original-goal",
+                    position=1, scope_json=scope, state="WAITING_DECISION", max_attempts=1,
+                    created_at=now, updated_at=now)
+            store.execute("UPDATE goal_steps SET position=position-3")
+        # An interrupted reorder rolls back its parking positions and original IDs.
+        before = store.rows("SELECT * FROM goal_steps ORDER BY position")
+        with pytest.raises(RuntimeError, match="interrupted"):
+            with store.transaction():
+                store.execute("UPDATE goal_steps SET position=position+3")
+                raise RuntimeError("interrupted")
+        assert store.rows("SELECT * FROM goal_steps ORDER BY position") == before
+        store.insert("goals", **(old_goal | {"goal_id": "another-goal",
+            "proposal_key": "another-proposal"}))
+        store.insert("goal_steps", step_id="another-step", goal_id="another-goal", position=4,
+            scope_json=scope, state="WAITING_DECISION", max_attempts=1,
+            created_at=now, updated_at=now)
+        with pytest.raises(sqlite3.IntegrityError, match="GOAL_STEP_LIMIT"):
+            store.execute("UPDATE goal_steps SET goal_id='original-goal' "
+                          "WHERE step_id='another-step'")
+        store.execute("UPDATE goal_steps SET goal_id=goal_id WHERE goal_id='original-goal'")
     config = Config()
     config.set_main_option("script_location", str(Path(__file__).parents[1] / "migrations"))
     config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     with pytest.raises(RuntimeError, match="GOAL_PLAN_DOWNGRADE_REQUIRES_EXPLICIT_CUSTODY"):
         command.downgrade(config, "0044_voice_owner_authority")
     with closing(Store(path)) as store:
-        assert store.one("SELECT COUNT(*) n FROM goal_steps")["n"] == 2
+        assert store.one("SELECT COUNT(*) n FROM goal_steps")["n"] == 4
         assert store.rows("PRAGMA foreign_key_check") == []

@@ -14,7 +14,8 @@ def upgrade():
         raise RuntimeError("GOAL_SCOPE_RECONCILIATION_REQUIRED")
     op.execute("""CREATE TABLE goal_steps_next (
         step_id TEXT PRIMARY KEY, goal_id TEXT NOT NULL REFERENCES goals(goal_id),
-        position INTEGER NOT NULL DEFAULT 1 CHECK(position IN (1,2,3)),
+        position INTEGER NOT NULL DEFAULT 1
+            CHECK(typeof(position)='integer' AND position BETWEEN 1 AND 6),
         scope_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(scope_json)
             AND json_type(scope_json)='object'),
         state TEXT NOT NULL CHECK(state IN ('QUEUED','RUNNING','DONE','WAITING_RESOURCE',
@@ -31,6 +32,15 @@ def upgrade():
                f"SELECT {selected},1,g.scope_json FROM goal_steps s JOIN goals g USING(goal_id)")
     op.drop_table("goal_steps")
     op.rename_table("goal_steps_next", "goal_steps")
+    # 4..6 are transaction-local parking slots for UNIQUE-safe reordering.
+    # Bound the actual step count independently of those temporary positions.
+    op.execute("""CREATE TRIGGER goal_steps_max_three_insert BEFORE INSERT ON goal_steps
+        WHEN (SELECT count(*) FROM goal_steps WHERE goal_id=NEW.goal_id)>=3
+        BEGIN SELECT RAISE(ABORT,'GOAL_STEP_LIMIT'); END""")
+    op.execute("""CREATE TRIGGER goal_steps_max_three_update BEFORE UPDATE OF goal_id ON goal_steps
+        WHEN (SELECT count(*) FROM goal_steps
+              WHERE goal_id=NEW.goal_id AND step_id!=OLD.step_id)>=3
+        BEGIN SELECT RAISE(ABORT,'GOAL_STEP_LIMIT'); END""")
     op.execute("""CREATE TABLE goal_step_evidence (
         step_id TEXT NOT NULL REFERENCES goal_steps(step_id),
         event_id TEXT NOT NULL REFERENCES events(event_id), PRIMARY KEY(step_id,event_id))""")
