@@ -12,7 +12,6 @@ from .bridge import Spool, normalize
 from .content import ImageQueue, prepare_shared, redact_image_urls, share_candidates
 from .delivery import host_driver
 from .expression_adapter import DEFAULT_CATEGORIES, MemeLibrary
-from .reader import reader_tick, validate_source_api
 
 
 @register("astrbot_plugin_companion_bridge", "yanyuhanyue", "Companion Core 私聊传输桥", "0.5.0")
@@ -24,10 +23,6 @@ class CompanionBridge(Star):
         self.task = None
         self.spool = None
         self.protocol_epoch = ""
-        self.reader_tasks = []
-        self.reader_clients = []
-        self.reader_wakeups = []
-        self.content_active_until = 0
         self.content_queue = None
         self.content_task = None
         self.meme_library = None
@@ -38,19 +33,10 @@ class CompanionBridge(Star):
         bot = self.config.get("bot_qq_id", "")
         if len(token) < 24 or not owner.isdigit() or not bot.isdigit() or owner == bot:
             raise ValueError("请配置 owner_qq_id、bot_qq_id 和至少 24 位 bridge_token")
-        reader_configs = []
-        for source in ("bilibili", "heybox"):
-            if not self.config.get(source + "_reader_enabled", False):
-                continue
-            adapter_id = self.config.get(source + "_reader_id", "")
-            reader_token = self.config.get(source + "_reader_token", "")
-            if not adapter_id or len(reader_token) < 24:
-                raise ValueError("内容读取器需要独立的 adapter_id 与至少 24 位令牌")
-            source_url = self.config.get("heybox_api_url", "") if source == "heybox" else ""
-            source_token = self.config.get("heybox_api_token", "")
-            if source_url:
-                validate_source_api(source_url, source_token)
-            reader_configs.append((source, adapter_id, reader_token, source_url, source_token))
+        if any(self.config.get(source + "_reader_enabled", False)
+               for source in ("bilibili", "heybox")):
+            raise ValueError("Embedded Reader configuration requires migration: "
+                             "python -m source_reader.migrate_astrbot")
         self.protocol_epoch = self.config.get("protocol_epoch", "")
         try:
             self.spool = Spool(str(StarTools.get_data_dir() / "inbox.sqlite3"))
@@ -69,49 +55,10 @@ class CompanionBridge(Star):
                 timeout=10,
                 trust_env=False,
             )
-            reader_args = []
-            for source, adapter_id, reader_token, source_url, source_token in reader_configs:
-                reader_client = httpx.AsyncClient(
-                    base_url=self.config.get("core_url", "http://companion-api:8765"),
-                    headers={"Authorization": "Bearer " + reader_token},
-                    timeout=10,
-                    trust_env=False,
-                )
-                self.reader_clients.append(reader_client)
-                public_client = httpx.AsyncClient(
-                    timeout=15,
-                    trust_env=False,
-                    follow_redirects=False,
-                    headers={
-                        "User-Agent": "Companion-ReadOnly/0.5",
-                        "Accept-Encoding": "identity",
-                    },
-                )
-                self.reader_clients.append(public_client)
-                source_client = None
-                if source_url:
-                    source_client = httpx.AsyncClient(
-                        base_url=source_url.rstrip("/"),
-                        timeout=15,
-                        trust_env=False,
-                        follow_redirects=False,
-                        headers={
-                            "Authorization": "Bearer " + source_token,
-                            "Accept-Encoding": "identity",
-                        },
-                    )
-                    self.reader_clients.append(source_client)
-                wakeup = asyncio.Event()
-                self.reader_wakeups.append(wakeup)
-                reader_args.append(
-                    (reader_client, public_client, adapter_id, source, source_client, wakeup)
-                )
             self.task = asyncio.create_task(self.pump())
             if self.config.get("content_enabled", False):
                 self.content_queue = ImageQueue(self.client, self.inbox_state)
                 self.content_task = asyncio.create_task(self.content_queue.run())
-            for args in reader_args:
-                self.reader_tasks.append(asyncio.create_task(self.read_content(*args)))
         except BaseException:
             await self.terminate()
             raise
@@ -119,26 +66,6 @@ class CompanionBridge(Star):
     def inbox_state(self, key):
         row = self.spool.db.execute("SELECT state FROM inbox WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
-
-    async def read_content(
-        self, core_client, public_client, adapter_id, source, source_client=None, wakeup=None
-    ):
-        wakeup = wakeup or asyncio.Event()
-        while True:
-            worked = False
-            try:
-                worked = await reader_tick(
-                    core_client, public_client, adapter_id, source, source_client
-                )
-            except Exception:
-                logger.debug("Companion reader unavailable; request state retained")
-            active = asyncio.get_running_loop().time() < self.content_active_until
-            try:
-                async with asyncio.timeout(2 if worked or active else 30):
-                    await wakeup.wait()
-                wakeup.clear()
-            except TimeoutError:
-                pass
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=10000)
     async def on_private_message(self, event: AstrMessageEvent):
@@ -190,12 +117,6 @@ class CompanionBridge(Star):
         self.spool.put(key, payload)
         if self.content_queue and images:
             self.content_queue.put(key, payload["event_id"], images)
-        if self.config.get("content_enabled", False) and any(
-            item["kind"] == "link" for item in payload["payload"].get("shared_content", [])
-        ):
-            self.content_active_until = asyncio.get_running_loop().time() + 60
-            for wakeup in self.reader_wakeups:
-                wakeup.set()
 
     async def pump(self):
         failures = 0
@@ -217,19 +138,16 @@ class CompanionBridge(Star):
             await asyncio.sleep(min(30, max(1, failures * 2)))
 
     async def terminate(self):
-        tasks = self.reader_tasks + [task for task in (self.task, self.content_task) if task]
+        tasks = [task for task in (self.task, self.content_task) if task]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self.reader_tasks.clear()
-        self.reader_wakeups.clear()
         self.task = self.content_task = None
         if self.content_queue:
             self.content_queue.clear()
             self.content_queue = None
-        clients = self.reader_clients + ([self.client] if self.client else [])
+        clients = [self.client] if self.client else []
         await asyncio.gather(*(client.aclose() for client in clients), return_exceptions=True)
-        self.reader_clients.clear()
         self.client = None
         if self.spool:
             self.spool.db.close()

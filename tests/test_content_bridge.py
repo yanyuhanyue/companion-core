@@ -370,7 +370,7 @@ def test_initialize_bad_reader_validates_before_allocating_resources(bridge_modu
 
     monkeypatch.setattr(bridge_module, "Spool", unexpected)
     bridge = bridge_module.CompanionBridge(object(), config(bilibili_reader_enabled=True))
-    with pytest.raises(ValueError, match="内容读取器"):
+    with pytest.raises(ValueError, match="requires migration"):
         asyncio.run(bridge.initialize())
     assert bridge.task is bridge.client is bridge.spool is None
 
@@ -386,8 +386,6 @@ def test_initialize_partial_failure_closes_every_client_and_spool(
         return spool
 
     def client_factory(**kwargs):
-        if len(clients) == 2:
-            raise RuntimeError("public client setup failed")
 
         async def close():
             client.closed = True
@@ -398,26 +396,23 @@ def test_initialize_partial_failure_closes_every_client_and_spool(
 
     monkeypatch.setattr(bridge_module, "Spool", spool_factory)
     monkeypatch.setattr(bridge_module.httpx, "AsyncClient", client_factory)
-    bridge = bridge_module.CompanionBridge(
-        object(),
-        config(
-            bilibili_reader_enabled=True,
-            bilibili_reader_id="bili",
-            bilibili_reader_token="y" * 32,
-        ),
-    )
+    def bad_queue(*args):
+        raise RuntimeError("content setup failed")
+
+    monkeypatch.setattr(bridge_module, "ImageQueue", bad_queue)
+    bridge = bridge_module.CompanionBridge(object(), config(content_enabled=True))
     with pytest.raises(RuntimeError, match="setup failed"):
         asyncio.run(bridge.initialize())
     assert all(client.closed for client in clients)
     assert bridge.task is bridge.client is bridge.spool is None
-    assert bridge.reader_clients == bridge.reader_tasks == []
+    assert not hasattr(bridge, "reader_tasks")
     import sqlite3
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         databases[0].execute("SELECT 1")
 
 
-def test_terminate_cancels_content_and_reader_tasks_and_is_repeatable(bridge_module, monkeypatch):
+def test_terminate_cancels_content_and_delivery_tasks_and_is_repeatable(bridge_module, monkeypatch):
     async def scenario():
         started = asyncio.Event()
 
@@ -426,23 +421,19 @@ def test_terminate_cancels_content_and_reader_tasks_and_is_repeatable(bridge_mod
             await asyncio.Event().wait()
 
         monkeypatch.setattr(bridge_module.CompanionBridge, "pump", block)
-        monkeypatch.setattr(bridge_module, "reader_tick", block)
         monkeypatch.setattr(content, "forward_images", block)
         bridge = bridge_module.CompanionBridge(
             object(),
             config(
                 content_enabled=True,
-                bilibili_reader_enabled=True,
-                bilibili_reader_id="bili",
-                bilibili_reader_token="y" * 32,
             ),
         )
         await bridge.initialize()
         bridge.content_queue.put("key", "event", [{"slot": 0, "url": "private"}])
         queue = bridge.content_queue
         images = queue.queue._queue[0][2]
-        tasks = [bridge.task, bridge.content_task, *bridge.reader_tasks]
-        clients = [bridge.client, *bridge.reader_clients]
+        tasks = [bridge.task, bridge.content_task]
+        clients = [bridge.client]
         await started.wait()
         await bridge.terminate()
         await bridge.terminate()
@@ -454,51 +445,17 @@ def test_terminate_cancels_content_and_reader_tasks_and_is_repeatable(bridge_mod
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(
-    "active,worked,expected", [(False, False, 30), (True, False, 2), (False, True, 2)]
-)
-def test_reader_cadence_is_fast_for_owner_work_and_bounded_when_idle(
-    bridge_module, monkeypatch, active, worked, expected
-):
-    async def scenario():
-        bridge = bridge_module.CompanionBridge(object(), config())
-        bridge.content_active_until = asyncio.get_running_loop().time() + (60 if active else -1)
-        delays = []
-
-        async def tick(*args):
-            return worked
-
-        class StopAtWait:
-            async def __aenter__(self):
-                raise asyncio.CancelledError
-
-            async def __aexit__(self, *args):
-                return False
-
-        def timeout(delay):
-            delays.append(delay)
-            return StopAtWait()
-
-        monkeypatch.setattr(bridge_module, "reader_tick", tick)
-        monkeypatch.setattr(bridge_module.asyncio, "timeout", timeout)
-        with pytest.raises(asyncio.CancelledError):
-            await bridge.read_content(None, None, "adapter", "bilibili")
-        assert delays == [expected]
-
-    asyncio.run(scenario())
-
-
-def test_owner_link_wakes_idle_readers(bridge_module, tmp_path):
+def test_owner_link_keeps_manifest_for_independent_reader(bridge_module, tmp_path):
     async def scenario():
         bridge = bridge_module.CompanionBridge(object(), config(content_enabled=True))
         bridge.spool = Spool(str(tmp_path / "spool.db"))
-        bridge.reader_wakeups = [asyncio.Event(), asyncio.Event()]
         try:
             await bridge.on_private_message(
                 event([], text="https://www.bilibili.com/video/BV1234567890")
             )
-            assert all(wakeup.is_set() for wakeup in bridge.reader_wakeups)
-            assert bridge.content_active_until > asyncio.get_running_loop().time()
+            saved = json.loads(bridge.spool.db.execute("SELECT body FROM inbox").fetchone()[0])
+            assert saved["payload"]["shared_content"][0]["kind"] == "link"
+            assert not hasattr(bridge, "reader_tasks")
         finally:
             bridge.spool.db.close()
 

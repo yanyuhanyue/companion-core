@@ -62,7 +62,44 @@ uv run python scripts/package_bridge.py
 
 本片 AstrBot 支持无窗口的主人私聊文字及已授权的本地表情图片。宿主高层接口没有最终传输钩子，因此 live window、分段回复、voice 和账户动作在此入口保持不可用；这些能力继续由原 OneBot 窗口路径处理，不能用布尔返回或更宽的权限模拟支持。只为同一机器人启用一个交付入口。
 
-升级前停止旧插件。继续使用原数据目录和 `inbox.sqlite3`：原 inbox 正文、source ID、幂等键和 `protocol_generations` 保持不变，初始化时从尚存 inbox 绑定目标身份，并新增回执表。旧版本没有留下的发送回执不会被推断成成功，Core 中已有 UNKNOWN 必须按原流程处理。若旧 inbox 已空且没有身份记录，插件等待下一条通过身份校验的主人输入后才领取新交付。存在待报告回执时不能切换协议 epoch；恢复进程先完成报告。Reader 和图片上传队列在本片保留原行为。
+升级前停止旧插件。继续使用原数据目录和 `inbox.sqlite3`：原 inbox 正文、source ID、幂等键和 `protocol_generations` 保持不变，初始化时从尚存 inbox 绑定目标身份，并新增回执表。旧版本没有留下的发送回执不会被推断成成功，Core 中已有 UNKNOWN 必须按原流程处理。若旧 inbox 已空且没有身份记录，插件等待下一条通过身份校验的主人输入后才领取新交付。存在待报告回执时不能切换协议 epoch；恢复进程先完成报告。图片上传队列继续保留原行为；Reader 按下节迁移为独立进程。
+
+## 将旧内置 Reader 迁出 AstrBot
+
+此版本删除插件内的 Bilibili/Heybox Reader poller。先停止旧插件，私密导出其配置对象为 JSON，
+再在仓库内运行以下迁移命令（输出目录必须尚不存在）：
+
+```powershell
+uv run python -m source_reader.migrate_astrbot --config privacy/astrbot-config.json --output privacy/readers --network companion-internal
+```
+
+命令不连接 QQ、Core 或来源站点，不修改原配置，也不启动服务。它生成：
+
+- `compose.json`：复用 `deploy/source-reader.Dockerfile` 与独立 Reader CLI，沿用原 Core origin 和 adapter ID。
+- 每来源一个私密 `.env`：仅携带该 Reader 的原令牌；配置过 Heybox 来源服务时保留独立来源令牌。
+- `astrbot-config.json`：保留其他插件设置，移除旧 Reader 字段，供回填 AstrBot 插件配置。
+
+使用 Docker Compose 2.30 及以上版本；`env_file.format: raw` 保留令牌内 `$`、引号和等号的原值。
+输出目录应位于私密位置；POSIX 系统创建为目录 0700、文件 0600。不要将配置或令牌提交到 Git。
+Core 中的 observation adapter ID/source/token 必须与原配置一致，迁移命令不创建新授权或扩大限额。
+默认的 `http://companion-api:8765` 只用于已配置的私有容器网络；其他明文地址仍需是 localhost 或私网 IP。
+
+```powershell
+docker compose -f privacy/readers/compose.json build
+docker compose -f privacy/readers/compose.json up -d
+```
+
+确认独立 Reader 在原队列完成一次受控读取后，把生成的插件配置回填并安装本版本插件。
+不要同时运行旧内置 poller。新插件发现旧启用字段会在初始化前报告迁移要求，不会默默丢弃读取能力。
+在途租约仍由 Core 保存；失去结果 ACK 时只依赖原租约恢复，不能删除队列或直接重新执行外部读取。
+既有 `/internal/v2/readers/{id}/lease`、`validate`、`result` 合同不变；来源证据和擦除继续由 Core 维护。
+
+迁移只保留原公开读取能力。小黑盒未配置来源服务时，生成的 `--public-discovery` 明确启用旧插件的
+公开首页标题/链接提取；默认独立 Reader 不受影响。仅提取标题的结果不能作为已读正文，SPA 空壳仍失败。
+不会启用账号授权、浏览器、评论、视频媒体或额外预算。Bilibili 元数据读取仍受原请求数约束；不足以取得字幕时明确标注层级。
+
+媒体 ImageQueue、引用/转发采集及上传恢复仍走原路径，此次不迁移它们。部署依据为现有独立 Reader
+入口及 [Compose env_file 的 raw 格式](https://docs.docker.com/reference/compose-file/services/#env_file)。
 
 ## 开启记忆
 

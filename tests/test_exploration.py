@@ -7,14 +7,6 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 
-from astrbot_plugin_companion_bridge.reader import (
-    ReadFailure,
-    bounded_get,
-    read_heybox_api,
-    read_public,
-    reader_tick,
-    validate_source_api,
-)
 from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError, LeaseRequest
@@ -24,6 +16,10 @@ from companion.observation import ObservationEvent
 from companion.privacy import epoch
 from companion.store import Store
 from companion.transport import begin_send, lease_deliveries
+from source_reader.bilibili import BilibiliReader
+from source_reader.heybox import HeyboxReader, SourceAPI
+from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
+from source_reader.worker import read_result, tick
 from tests.conftest import FakeModel, ingest, run
 
 URL = "https://www.bilibili.com/video/BV1xx411c7mD"
@@ -282,191 +278,121 @@ def test_similar_content_different_urls_is_suppressed(core, monkeypatch):
     assert rows[1]["reason_code"] == "SIMILAR_CONTENT"
 
 
-def test_public_reader_real_http_contract_only_get_and_no_core_auth():
-    seen = []
+def public_fixture(*responses):
+    from tests.test_heybox_reader import mock_pool
 
-    def handler(request):
-        seen.append(request)
-        assert request.method == "GET" and "authorization" not in request.headers
-        assert request.url.host == "api.bilibili.com"
-        return httpx.Response(
-            200, json={"code": 0, "data": {"title": "视频标题", "desc": "这是简介。"}}
-        )
+    pool, backend = mock_pool(*responses)
+    return PublicHTTP(pool), backend
+
+
+def test_public_reader_real_http_contract_only_get_and_no_core_auth():
+    from tests.test_source_reader import META, response
 
     async def scenario():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            result, count = await read_public(
-                client,
-                "bilibili",
-                {"operation": "read", "url": URL, "max_bytes": 4096, "max_items": 1},
-            )
-            assert result[0]["text"] == "这是简介。" and count > 0
+        public, backend = public_fixture(response(META))
+        async with public:
+            result = await read_result(BilibiliReader(public), {
+                "lease_token": "test", "operation": "read", "url": URL,
+                "max_bytes": 4096, "max_requests": 1, "max_items": 1})
+            assert result["status"] == "SUCCESS" and result["items"][0]["reading"]["level"] == "L1"
             with pytest.raises(ReadFailure):
-                await bounded_get(client, "https://127.0.0.1/internal", 4096)
-
+                await public.get("https://127.0.0.1/internal", ReadBudget(4096, 1), "metadata")
+        assert len(backend.requests) == 1
+        assert all(row.startswith(b"GET ") and b"authorization:" not in row.lower()
+                   for row in backend.requests)
     run(scenario())
-    assert len(seen) == 1
 
 
 def test_public_html_discovers_titles_but_spa_shell_is_not_read_body():
-    def handler(request):
-        return httpx.Response(
-            200, text='<title>小黑盒</title><a href="/app/bbs/link/123">游戏帖子</a>'
-        )
+    from tests.test_source_reader import response
+
+    html = b'<title>title</title><a href="/app/bbs/link/123">article</a>'
 
     async def scenario():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            item = {"operation": "discover", "url": "", "max_bytes": 4096, "max_items": 4}
-            data, _ = await read_public(client, "heybox", item)
-            assert data == [
-                {
-                    "title": "游戏帖子",
-                    "text": "",
-                    "url": "https://www.xiaoheihe.cn/app/bbs/link/123",
-                }
-            ]
-            with pytest.raises(ReadFailure, match="READ_BODY_UNAVAILABLE"):
-                await read_public(
-                    client, "heybox", {**item, "operation": "read", "url": data[0]["url"]}
-                )
-
+        public, _ = public_fixture(response(html), response(html))
+        async with public:
+            reader = HeyboxReader(public, public_discovery=True)
+            item = {"lease_token": "test", "operation": "discover", "url": "",
+                    "max_bytes": 4096, "max_items": 4}
+            discovered = await read_result(reader, item)
+            assert discovered["status"] == "SUCCESS"
+            assert discovered["items"][0]["url"].endswith("/123")
+            result = await read_result(reader, item | {"operation": "read",
+                "url": discovered["items"][0]["url"]})
+            assert result["status"] == "FAILED" and not result["items"]
     run(scenario())
 
 
 def test_reader_size_and_redirects_fail_without_followup():
-    for response in (
-        httpx.Response(302, headers={"location": "https://127.0.0.1/"}),
-        httpx.Response(200, content=b"x" * 4097),
-    ):
+    from tests.test_source_reader import response
 
-        async def scenario(response=response):
-            async with httpx.AsyncClient(
-                transport=httpx.MockTransport(lambda req: response)
-            ) as client:
-                with pytest.raises(ReadFailure):
-                    await read_public(
-                        client,
-                        "bilibili",
-                        {"operation": "discover", "max_bytes": 4096, "max_items": 1},
-                    )
-
-        run(scenario())
+    async def scenario():
+        for row in (response(status=302, headers={"Location": "https://127.0.0.1/"}),
+                    response(b"x" * 4097)):
+            public, backend = public_fixture(row)
+            async with public:
+                result = await read_result(HeyboxReader(public, public_discovery=True), {
+                    "lease_token": "test", "operation": "discover", "max_bytes": 4096,
+                    "max_items": 1})
+            assert result["status"] == "FAILED" and not result["items"]
+            assert len(backend.requests) == 1
+    run(scenario())
 
 
 def test_bridge_result_report_failure_does_not_repeat_public_io():
-    reads, reports = [], []
+    from tests.test_source_reader import META, response
+
+    reports = []
 
     def core_handler(request):
         if request.url.path.endswith("/lease"):
-            return httpx.Response(
-                200,
-                json={
-                    "item": {
-                        "request_id": "read_test",
-                        "lease_token": "lease_token_test",
-                        "operation": "read",
-                        "url": URL,
-                        "max_bytes": 4096,
-                        "max_items": 1,
-                    }
-                },
-            )
+            return httpx.Response(200, json={"item": {
+                "request_id": "read_test", "lease_token": "test", "operation": "read",
+                "url": URL, "max_bytes": 4096, "max_requests": 1, "max_items": 1}})
+        if request.url.path.endswith("/validate"):
+            return httpx.Response(200, json={"valid": True})
         reports.append(request)
         raise httpx.ReadTimeout("unknown")
 
-    def public_handler(request):
-        reads.append(request)
-        return httpx.Response(200, json={"code": 0, "data": {"title": "title", "desc": "body"}})
-
     async def scenario():
-        async with (
-            httpx.AsyncClient(
-                base_url="http://core", transport=httpx.MockTransport(core_handler)
-            ) as core_client,
-            httpx.AsyncClient(transport=httpx.MockTransport(public_handler)) as public,
-        ):
+        public, backend = public_fixture(response(META))
+        async with public, httpx.AsyncClient(base_url="http://core",
+                transport=httpx.MockTransport(core_handler)) as client:
             with pytest.raises(httpx.ReadTimeout):
-                await reader_tick(core_client, public, "bili", "bilibili")
-
+                await tick(client, BilibiliReader(public), "bili")
+        assert len(backend.requests) == len(reports) == 1
     run(scenario())
-    assert len(reads) == len(reports) == 1
 
 
 def test_optional_heybox_http_contract_keeps_get_scope_and_business_status():
-    paths = []
-
-    def handler(request):
-        paths.append(request.url.path)
-        assert request.method == "GET"
-        assert request.headers["authorization"] == "Bearer source-only-token"
-        if request.url.path == "/api/feeds":
-            return httpx.Response(
-                200,
-                json={"status": "ok", "result": {"links": [{"linkid": 123, "title": "帖子标题"}]}},
-            )
-        assert request.url.path == "/api/post/detail/123"
-        assert request.url.params["owner_only"] == "1"
-        return httpx.Response(
-            200,
-            json={
-                "status": "ok",
-                "result": {
-                    "link": {
-                        "title": "帖子标题",
-                        "text": json.dumps(
-                            [
-                                {"type": "text", "text": "<p>作者介绍了手绘关卡。</p>"},
-                                {"type": "img", "url": "https://example.org/large.jpg"},
-                                {
-                                    "type": "text",
-                                    "text": "<script>do_something()</script><p>下月公开试玩。</p>",
-                                },
-                            ]
-                        ),
-                    }
-                },
-            },
-        )
+    from tests.test_heybox_reader import ITEM, POST, SOURCE_TOKEN, URL, mock_pool
+    from tests.test_source_reader import response
 
     async def scenario():
-        async with httpx.AsyncClient(
-            base_url="http://127.0.0.1:4000",
-            headers={"Authorization": "Bearer source-only-token"},
-            transport=httpx.MockTransport(handler),
-        ) as client:
-            items, size = await read_heybox_api(
-                client, {"operation": "discover", "max_items": 3, "max_bytes": 4096}
-            )
-            assert size > 0 and items[0]["text"] == ""
-            read, _ = await read_heybox_api(
-                client, {"operation": "read", "url": items[0]["url"], "max_bytes": 4096}
-            )
-            assert read[0]["text"] == "作者介绍了手绘关卡。\n下月公开试玩。"
-        async with httpx.AsyncClient(
-            base_url="http://127.0.0.1:4000",
-            transport=httpx.MockTransport(
-                lambda req: httpx.Response(200, json={"status": "relogin", "result": {"links": []}})
-            ),
-        ) as client:
-            with pytest.raises(ReadFailure, match="UPSTREAM_RESPONSE_INVALID"):
-                await read_heybox_api(
-                    client, {"operation": "discover", "max_items": 3, "max_bytes": 4096}
-                )
-
+        pool, backend = mock_pool(response({"status": "ok", "result": {"links": [{
+            "linkid": 168860244, "title": "article"}]}}), response(POST),
+            response({"status": "relogin", "result": {"links": []}}))
+        async with SourceAPI("http://127.0.0.1:4000", SOURCE_TOKEN, pool) as source:
+            reader = HeyboxReader(None, source)
+            found = await read_result(reader, ITEM | {"operation": "discover"})
+            assert found["status"] == "SUCCESS" and found["items"][0]["url"] == URL
+            result = await read_result(reader, ITEM)
+            assert result["status"] == "SUCCESS"
+            assert result["items"][0]["article"]["response_sha256"]
+            denied = await read_result(reader, ITEM | {"operation": "discover"})
+            assert denied["status"] == "FAILED" and not denied["items"]
+        assert all(row.startswith(b"GET ") for row in backend.requests)
+        assert b"/api/feeds?" in backend.requests[0]
+        assert b"/api/post/detail/168860244?" in backend.requests[1]
     run(scenario())
-    assert paths == ["/api/feeds", "/api/post/detail/123"]
 
 
 def test_source_api_config_does_not_allow_public_cleartext_or_credential_urls():
-    validate_source_api("http://100.80.1.2:4000", "reader-key-" * 4)
-    for value in (
-        "http://example.org",
-        "https://user:pass@example.org",
-        "https://example.org/?token=x",
-        "file:///secret",
-    ):
+    SourceAPI("http://100.80.1.2:4000", "reader-key-" * 4)
+    for value in ("http://example.org", "https://user:pass@example.org",
+                  "https://example.org/?token=x", "file:///secret"):
         with pytest.raises(ValueError):
-            validate_source_api(value, "reader-key-" * 4)
+            SourceAPI(value, "reader-key-" * 4)
 
 
 def test_offline_reader_waits_without_burning_goal_attempts(core):
@@ -566,24 +492,18 @@ def test_unknown_zero_usage_cannot_release_reserved_traffic(core):
 
 
 def test_html_void_elements_do_not_truncate_read_content():
-    html = "<title>帖子</title><article><p>第一段</p><img/><p>第二段<br/>最后一段</p></article>"
+    from tests.test_source_reader import response
+
+    html = b"<title>post</title><article><p>first</p><img/><p>second<br/>last</p></article>"
 
     async def scenario():
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda req: httpx.Response(200, text=html))
-        ) as client:
-            items, _ = await read_public(
-                client,
-                "heybox",
-                {
-                    "operation": "read",
-                    "url": "https://www.xiaoheihe.cn/app/bbs/link/123",
-                    "max_bytes": 4096,
-                    "max_items": 1,
-                },
-            )
-            assert items[0]["text"] == "第一段\n第二段\n最后一段"
-
+        public, _ = public_fixture(response(html))
+        async with public:
+            result = await read_result(HeyboxReader(public), {"lease_token": "test",
+                "operation": "read", "url": "https://www.xiaoheihe.cn/app/bbs/link/123",
+                "max_bytes": 4096, "max_items": 1})
+        assert result["status"] == "SUCCESS"
+        assert all(word in result["items"][0]["text"] for word in ("first", "second", "last"))
     run(scenario())
 
 

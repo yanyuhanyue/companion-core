@@ -70,7 +70,7 @@ exploration_daily_bytes = 2621440
 
 Reader 环境单独配置 `COMPANION_READER_TOKEN` 为该适配器密钥。
 不得复用 Bridge／owner token。Core 中同一来源只配置一个实际领取该队列的 Reader；
-使用此进程时关闭 Bridge 的 `bilibili_reader_enabled`，避免旧 Reader 竞争租约。
+旧 AstrBot 内置 Reader 已移除；使用 `source_reader.migrate_astrbot` 导出原配置后启动独立进程，避免旧插件继续竞争租约。
 按需保留其他来源适配器的现有配置。所有功能在默认配置中仍关闭。
 
 ```powershell
@@ -81,7 +81,7 @@ uv sync --frozen --group reader
 .venv/Scripts/python.exe -m source_reader --probe https://www.bilibili.com/video/BV1GJ411x7h7
 ```
 
-Core 的 HTTP origin 仅接受 localhost／私网 IP；HTTPS 可使用受信任的服务域名。
+Core 的 HTTP origin 接受 localhost／私网 IP，另允许私有 Compose 网络中的固定 `companion-api` 服务名；HTTPS 可使用受信任的服务域名。
 Reader 只需要 httpx/httpcore；Playwright 是可选 reader 依赖组，不在 Core 默认安装路径。
 
 ## 可选 Chromium 与容器
