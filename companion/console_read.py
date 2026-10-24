@@ -197,6 +197,9 @@ def overview(core):
                                     "('PENDING','LEASED','SENDING','RETRY_WAIT')")["n"],
         "unknown_calls": s.one("SELECT COUNT(*) n FROM model_usage WHERE state='UNKNOWN'")["n"],
         "review_memories": _review_count(core),
+        "companion_proposals": s.one(
+            "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
+        if s.one("SELECT 1 FROM sqlite_master WHERE name='capability_overrides'") else 0,
     }
     worker = worker_loop.snapshot(s, datetime.fromisoformat(core.clock()))
     budget = budget_view(core)
