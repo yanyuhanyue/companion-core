@@ -169,11 +169,11 @@ def test_migrations_up_down_up(tmp_path):
     from alembic.config import Config
 
     path = tmp_path / "migration.db"
-    migrate(str(path))
+    migrate(str(path), "0033_model_usage_job_index")
     cfg = Config()
     cfg.set_main_option("script_location", str(Path("migrations").resolve()))
     cfg.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
     command.downgrade(cfg, "0001_m0")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0033_model_usage_job_index")
     command.downgrade(cfg, "base")
     command.upgrade(cfg, "head")
