@@ -117,3 +117,33 @@ def test_unbound_historical_work_cannot_receive_current_grant(core, tmp_path, mo
             assert json.loads(core.store.one(f"SELECT authority_json FROM {table}")[
                 "authority_json"]) == {}
     run(scenario())
+
+
+@pytest.mark.parametrize("old_binding", ["missing", "revision"])
+def test_rejected_old_goal_does_not_starve_current_goal(core, tmp_path, monkeypatch, old_binding):
+    async def scenario():
+        async with window(core, tmp_path, monkeypatch) as (client, config, plan):
+            old_id = await goal_read(core, client, config, plan)
+            # A previous uncertain attempt remains accountable while its future retry is queued.
+            core.store.execute("UPDATE exploration_requests SET state='UNKNOWN',"
+                               "reserved_requests=6,reserved_bytes=1048576")
+            core.store.execute("UPDATE goal_steps SET state='RETRY_WAIT'")
+            core.store.execute("UPDATE goals SET state='RETRY_WAIT',priority=3")
+            if old_binding == "missing":
+                core.store.execute("UPDATE goals SET authority_json='{}'")
+            changed, _ = activate(core, plan.policy, revision=2, operation="new-goal-reader-grant")
+            plan.authority = changed["authority"]
+            event, _ = await admit(client, core, config, plan, 2, "新的阅读目标")
+            new_id = core.goals.propose(GoalProposal(topic="当前阅读目标",
+                source_event_ids=[event["event_id"]],
+                scope=GoalScope(operation="read_content", url=URL)))
+            core.goals.accept(new_id)
+            frozen = core.store.one("SELECT * FROM exploration_requests")
+            claimed = core.goals.claim()
+            assert claimed["goal_id"] == new_id
+            assert core.goals.get(old_id)["state"] == "FAILED"
+            assert core.goals.get(old_id)["last_error_code"] == (
+                "OWNER_AUTHORITY_REFERENCE_INVALID" if old_binding == "missing"
+                else "OWNER_AUTHORITY_REVISION_CHANGED")
+            assert core.store.one("SELECT * FROM exploration_requests") == frozen
+    run(scenario())

@@ -449,7 +449,7 @@ class GoalEngine:
             self.feedback(goal_id, "EXPLAINED_FAILURE", "OWNER_CANCELLED")
         return self.get(goal_id)
 
-    def feedback(self, goal_id, outcome, code=None, result_event_id=None):
+    def feedback(self, goal_id, outcome, code=None, result_event_id=None, *, notify=True):
         row = self.store.one(
             "SELECT c.*,e.conversation_id FROM commitments c JOIN events e ON "
             "e.event_id=c.accepted_event_id WHERE c.goal_id=? AND c.state<>'ERASED'",
@@ -463,6 +463,8 @@ class GoalEngine:
             "goal_id=?",
             (result_event_id, outcome, code, self.clock(), goal_id),
         )
+        if not notify:
+            return
         from companion.notices import schedule
 
         schedule(self.store, self.settings, "commitment", row["commitment_id"],
@@ -511,18 +513,40 @@ class GoalEngine:
                 if state == "FAILED":
                     self.feedback(row["goal_id"], "EXPLAINED_FAILURE", "GOAL_LEASE_EXPIRED")
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
-            row = s.one(
+            candidates = s.rows(
                 "SELECT st.*,g.kind,g.topic,g.scope_json FROM goal_steps st JOIN goals g "
                 "USING(goal_id) WHERE st.state IN ('QUEUED','RETRY_WAIT','WAITING_RESOURCE') "
                 "AND g.state IN ('QUEUED','RETRY_WAIT','WAITING_RESOURCE') AND "
                 "g.next_due_at<=? AND g.redacted=0 AND (g.kind='commitment' OR ?=0) ORDER BY "
                 "CASE g.kind WHEN 'commitment' THEN 0 ELSE 1 END,g.priority DESC,g.created_at "
-                "LIMIT 1",
+                "LIMIT 256",
                 (now, int(bool(paused and paused["value"] == "1"))),
             )
-            if not row:
+            row = None
+            for candidate in candidates:
+                try:
+                    self.validate_authority(self.get(candidate["goal_id"]))
+                except CoreError as error:
+                    if error.code not in {"OWNER_AUTHORITY_REFERENCE_INVALID",
+                                          "OWNER_AUTHORITY_REVISION_CHANGED",
+                                          "OWNER_AUTHORITY_PURPOSE_REQUIRED"}:
+                        raise
+                    # Close rejected future work, keeping prior Reader attempts and liability.
+                    s.execute("UPDATE goal_steps SET state='FAILED',lease_token=NULL,"
+                              "last_error_code=?,updated_at=? WHERE step_id=?",
+                              (error.code, now, candidate["step_id"]))
+                    s.execute("UPDATE goals SET state='FAILED',last_error_code=?,"
+                              "version=version+1,updated_at=? WHERE goal_id=?",
+                              (error.code, now, candidate["goal_id"]))
+                    self.feedback(candidate["goal_id"], "EXPLAINED_FAILURE", error.code,
+                                  notify=False)
+                    s.audit("goal.authority_rejected", candidate["goal_id"],
+                            candidate["step_id"], now, error_code=error.code)
+                    continue
+                row = candidate
+                break
+            if row is None:
                 return None
-            self.validate_authority(self.get(row["goal_id"]))
             self.validate_reflection(self.get(row["goal_id"])["reflection_suggestion_id"])
             self.validate_sources(self.source_ids(row["goal_id"]))
             token = uid("goal_lease")
