@@ -30,6 +30,8 @@ if ($JunitXml) {
 }
 $roundTemp = '.local/test-temp/check-' + [guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Force -Path "$roundTemp/tmp" | Out-Null
+# Workers share this disposable cache; create it before their first concurrent writes.
+New-Item -ItemType Directory -Force -Path "$roundTemp/pytest-cache" | Out-Null
 $previousEnvironment = @{}
 foreach ($name in @('TEMP', 'TMP', 'TMPDIR', 'UV_CACHE_DIR', 'PYTHONDONTWRITEBYTECODE', 'PYTHONIOENCODING', 'PYTHONPATH')) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
