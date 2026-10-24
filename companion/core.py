@@ -1637,7 +1637,8 @@ class Core(Runtime):
                 self.store.audit(
                     "job.failed", job["job_id"], job["trace_id"], now, code=code, state=state
                 )
-                if state == "FAILED" and job["kind"] == "chat" and not bounded_text:
+                if (state == "FAILED" and job["kind"] == "chat" and not bounded_text
+                    and not owner_authority.required(self.store, self.settings)):
                     enqueue(
                         self.store,
                         job["event_id"],

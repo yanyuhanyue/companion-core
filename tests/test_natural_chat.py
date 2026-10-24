@@ -163,8 +163,11 @@ def test_failed_generation_keeps_one_fault_receipt_without_another_model_call(
                                  (accepted["job_id"],))
             code = "MODEL_INPUT_LIMIT" if failure == "budget" else "MODEL_INVALID_RESPONSE"
             assert job == {"state": "FAILED", "last_error_code": code}
-            receipts = core.store.rows("SELECT content_json FROM outbox")
-            assert len(receipts) == 1 and code in json.loads(receipts[0]["content_json"])["text"]
+            receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "
+                "WHERE action='job.failed' AND entity_id=?", (accepted["job_id"],))
+            assert len(receipts) == 1
+            assert json.loads(receipts[0]["safe_detail_json"]) == {"code": code, "state": "FAILED"}
+            assert core.store.rows("SELECT * FROM outbox") == []
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             if failure == "budget":
                 assert calls == [] and usage == []

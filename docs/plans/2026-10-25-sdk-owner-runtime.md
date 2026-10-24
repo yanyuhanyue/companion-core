@@ -65,6 +65,11 @@ This reuses the original signed input, `dialogue_history` projection and SDK per
 following the inspected DSH pre-step context boundary and Pydantic Conversation storage
 references above; it introduces no additional history store or execution authority.
 
+Native model failures retain the original job error and `job.failed` audit receipt with all
+reserved or unknown accounting. They do not enqueue the retired generic fallback, which lacks
+an original native delivery binding. Only a source-validated, authority-bound Outbox item can
+enter the native send path; the existing owner job view still exposes the recorded failure.
+
 
 ## Reader selection and continuation
 

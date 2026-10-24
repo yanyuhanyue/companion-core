@@ -302,9 +302,15 @@ def test_unknown_image_model_call_is_not_replayed_after_restart(core, tmp_path):
                 await restarted.run_once("never-replay-image-call")
             assert len(calls) == 1
             assert core.store.rows("SELECT * FROM model_usage") == before
-            notices = core.store.rows("SELECT content_json FROM outbox")
-            assert len(notices) == 1
-            assert "这次回复暂时失败" in json.loads(notices[0]["content_json"])["text"]
+            assert core.store.rows("SELECT * FROM outbox") == []
+            failed = core.store.one("SELECT job_id,last_error_code FROM jobs WHERE event_id=?",
+                                     (event["event_id"],))
+            receipts = core.store.rows("SELECT safe_detail_json FROM audit_log "
+                "WHERE action='job.failed' AND entity_id=? ORDER BY rowid", (failed["job_id"],))
+            assert [json.loads(row["safe_detail_json"]) for row in receipts] == [
+                {"code": "MODEL_RETRYABLE", "state": "RETRY_WAIT"},
+                {"code": "CONVERSATION_OUTCOME_UNAVAILABLE", "state": "FAILED"}]
+            assert failed["last_error_code"] == "CONVERSATION_OUTCOME_UNAVAILABLE"
     run(scenario())
 
 
