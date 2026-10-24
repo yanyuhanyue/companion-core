@@ -43,7 +43,7 @@ def evidence(repository, monkeypatch, tmp_path):
           "merge_commit_sha": target["commit"], "base": {"ref": "main", "repo": {
               "full_name": repo}}, "head": {"sha": head, "repo": {"full_name": repo}}}
     artifact = {"id": 300, "name": "ci-full-2", "expired": False, "size_in_bytes": 500}
-    jobs = {"total_count": 10, "jobs": [
+    jobs = {"total_count": len(ci_reuse.REQUIRED_JOBS), "jobs": [
         {"name": name, "status": "completed", "conclusion": "success"}
         for name in ci_reuse.REQUIRED_JOBS
     ]}
@@ -209,6 +209,8 @@ def test_reuse_workflow_keeps_only_lightweight_validation_and_full_only_artifact
         "preflight", "quality", "ci", "container", "browser-reader", "plugin-native",
         "test (ubuntu-latest, 0)", "test (ubuntu-latest, 1)",
         "test (windows-latest, 0)", "test (windows-latest, 1)",
+        "test (ubuntu-latest, 2)", "test (ubuntu-latest, 3)",
+        "test (windows-latest, 2)", "test (windows-latest, 3)",
     }
 
 
@@ -241,3 +243,10 @@ def test_api_only_uses_read_only_cli_and_does_not_print_errors(monkeypatch):
     assert ci_reuse.api("repos/synthetic/repository/actions/runs") == {"ok": True}
     assert calls[0][0][:4] == ["gh", "api", "--hostname", "github.com"]
     assert calls[0][1]["timeout"] == 30
+
+
+def test_old_two_shard_receipt_cannot_replace_four_shard_validation(evidence):
+    evidence["jobs"]["jobs"] = [job for job in evidence["jobs"]["jobs"]
+                                if not job["name"].endswith((", 2)", ", 3)"))]
+    evidence["jobs"]["total_count"] = len(evidence["jobs"]["jobs"])
+    assert evidence["plan"]() == ("full", None)

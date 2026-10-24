@@ -266,7 +266,7 @@ def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
     jobs = workflow["jobs"]
     assert set(jobs) == {"preflight", "quality", "ci", *FULL_JOBS}
     assert jobs["test"]["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
-    assert jobs["test"]["strategy"]["matrix"]["shard"] == ["0", "1"]
+    assert jobs["test"]["strategy"]["matrix"]["shard"] == ["0", "1", "2", "3"]
     assert jobs["test"]["strategy"]["matrix"]["include"] == [
         {"os": "ubuntu-latest", "verify_shard": "0"},
         {"os": "windows-latest", "verify_shard": "1"},
