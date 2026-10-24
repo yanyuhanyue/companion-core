@@ -27,7 +27,7 @@ from tests.test_reading_followup import notice as reader_notice
 
 
 @asynccontextmanager
-async def environment(core, tmp_path, monkeypatch, *, paid=None):
+async def environment(core, tmp_path, monkeypatch, *, paid=None, purposes=(), history=None):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     approved_live(core, tmp_path, **(paid or {}))
@@ -41,7 +41,9 @@ async def environment(core, tmp_path, monkeypatch, *, paid=None):
         onebot_token="s" * 32, protocol_epoch="native-meme-epoch")
     capability = owner_authority.capability_hashes(core.settings)["meme"]
     policy = OwnerGrantPolicy(owner_qq_id=config.owner_qq_id,
-        purposes=["chat", "expression", *(["meme"] if capability else [])],
+        purposes=["chat", "expression", *(["meme"] if capability else []), *purposes],
+        memory_scope="owner_private" if "memory" in purposes else "none",
+        **({"history": history} if history else {}),
         capability_policies={"meme": capability} if capability else {},
         authorization_sha256="d" * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),

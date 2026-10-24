@@ -14,7 +14,7 @@ from companion.core import Core
 from companion.model import EXTRACT_RULES, ModelClient
 from companion.store import Store
 from tests.conftest import run
-from tests.test_input_protocol import admit
+from tests.meme_authority_fixture import admit
 from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
 
 
@@ -36,7 +36,7 @@ def test_restored_discovery_reservation_cannot_refund_unknown_post_snapshot_io(
     restore(archive, restored_path, key, core.settings.erasure_ledger)
     with closing(Store(str(restored_path))) as restored:
         assert restored.one(
-            "SELECT 1 FROM runtime_meta WHERE key='model_budget_restore_required'",
+            "SELECT 1 FROM runtime_meta WHERE key='cloud_budget_restore_required'",
         )
         # The result endpoint intentionally accepts original witnesses despite a
         # restore/STOP guard, so the restored row itself must remain conservative.
@@ -71,7 +71,9 @@ def test_discovery_jobs_do_not_duplicate_or_enable_memory_extraction(
         })
 
     async def scenario():
-        async with discovery_environment(core, tmp_path, monkeypatch) as (event, chat, values):
+        async with discovery_environment(core, tmp_path, monkeypatch,
+            purposes=("memory",), memory_enabled=True,
+            extraction_min_events=1, extraction_idle_seconds=0) as (event, chat, values):
             client, config, plan, now = values
             submit(core, event)
             item = claim(core)

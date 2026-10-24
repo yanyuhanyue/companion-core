@@ -96,6 +96,9 @@ class ExpressionEngine:
                 return True, offer
             except (CoreError, ValidationError, ValueError, TypeError, KeyError):
                 return True, None
+        if event_id and self.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                                        ("owner_input:" + event_id,)):
+            return True, None
         row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
                              ("live_text_input:" + event_id,)) if event_id else None
         value = json.loads(row["value"]) if row else {}

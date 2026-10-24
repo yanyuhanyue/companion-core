@@ -1,6 +1,5 @@
 """Current-turn selection and durable, separately metered public discovery jobs."""
 
-import hashlib
 import json
 from contextlib import asynccontextmanager, closing
 
@@ -8,17 +7,14 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion import live_text, meme_service
+from companion import meme_service
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.expression import ExpressionEngine, ImageIntent, MemeOffer
 from companion.model import ModelClient
 from companion.store import Store, encode
-from companion_onebot_bridge.event_normalizer import normalize
-from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import ingest, run
-from tests.test_input_protocol import admit, environment, notice, sign
-from tests.test_onebot_direct import raw_event
+from tests.meme_authority_fixture import admit, environment, notice, stop
 
 
 def offer(event_id, *, candidate="a" * 64, category="happy", intent="celebrate"):
@@ -98,7 +94,8 @@ def test_new_source_requires_both_bindings_and_probability_is_stable(core):
 
 
 @asynccontextmanager
-async def discovery_environment(core, tmp_path, monkeypatch, **changes):
+async def discovery_environment(core, tmp_path, monkeypatch, *, paid=None, purposes=(),
+                                history=None, **changes):
     core.settings = core.settings.model_copy(update={
         "meme_discovery_enabled": True,
         "meme_discovery_daily_queries": 2,
@@ -107,7 +104,8 @@ async def discovery_environment(core, tmp_path, monkeypatch, **changes):
         "expression_selection_probability": 1,
         **changes,
     })
-    async with environment(core, tmp_path, monkeypatch) as values:
+    async with environment(core, tmp_path, monkeypatch, paid=paid,
+                           purposes=purposes, history=history) as values:
         client, config, plan, now = values
         event, accepted = await admit(client, config, plan, now)
         assert accepted.status_code == 202, accepted.text
@@ -253,11 +251,10 @@ def test_revocation_blocks_network_checks_but_accepts_original_attempt_accountin
             item = claim(core)
             reservation(core, item)
             if boundary == "stop":
-                stopped = await client.post("/internal/v1/live-text/stop",
-                                             json={"window_sha256": plan.sha256})
+                stopped = await stop(client, plan)
                 assert stopped.status_code == 200, stopped.text
             elif boundary == "recall":
-                recalled = await client.post("/internal/v1/live-text/inputs/recall",
+                recalled = await client.post("/internal/v1/owner-authority/inputs/recall",
                                              json=notice(config, plan, now))
                 assert recalled.status_code == 200, recalled.text
             else:
@@ -298,49 +295,55 @@ def test_observed_overrun_is_recorded_unknown_and_zero_usage_can_settle(
 
 
 def test_native_offer_is_bound_before_same_call_model_selection(core, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from companion import meme_core
+    from tests.test_meme_core import CAPTION, body, caption_environment, worker
+
+    monkeypatch.setattr(meme_core, "encoder", lambda *args, **kwargs:
+        SimpleNamespace(query_embed=lambda text: [[1.0] + [0.0] * 511]))
+
     async def scenario():
-        core.settings = core.settings.model_copy(update={"expression_selection_probability": 1})
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, now):
-            raw = raw_event(1, time=int(now.timestamp()), text="项目顺利完成了")
-            event = normalize(json.dumps(raw), config, now=now.timestamp())
-            capture = sign(config, {
-                "kind": "authenticated_onebot_ws", "window_sha256": plan.sha256,
-                "event_id": event["event_id"], "source_event_id": event["source_event_id"],
-                "input_sha256": input_digest(event["payload"]),
-                "frame_sha256": hashlib.sha256(encode(raw).encode()).hexdigest(),
-                "evidence_sha256": "e" * 64, "identity_sha256": plan.value["identity_sha256"],
-                "config_sha256": plan.value["config_sha256"],
-                "protocol_epoch": config.protocol_epoch,
-                "received_at": now.isoformat(), "occurred_at": event["occurred_at"],
-            }, live_text.CAPTURE_SIGNATURE_DOMAIN)
-            approved = await client.post("/internal/v1/live-text/inputs/approve", json={
-                "window_sha256": plan.sha256, "event_id": event["event_id"],
-                "input_sha256": capture["input_sha256"], "evidence_sha256": "f" * 64,
-                "capture": capture, "meme_offer": offer(event["event_id"]),
-            })
-            assert approved.status_code == 200, approved.text
-            accepted = await client.post("/internal/v1/inbox/events", json=event,
-                headers={"X-Idempotency-Key": event["event_id"]})
+        async with caption_environment(core, tmp_path, monkeypatch) as values:
+            source, _, client, config, grant, now, item = values
+            created = await client.post("/internal/v1/memes/captions",
+                                         json=body(core, source, item, now))
+            assert created.status_code == 200, created.text
+            caption_calls = []
+            assert await worker(core, caption_calls)
+            asset = created.json()["asset_sha256"]
+            event, accepted = await admit(client, config, grant, now, 2, text="我想要抱抱")
             assert accepted.status_code == 202, accepted.text
+            query = await client.post("/internal/v1/memes/query", json={
+                "event_id": event["event_id"], "reply_revision": 2})
+            assert query.status_code == 200, query.text
+            candidate = offer(event["event_id"], candidate=asset, category="like", intent="comfort")
+            candidate["candidates"][0].update(description=CAPTION["description"],
+                                                tags=CAPTION["tags"])
+            bound = await client.post("/internal/v1/memes/offers", json={
+                **{key: query.json()[key] for key in (
+                    "job_id", "event_id", "reply_revision", "query_sha256")}, "offer": candidate})
+            assert bound.status_code == 200, bound.text
             calls = []
 
             def provider(request):
                 calls.append(json.loads(request.content))
-                return httpx.Response(200, json={
-                    "choices": [{"message": {"content": "恭喜你。⬡" + "a" * 64 + "⬡"}}],
-                    "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-                })
+                return httpx.Response(200, json={"choices": [{"message": {
+                    "role": "assistant", "content": "给你抱抱。⬡" + asset + "⬡"}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as model_http:
-                with Core(core.settings, ModelClient(core.settings, model_http)) as worker:
-                    assert await worker.run_once()
-            assert len(calls) == 1 and "a" * 64 in encode(calls[0]["messages"])
+                model = ModelClient(core.settings, model_http)
+                with Core(core.settings, model, core.clock) as independent:
+                    assert await independent.run_once()
+            assert len(caption_calls) == len(calls) == 1
+            assert asset in encode(calls[0]["messages"])
             content = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])
             assert content["image"] == {
-                "source": "companion.meme_catalog", "category": "happy", "candidate_id": "a" * 64,
+                "source": "companion.meme_catalog", "category": "like", "candidate_id": asset,
                 "offer_key": "meme:" + event["event_id"],
             }
-            assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+            assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 2
 
     run(scenario())
 

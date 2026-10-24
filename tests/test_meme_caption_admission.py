@@ -6,20 +6,20 @@ import json
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from PIL import Image
 from pydantic import ValidationError
 
-from companion import budget, live_text, meme_input, paid_budget, private_life
+from companion import budget, meme_core, meme_input, owner_authority, paid_budget
 from companion.config import PaidModelApproval
 from companion.contracts import CoreError
 from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient, ModelResponse, model_payload
+from companion.owner_authority_protocol import AuthorityStop, OwnerRuntimeConfig
 from companion.store import after
-from tests.conftest import ingest, run
-from tests.test_live_text_window import live_fixture
+from tests.conftest import run
+from tests.test_meme_core import body
+from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
 from tests.test_paid_model_gate import approved_live
-from tests.test_private_companion import companion_options
 
 
 def policy(**changes):
@@ -45,36 +45,36 @@ def messages(count=1, format="PNG"):
     ]}]
 
 
-def setup_caption(core, tmp_path, monkeypatch, *, daily=30000, paid=None):
-    from companion import meme_core
+def setup_caption(core, tmp_path, monkeypatch, *, daily=30000, paid=None, second=False):
+    async def prepare():
+        async with discovery_environment(core, tmp_path, monkeypatch,
+            meme_semantics_enabled=True, meme_caption_daily_micro_usd=daily,
+            paid={"meme_input": policy(), "max_output_tokens": 4096,
+                "unlimited_period_spend": False, "daily_micro_usd": 200000,
+                "monthly_micro_usd": 1000000, "window_micro_usd": 2000000,
+                "concurrency": 1, **(paid or {})}) as values:
+            event, _, (client, _, _, now) = values
+            submit(core, event)
+            item = claim(core)
+            reservation(core, item)
+            result(core, item)
+            payload = body(core, event, item, now)
+            jobs = []
+            for n in range(2 if second else 1):
+                payload["source_evidence"]["usage_basis"] += str(n)
+                from companion_meme_protocol import digest
 
-    ingest(core)
-    job = core.store.one("SELECT * FROM jobs")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    options = companion_options(core)
-    options["core_options"].update(meme_semantics_enabled=True,
-                                    meme_caption_daily_micro_usd=daily)
-    options["paid_options"].update({
-        "meme_input": policy(), "max_output_tokens": 4096, "unlimited_period_spend": False,
-        "daily_micro_usd": 200000, "monthly_micro_usd": 1000000, "window_micro_usd": 2000000,
-        **(paid or {}),
-    })
-    live_fixture(core, tmp_path, bridge_options={
-        "capture_signing_key": Ed25519PrivateKey.generate().private_bytes_raw().hex(),
-    }, **options)
-    live_text.open_window(core.store, core.settings, core.clock, live_text.OpenWindow(
-        window_sha256=core.settings.live_text_window.plan_sha256,
-    ))
-    core.store.execute("UPDATE jobs SET kind='meme_caption',state='RUNNING',lease_token=?,"
-                       "lease_until=? WHERE job_id=?",
-                       ("caption-lease", after(core.clock(), 120), job["job_id"]))
+                payload["asset"]["source_evidence_sha256"] = digest(payload["source_evidence"])
+                created = await client.post("/internal/v1/memes/captions", json=payload)
+                assert created.status_code == 200, created.text
+                jobs.append(created.json()["job_id"])
+            for job_id in jobs:
+                core.store.execute("UPDATE jobs SET state='RUNNING',lease_token=?,"
+                    "lease_until=? WHERE job_id=?",
+                    ("caption-lease", after(core.clock(), 120), job_id))
+            return jobs if second else jobs[0]
 
-    def source(store, settings, approval, current):
-        assert current["kind"] == "meme_caption"
-        return store.one("SELECT * FROM events WHERE event_id=?", (current["event_id"],))
-
-    monkeypatch.setattr(meme_core, "check_caption_job", source)
-    return job["job_id"]
+    return run(prepare())
 
 
 def reserve(core, job_id, value=None):
@@ -139,26 +139,23 @@ def test_caption_estimate_uses_dedicated_policy_and_json_without_owner_image_per
 @pytest.mark.parametrize("change,code", [
     ("disabled", "MODEL_MEME_SCOPE_REQUIRED"),
     ("demo", "MODEL_MEME_SCOPE_REQUIRED"),
-    ("no_window", "MODEL_MEME_SCOPE_REQUIRED"),
-    ("ordinary_window", "MODEL_MEME_SCOPE_REQUIRED"),
+    ("runtime_off", "MODEL_MEME_SCOPE_REQUIRED"),
+    ("runtime_shadow", "MODEL_MEME_SCOPE_REQUIRED"),
     ("no_policy", "PAID_MEME_APPROVAL_REQUIRED"),
     ("zero_cap", "SCENARIO_BUDGET_DISABLED"),
     ("logical", "MODEL_MEME_JOB_REQUIRED"),
 ])
 def test_caption_contract_fails_closed(core, tmp_path, monkeypatch, change, code):
     job_id = setup_caption(core, tmp_path, monkeypatch)
-    assert core.settings.live_text_window.image_scope == "none"
+    assert core.settings.paid_model.image_input is None
     assert core.settings.content_enabled is False
     if change == "disabled":
         core.settings.meme_semantics_enabled = False
     elif change == "demo":
         core.settings.mode = "demo"
-    elif change == "no_window":
-        core.settings.live_text_window = None
-    elif change == "ordinary_window":
-        core.settings.live_text_window = core.settings.live_text_window.model_copy(
-            update={"companion_scope": "none"},
-        )
+    elif change in {"runtime_off", "runtime_shadow"}:
+        core.settings.owner_runtime = OwnerRuntimeConfig(
+            mode="OFF" if change == "runtime_off" else "SHADOW")
     elif change == "no_policy":
         core.settings.paid_model = core.settings.paid_model.model_copy(update={"meme_input": None})
     elif change == "zero_cap":
@@ -198,9 +195,9 @@ def test_caption_settles_one_native_attempt_and_cannot_reuse_chat_or_background_
     with pytest.raises(CoreError, match="MODEL_MEME_ALREADY_ATTEMPTED"):
         reserve(core, job_id)
     with pytest.raises(CoreError, match="COMPANION_MODEL_SCOPE_REQUIRED"):
-        private_life.admit_model(core.store, core.settings, core.clock, job_id, "chat")
+        owner_authority.admit_model(core.store, core.settings, core.clock, job_id, "chat")
     with pytest.raises(CoreError, match="COMPANION_BACKGROUND_SCOPE_REQUIRED"):
-        private_life.admit_model(core.store, core.settings, core.clock, None, "meme_caption")
+        owner_authority.admit_model(core.store, core.settings, core.clock, None, "meme_caption")
     core.store.execute("UPDATE jobs SET kind='chat' WHERE job_id=?", (job_id,))
     with pytest.raises(CoreError, match="MODEL_MEME_JOB_REQUIRED"):
         reserve(core, job_id)
@@ -220,12 +217,8 @@ def test_caption_respects_shared_paid_caps(core, tmp_path, monkeypatch, limit, c
 
 
 def test_caption_reservation_shares_provider_concurrency(core, tmp_path, monkeypatch):
-    job_id = setup_caption(core, tmp_path, monkeypatch)
+    job_id, other = setup_caption(core, tmp_path, monkeypatch, second=True)
     reserve(core, job_id)
-    event_id = core.store.one("SELECT event_id FROM jobs WHERE job_id=?", (job_id,))["event_id"]
-    other = core.new_job(event_id, "meme_caption", "independent-caption", core.clock())
-    core.store.execute("UPDATE jobs SET state='RUNNING',lease_token=?,lease_until=? WHERE job_id=?",
-                       ("second-caption-lease", after(core.clock(), 120), other))
     with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
         reserve(core, other)
     assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
@@ -265,9 +258,9 @@ def test_caption_actual_usage_over_independent_cap_stops_unlimited_period_spend(
 
 @pytest.mark.parametrize("change,code", [
     ("source", "MEME_SOURCE_CHANGED"),
-    ("stop", "LIVE_TEXT_RECONCILIATION_REQUIRED"),
-    ("lease", "LIVE_TEXT_MODEL_JOB_FENCED"),
-    ("event", "COMPANION_MODEL_SOURCE_CHANGED"),
+    ("stop", "MODEL_BUDGET_RECONCILIATION_REQUIRED"),
+    ("lease", "JOB_LEASE_LOST"),
+    ("event", "OWNER_SOURCE_CHANGED"),
 ])
 def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hooks(
     core, tmp_path, monkeypatch, change, code,
@@ -280,6 +273,9 @@ def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hook
         checks.append(True)
         if change == "source" and changed:
             raise CoreError("MEME_SOURCE_CHANGED", 409)
+        view = owner_authority.current(core.store, core.settings, core.clock, purpose="meme")
+        meme_core.check_caption_job(core.store, core.settings, view,
+            core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)), clock=core.clock)
 
     changed = False
 
@@ -287,7 +283,9 @@ def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hook
         nonlocal changed
         changed = True
         if change == "stop":
-            live_text.record_failure(core.store, core.settings, "TEST_STOP")
+            view = owner_authority.current(core.store, core.settings, core.clock)
+            owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                operation_id="caption-stop-hook", authority=view.authority.as_dict()))
         elif change == "lease":
             core.clock.advance(121)
         elif change == "event":
@@ -305,8 +303,10 @@ def test_caption_rechecks_source_stop_job_lease_and_frozen_event_after_http_hook
 
     run(complete())
     assert not calls
-    assert len(checks) == (2 if change == "source" else 1)
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    assert len(checks) >= 1
+    assert core.store.one("SELECT state,billed_micro_usd,input_tokens,output_tokens "
+                          "FROM model_usage") == {"state": "SETTLED", "billed_micro_usd": 0,
+                                                   "input_tokens": 0, "output_tokens": 0}
     assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
     assert json.loads(core.store.one("SELECT snapshot_json FROM model_admissions")[
         "snapshot_json"

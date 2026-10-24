@@ -870,8 +870,11 @@ class MemeCaptionService:
         if (
             not self.settings.meme_semantics_enabled
             or job["kind"] != "chat"
-            or not private_life.enabled(self.settings)
         ):
+            return False
+        try:
+            owner_authority.check_job(self.store, self.settings, lambda: now, job, purpose="meme")
+        except CoreError:
             return False
         body = json.loads(job["body_json"])
         if body.get("control_command") or body.get("diary_command") or not body.get("text"):

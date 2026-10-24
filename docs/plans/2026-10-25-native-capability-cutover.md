@@ -32,3 +32,19 @@ The native acceptance fixture uses signed HTTP ingress and a separate Core worke
 process with synthetic provider transport. It covers discovery-only authorization,
 caption idempotency, final-boundary STOP/source withdrawal, and an unknown provider
 result. Live QQ or provider acceptance remains a separate stage.
+
+Current native chat waits at most two seconds for a source-bound candidate offer.
+No offer keeps the response text-only. The selection acceptance first captions a
+real bounded PNG through the caption entry, binds that retained result to a newer
+owner turn, and selects it in that turn's single conversation-model call. Caption
+admission checks use real native grants and caption records, including shared
+amount/concurrency limits, independent caption limits, and zero-I/O cancellation.
+
+## Private poke proof
+
+The inspected [go-cqhttp private poke event](https://docs.go-cqhttp.org/event/#好友戳一戳（双击头像）)
+defines the sender, target, self account and native timestamp. The existing strict
+notice codec retains those identities and rejects group notifications. The shared
+standard-library wire codec signs the original owner authority reference under a
+separate v2 domain. Historical v1 receipts retain their original signature bytes;
+their existence cannot create a new native execution grant.
