@@ -161,10 +161,18 @@ class Candidate(StrictModel):
     content: str = Field(min_length=1, max_length=500)
     evidence_event_id: str
     evidence_quote: str = Field(min_length=2, max_length=500)
+    salience: int | None = Field(default=None, ge=1, le=10, strict=True)
+
+
+class EpisodeSummary(StrictModel):
+    title: str = Field(min_length=1, max_length=80)
+    summary: str = Field(min_length=1, max_length=600)
+    source_event_ids: list[str] = Field(min_length=1, max_length=20)
 
 
 class Extraction(StrictModel):
     memories: list[Candidate] = Field(default_factory=list, max_length=20)
+    episode_summaries: list[EpisodeSummary] = Field(default_factory=list, max_length=4)
 
 
 class MemoryRelation(StrictModel):

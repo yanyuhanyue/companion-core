@@ -72,7 +72,7 @@ def test_n2_builds_real_warm_context_before_separate_extraction_and_review(core)
     assert not model.calls
     assert step(core).progressed  # N2 native episode, does not consume extraction input.
     steps = json.loads(core.consolidation.status(DAY)["steps_json"])
-    assert steps["n2"] == "COMPLETE" and len(steps["warm_episode_ids"]) == 1
+    assert steps["n2"] == "MATERIAL_READY" and len(steps["warm_episode_ids"]) == 1
     assert not core.store.one("SELECT 1 FROM events WHERE memory_processed=1")
     conversation = core.store.one("SELECT conversation_id FROM events LIMIT 1")["conversation_id"]
     context = MemoryContext(core.memory).continuation(conversation, core.clock())
@@ -81,6 +81,7 @@ def test_n2_builds_real_warm_context_before_separate_extraction_and_review(core)
     assert step(core).progressed
     saved = json.loads(core.consolidation.status(DAY)["steps_json"])
     assert saved["memory_batch"]["phase"] == "REVIEW"
+    assert saved["n2"] == "COMPLETE" and saved["n3"] == "RUNNING"
     assert [kind for _, kind in model.calls] == ["memory_extract"]
     assert core.store.rows("SELECT * FROM memories") == []
     assert step(core).progressed

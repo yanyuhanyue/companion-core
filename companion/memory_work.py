@@ -9,8 +9,15 @@ import json
 from contextlib import nullcontext
 from datetime import date, datetime
 
-from companion import budget, live_text, owner_authority, private_life, reply_revision
-from companion.contracts import Candidate, CoreError, Extraction, MemoryReview
+from companion import (
+    budget,
+    live_text,
+    memory_enrichment,
+    owner_authority,
+    private_life,
+    reply_revision,
+)
+from companion.contracts import Candidate, CoreError, EpisodeSummary, Extraction, MemoryReview
 from companion.diary import day_bounds
 from companion.memory_authority import source_allowed
 from companion.model import EXTRACT_RULES, REVIEW_RULES
@@ -296,6 +303,7 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                     for key in batch.get("event_ids", []):
                         s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (key,))
                 batch.pop("candidates", None)
+                batch.pop("episode_summaries", None)
                 batch.pop("proof", None)
                 record["next_attempt_at"] = None
                 s.execute("UPDATE runtime_meta SET value=? WHERE key=?",
@@ -339,6 +347,7 @@ async def extract_step(core, local_day=None, *, on_checkpoint=None):
                     for key in batch.get("event_ids", []):
                         s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (key,))
                 batch.pop("candidates", None)
+                batch.pop("episode_summaries", None)
                 batch.pop("proof", None)
                 if batch.get("request_id") and not s.one(
                     "SELECT 1 FROM model_usage WHERE request_id=?", (batch["request_id"],),
@@ -480,7 +489,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
                      request_id=request_id)
         persist()
         if previous_phase == "EXTRACT":
-            data = [{"event_id": event["event_id"],
+            data = [{"event_id": event["event_id"], "conversation_id": event["conversation_id"],
+                     "occurred_at": event["occurred_at"],
                      "text": json.loads(event["body_json"]).get("text", "")} for event in events]
             messages = [{"role": "system", "content": EXTRACT_RULES},
                         {"role": "user", "content": encode(data)}]
@@ -496,6 +506,7 @@ async def extraction_step(core, local_day, lease, batch, persist):
             _settled(s, request_id)
             extraction = Extraction.model_validate_json(response.text)
             _validate_batch(core, lease, batch)
+            memory_enrichment.validate_summaries(core.memory, events, extraction.episode_summaries)
             candidates = []
             for candidate in extraction.memories:
                 if candidate.evidence_event_id not in batch["event_ids"]:
@@ -506,6 +517,8 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 except CoreError:
                     s.audit("memory.candidate_rejected", candidate.evidence_event_id, "memory", now)
             batch.update(phase="REVIEW", candidates=candidates,
+                         episode_summaries=[item.model_dump(mode="json")
+                                            for item in extraction.episode_summaries],
                          extraction_request_id=request_id)
             batch.pop("request_id", None)
             persist()
@@ -525,10 +538,15 @@ async def extraction_step(core, local_day, lease, batch, persist):
                 )
                 if episode_id:
                     episode_ids.append(episode_id)
+            summaries = [EpisodeSummary.model_validate(value)
+                         for value in batch.get("episode_summaries", [])]
+            memory_enrichment.record(core.memory, candidates, memory_ids, events, summaries,
+                                     batch["extraction_request_id"], at)
             s.execute("DELETE FROM runtime_meta WHERE key=?", (batch["attempt_key"],))
             batch.update(phase="COMPLETE", committed=True, memory_ids=memory_ids,
                          episode_ids=episode_ids)
             batch.pop("candidates", None)
+            batch.pop("episode_summaries", None)
             batch.pop("proof", None)
             persist()
         return UnitResult(True)

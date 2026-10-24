@@ -54,7 +54,7 @@ def _episodes(nightly, run, memory):
     done = set(steps.get("episode_sources", []))
     pending = [key for key in ids if key not in done]
     if not pending:
-        steps["n2"] = "COMPLETE"
+        steps["n2"] = "MATERIAL_READY"
         return _yield(nightly, run)
     first = nightly.store.one("SELECT * FROM events WHERE event_id=?", (pending[0],))
     events = []
@@ -74,7 +74,7 @@ def _episodes(nightly, run, memory):
         covered = memory.episode_coverage([event["event_id"] for event in events], nightly.clock())
         steps["warm_episode_ids"] = sorted(set(steps.get("warm_episode_ids", []))
             | {item["episode_id"] for item in covered} | ({episode_id} if episode_id else set()))
-        steps["n2"] = "COMPLETE" if set(ids) <= set(steps["episode_sources"]) else "RUNNING"
+        steps["n2"] = "MATERIAL_READY" if set(ids) <= set(steps["episode_sources"]) else "RUNNING"
         return _yield(nightly, run)
 
 
@@ -89,6 +89,11 @@ async def _memory(nightly, run, day):
             # Memory batches can extend beyond Diary's bounded display sources.
             # Pending candidates must still be owned by the existing erasure closure.
             batch = record["batch"]
+            if batch.get("phase") in {"REVIEW", "REVIEWING", "COMPLETE"}:
+                steps["n2"] = "COMPLETE"
+                steps["n3"] = "RUNNING"
+            elif batch.get("phase") in {"SKIPPED", "FAILED", "UNKNOWN", "CANCELLED"}:
+                steps["n2"] = batch["phase"]
             ids = record["source_event_ids"]
             for key in ids:
                 store.execute("INSERT OR IGNORE INTO consolidation_evidence VALUES (?,?)",
@@ -132,6 +137,8 @@ async def _memory(nightly, run, day):
         nightly.settings.extraction_min_events
     ) and (not latest or latest["batch"].get("phase") in TERMINAL_PHASES):
         steps["memory"] = "SKIPPED"
+        if steps.get("n2") == "MATERIAL_READY":
+            steps["n2"] = "SKIPPED"
         return _yield(nightly, run)
     steps["memory"] = "WAITING"
     return _yield(nightly, run, waiting=not result.progressed,
@@ -219,12 +226,12 @@ async def run_step(nightly, worker_id):
             # Actual budget reservation remains immediately before each model call.
             steps["n1"] = "COMPLETE"
             return _yield(nightly, run)
-        if steps.get("n2") not in {"COMPLETE", "SKIPPED"}:
+        if steps.get("n2") not in TERMINAL | {"MATERIAL_READY"}:
             return _episodes(nightly, run, Memory(nightly.store, nightly.settings,
                                                  nightly.diary.ledger))
-        steps["n3"] = "RUNNING"
         if steps.get("memory") not in TERMINAL:
             return await _memory(nightly, run, day)
+        steps["n3"] = "RUNNING"
         if steps.get("diary") not in TERMINAL:
             return await _diary(nightly, run, day, worker_id)
         if steps.get("reflection") not in TERMINAL:

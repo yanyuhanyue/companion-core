@@ -143,6 +143,13 @@ class Memory:
         base += "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,m.updated_at DESC"
         rows = [row for row in s.rows(base, params)
                 if sources.current(row) and sources.evidence(row["memory_id"])]
+        from companion.memory_enrichment import refresh_importance
+
+        for row in rows:
+            row["importance"] = refresh_importance(self, row, now)
+        if query == "*":
+            rows.sort(key=lambda row: (not row["needs_review"], row["status"] == "CONFIRMED",
+                                      row["importance"], row["updated_at"]), reverse=True)
         lexical = []
         if query != "*" and rows:
             allowed = {row["memory_id"] for row in rows}
@@ -201,6 +208,7 @@ class Memory:
                     query in row["content"],
                     scores[row["memory_id"]],
                     similarities[row["memory_id"]],
+                    row["importance"],
                 ),
                 reverse=True,
             )
@@ -541,7 +549,7 @@ class Memory:
                 status="CONFIRMED",
                 origin="user_confirmed",
                 confidence=1.0,
-                importance=old["importance"],
+                importance=0.5,
                 privacy_scope="private",
                 supersedes_memory_id=memory_id,
                 created_at=now,
@@ -606,6 +614,11 @@ class Memory:
         s = self.store
         with nullcontext() if s.db.in_transaction else s.transaction():
             return self._encode_episode(events, now, mark_processed=mark_processed)
+
+    def episode_summary(self, episode_id, source_event_ids, now):
+        from companion.memory_enrichment import summary
+
+        return summary(self, episode_id, source_event_ids, now)
 
     def episode_coverage(self, event_ids, now):
         """Reuse only complete, still-private native episodes; never trust old summary text."""
