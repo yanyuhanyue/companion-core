@@ -108,6 +108,7 @@ class Store:
             "memories": {"needs_review", "fact_key"},
             "memory_vectors": {"model_version", "content_hash", "vector"},
             "runtime_meta": {"key", "value"},
+            "model_admissions": {"payload_sha256", "snapshot_json", "measurement_json"},
             "diary_runs": {"captured_privacy_epoch", "lease_token", "source_set_sha256"},
             "diary_entries": {"body_md", "status", "version"},
             "diary_evidence": {"event_id", "outbox_message_id"},
