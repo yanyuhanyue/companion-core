@@ -327,6 +327,7 @@ async def run(core, job):
 
 def results(store, settings, clock, evaluation_id):
     _enabled(settings)
+    captured_epoch = epoch(store)
     row = store.one("SELECT r.*,j.state,j.last_error_code FROM evaluation_runs r JOIN jobs j "
                     "USING(job_id) WHERE evaluation_id=?", (evaluation_id,))
     if not row:
@@ -359,6 +360,18 @@ def results(store, settings, clock, evaluation_id):
                                                    and not observed["text_redacted"] and usage
                                                    and usage["state"] == "SETTLED"
                                                    and observed["finish_reason"] == "stop")})
+    # As in other private views, fence the completed projection rather than
+    # keeping an initial SQLite snapshot alive across an independent erasure.
+    current = store.one("SELECT redacted,manifest_sha256,sources_json FROM evaluation_runs "
+                        "WHERE evaluation_id=?", (evaluation_id,))
+    if not current or current["redacted"]:
+        raise CoreError("EVALUATION_ERASED", 410)
+    current_sources, _ = _sources(store, settings, manifest["source_event_ids"], clock())
+    if (current["manifest_sha256"] != row["manifest_sha256"]
+        or current["sources_json"] != row["sources_json"] or current_sources != sources):
+        raise CoreError("EVALUATION_SOURCE_CHANGED", 409)
+    if captured_epoch != epoch(store):
+        raise CoreError("PRIVACY_CHANGED", 409)
     return {"evaluation_id": evaluation_id, "manifest_sha256": row["manifest_sha256"],
             "plan_sha256": manifest["plan"]["plan_sha256"], "state": row["state"],
             "error_code": row["last_error_code"], "requests": outcomes}
