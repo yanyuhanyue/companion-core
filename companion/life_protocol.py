@@ -8,6 +8,8 @@ from companion.contracts import StrictModel
 from companion.goals import GoalProposal
 from companion_delivery_protocol.authority import validate_authority_ref
 
+LifeChannelAction = Literal["qq.private.proactive", "diary.save", "qzone.publish"]
+
 
 class LifeLoopConfig(StrictModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -32,7 +34,7 @@ class LifeQZoneSourceGrant(StrictModel):
 
 
 class LifeShadowApproval(StrictModel):
-    """Bounded Life sources and purposes in OwnerAuthority; never a send grant."""
+    """Bounded Life sources; channel execution still needs its independent purpose."""
 
     scope: Literal["owner_private_life_shadow_v1"]
     authorization_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -45,12 +47,16 @@ class LifeShadowApproval(StrictModel):
     expires_at: AwareDatetime
     max_items: int = Field(ge=1, le=100, strict=True)
     qzone_draft_sources: list[LifeQZoneSourceGrant] = Field(default_factory=list, max_length=64)
+    automatic_actions: list[LifeChannelAction] = Field(
+        default_factory=list, max_length=3, exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def unique_scope(self):
         if (
             len(set(self.source_event_ids)) != len(self.source_event_ids)
             or len(set(self.purposes)) != len(self.purposes)
+            or len(set(self.automatic_actions)) != len(self.automatic_actions)
             or len({g.event_id for g in self.qzone_draft_sources}) != len(self.qzone_draft_sources)
             or any(
                 g.event_id not in self.source_event_ids or g.expires_at > self.expires_at
@@ -58,6 +64,11 @@ class LifeShadowApproval(StrictModel):
             )
         ):
             raise ValueError("Life sources and purposes must be unique and bounded by approval")
+        if ("qq.private.proactive" in self.automatic_actions
+            and "PRIVATE_MESSAGE_DRAFT" not in self.purposes
+            or "diary.save" in self.automatic_actions and "PRIVATE_DIARY" not in self.purposes
+            or "qzone.publish" in self.automatic_actions and not self.qzone_draft_sources):
+            raise ValueError("automatic consumption requires its original draft purpose")
         return self
 
 
@@ -106,7 +117,7 @@ class LifeConsumeRequest(StrictModel):
     """Owner-controlled release of an exact retained draft, never a model proposal."""
 
     authority: dict
-    action: Literal["qq.private.proactive", "diary.save", "qzone.publish"]
+    action: LifeChannelAction
     expected_content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @field_validator("authority")

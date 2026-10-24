@@ -35,7 +35,7 @@ def close_provider_clients(core):
 
 
 def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purposes=None,
-             execute=True):
+             execute=True, automatic_actions=()):
     configure(core)
     payload = envelope("bilibili")
     url = payload["observations"][0]["url"]
@@ -78,6 +78,7 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
         conversation_id=conversation, source_event_ids=[source_id],
         purposes=["PRIVATE_MESSAGE_DRAFT", "PRIVATE_DIARY"], max_items=5,
         expires_at=after(core.clock(), 3 * 86400), qzone_draft_sources=[grant],
+        automatic_actions=list(automatic_actions),
     )
     purposes = purposes if purposes is not None else ["social", "account_actions", "proactive"]
     policy, ref = authorize(core, tmp_path, life=scope, additional_purposes=purposes)

@@ -600,6 +600,9 @@ class SocialAutonomy:
         data = LifeTopics(self.store, self.settings, self.clock).retained_result(
             job_id, destination="QZONE_DRAFT",
         )
+        if owner_authority.owner_waiting(self.store, self.settings, self.clock(),
+                                         authority=json.loads(data["job"]["authority_json"])):
+            raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
         draft = data["qzone_draft"]
         proof = {"job_id": job_id, "content_sha256": draft["content_sha256"],
                  "source_snapshot_sha256": draft["source_snapshot_sha256"]}

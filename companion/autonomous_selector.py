@@ -133,7 +133,7 @@ def native_selector(core, worker_id) -> RoundRobin:
         return UnitResult(bool(core.exploration.schedule_goal()))
 
     async def life_topic():
-        return UnitResult(bool(core.life_topics.schedule()))
+        return UnitResult(core.life_topics.advance(diary=core.diary))
 
     async def private_share():
         return UnitResult(bool(core.social.flush()))

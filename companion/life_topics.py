@@ -398,10 +398,12 @@ class LifeTopics:
 
         data = self.retained_result(job_id, destination="PRIVATE_MESSAGE_DRAFT")
         s, now = self.store, self.clock()
-        owner_authority.check_job(s, self.settings, self.clock, data["job"], purpose="proactive")
+        view = owner_authority.check_job(s, self.settings, self.clock, data["job"],
+                                         purpose="proactive")
         if (self.settings.life_loop.mode != "SHADOW"
             or not proactive_allowed(s, self.settings, now)
-            or budget.chat_pending(s, now)):
+            or owner_authority.owner_waiting(s, self.settings, now,
+                                             authority=view.authority.as_dict())):
             raise CoreError("LIFE_PRIVATE_DELIVERY_PAUSED", 409)
         conversation = s.one("SELECT reply_revision FROM conversations WHERE conversation_id=?",
                              (data["job"]["conversation_id"],))
@@ -412,7 +414,7 @@ class LifeTopics:
                 "authority_sha256": data["result"]["authority_sha256"]}
 
     def consume(self, job_id, body: LifeConsumeRequest, *, diary=None):
-        """Release an exact owner-reviewed draft through its existing native channel."""
+        """Release exact retained wording through its independently authorized native channel."""
         from companion import owner_delivery
         from companion.social import proactive_counts
         from companion.transport import enqueue_reply_parts
@@ -466,6 +468,62 @@ class LifeTopics:
             for delivery in existing:
                 owner_delivery.check_delivery(s, self.settings, self.clock, delivery["message_id"])
             return {"job_id": job_id, "action": body.action, "deliveries": existing}
+
+    def advance(self, *, diary=None):
+        """One bounded native planning turn, with no model call or second queue."""
+        return self.consume_due(diary=diary) or bool(self.schedule())
+
+    def consume_due(self, *, diary=None):
+        """Consume at most one original result under explicit automatic channel consent."""
+        s, cfg, now = self.store, self.settings, self.clock()
+        if (cfg.mode != "live" or cfg.life_loop.mode != "SHADOW" or not cfg.wake_enabled
+            or _paused(s, cfg, now) or _uncertain(s) or private_life.busy(s, now)):
+            return False
+        try:
+            view = owner_authority.current(s, cfg, self.clock, purpose="life")
+        except CoreError:
+            return False
+        scope = view.policy.life_shadow
+        if (scope is None or not scope.automatic_actions
+            or owner_authority.owner_waiting(s, cfg, now, authority=view.authority.as_dict())):
+            return False
+        channels = {"PRIVATE_MESSAGE_DRAFT": ("qq.private.proactive", {"proactive"}),
+                    "PRIVATE_DIARY": ("diary.save", {"diary"}),
+                    "QZONE_DRAFT": ("qzone.publish", {"social", "account_actions"})}
+        allowed = {destination: action for destination, (action, purposes) in channels.items()
+                   if action in scope.automatic_actions and purposes <= set(view.policy.purposes)}
+        if not allowed:
+            return False
+        # The owner-approved scope caps retained expressions at 100. Scan that bounded
+        # set so one permanently ineligible source cannot starve another channel.
+        rows = s.rows(
+            "SELECT r.job_id,r.destination,r.text FROM life_activity_results r "
+            "JOIN jobs j USING(job_id) JOIN events e ON e.event_id=j.event_id "
+            "WHERE r.state='SHADOW' AND j.state='SUCCEEDED' AND e.redacted=0 "
+            "AND r.authority_sha256=? AND json(j.authority_json)=json(?) "
+            "AND NOT EXISTS(SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id "
+            "AND o.action_type='qq.private.proactive') "
+            "AND NOT EXISTS(SELECT 1 FROM social_autonomy_plans p "
+            "WHERE p.idempotency_key='life:qzone:' || j.job_id) "
+            "AND NOT EXISTS(SELECT 1 FROM runtime_meta m WHERE m.key='diary_life:' || j.job_id) "
+            "ORDER BY r.created_at,r.job_id LIMIT ?",
+            (sha(view.authority.as_dict()), encode(view.authority.as_dict()), scope.max_items),
+        )
+        for row in rows:
+            action = allowed.get(row["destination"])
+            if action is None:
+                continue
+            try:
+                self.consume(row["job_id"], LifeConsumeRequest(
+                    authority=view.authority.as_dict(), action=action,
+                    expected_content_sha256=sha({"text": row["text"]}),
+                ), diary=diary)
+            except CoreError:
+                # Native consume rolls back a refusal. Leave its original evidence
+                # and accounting intact, and give the next eligible result a chance.
+                continue
+            return True
+        return False
 
     def preview(self, requester):
         if requester != self.settings.owner_qq_id:

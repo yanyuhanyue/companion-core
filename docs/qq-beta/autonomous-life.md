@@ -1,10 +1,10 @@
-# Autonomous Life: source-bound SHADOW
+# Autonomous Life: source-bound expression
 
 The feature defaults to OFF. It can inspect actual owner/private input and real Reader results,
 record WAITING/DUE/CLOSED/EXPIRED topics, and generate a bounded decision through the original
 activity job, model budget and Life worker. There is no new executor, factual memory store or
 QQ sender. Real sending, paid experimentation and production deployment require their own
-approval; this candidate is for offline verification and a Draft PR.
+approval and live acceptance; the checks described here use synthetic external transport.
 
 ## Configuration and inspection
 
@@ -64,8 +64,8 @@ evidence; native recovery and accounting remain authoritative.
 FOLLOW_UP targets only a conversational topic and PRIVATE_MESSAGE_DRAFT. SHARE can choose
 PRIVATE_MESSAGE_DRAFT or PRIVATE_DIARY; QZONE_DRAFT additionally needs explicit per-source purpose
 grants. A private diary result reuses the original cited reflection validation and is a private
-SHADOW draft, not a new canonical daily diary entry. Ordinary closed-day diary generation remains
-with DiaryService and its existing worker. SKIP creates no prose. DEFER is bounded by source expiry
+SHADOW draft until consumed through DiaryService. Ordinary closed-day diary generation remains
+with DiaryService and the original nightly lanes. SKIP creates no prose. DEFER is bounded by source expiry
 and permits at most one further decision; it does not loop on an unanswered topic.
 
 One completed decision consumes its topic. Explicit closure, expiry, mode changes or restart
@@ -94,7 +94,8 @@ The output `LifeQZoneDraft` contains schema version 1, draft/job ID, purpose, ow
 owner ID, text, content hash, source snapshot hash, source grants and effective expiry. Hashes use
 the project's canonical `paid_budget.sha`: content is `{"text": text}`; source snapshot is the map
 `{event_id: source_sha256}`. The DTO lives in `companion/life_protocol.py`. It is an activity SHADOW
-artifact; it is never a SocialAutonomy READY plan and cannot be passed to reserve/send.
+artifact; it must pass the separate native channel consumer before a SocialAutonomy READY plan
+and Outbox reservation can exist.
 Readback revalidates the DTO, native successful job and settled usage, retained text, both hashes,
 exact current unique source grants, audience/owner and effective expiry. A malformed or changed
 artifact is hidden individually without writing during GET or failing the whole view.
@@ -123,11 +124,34 @@ wording. Its separately scoped account-profile handling and retained native work
 
 Shared HTTP/Outbox integration supplies `owner_delivery.record_life_draft` for the completed
 activity job; the ordinary running-job `record_replies` contract is unchanged. Diary owns
-`DiaryService.save_life_expression` and the daily evidence/revision lifecycle. Missing native
-interfaces fail closed rather than reopening a completed job, relabelling an owner correction,
-or paying for another daily generation. REM remains Life-owned and requires explicit fiction,
-owner scope and source/erasure identity before any private expression consumer can accept it.
-The domain slice alone does not certify these shared integrations or real publication.
+`DiaryService.save_life_expression` and the daily evidence/revision lifecycle. It saves the retained
+wording once, preserves owner edits and deleted days, and does not pay for another generation.
+REM remains a separate private FICTION artifact; it cannot become factual Diary or public-source
+publication evidence.
+
+## Independently authorized automatic consumption
+
+The owner-approved `life_shadow.automatic_actions` defaults to `[]`. Existing policies keep their
+draft-only automatic behavior; the control-token consume API remains an explicit per-item action.
+The empty list is omitted during serialization so historical approval fingerprints stay unchanged.
+The optional list accepts only `qq.private.proactive`, `diary.save` and `qzone.publish`, without
+duplicates and only for corresponding allowed draft destinations. It does not replace the
+independent channel purposes, account policy, source grants or budgets described above.
+Adding automatic consent creates a new owner-policy revision: earlier drafts are never rebound
+to that revision. The policy must authorize the original job when the draft is generated.
+
+The existing Life selector calls `LifeTopics.advance`. In one bounded non-model turn it either
+consumes one eligible settled expression or schedules the next native decision. Consumption
+scans at most the approved scope's finite item cap, skips existing native Outbox/Social/Diary receipts,
+and invokes the same `consume` implementation. A refused candidate does not hide another eligible
+candidate. No new queue, model planner, timer or delivery transport is introduced.
+
+OFF/PREVIEW, owner pause, quiet hours, current or approved pre-ingress owner input, unresolved
+model/delivery outcomes, source expiry and channel quotas retain their original boundaries.
+Private and Life-origin QZone final send checks reuse `owner_authority.owner_waiting`, so a current
+signed capture can stop dispatch before its event is ingested. A queued item is not a successful
+send; native receipts determine success, rejection and delivery uncertainty. Restart does not
+recreate a consumed item or repeat an uncertain send.
 
 ## Recovery and erasure
 
@@ -153,6 +177,13 @@ independent Core/store in the original Life worker, native paid admission/settle
 `httpx.MockTransport`. Foreground reply jobs are explicitly cancelled to isolate background work;
 retained synthetic sources are explicitly admitted to the subsequent SHADOW window. They are not
 production capture or live QQ acceptance. No external model or QQ call is made.
+
+`test_life_expression_entrypoint.py` also exercises actual consumption HTTP, independent native
+selector processes, all three channels, and automatic worker consumption without a consume POST.
+It covers unchanged model accounting, repeated calls/restarts, owner edits/deletion, STOP/source
+withdrawal and native SENT/UNKNOWN receipts. `test_life_expression_pre_ingress.py` approves a real
+synthetic signed capture between begin-send and the final native channel check. These establish
+the execution mechanism, not real model quality or actual QQ delivery.
 
 The worker cases verify next-day Bug follow-up, reading-result SHARE, explicitly scoped QZone
 draft and in-flight grant revocation. Unit/integration checks also cover owner closure, source

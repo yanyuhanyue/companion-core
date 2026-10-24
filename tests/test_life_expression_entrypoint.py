@@ -211,3 +211,93 @@ def test_native_life_diary_save_over_http_preserves_original_custody(core, tmp_p
                 assert core.store.rows("SELECT * FROM model_usage") == usage
                 assert core.store.rows("SELECT * FROM outbox") == []
     run(scenario())
+
+
+@pytest.mark.parametrize("action,destination,purposes,outcome", [
+    ("qq.private.proactive", "PRIVATE_MESSAGE_DRAFT", ["proactive"], "SENT"),
+    ("qq.private.proactive", "PRIVATE_MESSAGE_DRAFT", ["proactive"], "UNKNOWN"),
+    ("qzone.publish", "QZONE_DRAFT", ["social", "account_actions"], "SENT"),
+    ("qzone.publish", "QZONE_DRAFT", ["social", "account_actions"], "UNKNOWN"),
+    ("diary.save", "PRIVATE_DIARY", ["diary"], "SAVED"),
+])
+def test_native_worker_automatically_consumes_only_explicit_channel_consent(
+    core, tmp_path, action, destination, purposes, outcome,
+):
+    core.settings.diary_enabled = True
+    _, _, authority, source = prepared(core, tmp_path, destination=destination, purposes=purposes,
+                                       automatic_actions=[action], execute=False)
+    core.settings.control_token = SecretStr("synthetic-automatic-life-control-token")
+    core.settings.diary_admin_token = SecretStr("synthetic-automatic-life-diary-token")
+
+    async def scenario():
+        async with real_core_http(core) as port:
+            first = await native_child(core, tmp_path, source, destination, 1)
+            assert first["provider_calls"] == 1, first
+            rows = [row for row in first["results"] if row["state"] == "SHADOW"]
+            assert len(rows) == 1, first
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}",
+                                          trust_env=False) as client:
+                # No consume POST: the sole native selector must have done the work.
+                if action == "diary.save":
+                    entry = core.store.one("SELECT * FROM diary_entries")
+                    assert entry and entry["body_md"] == rows[0]["text"]
+                    read = await client.get("/internal/v1/diary/" + entry["local_date"],
+                        headers={"Authorization": "Bearer "
+                                 + core.settings.diary_admin_token.get_secret_value()})
+                    assert read.status_code == 200, read.text
+                    assert core.store.rows("SELECT * FROM outbox") == []
+                else:
+                    outbox = core.store.rows("SELECT * FROM outbox")
+                    assert len(outbox) == 1
+                    content = json.loads(outbox[0]["content_json"])
+                    assert (content["proposal"]["text"] if action == "qzone.publish"
+                            else content["text"]) == rows[0]["text"]
+                    client.headers["Authorization"] = (
+                        "Bearer " + core.settings.bridge_token.get_secret_value())
+                    lease_body = {"worker_id": "synthetic-auto-bridge", "authority": authority}
+                    if action == "qzone.publish":
+                        lease_body.update(delivery_lane="qq_account",
+                            account_actions_authorization_sha256=(
+                                core.settings.social_autonomy.authorization_sha256))
+                    leased = await client.post("/internal/v1/deliveries/lease", json=lease_body)
+                    assert leased.status_code == 200, leased.text
+                    item = leased.json()["items"][0]
+                    path = "/internal/v1/deliveries/" + item["message_id"]
+                    begun = await client.post(path + "/begin-send",
+                                              json={"lease_token": item["lease_token"]})
+                    assert begun.status_code == 200, begun.text
+                    check = {"authority": authority, "message_id": item["message_id"],
+                             "lease_token": item["lease_token"],
+                             "content_sha256": item["content_sha256"]}
+                    result = {"lease_token": item["lease_token"],
+                              "result": "SENT" if outcome == "SENT" else "DELIVERY_UNCERTAIN"}
+                    if action == "qzone.publish":
+                        assert content["audience"] == {"ugc_right": 16, "target_uins": ["10001"]}
+                        check["payload_sha256"] = content["payload_sha256"]
+                        check_path = "/internal/v1/account-actions/send-check"
+                        result["account_action_receipt"] = {
+                            "message_id": item["message_id"], "lease_token": item["lease_token"],
+                            "payload_sha256": content["payload_sha256"], "action_type": action,
+                            "result": "SUCCEEDED" if outcome == "SENT" else "UNKNOWN",
+                            "native_retcode": 0 if outcome == "SENT" else None,
+                            "native_receipt_sha256": "d" * 64 if outcome == "SENT" else None,
+                            "resource_id": "synthetic-auto-tid" if outcome == "SENT" else None,
+                        }
+                    else:
+                        check["event_id"] = outbox[0]["origin_event_id"]
+                        check_path = "/internal/v1/owner-authority/send-check"
+                    checked = await client.post(check_path, json=check)
+                    assert checked.status_code == 200, checked.text
+                    recorded = await client.post(path + "/result", json=result)
+                    assert recorded.status_code == 200, recorded.text
+                    assert core.store.one("SELECT state FROM outbox")["state"] == result["result"]
+                deliveries = core.store.rows("SELECT * FROM outbox")
+                entries = core.store.rows("SELECT * FROM diary_entries")
+                second = await native_child(core, tmp_path, source, destination, 2)
+                assert second["provider_calls"] == 0, second
+                assert core.store.rows("SELECT * FROM outbox") == deliveries
+                assert core.store.rows("SELECT * FROM diary_entries") == entries
+                assert core.store.rows("SELECT * FROM model_usage") == usage
+    run(scenario())
