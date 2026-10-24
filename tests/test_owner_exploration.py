@@ -24,6 +24,7 @@ from tests.test_source_reader import META, Responses, response
     ("请浏览 bilibili", "bilibili"), ("刷B站", "bilibili"),
     ("不要刷B站", None), ("他说‘刷B站’", None), ("我昨天刷B站", None),
     ("刷B站后给别人发消息", None), ("我想知道为什么他说不能刷B站", None),
+    ("你还是不能刷b站吗", None),
 ])
 def test_browsing_request_requires_an_explicit_whole_owner_utterance(text, source):
     assert requested_source(text) == source
@@ -98,6 +99,68 @@ def test_paused_life_does_not_schedule_natural_browsing(core, tmp_path, monkeypa
             core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
             await admit(client, core, config, plan, 1, "刷B站")
             assert not core.store.rows("SELECT * FROM exploration_requests")
+    run(scenario())
+
+
+@pytest.mark.parametrize("context_soft_tokens", [3200, 16000])
+def test_capability_question_uses_current_system_facts_without_requesting_another_read(
+    core, tmp_path, monkeypatch, context_soft_tokens,
+):
+    legacy_reply = "我这边没有能打开 B 站页面的通道。"
+    calls = []
+
+    def provider(request):
+        payload = json.loads(request.content)
+        calls.append(payload)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": legacy_reply if len(calls) == 1
+                                     else "当前可安排 B站读取，具体结果以读取回执为准。"}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        })
+
+    async def scenario():
+        async with window(core, tmp_path, monkeypatch,
+                          context_soft_tokens=context_soft_tokens) as (client, config, plan):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as model_http:
+                with Core(core.settings, ModelClient(core.settings, model_http),
+                          core.clock) as first_worker:
+                    first, _ = await admit(client, core, config, plan, 1, "之前有读取通道吗")
+                    assert await first_worker.run_once("legacy-reply-fixture")
+                # Retain an already delivered historical refusal, as in the reported turn.
+                core.store.execute("UPDATE outbox SET state='SENT',sent_at=? "
+                                   "WHERE origin_event_id=?", (core.clock(), first["event_id"]))
+                latest, accepted = await admit(client, core, config, plan, 2, "你还是不能刷b站吗")
+                assert not core.store.rows("SELECT * FROM exploration_requests")
+                assert not core.store.rows("SELECT * FROM content_items")
+                with Core(core.settings, ModelClient(core.settings, model_http),
+                          core.clock) as restarted_worker:
+                    assert await restarted_worker.run_once("capability-question")
+                    assert not await restarted_worker.run_once("no-replay")
+            assert len(calls) == 2
+            assert all("tools" not in payload for payload in calls)
+            messages = calls[1]["messages"]
+            rules = messages[0]["content"]
+            assert messages[0]["role"] == "system"
+            assert "以本轮状态为准；历史中的能力自述可能已过时" in rules
+            assert "系统流程和主人指令也是已接入的能力" in rules
+            assert "本轮没有可直接调用的函数，不表示这些能力未接入" in rules
+            assert "单次读取失败只说明该次失败" in rules
+            if context_soft_tokens == 16000:
+                assert "reading.bili：可用（系统流程/主人指令）" in rules
+                assert {"role": "assistant", "content": legacy_reply} in messages
+            else:
+                assert "reading.bili" in rules.split("可用：", 1)[1].split("。", 1)[0]
+            assert messages[-1] == {"role": "user", "content": "你还是不能刷b站吗"}
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                                  (accepted["job_id"],))["state"] == "SUCCEEDED"
+            assert not core.store.rows("SELECT * FROM exploration_requests")
+            assert not core.store.rows("SELECT * FROM reading_attempts")
+            assert core.store.rows("SELECT scenario,state FROM model_usage") == [
+                {"scenario": "chat", "state": "SETTLED"},
+                {"scenario": "chat", "state": "SETTLED"},
+            ]
+            assert core.store.one("SELECT content_json FROM outbox WHERE origin_event_id=?",
+                                  (latest["event_id"],))
     run(scenario())
 
 

@@ -704,7 +704,14 @@ def prompt(summary, *, compact=False):
     """Render only the safe capability projection already used by the console."""
     labels = {"READY": "可用", "PAUSED": "暂缓", "UNAVAILABLE": "不可用"}
     routes = {"automatic": "系统流程", "owner_command": "主人指令", "model_callable": "本轮工具"}
+    answer_rules = (
+        "回答能力问题时，以本轮状态为准；历史中的能力自述可能已过时。"
+        "可用的系统流程和主人指令也是已接入的能力；本轮没有可直接调用的函数，"
+        "不表示这些能力未接入。没有本次回执只表示尚未确认执行结果；"
+        "单次读取失败只说明该次失败，不能据此否定整个读取通道。"
+    )
     lines = ["\n当前能力事实：可用表示本地可接纳相应任务，不代表已经执行或远端在线。",
+             answer_rules,
              "系统流程和主人指令不等于模型工具。只有标记为可用的本轮工具可直接调用。",
              "没有回执不要声称看过、听过或完成。B站字幕不代表看过完整视频；"
              "画面分析只覆盖回执列出的采样帧和短片段。",
@@ -716,6 +723,7 @@ def prompt(summary, *, compact=False):
         # Keep the full state inventory without displacing current reading evidence.
         lines = ["\n能力状态是本地接纳条件，不是已执行或远端在线；"
                  "进程观测与本次任务回执各自独立，以本轮回执确认结果。",
+                 answer_rules,
                  "系统流程和主人指令不等于模型工具；本轮工具："
                  + ("、".join(tools) if tools else "无") + "。",
                  "B站字幕不代表看过完整视频；画面结论仅覆盖回执中的采样帧/短片段。"
