@@ -52,9 +52,27 @@ def pending(core, tmp_path):
 
 
 @pytest.mark.parametrize("outcome", ["SENT", "CANCELLED"])
-def test_native_resolution_retains_original_evidence_and_replays(core, tmp_path, outcome):
+@pytest.mark.parametrize("quota", [False, True])
+def test_native_resolution_retains_original_evidence_and_replays(
+    core, tmp_path, monkeypatch, outcome, quota,
+):
+    if quota:
+        from tests import test_owner_input
+        from tests.test_cumulative_budget import policy
+
+        original_prepare = test_owner_input.prepare
+
+        def configure(core, directory):
+            grant = original_prepare(core, directory)
+            policy(core)
+            return grant.model_copy(update={
+                "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings))})
+
+        monkeypatch.setattr(test_owner_input, "prepare", configure)
     proof, _ = pending(core, tmp_path)
     usages = deepcopy(core.store.rows("SELECT * FROM model_usage"))
+    before = paid_budget.journal(core.store, core.settings.paid_model,
+                                 allow_settlement=True)["cumulative"]
     prepared = reconciliation.prepare(core.store, core.settings, proof, core.clock())
     assert prepared["state"] == "READY"
     result = reconciliation.resolve(core.store, core.settings, proof["message_id"], outcome,
@@ -64,7 +82,18 @@ def test_native_resolution_retains_original_evidence_and_replays(core, tmp_path,
     assert core.store.rows("SELECT * FROM model_usage") == usages
     receipt = reconciliation.lookup(core.store, core.settings, proof["message_id"])
     assert receipt == result["receipt"]
-    paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
+    after = paid_budget.journal(core.store, core.settings.paid_model,
+                                allow_settlement=True)["cumulative"]
+    assert before["policy_sha256"] == after["policy_sha256"]
+    if quota:
+        key = "send:" + wire.digest(proof["message_id"])
+        assert after["operations"][key]["state"] == (
+            "OWNER_SENT" if outcome == "SENT" else "OWNER_CLOSED")
+        for operation, prior in before["operations"].items():
+            assert {k: v for k, v in after["operations"][operation].items() if k != "state"} == {
+                k: v for k, v in prior.items() if k != "state"}
+        assert before["models"] == after["models"]
+        assert before["policies"] == after["policies"]
 
 
 @pytest.mark.parametrize("mutation", ["authority", "core_stop_record_sha256", "restored"])
