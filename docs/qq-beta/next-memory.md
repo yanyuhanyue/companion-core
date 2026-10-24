@@ -135,3 +135,48 @@ HTTP 查询的原有限额继续由入口校验。后台提取保留仍有效的
 其 consolidation 剩余计数由集成方同步验证。已发生调用保留 SETTLED/UNKNOWN 的原责任。
 
 状态：Core 接线与局部合成验收；组合完整 CI、部署、真实 QQ 与真实跨天效果由集成方继续验收。
+
+## P2：温度与经历状态只读投影
+
+`MemoryProjections(memory).snapshot(now, memory_ids=(), episode_ids=(),
+current_event_ids=(), used_memory_ids=(), event_ids=None, actor="owner")`
+是本片的集成接口，实现在 `companion/memory_projections.py`。每个 ID 集合最多 100 项，
+输出顺序稳定、重复 ID 去重。调用方提供已经授权的选中记忆与情景；空选择返回空视图。
+`event_ids` 是可选来源 allowlist，必须覆盖整个情景和关联目标，实际完成回执也须在范围内。
+本片不修改 Core、API、配置、worker、迁移或 UI；集成负责人可在原记忆读取/控制台入口调用，
+不能把投影当作新的提示授权。跨 await 使用仍须沿用原 `pin/revalidate`，不得缓存投影替代来源检查。
+
+- Hot：来源在当前上下文、事实确实被调用方用于本次上下文，或有原生活跃目标、执行不确定性、
+  尚未闭合的主人承诺。关注关系采用原 `goal_evidence` 的精确关联，不猜测主题相似关系。
+- Warm：没有以上关注条件、但有效来源发生在最近 7 天，复用已有情景接续时间窗。
+- Cold：更早的有效证据。温度只用于展示/上下文选择，不改变事实确认、重要性、FTS5+BGE 排序、
+  保留期或删除规则；较早的假设仍带 HYPOTHESIS 标签，不会自动成为已确认事实。
+
+经历保留 `discussed`，其每个目标单独投影 `planned/running/done/failed/UNKNOWN/closed`，
+避免将多个目标压成一个虚假的完成状态。CANDIDATE 只是讨论，原生取消才投影 closed。
+done 同时要求原 Goal/step 完成、完全一致的结果 ID、成功 FETCHED/WATCHED 回执和有效来源闭包；
+模拟来源、缺失/不匹配回执、EXECUTION_UNCERTAIN 都不能证明真实完成。目标 `told/closed`
+分别表示承诺反馈实际 SENT、以及原承诺终态和执行结果已对应；普通 SENT 回复仅证明那条回复送达，
+不能证明目标完成。DELIVERY_UNCERTAIN 和草稿均不算 told。最多读取 20 个关联目标及 20 条回复，
+超过时显式标记 truncated，消费者不得把有界结果说成全部历史。
+
+每次查询复用 `MemorySources`、来源有效期和 Ledger custody/epoch 复核，从同一 Core DB 重建。
+没有持久投影或第二事实源，因此没有新增表、擦除 handler 或后台任务；原生删除和擦除重放后重新查询
+不能复活记忆。按调用方实际使用传 `used_memory_ids`，不要把“候选被检索到”冒充“已经使用”。
+
+实施前对照与复用依据：
+
+- 对照 `codex/next-memory` 的 `3df9da6`：当前冻结基线已经保有情景编码、旧纠正来源校验、媒体批次
+  和 MemoryContext 成果；保留新基线的 async recall，不回退覆盖旧分支。
+- 实际检查本机 DSH `dsh-session-persistence/lib/index.js` 的 `validateStoredEvents`
+  （SHA256 `cc0b6d3a224133af611b428d5a49020e300f86c3b4ba28037aeb219029bde3eb`）：
+  读取时校验已知事件类型并拒绝无法解释的日志。沿用此严格解释原则，Core 继续以自身原生状态与
+  来源校验为准，不导入 DSH 的存储或执行器。
+- [KI-CO recall gate 固定源码](https://github.com/Kisera001/KI-CO/blob/fe1672bc25e45506018d57fdead51d7ce6d3cc72/src/utils/memoryRecallGate.ts)
+  提供有界关注条件的比较；本片使用明确的原生来源/目标关联，不复制词法阈值。
+- [YuriOS DreamConsolidator 固定源码](https://github.com/yuri-os/YuriOS/blob/cd4d1f16ae095f0f694dbbe7b1aac8e33db25367/yurios/mind/dream.py)
+  区分已结束日及原始经历。本片保留证据发生时间；夜间阶段与虚构 REM 属于后续片。
+
+`tests/test_memory_projections.py` 验证冷记忆仍可召回、只读无状态写入、重复选择/重新打开 DB 等价、
+原 Goal 状态转换、投递不确定性与 SENT 闭合、模拟/缺失执行证据、来源过期/撤回/上游失效和备份擦除重放。
+该接口尚未接入产品页面；完整 HTTP + 独立 worker 合成验收在共享入口接线后由集成负责人执行。
