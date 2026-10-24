@@ -16,15 +16,37 @@ def test_native_input_state_requires_original_capture_and_terminal_work(core, tm
     source = core.ingest(inbound(core, capture), "input-state-source")
     pending = owner_input_state.read(core.store, core.settings, capture)
     assert not pending["terminal"] and pending["unsettled_work"]
+    assert pending["reply_revision"] == 1
+    core.store.execute("UPDATE events SET reply_revision=3 WHERE event_id=?", (capture.event_id,))
+    revised = owner_input_state.read(core.store, core.settings, capture)
+    assert revised["reply_revision"] == 3
+    assert revised["work_sha256"] == pending["work_sha256"]
     owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-input-state", authority=capture.authority))
     core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (source["job_id"],))
     result = owner_input_state.read(core.store, core.settings, capture)
     assert result["terminal"] and result["authority"] == capture.authority
     assert result["input_sha256"] == capture.input_sha256
+    terminal(result, capture.model_dump(mode="json"))
+    historical = {key: value for key, value in result.items() if key != "reply_revision"}
+    terminal(historical, capture.model_dump(mode="json"))
+    for revision in (-1, True, "3", None):
+        with pytest.raises(ValueError, match="OWNER_INPUT_TERMINAL_REQUIRED"):
+            terminal({**result, "reply_revision": revision}, capture.model_dump(mode="json"))
     changed = capture.model_copy(update={"input_sha256": "f" * 64})
     with pytest.raises(CoreError, match="OWNER_CAPTURE_INVALID"):
         owner_input_state.read(core.store, core.settings, changed)
+
+
+def test_unadmitted_stopped_input_has_zero_revision_without_making_work(core, tmp_path):
+    capture, _ = captured(core, tmp_path)
+    owner_authority.stop(core.store, core.settings, core.clock,
+        AuthorityStop(operation_id="stop-unadmitted-input", authority=capture.authority))
+    before = list(core.store.db.iterdump())
+    result = owner_input_state.read(core.store, core.settings, capture)
+    assert result["reply_revision"] == 0 and result["state"] == "CANCELLED"
+    terminal(result, capture.model_dump(mode="json"))
+    assert list(core.store.db.iterdump()) == before
 
 
 def test_native_input_state_never_treats_unknown_delivery_as_complete(core, tmp_path):

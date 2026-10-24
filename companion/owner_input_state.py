@@ -21,8 +21,10 @@ def read(store, settings, capture):
         event_id = original.event_id
         erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                                  ("erased_event:" + event_id,)))
-        event = store.one("SELECT event_id,redacted,fingerprint FROM events WHERE event_id=?",
+        event = store.one("SELECT event_id,redacted,fingerprint,reply_revision "
+                          "FROM events WHERE event_id=?",
                           (event_id,))
+        revision = event.pop("reply_revision") if event else 0
         saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
                           ((poke.INPUT if native_poke else owner_input.INPUT) + event_id,))
         head = owner_authority._latest(store)
@@ -87,6 +89,7 @@ def read(store, settings, capture):
             and not (
             unsettled_work or unsettled_model or unsettled_delivery))
         return {"authority": original.authority, "event_id": event_id,
+            "reply_revision": revision,
             "input_sha256": input_hash, "terminal": terminal,
             "state": "RECALLED" if erased or event and event["redacted"] else (
                 "CANCELLED" if unadmitted and terminal else "COMPLETE" if terminal else "PENDING"),

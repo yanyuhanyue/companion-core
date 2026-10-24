@@ -62,7 +62,7 @@ def prepared_host(core, tmp_path):
 
 
 @pytest.mark.parametrize("outcome", ["ack", "unknown", "stop", "mutate",
-                                    "unknown_sent", "unknown_cancelled", "owner"])
+                                    "unknown_sent", "unknown_cancelled", "owner", "ack_handoff"])
 def test_account_host_checked_native_delivery(core, tmp_path, outcome):
     cfg, frozen = prepared_host(core, tmp_path)
     app = create_app(core.settings)
@@ -112,7 +112,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
                 assert await deliver_tick(client, OwnerOneBot(guard, protocol), spool,
                                           guard=guard, delivery_lane="qq_account")
                 expected = ("UNKNOWN" if outcome.startswith("unknown") else
-                            "ACK" if outcome == "ack" else "NOT_SENT")
+                            "ACK" if outcome.startswith("ack") else "NOT_SENT")
                 row = spool.db.execute("SELECT state FROM window_attempts").fetchone()
                 assert row[0] == expected
                 runtime.verify(active=not outcome.startswith("unknown"))
@@ -122,7 +122,9 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
                                        "target_uins": [int(cfg.owner_qq_id)]}
                 assert core.store.one("SELECT attempt_count FROM outbox WHERE message_id=?",
                                       (frozen.message_id,))["attempt_count"] == 1
-        if outcome in {"unknown_sent", "unknown_cancelled"}:
+                if outcome == "ack_handoff":
+                    runtime.stop()
+        if outcome in {"unknown_sent", "unknown_cancelled", "ack_handoff"}:
             from companion import delivery_reconciliation, owner_authority
             from companion_onebot_bridge import owner_handoff, owner_native_resolution
 
@@ -133,15 +135,16 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
                 runtime = OwnerRuntime(spool, clock=lambda: datetime.fromisoformat(core.clock()))
                 async with private_http_client(cfg.core_url, cfg.bridge_token,
                     transport=httpx.ASGITransport(app)) as client:
-                    assert (await owner_native_resolution.prepare(
-                        runtime, client, frozen.message_id))["state"] == "READY"
-                    target = outcome.removeprefix("unknown_").upper()
-                    resolved = delivery_reconciliation.resolve(core.store, core.settings,
-                        frozen.message_id, target, core.clock(),
-                        operation_id="account-host-resolve", operation_sha256="e" * 64)
-                    assert resolved["receipt"]["quiescence"]["authority"] == cfg.owner_authority
-                    assert (await owner_native_resolution.reconcile(
-                        runtime, client, frozen.message_id))["outcome"] == target
+                    if outcome != "ack_handoff":
+                        assert (await owner_native_resolution.prepare(
+                            runtime, client, frozen.message_id))["state"] == "READY"
+                        target = outcome.removeprefix("unknown_").upper()
+                        resolved = delivery_reconciliation.resolve(core.store, core.settings,
+                            frozen.message_id, target, core.clock(),
+                            operation_id="account-host-resolve", operation_sha256="e" * 64)
+                        assert resolved["receipt"]["quiescence"]["authority"] == cfg.owner_authority
+                        assert (await owner_native_resolution.reconcile(
+                            runtime, client, frozen.message_id))["outcome"] == target
                     runtime.verify(active=False)
                     assert len(sent) == 1
                     await owner_handoff.prepare(runtime, client)
@@ -156,7 +159,7 @@ def test_account_host_checked_native_delivery(core, tmp_path, outcome):
                     clock=lambda: datetime.fromisoformat(core.clock()))
                 restarted.verify()
                 assert spool.db.execute("SELECT state FROM window_attempts").fetchone()[0] == (
-                    "UNKNOWN")
+                    "ACK" if outcome == "ack_handoff" else "UNKNOWN")
                 assert len(sent) == 1
 
     asyncio.run(scenario())

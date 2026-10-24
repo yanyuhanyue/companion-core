@@ -19,7 +19,9 @@ def _rows(db, query, values=()):
 def terminal(receipt, capture):
     fields = {"authority", "event_id", "input_sha256", "terminal", "state", "unsettled_work",
               "unsettled_model", "unsettled_delivery", "work_sha256"}
-    if (not isinstance(receipt, dict) or set(receipt) != fields
+    if (not isinstance(receipt, dict) or set(receipt) not in (fields, fields | {"reply_revision"})
+        or "reply_revision" in receipt and (type(receipt["reply_revision"]) is not int
+                                             or receipt["reply_revision"] < 0)
         or any(receipt[key] != capture[key] for key in ("authority", "event_id"))
         or receipt["input_sha256"] != (wire.digest(capture["notice"])
             if capture["kind"] == "authenticated_onebot_poke" else capture["input_sha256"])
@@ -56,7 +58,8 @@ def closed(runtime, records, references):
                 raise ValueError("OWNER_HANDOFF_RECONCILIATION_REQUIRED")
         elif attempt["state"] == "ACK":
             body = json.loads(result[0]["body"]) if result else {}
-            ack = body.get("native_ack") or body.get("provider_message_id")
+            ack = (body.get("account_action_receipt") or body.get("native_ack")
+                   or body.get("provider_message_id"))
             if (not result or result[0]["state"] != "accepted" or body.get("result") != "SENT"
                 or not ack or wire.digest(ack) != attempt["provider_ack_hash"]):
                 raise ValueError("OWNER_HANDOFF_RECONCILIATION_REQUIRED")
