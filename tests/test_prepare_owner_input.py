@@ -29,7 +29,7 @@ from tests.test_owner_authority import activate, prepare
 
 @asynccontextmanager
 async def window(core, tmp_path, *, media=False, content=False, history=False, video=False,
-                 bili=False, model=None):
+                 bili=False, model=None, video_config=None, image_count=1):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
@@ -38,7 +38,7 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
         core.settings.paid_model = core.settings.paid_model.model_copy(update={
             "image_input": ImageInputPolicy(approval_sha256="b" * 64,
                 estimated_tokens_per_image=1000, max_bytes_per_image=100000,
-                max_pixels_per_image=10000, max_images_per_request=1)})
+                max_pixels_per_image=10000, max_images_per_request=image_count)})
         core.settings.private_files = PrivateFilesConfig(
             enabled=True, parser_image="sha256:" + "f" * 64)
     if video:
@@ -48,7 +48,7 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
 
         core.settings.video_model_key = SecretStr("synthetic-video-provider-key")
         core.settings.paid_model = core.settings.paid_model.model_copy(update={
-            "video_input": video_policy()})
+            "video_input": video_config or video_policy()})
         core.settings.content = core.settings.content.model_copy(update={
             "image_daily_micro_usd": 10000})
     if bili:

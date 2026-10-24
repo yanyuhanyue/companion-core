@@ -1,6 +1,5 @@
 """Native API/worker composition with generated media and synthetic provider transport."""
 
-import asyncio
 import base64
 import io
 import json
@@ -10,19 +9,18 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from companion import budget, live_text
+from companion import budget, owner_authority, paid_budget
 from companion.contracts import CoreError
-from companion.core import Core
-from companion.model import ModelClient
+from companion.owner_authority_protocol import AuthorityStop
+from companion.store import encode
 from companion.video_input import VideoInputPolicy, encode_animation, preview, text_and_estimate
-from companion_onebot_bridge import continuous
 from tests.conftest import run
-from tests.test_animated_owner_images import AdvancingClock, animation, policy
+from tests.sdk_reader_fixture import answer, call, worker_for
+from tests.test_animated_owner_images import animation, policy
 from tests.test_live_image_input import options as image_options
 from tests.test_live_image_input import png
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import image_segment
+from tests.test_prepare_owner_input import native_spool, window
 from tests.test_private_companion import companion_options
 
 
@@ -107,6 +105,41 @@ def scope_options(core, *, model, different_rates=False):
     return options
 
 
+async def native_media(core, tmp_path, client, config, plan, *, extra_static=False):
+    from companion_onebot_bridge.images import OriginalImage, upload_original
+    from companion_onebot_bridge.network import private_http_client
+    from tests.test_native_image_pipeline import admit_image
+
+    message = [image_segment("https://gchat.qpic.cn/animation")]
+    if extra_static:
+        message.append(image_segment("https://gchat.qpic.cn/static"))
+    event, _ = await admit_image(core, client, config, plan, tmp_path, message=message)
+    downloads = []
+
+    async def resolve(*_):
+        return ["1.1.1.1"]
+
+    def fetch(request):
+        downloads.append(str(request.url))
+        static = request.url.path == "/static"
+        return httpx.Response(200, content=png() if static else animation(size=(12, 8)),
+            headers={"Content-Type": "image/png" if static else "image/gif"})
+
+    spool, runtime = native_spool(core, tmp_path, config, plan)
+    try:
+        async with private_http_client(config.core_url, config.bridge_token) as transfer:
+            for image in event["payload"]["rich"]["segments"]:
+                original = OriginalImage(index=image["index"], slot=image["slot"],
+                    source_sha256=image["source_sha256"],
+                    url=message[image["index"]]["data"]["url"])
+                await upload_original(runtime, transfer, event["event_id"], original,
+                    transport=httpx.MockTransport(fetch), resolver=resolve)
+    finally:
+        spool.close()
+    assert len(downloads) == (2 if extra_static else 1)
+    return event
+
+
 @pytest.mark.parametrize("selected,model,extra_static,tool_index,different_rates", [
     (True, "configurable-video-one", False, None, False),
     (True, "configurable-video-two", False, None, False),
@@ -115,249 +148,164 @@ def scope_options(core, *, model, different_rates=False):
     (True, "configurable-video-one", False, 0, False),
     (True, "configurable-video-one", False, 0, True),
 ])
-def test_deepseek_selects_video_tool_then_independent_worker_chats(
-    core, tmp_path, monkeypatch, selected, model, extra_static, tool_index, different_rates,
+def test_sdk_selects_video_tool_then_independent_worker_chats(
+    core, tmp_path, selected, model, extra_static, tool_index, different_rates,
 ):
-    from companion import __main__, api
-    from companion import core as core_module
-
-    core.clock = AdvancingClock(core.clock.now)
-    calls, instances, sends_seen, downloads = [], [], [], []
-    original = animation(size=(12, 8))
-
-    async def source(ws):
-        message = [
-            {"type": "text", "data": {"text": "这张动图在做什么？"}},
-            image_segment("https://gchat.qpic.cn/animation"),
-        ]
-        if extra_static:
-            message.append(image_segment("https://gchat.qpic.cn/static"))
-        await ws.send(json.dumps(raw_event(
-            1, time=int(core.clock.now.timestamp()), message=message,
-        )))
-        await ws.wait_closed()
-
-    def construct(*args, **kwargs):
-        instance = Core(*args, clock=core.clock, **kwargs)
-        instances.append(instance)
-        return instance
+    calls = []
+    prices = ({"input_rate": 8990, "cached_input_rate": 899, "output_rate": 44949,
+               "max_output_tokens": 1000} if different_rates else {})
+    video = video_policy(model=model, **prices)
 
     def respond(request):
         body = json.loads(request.content)
-        calls.append((request, body))
-        output = 20
-        message = {"content": "画面是一个红色区域，只查看了首帧。"}
-        if "tools" in body and selected:
-            message = {"content": None, "tool_calls": [{
-                "id": "call_video_1", "type": "function", "function": {
-                    "name": "understand_video", "arguments": '{"question":"描述颜色变化过程"}',
-                },
-            }]}
-            if tool_index is not None:
-                message["tool_calls"][0]["index"] = tool_index
-        elif body["model"] == model:
-            output = 895 if different_rates else 20
+        calls.append(body)
+        if body["model"] == model:
             assert str(request.url) == "https://video.example.test/v1/chat/completions"
-            assert request.headers["Authorization"] == "Bearer synthetic-video-provider-key-12345"
+            assert request.headers["Authorization"] == "Bearer synthetic-video-provider-key"
             assert "thinking" not in body and "tools" not in body
             parts = body["messages"][0]["content"]
             assert parts[1]["type"] == "video_url"
             if extra_static:
                 assert len(parts) == 3 and parts[2]["type"] == "image_url"
-            video = base64.b64decode(parts[1]["video_url"]["url"].split(",", 1)[1])
-            with av.open(io.BytesIO(video)) as container:
+            raw = base64.b64decode(parts[1]["video_url"]["url"].split(",", 1)[1])
+            with av.open(io.BytesIO(raw)) as container:
                 assert len(list(container.decode(video=0))) == 8
-            message = {"content": "红色先变成绿色，再变成蓝色，连续发生。"
-                                  "synthetic-video-provider-key-12345"}
-        elif "tools" not in body:
-            assert body["model"] == core.settings.model_name
-            message = {"content": "它先变绿，再变蓝。" if selected else "我只看到了红色首帧。"}
-        return httpx.Response(200, json={"choices": [{"message": message}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": output}})
-
-    async def fetch(image, *_args, **_kwargs):
-        downloads.append(image.slot)
-        if image.slot == 1:
-            return png(), "image/png"
-        return original, "image/gif"
+            result = answer("红色先变成绿色，再变成蓝色，连续发生。synthetic-video-provider-key")
+            result["usage"]["completion_tokens"] = 895 if different_rates else 20
+        elif len(calls) == 1 and selected:
+            tool = call("motion-1", "understand_video", {"question": "描述颜色变化过程"})
+            if tool_index is not None:
+                tool["index"] = tool_index
+            result = answer(calls=[tool])
+        else:
+            result = answer("它先变绿，再变蓝。" if selected else "我只看到了红色首帧。")
+        return httpx.Response(200, json=result)
 
     async def scenario():
-        from companion_onebot_bridge import pending_media
-
-        monkeypatch.setattr(api, "Core", construct)
-        monkeypatch.setattr(core_module, "Core", construct)
-        monkeypatch.setattr(pending_media, "fetch_image", fetch)
-        monkeypatch.setattr(api, "AsyncClient", lambda **kwargs: httpx.AsyncClient(
-            **kwargs, transport=httpx.MockTransport(respond)), raising=False)
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model_http:
-            monkeypatch.setattr(__main__, "ModelClient", lambda settings, _: ModelClient(
-                settings, model_http))
-            options = scope_options(core, model=model, different_rates=different_rates)
-            if extra_static:
-                image = options["paid_options"]["image_input"]
-                options["paid_options"]["image_input"] = image.model_copy(
-                    update={"max_images_per_request": "unlimited"},
-                )
-            async with source_window(
-                core, tmp_path, source, live=True, approved=True,
-                scope_options=options, rich_input_scope="references_v1",
-                independent_api=True,
-            ) as (window, client, protocol, _, sends):
-                pause = asyncio.Event()
-
-                def emitted(kind, **_values):
-                    if kind == "automatic_input_delivered":
-                        sends_seen.extend(sends)
-                        pause.set()
-
-                monkeypatch.setattr(continuous, "emit", emitted)
-                task = asyncio.create_task(__main__.worker(core.settings))
-                try:
-                    result = await asyncio.wait_for(
-                        continuous.run(window, client, protocol, pause=pause), 25,
-                    )
-                    assert result["state"] == "OPEN" and result["new_inputs"] == 1
-                    assert result["attempt_states"] == {"ACK": 1}
-                finally:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-        assert len(instances) == 2 and instances[0].store is not instances[1].store
-        assert downloads == ([0, 1] if extra_static else [0])
-        assert len(calls) == (3 if selected else 2) and len(sends_seen) == 1
-        usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
-        assert [row["scenario"] for row in usages] == (
-            ["content_vision", "content_video", "chat"] if selected else ["content_vision", "chat"]
-        )
-        assert all(row["state"] == "SETTLED" for row in usages)
-        if selected:
-            assert usages[1]["provider"] == "synthetic-video" and usages[1]["model"] == model
-            assert usages[1]["billed_micro_usd"] == (42 if different_rates else 140)
-            assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
-        final = calls[-1][1]
-        assert "tools" not in final and final["model"] == core.settings.model_name
-        assert ("连续发生" in json.dumps(final, ensure_ascii=False)) is selected
-        assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
-        assert "synthetic-video-provider-key-12345" not in json.dumps(final)
-        assert budget.total_monthly(core.store, "2000-01-01") >= 140 if selected else True
-
-    try:
-        run(scenario())
-    except httpx.HTTPStatusError as error:
-        raise AssertionError(error.response.text) from error
+        async with window(core, tmp_path, media=True, content=True, video=True,
+                          video_config=video, image_count=2 if extra_static else 1) as (
+            client, config, plan,
+        ):
+            await native_media(core, tmp_path, client, config, plan, extra_static=extra_static)
+            async with worker_for(core, respond) as worker:
+                assert await worker.run_once("native-video-models")
+            assert len(calls) == (3 if selected else 1)
+            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            assert [row["scenario"] for row in usages] == (
+                ["chat", "content_video", "chat"] if selected else ["chat"])
+            assert all(row["state"] == "SETTLED" for row in usages)
+            if selected:
+                assert usages[1]["provider"] == "synthetic-video" and usages[1]["model"] == model
+                assert usages[1]["billed_micro_usd"] == (42 if different_rates else 140)
+                assert not core.store.one("SELECT 1 FROM runtime_meta "
+                                           "WHERE key='model_budget_blocked'")
+                assert budget.total_monthly(core.store, "2000-01-01") >= 140
+            final = calls[-1]
+            assert final["model"] == core.settings.model_name
+            assert ("连续发生" in encode(final)) is selected
+            assert len(core.store.rows("SELECT * FROM outbox")) == 1
+            assert "synthetic-video-provider-key" not in encode(final)
+    run(scenario())
 
 
 @pytest.mark.parametrize("boundary", [
     "stop", "key", "payload", "unknown", "missing_usage", "invalid_tool",
-    "invalid_index", "boolean_index", "unknown_field",
-    "video_price", "video_disabled",
+    "invalid_question", "boolean_question", "unknown_argument", "video_price", "video_disabled",
 ])
-def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(
-    core, tmp_path, boundary,
-):
+def test_video_boundary_changes_and_unknown_usage_never_send_or_repeat(core, tmp_path, boundary):
     calls = []
-    model_name = "configurable-video-one"
-
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(1, message=[image_segment()])))
-        await ws.wait_closed()
-
-    async def hook(request):
-        if json.loads(request.content)["model"] == model_name:
-            if boundary == "stop":
-                live_text.stop_window(core.store, live_text.WindowReference(
-                    window_sha256=core.settings.live_text_window.plan_sha256,
-                ), core.clock)
-            elif boundary == "key":
-                core.settings.video_model_key = SecretStr("different-synthetic-video-key")
-            elif boundary == "payload":
-                request._content = b'{}'
+    invalid = boundary in {
+        "invalid_tool", "invalid_question", "boolean_question", "unknown_argument"}
 
     def respond(request):
         body = json.loads(request.content)
         calls.append(body)
-        if body["model"] == model_name:
+        if body["model"] == "configurable-video-one":
             if boundary == "unknown":
-                raise httpx.ReadTimeout("synthetic unknown video result")
-            result = {"choices": [{"message": {"content": "分析结果。"}}]}
-            if boundary != "missing_usage":
-                result["usage"] = {"prompt_tokens": 100, "completion_tokens": 20}
-            if boundary == "video_price":
+                raise httpx.ReadTimeout("synthetic unknown video result", request=request)
+            result = answer("分析结果。")
+            if boundary == "missing_usage":
+                result.pop("usage")
+            elif boundary == "video_price":
                 current = core.settings.paid_model.video_input
                 core.settings.paid_model = core.settings.paid_model.model_copy(update={
                     "video_input": current.model_copy(update={
-                        "input_rate": current.input_rate + 1,
-                    }),
-                })
+                        "input_rate": current.input_rate + 1})})
             elif boundary == "video_disabled":
                 core.settings.paid_model = core.settings.paid_model.model_copy(
-                    update={"video_input": None},
-                )
-            return httpx.Response(200, json=result)
-        result = {
-            "choices": [{"message": {"content": None, "tool_calls": [{
-                "id": "call_video_1", "type": "function", "function": {
-                    "name": "unknown_tool" if boundary == "invalid_tool" else "understand_video",
-                    "arguments": '{"question":"描述动作"}',
-                },
-            }]}}], "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        }
-        tool = result["choices"][0]["message"]["tool_calls"][0]
-        if boundary == "invalid_index":
-            tool["index"] = 1
-        elif boundary == "boolean_index":
-            tool["index"] = False
-        elif boundary == "unknown_field":
-            tool["source_url"] = "https://untrusted.invalid/private"
+                    update={"video_input": None})
+        else:
+            arguments = {"question": "描述动作"}
+            if boundary == "invalid_question":
+                arguments["question"] = 1
+            elif boundary == "boolean_question":
+                arguments["question"] = False
+            elif boundary == "unknown_argument":
+                arguments["source_url"] = "https://untrusted.invalid/private"
+            result = answer(calls=[call("bad-video", "unknown_tool" if boundary == "invalid_tool"
+                                       else "understand_video", arguments)])
         return httpx.Response(200, json=result)
 
     async def scenario():
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True,
-            scope_options=scope_options(core, model=model_name), rich_input_scope="references_v1",
-        ) as (window, client, protocol, _, sends):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(respond),
-                                         event_hooks={"request": [hook]}) as model:
-                core.model = ModelClient(core.settings, model)
-                core.content.options = core.settings.content
-                await window.capture_once(client, protocol)
+        async with window(core, tmp_path, media=True, content=True, video=True) as (
+            client, config, plan,
+        ):
+            await native_media(core, tmp_path, client, config, plan)
 
-                async def resolve(*_):
-                    return ["1.1.1.1"]
+            async def hook(request):
+                if request.url.host == "video.example.test":
+                    if boundary == "stop":
+                        owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                            operation_id="stop-native-video", authority=plan.authority))
+                    elif boundary == "key":
+                        core.settings.video_model_key = SecretStr("different-synthetic-video-key")
+                    elif boundary == "payload":
+                        request._content = b'{}'
 
-                invalid_tool = boundary in {
-                    "invalid_tool", "invalid_index", "boolean_index", "unknown_field",
-                }
-                with pytest.raises(httpx.HTTPStatusError) as failed:
-                    await window.approve_captured(client, capture_approval(window),
-                        image_transport=httpx.MockTransport(lambda _: httpx.Response(
-                            200, content=animation(size=(3, 2)),
-                            headers={"Content-Type": "image/gif"},
-                        )), image_resolver=resolve)
-                if invalid_tool:
-                    assert failed.value.response.json()["error"] == (
-                        "CONTENT_VIDEO_TOOL_INVALID"
-                    )
-                    item = core.store.one("SELECT state,error_code FROM content_items")
-                    assert item == {"state": "UNKNOWN", "error_code": "CONTENT_VIDEO_TOOL_INVALID"}
-                expected_calls = 2 if boundary in {
-                    "unknown", "missing_usage", "video_price", "video_disabled",
-                } else 1
-                assert len(calls) == expected_calls and sends == []
-                usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
-                assert usages[0]["state"] == "SETTLED"
-                if not invalid_tool:
-                    assert len(usages) == 2 and usages[1]["state"] == "UNKNOWN"
+            async with worker_for(core, respond) as worker:
+                worker.model.client.event_hooks["request"].append(hook)
+                assert await worker.run_once("native-video-fault")
+            video_calls = [body for body in calls if body["model"] == "configurable-video-one"]
+            expected_video = boundary in {
+                "unknown", "missing_usage", "video_price", "video_disabled"}
+            assert len(video_calls) == int(expected_video)
+            usages = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            assert usages[0]["state"] == "SETTLED"
+            if not invalid:
+                assert len(usages) == 2
+                if boundary in {"stop", "key", "payload"}:
+                    assert usages[1]["state"] == "SETTLED"
+                    assert usages[1]["billed_micro_usd"] == 0
+                    admission = core.store.one("SELECT * FROM model_admissions "
+                        "WHERE request_id=?", (usages[1]["request_id"],))
+                    proof = core.store.one("SELECT safe_detail_json FROM audit_log "
+                        "WHERE action='model.not_dispatched' AND entity_id=?",
+                        (usages[1]["request_id"],))
+                    detail = json.loads(proof["safe_detail_json"])
+                    assert detail["evidence_sha256"] == paid_budget.sha({
+                        "kind": "reply_not_dispatched", "request_id": usages[1]["request_id"],
+                        "lease_token": admission["lease_token"],
+                        "payload_sha256": admission["payload_sha256"], "reason": detail["reason"]})
+                else:
+                    assert usages[1]["state"] == "UNKNOWN"
                     assert usages[1]["billed_micro_usd"] > 0
-                    if boundary in {"video_price", "video_disabled"}:
-                        detail = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
-                            "action='model.usage_diagnostic' AND entity_id=?",
-                            (usages[1]["request_id"],))
-                        assert json.loads(detail["safe_detail_json"])["code"] == (
-                            "PRICING_CONFIG_CHANGED"
-                        )
-                assert not core.store.rows("SELECT * FROM outbox")
-                assert window.status()["state"] == "STOPPED"
-                assert not await core.run_once()
-                assert len(calls) == expected_calls
-
+                if boundary in {"video_price", "video_disabled"}:
+                    detail = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
+                        "action='model.usage_diagnostic' AND entity_id=?",
+                        (usages[1]["request_id"],))
+                    assert json.loads(detail["safe_detail_json"])["code"] == (
+                        "PRICING_CONFIG_CHANGED")
+            else:
+                assert all(row["scenario"] == "chat" for row in usages)
+                assert not core.store.one("SELECT 1 FROM agent_tool_calls "
+                                           "WHERE metadata_json IS NOT NULL")
+            assert not core.store.rows("SELECT * FROM outbox")
+            before = len(calls)
+            core.clock.advance(100)
+            async with worker_for(core, respond) as restarted:
+                await restarted.run_once("native-video-no-replay")
+            assert len(calls) == before
+            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usages
     run(scenario())
+
+
