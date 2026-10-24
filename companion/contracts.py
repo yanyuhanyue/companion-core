@@ -76,7 +76,6 @@ class LeaseRequest(StrictModel):
     limit: int = Field(default=5, ge=1, le=20)
     delivery_lane: Literal["owner_private", "qq_account"] = "owner_private"
     authority: dict | None = None
-    window_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     account_actions_authorization_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$",
     )
@@ -90,12 +89,11 @@ class LeaseRequest(StrictModel):
 
     @model_validator(mode="after")
     def account_authority(self):
-        if (self.delivery_lane == "qq_account") != bool(
-            self.window_sha256 and self.account_actions_authorization_sha256
-        ) or (self.delivery_lane == "owner_private" and (
-            self.window_sha256 or self.account_actions_authorization_sha256
-        )):
-            raise ValueError("account delivery requires its explicit window and authority")
+        if (self.delivery_lane == "qq_account" and (
+            self.authority is None or not self.account_actions_authorization_sha256
+        )) or (self.delivery_lane == "owner_private"
+               and self.account_actions_authorization_sha256 is not None):
+            raise ValueError("account delivery requires its owner reference and action authority")
         return self
 
 

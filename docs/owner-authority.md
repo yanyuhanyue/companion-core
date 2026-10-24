@@ -49,6 +49,20 @@ OwnerAuthority 保存主人的持久用途授权。付费策略继续使用原 B
 输入和最终发送校验响应均为 `Cache-Control: no-store`。签名有效、Bridge 登录成功或
 持有一个旧引用，均不替代最终授权、来源和有限租约校验。
 
+## HTTP v1 账户操作边界
+
+账户投递沿用 `/deliveries/lease`，请求明确指定 `delivery_lane=qq_account`、
+`authority` 与 `account_actions_authorization_sha256`，返回项包含原授权引用。
+租用和 `begin-send` 校验账户 Outbox 的原始授权及 Social 回执。
+`POST /account-actions/send-check`、`profile-baselines`、`cancel-before-send`
+使用各自原有字段与 `authority`。`GET /account-actions/profile-baselines/state`
+接收 JSON 编码的 `authority` 查询参数及 `authorization_sha256`。
+账户通道要求当前 `social` 和 `account_actions` 用途及冻结策略摘要匹配。
+
+`tests/test_account_owner_transport.py` 使用真实 TCP 与独立 Bridge 测试进程覆盖
+租用、开始发送、最终账户校验以及校验前 STOP；模型传输仅使用 synthetic MockTransport，
+测试进程不调用 QQ 或 QZone provider。
+
 ## 恢复与验证
 
 STOP 取消尚可撤销的原生任务和待发项，保留 `SENDING`、`DELIVERY_UNCERTAIN` 及模型

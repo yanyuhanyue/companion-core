@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hmac
+import json
 import re
 from contextlib import asynccontextmanager, nullcontext
 from datetime import date
@@ -792,13 +793,18 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         return account_actions.record_profiles(core.store, settings, core.clock, body)
 
     @app.get(prefix + "/account-actions/profile-baselines/state", dependencies=auth)
-    async def account_profile_probe_state(window_sha256: str, authorization_sha256: str):
-        if not all(re.fullmatch(r"[a-f0-9]{64}", value)
-                   for value in (window_sha256, authorization_sha256)):
+    async def account_profile_probe_state(authority: str, authorization_sha256: str):
+        if len(authority) > 1024:
+            raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400)
+        try:
+            reference = account_actions.AuthorityBody(authority=json.loads(authority)).authority
+        except (ValueError, TypeError):
+            raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400) from None
+        if not re.fullmatch(r"[a-f0-9]{64}", authorization_sha256):
             raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400)
         core = app.state.core
         return account_actions.profile_probe_state(
-            core.store, settings, core.clock, window_sha256, authorization_sha256)
+            core.store, settings, core.clock, reference, authorization_sha256)
 
     @app.post(prefix + "/account-actions/cancel-before-send", dependencies=auth)
     async def account_cancel_before_send(body: account_actions.CancelBeforeSend):

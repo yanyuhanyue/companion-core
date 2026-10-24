@@ -258,7 +258,7 @@ def lease_deliveries(store, settings, request, now):
             owner_authority.current(store, settings, lambda: now, authority=request.authority)
         account = request.delivery_lane == "qq_account"
         approval = (account_actions.scope(store, settings, lambda: now,
-            request.window_sha256, request.account_actions_authorization_sha256)
+            request.authority, request.account_actions_authorization_sha256)
             if account else None)
         if not proactive_allowed(store, settings, now):
             cancel_proactive_work(store, now)
@@ -283,7 +283,10 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
-            if owner:
+            if account:
+                account_actions.scope(store, settings, lambda: now, request.authority,
+                    request.account_actions_authorization_sha256, message_id=row["message_id"])
+            elif owner:
                 owner_delivery.check_delivery(store, settings, lambda: now, row["message_id"])
             try:
                 reply_revision.check_delivery(store, row["message_id"])
@@ -363,7 +366,7 @@ def lease_deliveries(store, settings, request, now):
                     items[-1]["voice"] = voice.model_dump(mode="json")
             if account:
                 items[-1].update(delivery_lane="qq_account",
-                                 window_sha256=approval.plan_sha256,
+                                 authority=approval.authority.as_dict(),
                                  content_sha256=row["content_sha256"])
                 continue
             if owner:
@@ -405,20 +408,21 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
         reply_revision.check_delivery(store, message_id)
         account = store.one("SELECT 1 FROM outbox WHERE message_id=? "
                             "AND delivery_lane='qq_account'", (message_id,))
-        if settings is not None and owner_authority.required(store, settings):
-            if clock is None:
-                raise CoreError("OWNER_DELIVERY_CLOCK_REQUIRED", 503)
-            owner_delivery.check_delivery(store, settings, clock, message_id)
-            now = clock()
-        elif account:
+        if account:
             from companion import account_actions
 
             if settings is None or clock is None:
                 raise CoreError("SOCIAL_LIVE_SCOPE_REQUIRED", 403)
+            row = store.one("SELECT authority_json FROM outbox WHERE message_id=?", (message_id,))
             approval = account_actions.scope(store, settings, clock,
-                settings.live_text_window.plan_sha256 if settings.live_text_window else None,
-                settings.social_autonomy.authorization_sha256, message_id=message_id)
+                json.loads(row["authority_json"]), settings.social_autonomy.authorization_sha256,
+                message_id=message_id)
             account_actions.lease_receipt(store, settings, clock, message_id, token, approval)
+            now = clock()
+        elif settings is not None and owner_authority.required(store, settings):
+            if clock is None:
+                raise CoreError("OWNER_DELIVERY_CLOCK_REQUIRED", 503)
+            owner_delivery.check_delivery(store, settings, clock, message_id)
             now = clock()
         elif settings is not None and live_text.active(store, settings):
             live_text.check_delivery(store, settings, clock, message_id)
