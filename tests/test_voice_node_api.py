@@ -10,6 +10,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -333,7 +334,25 @@ async def tls_core(core, tmp_path):
         listener.close()
 
 
-async def independent_node(config, certificate, counter, tmp_path, timestamp, scenario="success"):
+def node_wall_clock(timestamp, monotonic_start=None):
+    """Share a fixed clock, or a parent's advancing clock including process startup."""
+    if monotonic_start is None:
+        return lambda: timestamp
+    return lambda: timestamp + time.monotonic() - monotonic_start
+
+
+@pytest.mark.parametrize("advancing", [False, True])
+def test_node_wall_clock_preserves_parent_anchor(monkeypatch, advancing):
+    clock = node_wall_clock(1000.0, 200.0 if advancing else None)
+    # The first reading occurs after child startup; the anchor must not reset there.
+    monkeypatch.setattr(time, "monotonic", lambda: 208.0)
+    assert clock() == (1008.0 if advancing else 1000.0)
+    monkeypatch.setattr(time, "monotonic", lambda: 210.0)
+    assert clock() == (1010.0 if advancing else 1000.0)
+
+
+async def independent_node(config, certificate, counter, tmp_path, timestamp, scenario="success",
+                           *, monotonic_start=None):
     config_path = tmp_path / "node-fixture.json"
     config_path.write_text(
         encode(
@@ -352,6 +371,7 @@ async def independent_node(config, certificate, counter, tmp_path, timestamp, sc
         str(counter),
         str(timestamp),
         scenario,
+        *([str(monotonic_start)] if monotonic_start is not None else []),
         cwd=str(config.workspace),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -553,9 +573,9 @@ def test_real_core_tls_native_authority_and_independent_node(
 if __name__ == "__main__" and sys.argv[1:2] == ["--node-fixture"]:
     node_config = VoiceNodeConfig.model_validate_json(Path(sys.argv[2]).read_text(encoding="utf-8"))
     trust = ssl.create_default_context(cafile=sys.argv[3])
-    # The existing native window fixture uses a fixed Core clock. The simulated
-    # independent node shares only that wall clock; lease verification stays real.
-    with patch("companion_voice_node.worker.time.time", return_value=float(sys.argv[5])):
+    # Fixed Core clocks remain fixed; advancing callers supply their original anchor.
+    clock = node_wall_clock(float(sys.argv[5]), float(sys.argv[7]) if len(sys.argv) > 7 else None)
+    with patch("companion_voice_node.worker.time.time", side_effect=clock):
         outcome = asyncio.run(
             VoiceNodeWorker(
                 node_config,
