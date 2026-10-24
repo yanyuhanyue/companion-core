@@ -143,7 +143,8 @@ def test_commitment_closure_requires_actual_sent_feedback(core):
     eid = episode(core, 1)
     step = core.goals.claim()
     core.goals.finish(step, fetched(core, goal))
-    assert run(core.run_once())
+    feedback = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert run(core.run_once(job_id=feedback["job_id"]))
     view = MemoryProjections(core.memory)
 
     def item():

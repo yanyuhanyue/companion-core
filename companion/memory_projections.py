@@ -8,6 +8,27 @@ from companion.store import after, encode
 
 ACTIVE = {"ACCEPTED", "QUEUED", "RUNNING", "WAITING_INPUT", "WAITING_RESOURCE", "RETRY_WAIT"}
 
+# A nomination/order hint only; _goals still validates sources and real outcomes.
+# Reused by episode nomination and the bounded goal projection so closed history
+# cannot hide the unresolved goal that made an older episode eligible.
+GOAL_ATTENTION = (
+    "g.state IN (SELECT value FROM json_each(?)) "
+    "OR s.state='EXECUTION_UNCERTAIN' "
+    "OR (g.kind='commitment' AND g.state!='CANCELLED' AND "
+    "(c.state IS NULL OR c.state NOT IN ('FULFILLED','EXPLAINED_FAILURE') "
+    "OR NOT EXISTS (SELECT 1 FROM outbox o WHERE o.message_id=c.feedback_message_id "
+    "AND o.state='SENT' AND o.action_type='qq.private.reply'))) "
+    "OR (g.state='DONE' AND NOT EXISTS (SELECT 1 FROM observations o "
+    "WHERE o.event_id=g.result_event_id AND o.redacted=0 "
+    "AND o.result_status IN ('FETCHED','WATCHED') AND s.state='DONE' "
+    "AND s.outcome_event_id=g.result_event_id)) "
+    "OR EXISTS (SELECT 1 FROM exploration_requests r "
+    "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
+    "AND r.operation='read' AND json_extract(r.goal_step_json,'$.goal_id')=g.goal_id "
+    "AND json_extract(r.goal_step_json,'$.step_id')=s.step_id "
+    "AND (r.state='UNKNOWN' OR a.state='UNKNOWN'))"
+)
+
 
 def identifiers(values):
     if (not isinstance(values, (list, tuple, set, frozenset)) or len(values) > 100
@@ -39,22 +60,7 @@ class MemoryProjections:
             "EXISTS (SELECT 1 FROM episode_events ee JOIN goal_evidence ge USING(event_id) "
             "JOIN goals g USING(goal_id) LEFT JOIN goal_steps s USING(goal_id) "
             "LEFT JOIN commitments c USING(goal_id) "
-            "WHERE ee.episode_id=e.episode_id AND g.redacted=0 AND ("
-            "g.state IN (SELECT value FROM json_each(?)) "
-            "OR s.state='EXECUTION_UNCERTAIN' "
-            "OR (g.kind='commitment' AND g.state!='CANCELLED' AND "
-            "(c.state IS NULL OR c.state NOT IN ('FULFILLED','EXPLAINED_FAILURE') "
-            "OR NOT EXISTS (SELECT 1 FROM outbox o WHERE o.message_id=c.feedback_message_id "
-            "AND o.state='SENT' AND o.action_type='qq.private.reply'))) "
-            "OR (g.state='DONE' AND NOT EXISTS (SELECT 1 FROM observations o "
-            "WHERE o.event_id=g.result_event_id AND o.redacted=0 "
-            "AND o.result_status IN ('FETCHED','WATCHED') AND s.state='DONE' "
-            "AND s.outcome_event_id=g.result_event_id)) "
-            "OR EXISTS (SELECT 1 FROM exploration_requests r "
-            "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
-            "AND r.operation='read' AND json_extract(r.goal_step_json,'$.goal_id')=g.goal_id "
-            "AND json_extract(r.goal_step_json,'$.step_id')=s.step_id "
-            "AND (r.state='UNKNOWN' OR a.state='UNKNOWN'))))"
+            "WHERE ee.episode_id=e.episode_id AND g.redacted=0 AND (" + GOAL_ATTENTION + "))"
         )
         lanes = [
             ("EXISTS (SELECT 1 FROM episode_events ee WHERE ee.episode_id=e.episode_id "
@@ -158,8 +164,10 @@ class MemoryProjections:
     def _goals(self, ids, sources, allowed):
         rows = self.store.rows(
             "SELECT DISTINCT g.* FROM goals g JOIN goal_evidence ge USING(goal_id) "
+            "LEFT JOIN goal_steps s USING(goal_id) LEFT JOIN commitments c USING(goal_id) "
             "WHERE g.redacted=0 AND ge.event_id IN (SELECT value FROM json_each(?)) "
-            "ORDER BY g.goal_id LIMIT 21", (encode(ids),),
+            "ORDER BY (" + GOAL_ATTENTION + ") DESC,g.goal_id LIMIT 21",
+            (encode(ids), encode(sorted(ACTIVE))),
         )
         result = []
         for goal in rows[:20]:

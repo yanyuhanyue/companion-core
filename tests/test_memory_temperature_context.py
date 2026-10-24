@@ -71,3 +71,33 @@ def test_current_event_and_unknown_execution_reactivate_context(core):
     assert read(core)[0]["attention_reasons"] == ["UNRESOLVED_GOAL"]
     core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
     assert not read(core)
+
+
+def test_closed_goal_history_cannot_hide_old_episode_active_goal(core, monkeypatch):
+    from companion import goals
+    from companion.goals import GoalProposal
+    from companion.memory_projections import MemoryProjections
+
+    original_uid = goals.uid
+    keys = iter(f"goal_{number:032d}" for number in range(26))
+    monkeypatch.setattr(goals, "uid", lambda prefix: next(keys) if prefix == "goal"
+                        else original_uid(prefix))
+    first = setup_goal(core)
+    core.goals.cancel(first)
+    for number in range(1, 25):
+        closed = core.goals.propose(GoalProposal(
+            topic=f"已经结束的历史目标 {number}", source_event_ids=["evt_test_1"]))
+        core.goals.cancel(closed)
+    active = core.goals.propose(GoalProposal(
+        topic="仍需继续的目标", source_event_ids=["evt_test_1"]))
+    core.goals.accept(active)
+    core.settings.memory_enabled = True
+    eid = episode(core, 1)
+    core.clock.advance(8 * 86400)
+    projected = MemoryProjections(core.memory).snapshot(
+        core.clock(), episode_ids=[eid])["episodes"][0]
+    assert len(projected["goals"]) == 20 and projected["goals_truncated"]
+    assert projected["goals"][0]["goal_id"] == active
+    assert read(core)[0]["episode_id"] == eid
+    core.goals.cancel(active)
+    assert not read(core)
