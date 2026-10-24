@@ -59,11 +59,13 @@ async def native(core, tmp_path, *, public=None, caption=False):
             core_url=f"http://127.0.0.1:{port}", protocol_epoch=policy.capture.protocol_epoch,
             owner_authority=authority, capture_signing_key=key.private_bytes_raw().hex(),
             data_dir=str(tmp_path / "bridge"), meme_enabled=True, meme_discovery_enabled=True,
+            meme_semantics_enabled=caption,
             meme_trusted_sources=(RULE,))
         with Spool(cfg) as spool:
             owner = OwnerRuntime(spool, clock=lambda: core.clock.now)
+            owner._memes = MemeRuntime(owner, transport=public, resolver=resolver)
             async with private_http_client(cfg.core_url, cfg.bridge_token) as client:
-                yield MemeRuntime(owner, transport=public, resolver=resolver), client
+                yield owner.memes, client
 
 
 def capture(runtime, number=1):
@@ -79,8 +81,8 @@ def test_signed_catalog_unknown_pin_survives_restart(core, tmp_path):
     async def scenario():
         async with native(core, tmp_path) as (runtime, client):
             event = capture(runtime)
-            assert await runtime.window.flush_one(client)
             digest = runtime.catalog.add(png(), metadata(), check=runtime._owner_check)
+            assert await runtime.window.flush_one(client)
             offer = runtime.prepare_offer(event)
             assert offer["candidates"][0]["candidate_id"] == digest
             delivery = {**item(event, digest), "authority": runtime.authority}
@@ -106,7 +108,8 @@ def test_caption_adapter_uses_real_http_and_independent_native_selector(core, tm
             assert await runtime.window.flush_one(client)
             core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE kind='chat'")
             submitted = await runtime.submit_missing(client, event["event_id"],
-                runtime.prepare_offer(event), reply_revision=1)
+                {"offer_key": "meme:" + event["event_id"], "intent": "celebrate", "candidates": []},
+                reply_revision=1)
             result = await runtime.run_once(client)
             assert result.get("status") == "completed", result
             sha = runtime.db.execute("SELECT sha FROM meme_assets").fetchone()[0]
