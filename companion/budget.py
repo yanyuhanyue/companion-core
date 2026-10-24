@@ -113,7 +113,7 @@ def reserve(
             or settings.live_text_window.image_scope != "owner_image_v1"
         ):
             raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-    autonomous = scenario not in {"chat", "qq_poke"}
+    autonomous = scenario not in {"chat", "qq_poke", "evaluation"}
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
@@ -159,7 +159,13 @@ def reserve(
             scenario=scenario, logical_request_id=logical_request_id,
         ) != video_binding:
             raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
-        live_text.reserve_model(store, settings, clock, job_id, scenario)
+        if scenario == "evaluation":
+            from companion import evaluation
+
+            evaluation.admit(store, settings, clock, job_id, request_id, messages,
+                             estimate, estimated_input)
+        else:
+            live_text.reserve_model(store, settings, clock, job_id, scenario)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
@@ -338,7 +344,8 @@ def reserve(
             )
             from companion.private_life import freeze_model
 
-            freeze_model(store, settings, request_id)
+            if scenario != "evaluation":
+                freeze_model(store, settings, request_id)
         return request_id
 
 
@@ -613,6 +620,13 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
     day = day.astimezone(UTC).isoformat(timespec="microseconds")
     month = month.astimezone(UTC).isoformat(timespec="microseconds")
     limits = []
+    if usage["scenario"] == "evaluation":
+        from companion.evaluation import COST
+
+        total = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+                          "WHERE job_id=?", (usage["job_id"],))["n"]
+        if actual > 5000 or total + delta > COST:
+            limits.append("EVALUATION_AMOUNT")
     if actual > snapshot["per_attempt_micro_usd"]:
         limits.append("ATTEMPT_AMOUNT")
     for column, value, cap, code in (
@@ -788,6 +802,14 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         settle(store, settings, request_id, response)
 
 
+def _model_scope(store, settings, clock, request_id, scenario):
+    from companion import evaluation, live_text
+
+    if scenario == "evaluation":
+        return evaluation.check_request(store, settings, clock, request_id)
+    return live_text.check_model(store, settings, clock, request_id)
+
+
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
     source_check=None,
@@ -797,7 +819,7 @@ async def _dispatch(
 
     if source_check is not None:
         source_check()
-    live_text.check_model(store, settings, clock, request_id)
+    _model_scope(store, settings, clock, request_id, scenario)
     notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
         with store.transaction():
@@ -900,7 +922,7 @@ async def _dispatch(
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     cumulative.preflight(store, settings, clock)
     paid_budget.contract(settings, clock())
-    live_text.check_model(store, settings, clock, request_id)
+    _model_scope(store, settings, clock, request_id, scenario)
     if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
         raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
     if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
@@ -912,7 +934,7 @@ async def _dispatch(
             with store.transaction():
                 custody = paid_budget.journal(store, approval)
                 quota_state = cumulative.check(store, settings, clock(), custody=custody)
-                current_job = live_text.check_model(store, settings, clock, request_id)
+                current_job = _model_scope(store, settings, clock, request_id, scenario)
                 notices.check_request(store, settings, request_id, clock())
                 current = store.one(
                     "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
@@ -985,6 +1007,10 @@ async def _dispatch(
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+                if scenario == "evaluation" and dispatch_now >= datetime.fromisoformat(
+                    current_job["lease_until"]
+                ):
+                    raise CoreError("EVALUATION_JOB_FENCED", 409)
                 cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
             if dispatch is not None:
                 # The checked model transport calls its delegate immediately after

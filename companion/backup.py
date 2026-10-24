@@ -62,6 +62,12 @@ def restore(source, destination, key, ledger_path):
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
                 store.execute(
                     "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
+                    "updated_at=?,last_error_code='RESTORED_EVALUATION_REQUIRES_REVIEW' "
+                    "WHERE kind='evaluation' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+                    (utcnow(),),
+                )
+                store.execute(
+                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
                     "updated_at=?,last_error_code='RESTORED_POKE_REQUIRES_RECONCILIATION' "
                     "WHERE kind='poke' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
                     (utcnow(),),

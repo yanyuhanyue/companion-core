@@ -52,6 +52,7 @@ class ModelResponse:
     output_tokens: int | None = None
     cached_tokens: int = 0
     tool_calls: tuple[dict, ...] = ()
+    finish_reason: str | None = None
 
 
 class ModelResponseError(CoreError):
@@ -240,6 +241,9 @@ class ModelClient:
                 raise ModelResponseError("MODEL_INVALID_RESPONSE", 502, received) from error
             received.text = text
             received.tool_calls = tuple(calls)
+            reason = body["choices"][0].get("finish_reason")
+            received.finish_reason = (reason if isinstance(reason, str)
+                                      and reason in {"stop", "length", "content_filter"} else None)
             return received
         except (httpx.TimeoutException, httpx.TransportError) as error:
             raise CoreError("MODEL_RETRYABLE", 503) from error

@@ -46,6 +46,7 @@ def cleanup_contracts():
     from companion.bili_video import erase_bili_video
     from companion.consolidation import erase_consolidation
     from companion.content import erase_content
+    from companion.evaluation import erase as erase_evaluation
     from companion.executive import erase_executive
     from companion.exploration import erase_exploration
     from companion.goals import erase_goals
@@ -81,6 +82,7 @@ def cleanup_contracts():
         event_cleanup("social-autonomy", erase_social_autonomy),
         event_cleanup("voice", erase_voice_jobs),
         event_cleanup("bili-video", erase_bili_video),
+        event_cleanup("evaluation", erase_evaluation),
     )
 
 

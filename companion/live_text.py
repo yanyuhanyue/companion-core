@@ -1904,5 +1904,8 @@ def stop_window(store, reference, clock=None):
         )
         if (history or {}).get("approval", {}).get("companion_scope") == "owner_private_v1":
             private_life.stop_work(store, clock() if callable(clock) else utcnow())
+        from companion.evaluation import stop_window as stop_evaluations
+
+        stop_evaluations(store, reference.window_sha256, clock() if callable(clock) else utcnow())
         image_spool.discard_window(store, reference.window_sha256)
     return {"stopped": True}

@@ -522,6 +522,24 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def grant_consent(body: ConsentRequest):
         return app.state.core.observations.consents.grant(body)
 
+    from companion import evaluation
+    from companion.evaluation import Manifest, Submission
+
+    @app.post("/internal/v2/evaluations/preview", dependencies=control_auth)
+    async def evaluation_preview(body: Manifest):
+        core = app.state.core
+        return evaluation.preview(core.store, settings, core.clock, body)
+
+    @app.post("/internal/v2/evaluations", dependencies=control_auth, status_code=202)
+    async def evaluation_submit(body: Submission):
+        return evaluation.submit(app.state.core, body)
+
+    @app.get("/internal/v2/evaluations/{evaluation_id}", dependencies=control_auth)
+    async def evaluation_results(evaluation_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return evaluation.results(core.store, settings, core.clock, evaluation_id)
+
     @app.post("/internal/v2/consents/{consent_id}/revoke", dependencies=control_auth)
     async def revoke_consent(consent_id: str):
         return app.state.core.observations.consents.revoke(consent_id)
