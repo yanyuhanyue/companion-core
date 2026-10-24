@@ -31,6 +31,10 @@ def pending(core, tmp_path):
     delivery_result(core.store, core.settings, item["message_id"], result, core.clock())
     stopped = owner_authority.stop(core.store, core.settings, core.clock,
         AuthorityStop(operation_id="stop-unknown-native", authority=capture.authority))
+    return delivery_proof(core, capture, key, item, check, result, stopped), key
+
+
+def delivery_proof(core, capture, key, item, check, result, stopped):
     proof = {"kind": "owner_delivery_quiescence_v2", "version": 2,
         "authority": capture.authority,
         "budget_journal_id": core.store.one(
@@ -46,9 +50,10 @@ def pending(core, tmp_path):
         "stop_record_sha256": "3" * 64, "core_stop_record_sha256": stopped["record_sha256"],
         "bridge_journal_head_sha256": "4" * 64,
         "original_result_sha256": wire.digest(result.model_dump(mode="json")),
-        "stopped_at": core.clock(), "quiesced_at": core.clock()}
+        "stopped_at": core.clock(), "quiesced_at": core.clock(),
+        **({"voice_check": check.voice} if check.voice is not None else {})}
     proof["signature"] = key.sign(wire.signing_payload(proof)).hex()
-    return proof, key
+    return proof
 
 
 @pytest.mark.parametrize("outcome", ["SENT", "CANCELLED"])

@@ -63,13 +63,19 @@ def binding(store, proof, row, authority, recorded):
                        "ON r.key='erased_event:'||e.event_id WHERE e.event_id=? AND e.redacted=1",
                        (row["origin_event_id"],)):
         raise ValueError("unproved erased native delivery")
-    if "voice_check" in proof or store.one(
-        "SELECT 1 FROM runtime_meta WHERE key=? AND "
-        "(json_extract(value,'$.binding') IS NOT NULL "
-        "OR json_extract(value,'$.retired') IS NOT NULL)",
-        ("voice_reply:" + row["message_id"],),
-    ):
-        raise ValueError("native voice original proof required")
+    from companion.voice_original_proof import validate_original_voice_binding
+
+    saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                      ("voice_reply:" + row["message_id"],))
+    given = proof.get("voice_check")
+    job = (store.one("SELECT * FROM voice_jobs WHERE job_id=?", (given["job_id"],))
+           if given else None)
+    voice_policy = policy.capability_policies.get("voice")
+    if given is not None and not voice_policy:
+        raise ValueError("original native voice scope missing")
+    validate_original_voice_binding(receipt=json.loads(saved["value"]) if saved else None,
+        job=job, proof=proof, outbox=row, content_sha256=content_hash,
+        original_scope={"authority": proof["authority"]}, voice_policy_sha256=voice_policy)
     token = row["lease_token"]
     if token:
         check = {"authority": proof["authority"], "message_id": row["message_id"],
@@ -77,6 +83,8 @@ def binding(store, proof, row, authority, recorded):
                  "lease_token": token}
         if proof["reply_revision"] is not None:
             check["reply_revision"] = proof["reply_revision"]
+        if given is not None:
+            check["voice"] = given
         if (wire.digest(token) != proof["lease_sha256"]
             or wire.digest(check) != proof["send_check_sha256"]):
             raise ValueError("original native send fence changed")

@@ -221,11 +221,11 @@ def account_authority(core, content, window_sha256):
 
 
 def voice_authority(core, event, content, message_id, window_sha256, *, legacy=False):
-    from companion.voice_protocol import VoiceDeliveryBinding
+    from companion.voice_protocol import LegacyVoiceDeliveryBinding
 
     job_id = uid("voice")
     delivery_key = "synthetic-original:" + message_id
-    binding = VoiceDeliveryBinding(
+    binding = LegacyVoiceDeliveryBinding(
         retirement_token="random-proof-" + "x" * 32,
         job_id=job_id,
         generation=1,
