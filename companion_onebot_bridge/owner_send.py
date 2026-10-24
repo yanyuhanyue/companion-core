@@ -104,12 +104,7 @@ class OwnerSendGuard:
 
     def _local(self):
         self.runtime.verify()
-        if (self.runtime.row()["state"] != "ACTIVE" or self.runtime.stop_path.exists()
-            or self.runtime.stop_path.is_symlink()):
-            raise ValueError("OWNER_RUNTIME_STOPPED")
-        if (self.current_item is None or self.item_hash != journal.digest(self.current_item)
-            or self.dispatched or self.runtime.clock() >= self.lease_until
-            or journal.digest(self.prepared_message) != self.message_hash):
+        if self.current_item is None:
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
         if not account_actions.is_account(self.current_item) and owner_notices.recalled(
             self.runtime, reply_segments.event_id(self.current_item)
@@ -119,6 +114,15 @@ class OwnerSendGuard:
             raise ValueError("OWNER_INPUT_PENDING")
         if self.segment_not_before is not None and self.runtime.clock() < self.segment_not_before:
             raise ValueError("REPLY_SEGMENT_INTERVAL_REQUIRED")
+        # Journal reads above may block while STOP or lease expiry arrives.
+        # Keep the immediate state fence after every read, immediately before I/O.
+        if (self.runtime.row()["state"] != "ACTIVE" or self.runtime.stop_path.exists()
+            or self.runtime.stop_path.is_symlink()):
+            raise ValueError("OWNER_RUNTIME_STOPPED")
+        if (self.current_item is None or self.item_hash != journal.digest(self.current_item)
+            or self.dispatched or self.runtime.clock() >= self.lease_until
+            or journal.digest(self.prepared_message) != self.message_hash):
+            raise ValueError("OWNER_DELIVERY_SEND_FENCED")
 
     def pending_input(self):
         item = self.current_item
