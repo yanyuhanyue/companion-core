@@ -233,7 +233,7 @@ def cancel_proactive_work(store, now):
         "UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
         "last_error_code='AUTONOMY_PAUSED' WHERE kind='activity' "
         "AND event_id NOT IN (SELECT event_id FROM events WHERE "
-        "json_extract(body_json,'$.notice.kind')='commitment') "
+        "json_extract(body_json,'$.notice.kind') IN ('commitment','life')) "
         "AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
         (now,),
     )

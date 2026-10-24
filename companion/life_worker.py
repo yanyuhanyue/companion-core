@@ -35,9 +35,18 @@ async def life_worker(settings):
                         core.goals.expire_commitments()
                     core.exploration.schedule_goal()
                     core.social.flush()
+                    core.life_topics.schedule()
                 worked = False
                 if not budget.chat_pending(core.store, core.clock()):
-                    worked = await core.consolidation.run_once(worker_id)
+                    pending = core.store.one(
+                        "SELECT j.job_id FROM jobs j JOIN life_activity_results r USING(job_id) "
+                        "WHERE j.state IN ('QUEUED','RETRY_WAIT','RUNNING') AND r.state='PENDING' "
+                        "ORDER BY j.created_at LIMIT 1",
+                    )
+                    if pending:
+                        worked = await core.run_once(worker_id, job_id=pending["job_id"])
+                    if not worked:
+                        worked = await core.consolidation.run_once(worker_id)
                     if (
                         not worked
                         and ticks % 60 == 0

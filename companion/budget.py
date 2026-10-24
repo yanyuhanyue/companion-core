@@ -177,7 +177,8 @@ def reserve(
                             "WHERE job_id=?", (job_id,))
             if notices.reference(job) is not None:
                 notices.validate(store, settings, job, now)
-            if not notices.required(store, job_id) and not proactive_allowed(store, settings, now):
+            if (not notices.shadow(job) and not notices.required(store, job_id)
+                and not proactive_allowed(store, settings, now)):
                 raise CoreError("AUTONOMY_PAUSED", 409)
         total = total_monthly(store, month.isoformat(timespec="microseconds"))
         unlimited_period = bool(approval and approval.unlimited_period_spend)
