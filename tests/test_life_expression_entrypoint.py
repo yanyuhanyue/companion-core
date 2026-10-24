@@ -1,0 +1,144 @@
+"""Real consume HTTP and independent native Life process preserve original wording."""
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+
+import httpx
+import pytest
+from pydantic import SecretStr
+
+from tests.conftest import run
+from tests.test_life_expression_consumption import prepared, request
+from tests.test_onebot_capture import real_core_http
+from tests.test_social_owner_authority import stop
+
+
+@pytest.fixture(autouse=True)
+def close_provider_clients(core):
+    core.authority_test_clients = []
+    yield
+    for client in core.authority_test_clients:
+        run(client.aclose())
+
+
+@pytest.mark.parametrize("action,destination", [
+    ("qq.private.proactive", "PRIVATE_MESSAGE_DRAFT"), ("qzone.publish", "QZONE_DRAFT"),
+])
+@pytest.mark.parametrize("outcome", ["SENT", "UNKNOWN", "STOP", "ERASE"])
+def test_native_life_result_consumed_once_over_actual_http(core, tmp_path, action, destination,
+                                                        outcome):
+    _, _, authority, source = prepared(core, tmp_path, destination=destination, execute=False)
+    core.settings.control_token = SecretStr("synthetic-owner-life-consumption-control")
+
+    async def child(number):
+        config = tmp_path / f"life-{number}.json"
+        result = tmp_path / f"life-{number}-result.json"
+        config.write_text(json.dumps({
+            "settings": core.settings.model_dump(mode="python"), "now": core.clock(),
+            "source_id": source, "destination": destination, "result_path": str(result),
+        }, default=lambda value: value.get_secret_value()
+           if isinstance(value, SecretStr) else str(value)), encoding="utf-8")
+        process = await asyncio.to_thread(subprocess.run,
+            [sys.executable, "-B", "-m", "tests.life_expression_process", str(config)],
+            capture_output=True, timeout=60)
+        assert process.returncode == 0, process.stderr.decode(errors="replace")
+        outcome = json.loads(result.read_text(encoding="utf-8"))
+        assert outcome["pid"] != os.getpid()
+        return outcome
+
+    async def scenario():
+        async with real_core_http(core) as port:
+            first = await child(1)
+            assert first["provider_calls"] == 1, first
+            rows = [row for row in first["results"] if row["state"] == "SHADOW"]
+            assert len(rows) == 1, first
+            job_id = rows[0]["job_id"]
+            body = request(core, job_id, authority, action).model_dump(mode="json")
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+            path = f"/internal/v2/life/results/{job_id}/consume"
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}",
+                                          trust_env=False) as client:
+                assert (await client.post(path, json=body)).status_code == 401
+                client.headers["Authorization"] = (
+                    "Bearer " + core.settings.control_token.get_secret_value())
+                changed = await client.post(path,
+                    json={**body, "expected_content_sha256": "0" * 64})
+                assert changed.status_code == 409, changed.text
+                assert core.store.rows("SELECT * FROM outbox") == []
+                consumed = await client.post(path, json=body)
+                assert consumed.status_code == 200, consumed.text
+                assert consumed.headers["Cache-Control"] == "no-store"
+                repeated = await client.post(path, json=body)
+                assert repeated.status_code == 200 and repeated.json() == consumed.json()
+                outbox = core.store.rows("SELECT * FROM outbox")
+                assert len(outbox) == 1
+                content = json.loads(outbox[0]["content_json"])
+                assert (content["proposal"]["text"] if action == "qzone.publish"
+                        else content["text"]) == rows[0]["text"]
+                if action == "qzone.publish":
+                    assert content["audience"] == {"ugc_right": 16, "target_uins": ["10001"]}
+                second = await child(2)
+                assert second["provider_calls"] == 0, second
+                assert core.store.rows("SELECT * FROM model_usage") == usage
+                assert core.store.rows("SELECT * FROM outbox") == outbox
+                assert (await client.post(path, json=body)).json() == consumed.json()
+                client.headers["Authorization"] = (
+                    "Bearer " + core.settings.bridge_token.get_secret_value())
+                lease_body = {"worker_id": "synthetic-life-delivery", "authority": authority}
+                if action == "qzone.publish":
+                    lease_body.update(delivery_lane="qq_account",
+                        account_actions_authorization_sha256=(
+                            core.settings.social_autonomy.authorization_sha256))
+                leased = await client.post("/internal/v1/deliveries/lease", json=lease_body)
+                assert leased.status_code == 200, leased.text
+                item = leased.json()["items"][0]
+                delivery_path = "/internal/v1/deliveries/" + item["message_id"]
+                if outcome == "STOP":
+                    stop(core, authority)
+                elif outcome == "ERASE":
+                    with core.store.transaction():
+                        core.ledger.expire_events(core.store, [source], core.clock())
+                begun = await client.post(delivery_path + "/begin-send",
+                                          json={"lease_token": item["lease_token"]})
+                if outcome in {"STOP", "ERASE"}:
+                    assert begun.status_code >= 400, begun.text
+                    assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
+                else:
+                    assert begun.status_code == 200, begun.text
+                    result = {"lease_token": item["lease_token"],
+                              "result": "SENT" if outcome == "SENT" else "DELIVERY_UNCERTAIN"}
+                    if action == "qzone.publish":
+                        checked = await client.post("/internal/v1/account-actions/send-check",
+                            json={"authority": authority, "message_id": item["message_id"],
+                                  "lease_token": item["lease_token"],
+                                  "content_sha256": item["content_sha256"],
+                                  "payload_sha256": content["payload_sha256"]})
+                        assert checked.status_code == 200, checked.text
+                        result["account_action_receipt"] = {
+                            "message_id": item["message_id"], "lease_token": item["lease_token"],
+                            "payload_sha256": content["payload_sha256"], "action_type": action,
+                            "result": "SUCCEEDED" if outcome == "SENT" else "UNKNOWN",
+                            "native_retcode": 0 if outcome == "SENT" else None,
+                            "native_receipt_sha256": "e" * 64 if outcome == "SENT" else None,
+                            "resource_id": "synthetic-life-tid" if outcome == "SENT" else None,
+                        }
+                    else:
+                        checked = await client.post("/internal/v1/owner-authority/send-check",
+                            json={"authority": authority,
+                                  "event_id": outbox[0]["origin_event_id"],
+                                  "message_id": item["message_id"],
+                                  "lease_token": item["lease_token"],
+                                  "content_sha256": item["content_sha256"]})
+                        assert checked.status_code == 200, checked.text
+                    recorded = await client.post(delivery_path + "/result", json=result)
+                    assert recorded.status_code == 200, recorded.text
+                    repeated = await client.post(delivery_path + "/result", json=result)
+                    assert repeated.status_code == 200 and repeated.json() == recorded.json()
+                    assert core.store.one("SELECT state FROM outbox")["state"] == result["result"]
+                assert core.store.rows("SELECT * FROM model_usage") == usage
+                assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    run(scenario())

@@ -34,7 +34,8 @@ def close_provider_clients(core):
         run(client.aclose())
 
 
-def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purposes=None):
+def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purposes=None,
+             execute=True):
     configure(core)
     payload = envelope("bilibili")
     url = payload["observations"][0]["url"]
@@ -86,6 +87,8 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
         "text": "这段关于恒星颜色的介绍让我想再弄懂光谱与温度的关系。",
     })
     core.clock.advance(86400 if private else core.settings.proactive_idle_seconds + 1)
+    if not execute:
+        return None, policy, ref, source_id
     job_id = core.life_topics.schedule()
     assert job_id
     assert run(core.run_once(job_id=job_id))
