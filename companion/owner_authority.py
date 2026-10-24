@@ -247,7 +247,8 @@ def admit_model(store, settings, clock, job_id, scenario):
     purpose = model_purpose(store, scenario, job_id)
     view = current(store, settings, clock, purpose=purpose)
     background = scenario in {"activity", "social_autonomy", "memory_extract", "diary",
-                              "reflection", "rem"} or scenario == "memory_review" and job_id is None
+                              "reflection", "rem", "meme_caption", "qq_poke"} or (
+        scenario == "memory_review" and job_id is None)
     if background and owner_waiting(store, settings, clock(), authority=view.authority.as_dict()):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     if job_id is not None:
@@ -339,12 +340,13 @@ def _reply(row):
 
 def capability_hashes(settings):
     """Reuse each domain's concrete policy fingerprint, never a programmable rule engine."""
+    from companion.meme_service import policy_hash as meme_policy_hash
+
     paid = settings.paid_model
     return {
         "image": _sha(paid.image_input.model_dump(mode="json"))
         if paid and paid.image_input else None,
-        "meme": _sha(paid.meme_input.model_dump(mode="json"))
-        if paid and paid.meme_input and settings.meme_semantics_enabled else None,
+        "meme": meme_policy_hash(settings),
         "file": _sha(settings.private_files.model_dump(mode="json"))
         if settings.private_files.enabled else None,
         "poke": _sha(settings.poke_policy.model_dump(mode="json"))
