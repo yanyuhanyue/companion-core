@@ -78,6 +78,10 @@ STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送�
 输入和最终发送校验响应均为 `Cache-Control: no-store`。签名有效、Bridge 登录成功或
 持有一个旧引用，均不替代最终授权、来源和有限租约校验。
 
+原生 Outbox 凭证沿用既有隐私版本机制，固定生成时的 `privacy_epoch`。
+领取租约与最终发送校验均比较当前版本；隐私版本变化后阻止旧回复发送，保留原模型费用。
+尚未开始发送的旧回复取消；已进入发送阶段则沿用既有取消证明与交付不确定性规则。
+
 原生分段回复沿用 `continuous.segment_pacing_pending` 的本地 ACK 计时原则：
 RESERVED 保存既有 `reply_segments.journal_value`，下一次领取租约前读取原 ACK
 journal 时间并等待该段间隔，重启后仍使用同一证据。缺少分段元数据的历史 ACK

@@ -322,4 +322,3 @@ def test_reply_limit_applies_to_the_full_answer_before_any_segment_is_deliverabl
             assert core.store.rows(
                 "SELECT * FROM runtime_meta WHERE key LIKE 'owner_delivery:%'") == []
     run(scenario())
-

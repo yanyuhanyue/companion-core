@@ -5,6 +5,7 @@ from datetime import datetime
 
 from companion import cumulative, notices, owner_authority, owner_input, paid_budget, reply_revision
 from companion.contracts import CoreError
+from companion.privacy import epoch
 from companion.private_life import event_digest
 from companion.store import encode
 
@@ -75,6 +76,7 @@ def _material(store, row, job, view, requests):
         or row["content_sha256"] != paid_budget.sha(json.loads(row["content_json"]))):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     return {"authority": view.authority.as_dict(), "job_id": job["job_id"],
+            "privacy_epoch": epoch(store),
             "message_id": row["message_id"], "event_id": row["origin_event_id"],
             "event_sha256": event_digest(event), "content_sha256": row["content_sha256"],
             "delivery_key": row["delivery_key"], "action_type": row["action_type"],
