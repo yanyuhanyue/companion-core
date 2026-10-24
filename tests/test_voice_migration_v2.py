@@ -20,8 +20,8 @@ from companion.voice_protocol import VoiceLeaseRef
 from tests.test_delivery_reconciliation import decide, native, prepare, put, signed
 from tests.test_voice_jobs import claim, create_tts, prepared
 
-OLD = "0034_social_plan_jobs"
-NEW = "0035_voice_retention_v2"
+OLD = "0033_model_usage_job_index"
+NEW = "0034_voice_retention_v2"
 
 
 def old_database(core, tmp_path):
@@ -146,7 +146,7 @@ def test_v1_signed_unknown_converts_once_and_original_owner_resolution_still_wor
 
 
 def historical_migration():
-    path = Path(__file__).parents[1] / "migrations/versions/0035_voice_retention_v2.py"
+    path = Path(__file__).parents[1] / "migrations/versions/0034_voice_retention_v2.py"
     spec = importlib.util.spec_from_file_location("historical_voice_v1", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

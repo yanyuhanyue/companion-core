@@ -13,8 +13,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from sqlalchemy import CheckConstraint
 
-revision = "0035_voice_retention_v2"
-down_revision = "0034_social_plan_jobs"
+revision = "0034_voice_retention_v2"
+down_revision = "0033_model_usage_job_index"
 branch_labels = None
 depends_on = None
 

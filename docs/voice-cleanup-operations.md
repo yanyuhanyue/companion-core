@@ -29,7 +29,8 @@ It does not invoke `--print-manifest`, `local_manifest`, a model warmup or a ser
 The worker owns deletion eligibility and locking; the PowerShell wrapper does not implement
 a second cleanup policy. Deploy it together with the v2 worker that implements this flag.
 
-The worker prints a JSON local report including a pending count. Exit 0 means this scan
+The worker prints JSON with `pending_temp`, `unowned_temp`, `pending_ack` and
+`core_cleanup_confirmed=false`. Exit 0 means this scan
 completed, **not** that pending work reached zero. A nonzero status means lock contention or
 an error; inspect stderr and the report before concluding anything was removed. The wrapper
 preserves the native exit code. A running node may hold the exclusive lock: leave its process
@@ -61,6 +62,34 @@ Task Scheduler's last result reports the process exit status; it does not preser
 stdout report. Run the manual command to inspect pending counts, or explicitly redirect its
 stdout into the existing private runtime logs directory when collecting an operator report.
 Neither a zero last result nor an idle Windows session proves Core cleanup acknowledgment.
+
+## Coordinated v2 upgrade and recovery
+
+Upgrade Core, the outbound node and the Bridge together while their existing execution and
+delivery loops are stopped. The node boundary is `/internal/v2/voice-node`; v1 requests
+return `410 VOICE_UPGRADE_REQUIRED`. Core migration validates the original signed stop and
+delivery evidence before changing the database. Missing or invalid proof stops the migration;
+retain the original database and journals and complete the existing stop/reconciliation
+procedure first. An upgrade never settles an UNKNOWN execution or delivery.
+
+Each node keeps a monotonic claim sequence and Core retains at most one replay response per
+node. Losing or rolling back node state, or restoring Core, requires explicit owner recovery.
+First confirm the original provider process has exited and use the existing resource recovery
+procedure for any quarantine. Then run the node's `--recover-claims` command with its existing
+config, `--control-token-file`, `--operator`, `--service-instance` and
+`--confirmation inflight-execution-stopped`. Keep the owner token in the private token file.
+Recovery holds the local state lock, removes exactly owned content and reconciles the Core
+session. A job absent from a restored Core is retired locally only after the explicit owner
+operation and a second matching session read; its audit records no Core cleanup confirmation.
+An ordinary worker 404 does not release that reference. Never edit the cursor or delete the
+state directory to make recovery succeed.
+
+For an existing job, Core reports cleanup pending until it receives the authenticated STOP
+receipt for the current cleanup epoch. The configured node can send this terminal receipt
+even when voice execution is disabled. Removing its credential before acknowledgment leaves
+cleanup unresolved. Owner control or that node's credential can read
+`GET /internal/v2/voice-node/nodes/{node_id}/cleanup` for the pending count. The local-only
+command above never contacts this endpoint or turns its local report into a Core receipt.
 
 ## Reused mechanisms and sources
 
