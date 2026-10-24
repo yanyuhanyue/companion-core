@@ -8,14 +8,14 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from companion import api, live_text
+from companion import api, live_text, owner_authority
 from companion.core import Core
 from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
 from companion.store import after, encode
 from tests import test_input_protocol as protocol_fixtures
 from tests.conftest import event, ingest, run
+from tests.support.owner_memory import environment as owner_memory_environment
 from tests.test_input_protocol import environment, notice
-from tests.test_live_memory_recall import readonly_window
 from tests.test_m1 import remember
 from tests.test_next_life_growth import feedback_days
 from tests.test_paid_model_gate import approved_live
@@ -36,7 +36,8 @@ def window_capacity_for_provenance_cases(monkeypatch):
 
 
 def response(text):
-    return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
+    return httpx.Response(200, json={"choices": [{"message": {"content": text},
+                                                "finish_reason": "stop"}],
                                    "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
 
@@ -136,7 +137,7 @@ def test_every_fact_source_is_tracked_before_await_and_recall_keeps_independent_
 
 
 def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
-    core, tmp_path, monkeypatch,
+    core, tmp_path,
 ):
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -153,25 +154,28 @@ def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
                 await release.wait()
             return response("合成回复")
 
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
+        async with owner_memory_environment(core, tmp_path) as (
+            admit_input, recall_input, reference,
+        ):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    sources = []
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    sources, captures = [], []
                     for number in range(1, 6):
-                        source, _ = await admit(
-                            client, config, plan, number, f"设计进度第{number}步",
-                        )
+                        source, _ = await admit_input(number, f"设计进度第{number}步")
                         assert await worker.run_once("historical-chat")
-                        sources.append(source["event_id"])
+                        sources.append(source.event_id)
+                        captures.append(source)
                     assert await worker.extract_once()
                     assert core.store.one("SELECT COUNT(*) n FROM episodes")["n"] == 1
-                    question, accepted = await admit(client, config, plan, 6, "继续上次的设计")
+                    question, accepted = await admit_input(6, "继续上次的设计")
                     hold = True
                     task = asyncio.create_task(worker.run_once("continuation-chat"))
                     try:
                         await asyncio.wait_for(entered.wait(), 10)
                         message = next(m for m in captured[0]
-                                       if m["content"].startswith("近期情景接续"))
+                                       if isinstance(m.get("content"), str)
+                                       and m["content"].startswith("相关情景接续"))
                         items = json.loads(message["content"].split("\n", 1)[1])
                         assert set(items[0]["source_event_ids"]) == set(sources)
                         assert sources[0] not in {row["event_id"] for row in items[0]["excerpts"]}
@@ -180,8 +184,7 @@ def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
                             (accepted["job_id"],),
                         )}
                         assert set(sources) <= tracked
-                        recalled = await client.post("/internal/v1/live-text/inputs/recall", json=
-                            notice(config, plan, datetime.now(UTC), number=1))
+                        recalled = await recall_input(captures[0])
                         assert recalled.status_code == 200, recalled.text
                         release.set()
                         assert await asyncio.wait_for(task, 10)
@@ -189,8 +192,9 @@ def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
                         release.set()
                         await asyncio.gather(task, return_exceptions=True)
                     assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
-                                               (question["event_id"],))
-                    assert not live_text.stopped(core.store, plan.sha256)
+                                               (question.event_id,))
+                    current = owner_authority.current(core.store, core.settings, core.clock)
+                    assert current.authority.as_dict() == reference
     run(scenario())
 
 
@@ -334,23 +338,43 @@ def test_history_is_explicit_and_current_recall_does_not_reintroduce_revision_te
 
 
 def test_strict_fact_scope_does_not_authorize_episode_context(core, tmp_path):
-    core.settings.memory_enabled = True
-    canary = "没有授予当前窗口的情景原文"
-    source = ingest(core, 80, canary, origin="onebot-direct:FriendMessage:10001")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
-    core.memory.episodes(core.store.rows("SELECT * FROM events WHERE event_id='evt_test_80'"),
-                         core.clock())
+    canary = "未授予历史读取用途的情景原文"
+    calls = []
+
+    def provider(request):
+        messages = json.loads(request.content)["messages"]
+        calls.append(messages)
+        if messages[-1]["role"] == "user" and messages[-1]["content"] == "配色":
+            return httpx.Response(200, json={"choices": [{"message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": "recall-color", "type": "function", "function": {
+                        "name": "memory_recall", "arguments": '{"query":"配色"}'}}]},
+                "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+        return response("合成回复")
 
     async def scenario():
-        async with readonly_window(core, tmp_path) as (
-            _, _, capture, _, calls, _, _, _, _,
-        ):
-            assert core.store.one("SELECT COUNT(*) n FROM episodes")["n"] == 1
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 2, core.store.rows("SELECT state,last_error_code FROM jobs")
-            assert "近期情景接续" not in encode(calls)
-            assert canary not in encode(calls)
+        async with owner_memory_environment(core, tmp_path, history=False) as (admit_input, _, _):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    source, _ = await admit_input(80, canary)
+                    assert await worker.run_once()
+                    worker.memory.episodes(worker.store.rows(
+                        "SELECT * FROM events WHERE event_id=?", (source.event_id,)),
+                        worker.clock())
+                    await admit_input(81, "/记住这个 " + FACT)
+                    assert await worker.run_once()
+                    assert worker.store.one("SELECT content FROM memories") == {"content": FACT}
+                    calls.clear()
+                    _, accepted = await admit_input(82, "配色")
+                    assert await worker.run_once()
+                    assert len(calls) == 2, worker.store.rows(
+                        "SELECT * FROM audit_log WHERE action LIKE 'memory.%'")
+                    assert FACT in encode(calls)
+                    assert "相关情景接续" not in encode(calls) and canary not in encode(calls)
+                    assert source.event_id not in {row["event_id"] for row in worker.store.rows(
+                        "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
     run(scenario())
 
 
