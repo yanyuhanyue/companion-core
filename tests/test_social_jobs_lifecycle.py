@@ -78,16 +78,16 @@ def test_mapping_migration_preserves_native_rows_and_blocks_populated_downgrade(
     # Exercise this migration on its actual predecessor. Later custody migrations
     # may intentionally prohibit downgrading a current production schema.
     database, _, _ = seed_legacy(tmp_path, "0004_diary")
-    migrate(str(database), "0033_model_usage_job_index")
+    migrate(str(database), "0035_token_measurement")
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
     config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(database).as_posix())
     with closing(Store(str(database))) as store:
         before = store.rows("SELECT rowid,* FROM jobs")
-        migrate(str(database), "0034_social_plan_jobs")
-        command.downgrade(config, "0033_model_usage_job_index")
-        migrate(str(database), "0034_social_plan_jobs")
+        migrate(str(database), "0036_social_plan_jobs")
+        command.downgrade(config, "0035_token_measurement")
+        migrate(str(database), "0036_social_plan_jobs")
         assert store.rows("SELECT rowid,* FROM jobs") == before
         now = TIMES["keep"]
         store.insert("jobs", job_id="job_social_migration", event_id="evt_keep",
@@ -106,8 +106,8 @@ def test_mapping_migration_preserves_native_rows_and_blocks_populated_downgrade(
         with pytest.raises(
             RuntimeError, match="SOCIAL_JOB_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW",
         ):
-            command.downgrade(config, "0033_model_usage_job_index")
+            command.downgrade(config, "0035_token_measurement")
         assert store.one("SELECT * FROM jobs WHERE job_id='job_social_migration'") == job
         assert store.one("SELECT version_num FROM alembic_version") == {
-            "version_num": "0034_social_plan_jobs"}
+            "version_num": "0036_social_plan_jobs"}
         assert store.rows("PRAGMA foreign_key_check") == []
