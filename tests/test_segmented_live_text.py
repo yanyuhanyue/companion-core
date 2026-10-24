@@ -8,13 +8,21 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion import dialogue_history, live_text, paid_budget, transport
+from companion import (
+    dialogue_history,
+    live_text,
+    owner_delivery,
+    owner_input,
+    paid_budget,
+    transport,
+)
 from companion.config import LiveTextWindowApproval, Settings
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from companion.store import encode
 from tests.conftest import event, ingest, run
+from tests.support.native_segments import session
 from tests.test_dialogue_context import current_job, sent_history
 from tests.test_live_text_handoff import KEY, configure, reference
 
@@ -147,103 +155,80 @@ def test_legacy_approval_and_settings_keep_their_serialized_shape(core, tmp_path
 
 def test_segmented_receipts_share_one_model_result_and_history_is_one_complete_turn(core, tmp_path):
     async def scenario():
-        async with segmented_window(core, tmp_path) as (approval, calls):
-            job = capture_input(core)
+        async with session(core, tmp_path) as host:
+            job = await host.admit()
             assert await core.run_once()
             rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
-            assert len(rows) == 2
-            assert len(calls) == 1
+            assert len(rows) == 2 and len(host.calls) == 1
             usage = core.store.rows("SELECT * FROM model_usage")
             assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
             receipts = [json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
-                ("live_text_reply:" + row["message_id"],))["value"]) for row in rows]
-            assert {r["request_id"] for r in receipts} == {usage[0]["request_id"]}
-            assert [r["reply_segments"]["index"] for r in receipts] == [0, 1]
-            assert all(r["reply_segments"]["total_chars"] == len("第一段合成回答。第二段合成回答。")
-                       for r in receipts)
-            assert live_text.remaining_send_slots(core.store, approval) == 3
-            send_next(core)
+                (owner_delivery.DELIVERY + row["message_id"],))["value"]) for row in rows]
+            assert all(r["request_ids"] == [usage[0]["request_id"]] for r in receipts)
+            envelopes = [transport.segment_envelope(core.store, row["message_id"]) for row in rows]
+            assert [e["index"] for e in envelopes] == [0, 1]
+            assert all(e["total_chars"] == len("第一段合成回答。第二段合成回答。")
+                       for e in envelopes)
+            await host.send()
             core.clock.advance(0.5)
-            send_next(core)
-            next_job = capture_input(core, 2)
-            sources = live_text.history_sources(core.store, core.settings, core.clock, next_job)
-            assert len(sources) == 1
-            assert sources[0]["event_id"] == job["event_id"]
+            await host.send()
+            next_job = await host.admit()
+            sources = owner_input.history_sources(core.store, core.settings, core.clock, next_job)
+            assert len(sources) == 1 and sources[0]["event_id"] == job["event_id"]
             assert sources[0]["reply_text"] == "第一段合成回答。第二段合成回答。"
-            pinned = live_text._history_fingerprint(
-                core.store, core.settings, core.clock, approval, sources[0],
-            )
-            assert pinned["message_ids"] == [row["message_id"] for row in rows]
-            assert pinned["reply_receipts_sha256"] == paid_budget.sha(receipts)
+            assert [p["message_id"] for p in sources[0]["reply_segments"]] == [
+                row["message_id"] for row in rows]
+            proof = owner_input.history_proof(sources)
+            owner_input.check_history(core.store, core.settings, core.clock, next_job, proof)
             assert await core.run_once()
-            assert [m for m in calls[-1]["messages"] if m["role"] == "assistant"] == [
-                {"role": "assistant", "content": "第一段合成回答。第二段合成回答。"},
-            ]
-            assert len(calls) == 2
-
+            assert [m for m in host.calls[-1]["messages"] if m["role"] == "assistant"] == [
+                {"role": "assistant", "content": "第一段合成回答。第二段合成回答。"}]
+            assert len(host.calls) == 2
     run(scenario())
 
 
-@pytest.mark.parametrize("cap,count", [(1, 1), (2, 2)])
-def test_send_budget_falls_back_to_full_text_and_allows_already_reserved_exact_capacity(
-    core, tmp_path, cap, count,
-):
+@pytest.mark.parametrize("cap,count", [(2, 2), (3, 3)])
+def test_native_segment_limit_preserves_full_text_and_each_new_turn(core, tmp_path, cap, count):
     async def scenario():
-        async with segmented_window(core, tmp_path, cap=cap) as (approval, calls):
-            capture_input(core)
-            assert await core.run_once()
-            rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
-            assert len(rows) == count
-            assert "".join(json.loads(row["content_json"])["text"] for row in rows) == (
-                "第一段合成回答。第二段合成回答。"
-            )
-            assert live_text.remaining_send_slots(core.store, approval) == 0
-            for _ in rows:
-                send_next(core)
-                core.clock.advance(0.5)
-            assert len(calls) == 1
-            assert live_text.remaining_send_slots(core.store, approval) == 0
-            job = capture_input(core, 2)
-            assert await core.run_once()
-            assert len(core.store.rows("SELECT * FROM outbox")) == count
-            assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
-                "state"
-            ] == "FAILED"
-
+        reply = "第一段合成回答。第二段合成回答。第三段合成回答。"
+        async with session(core, tmp_path, reply=reply, cap=cap) as host:
+            for turn in range(2):
+                job = await host.admit()
+                assert await core.run_once()
+                rows = core.store.rows("SELECT * FROM outbox WHERE origin_event_id=? "
+                                       "ORDER BY segment_index", (job["event_id"],))
+                assert len(rows) == count
+                assert "".join(json.loads(row["content_json"])["text"] for row in rows) == reply
+                for _ in rows:
+                    await host.send()
+                    core.clock.advance(0.5)
+                assert len(host.calls) == turn + 1
+                assert len(host.sends) == count * (turn + 1)
+                assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
+                    "state"] == "SUCCEEDED"
     run(scenario())
 
 
 @pytest.mark.parametrize("segment_index", [0, 1])
-def test_any_changed_segment_receipt_invalidates_delivery_and_history(
+def test_any_changed_segment_manifest_invalidates_delivery_and_history(
     core, tmp_path, segment_index,
 ):
     async def scenario():
-        async with segmented_window(core, tmp_path) as (approval, _):
-            capture_input(core)
+        async with session(core, tmp_path) as host:
+            await host.admit()
             assert await core.run_once()
             rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
             assert len(rows) == 2
-            send_next(core)
+            await host.send()
             core.clock.advance(0.5)
-            send_next(core)
-            job = capture_input(core, 2)
-            sources = live_text.history_sources(core.store, core.settings, core.clock, job)
-            assert len(sources) == 1
-            key = "live_text_reply:" + rows[segment_index]["message_id"]
-            receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
-                                               (key,))["value"])
-            receipt["reply_segments"]["group_sha256"] = "f" * 64
-            core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
-                               (encode(receipt), key))
-            assert live_text._history_fingerprint(
-                core.store, core.settings, core.clock, approval, sources[0],
-            ) is None
-            assert live_text.history_sources(core.store, core.settings, core.clock, job) == []
-            with pytest.raises(CoreError, match="LIVE_TEXT_REPLY_RECEIPT_CHANGED"):
-                live_text.check_delivery(
-                    core.store, core.settings, core.clock, rows[0]["message_id"],
-                )
-
+            await host.send()
+            core.store.execute("UPDATE outbox SET reply_group_sha256=? WHERE message_id=?",
+                               ("f" * 64, rows[segment_index]["message_id"]))
+            with pytest.raises(CoreError):
+                owner_delivery.check_delivery(core.store, core.settings, core.clock,
+                                              rows[0]["message_id"])
+            job = await host.admit()
+            assert owner_input.history_sources(core.store, core.settings, core.clock, job) == []
     run(scenario())
 
 
@@ -327,16 +312,14 @@ def test_damaged_group_cannot_be_reclassified_as_single_message_history(core, co
 def test_reply_limit_applies_to_the_full_answer_before_any_segment_is_deliverable(core, tmp_path):
     async def scenario():
         reply = "首" * 250 + "。" + "尾" * 250
-        async with segmented_window(core, tmp_path, reply=reply) as (_, calls):
-            job = capture_input(core)
+        async with session(core, tmp_path, reply=reply) as host:
+            job = await host.admit()
             assert await core.run_once()
-            assert len(calls) == 1
+            assert len(host.calls) == 1
             assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job["job_id"],))[
-                "state"
-            ] == "FAILED"
+                "state"] == "FAILED"
             assert core.store.rows("SELECT * FROM outbox") == []
             assert core.store.rows(
-                "SELECT * FROM runtime_meta WHERE key LIKE 'live_text_reply:%'",
-            ) == []
-
+                "SELECT * FROM runtime_meta WHERE key LIKE 'owner_delivery:%'") == []
     run(scenario())
+

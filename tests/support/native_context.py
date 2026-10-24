@@ -29,7 +29,8 @@ from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 
 
-def configure(core, tmp_path, *, scope="references_v1", history_bytes=0, media=False, **limits):
+def configure(core, tmp_path, *, scope="references_v1", history_bytes=0, media=False,
+              owner_policy=None, **limits):
     approved_live(core, tmp_path, **limits)
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     core.settings.rich_input_scope = scope
@@ -56,6 +57,7 @@ def configure(core, tmp_path, *, scope="references_v1", history_bytes=0, media=F
         capability_policies={kind: owner_authority.capability_hashes(core.settings)[kind]
                              for kind in ("image", "file")} if media else {},
     )
+    policy = OwnerGrantPolicy.model_validate({**policy.model_dump(), **(owner_policy or {})})
     authority = activate(core, policy)[0]["authority"]
     core.context_test_capture = SimpleNamespace(key=key, policy=policy, authority=authority,
                                                directory=tmp_path)
@@ -116,7 +118,8 @@ async def source_window(core, tmp_path, source, *, rich_input_scope="none", scop
     for name, value in options.get("core_options", {}).items():
         setattr(core.settings, name, value)
     plan = configure(core, tmp_path, scope=rich_input_scope,
-                     history_bytes=options.get("max_history_utf8_bytes", 0), media=media)
+                     history_bytes=options.get("max_history_utf8_bytes", 0), media=media,
+                     owner_policy=options.get("owner_policy"))
     handshakes, sends = [], []
 
     async def authenticate(connection, request):
