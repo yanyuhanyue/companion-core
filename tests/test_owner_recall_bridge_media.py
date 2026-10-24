@@ -192,8 +192,9 @@ def test_restart_recovers_queued_or_confirmed_upload_without_repeating_io(
     run(scenario())
 
 
-def test_restart_never_replays_an_uncertain_original_download(core, tmp_path):
-    downloads = []
+@pytest.mark.parametrize("recovery", ["active", "expired", "erased"])
+def test_restart_download_reuses_only_original_valid_lease(core, tmp_path, recovery):
+    downloads, claims, checks = [], [], []
 
     async def source(ws):
         await ws.send(json.dumps(original()))
@@ -209,6 +210,14 @@ def test_restart_never_replays_an_uncertain_original_download(core, tmp_path):
             window, client, protocol, _, sends,
         ):
             core.content.options = core.settings.content
+
+            async def track(request):
+                if request.url.path.endswith("/image/claim"):
+                    claims.append(json.loads(request.content))
+                elif request.url.path.endswith("/image/check"):
+                    checks.append(json.loads(request.content))
+
+            client.event_hooks["request"].append(track)
             await window.capture_once(client, protocol)
             await window.approve_captured(client, capture_approval(window), defer_media=True)
             row = window.db.execute("SELECT * FROM automatic_media").fetchone()
@@ -218,15 +227,51 @@ def test_restart_never_replays_an_uncertain_original_download(core, tmp_path):
                 await first.execute(row)
             row = window.db.execute("SELECT * FROM automatic_media").fetchone()
             assert row["state"] == "DOWNLOADING"
+            original_claim = json.loads(row["receipt_json"])
+            original_source = json.loads(row["manifest_json"])["images"][0]["source_sha256"]
+            item = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
+            if recovery == "expired":
+                core.clock.advance(16)
+            elif recovery == "erased":
+                with core.store.transaction():
+                    core.ledger.expire_events(core.store, [row["event_id"]], core.clock())
             resumed = pending_media.MediaPump(window, client,
                 image_transport=httpx.MockTransport(cdn), image_resolver=resolve)
-            with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED"):
+            if recovery == "expired":
+                with pytest.raises(ValueError, match="IMAGE_DOWNLOAD_CLAIM_REJECTED"):
+                    await resumed.execute(row)
+            elif recovery == "active":
+                with pytest.raises(ValueError, match="IMAGE_FETCH_FAILED"):
+                    await resumed.execute(row)
+            else:
                 await resumed.execute(row)
-            assert len(downloads) == 1 and sends == []
+            assert len(downloads) == (2 if recovery == "active" else 1) and sends == []
             assert core.store.rows("SELECT * FROM model_usage") == []
+            assert claims == [{"request_key": "image:0", "source_sha256": original_source}]
+            assert checks and all(check == {"lease_token": original_claim["lease_token"],
+                "source_sha256": original_source} for check in checks)
+            current = core.store.one("SELECT * FROM content_items WHERE item_id=?",
+                                     (item["item_id"],))
+            assert current["reserved_bytes"] == item["reserved_bytes"]
+            if recovery == "active":
+                assert current["state"] == "FETCHING"
+                assert current["lease_token"] == original_claim["lease_token"]
+                assert current["lease_until"] == original_claim["lease_until"]
+                retry = window.db.execute("SELECT * FROM automatic_media").fetchone()
+                assert retry["state"] == "DOWNLOADING"
+                assert json.loads(retry["receipt_json"]) == original_claim
+            if recovery == "erased":
+                cancelled = window.db.execute("SELECT * FROM automatic_media").fetchone()
+                assert cancelled["state"] == "CANCELLED" and cancelled["manifest_json"] is None
             await window.stop_live(client)
             row = window.db.execute("SELECT * FROM automatic_media").fetchone()
-            assert row["state"] == "CANCELLED" and row["manifest_json"] is None
+            assert row["state"] == "CANCELLED"
+            assert row["manifest_json"] is None
+            before = len(downloads), len(claims), len(checks)
+            with pytest.raises(ValueError, match="WINDOW_STOPPED"):
+                await resumed.execute(row)
+            assert (len(downloads), len(claims), len(checks)) == before
+            assert core.store.rows("SELECT * FROM model_usage") == [] and sends == []
             window.verify(active=False)
 
     run(scenario())
