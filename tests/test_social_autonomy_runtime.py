@@ -39,6 +39,21 @@ def test_disabled_runtime_has_no_plan_fee_or_outbox(core):
         assert not core.store.rows("SELECT * FROM " + table)
 
 
+@pytest.mark.parametrize("kind", ["QZONE_DRAFT", "qzone_draft"])
+def test_draft_intent_is_not_a_publish_proposal_or_a_delivery_permit(core, kind):
+    module, ref, _ = background(core)
+    module.model.proposal = {"kind": kind, "text": "待审核的合成草稿", "source_refs": [ref]}
+    assert tick(module) is True
+    assert core.store.one("SELECT state FROM social_autonomy_plans") == {"state": "REJECTED"}
+    assert not core.store.rows("SELECT * FROM social_autonomy_reservations")
+    assert not core.store.rows("SELECT * FROM outbox")
+    usage = core.store.rows("SELECT * FROM model_usage")
+    assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+    assert tick(module) is False
+    assert len(module.model.calls) == 1
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+
+
 def test_public_evidence_without_direct_owner_binding_cannot_start_decision(core):
     read_public(core, "bilibili")
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")

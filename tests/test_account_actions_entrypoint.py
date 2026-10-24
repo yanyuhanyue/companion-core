@@ -10,6 +10,7 @@ from companion.core import Core
 from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from companion.social_autonomy_protocol import FrozenPlan, SocialAutonomyConfig
+from companion.social_autonomy_runtime import run_once as social_tick
 from companion.store import encode
 from tests.conftest import ingest, run
 from tests.test_onebot_capture import pinned_plan, real_core_http
@@ -17,7 +18,10 @@ from tests.test_private_companion import companion_options
 from tests.test_social_autonomy import read_public
 
 
-@pytest.mark.parametrize("outcome", ["SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED"])
+@pytest.mark.parametrize("outcome", [
+    "SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED", "STOPPED",
+    "AUTH_REVOKED", "EXPIRED",
+])
 def test_account_action_http_uses_distinct_scope_native_budget_and_original_outbox(
     core,
     tmp_path,
@@ -33,7 +37,7 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     policy = SocialAutonomyConfig(
         enabled=True, scope="qq_social_v1", authorization_sha256="a" * 64, qzone_enabled=True,
-        max_output_tokens=128,
+        max_output_tokens=128, plan_ttl_seconds=30,
     )
     calls = []
 
@@ -141,10 +145,36 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                         "content_sha256": item["content_sha256"],
                         "payload_sha256": frozen.payload_sha256,
                     }
-                    if outcome in {"CANCELLED", "ERASED"}:
+                    if outcome in {"CANCELLED", "ERASED", "STOPPED", "AUTH_REVOKED", "EXPIRED"}:
                         if outcome == "ERASED":
                             with worker.store.transaction():
                                 worker.ledger.expire_events(worker.store, [ref], worker.clock())
+                        elif outcome == "STOPPED":
+                            worker.store.execute(
+                                "INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')"
+                            )
+                        elif outcome == "AUTH_REVOKED":
+                            core.settings.social_autonomy = policy.model_copy(
+                                update={"enabled": False}
+                            )
+                        elif outcome == "EXPIRED":
+                            core.clock.advance(31)
+                        if outcome != "CANCELLED":
+                            refused = await client.post(
+                                "/internal/v1/account-actions/send-check", json=check
+                            )
+                            expected_error = {
+                                "ERASED": (503, "LIVE_TEXT_RECONCILIATION_REQUIRED"),
+                                "STOPPED": (409, "SOCIAL_AUTONOMY_PAUSED"),
+                                "AUTH_REVOKED": (503, "LIVE_TEXT_RUNTIME_CHANGED"),
+                                "EXPIRED": (403, "SOCIAL_PLAN_AUTHORITY_CHANGED"),
+                            }[outcome]
+                            assert (
+                                refused.status_code, refused.json().get("error")
+                            ) == expected_error
+                            assert core.store.one(
+                                "SELECT dispatched_at FROM social_autonomy_reservations"
+                            ) == {"dispatched_at": None}
                         cancelled = await client.post(
                             "/internal/v1/account-actions/cancel-before-send",
                             json={**check, "reason": "LOCAL_PREPARATION_FAILED"},
@@ -216,5 +246,27 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                         "native_ack_json": None,
                     }
                     assert len(calls) == 1
+                    usage = core.store.rows("SELECT * FROM model_usage")
+                # Reopen the independent worker against persisted state. A completed or
+                # uncertain send must never become a replacement plan or a fresh lease.
+                with Core(
+                    core.settings, ModelClient(core.settings, external), core.clock
+                ) as restarted:
+                    assert await social_tick(
+                        restarted.store, restarted.settings, restarted.model, restarted.clock
+                    ) is False
+                    assert core.store.rows("SELECT * FROM model_usage") == usage
+                    assert core.store.one(
+                        "SELECT state,attempt_count,provider_message_id,native_ack_json FROM outbox"
+                    ) == row
+                if outcome in {"SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED"}:
+                    duplicate = await client.post("/internal/v1/deliveries/lease", json=request)
+                    if outcome == "UNKNOWN":
+                        assert duplicate.status_code == 503
+                        assert duplicate.json() == {"error": "LIVE_TEXT_RECONCILIATION_REQUIRED"}
+                    else:
+                        assert duplicate.status_code == 200, duplicate.text
+                        assert duplicate.json() == {"items": []}
+                assert len(calls) == 1
 
     run(scenario())
