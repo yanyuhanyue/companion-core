@@ -72,7 +72,7 @@ def validate_original_voice_binding(
     content = json.loads(outbox["content_json"])
     if wire.digest(content) != content_sha256 or not isinstance(content.get("text"), str):
         raise ValueError("original voice content changed")
-    reply_hash = hashlib.sha256(content["text"].encode()).hexdigest()
+    reply_hash = wire.digest(content["text"])
     if proof.get("payload_kind") == "reply_sha256" and proof["payload_sha256"] != reply_hash:
         raise ValueError("original voice reply changed")
     expected.update(content_sha256=content_sha256, reply_sha256=reply_hash)

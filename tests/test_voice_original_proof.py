@@ -5,6 +5,7 @@ import json
 import pytest
 
 import companion_delivery_protocol as wire
+from companion import paid_budget
 from companion.voice_original_proof import validate_original_voice_binding
 from companion.voice_protocol import LegacyVoiceDeliveryBinding, VoiceDeliveryBinding
 
@@ -22,7 +23,7 @@ def original(*, legacy=False, retired=False):
         privacy_epoch=0, reply_revision=1, node_id="original-node",
         manifest_sha256="c" * 64, node_config_sha256="d" * 64,
         voice_policy_sha256="e" * 64, content_sha256=wire.digest(content),
-        reply_sha256=hashlib.sha256(content["text"].encode()).hexdigest(),
+        reply_sha256=paid_budget.sha(content["text"]),
         result_sha256="f" * 64, audio_sha256="a" * 64, audio_bytes=44,
         expires_at="2000-01-01T00:00:00Z", **scope,
     )
