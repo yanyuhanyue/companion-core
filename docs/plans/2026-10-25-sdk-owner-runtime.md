@@ -132,4 +132,17 @@ CLAIMING/DOWNLOADING/UPLOADING transitions and must reconcile uncertain effects 
 Three real HTTP plus independent SDK-worker cases cover PNG/GIF/APNG through this transfer;
 three additional cases cover STOP after DNS, changed upload proof, and lost upload receipt.
 The lost-receipt case retains the accepted original and reports failure to the queue owner.
-Durable queue wiring remains separate from this verified byte-transfer helper.
+The native queue now reuses `automatic_media`, its original stage journal, and finite Content
+claims. Private descriptors bind the native authority and capture digest in the v2 local
+manifest; v1 manifests retain their original verification domain. Queue writes belong to the
+same capture transaction. Tuple-based OwnerRuntime connections use per-cursor named rows;
+the shared connection's row factory is unchanged.
+
+Recovery from DOWNLOADING reuses the original lease. Recovery from UPLOADING only queries
+the existing Content status, and discards private descriptors after confirmed acceptance.
+An uncertain CLAIMING result remains fenced without a replacement claim. Native daemon
+patches add the existing pump after admission and pass prepared descriptors into capture
+persistence. A real authenticated loopback WebSocket, actual HTTP Core, queued transfer and
+independent SDK process exercise this entry; provider/CDN transport remains synthetic.
+The queue/daemon slice adds six native checks and preserves three frozen queue regression
+checks. Files, nested attachments, video and voice integration remain separate work.

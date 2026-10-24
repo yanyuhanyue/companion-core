@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import re
+import sqlite3
 from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime
@@ -22,21 +23,83 @@ from .voice_media import OriginalRecord, original_records
 from .window import digest
 
 DOMAIN = b"companion-core/onebot-owner-media-queue/v1\x00"
+OWNER_DOMAIN = b"companion-core/onebot-owner-media-queue/v2\x00"
 TERMINAL = {"DONE", "CANCELLED"}
 
 
+def _execute(window, sql, args=()):
+    cursor = window.db.cursor()
+    cursor.row_factory = sqlite3.Row
+    return cursor.execute(sql, args)
+
+
+def _binding(window):
+    return digest(window.authority) if hasattr(window, "authority") else window.plan.sha256
+
+
+def _head(window, head):
+    table = "owner_runtime" if hasattr(window, "authority") else "test_window"
+    _execute(window, "UPDATE " + table + " SET journal_head=?", (head,))
+
+
 def exists(window):
-    return bool(window.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_media'")
+    return bool(_execute(window, "SELECT 1 FROM sqlite_master WHERE name='automatic_media'")
                 .fetchone())
 
 
 def prepare(window):
-    window.db.execute("CREATE TABLE IF NOT EXISTS automatic_media(event_id TEXT PRIMARY KEY,"
+    in_transaction = window.db.in_transaction
+    _execute(window, "CREATE TABLE IF NOT EXISTS automatic_media(event_id TEXT PRIMARY KEY,"
                       "plan_hash TEXT NOT NULL,capture_sha256 TEXT NOT NULL,"
                       "manifest_sha256 TEXT NOT NULL,manifest_json TEXT,"
                       "image_count INTEGER NOT NULL,"
                       "next_slot INTEGER NOT NULL,state TEXT NOT NULL,receipt_json TEXT)")
-    window.db.commit()
+    if not in_transaction:
+        window.db.commit()
+
+
+def queue_owner(runtime, event, media, capture, raw):
+    """Persist private originals in the existing queue, inside CAPTURED's transaction."""
+    images = [OriginalImage(**value) for value in media.get("images", [])]
+    files = [OriginalFile(**value) for value in media.get("files", [])]
+    if set(media) - {"images", "files"}:
+        raise ValueError("AUTOMATIC_MEDIA_CHANGED")
+    if not images and not files:
+        return
+    projected = event["payload"].get("rich", {}).get("segments", [])
+    originals = [*images, *files]
+    if (not 1 <= len(originals) <= 64
+        or images != original_images(raw["message"])
+        or files != original_files(raw["message"])
+        or sorted((item.projection() for item in originals), key=lambda item: item["index"])
+        != [item for item in projected if item.get("type") in {"image", "file", "face"}]
+        or any(image.slot != slot or image.url != source_url(image)
+               for slot, image in enumerate(images))
+        or any(file.slot != slot for slot, file in enumerate(files))):
+        raise ValueError("AUTOMATIC_MEDIA_CHANGED")
+    prepare(runtime)
+    value = {"authority": runtime.authority, "event_id": event["event_id"],
+             "capture_sha256": digest(capture), "input_sha256": capture["input_sha256"],
+             "images": [asdict(image) for image in images]}
+    if files:
+        value["files"] = [asdict(file) for file in files]
+    value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+        runtime.config.capture_signing_key)).sign(OWNER_DOMAIN + encode(value).encode()).hex()
+    prior = _execute(runtime, "SELECT * FROM automatic_media WHERE event_id=?",
+                     (event["event_id"],)).fetchone()
+    manifest_hash = digest(value)
+    if prior:
+        if prior["manifest_sha256"] != manifest_hash:
+            raise ValueError("AUTOMATIC_MEDIA_CHANGED")
+        return
+    runtime.spool.capacity(len(encode(value).encode()) * 3)
+    head = runtime.append("MEDIA_QUEUED", {"event_hash": digest(event["event_id"]),
+        "manifest_sha256": manifest_hash, "capture_sha256": digest(capture),
+        "image_count": len(images), **({"file_count": len(files)} if files else {})})
+    _execute(runtime, "INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
+        (event["event_id"], _binding(runtime), digest(capture), manifest_hash,
+         encode(value), len(images)))
+    _head(runtime, head)
 
 
 def queue(window, event, raw, capture):
@@ -66,7 +129,7 @@ def queue(window, event, raw, capture):
                      source_event_id=event["source_event_id"])
     value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
         window.plan.config.capture_signing_key)).sign(DOMAIN + encode(value).encode()).hex()
-    prior = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    prior = _execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                               (event["event_id"],)).fetchone()
     manifest_hash = digest(value)
     if prior:
@@ -79,31 +142,34 @@ def queue(window, event, raw, capture):
         "image_count": len(images), **({"file_count": len(files)} if files else {}),
         **({"record_count": len(records)} if records else {})})
     with window.db:
-        window.db.execute("INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
+        _execute(window, "INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
             (event["event_id"], window.plan.sha256, digest(capture), manifest_hash,
              encode(value), len(images)))
-        window.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        _head(window, head)
 
 
 def manifest(window, row):
     value = json.loads(row["manifest_json"])
+    native = hasattr(window, "authority")
+    config = window.config if native else window.plan.config
     try:
-        fields = {"window_sha256", "event_id", "capture_sha256", "input_sha256",
-                  "images", "signature"}
+        fields = {"authority" if native else "window_sha256", "event_id", "capture_sha256",
+                  "input_sha256", "images", "signature"}
         if (set(value) not in (fields, fields | {"files"},
                               fields | {"records", "source_event_id"},
                               fields | {"files", "records", "source_event_id"})
             or digest(value) != row["manifest_sha256"]):
             raise ValueError()
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(
-            window.plan.config.capture_public_key)).verify(bytes.fromhex(value["signature"]),
-                DOMAIN + encode({key: item for key, item in value.items()
-                                 if key != "signature"}).encode())
-        source = window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
+            config.capture_public_key)).verify(bytes.fromhex(value["signature"]),
+                (OWNER_DOMAIN if native else DOMAIN) + encode({
+                    key: item for key, item in value.items() if key != "signature"}).encode())
+        source = _execute(window, "SELECT * FROM window_inputs WHERE event_id=?",
                                     (row["event_id"],)).fetchone()
         if (not source or value["event_id"] != row["event_id"]
-            or value["window_sha256"] != row["plan_hash"]
-            or row["plan_hash"] != window.plan.sha256
+            or (value.get("authority") != window.authority if native
+                else value.get("window_sha256") != row["plan_hash"])
+            or row["plan_hash"] != _binding(window)
             or value["capture_sha256"] != row["capture_sha256"]
             or value["capture_sha256"] != digest(json.loads(source["capture_json"]))
             or value["input_sha256"] != source["input_hash"]
@@ -116,10 +182,10 @@ def manifest(window, row):
                for slot, image in enumerate(images)):
             raise ValueError()
         if (not 1 <= len(images) + len(files) + len(records) <= 64
-            or ("files" in value and (not files or window.plan.value.get(
+            or ("files" in value and (not files or not native and window.plan.value.get(
                 "live_text", {}).get("file_scope") != "owner_file_v1"))
             or any(file.slot != slot for slot, file in enumerate(files))
-            or ("records" in value and (not records or window.plan.value.get(
+            or ("records" in value and (native or not records or window.plan.value.get(
                 "live_text", {}).get("voice_scope") != "owner_voice_v1"
                 or value["source_event_id"] != json.loads(source["capture_json"])[
                     "source_event_id"]))
@@ -132,26 +198,43 @@ def manifest(window, row):
 
 
 def transition(window, event_id, state, next_slot, receipt=None):
-    row = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    row = _execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                             (event_id,)).fetchone()
     if row["state"] in TERMINAL:
         return
     head = window.append("MEDIA_STATE", {"event_hash": digest(event_id), "state": state,
         "next_slot": next_slot, "receipt_sha256": digest(receipt) if receipt is not None else None})
     with window.db:
-        window.db.execute("UPDATE automatic_media SET state=?,next_slot=?,receipt_json=?,"
+        _execute(window, "UPDATE automatic_media SET state=?,next_slot=?,receipt_json=?,"
                           "manifest_json=CASE WHEN ? THEN NULL ELSE manifest_json END "
                           "WHERE event_id=?",
                           (state, next_slot, encode(receipt) if receipt else None,
                            state in TERMINAL, event_id))
-        window.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        _head(window, head)
     if state in TERMINAL:
-        window.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _execute(window, "PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+def verify_owner_history(runtime, records):
+    history = []
+    current = None
+    entries = []
+    for record in records:
+        if record["kind"] in {"OWNER_BOUND", "OWNER_REBOUND"}:
+            if current is not None:
+                history.append((current, entries))
+            current, entries = digest(record["data"]["authority"]), []
+        else:
+            entries.append(record)
+    if current is not None:
+        history.append((current, entries))
+    verify_history(runtime, history)
 
 
 def verify_history(window, history):
     projected = {}
     for plan, entries in history:
+        plan_hash = plan if isinstance(plan, str) else plan.sha256
         for entry in entries:
             if entry["kind"] == "MEDIA_QUEUED":
                 data = entry["data"]
@@ -172,15 +255,15 @@ def verify_history(window, history):
                 key = data["event_hash"]
                 if key in projected:
                     raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
-                projected[key] = {**data, "plan_hash": plan.sha256, "state": "PENDING",
+                projected[key] = {**data, "plan_hash": plan_hash, "state": "PENDING",
                                   "next_slot": 0, "receipt_sha256": None}
             elif entry["kind"] == "MEDIA_STATE":
                 data = entry["data"]
                 prior = projected.get(data["event_hash"])
-                if not prior or prior["state"] in TERMINAL or prior["plan_hash"] != plan.sha256:
+                if not prior or prior["state"] in TERMINAL or prior["plan_hash"] != plan_hash:
                     raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
                 prior.update(data)
-    rows = window.db.execute("SELECT * FROM automatic_media").fetchall() if exists(window) else []
+    rows = _execute(window, "SELECT * FROM automatic_media").fetchall() if exists(window) else []
     if set(projected) != {digest(row["event_id"]) for row in rows}:
         raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
     for row in rows:
@@ -204,7 +287,7 @@ def verify_history(window, history):
 def cancel(window, event_id, receipt):
     if not exists(window):
         return
-    row = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    row = _execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                             (event_id,)).fetchone()
     if row and row["state"] not in TERMINAL:
         transition(window, event_id, "CANCELLED", row["next_slot"], receipt)
@@ -212,11 +295,13 @@ def cancel(window, event_id, receipt):
 
 def stop(window):
     if exists(window):
-        for row in window.db.execute("SELECT event_id FROM automatic_media WHERE plan_hash=? "
+        for row in _execute(window, "SELECT event_id FROM automatic_media WHERE plan_hash=? "
                                       "AND state NOT IN ('DONE','CANCELLED')",
-                                      (window.plan.sha256,)).fetchall():
-            cancel(window, row["event_id"], {"window_sha256": window.plan.sha256,
-                                           "reason": "WINDOW_STOPPED"})
+                                      (_binding(window),)).fetchall():
+            cancel(window, row["event_id"], (
+                {"authority": window.authority, "reason": "AUTHORITY_STOPPED"}
+                if hasattr(window, "authority") else
+                {"window_sha256": window.plan.sha256, "reason": "WINDOW_STOPPED"}))
 
 
 async def upload(window, client, event_id, images, *, files=(), records=(), start_slot=0,
@@ -235,6 +320,22 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     async def progress(state, slot, receipt=None):
         if stage:
             stage(state, slot, receipt)
+
+    if hasattr(window, "authority"):
+        from .images import upload_original
+
+        for image in images[start_slot:]:
+            await guard()
+            options = {"resolver": image_resolver} if image_resolver is not None else {}
+            result = await upload_original(window, client, event_id, image,
+                resume_claim=resume_claim if image.slot == start_slot else None,
+                progress=lambda state, receipt, slot=image.slot: progress(state, slot, receipt),
+                transport=image_transport, **options)
+            await progress("DONE" if image.slot + 1 == len(images) + len(files) + len(records)
+                           else "PENDING", image.slot + 1, result)
+        if files or records:
+            raise ValueError("OWNER_MEDIA_TRANSFER_REQUIRED")
+        return
 
     if (start_slot < len(images)
         and window.plan.value["live_text"].get("companion_scope") == "owner_private_v1"):
@@ -412,16 +513,48 @@ class MediaPump:
                              "voice_resolver": voice_resolver, "set_phase": set_phase}
 
     async def check_source(self, row):
+        if hasattr(self.window, "authority"):
+            return await self.status(row["event_id"])
         from .continuous import require_scope
 
         require_scope(self.window)
-        source = self.window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
+        source = _execute(self.window, "SELECT * FROM window_inputs WHERE event_id=?",
                                         (row["event_id"],)).fetchone()
         state = await self.window.input_state(self.client, source)
         if state["state"] in {"SUPERSEDED", "RECALLED"}:
             cancel(self.window, row["event_id"], state)
             raise SourceCancelled()
         return state
+
+    async def status(self, event_id):
+        path = "/internal/v2/content/" + event_id
+        if not hasattr(self.window, "authority"):
+            return await self.window.core_get(self.client, path)
+        from .event_normalizer import decode
+        from .network import checked_http_client, private_request_matches
+
+        def validate(request):
+            if (request.method != "GET" or request.content
+                or not private_request_matches(request, self.window.config.core_url, path)
+                or request.headers.get("Authorization") !=
+                    "Bearer " + self.window.config.bridge_token):
+                raise ValueError("MEDIA_STATUS_REQUEST_CHANGED")
+
+        async def boundary(request):
+            validate(request)
+            await self.window.check(self.client, purpose="content")
+            validate(request)
+            self.window.verify()
+
+        async with checked_http_client(self.client, boundary) as scoped:
+            async with scoped.stream("GET", path) as response:
+                response.raise_for_status()
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    data.extend(chunk)
+                    if len(data) > 65536:
+                        raise ValueError("INVALID_CORE_RECEIPT")
+        return decode(bytes(data), 65536)
 
     async def execute(self, row):
         try:
@@ -466,8 +599,7 @@ class MediaPump:
                 async with asyncio.timeout(300):
                     while True:
                         await self.check_source(row)
-                        status = await self.window.core_get(self.client,
-                            "/internal/v2/content/" + row["event_id"])
+                        status = await self.status(row["event_id"])
                         items = {item["slot"]: item["state"] for item in status.get("items", [])
                                  if item.get("kind") == kind}
                         state = items.get(original.slot)
@@ -513,14 +645,16 @@ class MediaPump:
             task, self.task = self.task, None
             task.result()
         if exists(self.window):
-            row = self.window.db.execute("SELECT * FROM automatic_media WHERE plan_hash=? "
-                "AND state NOT IN ('DONE','CANCELLED') ORDER BY rowid LIMIT 1",
-                (self.window.plan.sha256,)).fetchone()
+            accepted = ("AND event_id IN (SELECT key FROM inbox WHERE state='accepted') "
+                        if hasattr(self.window, "authority") else "")
+            row = _execute(self.window, "SELECT * FROM automatic_media WHERE plan_hash=? "
+                "AND state NOT IN ('DONE','CANCELLED') " + accepted + "ORDER BY rowid LIMIT 1",
+                (_binding(self.window),)).fetchone()
             if row:
                 self.task = asyncio.create_task(self.execute(row))
 
     def pending(self, event_id):
-        return exists(self.window) and bool(self.window.db.execute(
+        return exists(self.window) and bool(_execute(self.window, 
             "SELECT 1 FROM automatic_media WHERE event_id=? AND state NOT IN ('DONE','CANCELLED')",
             (event_id,),
         ).fetchone())

@@ -1,0 +1,261 @@
+"""The original media queue recovers native transfers without replaying uploads."""
+
+import asyncio
+import json
+import pickle
+import sys
+from dataclasses import replace
+from datetime import UTC, datetime
+from pathlib import Path
+
+import httpx
+import pytest
+
+from companion.store import encode
+from companion_onebot_bridge import pending_media
+from companion_onebot_bridge.capture import prepare_owner_input
+from companion_onebot_bridge.network import private_http_client
+from tests.conftest import run
+from tests.test_native_image_pipeline import pixels
+from tests.test_onebot_direct import raw_event
+from tests.test_prepare_owner_input import native_spool, window
+
+
+async def captured(core, client, runtime):
+    frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[
+        {"type": "image", "data": {"url": "https://gchat.qpic.cn/queue-original"}}]))
+    prepared = await prepare_owner_input(runtime, client, None, frame, core.clock.now,
+                                          ("127.0.0.1", 3001))
+    runtime.persist_capture(prepared["event"], frame, received_at=core.clock.now,
+                            peer=("127.0.0.1", 3001), media=prepared["media"])
+    runtime.verify()
+    assert await runtime.flush_one(client)
+    return prepared
+
+
+def row(runtime):
+    return pending_media._execute(runtime, "SELECT * FROM automatic_media").fetchone()
+
+
+@pytest.mark.parametrize("recovery", ["pending", "downloading", "lost_receipt"])
+def test_original_queue_recovers_native_transfer(core, tmp_path, recovery):
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                prepared = await captured(core, client, runtime)
+                if recovery == "downloading":
+                    image = prepared["media"]["images"][0]
+                    pending_media.transition(runtime, prepared["event"]["event_id"], "CLAIMING", 0)
+                    response = await client.post("/internal/v2/content/" +
+                        prepared["event"]["event_id"] + "/image/claim", json={
+                            "request_key": "image:0", "source_sha256": image["source_sha256"]})
+                    assert response.status_code == 200
+                    pending_media.transition(runtime, prepared["event"]["event_id"],
+                                               "DOWNLOADING", 0, response.json())
+                    original_claim = response.json()
+            finally:
+                spool.close()
+            downloads, claims, uploads = [], [], []
+
+            async def resolve(host, port):
+                return ["8.8.8.8"]
+
+            async def download(request):
+                downloads.append(request)
+                return httpx.Response(200, content=pixels(), headers={"content-type": "image/png"})
+
+            async def request_hook(request):
+                if request.url.path.endswith("/image/claim"):
+                    claims.append(request.url.path)
+                if request.url.path.endswith("/image"):
+                    uploads.append(request.url.path)
+
+            async def response_hook(response):
+                if response.request.url.path.endswith("/image") and recovery == "lost_receipt":
+                    raise httpx.ReadTimeout("synthetic lost receipt", request=response.request)
+
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    transfer.event_hooks["request"].append(request_hook)
+                    transfer.event_hooks["response"].append(response_hook)
+                    pump = pending_media.MediaPump(runtime, transfer,
+                        image_transport=httpx.MockTransport(download), image_resolver=resolve)
+                    if recovery == "lost_receipt":
+                        with pytest.raises(httpx.ReadTimeout):
+                            await pump.execute(row(runtime))
+                        assert row(runtime)["state"] == "UPLOADING"
+                    else:
+                        await pump.execute(row(runtime))
+                        assert row(runtime)["state"] == "DONE"
+                runtime.verify()
+            finally:
+                spool.close()
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    transfer.event_hooks["request"].append(request_hook)
+                    pump = pending_media.MediaPump(runtime, transfer,
+                        image_transport=httpx.MockTransport(download), image_resolver=resolve)
+                    if recovery == "lost_receipt":
+                        await pump.execute(row(runtime))
+                    assert row(runtime)["state"] == "DONE"
+                    assert row(runtime)["manifest_json"] is None
+                    runtime.verify()
+                assert len(downloads) == len(uploads) == 1
+                assert len(claims) == (0 if recovery == "downloading" else 1)
+                item = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
+                if recovery == "downloading":
+                    assert item["lease_token"] == original_claim["lease_token"]
+                    assert item["lease_until"] == original_claim["lease_until"]
+                assert len(core.store.rows("SELECT * FROM captured_images")) == 1
+                assert not core.store.rows("SELECT * FROM model_usage")
+            finally:
+                spool.close()
+    run(scenario())
+
+
+def test_native_queue_manifest_tamper_blocks_verification(core, tmp_path):
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                await captured(core, client, runtime)
+                value = json.loads(row(runtime)["manifest_json"])
+                value["images"][0]["url"] = "https://gchat.qpic.cn/replaced"
+                with runtime.db:
+                    runtime.db.execute("UPDATE automatic_media SET manifest_json=?",
+                                       (encode(value),))
+                with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_JOURNAL_CHANGED"):
+                    runtime.verify()
+            finally:
+                spool.close()
+    run(scenario())
+
+
+def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                prepared = await captured(core, client, runtime)
+                event_id = prepared["event"]["event_id"]
+                pending_media.transition(runtime, event_id, "CLAIMING", 0)
+                response = await client.post("/internal/v2/content/" + event_id + "/image/claim",
+                    json={"request_key": "image:0",
+                          "source_sha256": prepared["media"]["images"][0]["source_sha256"]})
+                assert response.status_code == 200
+                original = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
+            finally:
+                spool.close()
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            requests = []
+
+            async def request_hook(request):
+                requests.append(request.url.path)
+
+            try:
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    transfer.event_hooks["request"].append(request_hook)
+                    pump = pending_media.MediaPump(runtime, transfer)
+                    with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED"):
+                        await pump.execute(row(runtime))
+                assert row(runtime)["state"] == "CLAIMING"
+                assert not any(path.endswith(("/claim", "/image")) for path in requests)
+                assert core.store.one(
+                    "SELECT * FROM content_items WHERE kind='qq_image'") == original
+                assert not core.store.rows("SELECT * FROM captured_images")
+                runtime.verify()
+            finally:
+                spool.close()
+    run(scenario())
+
+
+def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path):
+    from websockets.asyncio.server import serve
+
+    from companion_onebot_bridge.app import receive, transfer_media, upload
+    from companion_onebot_bridge.metrics import Metrics
+    from tests.sdk_reader_fixture import answer
+
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+            stop, wake, uploaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+            frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[
+                {"type": "image", "data": {"url": "https://gchat.qpic.cn/daemon-original"}}]))
+
+            async def server(socket):
+                assert socket.request.headers["Authorization"] == "Bearer " + config.onebot_token
+                core.clock.now = datetime.now(UTC)
+                await socket.send(frame)
+                await stop.wait()
+
+            async def resolve(host, port):
+                return ["8.8.8.8"]
+
+            async def downloaded(request):
+                return httpx.Response(200, content=pixels(), headers={"content-type": "image/png"})
+
+            async def response_hook(response):
+                if response.request.url.path.endswith("/image"):
+                    assert response.status_code == 200
+                    uploaded.set()
+
+            async with serve(server, "127.0.0.1", 0) as listener:
+                config = replace(config, onebot_ws_url=
+                                 f"ws://127.0.0.1:{listener.sockets[0].getsockname()[1]}")
+                spool, runtime = native_spool(core, tmp_path, config, plan)
+                try:
+                    async with private_http_client(
+                        config.core_url, config.bridge_token,
+                    ) as transfer:
+                        transfer.event_hooks["response"].append(response_hook)
+                        metrics = Metrics()
+                        pump = pending_media.MediaPump(runtime, transfer,
+                            image_transport=httpx.MockTransport(downloaded), image_resolver=resolve)
+                        tasks = [asyncio.create_task(receive(runtime.config, spool, wake, stop,
+                            metrics, runtime=runtime, core=transfer)),
+                            asyncio.create_task(upload(transfer, spool, wake, stop, metrics,
+                                                       runtime=runtime)),
+                            asyncio.create_task(transfer_media(pump, stop))]
+                        completion = asyncio.create_task(uploaded.wait())
+                        try:
+                            done, _ = await asyncio.wait([completion, *tasks], timeout=20,
+                                                       return_when=asyncio.FIRST_COMPLETED)
+                            for task in done:
+                                task.result()
+                            assert completion in done, "daemon did not finish the media upload"
+                            await asyncio.wait_for(asyncio.shield(pump.task), 5)
+                            assert row(runtime)["state"] == "DONE"
+                            runtime.verify()
+                        finally:
+                            stop.set()
+                            completion.cancel()
+                            for task in tasks:
+                                task.cancel()
+                            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                        assert all(isinstance(result, asyncio.CancelledError) or result is None
+                                   for result in outcomes), outcomes
+                finally:
+                    spool.close()
+            job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
+            config_path, output = tmp_path / "queue-worker.pickle", tmp_path / "queue-wire.json"
+            config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
+                [answer("原图已经收到。")], "SUCCEEDED", str(output))))
+            process = await asyncio.create_subprocess_exec(sys.executable,
+                str(Path(__file__).with_name("reader_sdk_worker.py")), str(config_path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                logs, _ = await asyncio.wait_for(process.communicate(), 45)
+            except BaseException:
+                process.kill()
+                await process.wait()
+                raise
+            assert process.returncode == 0, logs.decode(errors="replace")
+            requests = json.loads(output.read_text(encoding="utf-8"))
+            assert len(requests) == 1
+            assert any(part["type"] == "image_url" for message in requests[0]["messages"]
+                       if isinstance(message["content"], list) for part in message["content"])
+            assert len(core.store.rows("SELECT * FROM outbox")) == 1
+    run(scenario())
