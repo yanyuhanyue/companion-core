@@ -225,25 +225,35 @@ class MemoryContext:
                 "rows": [row for row in rows if row["memory_id"] in selected],
                 "requires_relevance_review": bool(rows)}
 
-    def continuation(self, conversation_id, now, *, actor="owner", event_ids=None):
-        """Three recent episode excerpts; explicit event scope must cover the whole episode.
+    def continuation(self, conversation_id, now, *, actor="owner", event_ids=None,
+                     current_event_ids=(), used_memory_ids=(), source_check=None):
+        """Three Hot/Warm episode excerpts within the caller's authorized source scope.
 
         These are attributed observations, never current facts or proof of a sent reply.
         Context integration must explicitly opt in with its authorized conversation/sources.
         """
         from companion.diary import is_management_command
+        from companion.memory_projections import MemoryProjections, identifiers
 
         version = self._begin(actor)
         sources = MemorySources(self.memory, now)
         allowed = set(event_ids) if event_ids is not None else None
-        since = after(now, -7 * 86400)
-        rows = self.store.rows(
-            "SELECT * FROM episodes WHERE conversation_id=? AND privacy_scope='private' "
-            "AND status='ACTIVE' AND ended_at>=? AND started_at<=? "
-            "ORDER BY ended_at DESC,episode_id LIMIT 21", (conversation_id, since, now),
+        current = set(identifiers(current_event_ids))
+        used = identifiers(used_memory_ids)
+        recalled = set()
+        for memory in self.store.rows(
+            "SELECT * FROM memories WHERE memory_id IN (SELECT value FROM json_each(?)) "
+            "AND status IN ('CONFIRMED','HYPOTHESIS') AND confidence>0 "
+            "AND privacy_scope='private'", (encode(used),),
+        ):
+            if sources.current(memory):
+                recalled.update(item["event_id"] for item in sources.evidence(memory["memory_id"]))
+        projection = MemoryProjections(self.memory)
+        rows, truncated = projection.continuation_candidates(
+            conversation_id, now, current | recalled,
         )
         items = []
-        for row in rows[:20]:
+        for row in rows:
             ids = [link["event_id"] for link in self.store.rows(
                 "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id LIMIT 21",
                 (row["episode_id"],),
@@ -253,6 +263,14 @@ class MemoryContext:
             events = [sources.event(key, require_text=False) for key in ids]
             if any(event is None or event["conversation_id"] != conversation_id
                    for event in events):
+                continue
+            if source_check is not None and not all(source_check(key) for key in ids):
+                continue
+            goals, _ = projection._goals(ids, sources, allowed)
+            temperature, reasons = projection._temperature(
+                events, goals, current, now, bool(set(ids) & recalled),
+            )
+            if temperature == "Cold":
                 continue
             excerpts = []
             for event in sorted(events, key=lambda e: (
@@ -271,11 +289,13 @@ class MemoryContext:
                                  "occurred_at": event["occurred_at"], "excerpt": text[:200]})
             if excerpts:
                 items.append({"episode_id": row["episode_id"], "kind": "owner_observation",
+                              "temperature": temperature, "attention_reasons": reasons,
                               "source_event_ids": ids,
                               "excerpts": excerpts[-3:], "truncated": len(excerpts) > 3})
+        items.sort(key=lambda item: item["temperature"] != "Hot")
         check_version(self.memory, version)
         return {"privacy_epoch": version[0], "as_of": now, "items": items[:3],
-                "truncated": len(rows) > 20 or len(items) > 3}
+                "truncated": truncated or len(items) > 3}
 
     def history(self, memory_id, now, *, actor="owner", memory_ids=None):
         """Owner-inspectable revision chain, including superseded facts with live support.

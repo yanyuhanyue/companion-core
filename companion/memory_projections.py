@@ -27,6 +27,53 @@ class MemoryProjections:
     def __init__(self, memory):
         self.memory, self.store = memory, memory.store
 
+    def continuation_candidates(self, conversation_id, now, selected_event_ids):
+        """Bound each candidate lane before provenance and native heat validation.
+
+        Separate lanes prevent recent episodes from hiding old active goals. SQL
+        only nominates candidates: _goals and _temperature decide usable attention.
+        """
+        base = ("SELECT DISTINCT e.* FROM episodes e WHERE e.conversation_id=? "
+                "AND e.privacy_scope='private' AND e.status='ACTIVE' AND e.started_at<=? ")
+        goal = (
+            "EXISTS (SELECT 1 FROM episode_events ee JOIN goal_evidence ge USING(event_id) "
+            "JOIN goals g USING(goal_id) LEFT JOIN goal_steps s USING(goal_id) "
+            "LEFT JOIN commitments c USING(goal_id) "
+            "WHERE ee.episode_id=e.episode_id AND g.redacted=0 AND ("
+            "g.state IN (SELECT value FROM json_each(?)) "
+            "OR s.state='EXECUTION_UNCERTAIN' "
+            "OR (g.kind='commitment' AND g.state!='CANCELLED' AND "
+            "(c.state IS NULL OR c.state NOT IN ('FULFILLED','EXPLAINED_FAILURE') "
+            "OR NOT EXISTS (SELECT 1 FROM outbox o WHERE o.message_id=c.feedback_message_id "
+            "AND o.state='SENT' AND o.action_type='qq.private.reply'))) "
+            "OR (g.state='DONE' AND NOT EXISTS (SELECT 1 FROM observations o "
+            "WHERE o.event_id=g.result_event_id AND o.redacted=0 "
+            "AND o.result_status IN ('FETCHED','WATCHED') AND s.state='DONE' "
+            "AND s.outcome_event_id=g.result_event_id)) "
+            "OR EXISTS (SELECT 1 FROM exploration_requests r "
+            "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
+            "AND r.operation='read' AND json_extract(r.goal_step_json,'$.goal_id')=g.goal_id "
+            "AND json_extract(r.goal_step_json,'$.step_id')=s.step_id "
+            "AND (r.state='UNKNOWN' OR a.state='UNKNOWN'))))"
+        )
+        lanes = [
+            ("EXISTS (SELECT 1 FROM episode_events ee WHERE ee.episode_id=e.episode_id "
+             "AND ee.event_id IN (SELECT value FROM json_each(?)))",
+             encode(sorted(selected_event_ids))),
+            (goal, encode(sorted(ACTIVE))),
+            ("e.ended_at>=?", after(now, -7 * 86400)),
+        ]
+        selected, truncated = {}, False
+        for predicate, parameter in lanes:
+            rows = self.store.rows(base + "AND " + predicate +
+                " ORDER BY e.ended_at DESC,e.episode_id LIMIT 21",
+                (conversation_id, now, parameter))
+            truncated |= len(rows) > 20
+            selected.update((row["episode_id"], row) for row in rows[:20])
+        return sorted(selected.values(), key=lambda row: (
+            row["ended_at"], row["episode_id"],
+        ), reverse=True), truncated
+
     def snapshot(self, now, *, memory_ids=(), episode_ids=(), current_event_ids=(),
                  used_memory_ids=(), event_ids=None, actor="owner"):
         self.memory.require_owner(actor)
