@@ -198,7 +198,7 @@ def test_reuse_workflow_keeps_only_lightweight_validation_and_full_only_artifact
     record = next(i for i, step in enumerate(steps)
                   if step.get("run") == "python scripts/ci_reuse.py record")
     upload = next(i for i, step in enumerate(steps)
-                  if step.get("uses") == "actions/upload-artifact@v4")
+                  if step.get("uses", "").startswith("actions/upload-artifact@"))
     assert gate < record < upload
     assert (steps[record]["if"] == steps[upload]["if"]
             == "${{ needs.preflight.outputs.profile == 'full' }}")

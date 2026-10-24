@@ -304,3 +304,14 @@ def test_docs_gate_requires_its_documentation_validation(state):
     results = needs("docs")
     results["quality"]["result"] = state
     assert not check_results("docs", results)
+
+
+def test_external_workflow_actions_use_immutable_commit_references():
+    workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text("utf-8"),
+                         Loader=yaml.BaseLoader)
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            if "uses" in step:
+                action, commit = step["uses"].rsplit("@", 1)
+                assert action and len(commit) == 40
+                assert set(commit) <= set("0123456789abcdef")

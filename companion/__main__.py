@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -46,6 +47,14 @@ async def worker(settings):
             core.store.close()
 
 
+def trusted_proxy_ips(value):
+    """Explicit proxy socket addresses only; forwarded headers never grant authority."""
+    try:
+        return [str(ipaddress.ip_address(item.strip())) for item in value.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError("Use fixed proxy IP addresses, comma separated") from None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Companion Core v0.5")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -72,6 +81,8 @@ def main():
     server = sub.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
+    server.add_argument("--forwarded-allow-ips", type=trusted_proxy_ips, default=[],
+                        help="Trust X-Forwarded-For/Proto only from these fixed proxy IPs")
     server.add_argument("--memory-control-grant")
     server.add_argument("--memory-control-sha256")
     archive = sub.add_parser("backup")
@@ -104,7 +115,8 @@ def main():
                 host=args.host,
                 port=args.port,
                 access_log=False,
-                proxy_headers=False,
+                proxy_headers=bool(args.forwarded_allow_ips),
+                forwarded_allow_ips=args.forwarded_allow_ips,
             )
         elif args.command == "worker":
             logging.getLogger("httpx").setLevel(logging.WARNING)
