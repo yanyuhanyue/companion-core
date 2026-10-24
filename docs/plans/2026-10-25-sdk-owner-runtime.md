@@ -180,3 +180,30 @@ excerpts, source locations and the existing external-untrusted label, then one O
 The shared Core patch describes an empty-text capture as a received non-text message; it does
 not supply a request on the owner's behalf. Shared app and codec edits remain narrow patches
 for the integration owner alongside the prior native queue patches.
+
+
+### SDK animation analysis
+
+The SDK exposes `understand_video(question)` only with the configured video model and native
+content/image purposes. It consumes the original `agent_image_inputs`; model arguments cannot
+select a URL, path, account or model. Animated sources have a first-frame preview and an
+explicit temporal limitation in chat context. A selected tool reuses the existing bounded
+PyAV/H.264 conversion, preserving frame composition and timing for one animation cycle.
+Static images remain image parts. No selected animation means no video-provider call.
+
+The existing `agent_tool_calls` STARTED/RETURNED lifecycle owns the tool outcome. Its metadata
+binds the original paid request, authority, source snapshot and encoded payload. The Reader
+foreign-key column is untouched. The existing budget reserve/complete path keeps the original
+chat logical request and all limits, and rechecks source, job, permission and tool binding at
+actual model dispatch. An unknown outcome keeps its charge and cannot restart the tool.
+Historical v1 video evidence retains its original verification functions; native execution is
+owned by the SDK tool, including the final chat response and original Outbox transaction.
+
+The inspected [DSH vision tool](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/media/vision-tool.ts)
+registers auxiliary analysis as a tool and keeps image bytes out of session logs. This port
+reuses that separation through [Pydantic AI function tools](https://pydantic.dev/docs/ai/tools-toolsets/tools/)
+and existing source references. Encoding uses the existing [PyAV encode/mux pattern](https://pyav.org/docs/stable/cookbook/numpy.html),
+without adding a model loop or media downloader. Synthetic checks decode the actual MP4
+received by the video model, verify changing frames, and exercise GIF/APNG through an
+independent SDK process. The authenticated WebSocket daemon also carries a GIF through the
+same queue, Core upload, independent SDK tool and one final reply.

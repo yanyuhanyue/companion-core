@@ -23,6 +23,10 @@ async def reply(core, job, snapshots):
     if (core.settings.content_enabled and core.settings.observation_enabled
         and "content" in view.policy.purposes):
         tools.append(reader_tools(core, job, snapshots, persistence))
+    from companion import qq_video, video_input
+
+    if video_input.enabled(core.settings) and {"content", "image"} <= set(view.policy.purposes):
+        tools.append(qq_video.toolset(core, job, snapshots))
     messages = [] if conversation is not None else core.context(
         job, memories=[], snapshots=snapshots,
         model_tools=tuple(name for toolset in tools for name in toolset.tools),

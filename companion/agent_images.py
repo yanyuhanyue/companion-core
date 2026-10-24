@@ -217,7 +217,12 @@ def _prepared(store, settings, clock, job, item_id):
         or hashlib.sha256(mime.encode() + b"\0" + data).hexdigest() != row["fingerprint"]
         or image_spool.deadline(store, row) != row["expires_at"]):
         raise CoreError("LIVE_IMAGE_ORIGINAL_CHANGED", 403)
-    return row, image, prepare(data, mime, settings.paid_model.image_input)
+    from companion import video_input
+
+    prepared = (video_input.preview(data, mime, settings.paid_model.image_input)[0]
+                if video_input.enabled(settings) else
+                prepare(data, mime, settings.paid_model.image_input))
+    return row, image, prepared
 
 
 def inputs(store, settings, clock, job):

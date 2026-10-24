@@ -28,7 +28,7 @@ from tests.test_owner_authority import activate, prepare
 
 
 @asynccontextmanager
-async def window(core, tmp_path, *, media=False, content=False, history=False):
+async def window(core, tmp_path, *, media=False, content=False, history=False, video=False):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
@@ -40,6 +40,16 @@ async def window(core, tmp_path, *, media=False, content=False, history=False):
                 max_pixels_per_image=10000, max_images_per_request=1)})
         core.settings.private_files = PrivateFilesConfig(
             enabled=True, parser_image="sha256:" + "f" * 64)
+    if video:
+        from pydantic import SecretStr
+
+        from tests.test_video_understanding import video_policy
+
+        core.settings.video_model_key = SecretStr("synthetic-video-provider-key")
+        core.settings.paid_model = core.settings.paid_model.model_copy(update={
+            "video_input": video_policy()})
+        core.settings.content = core.settings.content.model_copy(update={
+            "image_daily_micro_usd": 10000})
     key = Ed25519PrivateKey.generate()
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
         bot_qq_id=core.settings.bot_qq_id,

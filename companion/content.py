@@ -23,7 +23,6 @@ from companion import (
     owner_input,
     qq_files,
     qq_images,
-    qq_video,
     video_input,
 )
 from companion.contracts import CoreError
@@ -1097,9 +1096,7 @@ class ContentService:
                 )
             result_model = cfg.model_name
             if response.tool_calls:
-                response = await qq_video.analyze(model, s, cfg, clock, job, response.tool_calls)
-                result_model = cfg.paid_model.video_input.model
-                sampling = ["[本批动图已按原时间顺序转为无声视频分析，图像预览仅为首帧。]"]
+                raise CoreError("OWNER_AUTHORITY_REQUIRED", 403)
             text = redact(response.text, cfg).replace(
                 cfg.model_key.get_secret_value(), "[REDACTED]",
             )

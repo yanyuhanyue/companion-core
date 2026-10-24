@@ -172,7 +172,7 @@ def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
     run(scenario())
 
 
-@pytest.mark.parametrize("kind", ["image", "file"])
+@pytest.mark.parametrize("kind", ["image", "file", "animation"])
 def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, kind):
     from websockets.asyncio.server import serve
 
@@ -185,11 +185,14 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
     async def scenario():
         if kind == "file":
             configure(core)
-        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+        async with window(core, tmp_path, media=True, content=True,
+                          video=kind == "animation") as (client, config, plan):
             stop, wake, uploaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
-            data = pixels() if kind == "image" else b"first\n\nsecond"
+            media_kind = "file" if kind == "file" else "image"
+            mime = "image/gif" if kind == "animation" else "image/png"
+            data = pixels(mime) if media_kind == "image" else b"first\n\nsecond"
             segment = ({"type": "image", "data": {"url": "https://gchat.qpic.cn/daemon-original"}}
-                if kind == "image" else {"type": "file", "data": {"file_id": "daemon-file",
+                if media_kind == "image" else {"type": "file", "data": {"file_id": "daemon-file",
                     "file": "notes.txt", "file_size": len(data)}})
             frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[segment]))
 
@@ -204,7 +207,7 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
 
             async def downloaded(request):
                 return httpx.Response(200, content=data, headers={
-                    "content-type": "image/png" if kind == "image" else "text/plain"})
+                    "content-type": mime if media_kind == "image" else "text/plain"})
 
             async def lookup(request):
                 assert kind == "file" and request.url.path == "/get_private_file_url"
@@ -212,7 +215,7 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
                     "data": {"url": "https://files.example.test/daemon-file"}})
 
             async def response_hook(response):
-                if response.request.url.path.endswith("/" + kind):
+                if response.request.url.path.endswith("/" + media_kind):
                     assert response.status_code == 200
                     uploaded.set()
 
@@ -261,8 +264,14 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
             arguments = ((core.settings, core.clock.now, job["job_id"],
                 [answer("原图已经收到。")], "SUCCEEDED", str(output)) if kind == "image" else
                 (core.settings, core.clock.now, job["job_id"], data, str(output)))
+            if kind == "animation":
+                from tests.test_native_video import responses
+
+                arguments = (core.settings, core.clock.now, job["job_id"],
+                             responses(), "SUCCEEDED", str(output))
             config_path.write_bytes(pickle.dumps(arguments))
-            worker_script = "reader_sdk_worker.py" if kind == "image" else "file_sdk_worker.py"
+            worker_script = ("reader_sdk_worker.py" if media_kind == "image" else
+                             "file_sdk_worker.py")
             process = await asyncio.create_subprocess_exec(sys.executable,
                 str(Path(__file__).with_name(worker_script)), str(config_path),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -274,10 +283,13 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
                 raise
             assert process.returncode == 0, logs.decode(errors="replace")
             requests = json.loads(output.read_text(encoding="utf-8"))
-            assert len(requests) == 1
-            if kind == "image":
+            assert len(requests) == (3 if kind == "animation" else 1)
+            if media_kind == "image":
                 assert any(part["type"] == "image_url" for message in requests[0]["messages"]
                            if isinstance(message["content"], list) for part in message["content"])
+                if kind == "animation":
+                    assert "video_url" in encode(requests[1]["messages"])
+                    assert "one_animation_cycle" in encode(requests[2]["messages"])
             else:
                 wire = encode(requests[0]["messages"])
                 assert "first" in wire and "second" in wire and "notes.txt" in wire
