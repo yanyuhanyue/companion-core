@@ -22,7 +22,7 @@ from companion.poke_protocol import (
 from companion.store import Store, encode, migrate
 from companion.transport import enqueue_reply_parts
 from tests.poke_authority_fixture import environment as native_environment
-from tests.poke_authority_fixture import owner_turn, refresh, signed
+from tests.poke_authority_fixture import owner_turn, refresh, settle, signed
 
 
 def native_frame(now=1792382400, **changes):
@@ -261,6 +261,7 @@ def test_one_decision_commits_at_most_one_native_outbox_entry(environment, kind)
     receive(env)
     job = claim(env)
     choice = {"kind": kind, **({"text": "怎么啦？"} if kind == "text" else {})}
+    settle(env, job, choice)
     result = poke.finish(env.store, env.settings, env.approval, job, choice, env.clock())
     assert poke.finish(env.store, env.settings, env.approval, job, choice, env.clock()) == result
     assert len(result) == (0 if kind == "none" else 1)
@@ -290,6 +291,7 @@ def test_new_owner_text_after_decision_blocks_send(environment):
     env = environment
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "poke"})
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "poke"}, env.clock())[0]
     owner_turn(env, 2, "先停一下", delivered=False)
@@ -316,6 +318,7 @@ def test_erased_consumed_context_clears_poke_derivatives_but_retains_rate_charge
     turn = owner_turn(env, 1, "需要撤回的内容")
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "text", "text": "由此产生的回应"})
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "text", "text": "由此产生的回应"}, env.clock())[0]
     original = env.store.one("SELECT * FROM poke_batches")
@@ -375,6 +378,7 @@ def test_poke_migration_preserves_preceding_outbox_actions_and_foreign_keys(envi
     assert not env.store.rows("PRAGMA foreign_key_check")
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "poke"})
     poke.finish(env.store, env.settings, env.approval, job, {"kind": "poke"}, env.clock())
     with pytest.raises(sqlite3.IntegrityError):
         env.store.execute("UPDATE outbox SET action_type='qq.group.poke'")
@@ -384,6 +388,7 @@ def test_tampered_native_content_and_decision_are_not_delivery_authority(environ
     env = environment
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "poke"})
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "poke"}, env.clock())[0]
     value = {"kind": "poke", "target_user_id": "10003"}

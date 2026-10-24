@@ -104,7 +104,7 @@ def owner_turn(env, number, text, *, delivered=True, approve_only=False):
     return result
 
 
-def settle(env, job):
+def settle(env, job, decision):
     """Run the actual paid admission once before testing domain commit or delivery."""
     messages = poke.context(env.store, env.settings, job, clock=env.clock)
     request_id = budget.reserve(env.store, env.settings, job["job_id"], "qq_poke",
@@ -113,7 +113,7 @@ def settle(env, job):
     async def complete():
         def provider(request):
             return httpx.Response(200, json={"choices": [{"message": {
-                "content": '{"kind":"none"}'}}],
+                "content": json.dumps(decision)}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 10}})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
