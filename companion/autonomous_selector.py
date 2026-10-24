@@ -193,6 +193,34 @@ def native_selector(core, worker_id) -> RoundRobin:
             raise CoreError("NATIVE_MEMORY_STEP_REQUIRED", 503)
         return await operation()
 
+    async def rem():
+        if not core.settings.rem.enabled or not core.settings.memory_enabled:
+            return UnitResult(False)
+        from companion import rem as rem_domain
+
+        # The lane guard checks both purposes. Pin selection to the original
+        # current reference too; a stale job never gains its successor's grant.
+        try:
+            view = owner_authority.current(core.store, core.settings, core.clock, purpose="rem")
+        except CoreError:
+            return UnitResult(False)
+        now = core.clock()
+        row = core.store.one(
+            "SELECT j.job_id FROM jobs j JOIN events e USING(event_id) "
+            "WHERE j.kind='rem' AND e.redacted=0 AND json(j.authority_json)=json(?) "
+            "AND (j.state='QUEUED' OR (j.state='RETRY_WAIT' AND j.next_attempt_at<=?) "
+            "OR (j.state='RUNNING' AND j.lease_until<=?)) "
+            "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) ORDER BY j.rowid LIMIT 1",
+            (encode(view.authority.as_dict()), now, now, now),
+        )
+        if row is None:
+            return UnitResult(bool(rem_domain.schedule_due(core)))
+
+        async def execute():
+            return await core.run_once(worker_id, job_id=row["job_id"])
+
+        return await run_native_unit(execute)
+
     async def social():
         result = await social_autonomy_runtime.run_once(
             core.store, core.settings, core.model, core.clock, worker_id=worker_id,
@@ -212,5 +240,6 @@ def native_selector(core, worker_id) -> RoundRobin:
         lane("diary", diary, ("diary",)),
         lane("consolidation", consolidation, ("consolidation",)),
         lane("memory", memory, ("memory",)),
+        lane("rem", rem, ("rem", "memory")),
         lane("social", social, ("social",)),
     ), lambda: foreground_clear(core))

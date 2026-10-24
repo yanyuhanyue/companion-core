@@ -138,6 +138,11 @@ purpose。activity 还须匹配原 job 的完整授权引用，并由原生 chec
 重绑旧任务。已批准但未入库的签名输入按当前引用阻止新后台 turn。领域截止时间只读取可为空的
 `policy.expires_at`；没有截止时间不补造窗口。STOP、授权版本变化和恢复仍触发原 wakeup 重算。
 
+Wake 在推进或过期处理目标前同时要求 `wake`、`goals`、`exploration`；Affect 仅在开关开启且
+具备独立 `affect` purpose 时读取。REM 默认关闭，启用后还须具备 `rem` 与 `memory`，每轮只
+创建一个原生 REM job 或执行一次指定 job；原预算准入负责每日调用数和日／月费用上限。
+REM 沿用同一轮转，预算拒绝或空闲不会占用其他 N1–N3 lane 的下一轮机会，输出仅为私人虚构记录。
+
 Life、Diary、Social 的默认关闭／SHADOW、DND、每日次数、冷却、SKIP/DEFER 都由原生模块处理。
 静默的一次检查不调用模型；SKIP 消费原候选，不新增消息。公平性只保证进程持续运行且存在
 空闲资源时，持续可用的后台 lane 获得有限轮转机会；不保证持续前台流量下后台按时完成。
