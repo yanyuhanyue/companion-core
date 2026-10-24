@@ -279,7 +279,8 @@ def lease_deliveries(store, settings, request, now):
             "('PENDING','RETRY_WAIT','LEASED','SENDING')) "
             "ORDER BY o.rowid LIMIT ?",
             (now, request.delivery_lane, int(account), int(account),
-             int(private_life.enabled(settings) and poke.enabled(settings)), request.limit),
+             int((owner or private_life.enabled(settings)) and poke.enabled(settings)),
+             request.limit),
         )
         items = []
         for row in rows:

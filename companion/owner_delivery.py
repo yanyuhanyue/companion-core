@@ -20,13 +20,18 @@ def _sources(store, settings, clock, job, *, executing=False):
     if job is None:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
     view = owner_authority.check_job(store, settings, clock, job,
-        purpose=owner_authority.model_purpose(store, job["kind"], job["job_id"]),
+        purpose="poke" if job["kind"] == "poke" else owner_authority.model_purpose(
+            store, job["kind"], job["job_id"]),
         executing=executing)
     reply_revision.check_job(store, job)
     if job["kind"] == "chat":
         owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
+    elif job["kind"] == "poke":
+        from companion import poke
+
+        poke.check_job(store, settings, view, job, clock=clock)
     else:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
     return view
@@ -39,7 +44,8 @@ def _usage(store, job, view):
     if (any(row["state"] != "SETTLED" or not row["authority_json"]
             or json.loads(row["authority_json"]) != view.authority.as_dict() for row in rows)
         or not reply_revision.control_job(store, job)
-        and not any(row["scenario"] == job["kind"] for row in rows)):
+        and not any(row["scenario"] == ("qq_poke" if job["kind"] == "poke" else job["kind"])
+                    for row in rows)):
         raise CoreError("OWNER_DELIVERY_SETTLED_MODEL_REQUIRED", 403)
     return [row["request_id"] for row in rows]
 
@@ -48,7 +54,8 @@ def _material(store, row, job, view, requests):
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
     if (not event or row["origin_event_id"] != job["event_id"]
         or row["conversation_id"] != job["conversation_id"]
-        or row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
+        or row["action_type"] not in ({"qq.private.reply", "qq.private.poke"}
+            if job["kind"] == "poke" else {"qq.private.reply", "qq.private.proactive"})
         or row["content_sha256"] != paid_budget.sha(json.loads(row["content_json"]))):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     return {"authority": view.authority.as_dict(), "job_id": job["job_id"],
@@ -60,6 +67,15 @@ def _material(store, row, job, view, requests):
 
 def record_replies(store, settings, clock, job, message_ids):
     """Pin replies created by the still-running native model job."""
+    if job["kind"] not in {"chat", "activity"}:
+        raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
+    return _record_replies(store, settings, clock, job, message_ids, executing=True)
+
+
+def record_poke_reply(store, settings, clock, job, message_ids):
+    """The settled native interaction pins its decision before its running job completes."""
+    if job["kind"] != "poke" or len(message_ids) != 1:
+        raise CoreError("PRIVATE_POKE_DELIVERY_REQUIRED", 403)
     return _record_replies(store, settings, clock, job, message_ids, executing=True)
 
 
@@ -83,7 +99,9 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
         return
     view = _sources(store, settings, clock, job, executing=executing)
     requests = _usage(store, job, view)
-    group = reply_group(store, message_ids[0])
+    first = store.one("SELECT action_type FROM outbox WHERE message_id=?", (message_ids[0],))
+    group = None if first and first["action_type"] == "qq.private.poke" else reply_group(
+        store, message_ids[0])
     if group:
         envelopes = segment_envelopes(group)
         if (len(group["text"]) > view.policy.max_reply_chars
@@ -99,6 +117,10 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
         if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
             raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
         material = _material(store, row, job, view, requests)
+        if job["kind"] == "poke":
+            from companion import poke
+
+            poke.check_delivery(store, settings, view, message_id, clock=clock)
         store.execute("UPDATE outbox SET authority_json=? WHERE message_id=?",
                       (encode(view.authority.as_dict()), message_id))
         store.insert("runtime_meta", key=DELIVERY + message_id, value=encode(material))
@@ -121,6 +143,10 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
         or material != _material(store, row, job, view, _usage(store, job, view))):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     reply_revision.check_delivery(store, message_id)
+    if job["kind"] == "poke":
+        from companion import poke
+
+        poke.check_delivery(store, settings, view, message_id, clock=clock)
     if problem := notices.delivery_problem(store, settings, message_id, clock()):
         raise CoreError(problem, 403)
     if row["action_type"] == "qq.private.proactive" and not proactive_allowed(

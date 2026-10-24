@@ -1272,7 +1272,7 @@ class Core(Runtime):
         if job is None:
             return False
         try:
-            messages = poke.context(self.store, self.settings, job)
+            messages = poke.context(self.store, self.settings, job, clock=self.clock)
             request_id = budget.reserve(
                 self.store, self.settings, job["job_id"], "qq_poke", messages, self.clock(),
                 clock=self.clock,
@@ -1280,19 +1280,16 @@ class Core(Runtime):
             response = await budget.complete(
                 self.model, self.store, self.settings, request_id, messages, "qq_poke", self.clock,
                 source_check=lambda: poke.check_job(
-                    self.store, self.settings, self.settings.live_text_window, job,
+                    self.store, self.settings, None, job, clock=self.clock,
                 ),
             )
             decision = poke.decide(response.text, self.settings.poke_policy)
             with self.store.transaction():
-                approval, _ = live_text.check_job(self.store, self.settings, self.clock, job)
-                message_ids = poke.finish(
+                approval = owner_authority.check_job(
+                    self.store, self.settings, self.clock, job, purpose="poke", executing=True)
+                poke.finish(
                     self.store, self.settings, approval, job, decision, self.clock(),
                 )
-                if message_ids:
-                    live_text.record_replies(
-                        self.store, self.settings, self.clock, job, message_ids,
-                    )
                 self.store.audit("poke.completed", job["job_id"], job["trace_id"], self.clock(),
                                  decision=decision.kind)
         except Exception as error:

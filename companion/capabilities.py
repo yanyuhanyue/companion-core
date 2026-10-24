@@ -423,16 +423,15 @@ def _voice_facts(store, settings, now, operation, live_blocks):
 
 
 def _poke_facts(store, settings, now, model_blocks, send_blocks, *, native=False):
-    from companion import poke
+    from companion import owner_authority, poke
 
     config = settings.poke_policy
-    unavailable = _private_scope(settings, "poke_scope", "owner_poke_v1",
-                                  "PRIVATE_POKE_SCOPE_REQUIRED")
-    if not unavailable:
-        try:
-            poke.policy(settings, settings.live_text_window)
-        except CoreError as error:
-            unavailable.append(error.code)
+    unavailable = []
+    try:
+        view = owner_authority.current(store, settings, lambda: now, purpose="poke")
+        poke.policy(settings, view)
+    except CoreError as error:
+        unavailable.append(error.code)
     if native and (not config.allow_native or config.mode not in {"auto", "poke_only"}):
         unavailable.append("PRIVATE_POKE_NATIVE_DISABLED")
     paused = []

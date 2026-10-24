@@ -12,6 +12,7 @@ from pydantic import AwareDatetime, Field
 
 from companion import cumulative, input_recall, live_text, paid_budget, private_life, reply_revision
 from companion.contracts import CoreError
+from companion.owner_authority_protocol import AuthorityReference
 from companion.store import after, encode
 
 RECALL_DOMAIN = b"companion-core/onebot-owner-recall/v1\x00"
@@ -42,6 +43,18 @@ class CancelBeforeSend(live_text.WindowReference):
     cause: Literal["OWNER_INPUT_PENDING"] | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
+    pending_event_id: str | None = Field(default=None, pattern=r"^evt_[a-f0-9]{64}$",
+                                        exclude_if=lambda value: value is None)
+
+
+class OwnerCancelBeforeSend(AuthorityReference):
+    message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
+    lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
+    content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reply_revision: int | None = Field(default=None, ge=0, strict=True,
+                                       exclude_if=lambda value: value is None)
+    cause: Literal["OWNER_INPUT_PENDING"] | None = Field(
+        default=None, exclude_if=lambda value: value is None)
     pending_event_id: str | None = Field(default=None, pattern=r"^evt_[a-f0-9]{64}$",
                                         exclude_if=lambda value: value is None)
 
@@ -302,7 +315,13 @@ def input_state(store, settings, event_id):
 def cancel_before_send(store, settings, clock, body):
     """Consume the Bridge's narrow pre-delegate non-dispatch attestation."""
     with store.transaction():
-        approval = approval_for_receipt(store, settings, body.window_sha256)
+        native = isinstance(body, OwnerCancelBeforeSend)
+        if native:
+            from companion import owner_authority
+
+            approval = owner_authority.evidence(store, settings, body.authority)
+        else:
+            approval = approval_for_receipt(store, settings, body.window_sha256)
         key = "input_cancel_before_send:" + body.message_id
         prior = live_text._meta(store, key)
         material = body.model_dump(mode="json")
@@ -321,14 +340,33 @@ def cancel_before_send(store, settings, clock, body):
                        and row["state"] in {"LEASED", "SENDING"})
             if (body.cause is None) != (body.pending_event_id is None):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
-            record = live_text._meta(store, private_life.DELIVERY + body.message_id)
-            expected = {"plan_sha256": body.window_sha256,
+            record = live_text._meta(store, ("owner_delivery:" if native else private_life.DELIVERY)
+                                     + body.message_id)
+            expected = {**({"authority": body.authority} if native else {
+                            "plan_sha256": body.window_sha256}),
                         "message_id": body.message_id, "event_id": row["origin_event_id"],
                         "action_type": row["action_type"],
                         "content_sha256": row["content_sha256"],
                         "delivery_key": row["delivery_key"]}
             bound_delivery = record and all(record.get(key) == value
                                             for key, value in expected.items())
+            if native and (json.loads(row["authority_json"]) != body.authority
+                or not record or record.get("authority") != body.authority
+                or body.content_sha256 != record.get("content_sha256")
+                or any(record.get(key) != value for key, value in expected.items()
+                       if key != "content_sha256")
+                or store.one("SELECT 1 FROM audit_log WHERE action='delivery.result' "
+                             "AND entity_id=?",
+                             (body.message_id,))):
+                raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
+            if native and row["content_sha256"] != body.content_sha256:
+                erased_source = store.one(
+                    "SELECT 1 FROM job_sources s JOIN events e USING(event_id) "
+                    "WHERE s.job_id=? AND (e.redacted=1 OR EXISTS "
+                    "(SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id)) LIMIT 1",
+                    (record.get("job_id"),))
+                if row["content_sha256"] != "" or not erased_source:
+                    raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             poke_delivery = bool(store.one(
                 "SELECT 1 FROM poke_batches WHERE response_message_id=?", (body.message_id,),
             ))
@@ -360,7 +398,9 @@ def cancel_before_send(store, settings, clock, body):
                     notice_identity = record and all(record.get(key) == value
                         for key, value in expected.items() if key != "content_sha256")
                     if (body.reply_revision is not None or not notice_identity
-                        or record.get("window_notice") != "commitment"
+                        or (not native and record.get("window_notice") != "commitment")
+                        or (native and not store.one("SELECT 1 FROM jobs WHERE job_id=? "
+                            "AND kind='activity'", (record.get("job_id"),)))
                         or body.content_sha256 != record.get("content_sha256")
                         or (row["content_sha256"] != body.content_sha256
                             and not (erased and row["content_sha256"] == ""))
@@ -379,10 +419,12 @@ def cancel_before_send(store, settings, clock, body):
                 raise CoreError("INPUT_CANCEL_BEFORE_SEND_UNPROVEN", 409)
             if not pending:
                 try:
+                    if native:
+                        reply_revision.check_delivery(store, body.message_id)
                     if poke_delivery:
                         from companion import poke
 
-                        poke.check_delivery(store, settings, approval, body.message_id)
+                        poke.check_delivery(store, settings, approval, body.message_id, clock=clock)
                     else:
                         reply_revision.check_delivery(store, body.message_id)
                 except CoreError as error:

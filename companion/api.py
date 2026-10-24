@@ -61,7 +61,7 @@ from companion.owner_authority_protocol import (
     OwnerRecall,
     OwnerSendCheck,
 )
-from companion.poke_protocol import PokeCapture
+from companion.poke_protocol import OwnerPokeCapture, PokeCapture
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
 from companion.voice_node_api import register_voice_node_routes
@@ -697,6 +697,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/owner-authority/cancel-before-send", dependencies=auth)
+    async def owner_not_sent(body: input_protocol.OwnerCancelBeforeSend, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/send-check", dependencies=auth)
     async def live_text_send(body: live_text.SendCheck):
         core = app.state.core
@@ -705,6 +711,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/live-text/pokes", dependencies=auth)
     async def receive_poke(body: PokeCapture):
         core = app.state.core
+        return poke.receive(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/pokes", dependencies=auth)
+    async def receive_owner_poke(body: OwnerPokeCapture, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
         return poke.receive(core.store, settings, core.clock, body)
 
     @app.post(prefix + "/voice-inputs/{event_id}", dependencies=auth)
