@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import AsyncClient
+from pydantic import Field
 
 from companion import (
     __version__,
@@ -35,6 +36,7 @@ from companion.contracts import (
     LeaseToken,
     MemoryDecision,
     SearchRequest,
+    StrictModel,
 )
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
@@ -53,6 +55,10 @@ from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
 from companion.voice_node_api import register_voice_node_routes
 from companion.voice_protocol import MAX_RESULT_BODY_BYTES
+
+
+class AffectResetRequest(StrictModel):
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
 class BodyLimit:
@@ -402,6 +408,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.get("/internal/v2/affect", dependencies=control_auth)
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
+
+    @app.post("/internal/v2/affect/reset", dependencies=control_auth)
+    async def affect_reset(body: AffectResetRequest, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return core.affect.reset(core.settings.owner_qq_id, body.request_id, core.ledger)
 
     @app.get("/internal/v2/expression-learning", dependencies=control_auth)
     async def expression_learning(response: Response):

@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from companion import (
     __version__,
     budget,
+    conversation_policy,
     dialogue_history,
     image_spool,
     input_protocol,
@@ -196,6 +197,7 @@ class Core(Runtime):
                 control_command = native_controls and (
                     is_life_command(body["text"]) or is_memory_command(body["text"])
                     or command in {"发送状态", "核对发送", "暂停主动分享", "恢复主动分享"}
+                    or (command == "重置互动" and not arguments)
                 )
                 if control_command:
                     body["control_command"] = True
@@ -245,6 +247,8 @@ class Core(Runtime):
                     self.content.schedule(event.event_id)
                     self.content.followup(event.event_id)
                     owner_exploration.schedule(self, event.event_id)
+                if native_controls and command == "重置互动" and not arguments:
+                    self.affect.reset(cfg.owner_qq_id, event.event_id, self.ledger)
                 self.affect.observe(event.event_id)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
                 return {
@@ -432,6 +436,13 @@ class Core(Runtime):
                     current = self._expression_learning_reference(job, self.affect.snapshot())
                     if current is None or current["snapshot"] != snapshot["proof"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
+                elif snapshot["kind"] == "affect":
+                    self.affect.revalidate(snapshot["proof"])
+                elif snapshot["kind"] == "conversation_policy":
+                    conversation_policy.revalidate(snapshot["proof"],
+                        self.settings.conversation_policy,
+                        current_text=json.loads(job["body_json"]).get("text", ""),
+                        affect=self.affect.snapshot())
                 elif snapshot["kind"] == "voice":
                     self.voice.check_context(job, snapshot["proof"])
             except CoreError as error:
@@ -517,7 +528,12 @@ class Core(Runtime):
         text = body.get("text", "")
         expression_rules, expression_data = self.expression.instruction_parts(job["event_id"])
         rules = PRINCIPLES + expression_rules
-        dynamic_rules = [expression_data]
+        affect = self.affect.snapshot()
+        rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
+            rules, cfg.conversation_policy if job["kind"] == "chat" else None,
+            current_text=text, affect=affect,
+        )
+        dynamic_rules = [expression_data, policy_data]
         if private_life.enabled(cfg):
             from companion.capabilities import prompt_parts as capability_prompt
             from companion.capabilities import snapshot as capability_snapshot
@@ -597,7 +613,6 @@ class Core(Runtime):
                 # still checks the complete request against its hard limits.
                 available = max(2048, available)
             content_reference = self.content.context_message(job["event_id"], available - 24)
-        affect = self.affect.snapshot()
         goals = self.life.context()
         if goals:
             references.append(
@@ -622,6 +637,7 @@ class Core(Runtime):
             )
             reference_sources.append((references[-1],
                                       {row["event_id"] for row in affect["evidence"]}))
+            reference_proofs.append((references[-1], {"kind": "affect", "proof": affect}))
         if learned := self._expression_learning_reference(job, affect):
             references.append(learned["message"])
             reference_sources.append((learned["message"], learned["source_event_ids"]))
@@ -752,6 +768,9 @@ class Core(Runtime):
         reply_revision.remember_sources(s, job, actual_sources)
         retained = [proof for reference, proof in reference_proofs
                     if any(message is reference for message in messages)]
+        if conversation_decision.mode == "ENABLED":
+            retained.append({"kind": "conversation_policy",
+                             "proof": conversation_decision.receipt()})
         self._check_context_snapshots(job, retained)
         if snapshots is not None:
             snapshots.extend(retained)
@@ -1067,6 +1086,9 @@ class Core(Runtime):
         if not command:
             return None
         now, s = self.clock(), self.store
+        if command == "重置互动" and not arguments:
+            self.affect.reset(self.settings.owner_qq_id, job["event_id"], self.ledger)
+            return "已重置互动反馈；之后的新反馈会重新生效。"
         if command in {"读日记", "日记列表", "目标列表", "承诺列表", "反思列表",
                        "当前交互状态", "为什么形成偏好", "你记得什么"}:
             # These service responses do not yet expose complete source receipts.

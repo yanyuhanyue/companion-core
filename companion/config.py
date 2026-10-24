@@ -19,6 +19,7 @@ from pydantic import (
 
 from companion.bili_video_config import BiliVideoConfig
 from companion.cloud_budget import CloudBudgetConfig
+from companion.conversation_policy import ConversationPolicyConfig
 from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.file_evidence import PrivateFilesConfig
@@ -384,6 +385,9 @@ class Settings(BaseModel):
     model_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-flash"
     provider: str = "deepseek"
+    conversation_policy: ConversationPolicyConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     token_measurement: TokenMeasurementConfig | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )

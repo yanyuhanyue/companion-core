@@ -114,7 +114,7 @@ UNKNOWN、异常 usage、来源撤回、到期、预算拒绝或停止要求均�
 话题继续方式。它不推断隐藏意图、隐私或真实 AI 心理，不设固定人格、称呼和亲密话术，
 也不产生主动任务、工具授权或发送决定。
 
-运行集成需由 Core 在组装前调用 `prompt_parts`，并在原有来源校验中调用 `revalidate`。
+Core 已在组装前调用 `prompt_parts`，并在原有来源校验中调用 `revalidate`。
 进入实际上下文的 Affect 快照也须独立重验，以拦截生成期间发生的重置或失效，不依赖策略启用。
 配置未提供时序列化保持原形；建议的 Settings 字段为可空 `conversation_policy`，默认
 省略。本组件没有模型客户端、数据库、计费或投递入口。当前模式与真实授权、实机可用性
@@ -129,6 +129,12 @@ Affect 仍只有原来的四维明确反馈与 TTL。`AffectEngine.reset` 仅接
 原生 Ledger 的读入、重放与 apply 必须识别此目标并在通用删除分支之前处理；未接入时
 reset 返回 `AFFECT_RESET_NOT_INTEGRATED`，不会伪报成功。Core 的显式控制入口应使用
 `/重置互动`，沿用 owner/private 认证与既有命令范围，引用、近似文本或带参数文本不执行。
+
+原生 Ledger、Core 控制命令与主人管理 API 已接入。`POST /internal/v2/affect/reset`
+仅接受控制令牌及 `request_id`（1–128 个 ASCII 字母、数字或 `_.:-`），返回 `RESET`
+和持久化截止时间；Owner runtime OFF 时也能管理。此操作不激活授权、模型或投递。
+真实 HTTP 与独立 Core worker 的合成检查覆盖上下文后重置阻断 dispatch、无需模型的
+重置命令，以及旧加密备份恢复后重放屏障。UNKNOWN 与原预算 journal 保持原状。
 
 36 个合成 case、v1 策略字节和 v1 计划格式保持原样。导出会重新校验计划 hash、每项
 payload hash、共同输入 hash，并检查同一对的历史、当前输入和模型参数完全一致。
