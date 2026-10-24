@@ -33,8 +33,11 @@ def run_worker(settings_path, now, stop_after_extract):
             value = {"memories": [
                 {"subject": "project", "kind": "fact", "fact_key": "source-" + str(index),
                  "content": row["text"], "evidence_event_id": row["event_id"],
-                 "evidence_quote": row["text"]} for index, row in enumerate(data[:2])
-            ]}
+                 "evidence_quote": row["text"], "salience": (8, 3)[index]}
+                for index, row in enumerate(data[:2])
+            ], "episode_summaries": [{"title": "项目安排",
+                "summary": "讨论了两个项目的安排，并计划周末核对资料；这些仍是待办事项。",
+                "source_event_ids": [row["event_id"] for row in data if row["text"].strip()]}]}
         elif rules == REVIEW_RULES:
             calls.append("memory_review")
             value = {"relations": [{"same": None, "conflicts": []} for _ in data["candidates"]]}

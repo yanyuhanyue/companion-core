@@ -130,5 +130,24 @@ def test_authenticated_ingress_and_independent_nightly_steps_restart(core, tmp_p
                 conversation["conversation_id"], core.clock(),
             )["items"]
             assert len(core.store.rows("SELECT * FROM memories")) == 2
+            assert core.store.rows(
+                "SELECT status,importance FROM memories ORDER BY importance") == [
+                {"status": "HYPOTHESIS", "importance": 0.3},
+                {"status": "HYPOTHESIS", "importance": 0.8}]
+            episode = core.store.one("SELECT * FROM episodes WHERE status='ACTIVE'")
+            ids = [row["event_id"] for row in core.store.rows(
+                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id",
+                (episode["episode_id"],))]
+            changes = core.store.db.total_changes
+            summary = core.memory.episode_summary(episode["episode_id"], ids, core.clock())
+            assert summary["kind"] == "model_summary" and summary["title"] == "项目安排"
+            assert "仍是待办事项" in summary["text"] and summary["text"] == episode["summary"]
+            assert core.store.db.total_changes == changes
+            assert core.store.one("SELECT scenario,state FROM model_usage WHERE request_id=?",
+                                   (summary["request_id"],)) == {
+                "scenario": "memory_extract", "state": "SETTLED"}
+            checkpoint = core.store.one("SELECT value FROM runtime_meta "
+                                         "WHERE key='memory_extraction_checkpoint'")
+            assert "episode_summaries" not in json.loads(checkpoint["value"])["batch"]
             assert not core.store.one("SELECT 1 FROM model_usage WHERE state!='SETTLED'")
     run(scenario())
