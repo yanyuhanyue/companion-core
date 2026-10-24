@@ -544,6 +544,14 @@ class Core(Runtime):
                                  "不得按相似度、重复次数或新旧顺序投票决定真假。")
         memory_reference, hits = None, []
         current = {"role": "user", "content": text or "请看看我分享的内容。"}
+        if (job["kind"] == "chat" and not text and not body.get("rich")
+            and not (cfg.content_enabled and self.content._rows(job["event_id"]))):
+            current["content"] = "本条主人消息的接收事实（不是主人原话或新指令）：\n" + encode({
+                "owner_text": "",
+                "media_kinds": [item["kind"] for item in body.get("media", [])],
+                "shared_content_kinds": [item["kind"] for item in body.get("shared_content", [])],
+                "readable_content": False,
+            })
         content_reference = ""
         if (
             cfg.content_enabled
@@ -1252,68 +1260,59 @@ class Core(Runtime):
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)
             if reply is None:
-                body = json.loads(job["body_json"])
-                if (
-                    job["kind"] == "chat"
-                    and not body.get("text")
-                    and not body.get("rich")
-                    and not (self.settings.content_enabled and self.content._rows(job["event_id"]))
-                ):
-                    reply = "目前支持文字聊天；这条附件我还不能读取，请补充文字。"
-                else:
-                    if self.settings.memory_enabled and notices.reference(job) is None:
-                        hits, paused_memory = await self.recall_for_reply(job)
-                        self._check_reply_epoch(job, captured_epoch)
-                        messages = self.context(job, hits, paused_memory,
-                                                snapshots=context_snapshots)
-                    else:
-                        messages = self.context(job, snapshots=context_snapshots)
+                if self.settings.memory_enabled and notices.reference(job) is None:
+                    hits, paused_memory = await self.recall_for_reply(job)
                     self._check_reply_epoch(job, captured_epoch)
-                    self._check_context_snapshots(job, context_snapshots)
-                    emit(
-                        "t_context_ready",
-                        job["trace_id"],
-                        elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6,
-                    )
-                    request_id = budget.reserve(
-                        self.store,
-                        self.settings,
-                        job["job_id"],
-                        job["kind"],
-                        messages,
-                        self.clock(),
-                        clock=self.clock,
-                    )
-                    model_started_ns = time.perf_counter_ns()
-                    emit("t_model_request", job["trace_id"])
-                    response = await budget.complete(
-                        self.model,
-                        self.store,
-                        self.settings,
-                        request_id,
-                        messages,
-                        job["kind"],
-                        self.clock,
-                        source_check=lambda: self._check_context_snapshots(
-                            job, context_snapshots, current_request=request_id,
-                        ),
-                    )
-                    model_done_ns = time.perf_counter_ns()
-                    usage = self.store.one(
-                        "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
-                        (request_id,),
-                    )
-                    emit(
-                        "t_model_done",
-                        job["trace_id"],
-                        elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
-                        budget_micro_usd=usage["billed_micro_usd"] if usage else None,
-                        model_usage_state=usage["state"] if usage else None,
-                        at_ns=model_done_ns,
-                    )
-                    request_id = None
-                    reply = redact(response.text, self.settings)
-                    generated_reply = True
+                    messages = self.context(job, hits, paused_memory,
+                                            snapshots=context_snapshots)
+                else:
+                    messages = self.context(job, snapshots=context_snapshots)
+                self._check_reply_epoch(job, captured_epoch)
+                self._check_context_snapshots(job, context_snapshots)
+                emit(
+                    "t_context_ready",
+                    job["trace_id"],
+                    elapsed_ms=(time.perf_counter_ns() - started_ns) / 1e6,
+                )
+                request_id = budget.reserve(
+                    self.store,
+                    self.settings,
+                    job["job_id"],
+                    job["kind"],
+                    messages,
+                    self.clock(),
+                    clock=self.clock,
+                )
+                model_started_ns = time.perf_counter_ns()
+                emit("t_model_request", job["trace_id"])
+                response = await budget.complete(
+                    self.model,
+                    self.store,
+                    self.settings,
+                    request_id,
+                    messages,
+                    job["kind"],
+                    self.clock,
+                    source_check=lambda: self._check_context_snapshots(
+                        job, context_snapshots, current_request=request_id,
+                    ),
+                )
+                model_done_ns = time.perf_counter_ns()
+                usage = self.store.one(
+                    "SELECT billed_micro_usd,state FROM model_usage WHERE request_id=?",
+                    (request_id,),
+                )
+                emit(
+                    "t_model_done",
+                    job["trace_id"],
+                    elapsed_ms=(model_done_ns - model_started_ns) / 1e6,
+                    budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+                    model_usage_state=usage["state"] if usage else None,
+                    at_ns=model_done_ns,
+                )
+                request_id = None
+                reply = redact(response.text, self.settings)
+                generated_reply = True
             with self.store.transaction():
                 self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:

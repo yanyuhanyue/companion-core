@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from astrbot_plugin_companion_bridge.bridge import Spool, normalize
 from companion.contracts import CoreError, InboundEvent
+from companion.model import ModelResponse
 from scripts.probe_onebot import probe
 from tests.conftest import run
 
@@ -99,7 +100,17 @@ def test_switch_requires_drained_inbox_and_generation_survives_restart(tmp_path)
 
 
 @pytest.mark.parametrize("segment", ["image", "record", "reply", "json"])
-def test_media_and_extension_segments_do_not_claim_unimplemented_capabilities(core, segment):
+def test_media_and_extension_segments_delegate_wording_without_untrusted_refs(
+    core, monkeypatch, segment,
+):
+    calls = []
+    wording = "这是一条由测试模型生成的回复：" + segment
+
+    async def complete(messages, scenario):
+        calls.append((messages, scenario))
+        return ModelResponse(wording, 100, 20)
+
+    monkeypatch.setattr(core.model, "complete", complete)
     raw = astrbot_event("", segment=segment)
     raw.message_obj.raw_message["message"][0]["data"] = {
         "file": "https://untrusted.example/private-record?token=not-to-fetch"
@@ -110,8 +121,10 @@ def test_media_and_extension_segments_do_not_claim_unimplemented_capabilities(co
     core.ingest(InboundEvent.model_validate(payload), key)
     assert run(core.run_once("chat"))
     text = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])["text"]
-    assert "目前支持文字聊天" in text
-    assert core.model.calls == []
+    assert text == wording
+    assert len(calls) == 1 and calls[0][1] == "chat"
+    assert "untrusted.example" not in json.dumps(calls[0][0])
+    assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
 
 
 def test_protocol_change_does_not_bypass_owner_or_bot_identity(core):
