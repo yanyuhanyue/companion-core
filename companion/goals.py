@@ -191,6 +191,13 @@ class GoalEngine:
             raise CoreError("GOAL_REFLECTION_UNAVAILABLE", 409)
         return suggestion
 
+    def validate_authority(self, goal):
+        from companion import owner_authority
+
+        if owner_authority.required(self.store, self.settings):
+            owner_authority.current(self.store, self.settings, self.clock, purpose="goals",
+                                    authority=json.loads(goal["authority_json"]))
+
     def propose(self, proposal, kind="self", *, reflection_suggestion_id=None):
         if not self.settings.goals_enabled:
             raise CoreError("GOALS_DISABLED", 403)
@@ -225,6 +232,12 @@ class GoalEngine:
             previous = s.one("SELECT * FROM goals WHERE proposal_key=?", (key,))
             if previous:
                 return previous["goal_id"]
+            from companion import owner_authority
+
+            authority = {}
+            if owner_authority.required(s, self.settings):
+                authority = owner_authority.current(s, self.settings, self.clock,
+                                                     purpose="goals").authority.as_dict()
             active = s.one(
                 "SELECT COUNT(*) AS n FROM goals WHERE state NOT IN ('DONE','FAILED','CANCELLED')"
             )["n"]
@@ -244,6 +257,7 @@ class GoalEngine:
                 created_at=now,
                 updated_at=now,
                 reflection_suggestion_id=reflection_suggestion_id,
+                authority_json=encode(authority),
             )
             for event_id in sorted(set(proposal.source_event_ids)):
                 s.insert("goal_evidence", goal_id=goal_id, event_id=event_id)
@@ -256,6 +270,7 @@ class GoalEngine:
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
             goal = self.get(goal_id)
+            self.validate_authority(goal)
             if autonomous and goal["kind"] != "self":
                 raise CoreError("OWNER_REQUIRED", 403)
             if goal["state"] in TERMINAL:
@@ -507,6 +522,7 @@ class GoalEngine:
             )
             if not row:
                 return None
+            self.validate_authority(self.get(row["goal_id"]))
             self.validate_reflection(self.get(row["goal_id"])["reflection_suggestion_id"])
             self.validate_sources(self.source_ids(row["goal_id"]))
             token = uid("goal_lease")
@@ -532,6 +548,7 @@ class GoalEngine:
             }
 
     def validate_lease(self, step):
+        self.validate_authority(self.get(step["goal_id"]))
         current = self.store.one("SELECT * FROM goal_steps WHERE step_id=?", (step["step_id"],))
         if (
             not current
