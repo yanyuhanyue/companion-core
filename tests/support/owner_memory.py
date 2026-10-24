@@ -18,14 +18,16 @@ from tests.test_owner_recall import receipt
 
 
 @asynccontextmanager
-async def environment(core, tmp_path, *, history=True):
+async def environment(core, tmp_path, *, history=True, additional_purposes=(),
+                      capability_policies=None):
     original, key = captured(core, tmp_path)
     core.settings.memory_enabled = True
     core.settings.extraction_idle_seconds = 0
     core.settings.context_soft_tokens = 12000
     view = owner_authority.current(core.store, core.settings, core.clock)
     policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
-        "purposes": ["chat", "memory", *(["history"] if history else [])],
+        "purposes": ["chat", "memory", *(["history"] if history else []), *additional_purposes],
+        "capability_policies": capability_policies or {},
         "memory_scope": "owner_private", "history": {
             "scope": "owner_private", "not_before": after(core.clock(), -1),
             "max_turns": 15, "max_utf8_bytes": 16000} if history else {}})
@@ -35,7 +37,7 @@ async def environment(core, tmp_path, *, history=True):
         base_url=f"http://127.0.0.1:{port}", trust_env=False,
         headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
     ) as client:
-        async def admit(number, text):
+        async def admit(number, text, *, ingest_event=True):
             source = original.source_event_id.rsplit(":", 1)[0] + ":" + str(number)
             value = original.model_dump(mode="json", exclude={"signature"}) | {
                 "authority": reference, "source_event_id": source,
@@ -47,6 +49,8 @@ async def environment(core, tmp_path, *, history=True):
             accepted = await client.post("/internal/v1/owner-authority/inputs/approve",
                                          json=capture.model_dump(mode="json"))
             assert accepted.status_code == 200, accepted.text
+            if not ingest_event:
+                return capture, accepted.json()
             message = inbound(core, capture)
             message = message.model_copy(update={
                 "occurred_at": datetime.fromisoformat(core.clock()),
