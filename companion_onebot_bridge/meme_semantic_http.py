@@ -3,7 +3,9 @@
 import base64
 import hashlib
 import re
+from datetime import datetime
 
+from .images import owner_media_request
 from .meme_caption import (
     CaptionIdentity,
     EmbeddingBatch,
@@ -20,16 +22,38 @@ JOB = re.compile(r"job_[a-f0-9]{32}")
 SHA = re.compile(r"[a-f0-9]{64}")
 
 
+async def core_request(runtime, client, path, body, *, check, after=True):
+    """Use the original native transport fence and retain its expiry across the await."""
+    check()
+    authority = dict(runtime.authority)
+    approval = await runtime.check(client, purpose="meme")
+    expires = datetime.fromisoformat(approval["expires_at"]) if approval["expires_at"] else None
+
+    def fence():
+        check()
+        runtime.verify()
+        if runtime.authority != authority:
+            raise ValueError("OWNER_AUTHORITY_BINDING_CHANGED")
+        if expires is not None and runtime.clock() >= expires:
+            raise ValueError("OWNER_AUTHORITY_EXPIRED")
+
+    async def before():
+        fence()
+
+    result = await owner_media_request(runtime, client, path, body,
+                                      purpose="meme", before=before)
+    if after:
+        fence()
+    return result
+
+
 class SemanticHTTP:
     def __init__(self, window, client, *, check):
         self.window, self.client, self.check = window, client, check
 
     async def post(self, suffix, body, *, after=True):
-        self.check()
-        result = await self.window.core_post(self.client, BASE + suffix, body)
-        if after:
-            self.check()
-        return result
+        return await core_request(self.window, self.client, BASE + suffix, body,
+                                  check=self.check, after=after)
 
     async def profile(self):
         value = await self.post("/semantics/profile", {})
