@@ -1,6 +1,6 @@
 """One background decision using retained public evidence and the native Outbox.
 
-Core calls this after foreground, poke and meme work. This module never fetches
+The Life selector calls this between bounded native units. This module never fetches
 account data or sends an action; reviewed assets and real profile probes arrive
 through the authenticated evidence interfaces on SocialAutonomy.
 """
@@ -21,6 +21,8 @@ _INVALID_PLAN = {
     "SOCIAL_PROFILE_BASELINE_REQUIRED", "SOCIAL_PROFILE_BASELINE_STALE",
     "SOCIAL_DUPLICATE_ACTION", "SOCIAL_PROFILE_PURPOSE_REQUIRED",
     "SOCIAL_PROFILE_SOURCE_REQUIRED", "PRIVACY_CHANGED",
+    "OWNER_AUTHORITY_REVISION_CHANGED", "OWNER_AUTHORITY_REFERENCE_INVALID",
+    "SOCIAL_DELIVERY_AUTHORITY_CHANGED",
 }
 
 

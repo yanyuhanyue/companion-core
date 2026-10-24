@@ -76,11 +76,13 @@ real model expression quality.
 
 ## Authority and QZone draft handoff
 
-Live-mode model generation requires `LiveTextWindowApproval.life_shadow`, an extension of the
-existing owner/private window: exact conversation, allowed source IDs and private purposes,
-authorization hash, expiry within the window and finite item cap. This is additional to the
-original paid admission. It grants no delivery. A changed or expired approval fences commit and
-readback. Source invalidation is checked before model I/O and before commit.
+Model generation with live or retained owner-authority custody requires the current
+`OwnerAuthorityView.policy.life_shadow`: exact conversation, allowed source IDs and private
+purposes, authorization hash, expiry and finite item cap. Native activity jobs pin the complete
+owner authority reference in their admission transaction. Current permission and the original
+job lease are checked independently; a revision never rebinds an old job. This is additional to
+the original paid admission and grants no delivery. STOP, restore, changed sources and expired
+approval fence commit and readback even if runtime settings are later switched to mock/OFF.
 
 `life_shadow.qzone_draft_sources` supplies per-source `LifeQZoneSourceGrant`: grant identity and
 revision, `purpose=qzone_draft`, event ID, current source fingerprint, expiry, `audience=owner_only`

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, social_profile_sources
+from companion import budget, owner_authority, social_profile_sources
 from companion.contracts import CoreError
 from companion.observation import ArticleEvidence, ReadingEvidence, expired_sources
 from companion.privacy import redact
@@ -207,22 +207,14 @@ class SocialAutonomy:
             # Historical social quotas and native model budgets must use the same
             # calendar. Do not silently migrate either binding on reconfiguration.
             raise CoreError("SOCIAL_TIMEZONE_BINDING_CHANGED", 403)
-        if self.settings.mode == "live":
-            approval = self.settings.live_text_window
-            if (getattr(approval, "account_actions_scope", None) != "qq_social_v1"
-                or getattr(approval, "account_actions_authorization_sha256", None)
-                != cfg.authorization_sha256):
-                raise CoreError("SOCIAL_LIVE_SCOPE_REQUIRED", 403)
+        if owner_authority.required(s, self.settings):
+            owner_authority.current(s, self.settings, self.clock, purpose="social")
         return cfg
 
     def _authorized(self, *, current_request=None, current_delivery=None):
-        cfg = self._policy()
-        if self.settings.mode == "live":
-            from companion import live_text
-
-            live_text.guard(self.store, self.settings, self.clock, current_request=current_request,
-                            current_delivery=current_delivery)
-        return cfg
+        # Native model/outbox callers independently validate their pinned reference
+        # and lease. A current planning purpose alone is never an execution grant.
+        return self._policy()
 
     def _bind(self):
         _require_tx(self.store)
@@ -304,6 +296,16 @@ class SocialAutonomy:
         assets = [self._asset(ref, now).model_dump(mode="json") for ref in sorted(asset_ids)]
         profiles = [self._profile(field, now, ignore_plan) for field in sorted(profile_fields)]
         context = {"sources": sources, "assets": assets, "profiles": profiles}
+        if owner_authority.required(self.store, self.settings):
+            view = owner_authority.current(
+                self.store, self.settings, self.clock, purpose="social",
+            )
+            context["authority"] = view.authority.as_dict()
+            roots = {root["event_id"] for source in sources for root in source["dependencies"]}
+            if expired_sources(self.store, sorted(roots), after(
+                now, -view.policy.source_retention_days * 86400,
+            )):
+                raise CoreError("SOCIAL_SOURCE_EXPIRED", 403)
         if profile_purpose:
             context.update(purpose="owner_confirmed_profile", profile_material=(
                 social_profile_sources.material(self.store, self.settings, now, profile_memory_ids)
@@ -479,7 +481,7 @@ class SocialAutonomy:
     def check_retry_job(self, job):
         from companion import social_plan_jobs
 
-        event = social_plan_jobs.validate_binding(self.store, self.settings, job)
+        event = social_plan_jobs.validate_binding(self.store, self.settings, job, self.clock)
         if (not event["job_lease_until"]
             or _instant(event["job_lease_until"]) <= _instant(self.clock())
             or _instant(event["plan_expires_at"]) <= _instant(self.clock())):
@@ -540,7 +542,8 @@ class SocialAutonomy:
                 return self.get(previous["plan_id"])
             context = self.context(source_ids, asset_ids, profile_fields, profile_memory_ids)
             messages, allowed = self._messages(context, cfg)
-            candidate = _sha(context)
+            # A permission revision must not manufacture a new content candidate.
+            candidate = _sha({k: v for k, v in context.items() if k != "authority"})
             if s.one("SELECT 1 FROM social_autonomy_plans WHERE candidate_sha256=?", (candidate,)):
                 raise CoreError("SOCIAL_CANDIDATE_ALREADY_CONSIDERED", 409)
             timezone = self._bind()
@@ -668,6 +671,9 @@ class SocialAutonomy:
             or row["authorization_sha256"] != cfg.authorization_sha256):
             raise CoreError("SOCIAL_PLAN_AUTHORITY_CHANGED", 403)
         original = json.loads(row["input_snapshot_json"])
+        if owner_authority.required(self.store, self.settings):
+            owner_authority.current(self.store, self.settings, self.clock, purpose="social",
+                                    authority=original.get("authority", {}))
         if any(p["field"] in social_profile_sources.FIELDS for p in original["profiles"]):
             if (original.get("purpose") != "owner_confirmed_profile"
                 or not original.get("profile_material")
@@ -855,13 +861,21 @@ class SocialAutonomy:
         if s.one("SELECT 1 FROM social_autonomy_reservations WHERE semantic_sha256=?", (semantic,)):
             raise CoreError("SOCIAL_DUPLICATE_ACTION", 409)
         sources = json.loads(row["input_snapshot_json"])["sources"]
+        authority = {}
+        if owner_authority.required(s, self.settings):
+            from companion.account_actions import scope
+
+            view = scope(s, self.settings, self.clock,
+                         json.loads(row["input_snapshot_json"]).get("authority", {}),
+                         frozen.authorization_sha256)
+            authority = view.authority.as_dict()
         content = frozen.model_dump(mode="json")
         s.insert("outbox", message_id=frozen.message_id,
                  origin_event_id=sources[0]["ref"] if sources else None,
                  conversation_id=conversation_id, action_type=frozen.action_type,
                  content_json=encode(content), content_sha256=_sha(content), state="PENDING",
                  delivery_key=frozen.delivery_key, delivery_lane="qq_account",
-                 created_at=now, updated_at=now)
+                 created_at=now, updated_at=now, authority_json=encode(authority))
         s.insert("social_autonomy_reservations", plan_id=plan_id, message_id=frozen.message_id,
                  action_type=frozen.action_type, semantic_sha256=semantic,
                  reserved_day=_day(now, row["timezone"]), reserved_at=now)
@@ -896,6 +910,11 @@ class SocialAutonomy:
             != "onebot-direct:FriendMessage:" + self.settings.owner_qq_id
             or native["message_id"] != frozen.message_id):
             raise CoreError("SOCIAL_DELIVERY_CHANGED", 403)
+        if owner_authority.required(s, self.settings):
+            from companion.account_actions import scope
+
+            scope(s, self.settings, self.clock, json.loads(native["authority_json"]),
+                  frozen.authorization_sha256, message_id=message_id)
         return frozen
 
     def mark_dispatched(self, message_id, lease_token):

@@ -31,7 +31,7 @@ The job has one admitted attempt. A provably unadmitted refusal returns that unu
 expiry of a worker lease may reclaim only that same unadmitted request. RESERVED, SETTLED,
 UNKNOWN or any admission/cost evidence prevents replay. STOP, erasure and restore cancel mapped
 jobs using existing native cancellation and source-ledger mechanisms. Jobs also bind the original
-live window, so a successor window cannot reauthorize an old deferral. Console plan results expose
+owner authority reference, so a successor revision cannot reauthorize an old deferral. Console plan results expose
 the native job state and next due time. A populated mapping blocks downgrade for explicit data
 review, preserving original jobs and accounting history.
 
@@ -39,6 +39,27 @@ The original expiry is never extended. If an equivalent Reader refetch receives 
 the background worker retries the original frozen references, not the newer observation. Each
 reference is checked again; refetch cannot repair revoked authority or erased original evidence.
 Source deletion keeps using the existing erasure ledger. No model adapter owns storage or delivery.
+
+Social planning requires the current `social` purpose. Account execution additionally requires
+`account_actions` and the original independently configured action permission. Plans pin the owner
+reference in their source snapshot; native retry jobs and Outbox rows retain that same reference.
+The full social policy hash still protects configured action limits and payload rules. A grant
+revision is excluded from content-candidate identity so it cannot manufacture another candidate.
+Account send/probe DTOs carry `authority`, not a window hash. STOP may clear an unstarted Outbox
+lease; the retained lease receipt preserves its exact token for matching no-I/O cancellation.
+An old token, different authority or any recorded dispatch cannot use that cancellation path.
+
+This migration reuses the existing Core journal, native jobs and Outbox. The boundary follows
+[RFC 7662 current-state and scope checks](https://www.rfc-editor.org/rfc/rfc7662.html#section-2.2)
+and [SQLite transaction isolation](https://sqlite.org/lang_transaction.html): pin under the native
+write transaction, then re-read current authority at execution boundaries. DSH's
+[schedule implementation](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/schedule/schedule/src/runtime.ts)
+also separates durable inbox acknowledgement from task state; it does not supply QQ delivery proof.
+
+Domain migration checks cover owner revision/STOP, restored authority, native lease substitution,
+source erasure, charged UNKNOWN and account-purpose separation. The shared Core/API/transport
+cutover and enabled independent-worker acceptance must be verified on the integrated candidate;
+earlier window-based process receipts do not certify the new owner-authority boundary.
 
 ## Quota reads and local dates
 

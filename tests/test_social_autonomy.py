@@ -128,7 +128,7 @@ def test_no_suitable_candidate_is_a_durable_skip_without_model_cost_or_profile_d
 def test_live_planning_requires_separate_qq_authority_before_any_native_provider_gate(core):
     module = service(core)
     core.settings.mode = "live"
-    with pytest.raises(CoreError, match="SOCIAL_LIVE_SCOPE_REQUIRED"):
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
         run(module.plan("unapproved-live"))
     assert core.model.calls == []
     assert not core.store.rows("SELECT * FROM social_autonomy_plans")

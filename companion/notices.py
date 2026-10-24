@@ -5,6 +5,7 @@ import json
 import re
 from contextlib import nullcontext
 
+from companion import owner_authority
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.paid_budget import sha
@@ -157,6 +158,11 @@ def schedule(store, settings, kind, ref, conversation_id, now):
         job_id = uid("job")
         store.insert("jobs", job_id=job_id, event_id=event_id, kind="activity", state="QUEUED",
             idempotency_key=key, max_attempts=1, context_tracked=1, created_at=now, updated_at=now)
+        if owner_authority.required(store, settings):
+            owner_authority.bind_job(
+                store, settings, lambda: now, job_id,
+                purpose=owner_authority.model_purpose(store, "activity", job_id),
+            )
         for source_id in {event_id, *data["source_events"]}:
             store.insert("job_sources", job_id=job_id, event_id=source_id)
         return job_id
@@ -164,13 +170,20 @@ def schedule(store, settings, kind, ref, conversation_id, now):
 
 def validate(store, settings, job, now):
     current = store.one(
-        "SELECT j.kind,e.*,c.scope,c.owner_actor_id,c.platform FROM jobs j JOIN events e "
+        "SELECT j.kind,j.state AS job_state,e.*,c.scope,c.owner_actor_id,c.platform "
+        "FROM jobs j JOIN events e "
         "USING(event_id) JOIN conversations c USING(conversation_id) WHERE job_id=?",
         (job["job_id"],),
     )
     value = reference(current)
     if value is None:
         return None
+    if owner_authority.required(store, settings):
+        owner_authority.check_job(
+            store, settings, lambda: now, job,
+            purpose=owner_authority.model_purpose(store, "activity", job["job_id"]),
+            executing=current["job_state"] == "RUNNING",
+        )
     if (not isinstance(value, dict) or set(value) != {"kind", "ref", "material_sha256"}
         or value["kind"] not in {"share", "commitment", "life"}
         or not isinstance(value["ref"], str) or not 1 <= len(value["ref"]) <= 128
@@ -316,14 +329,15 @@ def retry_required_wording(store, settings, job, code, now):
     if (not commitment or commitment["feedback_message_id"] is not None
         or commitment["state"] != "IN_PROGRESS"):
         return False
-    from companion import live_text, paid_budget
+    from companion import paid_budget
 
     try:
         validate(store, settings, current, now)
         if settings.mode == "live":
             paid_budget.contract(settings, now)
-        if live_text.active(store, settings):
-            live_text.guard(store, settings, lambda: now)
+        if owner_authority.required(store, settings):
+            owner_authority.check_job(store, settings, lambda: now, current,
+                                      purpose="goals", executing=True)
     except CoreError:
         return False
     state = "RETRY_WAIT" if current["attempts"] == 1 else "FAILED"

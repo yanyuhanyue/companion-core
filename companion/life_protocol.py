@@ -31,7 +31,7 @@ class LifeQZoneSourceGrant(StrictModel):
 
 
 class LifeShadowApproval(StrictModel):
-    """An explicit addition to the existing private-life window, never a send grant."""
+    """Bounded Life sources and purposes in OwnerAuthority; never a send grant."""
 
     scope: Literal["owner_private_life_shadow_v1"]
     authorization_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")

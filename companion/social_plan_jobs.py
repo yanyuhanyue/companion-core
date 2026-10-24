@@ -3,9 +3,9 @@
 import json
 from contextlib import nullcontext
 
-from companion import budget, paid_budget, reply_revision
+from companion import budget, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError
-from companion.store import after, encode, uid
+from companion.store import after, encode, uid, utcnow
 
 KIND = "social_plan"
 RETRY_SECONDS = 60  # Same pre-admission delay as native required activity jobs.
@@ -40,18 +40,22 @@ def queue(module, plan_id):
         if not conversation:
             return None
         event_id, job_id = uid("evt"), uid("job")
-        window = (module.settings.live_text_window.plan_sha256
-                  if module.settings.mode == "live" else None)
+        authority = json.loads(row["input_snapshot_json"]).get("authority", {})
         s.insert("events", event_id=event_id, schema_version=1, source="system.control",
                  source_event_id="social-retry:" + plan_id,
                  conversation_id=conversation["conversation_id"], actor_id="system",
                  event_type="social.plan_retry", occurred_at=now, ingested_at=now,
-                 privacy_scope="private", body_json=encode({"plan_id": plan_id, "window": window}),
+                 privacy_scope="private",
+                 body_json=encode({"plan_id": plan_id, "authority": authority}),
                  trace_id=plan_id, memory_processed=1)
         s.insert("jobs", job_id=job_id, event_id=event_id, kind=KIND, state="QUEUED",
                  idempotency_key="social-retry:" + plan_id, max_attempts=1, context_tracked=1,
                  next_attempt_at=after(now, RETRY_SECONDS), last_error_code=row["last_error_code"],
                  created_at=now, updated_at=now)
+        if owner_authority.required(s, module.settings):
+            owner_authority.current(s, module.settings, module.clock,
+                                    purpose="social", authority=authority)
+            owner_authority.bind_job(s, module.settings, module.clock, job_id, purpose="social")
         s.insert("social_autonomy_jobs", plan_id=plan_id, job_id=job_id)
         s.insert("job_sources", job_id=job_id, event_id=event_id)
         for source in s.rows("SELECT event_id FROM social_autonomy_sources WHERE plan_id=?",
@@ -62,22 +66,24 @@ def queue(module, plan_id):
         return get(s, plan_id)
 
 
-def validate_binding(store, settings, job):
-    """Pure binding check for private-life receipts; callers own their current clock fence."""
+def validate_binding(store, settings, job, clock=utcnow):
+    """Recheck original plan, source, native lease and current owner authority."""
     from companion.social_autonomy import SocialAutonomy
 
-    cfg = SocialAutonomy(store, settings)._policy()
+    cfg = SocialAutonomy(store, settings, clock=clock)._policy()
+    if owner_authority.required(store, settings):
+        owner_authority.check_job(store, settings, clock, job, purpose="social", executing=True)
     row = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id,c.platform,c.platform_session_key,"
         "p.plan_id,p.state AS plan_state,p.redacted AS plan_redacted,p.policy_sha256,"
-        "p.expires_at AS plan_expires_at,j.lease_until AS job_lease_until "
+        "p.expires_at AS plan_expires_at,p.input_snapshot_json,"
+        "j.lease_until AS job_lease_until,j.authority_json "
         "FROM social_autonomy_jobs r JOIN social_autonomy_plans p USING(plan_id) "
         "JOIN jobs j USING(job_id) JOIN events e ON e.event_id=j.event_id "
         "JOIN conversations c USING(conversation_id) WHERE j.job_id=? AND j.kind=? "
         "AND j.state='RUNNING' AND j.lease_token=? AND j.event_id=?",
         (job["job_id"], KIND, job["lease_token"], job["event_id"]),
     )
-    window = settings.live_text_window.plan_sha256 if settings.mode == "live" else None
     if (not row or row["plan_redacted"] or row["redacted"]
         or row["plan_state"] not in {"PLANNING", "REJECTED"}
         or row["policy_sha256"] != paid_budget.sha(cfg.model_dump())
@@ -85,7 +91,11 @@ def validate_binding(store, settings, job):
             row["scope"], row["owner_actor_id"], row["platform"], row["platform_session_key"])
         != ("system.control", "system", "social.plan_retry", "private", "private", "owner",
             "qq.onebot", "onebot-direct:FriendMessage:" + settings.owner_qq_id)
-        or json.loads(row["body_json"]) != {"plan_id": row["plan_id"], "window": window}):
+        or json.loads(row["body_json"]) != {
+            "plan_id": row["plan_id"], "authority": json.loads(row["authority_json"]),
+        }
+        or json.loads(row["input_snapshot_json"]).get("authority", {})
+        != json.loads(row["authority_json"])):
         raise CoreError("SOCIAL_RETRY_JOB_FENCED", 409)
     reply_revision.check_sources(store, job["job_id"])
     return row
@@ -103,6 +113,8 @@ def claim(module, worker_id):
         if not row:
             return None
         try:
+            if owner_authority.required(s, module.settings):
+                owner_authority.check_job(s, module.settings, module.clock, row, purpose="social")
             plan = module._validate_plan(row["plan_id"], allow_unadmitted=True)
             if not module.retryable_unadmitted(plan):
                 raise CoreError("SOCIAL_RETRY_ALREADY_ADMITTED", 409)

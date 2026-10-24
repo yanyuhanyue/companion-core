@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
-from companion import budget, private_life, reply_revision
+from companion import budget, owner_authority, private_life, reply_revision
 from companion.affect import AffectEngine
 from companion.contracts import CoreError
 from companion.diary import DiaryDraft, is_management_command, render_draft
@@ -112,7 +112,12 @@ def _qzone_readback(store, settings, result, topic, sources, approved, now):
 
 
 def _source(store, settings, event_id, now):
-    cutoff = after(now, -settings.raw_event_retention_days * 86400)
+    retention = settings.raw_event_retention_days
+    if owner_authority.required(store, settings):
+        retention = min(retention, owner_authority.current(
+            store, settings, lambda: now, purpose="life",
+        ).policy.source_retention_days)
+    cutoff = after(now, -retention * 86400)
     row = store.one(
         "SELECT e.*,c.scope,c.owner_actor_id,c.platform FROM events e "
         "JOIN conversations c USING(conversation_id) WHERE e.event_id=?",
@@ -162,7 +167,7 @@ def _source(store, settings, event_id, now):
         "occurred_at": row["occurred_at"],
         "source": row["source"],
         "result_status": status,
-        "expires_at": after(row["ingested_at"], settings.raw_event_retention_days * 86400),
+        "expires_at": after(row["ingested_at"], retention * 86400),
         "source_sha256": sha(
             {
                 key: row[key]
@@ -180,7 +185,7 @@ def _source(store, settings, event_id, now):
     }
 
 
-def _completed_goal_source(store, settings, event_id, scope, now):
+def _completed_goal_source(store, settings, event_id, scope, now, authority_sha256):
     """Private purpose follows an actual result of this approval's settled Life choice."""
     from companion.notices import _settled
 
@@ -192,7 +197,7 @@ def _completed_goal_source(store, settings, event_id, scope, now):
         "AND r.authority_sha256=? AND j.state='SUCCEEDED' AND g.kind='self' "
         "AND g.state='DONE' AND g.redacted=0 AND g.result_event_id=? "
         "AND step.state='DONE' AND step.outcome_event_id=g.result_event_id",
-        (sha(scope.model_dump(mode="json")), event_id),
+        (authority_sha256, event_id),
     )
     for row in rows:
         roots = store.rows("SELECT event_id FROM goal_evidence WHERE goal_id=?", (row["goal_id"],))
@@ -214,22 +219,24 @@ def _completed_goal_source(store, settings, event_id, scope, now):
 
 def authority(store, settings, conversation_id, sources, now, *, topic_id=None, check_limit=True):
     """Current approval only. Model output and existing share consent cannot fill this in."""
-    if settings.mode != "live":
+    if not owner_authority.required(store, settings):
         return {
             "sha256": sha({"synthetic": True, "mode": settings.life_loop.mode}),
             "destinations": ["PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT"],
             "qzone": [],
         }
-    approval = settings.live_text_window
-    scope = approval.life_shadow if approval else None
+    view = owner_authority.current(store, settings, lambda: now, purpose="life")
+    scope = view.policy.life_shadow
+    authority_sha256 = sha(view.authority.as_dict())
     if (
-        not private_life.enabled(settings)
-        or scope is None
+        scope is None
         or scope.conversation_id != conversation_id
         or scope.expires_at <= datetime.fromisoformat(now)
         or any(
             source["event_id"] not in scope.source_event_ids
-            and not _completed_goal_source(store, settings, source["event_id"], scope, now)
+            and not _completed_goal_source(
+                store, settings, source["event_id"], scope, now, authority_sha256,
+            )
             for source in sources
         )
     ):
@@ -237,7 +244,7 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
     count = store.one(
         "SELECT COUNT(*) n FROM life_activity_results WHERE authority_sha256=? "
         "AND (state='SHADOW' OR (state='PENDING' AND topic_id<>?))",
-        (sha(scope.model_dump(mode="json")), topic_id or ""),
+        (authority_sha256, topic_id or ""),
     )
     if check_limit and count["n"] >= scope.max_items:
         raise CoreError("LIFE_SHADOW_ITEM_LIMIT", 429)
@@ -255,7 +262,7 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
             break
         qzone.append(grant.model_dump(mode="json"))
     return {
-        "sha256": sha(scope.model_dump(mode="json")),
+        "sha256": authority_sha256,
         "destinations": [*scope.purposes, *(["QZONE_DRAFT"] if qzone else [])],
         "qzone": qzone,
     }
@@ -338,7 +345,7 @@ class LifeTopics:
                     if retained != fingerprints:
                         continue
                     approved = None
-                    if self.settings.mode == "live":
+                    if owner_authority.required(self.store, self.settings):
                         try:
                             approved = authority(
                                 self.store,
