@@ -55,7 +55,6 @@ def main():
             for args in (
                 ["serve", "--port", str(port)],
                 ["worker"],
-                ["diary-worker"],
                 ["life-worker"],
                 ["executive-worker"],
                 ["content-worker"],
