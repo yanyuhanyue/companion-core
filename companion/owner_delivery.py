@@ -59,6 +59,21 @@ def _material(store, row, job, view, requests):
 
 
 def record_replies(store, settings, clock, job, message_ids):
+    """Pin replies created by the still-running native model job."""
+    return _record_replies(store, settings, clock, job, message_ids, executing=True)
+
+
+def record_life_draft(store, settings, clock, job, message_ids):
+    """Consume settled Life wording under its independent current private-send purpose."""
+    original = _job(store, job["job_id"])
+    if (not original or original["state"] != "SUCCEEDED" or not notices.shadow(original)):
+        raise CoreError("LIFE_SETTLED_DRAFT_REQUIRED", 409)
+    # notices.validate uses LifeTopics.delivery_material for completed Life jobs:
+    # source/wording integrity, current life+proactive and conversation revision.
+    return _record_replies(store, settings, clock, original, message_ids, executing=False)
+
+
+def _record_replies(store, settings, clock, job, message_ids, *, executing):
     """Pin each native Outbox item in the transaction that creates its complete group."""
     from companion.transport import reply_group, segment_envelopes
 
@@ -66,7 +81,7 @@ def record_replies(store, settings, clock, job, message_ids):
         raise RuntimeError("owner delivery recording requires the enqueue transaction")
     if not message_ids:
         return
-    view = _sources(store, settings, clock, job, executing=True)
+    view = _sources(store, settings, clock, job, executing=executing)
     requests = _usage(store, job, view)
     group = reply_group(store, message_ids[0])
     if group:

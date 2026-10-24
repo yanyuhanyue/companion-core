@@ -45,7 +45,7 @@ from companion.contracts import (
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
 from companion.exploration import METERED_READS_SQL
-from companion.life_protocol import TopicClosure
+from companion.life_protocol import LifeConsumeRequest, TopicClosure
 from companion.media_api import register_media_routes
 from companion.memory_control import (
     MemoryControlGrant,
@@ -495,6 +495,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         response.headers["Cache-Control"] = "no-store"
         core = app.state.core
         return core.life_topics.preview(core.settings.owner_qq_id)
+
+    @app.post("/internal/v2/life/results/{job_id}/consume", dependencies=control_auth)
+    async def consume_life_draft(job_id: str, body: LifeConsumeRequest, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return core.life_topics.consume(job_id, body, diary=core.diary)
 
     @app.post("/internal/v2/life/topics/{topic_id}/close", dependencies=control_auth)
     async def close_life_topic(topic_id: str, body: TopicClosure, response: Response):
