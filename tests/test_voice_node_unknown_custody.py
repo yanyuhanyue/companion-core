@@ -25,6 +25,8 @@ def test_quarantine_recovery_replays_ref_until_core_accepts_ready(
     lease = answer.lease
     jobs.input("local", VoiceLeaseRef.from_lease(lease))
     config, _, _ = node
+    # This case verifies custody and lost ACK replay, not a subsecond request deadline.
+    config = config.model_copy(update={"request_timeout_seconds": 5})
     directory = tmp_path / "quarantined-node"
     controls = []
 
@@ -47,7 +49,8 @@ def test_quarantine_recovery_replays_ref_until_core_accepts_ready(
             return response
 
     async def scenario():
-        async with httpx.AsyncClient(transport=LostAck(),
+        transport = LostAck()
+        async with httpx.AsyncClient(transport=transport,
                 headers={"Authorization": "Bearer " + TOKEN}) as client:
             worker = VoiceNodeWorker(config)
             with NodeState(directory) as state:
@@ -72,6 +75,7 @@ def test_quarantine_recovery_replays_ref_until_core_accepts_ready(
                 if loss:
                     with pytest.raises(VoiceProtocolError, match="VOICE_CORE_UNAVAILABLE"):
                         await worker._cycle(client, state)
+                    assert transport.loss is None, "Expected synthetic ACK loss was not consumed"
                     assert state.active_job()["phase"] == phase
                     held = core.store.one("SELECT active_job_id FROM voice_node_state")[
                         "active_job_id"]
