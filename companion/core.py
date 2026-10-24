@@ -253,7 +253,6 @@ class Core(Runtime):
                     and not body["text"].lstrip().startswith("/")):
                     if not authority or "content" in authority.policy.purposes:
                         self.content.schedule(event.event_id)
-                        self.content.followup(event.event_id)
                 if native_controls and command == "重置互动" and not arguments:
                     self.affect.reset(cfg.owner_qq_id, event.event_id, self.ledger)
                 if not authority or "affect" in authority.policy.purposes:
@@ -653,7 +652,7 @@ class Core(Runtime):
             current_text=text, affect=affect,
         )
         dynamic_rules = [expression_data, policy_data]
-        if private_life.enabled(cfg):
+        if authority or private_life.enabled(cfg):
             from companion.capabilities import prompt_parts as capability_prompt
             from companion.capabilities import snapshot as capability_snapshot
 
