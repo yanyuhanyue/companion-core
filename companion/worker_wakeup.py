@@ -96,6 +96,7 @@ class Wakeup:
         self.stop = threading.Event()
         self.watcher = None
         self.version = None
+        self.scan_started_at = None
         self.notifications = self.version_checks = 0
 
     def __enter__(self):
@@ -115,11 +116,15 @@ class Wakeup:
         return self.store.one("PRAGMA data_version")["data_version"]
 
     def before_scan(self):
+        self.scan_started_at = datetime.fromisoformat(self.clock())
         self.version = self.data_version()
 
     async def wait(self, maintenance_at=None):
         wall = datetime.fromisoformat(self.clock())
-        deadline = next_deadline(self.store, self.settings, self.kind, wall)
+        # Keep boundaries crossed during the native scan eligible for one rescan.
+        # The next before_scan advances this horizon, excluding past fenced rows.
+        deadline = next_deadline(self.store, self.settings, self.kind,
+                                 self.scan_started_at or wall)
         started = monotonic()
         # Reconcile potentially missed hints using the existing maintenance horizon;
         # a timeout with no commit/deadline does not run the business scan or Recorder.

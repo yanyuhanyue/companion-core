@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import closing
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from time import monotonic
 
 import pytest
@@ -158,6 +158,68 @@ def test_wait_record_is_not_health_and_expires_under_strict_public_projection(co
 def test_all_deadline_queries_use_existing_schema(core):
     for kind in worker_wakeup.DEADLINES:
         assert next_deadline(core.store, core.settings, kind, datetime.fromisoformat(utcnow()))
+
+
+@pytest.mark.parametrize("kind,table,field,state", [
+    ("content-worker", "content_items", "lease_until", "FETCHING"),
+    ("executive-worker", "tool_tasks", "lease_until", "LEASED"),
+])
+@pytest.mark.parametrize("crossed_during_scan", [True, False])
+def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
+    core, monkeypatch, kind, table, field, state, crossed_during_scan,
+):
+    # Isolate the actual deadline SQL and wait loop from unrelated fixture clocks,
+    # filesystem events and provider work. Both workers wait without maintenance_at.
+    start = datetime(2026, 10, 24, 12, tzinfo=UTC)
+    elapsed = [0.0]
+    monkeypatch.setattr(worker_wakeup, "monotonic", lambda: elapsed[0])
+
+    def clock():
+        return (start + timedelta(seconds=elapsed[0])).isoformat()
+
+    with closing(Store(":memory:")) as store:
+        fields = {column for _, column, _ in worker_wakeup.DEADLINES[kind]}
+        store.execute(f"CREATE TABLE {table} (state TEXT, "
+                      + ", ".join(f"{column} TEXT" for column in fields) + ")")
+        store.execute("CREATE TABLE model_admissions (request_id TEXT,lease_until TEXT)")
+        store.execute("CREATE TABLE model_usage (request_id TEXT,state TEXT)")
+        due = start + timedelta(seconds=0.1 if crossed_during_scan else -1)
+        store.execute(f"INSERT INTO {table} (state,{field}) VALUES (?,?)",
+                      (state, due.isoformat()))
+        wake = Wakeup(store, core.settings, kind, clock)
+
+        class TimeoutOnly:
+            calls = 0
+
+            def watch(self, _debounce, _step, timeout, _stop):
+                self.calls += 1
+                elapsed[0] += timeout / 1000
+                if self.calls == 3:
+                    return "stop"
+                return "timeout"
+
+        wake.watcher = watcher = TimeoutOnly()
+
+        async def scenario():
+            wake.before_scan()
+            # Native recovery sees no eligible lease before the boundary.
+            if crossed_during_scan:
+                assert store.one(f"SELECT state FROM {table} WHERE {field}<=?",
+                                 (clock(),)) is None
+            elapsed[0] = 0.2
+            if crossed_during_scan:
+                assert await wake.wait() == "deadline"
+                assert watcher.calls == 0
+                assert store.one(f"SELECT state FROM {table} WHERE {field}<=?", (clock(),))
+                # A subsequent scan can leave this row fenced. It must not cause
+                # repeated immediate wakeups simply because its lease is past due.
+                wake.before_scan()
+            with pytest.raises(asyncio.CancelledError):
+                await wake.wait()
+            assert watcher.calls == 3
+            assert elapsed[0] >= 180
+
+        run(scenario())
 
 
 @pytest.mark.parametrize("force_polling", ["true", "false"])
