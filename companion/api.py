@@ -54,7 +54,7 @@ from companion.memory_control import (
     stopped_workers,
 )
 from companion.model import ModelClient
-from companion.owner_authority_protocol import OwnerCapture, OwnerSendCheck
+from companion.owner_authority_protocol import OwnerCapture, OwnerRecall, OwnerSendCheck
 from companion.poke_protocol import PokeCapture
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
@@ -617,6 +617,14 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         response.headers["Cache-Control"] = "no-store"
         return owner_delivery.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/owner-authority/inputs/recall", dependencies=auth)
+    async def owner_input_recall(body: OwnerRecall, response: Response):
+        from companion import owner_recall
+
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return owner_recall.receive(core.store, settings, core.ledger, core.clock, body)
 
     @app.post(prefix + "/live-text/open", dependencies=auth)
     async def live_text_open(body: live_text.OpenWindow):

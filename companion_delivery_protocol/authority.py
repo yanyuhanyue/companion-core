@@ -7,6 +7,7 @@ from datetime import datetime
 CAPTURE_DOMAIN = b"companion-core/owner-capture/v2\x00"
 DELIVERY_DOMAIN = b"companion-core/owner-delivery/v2\x00"
 QUIESCENCE_DOMAIN = b"companion-core/owner-quiescence/v2\x00"
+RECALL_DOMAIN = b"companion-core/owner-recall/v2\x00"
 FIELDS = {"version", "grant_id", "revision", "policy_sha256", "restore_generation"}
 
 
@@ -90,3 +91,31 @@ def validate_send_check(value):
     if "voice" in value:
         result["voice"] = validate_voice_check(value["voice"])
     return result
+
+
+def recall_signing_payload(value):
+    """Versioned canonical recall bytes; the original capture proves direction."""
+    from companion_delivery_protocol import canonical, hash_value, identifier
+
+    fields = {"authority", "kind", "recall_id", "target_source_event_id", "target_event_id",
+              "protocol_epoch", "identity_sha256", "occurred_at", "received_at",
+              "frame_sha256", "evidence_sha256"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("OWNER_RECALL_INVALID")
+    result = {**value, "authority": validate_authority_ref(value["authority"])}
+    if (result["kind"] != "authenticated_onebot_friend_recall"
+        or not identifier(result["recall_id"], r"recall_[a-f0-9]{64}")
+        or not identifier(result["target_event_id"], r"evt_[a-f0-9]{64}")
+        or not isinstance(result["target_source_event_id"], str)
+        or not 1 <= len(result["target_source_event_id"]) <= 512
+        or not identifier(result["protocol_epoch"], r"[A-Za-z0-9_-]{8,64}")
+        or any(not hash_value(result[key]) for key in fields if key.endswith("_sha256"))):
+        raise ValueError("OWNER_RECALL_INVALID")
+    for key in ("received_at", "occurred_at"):
+        if not isinstance(result[key], str) or len(result[key]) > 48:
+            raise ValueError("OWNER_RECALL_INVALID")
+        parsed = datetime.fromisoformat(result[key])
+        if parsed.utcoffset() is None:
+            raise ValueError("OWNER_RECALL_INVALID")
+        result[key] = parsed.isoformat()
+    return RECALL_DOMAIN + canonical(result)

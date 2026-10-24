@@ -49,6 +49,15 @@ OwnerAuthority 保存主人的持久用途授权。付费策略继续使用原 B
 输入和最终发送校验响应均为 `Cache-Control: no-store`。签名有效、Bridge 登录成功或
 持有一个旧引用，均不替代最终授权、来源和有限租约校验。
 
+`POST /owner-authority/inputs/recall` 接收原签名 transport identity 绑定的
+`OwnerRecall`，使用 `recall_signing_payload` 和独立 `owner-recall/v2` 签名域。
+它沿用原 ErasureLedger 的 PENDING_TARGET / RECALLED、幂等及恢复重放。
+已 STOP 或恢复后的原授权仅用于验证撤回证据；原始捕获与出站 provider ID
+冲突时不推断消息方向。先收到撤回的输入在实际 inbox 准入前完成擦除并返回 410。
+
+后台消费者使用 `owner_input.source(..., purpose=...)` 验证本次执行用途；
+`history=True` 另外检查显式历史范围。原始签名与任务引用始终按原版本验证。
+
 ## HTTP v1 账户操作边界
 
 账户投递沿用 `/deliveries/lease`，请求明确指定 `delivery_lane=qq_account`、

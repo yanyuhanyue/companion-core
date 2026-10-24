@@ -223,6 +223,10 @@ def receive_recall(store, settings, ledger, clock, body):
 
 def apply_pending_input(store, settings, ledger, clock, event):
     """Commit recall before inbox admission, so a returned 410 cannot roll it back."""
+    from companion import owner_authority, owner_recall
+
+    if owner_authority.required(store, settings):
+        return owner_recall.apply_pending(store, settings, ledger, clock, event)
     if not private_life.enabled(settings):
         return
     with store.transaction():

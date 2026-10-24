@@ -147,3 +147,17 @@ class OwnerSendCheck(AuthorityReference):
         from companion_delivery_protocol import validate_voice_check
 
         return validate_voice_check(value) if value is not None else None
+
+
+class OwnerRecall(AuthorityReference):
+    kind: Literal["authenticated_onebot_friend_recall"]
+    recall_id: str = Field(pattern=r"^recall_[a-f0-9]{64}$")
+    target_source_event_id: str = Field(min_length=1, max_length=512)
+    target_event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
+    protocol_epoch: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+    identity_sha256: str = Field(pattern=SHA)
+    occurred_at: AwareDatetime
+    received_at: AwareDatetime
+    frame_sha256: str = Field(pattern=SHA)
+    evidence_sha256: str = Field(pattern=SHA)
+    signature: str = Field(pattern=r"^[a-f0-9]{128}$")
