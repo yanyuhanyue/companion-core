@@ -77,3 +77,18 @@ The Core integration owner removes the retired owner-exploration import and sche
 calls, and the old `Content.followup` call. Reader regression fixtures use real signed v2 input
 approval and the HTTP inbox, actual SDK calls, independent Core connections, and mocked external
 provider transport. The v1 capture helper remains only for frozen video-contract tests.
+
+
+## Native capture preparation
+
+`capture.prepare_owner_input(runtime, core_client, onebot, frame, received_at, peer)`
+returns `event`, the exact `frame_sha256`, and private `media.images` / `media.files`
+descriptors using the existing OriginalImage/OriginalFile fields. It reuses normalization,
+bounded reference enrichment, checked HTTP dispatch, and explicit current purpose checks.
+The caller supplies the authenticated WebSocket frame and original OneBotClient; OwnerRuntime
+owns capture signing, Spool/journal persistence and HTTP admission. The helper does not acquire
+attachment bytes or upload them. In particular, the returned descriptors are not Core events.
+The pinned DSH inbound reference above separates current and quoted attachments; this slice
+prepares direct image/file descriptors, while nested attachment expansion and native upload
+acceptance remain pending. The native reference-read transport rejects STOP and modified
+request bodies at its final HTTP boundary and rechecks authority after each enrichment batch.
