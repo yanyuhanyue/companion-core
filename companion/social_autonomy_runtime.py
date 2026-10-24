@@ -8,7 +8,7 @@ through the authenticated evidence interfaces on SocialAutonomy.
 import hashlib
 import json
 
-from companion import budget, social_plan_jobs
+from companion import budget, social_plan_jobs, social_profile_sources
 from companion.contracts import CoreError
 from companion.social_autonomy import SocialAutonomy, public_source
 from companion.store import after, encode, utcnow
@@ -19,7 +19,8 @@ _INVALID_PLAN = {
     "SOCIAL_SOURCE_CHANGED", "SOCIAL_SOURCE_EXPIRED", "SOCIAL_PUBLIC_SOURCE_REQUIRED",
     "SOCIAL_PRIVATE_OR_INVALID_TEXT", "SOCIAL_REVIEWED_AVATAR_REQUIRED",
     "SOCIAL_PROFILE_BASELINE_REQUIRED", "SOCIAL_PROFILE_BASELINE_STALE",
-    "SOCIAL_DUPLICATE_ACTION",
+    "SOCIAL_DUPLICATE_ACTION", "SOCIAL_PROFILE_PURPOSE_REQUIRED",
+    "SOCIAL_PROFILE_SOURCE_REQUIRED", "PRIVACY_CHANGED",
 }
 
 
@@ -67,7 +68,7 @@ def _candidates(module):
         if len(sources) >= cfg.max_source_refs:
             break
     profiles, assets = [], []
-    for field in ("nickname", "signature", "avatar"):
+    for field in ("avatar",):
         if not getattr(cfg, field + "_enabled"):
             continue
         try:
@@ -112,6 +113,37 @@ def _candidates(module):
         "asset_ids": sorted(asset["asset_id"] for asset in assets),
         "profile_fields": sorted(profile["field"] for profile in profiles),
     }
+
+
+def _profile_candidate(module):
+    fields = []
+    for field in ("nickname", "signature"):
+        if not getattr(module.config, field + "_enabled"):
+            continue
+        try:
+            module.context(profile_fields=[field])
+        except CoreError:
+            continue
+        fields.append(field)
+    if not fields:
+        return None
+    ids = social_profile_sources.candidates(module.store, module.settings, module.clock())
+    while ids:
+        context = module.context(profile_fields=fields, profile_memory_ids=ids)
+        try:
+            module._messages(context, module.config)
+        except CoreError as error:
+            if error.code != "SOCIAL_CONTEXT_TOO_LARGE":
+                raise
+            ids.pop()
+            continue
+        semantic = {"purpose": context["purpose"], "profile_material": context["profile_material"],
+                    "profiles": [{"field": p["field"], "value": p["value"]}
+                                 for p in context["profiles"]]}
+        return "social-profile:" + _fingerprint(semantic), {
+            "profile_fields": fields, "profile_memory_ids": ids,
+        }
+    return None
 
 
 def _cancel(store, plan_id, code, now):
@@ -217,20 +249,26 @@ async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-wo
         if plan["state"] == "READY":
             _enqueue(module, plan["plan_id"], conversation)
         return True
-    candidate = _candidates(module)
-    if not candidate:
-        return changed
-    key, inputs = candidate
-    previous = store.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
-    if previous:
+    candidate = None
+    for build in (_profile_candidate, _candidates):
+        try:
+            candidate = build(module)
+        except CoreError:
+            continue
+        if not candidate:
+            continue
+        key, inputs = candidate
+        previous = store.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
+        if not previous:
+            break
         if (module.retryable_unadmitted(previous)
             and social_plan_jobs.get(store, previous["plan_id"]) is None):
-            # Upgrade an old, provably unadmitted refusal to a native waiting job.
-            # It retains its original sources even after an equivalent refetch.
             try:
                 return bool(social_plan_jobs.queue(module, previous["plan_id"])) or changed
             except CoreError:
-                return changed
+                pass
+        candidate = None
+    if not candidate:
         return changed
     try:
         plan = await module.plan(key, **inputs)

@@ -32,6 +32,7 @@ from companion.social_autonomy_protocol import (
 )
 from companion.store import Store, after, encode, migrate, uid
 from tests.conftest import ingest, run
+from tests.social_profile_support import confirmed_profile_material
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import queued
 
@@ -596,7 +597,9 @@ def test_profile_result_uses_protocol_receipt_without_inventing_a_message_id(cor
     module.record_profile(ProfileBaseline(bot_qq_id="10002", field=field, value="当前资料",
                                           observed_at=core.clock(), receipt_sha256="c" * 64))
     module.model.proposal = {"kind": field, "value": value}
-    result = planned(module, ref, profile_fields=[field])
+    memory_id = confirmed_profile_material(core)
+    result = run(module.plan("profile-test-plan", profile_fields=[field],
+                             profile_memory_ids=[memory_id]))
     frozen = queue(module, result, conversation)
     assert frozen.audience is None and frozen.profile_baseline_sha256
     token = dispatch(module, frozen)
@@ -613,7 +616,10 @@ def test_changed_profile_baseline_cannot_pass_final_dispatch(core):
     module.record_profile(ProfileBaseline(bot_qq_id="10002", field="nickname", value="原昵称",
                                           observed_at=core.clock(), receipt_sha256="c" * 64))
     module.model.proposal = {"kind": "nickname", "value": "自主新昵称"}
-    frozen = queue(module, planned(module, ref, profile_fields=["nickname"]), conversation)
+    memory_id = confirmed_profile_material(core)
+    result = run(module.plan("profile-test-plan", profile_fields=["nickname"],
+                             profile_memory_ids=[memory_id]))
+    frozen = queue(module, result, conversation)
     core.clock.advance(1)
     module.record_profile(ProfileBaseline(bot_qq_id="10002", field="nickname", value="刚手动改过",
                                           observed_at=core.clock(), receipt_sha256="d" * 64))

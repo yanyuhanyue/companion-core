@@ -19,6 +19,7 @@ from companion_onebot_bridge.native_actions import content_hash
 from companion_onebot_bridge.outbound import validate_item
 from companion_onebot_bridge.window import request_stop
 from tests.conftest import ingest, run
+from tests.social_profile_support import confirmed_profile_material
 from tests.test_onebot_capture import source_window
 from tests.test_onebot_direct import config
 from tests.test_onebot_pokes import silent
@@ -32,6 +33,8 @@ def fixture(core, kind="qzone_publish"):
     conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
                                   (owner["event_id"],))["conversation_id"]
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    if kind in {"nickname", "signature"}:
+        confirmed_profile_material(core)
     policy = SocialAutonomyConfig(enabled=True, scope="qq_social_v1",
         authorization_sha256="a" * 64, qzone_enabled=True, nickname_enabled=True,
         signature_enabled=True, avatar_enabled=True, asset_policy_sha256="e" * 64,
@@ -75,7 +78,10 @@ async def plan_action(core, ref, conversation, proposal, *, review=None):
             receipt_sha256="f" * 64))
     if review:
         module.register_asset(review)
-    planned = await module.plan("bridge-account-plan",
+    memory_ids = ([core.store.one(
+        "SELECT memory_id FROM memories WHERE fact_key='profile-preference-800'"
+    )["memory_id"]] if kind in {"nickname", "signature"} else [])
+    planned = await module.plan("bridge-account-plan", profile_memory_ids=memory_ids,
         source_ids=[ref] if kind == "qzone_publish" else [],
         profile_fields=[] if kind == "qzone_publish" else [kind],
         asset_ids=[review.asset_id] if review else [])

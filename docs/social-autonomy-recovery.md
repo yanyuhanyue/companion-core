@@ -80,6 +80,42 @@ reservation, after reservation and after settlement. Cancellation, stale tokens,
 times and populated downgrade protection have dedicated checks.
 These are synthetic evidence, not real QQ acceptance or permission for paid calls/deployment.
 
-Public content remains untrusted model input. The field/authority checks bound what an authorized
-profile decision may do; they do not prove resistance to all prompt injection. This repair does
-not expand public-source authority or replace existing authorized autonomy with mandatory reviews.
+## Profile-purpose sources
+
+Nickname and signature generation use a separate `owner_confirmed_profile` input. Public
+Reader material, summaries derived from it, reviewed avatar descriptions and the current
+account-profile text do not enter that prompt. QZone retains its public-source purpose;
+avatar selection retains its reviewed-asset contract. Mixed public/profile-text requests are
+rejected instead of silently changing their meaning.
+
+`social_profile_sources` reuses native Memory source closure, pinned evidence and ledger custody.
+Eligible material is a current, conflict-free self fact/preference or owner preference, with a
+native `memory.owner_decision` audit matching the actual direct-owner QQ confirmation/correction
+command. A model-produced CONFIRMED flag or `user_confirmed` origin is insufficient. Older
+API/console decisions without an attributable command receipt are not admitted by this stricter
+consumer; the existing owner confirmation command supplies that evidence. Public/Reader or
+granted-source ancestors, missing/erased evidence, invalid conversations and expired material
+fail closed, including when other valid evidence remains. No new approval queue or authority
+store is created.
+
+Before generation, after model completion and before dispatch, Core reconstructs the same
+material and verifies its original snapshot. The complete consumed event closure, including
+the confirmation event, is attached to `social_autonomy_sources`; existing erasure hooks cancel
+pending jobs/Outbox actions and remove the stored material. A change after payment preserves
+actual fees. An old nickname/signature plan without the profile-purpose proof cannot pass final
+dispatch; unreserved READY plans are cancelled by the native runtime. Previously dispatched or
+uncertain deliveries retain their liability and are never revived.
+
+The implementation reuses [Memory source pinning](../companion/memory_context.py),
+[native owner decisions](../companion/memory.py) and the existing profile-probe text rules.
+The prior DSH execution/approval separation remains applicable. Primary guidance from
+[OWASP prompt-injection prevention](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html)
+supports enforcing permissions and parameters at the operation boundary. This change enforces
+a specific source-purpose boundary; it is not a claim that character filters or prompts eliminate
+all semantic injection. Owner-confirmed material remains subject to the existing private-text
+and sensitive-memory restrictions.
+
+Synthetic checks cover automatically confirmed memories, real owner confirmation/correction,
+Reader-derived ancestry, missing and withdrawn evidence, forget during generation and before
+send, old public-profile plans, unchanged uncertain accounting, and a real HTTP profile-baseline
+API with an independent Core worker process and mocked provider transport.

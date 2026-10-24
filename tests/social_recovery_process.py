@@ -38,18 +38,21 @@ async def main():
             os._exit(23)
         return result
 
-    calls = []
+    calls, payloads = [], []
 
     def provider(request):
         calls.append(True)
+        payloads.append(json.loads(request.content)["messages"])
         return httpx.Response(200, json={
-            "choices": [{"message": {"content": encode({
-                "kind": "qzone_publish", "text": "合成公开阅读想法。",
-                "source_refs": [args["source_id"]],
-            })}}], "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+            "choices": [{"message": {"content": encode(
+                {"kind": "nickname", "value": "星语"} if mode == "core_profile" else {
+                    "kind": "qzone_publish", "text": "合成公开阅读想法。",
+                    "source_refs": [args["source_id"]],
+                }
+            )}}], "usage": {"prompt_tokens": 100, "completion_tokens": 20},
         })
 
-    if mode in {"core_defer", "core_resume"}:
+    if mode in {"core_defer", "core_resume", "core_profile"}:
         from companion import cloud_budget
         from companion.contracts import CoreError
         from companion.core import Core
@@ -66,6 +69,7 @@ async def main():
                 idle = not await worker.run_once(mode + "-idle")
         await asyncio.to_thread(Path(args["result_path"]).write_text, json.dumps({
             "pid": os.getpid(), "worked": worked, "idle": idle, "provider_calls": len(calls),
+            "payloads": payloads,
         }), encoding="utf-8")
         return
 
