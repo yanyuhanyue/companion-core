@@ -179,7 +179,8 @@ class OwnerRuntime:
                 inputs[value["event_id"]] = value["capture_sha256"]
             elif record["kind"] in {"RECALL_RECEIVED", "RECALL_ACCEPTED",
                                     "CORE_STOP_CONFIRMED", "DELIVERY_QUIESCED", "OWNER_RECONCILED",
-                                    "OWNER_INPUT_TERMINAL", "OWNER_HANDOFF_PREPARED"}:
+                                    "OWNER_INPUT_TERMINAL", "OWNER_HANDOFF_PREPARED",
+                                    "MEDIA_QUEUED", "MEDIA_STATE"}:
                 pass  # The original durable notice projection is checked below.
             elif record["kind"] in {"IO_STARTED", "ACK", "UNKNOWN", "NOT_SENT"}:
                 value = record["data"]
@@ -218,6 +219,9 @@ class OwnerRuntime:
         from . import owner_notices
 
         owner_notices.verify(self, records, references=references)
+        from . import pending_media
+
+        pending_media.verify_owner_history(self, records)
         from . import owner_native_resolution
 
         owner_native_resolution.verify(self, records)
@@ -282,6 +286,9 @@ class OwnerRuntime:
             with self.db:
                 self.append("OWNER_STOPPED", {"authority": self.authority})
                 self.db.execute("UPDATE owner_runtime SET state='STOPPED' WHERE id=1")
+        from . import pending_media
+
+        pending_media.stop(self)
 
     async def check(self, core_client, *, purpose="chat"):
         self.verify()
@@ -319,7 +326,7 @@ class OwnerRuntime:
         self.verify()
         return result
 
-    def persist_capture(self, event, frame, *, received_at, peer):
+    def persist_capture(self, event, frame, *, received_at, peer, media=None):
         """Called only by the authenticated receive boundary after input preparation."""
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -377,6 +384,10 @@ class OwnerRuntime:
                  encode(receipt), journal.digest(self.authority)))
             self.db.execute("INSERT INTO inbox(key,fingerprint,body,trace) VALUES(?,?,?,?)",
                 (event["event_id"], fingerprint, body, event["trace_id"]))
+            if media is not None:
+                from . import pending_media
+
+                pending_media.queue_owner(self, event, media, receipt, raw)
         return True
 
     async def flush_one(self, client):

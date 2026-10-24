@@ -56,3 +56,26 @@ history purpose, retention/byte bounds and the poke batch's original cutoff.
 `verify_original` and `original_source` only inspect retained provenance, including
 after STOP. New intake, claim and source use separately recheck the current grant.
 Shared API, delivery binding and Bridge acceptance are required before activation.
+
+## Native media host integration
+
+The Bridge daemon reuses the existing durable media queue and checked HTTP
+transport. Authenticated input capture and its media manifest are persisted in
+the same transaction; queue transitions remain in the owner journal. Recall and
+STOP close the original queue, and a cutover keeps legacy custody separate from
+the new authority's journal projection.
+
+The original image upload entry points dispatch to the existing native claim,
+check and stage functions. Core waits for the original bounded upload, attaches
+the retained image to its source turn, and keeps completed originals only until
+their existing expiry. Native chat image budget admission validates the current
+image purpose, running job and exact source-bound payload before reserving funds.
+It does not introduce a separate image model workflow.
+
+This wiring reuses the inspected DSH attachment separation, Pydantic AI multimodal
+input, and checked HTTPX transport recorded in
+[the SDK runtime plan](2026-10-25-sdk-owner-runtime.md). Synthetic acceptance runs
+the daemon's real WebSocket receive, HTTP ingress and media loop, followed by a
+separate SDK worker process. Only external provider/download transport is mocked.
+The cases cover PNG/GIF/APNG, file parsing, source withdrawal, STOP, one-shot
+leases, lost receipts, later-turn image reuse and unknown model outcomes.

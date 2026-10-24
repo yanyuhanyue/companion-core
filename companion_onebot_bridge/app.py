@@ -65,11 +65,10 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
                                 runtime, core, onebot, frame, received_at, ws.remote_address)
                             if prepared is None:
                                 continue
-                            if any(prepared["media"].values()):
-                                raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
                             payload = prepared["event"]
                             added = runtime.persist_capture(payload, frame,
-                                received_at=received_at, peer=ws.remote_address)
+                                received_at=received_at, peer=ws.remote_address,
+                                media=prepared["media"])
                             if added:
                                 metrics.start(payload, received_ns)
                                 wake.set()
@@ -171,6 +170,19 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
             await pause(stop, onebot.config.poll_seconds)
 
 
+async def transfer_media(pump, stop):
+    try:
+        while not stop.is_set():
+            pump.window.verify()
+            pump.tick()
+            if pump.task is not None:
+                await pump.task
+            else:
+                await pause(stop, pump.window.config.poll_seconds)
+    finally:
+        await pump.close()
+
+
 async def run(config):
     if config.owner_authority is None:
         raise ValueError("OWNER_AUTHORITY_REQUIRED")
@@ -182,8 +194,6 @@ async def run(config):
             signal.signal(sig, lambda *_: stop.set())
     metrics = Metrics()
     with Spool(config) as spool:
-        if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
-            raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
         runtime = None
         if config.owner_authority is not None:
             from .owner_runtime import OwnerRuntime
@@ -195,6 +205,9 @@ async def run(config):
             private_http_client(config.onebot_http_url, config.onebot_token) as protocol,
         ):
             onebot = OneBotClient(config, protocol)
+            from .pending_media import MediaPump
+
+            media = MediaPump(runtime, core, protocol=onebot)
             status = await runtime.probe(core, protocol)
             if not status["connection_ready"]:
                 raise ValueError("ONEBOT_NOT_READY")
@@ -205,6 +218,7 @@ async def run(config):
                     group.create_task(upload(core, spool, wake, stop, metrics, runtime=runtime)),
                     group.create_task(deliver(core, onebot, spool, stop, metrics,
                                               runtime=runtime, protocol=protocol)),
+                    group.create_task(transfer_media(media, stop)),
                 ]
                 await stop.wait()
                 for task in tasks:

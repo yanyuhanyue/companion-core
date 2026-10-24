@@ -110,4 +110,7 @@ async def flush_one(runtime, client):
                                            "response_sha256": journal.digest(result)})
         runtime.db.execute("UPDATE automatic_recalls SET state='ACCEPTED',response_json=? "
                            "WHERE recall_id=?", (encode(result), row[0]))
+    from . import pending_media
+
+    pending_media.cancel(runtime, receipt["target_event_id"], result)
     return True

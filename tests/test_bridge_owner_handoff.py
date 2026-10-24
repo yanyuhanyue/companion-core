@@ -76,6 +76,9 @@ def test_handoff_refuses_unsettled_original_custody(config, pending):
                 spool.db.execute("INSERT INTO automatic_media VALUES('event',?,'WAITING')",
                                   (journal.digest(runtime.authority),))
                 spool.db.commit()
+                with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_JOURNAL_CHANGED"):
+                    runtime.stop()
+                return
             runtime.stop()
     with Spool(config, reconciliation_only=True) as spool:
         runtime = OwnerRuntime(spool, clock=lambda: datetime.now(UTC) + timedelta(seconds=1))

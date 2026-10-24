@@ -294,7 +294,9 @@ class Core(Runtime):
         from companion.rem import recover_interrupted
 
         recover_interrupted(s, now)
-        image_spool.cleanup(s, now)
+        from companion import agent_images
+
+        image_spool.cleanup(s, now, retain_completed=agent_images.enabled(self.settings))
         # The autonomous selector no longer consumes old fixed-timer greetings.
         # Only unadmitted queued work can be retired; retain all model/send custody.
         for job in s.rows(
@@ -385,6 +387,10 @@ class Core(Runtime):
                 and not body.get("diary_command")
                 and not body.get("control_command")
             ):
+                from companion import agent_images
+
+                if row.get("authority_json") and agent_images.waiting(self, row):
+                    return None
                 if qq_images.enabled(self.settings):
                     inflight = s.one(
                         "SELECT m.request_id FROM model_usage m JOIN model_admissions a "
@@ -698,7 +704,8 @@ class Core(Runtime):
             add_rules("\n近期对话与长期事实不一致时，说明来源差异和不确定并请主人澄清；"
                                  "不得按相似度、重复次数或新旧顺序投票决定真假。")
         memory_reference, hits = None, []
-        current = {"role": "user", "content": text or "请看看我分享的内容。"}
+        current = {"role": "user", "content": text or (
+            "主人发送了一条非文本消息。" if authority else "请看看我分享的内容。")}
         if (job["kind"] == "chat" and not text and not body.get("rich")
             and not (cfg.content_enabled and self.content._rows(job["event_id"]))):
             current["content"] = "本条主人消息的接收事实（不是主人原话或新指令）：\n" + encode({
@@ -875,6 +882,11 @@ class Core(Runtime):
                 rules, references, turns, current_input, cfg.context_soft_tokens,
                 settings=cfg, scenario=job["kind"],
             )
+        if authority and job["kind"] == "chat":
+            from companion import agent_images
+
+            if agent_images.enabled(cfg) and permitted("image"):
+                agent_images.attach(self, job, messages, sources, turns, current, snapshots)
         if (continuation and continuation["uses_recalled_memory"]
             and not any(message is memory_reference for message in messages)):
             messages = [message for message in messages if message is not continuation["message"]]

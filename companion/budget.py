@@ -74,6 +74,9 @@ def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
 ):
+    from companion import owner_authority
+
+    native_image_chat = False
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     video_binding = (reader_video_binding(store, settings, clock or (lambda: now), request_id,
@@ -108,7 +111,9 @@ def reserve(
 
         logical_request_id = logical_request_id or job_id
         image_contract(settings, job_id, logical_request_id)
-        if scenario != "content_vision" and (
+        if scenario == "chat" and owner_authority.required(store, settings):
+            native_image_chat = True
+        elif scenario != "content_vision" and (
             scenario != "chat" or not settings.live_text_window
             or settings.live_text_window.image_scope != "owner_image_v1"
         ):
@@ -139,6 +144,14 @@ def reserve(
                 check_job(store, job)
         if source_check is not None:
             source_check()
+        if native_image_chat:
+            from companion import agent_images
+
+            if not job or job["kind"] != "chat":
+                raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+            owner_authority.check_job(store, settings, clock or (lambda: now), job,
+                                      purpose="image", executing=True)
+            agent_images.check_payload(store, settings, clock or (lambda: now), job, messages)
 
         if job_id is None and scenario in {"memory_extract", "memory_review"} and chat_pending(
             store, clock() if callable(clock) else now,

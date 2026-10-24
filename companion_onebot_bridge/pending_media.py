@@ -228,10 +228,10 @@ def verify_owner_history(runtime, records):
             entries.append(record)
     if current is not None:
         history.append((current, entries))
-    verify_history(runtime, history)
+    verify_history(runtime, history, native_only=bool(runtime.legacy))
 
 
-def verify_history(window, history):
+def verify_history(window, history, *, native_only=False):
     projected = {}
     for plan, entries in history:
         plan_hash = plan if isinstance(plan, str) else plan.sha256
@@ -264,6 +264,9 @@ def verify_history(window, history):
                     raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
                 prior.update(data)
     rows = _execute(window, "SELECT * FROM automatic_media").fetchall() if exists(window) else []
+    if native_only:
+        bindings = {plan for plan, _ in history}
+        rows = [row for row in rows if row["plan_hash"] in bindings]
     if set(projected) != {digest(row["event_id"]) for row in rows}:
         raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
     for row in rows:
