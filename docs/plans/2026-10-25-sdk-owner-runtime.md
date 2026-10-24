@@ -92,3 +92,32 @@ The pinned DSH inbound reference above separates current and quoted attachments;
 prepares direct image/file descriptors, while nested attachment expansion and native upload
 acceptance remain pending. The native reference-read transport rejects STOP and modified
 request bodies at its final HTTP boundary and rechecks authority after each enrichment batch.
+
+
+## Native original-image custody
+
+The existing image claim/check/upload routes can dispatch to the native `agent_images`
+handlers. Claims reuse Content's byte reservation and finite upload lease. A signed v2 proof
+binds authority, event, slot, source digest, lease, original-byte digest and MIME. A known
+identical upload returns its existing receipt without extending retention; a lost or uncertain
+claim/upload is not permission to create a replacement lease. Upload stages bytes and does not
+run a separate vision model. The ordinary SDK chat consumes originals under the existing paid
+ledger. GIF/APNG inputs retain original bytes and use the existing bounded Pillow frame-sheet
+preparation for the image context; temporal video analysis is a separate capability.
+
+A later owner message may consume the original upload under explicit history and image scopes.
+Content initialization and worker recovery retain those originals only until their recorded
+expiry. Source recall and erasure remove access and bytes. Source replacement, STOP and expired
+upload leases reject before model work. Unknown model calls preserve the original liability and
+are not replayed; the existing honest failure notice remains available.
+
+The 0041 positive migration tests create a v1 upload proof with the frozen signing domain and
+validate it through the original verifier. The migration preserves canonical proof JSON,
+expiry, raw-file bytes and the budget journal, while creating no authority or image-consumer
+binding. A current native grant still rejects that v1 proof. Expiry and source withdrawal remove
+the retained bytes. Copying evidence therefore does not upgrade its permission.
+
+The Core/API/shared-codec and budget changes are delivered as narrow patches to R1. The image
+HTTP and independent SDK-process tests use only synthetic images and mocked provider transport.
+Native Bridge queue integration, nested attachment capture, file processing and both video
+capabilities have separate remaining acceptance work.

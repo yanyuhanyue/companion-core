@@ -28,10 +28,11 @@ from tests.test_owner_authority import activate, prepare
 
 
 @asynccontextmanager
-async def window(core, tmp_path, *, media=False):
+async def window(core, tmp_path, *, media=False, content=False, history=False):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
+    core.settings.content_enabled = content
     if media:
         core.settings.paid_model = core.settings.paid_model.model_copy(update={
             "image_input": ImageInputPolicy(approval_sha256="b" * 64,
@@ -46,9 +47,14 @@ async def window(core, tmp_path, *, media=False):
         onebot_token="s" * 32, protocol_epoch="native-capture-test",
         onebot_http_url="http://127.0.0.1:3000", onebot_ws_url="ws://127.0.0.1:3001")
     hashes = owner_authority.capability_hashes(core.settings)
+    purposes = (["chat", "image", "file"] if media else ["chat"])
+    purposes += ["content"] if content else []
+    purposes += ["history"] if history else []
     policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
         "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
-        "purposes": ["chat", "image", "file"] if media else ["chat"],
+        "purposes": purposes,
+        "history": {"scope": "owner_private", "not_before": core.clock(),
+                    "max_turns": 16, "max_utf8_bytes": 64000} if history else {},
         "capability_policies": {name: hashes[name] for name in ("image", "file")} if media else {},
         "capture": {"public_key": key.public_key().public_bytes_raw().hex(),
             "identity_sha256": paid_budget.sha([config.owner_qq_id, config.bot_qq_id]),

@@ -7,6 +7,8 @@ run. Neither the model adapter nor the event journal acquires file custody.
 
 import hashlib
 import json
+import re
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import UTC, datetime
 
@@ -17,7 +19,7 @@ from companion import image_spool, owner_authority, owner_input, qq_images, repl
 from companion.contracts import CoreError
 from companion.image_frames import prepare
 from companion.privacy import epoch
-from companion.store import after, encode
+from companion.store import after, encode, uid
 
 REFERENCE = "companion-image://"
 
@@ -60,6 +62,73 @@ def lease(store, settings, clock, event_id, lease_token):
     return view, row, images[row["slot"]]
 
 
+def _item(service, event_id, request_key):
+    matched = re.fullmatch(r"image:(0|[1-9][0-9]{0,8})", request_key)
+    if not matched:
+        raise CoreError("CONTENT_IMAGE_SLOT_INVALID", 400)
+    row = service.store.one("SELECT * FROM content_items WHERE owner_event_id=? "
+                            "AND kind='qq_image' AND slot=? AND redacted=0",
+                            (event_id, int(matched[1])))
+    if row is None:
+        raise CoreError("CONTENT_IMAGE_NOT_SHARED", 403)
+    return row
+
+
+def claim(service, event_id, request_key, source_sha256):
+    """Reserve the original bounded download once; no model inference is admitted."""
+    store, settings, clock = service.store, service.settings, service.clock
+    with store.transaction():
+        _, _, images, _ = source(store, settings, clock, event_id)
+        service._source(event_id, upload=True)
+        service.schedule(event_id)
+        row = _item(service, event_id, request_key)
+        if (row["captured_privacy_epoch"] != epoch(store) or row["slot"] >= len(images)
+            or images[row["slot"]]["source_sha256"] != source_sha256):
+            raise CoreError("OWNER_IMAGE_SOURCE_CHANGED", 403)
+        if (row["state"] != "WAITING" or not row["reserved_bytes"]
+            or row["deadline"] <= clock()):
+            raise CoreError("CONTENT_IMAGE_ALREADY_" + row["state"], 409)
+        token, until = uid("content_lease"), min(row["deadline"], after(clock(), 15))
+        store.execute("UPDATE content_items SET state='FETCHING',lease_token=?,lease_until=?,"
+                      "updated_at=? WHERE item_id=?", (token, until, clock(), row["item_id"]))
+        return {"state": "FETCHING", "lease_token": token, "lease_until": until,
+                "max_bytes": min(row["reserved_bytes"], service.options.max_image_bytes,
+                                 settings.paid_model.image_input.max_bytes_per_image)}
+
+
+def check_upload(service, event_id, lease_token, source_sha256):
+    with service.store.transaction():
+        _, row, image = lease(service.store, service.settings, service.clock, event_id, lease_token)
+        if image["source_sha256"] != source_sha256:
+            raise CoreError("OWNER_IMAGE_SOURCE_CHANGED", 403)
+        return {"approved": True, "lease_until": row["lease_until"]}
+
+
+def stage(service, event_id, request_key, data, mime, lease_token, proof):
+    """An identical known upload may return its receipt, never renew its original bytes."""
+    store, settings, clock = service.store, service.settings, service.clock
+    with store.transaction():
+        view, _, images, _ = source(store, settings, clock, event_id)
+        row = _item(service, event_id, request_key)
+        if row["slot"] >= len(images):
+            raise CoreError("OWNER_IMAGE_SOURCE_CHANGED", 403)
+        upload_proof(store, settings, view.authority.as_dict(), event_id, images[row["slot"]],
+                     lease_token, hashlib.sha256(data).hexdigest(), mime, proof)
+        if row["state"] == "SUCCEEDED":
+            saved = store.one("SELECT * FROM captured_images WHERE item_id=?", (row["item_id"],))
+            if (not saved or saved["proof_json"] != encode(proof) or saved["mime"] != mime
+                or saved["expires_at"] <= clock()):
+                raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403)
+            maximum = min(service.options.max_image_bytes,
+                          settings.paid_model.image_input.max_bytes_per_image)
+            original, original_mime = image_spool.get(store, row, clock(), maximum)
+            if original != data or original_mime != mime:
+                raise CoreError("OWNER_IMAGE_UPLOAD_INVALID", 403)
+            return {"state": "SUCCEEDED", "slot": row["slot"], "duplicate": True,
+                    "input_ready": True}
+        return accept(service, row, data, mime, lease_token, proof)
+
+
 def upload_proof(store, settings, authority, event_id, image, lease_token, media_hash, mime, proof):
     from companion_delivery_protocol.authority import image_upload_signing_payload
 
@@ -84,7 +153,7 @@ def upload_proof(store, settings, authority, event_id, image, lease_token, media
 def accept(service, original, data, mime, lease_token, proof):
     """Stage signed originals; only the ordinary chat SDK may request model inference."""
     store, settings, clock = service.store, service.settings, service.clock
-    with store.transaction():
+    with nullcontext() if store.db.in_transaction else store.transaction():
         view, row, image = lease(store, settings, clock, original["owner_event_id"], lease_token)
         if row["item_id"] != original["item_id"]:
             raise CoreError("LIVE_IMAGE_LEASE_FENCED", 409)

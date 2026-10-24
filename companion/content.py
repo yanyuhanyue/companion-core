@@ -188,7 +188,10 @@ class ContentService:
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
         self.model = model
-        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes)
+        from companion import agent_images
+
+        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes,
+                            retain_completed=agent_images.enabled(self.settings))
 
     def discard_images(self, event_id):
         rows = self.store.rows(
@@ -219,7 +222,7 @@ class ContentService:
         ) != ("qq.onebot", "owner", "private", "owner"):
             raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
         body = json.loads(event["body_json"])
-        if self.settings.owner_runtime.mode == "ENABLED":
+        if owner_authority.required(self.store, self.settings):
             view = owner_authority.current(self.store, self.settings, self.clock, purpose="content")
             owner_input.source(self.store, self.settings, view, event_id, self.clock())
         if live_text.active(self.store, self.settings):
@@ -279,6 +282,11 @@ class ContentService:
                 if item["slot"] >= 0 and (self.options.max_images_per_event == "unlimited"
                                          or item["slot"] < self.options.max_images_per_event):
                     images.add(item["slot"])
+        native_images = bool(images and owner_authority.required(self.store, self.settings))
+        if native_images:
+            from companion import agent_images
+
+            agent_images.source(self.store, self.settings, self.clock, event_id)
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
             # The preflight body cannot resurrect a share erased while waiting for this write lock.
@@ -319,12 +327,12 @@ class ContentService:
                             )
                         except CoreError as exc:
                             error = exc.code
-                elif kind != "link" and not bounded and (
+                elif kind != "link" and not bounded and not native_images and (
                     not self.options.vision.url or not self.options.vision.max_request_micro_usd
                 ):
                     error = "CONTENT_VISION_NOT_CONFIGURED"
                 elif (
-                    kind != "link" and not bounded
+                    kind != "link" and not bounded and not native_images
                     and self.options.image_daily_micro_usd
                     < self.options.vision.max_request_micro_usd
                 ):
@@ -1315,12 +1323,15 @@ class ContentService:
             return {"approved": True, "lease_until": row["lease_until"]}
 
     async def run_once(self):
+        from companion import agent_images
+
         if not self.settings.content_enabled:
             return False
         if await content_files.run_file_once(self):
             return True
         s, now = self.store, self.clock()
-        image_spool.cleanup(s, now, self.options.max_image_bytes)
+        image_spool.cleanup(s, now, self.options.max_image_bytes,
+                            retain_completed=agent_images.enabled(self.settings))
         day, _ = self._periods()
         for lost in s.rows(
             "SELECT m.request_id FROM model_usage m JOIN content_items c "

@@ -197,7 +197,7 @@ def discard_window(store, plan_sha256):
             )
 
 
-def cleanup(store, now, max_bytes=4_000_000):
+def cleanup(store, now, max_bytes=4_000_000, *, retain_completed=False):
     root = directory(store)
     if not root.exists():
         return
@@ -216,11 +216,14 @@ def cleanup(store, now, max_bytes=4_000_000):
                 "JOIN jobs j ON j.event_id=c.owner_event_id AND j.kind='chat' "
                 "WHERE c.item_id=?", (item_id,),
             )
+            captured = bool(retain_completed and row and store.one(
+                "SELECT 1 FROM captured_images WHERE item_id=? AND expires_at>?", (item_id, now),
+            ))
             expired = (
                 not row or row["redacted"] or row["source_redacted"]
-                or row["captured_privacy_epoch"] != epoch(store)
+                or (row["captured_privacy_epoch"] != epoch(store) and not captured)
                 or row["state"] not in {"QUEUED", "RUNNING", "SUCCEEDED"}
-                or row["job_state"] not in {"QUEUED", "RUNNING", "RETRY_WAIT"}
+                or (row["job_state"] not in {"QUEUED", "RUNNING", "RETRY_WAIT"} and not captured)
             )
             if not expired:
                 try:
