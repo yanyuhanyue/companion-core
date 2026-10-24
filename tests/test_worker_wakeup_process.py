@@ -1,6 +1,7 @@
 """Real CLI processes share one SQLite authority; only external model transport is mocked."""
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -12,11 +13,15 @@ from zoneinfo import ZoneInfo
 import httpx
 from pydantic import SecretStr
 
+from companion import owner_authority, owner_input
 from companion.contracts import Candidate
+from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.store import after, utcnow
-from tests.conftest import event, ingest, run
+from companion_delivery_protocol.authority import capture_signing_payload
+from tests.conftest import ingest, run
 from tests.test_onebot_capture import pinned_plan, real_core_http
-from tests.test_paid_model_gate import approved_live
+from tests.test_owner_authority import activate
+from tests.test_owner_input import captured, inbound
 from tests.test_private_companion import companion_options
 
 
@@ -76,6 +81,26 @@ async def finish(child, *, code=0):
     return result
 
 
+async def close_child(child):
+    process = child[0]
+    if process.returncode is None:
+        process.kill()
+    await process.communicate()
+
+
+def signed_input(core, template, key, number):
+    value = template.model_dump(mode="json", exclude={"signature"})
+    source = template.source_event_id.rpartition(":")[0] + ":" + str(number)
+    stamp = core.clock()
+    value.update(source_event_id=source,
+                 event_id="evt_" + hashlib.sha256(source.encode()).hexdigest(),
+                 occurred_at=stamp, received_at=stamp)
+    value["signature"] = key.sign(capture_signing_payload(value)).hex()
+    capture = OwnerCapture.model_validate(value)
+    message = inbound(core, capture).model_copy(update={"occurred_at": capture.occurred_at})
+    return capture, message
+
+
 async def state(core, job_id, wanted="SUCCEEDED", seconds=3):
     started = monotonic()
     async with asyncio.timeout(seconds):
@@ -114,42 +139,50 @@ def test_four_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_pat
 
 def test_real_http_enqueue_new_owner_and_independent_worker_latency(core, tmp_path):
     core.clock = utcnow
-    approved_live(core, tmp_path)
+    template, key = captured(core, tmp_path)
 
     async def scenario():
         async with real_core_http(core) as port:
             child = await start(core, tmp_path / "chat", duration=4)
-            await ready(child)
-            latencies = []
-            async with httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}",
-                trust_env=False,
-                headers={
-                    "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()
-                },
-            ) as api:
-                for number in (1, 2):
-                    payload = event(core, number, "A new owner input.").model_dump(mode="json")
-                    response = await api.post(
-                        "/internal/v1/inbox/events",
-                        json=payload,
-                        headers={"X-Idempotency-Key": f"wake-{number}"},
-                    )
-                    assert response.status_code == 202, response.text
-                    latency = await state(core, response.json()["job_id"])
-                    assert latency < 1.5
-                    latencies.append(latency)
-            result = await finish(child)
-            assert result["total"]["provider_calls"] == 2
-            receipt("enqueue-latency", {"latencies_seconds": latencies, "process": result})
+            try:
+                await ready(child)
+                latencies = []
+                async with httpx.AsyncClient(
+                    base_url=f"http://127.0.0.1:{port}",
+                    trust_env=False,
+                    headers={
+                        "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()
+                    },
+                ) as api:
+                    for number in (1, 2):
+                        capture, message = signed_input(core, template, key, number)
+                        approved = await api.post("/internal/v1/owner-authority/inputs/approve",
+                                                  json=capture.model_dump(mode="json"))
+                        assert approved.status_code == 200, approved.text
+                        response = await api.post(
+                            "/internal/v1/inbox/events",
+                            json=message.model_dump(mode="json"),
+                            headers={"X-Idempotency-Key": f"wake-{number}"},
+                        )
+                        assert response.status_code == 202, response.text
+                        latency = await state(core, response.json()["job_id"])
+                        assert latency < 1.5
+                        latencies.append(latency)
+                result = await finish(child)
+                assert result["total"]["provider_calls"] == 2
+                receipt("enqueue-latency", {"latencies_seconds": latencies, "process": result})
+            finally:
+                await close_child(child)
 
     run(scenario())
 
 
 def test_independent_retry_due_without_new_write(core, tmp_path):
     core.clock = utcnow
-    approved_live(core, tmp_path)
-    item = ingest(core)
+    template, key = captured(core, tmp_path)
+    capture, message = signed_input(core, template, key, 1)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    item = core.ingest(message, "wake-retry")
     # Keep the job pending while the independent interpreter imports/starts.
     due = after(utcnow(), 3600)
     core.store.execute(
@@ -171,7 +204,7 @@ def test_independent_retry_due_without_new_write(core, tmp_path):
             assert result["total"]["provider_calls"] == 1
             receipt("retry-without-writer", result)
         finally:
-            await child[0].communicate()
+            await close_child(child)
 
     run(scenario())
 
@@ -194,29 +227,37 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
             confirmed=True,
         )
         core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    approved_live(core, tmp_path)
+    captured(core, tmp_path)
+    view = owner_authority.current(core.store, core.settings, core.clock)
+    policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
+        "purposes": ["chat", "memory"], "memory_scope": "owner_private"})
+    activate(core, policy, revision=view.authority.revision, operation="wakeup-memory-policy")
 
     async def scenario():
         async with real_core_http(core) as port:
             child = await start(core, tmp_path / "forget", duration=3)
-            await ready(child)
-            async with httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}", trust_env=False
-            ) as api:
-                response = await api.post(
-                    "/internal/v1/memories/" + memory_id + "/decisions",
-                    json={"actor_id": "owner", "decision": "forget"},
-                    headers={
-                        "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()
-                    },
-                )
-                assert response.status_code == 200, response.text
-            result = await finish(child)
-            assert result["total"]["provider_calls"] == 0
-            assert result["steady"]["scans"] >= 1
-            assert core.store.one(
-                "SELECT status FROM memories WHERE memory_id=?", (memory_id,)
-            ) == {"status": "FORGOTTEN"}
+            try:
+                await ready(child)
+                async with httpx.AsyncClient(
+                    base_url=f"http://127.0.0.1:{port}", trust_env=False
+                ) as api:
+                    response = await api.post(
+                        "/internal/v1/memories/" + memory_id + "/decisions",
+                        json={"actor_id": "owner", "decision": "forget"},
+                        headers={
+                            "Authorization": "Bearer "
+                            + core.settings.bridge_token.get_secret_value()
+                        },
+                    )
+                    assert response.status_code == 200, response.text
+                result = await finish(child)
+                assert result["total"]["provider_calls"] == 0
+                assert result["steady"]["scans"] >= 1
+                assert core.store.one(
+                    "SELECT status FROM memories WHERE memory_id=?", (memory_id,)
+                ) == {"status": "FORGOTTEN"}
+            finally:
+                await close_child(child)
 
     run(scenario())
 
