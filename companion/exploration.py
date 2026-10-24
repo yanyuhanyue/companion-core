@@ -138,7 +138,7 @@ class ExplorationService:
             not supports(policy.source, "get")
         ) or (
             policy.source == "web" and (
-                not self.settings.web_reading_enabled or not policy.allowed_hosts
+                not self.settings.web_reading_enabled or not self.settings.web_reading_hosts
             )
         ):
             raise CoreError("EXPLORATION_DISABLED", 403)
@@ -225,7 +225,7 @@ class ExplorationService:
                     name
                     for name, adapter in self.settings.observation_adapters.items()
                     if adapter.source == source and (
-                        source != "web" or urlsplit(url).hostname in adapter.allowed_hosts
+                        source != "web" or urlsplit(url).hostname in self.settings.web_reading_hosts
                     )
                 ),
                 None,
@@ -544,7 +544,7 @@ class ExplorationService:
                 )["n"]
                 for index, item in enumerate(result.items):
                     source, canonical = content_target(
-                        item.url, web_hosts=policy.allowed_hosts if reading else (),
+                        item.url, web_hosts=self.settings.web_reading_hosts if reading else (),
                     )
                     if source != policy.source or (row["url"] and canonical != row["url"]
                                                   and not (reading and source == "web")):

@@ -117,6 +117,7 @@ LABELS = {
     "meme_discovery_daily_download_bytes": "每日表情下载上限（字节）",
     "meme_discovery_daily_storage_bytes": "每日表情新增存储上限（字节）",
     "expression_meme_categories": "允许的表情素材分类",
+    "web_reading_hosts": "允许读取的网站",
     "semantic_min_score": "记忆相似度下限", "extraction_min_events": "记忆提取最少事件数",
     "extraction_idle_seconds": "记忆提取空闲等待（秒）",
     "emerging_min_sessions": "初步偏好最少独立会话数",

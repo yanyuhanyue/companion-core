@@ -81,6 +81,8 @@ expression_enabled = false
 expression_learning_enabled = false
 content_enabled = false
 web_reading_enabled = false
+# Exact public hosts for web reading; editable in the owner console.
+web_reading_hosts = []
 expression_cooldown_minutes = 30
 expression_meme_categories = ["happy", "like", "surprised", "morning", "sleep"]
 meme_discovery_enabled = false
@@ -98,7 +100,7 @@ android_enabled = false
 # Independent source_reader: set reader_max_requests=4 on its bilibili adapter;
 # default 1 preserves existing Bridge readers. See docs/design-v0.6/source-reader.md.
 # Heybox source_reader uses reader_max_requests=1; see docs/design-v0.6/heybox-reader.md.
-# Web reading additionally requires an adapter with source="web", explicit allowed_hosts,
+# Web reading additionally requires an adapter with source="web", explicit web_reading_hosts,
 # and source_reader --protocol reading-v1. Hosts never come from a model or page text.
 # See docs/qq-beta/next-reading.md for the v3 evidence and cancellation contract.
 

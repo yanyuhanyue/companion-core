@@ -352,7 +352,7 @@ class ObservationService:
             if observation.source in source_names("read"):
                 try:
                     source, _ = content_target(
-                        value, web_hosts=adapter.allowed_hosts
+                        value, web_hosts=self.settings.web_reading_hosts
                         if self.settings.web_reading_enabled else (),
                     )
                 except CoreError:

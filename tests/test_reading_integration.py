@@ -138,9 +138,10 @@ def test_signed_private_plaintext_web_read_late_result_cannot_cross_stop(core, t
         options["link_scope"] = "owner_links_v1"
         options["core_options"].update(
             content_enabled=True, observation_enabled=True, web_reading_enabled=True,
-            observation_adapters={"web": ObservationAdapterConfig(
-                source="web", token=TOKEN, allowed_hosts=("articles.example",),
-            )}, exploration_daily_requests=8, exploration_monthly_requests=16,
+            web_reading_hosts=("articles.example",),
+            observation_adapters={
+                "web": ObservationAdapterConfig(source="web", token=TOKEN),
+            }, exploration_daily_requests=8, exploration_monthly_requests=16,
             exploration_daily_bytes=4194304,
         )
         async with source_window(

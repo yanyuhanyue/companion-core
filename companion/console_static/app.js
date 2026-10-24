@@ -141,7 +141,7 @@ const CAP_FIELDS = {
   wake: ["wake_enabled", "wake_min_interval_minutes", "wake_max_daily_runs", "autonomous_daily_micro_usd"],
   exploration: ["exploration_enabled", "exploration_daily_candidate_limit", "exploration_daily_deep_reads", "exploration_daily_requests", "exploration_monthly_requests", "exploration_max_response_bytes", "exploration_daily_bytes"],
   social: ["social_enabled", "social_semantic_threshold"], "qq.poke": ["poke_policy"], "qq.poke.native": ["poke_policy"],
-  "reading.web": ["web_reading_enabled", "content_enabled"], "reading.bilibili": ["observation_enabled", "content_enabled"], "reading.heybox": ["observation_enabled", "content_enabled"],
+  "reading.web": ["web_reading_enabled", "web_reading_hosts", "content_enabled"], "reading.bilibili": ["observation_enabled", "content_enabled"], "reading.heybox": ["observation_enabled", "content_enabled"],
   "bilibili.video": ["bili_video"], "model.understand_video": ["bili_video", "video_model_key"], "qq.images": ["content"], "qq.animation": ["content"], "qq.files": ["private_files"],
   expression: ["expression_enabled", "expression_cooldown_minutes", "expression_selection_probability", "expression_meme_categories"],
   expression_learning: ["expression_learning_enabled"], "unicode.emoji": ["expression_enabled"], "qq.face_names": ["expression_enabled"], "qq.face_images": ["expression_enabled"],
@@ -1212,6 +1212,7 @@ function numberInput({ id, key, type, value, nullable, lo, hi, onValue }) {
 function control(f) {
   const v = draftVal(f), id = "cf-" + f.key.replace(/[^a-z0-9_]/gi, "-");
   if (f.key === "expression_meme_categories") return categoryPicker(f, v || []);
+  if (f.key === "web_reading_hosts") return hostPicker(f, v || []);
   if (f.type === "boolean") return el("button", { type: "button", class: "switch", role: "switch", id, "aria-checked": String(Boolean(v)), "data-k": id, "aria-label": f.label, onclick: () => setDraft(f, !draftVal(f)) });
   if (enumOf(f)) return el("select", { class: "input", id, "data-k": id, onchange: e => setDraft(f, JSON.parse(e.target.value)) },
     enumOf(f).map(o => el("option", { value: JSON.stringify(o), selected: same(o, v) }, VALUE_NAMES[o] || String(o))));
@@ -1262,6 +1263,32 @@ function objectEditor(f, value, path, bare = false) {
   if (path.length || bare) return el("div", { class: "sub-list" }, rows);
   return el("div", { class: "obj" }, el("div", { class: "sub-list" }, rows),
     btn("以 JSON 编辑", () => { state.jsonEdit = state.jsonEdit || new Set(); state.jsonEdit.add(f.key); rerender(); }, { cls: "sm quiet" }));
+}
+/* 与 config.exact_web_hosts 相同的规则：小写精确域名，不支持通配符、IP 和内网后缀 */
+const HOST_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+function normHost(raw) {
+  let x = raw.trim().toLowerCase();
+  if (!x) return [null, "请输入域名。"];
+  if (x.includes("://")) { try { x = new URL(x).hostname; } catch { return [null, "这不是有效的网址。"]; } }
+  x = x.replace(/\/.*$/, "").replace(/\.$/, "");
+  if (x.includes("*")) return [null, "不支持通配符，请逐个填写域名。"];
+  if (/^[\d.]+$/.test(x) || x.includes(":")) return [null, "不支持 IP 地址，请填写域名。"];
+  if (/\.(localhost|local|internal)$/.test(x)) return [null, "不支持内网地址。"];
+  if (x.length > 253 || !HOST_RE.test(x)) return [null, "域名格式不对，例如 sspai.com。"];
+  return [x, null];
+}
+function hostPicker(f, list) {
+  const input = el("input", { class: "input", id: "cf-web-hosts", placeholder: "输入域名或粘贴网址，例如 sspai.com", maxlength: "300" });
+  const err = el("p", { class: "list-err", role: "alert", hidden: true });
+  const fail = m => { err.textContent = m; err.hidden = false; input.focus(); };
+  const add = () => { const [x, m] = normHost(input.value); if (m) return fail(m); if (list.includes(x)) return fail(x + " 已经在名单里。");
+    if (list.length >= 32) return fail("最多 32 个网站。"); setDraft(f, [...list, x]); };
+  input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+  return el("div", { class: "listed" }, el("ul", {}, list.length ? list.map((x, i) => el("li", {}, el("span", { class: "num" }, x),
+      el("button", { type: "button", class: "icon-btn", "aria-label": "移除 " + x, onclick: () => setDraft(f, list.filter((_, j) => j !== i)) }, icon("close"))))
+      : el("li", { class: "none" }, "名单是空的，网页阅读会保持不可用。")),
+    el("div", { class: "list-add" }, input, btn("添加", add, { cls: "sm" }), el("small", { class: "num" }, list.length + " / 32")), err,
+    el("p", { class: "note" }, "只读这些网站，跳转到名单外的地址会被拦下。必须是精确域名：sspai.com 不包含 www.sspai.com，子域名要单独添加。"));
 }
 function categoryPicker(f, list) {
   const all = [...new Set([...MEME_CATEGORY_PRESETS, ...list])];
@@ -1351,7 +1378,6 @@ const capMain = id => capFieldsOf(id).find(f => f.type === "boolean" && /_enable
 const CAP_DEPLOY = {
   "media.voice": "网页语音会话的服务商地址、费用上限和会话时长在服务器部署配置的 [media] 段设置。",
   executive: "执行任务的端点和凭据在服务器部署配置的 [executive] 段设置，控制台不能修改。",
-  "reading.web": "要读取的网站名单现在只能在服务器的部署环境里填写：读取适配器配置 COMPANION_OBSERVATION_ADAPTERS 里网页适配器的 allowed_hosts。控制台里填写需要后端先把名单从适配器凭据中拆出来。",
   "reading.bilibili": "B 站读取适配器和账号授权在部署环境里配置。", "reading.heybox": "小黑盒读取适配器在部署环境里配置。",
   "model.understand_video": "视频理解模型的审批窗口（paid_model）在部署配置里设置。",
   "qq.images": "付费图片理解的审批窗口（paid_model.image_input）在部署配置里设置。",

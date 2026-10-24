@@ -146,8 +146,9 @@ UNKNOWN 预留，不可恢复正文；两版 API 不能互换租约或回执。
 仍保留真实观察字节，不因 `used_bytes=null` 而释放已消耗容量。撤回和旧备份回放也保留该计量。
 
 网页读取默认关闭。Core 需要 `web_reading_enabled=true`、已启用的内容/Observation
-能力和非零请求/字节限额；对应 adapter 配置 `source="web"`、独立 token、明确的
-`allowed_hosts=["articles.example"]`。主机必须为小写精确 DNS 名，不接受通配符、IP 或
+能力和非零请求/字节限额；对应 adapter 配置 `source="web"` 和独立 token，主人配置
+`web_reading_hosts=["articles.example"]`（可在控制台的网页阅读里填写，保存为新配置版本）。
+适配器配置不再接受 `allowed_hosts`。主机必须为小写精确 DNS 名，不接受通配符、IP 或
 私有后缀；DNS 解析还要经过 Reader 的公网检查。重定向的每一跳受同一主机列表约束。
 
 部署配置提供显式 `web-reader` Compose profile，凭据来自私有 `privacy/web-reader.env`，

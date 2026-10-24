@@ -228,7 +228,7 @@ def public_source_readiness(store, settings, clock, adapter_id, *, integration=N
             settings.content_enabled or settings.exploration_enabled
         ):
             unavailable.append("READING_DISABLED")
-        if source == "web" and (not settings.web_reading_enabled or not policy.allowed_hosts):
+        if source == "web" and (not settings.web_reading_enabled or not settings.web_reading_hosts):
             unavailable.append("WEB_HOST_SCOPE_REQUIRED")
         if policy.source_grant_required:
             grants = store.rows(

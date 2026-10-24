@@ -101,8 +101,9 @@ def reading_fixture(core, source="web"):
     if source == "web":
         configure(core)
         core.settings.web_reading_enabled = True
+        core.settings.web_reading_hosts = ("articles.example",)
         core.settings.observation_adapters["web"] = ObservationAdapterConfig(
-            source="web", token="web-reader-test-" * 4, allowed_hosts=("articles.example",),
+            source="web", token="web-reader-test-" * 4,
         )
     owner_id = incoming(core, text="请阅读我分享的资料。")
     service = ReadingService(core.store, core.settings, core.exploration, core.clock)

@@ -266,8 +266,9 @@ def test_discovery_keeps_source_grant_scope_and_web_is_read_only(core):
     assert current["state"] == "UNAVAILABLE"
     assert "SOURCE_GRANT_REVOKED" in current["reason_codes"]
     cfg.content_enabled = cfg.web_reading_enabled = True
+    cfg.web_reading_hosts = ("example.com",)
     cfg.observation_adapters["web"] = ObservationAdapterConfig(
-        source="web", token="synthetic-web-reader-token-12345", allowed_hosts=("example.com",),
+        source="web", token="synthetic-web-reader-token-12345",
     )
     cfg.exploration_daily_deep_reads = 5
     assert public_source_readiness(core.store, cfg, core.clock, "web")["state"] == "READY"
