@@ -75,6 +75,28 @@ def due(window):
         previous["at"])).total_seconds() >= COOLDOWN_SECONDS
 
 
+def _complete_profile(data):
+    # SnowLuma v2.0.3 db142db9: contact-actions.ts formatStrangerInfo.
+    # Native profiles may omit UID; the six-field fallback lacks this full shape.
+    required = {
+        "user_id": int, "uid": str, "qid": str, "nickname": str, "remark": str,
+        "sex": str, "age": int, "long_nick": str, "qq_level": int, "qqLevel": int,
+        "level": int, "status": int, "extStatus": int, "ext_status": int,
+        "batteryStatus": int, "customStatusDescInfo": str, "qidian_master_flag": int,
+        "qidian_crew_flag": int, "qidian_crew_flag_2": int, "qidian_enterprise_name": str,
+    }
+    optional = {"reg_time": int, "is_vip": bool, "is_years_vip": bool, "vip_level": int}
+    fields = required.keys() | {"customStatus"}
+    return (
+        fields <= data.keys() <= fields | optional.keys()
+        and all(type(data[key]) is kind for key, kind in required.items())
+        and all(type(data[key]) is kind for key, kind in optional.items() if key in data)
+        and (data["customStatus"] is None or isinstance(data["customStatus"], dict))
+        and data["qq_level"] == data["qqLevel"] == data["level"]
+        and data["extStatus"] == data["ext_status"]
+    )
+
+
 async def native_profile(window, protocol, check):
     config = window.plan.config
     body = {"user_id": int(config.bot_qq_id)}
@@ -101,7 +123,8 @@ async def native_profile(window, protocol, check):
         or value["retcode"] != 0 or not isinstance(data, dict)
         or identifier(data.get("user_id")) != config.bot_qq_id
         or not isinstance(data.get("uid"), str)
-        or re.fullmatch(r"u_[A-Za-z0-9_-]{20,64}", data["uid"]) is None):
+        or (re.fullmatch(r"u_[A-Za-z0-9_-]{20,64}", data["uid"]) is None
+            and not (data["uid"] == "" and _complete_profile(data)))):
         raise ValueError("PROFILE_FULL_ACCOUNT_REQUIRED")
     return data, observed_at, digest(value)
 

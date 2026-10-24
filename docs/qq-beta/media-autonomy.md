@@ -206,9 +206,15 @@ TTS 绑定原 outbox 的 message ID、delivery key、文本、窗口和音频摘
 
 Bridge 在空闲时通过 `GET /internal/v1/account-actions/profile-baselines/state` 查询当前
 窗口允许观测的字段，再进行有界读取和批量提交。只开启空间发布时返回空字段集，
-不会附带读取资料。昵称/签名要求完整账号资料身份，头像从固定 QQ CDN 的本账号图像
+不会附带读取资料。昵称/签名要求完整账号资料且响应 QQ 号与绑定账号一致，头像从固定 QQ CDN 的本账号图像
 取实际字节摘要；分别保留响应凭证。读取失败不覆盖已有基线，主人新输入优先打断采集。
 已知平台拒绝的完全相同回执允许重放；内容不同的回执仍报冲突，不触发第二次平台动作。
+
+SnowLuma 2.0.3 的完整资料响应可能包含空字符串 `uid`。此时采集器还要求完整格式的
+21 个必备字段及正确类型，并核对等级、扩展状态的别名一致；注册时间和会员信息仍可缺省。
+完整接口明确返回的空签名按原响应记录，缺失或 `null` 的签名不能补为空串。
+格式依据固定版本的[完整资料与降级分支](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/modules/contact-actions.ts#L376-L471)
+及[原生资料解码](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/protocol/src/oidb-services/contacts/fetch-user-profile.ts#L111-L180)。
 
 头像只选审核 catalog 中的静态 PNG/JPEG/WebP。Core 的 `ReviewedAsset` 登记包括公开
 来源页/下载出处、许可标签及条件、许可摘要、审核回执/策略摘要、尺寸、字节和有效期。

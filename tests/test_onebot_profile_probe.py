@@ -38,6 +38,88 @@ def profile(**changes):
         "uid": "u_" + "a" * 22, "nickname": "当前名字", "long_nick": "当前签名", **changes}}
 
 
+def full_profile(*, optional=True, **changes):
+    # SnowLuma v2.0.3 formatStrangerInfo: 21 required keys plus four optional keys.
+    fields = {"uid": "", "qid": "synthetic-qid", "remark": "", "sex": "unknown", "age": 0,
+        "qq_level": 12, "qqLevel": 12, "level": 12, "status": 10, "extStatus": 0,
+        "ext_status": 0, "batteryStatus": 0, "customStatus": None, "customStatusDescInfo": "",
+        "qidian_master_flag": 0, "qidian_crew_flag": 0, "qidian_crew_flag_2": 0,
+        "qidian_enterprise_name": ""}
+    if optional:
+        fields.update(reg_time=1_200_000_000, is_vip=False, is_years_vip=False, vip_level=0)
+    return profile(**(fields | changes))
+
+
+@pytest.mark.parametrize("variant", ["complete", "required_only", "empty_signature"])
+def test_empty_uid_complete_native_profile_preserves_explicit_field_observations(
+    core, tmp_path, variant,
+):
+    scope = options(core, ("nickname", "signature"))
+    response = full_profile(optional=variant != "required_only",
+        long_nick="" if variant == "empty_signature" else "当前签名",
+        customStatus={"faceId": 1, "wording": "synthetic"} if variant == "complete" else None)
+    assert len(response["data"]) == (21 if variant == "required_only" else 25)
+
+    def qq(request):
+        if request.url.path == profile_probe.ACTION:
+            assert json.loads(request.content) == {"user_id": 10002}
+            return httpx.Response(200, json=response)
+
+    async def scenario():
+        async with source_window(core, tmp_path, silent, live=True, approved=True,
+            scope_options=scope, protocol_reply=qq) as (window, client, protocol, _, _):
+            result = await profile_probe.collect(window, client, protocol)
+            assert result == {"status": "ACCEPTED", "fields": ["nickname", "signature"]}
+            rows = {row["field"]: row for row in core.store.rows(
+                "SELECT * FROM social_autonomy_profiles")}
+            assert rows["nickname"]["value"] == response["data"]["nickname"]
+            assert rows["signature"]["value"] == response["data"]["long_nick"]
+            assert all(row["receipt_sha256"] == digest(response) for row in rows.values())
+            assert not core.store.rows("SELECT * FROM model_usage")
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert window.count("window_attempts") == 0
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("change", [
+    "compact", "compact_empty_uid", "missing_uid", "missing_qid", "missing_signature",
+    {"uid": None}, {"uid": "unknown"}, {"user_id": 10001}, {"qid": 1},
+    {"age": True}, {"qq_level": 12.0}, {"customStatus": []}, {"is_vip": 0},
+    {"vip_level": True}, {"reg_time": "1200000000"}, {"qqLevel": 13}, {"ext_status": 1},
+    {"unexpected": "field"},
+])
+def test_empty_uid_does_not_bypass_full_native_profile_contract(core, tmp_path, change):
+    scope = options(core, ("nickname", "signature"))
+    response = full_profile()
+    if change in ("compact", "compact_empty_uid"):
+        response["data"] = {key: response["data"][key] for key in (
+            "user_id", "nickname", "remark", "sex", "age", "long_nick")}
+        if change == "compact_empty_uid":
+            response["data"]["uid"] = ""
+    elif isinstance(change, str):
+        response["data"].pop({"missing_uid": "uid", "missing_qid": "qid",
+                              "missing_signature": "long_nick"}[change])
+    else:
+        response["data"].update(change)
+
+    def qq(request):
+        if request.url.path == profile_probe.ACTION:
+            return httpx.Response(200, json=response)
+
+    async def scenario():
+        async with source_window(core, tmp_path, silent, live=True, approved=True,
+            scope_options=scope, protocol_reply=qq) as (window, client, protocol, _, _):
+            result = await profile_probe.collect(window, client, protocol)
+            assert result["status"] == "UNAVAILABLE"
+            assert not core.store.rows("SELECT * FROM social_autonomy_profiles")
+            assert not core.store.rows("SELECT * FROM model_usage")
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert window.row()["state"] == "OPEN"
+
+    run(scenario())
+
+
 def picture():
     output = io.BytesIO()
     Image.new("RGB", (100, 100), "navy").save(output, format="PNG")
@@ -260,8 +342,9 @@ def test_observation_submission_cannot_be_changed_by_request_hook(core, tmp_path
     run(scenario())
 
 
+@pytest.mark.parametrize("empty_uid", [False, True])
 def test_continuous_probe_real_core_http_independent_worker_and_native_profile_action(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, empty_uid,
 ):
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     scope, native, model_calls = options(core, ("nickname",)), [], []
@@ -271,7 +354,7 @@ def test_continuous_probe_real_core_http_independent_worker_and_native_profile_a
     def qq(request):
         if request.url.path == profile_probe.ACTION:
             native.append((request.url.path, json.loads(request.content)))
-            return httpx.Response(200, json=profile())
+            return httpx.Response(200, json=full_profile() if empty_uid else profile())
         if request.url.path == "/set_qq_profile":
             native.append((request.url.path, json.loads(request.content)))
             return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": None})
