@@ -93,7 +93,9 @@ def cancelled_input_proof(row, value):
     failure_fields = {"resolution", "failure_code", "failure_phase", "failure_evidence_sha256",
                       "reply_revision", "input_privacy_epoch"}
     failed = isinstance(value, dict) and value.get("state") == "FAILED"
-    permitted = ((fields | paid_fields | failure_fields,) if failed
+    rejected = failed and value.get("failure_code") == "MONTHLY_BUDGET_EXHAUSTED"
+    permitted = ((fields | failure_fields,) if rejected else
+                 (fields | paid_fields | failure_fields,) if failed
                  else (fields, fields | paid_fields))
     if (not isinstance(value, dict) or set(value) not in permitted
         or value["state"] not in {"CANCELLED", "FAILED"}
@@ -106,15 +108,15 @@ def cancelled_input_proof(row, value):
         or type(value["model_attempts"]) is not int or value["model_attempts"] < 0):
         raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
     if failed and (
-        value["resolution"] != "SETTLED_NO_DELIVERY"
-        or value["failure_code"] != "MEMORY_REVIEW_INVALID"
-        or value["failure_phase"] != "memory_recall"
+        (value["resolution"], value["failure_code"], value["failure_phase"],
+         value["model_attempts"]) != (
+            ("REJECTED_BEFORE_DISPATCH", "MONTHLY_BUDGET_EXHAUSTED", "model_admission", 0)
+            if rejected else ("SETTLED_NO_DELIVERY", "MEMORY_REVIEW_INVALID", "memory_recall", 1))
         or not isinstance(value["failure_evidence_sha256"], str)
         or not SHA.fullmatch(value["failure_evidence_sha256"])
         or type(value["reply_revision"]) is not int or value["reply_revision"] < 0
         or type(value["input_privacy_epoch"]) is not int
         or not 0 <= value["input_privacy_epoch"] <= value["privacy_epoch"]
-        or value["model_attempts"] != 1
     ):
         raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
     if value["model_attempts"]:
@@ -123,7 +125,7 @@ def cancelled_input_proof(row, value):
             or not SHA.fullmatch(value["settled_model_usage_sha256"])
             or type(value["billed_micro_usd"]) is not int or value["billed_micro_usd"] < 0):
             raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
-    elif set(value) != fields:
+    elif set(value) != fields | (failure_fields if failed else set()):
         raise ValueError("CANCELLED_INPUT_CORE_PROOF_REQUIRED")
 
 
@@ -989,7 +991,8 @@ class TestWindow:
             raise ValueError("STOPPED_INPUT_RECONCILIATION_REQUIRED")
         changed = 0
         for source in self.db.execute("SELECT * FROM window_inputs WHERE plan_hash=? "
-                                      "AND state NOT IN ('ACK','CANCELLED')",
+                                      "AND state NOT IN "
+                                      "('ACK','CANCELLED','SUPERSEDED','RECALLED')",
                                       (self.plan.sha256,)).fetchall():
             if (source["state"] != "APPROVED" or not source["capture_json"]
                 or self.db.execute("SELECT 1 FROM window_attempts WHERE event_id=?",
