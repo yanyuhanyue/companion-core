@@ -292,11 +292,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     )
 
     control_auth = [Depends(control_admin)]
+    from companion.cognition_api import register_cognition_routes
     from companion.memory_projection_api import register_memory_projection_routes
     from companion.owner_authority_api import register_owner_authority_routes
 
     register_owner_authority_routes(app, control_auth)
     register_memory_projection_routes(app, control_auth)
+    register_cognition_routes(app, control_auth)
     adapter_auth = [Depends(observation_adapter)]
     register_media_routes(app, control_auth)
 
