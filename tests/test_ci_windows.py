@@ -1,0 +1,202 @@
+"""Windows omission is scoped evidence, never a substitute for cross-platform CI."""
+
+import json
+import sys
+
+import pytest
+import yaml
+
+from scripts import ci_policy, ci_reuse
+from tests.test_ci_policy import ROOT, needs
+
+
+def selection(files, event="pull_request", ref="refs/pull/1/merge", profile="full"):
+    return ci_policy.windows_selection(profile, event, ref, files)
+
+
+@pytest.mark.parametrize("path", [
+    "pyproject.toml", "uv.lock", "deploy/executor.lock", "Dockerfile",
+    "deploy/compose.executors.yaml", "scripts/check.ps1", "scripts/cleanup-voice-node.ps1",
+    "scripts/ci_policy.py", ".github/workflows/ci.yml", "tests/conftest.py",
+    "companion/worker_lock.py", "companion/backup.py", "companion/executor_files.py",
+    "companion/core.py", "companion/model.py", "companion/config.py", "companion/store.py",
+    "companion_voice_node/state.py", "companion_onebot_bridge/voice_media.py",
+    "source_reader/browser.py", "tests/test_source_browser.py", "tests/test_new_feature.py",
+    "companion/new_backend.py", "unknown/new.txt", "docs/unknown.json", "companion/NEW.py",
+])
+def test_shared_platform_browser_and_unknown_paths_keep_both_windows_checks(path):
+    value = selection(["companion/console_static/app.css", path])
+    assert value["product"] and value["browser"]
+
+
+@pytest.mark.parametrize("files,product,browser", [
+    (["companion/console_static/app.css"], False, True),
+    (["companion/console_static/app.js", "docs/guide.md"], False, True),
+    (["companion/expression.py", "tests/test_expression.py"], True, False),
+    (["companion/diary.py", "docs/guide.md"], True, False),
+    (["companion/diary.py", "companion/console_static/app.css"], True, True),
+    (["companion/console_static/new.js"], True, True),
+])
+def test_only_reviewed_paths_can_reduce_one_surface(files, product, browser):
+    assert (selection(files)["product"], selection(files)["browser"]) == (product, browser)
+
+
+@pytest.mark.parametrize("event,ref", [
+    ("push", "refs/heads/main"), ("push", "refs/heads/topic"), ("push", "refs/tags/v1"),
+    ("merge_group", "refs/heads/queue"), ("workflow_dispatch", "refs/heads/main"),
+    ("pull_request", "unknown"), ("unknown", "refs/pull/1/merge"),
+])
+def test_non_pr_events_keep_full_platform_checks(event, ref):
+    value = selection(["companion/console_static/app.css"], event, ref)
+    assert value["product"] and value["browser"]
+
+
+@pytest.mark.parametrize("files", [None, [], ["../app.css"], ["docs/guide.md\nprofile=docs"]])
+def test_missing_or_malformed_diff_cannot_omit_windows(files):
+    value = selection(files)
+    assert value["product"] and value["browser"]
+
+
+@pytest.mark.parametrize("profile", ["docs", "reuse"])
+def test_docs_and_reuse_have_no_new_windows_jobs(profile):
+    value = selection(["docs/guide.md"], profile=profile)
+    assert value == {"product": False, "browser": False, "reason": profile}
+    assert ci_policy.check_results(profile, needs(profile), value)
+
+
+def test_allowlists_are_existing_files_and_do_not_hide_new_tests():
+    assert all((ROOT / name).is_file() for name in ci_policy.STATIC_UI | ci_policy.NON_BROWSER)
+    assert not any(name.startswith("companion_voice_node/") for name in ci_policy.NON_BROWSER)
+
+
+@pytest.mark.parametrize("event,files,profile,count,browser", [
+    ("pull_request", ["companion/console_static/app.css"], "selected", 4, True),
+    ("pull_request", ["companion/expression.py"], "selected", 8, False),
+    ("pull_request", ["companion/new.py"], "full", 8, True),
+    ("pull_request", ["uv.lock"], "full", 8, True),
+    ("pull_request", ["docs/guide.md"], "docs", 4, False),
+    ("push", ["companion/console_static/app.css"], "full", 8, True),
+])
+def test_plan_cli_emits_consistent_profile_selection_and_matrix(
+    tmp_path, monkeypatch, event, files, profile, count, browser,
+):
+    source, output = tmp_path / "event.json", tmp_path / "output"
+    source.write_text(json.dumps({"repository": {"default_branch": "main"}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(source))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    monkeypatch.setenv("GITHUB_REF", "refs/pull/1/merge" if event == "pull_request"
+                       else "refs/heads/main")
+    monkeypatch.setattr(ci_policy, "changed_files", lambda *args: files)
+    monkeypatch.setattr(ci_reuse, "find_verified_run", lambda *args: None)
+    monkeypatch.setattr(sys, "argv", ["ci_policy.py", "plan"])
+    ci_policy.main()
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["profile"] == profile
+    assert json.loads(values["windows"])["browser"] is browser
+    assert len(json.loads(values["matrix"])["include"]) == count
+    # An unreadable/incomplete repository identity cannot use the path exception.
+    source.write_text("{}")
+    output.write_text("")
+    ci_policy.main()
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["profile"] == "full"
+    assert len(json.loads(values["matrix"])["include"]) == 8
+
+
+@pytest.mark.parametrize("product,browser", [(True, True), (False, True), (True, False)])
+def test_matrix_and_gate_cover_every_selected_shard_and_required_job(product, browser):
+    value = {"product": product, "browser": browser, "reason": "synthetic"}
+    matrix = ci_policy.test_matrix(value)["include"]
+    expected_platforms = ["ubuntu-latest"] + (["windows-latest"] if product else [])
+    assert {(row["os"], row["shard"]) for row in matrix} == {
+        (platform, shard) for platform in expected_platforms for shard in range(4)}
+    assert sum(row["shard"] == row["verify_shard"] for row in matrix) == len(expected_platforms)
+    profile = "full" if product and browser else "selected"
+    results = needs("full")
+    results["browser-reader"]["result"] = "success" if browser else "skipped"
+    assert ci_policy.check_results(profile, results, value)
+    for job in ("preflight", "quality", *ci_policy.FULL_JOBS):
+        original = results[job]["result"]
+        for result in ("failure", "cancelled", "missing"):
+            results[job]["result"] = result
+            assert not ci_policy.check_results(profile, results, value)
+        results[job]["result"] = original
+    if not browser:
+        results["browser-reader"]["result"] = "success"
+        assert not ci_policy.check_results(profile, results, value)
+    assert not ci_policy.check_results("full", results, {**value, "product": False})
+
+
+@pytest.mark.parametrize("profile,raw", [("full", ""), ("full", "null"), ("", "")])
+def test_failed_preflight_still_writes_machine_result(tmp_path, monkeypatch, profile, raw):
+    monkeypatch.setattr(ci_policy, "ROOT", tmp_path)
+    monkeypatch.setattr(ci_policy.subprocess, "check_output", lambda *a, **k: "a\nb\n")
+    monkeypatch.setenv("NEEDS_JSON", json.dumps({"preflight": {"result": "failure"}}))
+    monkeypatch.setenv("CI_WINDOWS", raw)
+    monkeypatch.setenv("CI_REUSE", "")
+    monkeypatch.setattr(sys, "argv", ["ci_policy.py", "gate", "--profile", profile])
+    with pytest.raises(SystemExit):
+        ci_policy.main()
+    record = json.loads((tmp_path / ".local/ci/validation.json").read_text())
+    assert record["passed"] is False and record["checks"]["quality"] == "missing"
+
+
+def test_selected_receipt_records_skips_and_cannot_mint_full_reuse(tmp_path, monkeypatch):
+    value = selection(["companion/expression.py"])
+    results = needs("full")
+    results["browser-reader"]["result"] = "skipped"
+    monkeypatch.setattr(ci_policy, "ROOT", tmp_path)
+    monkeypatch.setattr(ci_policy.subprocess, "check_output", lambda *a, **k: "a\nb\n")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setenv("NEEDS_JSON", json.dumps(results))
+    monkeypatch.setenv("CI_WINDOWS", json.dumps(value))
+    monkeypatch.setenv("CI_REUSE", "null")
+    monkeypatch.setattr(sys, "argv", ["ci_policy.py", "gate", "--profile", "selected"])
+    ci_policy.main()
+    record = json.loads((tmp_path / ".local/ci/validation.json").read_text())
+    assert record["passed"] and record["windows"]["reason"] == "known-backend-only"
+    assert record["checks"]["browser-reader"] == record["expected"]["browser-reader"] == "skipped"
+    monkeypatch.setattr(ci_reuse, "checkout", lambda: {"commit": "a", "tree": "b"})
+    monkeypatch.setenv("GITHUB_SHA", "a")
+    for profile in ("selected", "full"):
+        monkeypatch.setenv("CI_PROFILE", profile)
+        monkeypatch.setattr(sys, "argv", ["ci_reuse.py", "record"])
+        with pytest.raises(ValueError):
+            ci_reuse.main()
+
+
+def test_workflow_preserves_receipt_on_failure_and_uses_selection_everywhere():
+    jobs = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(),
+                     Loader=yaml.BaseLoader)["jobs"]
+    assert jobs["preflight"]["outputs"]["matrix"] == "${{ steps.plan.outputs.matrix }}"
+    gate = next(step for step in jobs["ci"]["steps"] if " gate " in step.get("run", ""))
+    assert gate["env"]["CI_WINDOWS"] == "${{ needs.preflight.outputs.windows }}"
+    upload = next(step for step in jobs["ci"]["steps"]
+                  if step.get("with", {}).get("name") == "ci-validation-${{ github.run_attempt }}")
+    assert upload["if"] == "${{ always() }}"
+    assert upload["with"]["path"] == ".local/ci/validation.json"
+
+
+def test_job_timings_are_native_optional_and_never_invent_completion():
+    env = {"CI_JOB_TIMINGS": "true", "GITHUB_REPOSITORY": "synthetic/repo",
+           "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"}
+    jobs = [{"name": "test (windows-latest, 0)", "status": "completed",
+             "conclusion": "success", "started_at": "2026-10-24T00:00:00Z",
+             "completed_at": "2026-10-24T00:01:05Z"},
+            {"name": "ci", "status": "in_progress", "started_at": "2026-10-24T00:01:05Z"}]
+
+    def read(path):
+        assert path == "repos/synthetic/repo/actions/runs/123/attempts/2/jobs?per_page=100"
+        return {"total_count": len(jobs), "jobs": jobs}
+
+    result = ci_policy.job_timings(env, read)
+    assert result["available"]
+    assert [job["elapsed_seconds"] for job in result["jobs"]] == [65, None]
+    assert not ci_policy.job_timings({}, read)["available"]
+    assert not ci_policy.job_timings(env, lambda _: {"total_count": 200, "jobs": []})["available"]
+
+    def unavailable(_):
+        raise OSError("synthetic API unavailable")
+
+    assert ci_policy.job_timings(env, unavailable) == {"available": False, "reason": "OSError"}

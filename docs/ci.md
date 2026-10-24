@@ -9,7 +9,7 @@ commit and all of its required jobs.
 |---|---|
 | Default branch | Full validation, or exact-tree reuse of successful merged-PR CI |
 | Release tag, merge queue, manual run | Full validation |
-| PR containing code or configuration | Full validation against GitHub's merge preview |
+| PR containing code or configuration | Full or conservatively path-selected validation against GitHub's merge preview |
 | Development branch push | No workflow; open a PR or manually dispatch full validation |
 | Only README.md, Markdown under docs/, or explicitly registered evidence JSON | Privacy, CI policy and registered evidence checks |
 | Dependency locks, protocols, schema, privacy/budget/transport policy, build/deployment or CI configuration in a PR | Full validation |
@@ -22,6 +22,46 @@ and checks existing verification receipts; it does not install dependencies or
 repeat product tests before the parallel jobs. Documentation validation owns a
 fresh `ci-docs-*` directory under `.local/test-temp`, removed on success or failure.
 Unrelated retained diagnostics are preserved.
+
+## Windows path selection
+
+Only pull requests can use the `selected` profile. Ubuntu's complete four-file-shard suite,
+container checks and native-plugin checks remain required. Windows is selected independently
+for the product suite and the browser-reader job:
+
+| Complete non-document diff | Windows product suite/package checks | Windows browser |
+|---|---|---|
+| Only the three existing Console static assets in `STATIC_UI` | Omitted | Required |
+| Only existing backend files/tests explicitly listed in `NON_BROWSER` | Required | Omitted |
+| Mixed surfaces, shared dependencies, packaging/deployment, PowerShell, process/path/lock, voice/bridge, new tests/files or any unknown path | Required | Required |
+
+The exact small allowlists live in `scripts/ci_policy.py`. Generic Python changes are **not**
+assumed portable or browser-independent; they keep Windows unless explicitly listed. Even
+the listed backend Python changes retain the complete Windows product suite. New filenames,
+unknown evidence JSON, missing Git history and malformed events run both surfaces. Existing
+backend test files listed alongside their modules can omit only the browser job; new test
+files default to both. An allowlisted file gaining browser/platform responsibilities requires
+review of this policy in the same change. No source grep, test deletion or timing heuristic
+decides coverage.
+
+Main pushes, tags, merge queues and manual runs keep full platform coverage (or the existing
+documentation-only profile). Main can reuse only independently verified **full** PR evidence;
+a `selected` PR must run full validation after merge. Missing Windows work never counts as
+full coverage. The full reuse artifact is version 2 and explicitly records Windows product
+and browser coverage in addition to checking all actual job names/results. Older receipts
+and selected receipts are rejected.
+
+Preflight emits the native GitHub Actions JSON matrix. Each selected platform still gets all
+four shards, plus its replay/smoke/package checks once. The gate validates the browser skip
+against the selection and rejects failed, cancelled or unexpected job results. Every final
+gate writes `.local/ci/validation.json` with selection reasons, the actual scheduled matrix,
+expected and observed job results, checkout identity and reuse reference. The always-uploaded
+`ci-validation-*` artifact preserves failures as well as successes. It is a scoped report,
+not reusable full-tree proof; only a successful `full` run emits `ci-full-*`.
+The gate also reads this run attempt's native Actions job timestamps with read-only permission
+and adds per-job elapsed seconds to the report/summary. Unavailable or incomplete timing data
+is explicitly marked unavailable; the running gate has no invented completion time. These
+measurements do not replace JUnit timings or change which jobs must pass.
 
 The final `ci` job rejects failed, cancelled, missing or unexpectedly skipped
 required jobs. A docs run requires every full-only job to be skipped; it cannot
@@ -56,11 +96,11 @@ same candidate's checks or duplicating its commit/tree identifiers.
 
 ## File shards and timing maintenance
 
-The ordinary suite runs as four disjoint file shards on each of Ubuntu and
-Windows. Every collected file is assigned, including new files, and a file's
+The ordinary suite runs as four disjoint file shards on each selected platform.
+Full runs include both Ubuntu and Windows. Every collected file is assigned, including new files, and a file's
 parametrized cases and module fixtures stay together. Replay, smoke, build and
 package checks run once per platform, on the existing designated shard. A failed
-shard fails the final gate; reuse requires all eight test jobs as well as the
+shard fails the final gate; full-tree reuse requires all eight test jobs as well as the
 remaining full-validation jobs. An old two-shard receipt is insufficient.
 
 `scripts/ci_weights.json` records file durations from a successful full run.

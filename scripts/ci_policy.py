@@ -7,10 +7,24 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL_JOBS = ("test", "container", "browser-reader", "plugin-native")
+# Only these existing UI assets can omit Windows Python/package checks. New assets
+# and every Python file fail open to Windows; this is not an inferred import graph.
+STATIC_UI = {"companion/console_static/" + name for name in ("app.css", "app.js", "index.html")}
+# These existing backend-only files still run complete Ubuntu AND Windows suites,
+# but do not change the browser reader. Shared code, new tests and unknown paths
+# intentionally stay outside this narrow reviewed list.
+NON_BROWSER = {
+    "companion/affect.py", "companion/consolidation.py", "companion/expression.py",
+    "companion/goals.py", "companion/growth.py", "companion/interest.py",
+    "companion/reflection.py", "companion/diary.py",
+    "tests/test_affect.py", "tests/test_consolidation.py", "tests/test_expression.py",
+    "tests/test_goals.py", "tests/test_diary.py",
+}
 # Each fast-path evidence file names the checks that validate its actual contents.
 # Unknown JSON and changes to these checks still require full CI.
 DOC_EVIDENCE = {
@@ -114,13 +128,64 @@ def changed_files(event_name, event, root=ROOT):
         return None
 
 
-def check_results(profile, needs):
-    expected = "success" if profile == "full" else "skipped"
+def windows_selection(profile, event_name, ref, files):
+    """Only PRs with a complete, recognized diff may omit a Windows surface."""
+    if profile in {"docs", "reuse"}:
+        return {"product": False, "browser": False, "reason": profile}
+    if event_name != "pull_request" or not ref.startswith("refs/pull/"):
+        return {"product": True, "browser": True, "reason": "integration-or-unknown-event"}
+    if not files or any(not safe_path(name) for name in files):
+        return {"product": True, "browser": True, "reason": "unknown-change-set"}
+    code = [name for name in files if not (
+        name in DOC_EVIDENCE or name.endswith(".md")
+        and (name == "README.md" or name.startswith("docs/"))
+    )]
+    if code and all(name in STATIC_UI for name in code):
+        return {"product": False, "browser": True, "reason": "known-static-ui-only"}
+    if code and all(name in NON_BROWSER for name in code):
+        return {"product": True, "browser": False, "reason": "known-backend-only"}
+    return {"product": True, "browser": True, "reason": "shared-platform-or-unknown-path"}
+
+
+def test_matrix(selection):
+    platforms = ["ubuntu-latest"] + (["windows-latest"] if selection["product"] else [])
+    return {"include": [{"os": platform, "shard": shard,
+                         "verify_shard": int(platform == "windows-latest")}
+                        for platform in platforms for shard in range(4)]}
+
+
+def valid_selection(selection):
+    return (isinstance(selection, dict) and set(selection) == {"product", "browser", "reason"}
+            and type(selection["product"]) is bool and type(selection["browser"]) is bool
+            and isinstance(selection["reason"], str) and bool(selection["reason"]))
+
+
+def expected_results(profile, selection):
+    expected = "success" if profile in {"full", "selected"} else "skipped"
+    results = {"preflight": "success", "quality": "success",
+               **dict.fromkeys(FULL_JOBS, expected)}
+    if profile == "selected" and not selection["browser"]:
+        results["browser-reader"] = "skipped"
+    return results
+
+
+def check_results(profile, needs, selection=None):
+    if selection is None:
+        selection = {"product": profile == "full", "browser": profile == "full", "reason": profile}
+    if not valid_selection(selection):
+        return False
+    if profile == "full" and not (selection["product"] and selection["browser"]):
+        return False
+    if profile == "selected" and (selection["product"], selection["browser"]) not in {
+        (True, False), (False, True),
+    }:
+        return False
+    if profile in {"docs", "reuse"} and (selection["product"] or selection["browser"]):
+        return False
     return (
-        profile in {"full", "docs", "reuse"}
-        and needs.get("preflight", {}).get("result") == "success"
-        and needs.get("quality", {}).get("result") == "success"
-        and all(needs.get(name, {}).get("result") == expected for name in FULL_JOBS)
+        profile in {"full", "selected", "docs", "reuse"}
+        and all(needs.get(name, {}).get("result") == expected
+                for name, expected in expected_results(profile, selection).items())
     )
 
 
@@ -139,18 +204,55 @@ def run_docs(root=ROOT):
         ], cwd=root)
 
 
+def job_timings(env=os.environ, read=None):
+    """Optional native Actions timings; absence never invents zero-duration evidence."""
+    if env.get("CI_JOB_TIMINGS") != "true":
+        return {"available": False, "reason": "not-requested"}
+    try:
+        if read is None:
+            if __package__:
+                from .ci_reuse import api
+            else:
+                from ci_reuse import api
+            read = api
+        repo, run, attempt = (env[key] for key in (
+            "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or not (
+            run.isdigit() and attempt.isdigit()
+        ):
+            raise ValueError("Invalid run identity")
+        result = read(f"repos/{repo}/actions/runs/{run}/attempts/{attempt}/jobs?per_page=100")
+        if result["total_count"] != len(result["jobs"]):
+            raise ValueError("Incomplete job timing page")
+        jobs = []
+        for job in result["jobs"]:
+            start, end = job.get("started_at"), job.get("completed_at")
+            seconds = ((datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+                       if start and end else None)
+            if seconds is not None and seconds < 0:
+                raise ValueError("Invalid job timestamps")
+            jobs.append({key: job.get(key) for key in (
+                "name", "status", "conclusion", "started_at", "completed_at")}
+                        | {"elapsed_seconds": seconds})
+        return {"available": True, "jobs": jobs}
+    except Exception as error:
+        return {"available": False, "reason": type(error).__name__}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=["plan", "docs", "gate"])
-    parser.add_argument("--profile", choices=["full", "docs", "reuse"])
+    parser.add_argument("--profile")
     args = parser.parse_args()
     if args.operation == "plan":
         reuse = None
         name, ref, event = "", "", {}
+        files = None
         try:
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text("utf-8"))
             name, ref = os.environ["GITHUB_EVENT_NAME"], os.environ["GITHUB_REF"]
-            profile, reason = choose_profile(name, ref, event, changed_files(name, event))
+            files = changed_files(name, event)
+            profile, reason = choose_profile(name, ref, event, files)
         except (KeyError, TypeError, ValueError, OSError, AttributeError):
             profile, reason = "full", "unreadable-event"
         if profile == "full":
@@ -167,31 +269,72 @@ def main():
                 reuse = None
             if reuse:
                 profile, reason = "reuse", "verified-identical-pr-tree"
+        selection = windows_selection(
+            profile, name if profile != "full" or reason == "pr-merge-preview" else "", ref, files,
+        )
+        if profile == "full" and not (selection["product"] and selection["browser"]):
+            profile, reason = "selected", selection["reason"]
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write(f"profile={profile}\n")
             output.write("reuse=" + json.dumps(reuse, separators=(",", ":")) + "\n")
-        print(json.dumps({"profile": profile, "reason": reason}))
+            output.write("windows=" + json.dumps(selection, separators=(",", ":")) + "\n")
+            output.write("matrix=" + json.dumps(test_matrix(selection),
+                                                 separators=(",", ":")) + "\n")
+        print(json.dumps({"profile": profile, "reason": reason, "windows": selection}))
     elif args.operation == "gate":
         needs = json.loads(os.environ["NEEDS_JSON"])
-        if not check_results(args.profile, needs):
+        try:
+            selection = json.loads(os.environ.get("CI_WINDOWS", "null"))
+        except ValueError:
+            selection = {"error": "invalid-preflight-selection"}
+        if selection is None and "CI_WINDOWS" not in os.environ:
+            selection = {"product": args.profile == "full", "browser": args.profile == "full",
+                         "reason": args.profile}
+        passed = valid_selection(selection) and check_results(args.profile, needs, selection)
+        try:
+            reuse = json.loads(os.environ.get("CI_REUSE", "null"))
+        except ValueError:
+            reuse = {"error": "invalid-preflight-reuse"}
+        commit, tree = subprocess.check_output(
+            ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=ROOT, text=True, timeout=10,
+        ).splitlines()
+        machine = {"version": 1, "profile": args.profile, "commit": commit, "tree": tree,
+                   "passed": passed, "windows": selection,
+                   "matrix": test_matrix(selection) if valid_selection(selection)
+                   and args.profile in {"full", "selected"} else {"include": []},
+                   "checks": {job: needs.get(job, {}).get("result", "missing")
+                              for job in ("preflight", "quality", *FULL_JOBS)},
+                   "expected": expected_results(args.profile, selection)
+                   if valid_selection(selection) else {},
+                   "reuse": reuse, "timings": job_timings(),
+                   "run_id": os.environ.get("GITHUB_RUN_ID"),
+                   "attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}
+        path = ROOT / ".local/ci/validation.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(machine, indent=2) + "\n", encoding="utf-8")
+        if not passed:
             raise SystemExit("Required CI validation did not complete successfully")
         print(f"CI passed: {args.profile}")
         if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
             # This receipt describes this run; full-tree reuse still requires its
             # separately authenticated artifact and all successful job results.
-            commit, tree = subprocess.check_output(
-                ["git", "rev-parse", "HEAD", "HEAD^{tree}"], cwd=ROOT, text=True, timeout=10,
-            ).splitlines()
             run = (f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
                    f"/actions/runs/{os.environ['GITHUB_RUN_ID']}")
             with Path(summary).open("a", encoding="utf-8") as receipt:
                 receipt.write(
                     f"### Validation receipt\n\nProfile: `{args.profile}`\n\n"
+                    f"Windows selection: `{json.dumps(selection, sort_keys=True)}`\n\n"
                     f"Commit: `{commit}`\n\nTree: `{tree}`\n\n[CI run]({run})\n\n"
                     "| Check | Result |\n| --- | --- |\n"
                 )
                 for job in ("preflight", "quality", *FULL_JOBS):
                     receipt.write(f"| {job} | {needs[job]['result']} |\n")
+                if machine["timings"]["available"]:
+                    receipt.write("\n| Actual job | Elapsed seconds |\n| --- | --- |\n")
+                    for job in machine["timings"]["jobs"]:
+                        seconds = job["elapsed_seconds"]
+                        elapsed = seconds if seconds is not None else "pending"
+                        receipt.write(f"| {job['name']} | {elapsed} |\n")
     else:
         raise SystemExit(run_docs())
 

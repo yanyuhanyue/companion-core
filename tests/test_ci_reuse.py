@@ -31,7 +31,8 @@ def evidence(repository, monkeypatch, tmp_path):
     event = {"after": target["commit"], "repository": {
         "full_name": repo, "default_branch": "main",
     }}
-    record = {"version": 1, "profile": "full", "repository": repo, "event": "pull_request",
+    record = {"version": 2, "profile": "full", "repository": repo, "event": "pull_request",
+              "coverage": {"windows_product": True, "windows_browser": True},
               "tree": target["tree"], "commit": "b" * 40, "run_id": 101, "attempt": 2}
     # The recorded checkout is deliberately different from the PR head and main
     # commit. Reuse must bind the actual tested tree, not infer it from head_sha.
@@ -118,7 +119,11 @@ def test_identical_actual_tree_reuses_full_success_and_validates_again(evidence)
     ("record", "tree", "c" * 40), ("record", "profile", "docs"),
     ("record", "profile", "reuse"), ("record", "repository", "other/repository"),
     ("record", "run_id", 100), ("record", "attempt", 1),
-    ("record", "event", "push"), ("record", "version", 2),
+    ("record", "event", "push"), ("record", "version", 1),
+    ("record", "version", 3), ("record", "profile", "selected"),
+    ("record", "coverage", {"windows_product": False, "windows_browser": True}),
+    ("record", "coverage", {"windows_product": True, "windows_browser": False}),
+    ("record", "coverage", None),
     ("record", "version", True),
     ("artifact", "expired", True), ("artifact", "name", "ci-full-1"),
     ("artifact", "size_in_bytes", 16385), ("artifact", "id", -1),
@@ -219,6 +224,7 @@ def test_record_cli_captures_real_tree_only_for_full_success(repository, monkeyp
     monkeypatch.setattr(ci_reuse, "ROOT", repository)
     monkeypatch.setattr(ci_reuse, "checkout", lambda: target)
     for name, value in {"CI_PROFILE": "full", "GITHUB_SHA": target["commit"],
+                        "CI_WINDOWS": json.dumps({"product": True, "browser": True}),
                         "GITHUB_REPOSITORY": "synthetic/repository", "GITHUB_RUN_ID": "101",
                         "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "pull_request"}.items():
         monkeypatch.setenv(name, value)
