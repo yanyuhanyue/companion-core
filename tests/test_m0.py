@@ -1,3 +1,4 @@
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -12,6 +13,7 @@ from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
 from astrbot_plugin_companion_bridge.bridge import Spool, normalize
+from companion import owner_input
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.config import Settings
@@ -114,9 +116,10 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
 
 @pytest.mark.parametrize("failure", [429, 503, "timeout"])
 def test_m0_04_uncertain_provider_usage_blocks_paid_retry(core, failure, tmp_path):
-    from tests.test_paid_model_gate import approved_live
+    from tests.test_owner_input import captured, inbound
 
-    approved_live(core, tmp_path, concurrency=3)
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
     calls = []
 
     def handler(request):
@@ -129,7 +132,7 @@ def test_m0_04_uncertain_provider_usage_blocks_paid_retry(core, failure, tmp_pat
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             core.settings.mode = "live"
             core.model = ModelClient(core.settings, client)
-            ingest(core)
+            core.ingest(inbound(core, capture), "m0-unknown-input")
             assert await core.run_once()
             core.clock.advance(30)
             # A queued retry reaches admission, where the first call's unresolved
@@ -253,20 +256,42 @@ def test_m0_11_encrypted_backup_restore(core, tmp_path):
 
 
 def test_m0_12_proactive_quota_does_not_block_chat(core):
-    core.settings.proactive_enabled = True
+    from companion.social import proactive_counts
+    from tests.test_source_definitions import accepted_text
+
+    core.settings.social_enabled = core.settings.proactive_enabled = True
     core.settings.proactive_daily_limit = 1
     core.settings.proactive_idle_seconds = 0
+    core.settings.quiet_start = core.settings.quiet_end = 0
     ingest(core)
     run(core.run_once())
     core.store.execute("UPDATE outbox SET state='SENT'")
-    assert core.schedule_proactive()
-    run(core.run_once())
+    observed = accepted_text(core)
+    core.observations.append("reader", observed)
+    core.social.consider(observed.event_id)
+    assert core.social.flush()
+    activity = core.store.one("SELECT job_id FROM jobs WHERE kind='activity'")
+    assert run(core.run_once(job_id=activity["job_id"]))
     core.store.execute("UPDATE outbox SET state='SENT'")
     core.clock.advance(10801)
-    assert not core.schedule_proactive()
-    ingest(core, 2, "普通回复继续")
+    observed = accepted_text(core, number=2)
+    text = "合成天文资料：土星环由冰和岩石碎片组成。"
+    observed = observed.model_copy(update={
+        "source_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "payload": observed.payload.model_copy(update={"title": "土星环",
+            "text": text, "url": "https://www.bilibili.com/video/BV1xx411c7mE"}),
+    })
+    core.observations.append("reader", observed)
+    candidate = core.social.consider(observed.event_id)
+    assert core.store.one("SELECT state FROM social_candidates WHERE candidate_id=?",
+                          (candidate,))["state"] == "CANDIDATE"
+    assert proactive_counts(core.store, core.settings, core.clock()) == (1, False)
+    assert not core.social.flush()
+    accepted = ingest(core, 2, "普通回复继续")
     assert run(core.run_once())
-    assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 3
+    assert core.store.one("SELECT COUNT(*) AS n FROM outbox WHERE origin_event_id=?",
+                          (accepted["event_id"],))["n"] == 1
+    assert proactive_counts(core.store, core.settings, core.clock())[0] == 1
 
 
 def test_m0_13_public_capabilities_disabled(core):

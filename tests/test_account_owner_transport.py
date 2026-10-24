@@ -14,7 +14,11 @@ from companion.contracts import LeaseRequest
 from companion.model import ModelClient
 from tests.test_onebot_capture import real_core_http
 from tests.test_social_autonomy import background, queue
-from tests.test_social_owner_authority import authorize, stop
+from tests.test_social_owner_authority import (
+    authorize,
+    close_provider_clients,  # noqa: F401 - pytest autouse fixture for the shared helper
+    stop,
+)
 
 
 def prepared(core, tmp_path):
