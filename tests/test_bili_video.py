@@ -48,6 +48,7 @@ from tests.test_onebot_direct import raw_event
 from tests.test_reading_followup import admit
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import queued
+from tests.test_test_fixtures import historical_database
 from tests.test_video_understanding import scope_options
 
 
@@ -549,20 +550,23 @@ def test_restore_fences_pending_native_work_without_clearing_its_reservations(co
         module.prepare("bili", item["request_id"], preparation(item))
 
 
-def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_history(core):
+def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_history(core, tmp_path):
     module, item, _, _ = prepared(core)
     before = core.store.rows("SELECT * FROM reading_attempts")
+    database = historical_database(core.store, tmp_path / "bili.db", "0032_bili_video")
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     config.set_main_option(
-        "sqlalchemy.url", "sqlite:///" + core.settings.database.replace("\\", "/")
+        "sqlalchemy.url", "sqlite:///" + database.as_posix()
     )
     with pytest.raises(RuntimeError, match="BILI_VIDEO_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(config, "0031_voice_nodes")
-    assert core.store.rows("SELECT * FROM reading_attempts") == before
-    assert module.context(item["media"]["content_item_id"])["state"] == "PREPARED"
+    with closing(Store(database)) as store:
+        assert store.rows("SELECT * FROM reading_attempts") == before
+        historical = BiliVideoService(store, core.settings, module.reading, clock=core.clock)
+        assert historical.context(item["media"]["content_item_id"])["state"] == "PREPARED"
 
 
 def paid_options(core, *, cloud=None, short_window=False, call_limit=4):

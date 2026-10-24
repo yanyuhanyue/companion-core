@@ -349,14 +349,13 @@ def test_existing_m1_database_keeps_facts_across_index_upgrade_and_downgrade(cor
                 subject="user", kind="preference", fact_key="drink", content=content,
                 evidence_event_id="evt_legacy", evidence_quote=content,
             ), now, confirmed=True)
-    migrate(str(path))
+    migrate(str(path), "0003_memory_index")
     settings.memory_enabled = True
-    previous = Core(settings, core.model, core.clock)
-    try:
-        assert previous.memory.search("我平时最爱喝什么？")[0]["memory_id"] == mid
-        assert previous.store.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 1
-    finally:
-        previous.store.close()
+    with closing(Store(str(path))) as indexed:
+        memory = Memory(indexed, settings, ErasureLedger(settings.erasure_ledger))
+        memory.index.warmup()
+        assert memory.search("我平时最爱喝什么？")[0]["memory_id"] == mid
+        assert indexed.one("SELECT COUNT(*) AS n FROM memory_vectors")["n"] == 1
     migration = Config()
     migration.set_main_option("script_location", str(Path("migrations").resolve()))
     migration.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())

@@ -540,7 +540,7 @@ def test_upgrade_and_empty_downgrade_preserve_existing_profile_delivery(tmp_path
         before = store.one("SELECT * FROM outbox")
     finally:
         store.close()
-    migrate(path)
+    migrate(path, "0030_private_poke")
     store = Store(path)
     try:
         after = store.one("SELECT * FROM outbox")
@@ -559,7 +559,7 @@ def test_upgrade_and_empty_downgrade_preserve_existing_profile_delivery(tmp_path
 
 def test_downgrade_refuses_native_ack_on_existing_nonpoke_delivery(tmp_path):
     path = tmp_path / "ack.db"
-    migrate(path)
+    migrate(path, "0030_private_poke")
     store = Store(path)
     try:
         store.insert("principals", actor_id="owner", kind="owner", created_at="2026-10-19")
