@@ -186,6 +186,17 @@ def validate(store, settings, job, now):
     data = _material(store, settings, value["kind"], value["ref"], now)
     dependencies = {row["source_event_id"] for row in store.rows(
         "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (current["event_id"],))}
+    if value["kind"] == "life":
+        from companion import reply_revision
+
+        result = store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job["job_id"],))
+        if not result or result["authority_sha256"] != data["authority_sha256"]:
+            raise CoreError("LIFE_AUTHORITY_CHANGED", 403)
+        if (json.loads(result["source_fingerprints_json"]) != data["source_events"]
+            or dependencies != set(data["source_events"])):
+            raise CoreError(reply_revision.SOURCE_RECALLED, 409)
+        if sha(data) != value["material_sha256"]:
+            raise CoreError(reply_revision.SUPERSEDED, 409)
     if sha(data) != value["material_sha256"] or dependencies != set(data["source_events"]):
         raise CoreError("NOTICE_SOURCE_CHANGED", 409)
     return data
