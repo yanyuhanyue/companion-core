@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 
-from companion import private_life
+from companion import owner_authority
 from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.model import ModelClient
@@ -25,8 +25,8 @@ async def life_worker(settings):
                 "UPDATE model_usage SET state='UNKNOWN' WHERE scenario='diary' AND state='RESERVED'"
                 + (" AND request_id IN (SELECT request_id FROM model_admissions "
                    "WHERE lease_until<=?)"
-                   if private_life.enabled(settings) else ""),
-                (core.clock(),) if private_life.enabled(settings) else (),
+                   if owner_authority.required(core.store, settings) else ""),
+                (core.clock(),) if owner_authority.required(core.store, settings) else (),
             )
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
                 scan, deadline = wake.before_scan(), None

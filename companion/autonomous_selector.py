@@ -4,8 +4,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
 
-from companion import budget, private_life, social_autonomy_runtime
+from companion import budget, owner_authority, private_life, social_autonomy_runtime
 from companion.contracts import CoreError
+from companion.store import encode
 from companion.worker_schedule import UnitResult, run_native_unit
 from companion.worker_wakeup import MAINTENANCE_SECONDS
 
@@ -69,7 +70,32 @@ class RoundRobin:
 def foreground_clear(core):
     if budget.chat_pending(core.store, core.clock()):
         return False
-    return private_life.ready(core.store, core.settings, core.clock)
+    if not owner_authority.required(core.store, core.settings):
+        return True
+    try:
+        view = owner_authority.current(core.store, core.settings, core.clock)
+    except CoreError:
+        return False
+    # This is a scheduling hint over the native signed input receipt, not a new
+    # permission or input queue. Final admission remains owned by the domain.
+    pending = core.store.one(
+        "SELECT 1 FROM runtime_meta r LEFT JOIN events e "
+        "ON e.event_id=json_extract(r.value,'$.event_id') "
+        "WHERE r.key LIKE 'owner_input:%' AND e.event_id IS NULL "
+        "AND json_extract(r.value,'$.authority')=json(?) LIMIT 1",
+        (encode(view.authority.as_dict()),),
+    )
+    return not pending and not private_life.busy(core.store, core.clock())
+
+
+def _allowed(core, purposes):
+    if not owner_authority.required(core.store, core.settings):
+        return True
+    try:
+        view = owner_authority.current(core.store, core.settings, core.clock)
+    except CoreError:
+        return False
+    return set(purposes) <= set(view.policy.purposes)
 
 
 def native_selector(core, worker_id) -> RoundRobin:
@@ -78,21 +104,30 @@ def native_selector(core, worker_id) -> RoundRobin:
     Core and domain owners provide the paid-admission/final-dispatch fences. This
     foreground check is a scheduling hint and grants no model or tool authority.
     """
-    if core.settings.consolidation_enabled and not callable(
+    if core.settings.consolidation_enabled and _allowed(core, ("consolidation",)) and not callable(
         getattr(core.consolidation, "run_step", None),
     ):
         raise CoreError("NATIVE_CONSOLIDATION_STEP_REQUIRED", 503)
-    if core.settings.memory_enabled and not callable(getattr(core, "extract_step", None)):
+    if (core.settings.memory_enabled and _allowed(core, ("memory",))
+        and not callable(getattr(core, "extract_step", None))):
         raise CoreError("NATIVE_MEMORY_STEP_REQUIRED", 503)
 
-    def maintenance(name, operation):
+    def lane(name, operation, purposes=(), *, interval=None):
+        async def run():
+            if not _allowed(core, purposes):
+                return UnitResult(False)
+            return await operation()
+
+        return Lane(name, run, interval=interval)
+
+    def maintenance(name, operation, purposes=()):
         async def run():
             operation()
             # Completed a scheduled maintenance unit. Its next monotonic deadline
             # advances once; rescan to observe any work enqueued on our own Store.
             return UnitResult(True)
 
-        return Lane(name, run, interval=MAINTENANCE_SECONDS)
+        return lane(name, run, purposes, interval=MAINTENANCE_SECONDS)
 
     async def wake_goal():
         decisions = core.wake.evaluate()
@@ -109,17 +144,35 @@ def native_selector(core, worker_id) -> RoundRobin:
         return UnitResult(bool(core.social.flush()))
 
     async def activity():
+        kinds, authority = ["life", "share", "commitment"], None
+        if owner_authority.required(core.store, core.settings):
+            try:
+                view = owner_authority.current(core.store, core.settings, core.clock)
+            except CoreError:
+                return UnitResult(False)
+            authority = encode(view.authority.as_dict())
+            kinds = [kind for kind, purpose in (
+                ("life", "life"), ("share", "proactive"), ("commitment", "goals"),
+            ) if purpose in view.policy.purposes]
         row = core.store.one(
-            "SELECT j.job_id FROM jobs j JOIN events e USING(event_id) "
+            "SELECT j.* FROM jobs j JOIN events e USING(event_id) "
             "WHERE j.kind='activity' AND e.redacted=0 "
-            "AND json_extract(e.body_json,'$.notice.kind') IN ('life','share','commitment') "
+            "AND json_extract(e.body_json,'$.notice.kind') IN (SELECT value FROM json_each(?)) "
+            "AND (? IS NULL OR json(j.authority_json)=json(?)) "
             "AND (j.state IN ('QUEUED','RETRY_WAIT') "
             "OR (j.state='RUNNING' AND j.lease_until<=?)) "
             "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) "
-            "ORDER BY j.rowid LIMIT 1", (core.clock(), core.clock()),
+            "ORDER BY j.rowid LIMIT 1",
+            (encode(kinds), authority, authority, core.clock(), core.clock()),
         )
         if row is None:
             return UnitResult(False)
+        if authority is not None:
+            try:
+                owner_authority.check_job(core.store, core.settings, core.clock, row,
+                    purpose=owner_authority.model_purpose(core.store, "activity", row["job_id"]))
+            except CoreError:
+                return UnitResult(False)
 
         async def execute():
             return await core.run_once(worker_id, job_id=row["job_id"])
@@ -132,12 +185,18 @@ def native_selector(core, worker_id) -> RoundRobin:
     async def consolidation():
         if not core.settings.consolidation_enabled:
             return UnitResult(False)
-        return await core.consolidation.run_step(worker_id)
+        operation = getattr(core.consolidation, "run_step", None)
+        if not callable(operation):
+            raise CoreError("NATIVE_CONSOLIDATION_STEP_REQUIRED", 503)
+        return await operation(worker_id)
 
     async def memory():
         if not core.settings.memory_enabled:
             return UnitResult(False)
-        return await core.extract_step()
+        operation = getattr(core, "extract_step", None)
+        if not callable(operation):
+            raise CoreError("NATIVE_MEMORY_STEP_REQUIRED", 503)
+        return await operation()
 
     async def social():
         result = await social_autonomy_runtime.run_once(
@@ -147,16 +206,16 @@ def native_selector(core, worker_id) -> RoundRobin:
 
     return RoundRobin((
         maintenance("retention", core.expire_raw_events),
-        maintenance("diary_schedule", core.diary.schedule_due),
-        maintenance("consolidation_schedule", core.consolidation.schedule_due),
-        maintenance("commitment_expiry", core.goals.expire_commitments),
-        Lane("wake", wake_goal, interval=MAINTENANCE_SECONDS),
-        Lane("goal", schedule_goal),
-        Lane("life_topic", life_topic),
-        Lane("private_share", private_share),
-        Lane("activity", activity),
-        Lane("diary", diary),
-        Lane("consolidation", consolidation),
-        Lane("memory", memory),
-        Lane("social", social),
+        maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
+        maintenance("consolidation_schedule", core.consolidation.schedule_due, ("consolidation",)),
+        maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),
+        lane("wake", wake_goal, ("wake", "exploration"), interval=MAINTENANCE_SECONDS),
+        lane("goal", schedule_goal, ("goals", "exploration")),
+        lane("life_topic", life_topic, ("life",)),
+        lane("private_share", private_share, ("proactive",)),
+        lane("activity", activity),
+        lane("diary", diary, ("diary",)),
+        lane("consolidation", consolidation, ("consolidation",)),
+        lane("memory", memory, ("memory",)),
+        lane("social", social, ("social",)),
     ), lambda: foreground_clear(core))

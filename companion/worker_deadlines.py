@@ -3,6 +3,9 @@
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from companion import owner_authority
+from companion.contracts import CoreError
+
 JOBS = (
     ("jobs", "next_attempt_at", "state IN ('QUEUED','RETRY_WAIT')"),
     ("jobs", "lease_until", "state='RUNNING'"),
@@ -50,9 +53,14 @@ def _next(store, settings, scan_started_at, boundaries, *, local_hours=()):
         if due <= local:
             due += timedelta(days=1)
         dates.append(due.astimezone(UTC))
-    if settings.live_text_window:
-        end = settings.live_text_window.ends_at
-        if end > scan_started_at:
+    if owner_authority.required(store, settings):
+        try:
+            end = owner_authority.current(
+                store, settings, lambda: scan_started_at.isoformat(),
+            ).policy.expires_at
+        except CoreError:
+            end = None
+        if end is not None and end > scan_started_at:
             dates.append(end)
     return min(dates)
 

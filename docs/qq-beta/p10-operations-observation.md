@@ -133,6 +133,11 @@ Reader、Executive、Voice 仍由各自原生入口执行；不会因为“后�
 原生 claim 和最终 dispatch 继续检查最新来源、权限和预算；selector 的前置检查不是许可。
 已开始的模型、发送和不确定结果保留原责任，不为让路而退款或自动重试。
 
+OwnerAuthority 的 `required/current` 决定是否需要当前授权；各 lane 仅消费其明确许可的
+purpose。activity 还须匹配原 job 的完整授权引用，并由原生 check_job 复验，不能借最新授权
+重绑旧任务。已批准但未入库的签名输入按当前引用阻止新后台 turn。领域截止时间只读取可为空的
+`policy.expires_at`；没有截止时间不补造窗口。STOP、授权版本变化和恢复仍触发原 wakeup 重算。
+
 Life、Diary、Social 的默认关闭／SHADOW、DND、每日次数、冷却、SKIP/DEFER 都由原生模块处理。
 静默的一次检查不调用模型；SKIP 消费原候选，不新增消息。公平性只保证进程持续运行且存在
 空闲资源时，持续可用的后台 lane 获得有限轮转机会；不保证持续前台流量下后台按时完成。
@@ -140,5 +145,6 @@ Life、Diary、Social 的默认关闭／SHADOW、DND、每日次数、冷却、S
 完整切换须同时接入 Core 的前台／指定 activity 领取隔离、移除 Core 的 Social fallthrough
 和 timer 问候生产、停用独立 Diary 入口，并提供 `NightlyConsolidator.run_step(worker_id)` 与
 `Core.extract_step(local_day=None)`。两种原生单步均返回 UnitResult，最多一次模型 admission
-或一次有界非模型推进。缺少接口时 Life 启动失败，不能回退调用多模型 `run_once/extract_once`。
+或一次有界非模型推进。获准启用的 lane 缺少接口时，Life 启动或该 lane 首次执行失败，
+不能回退调用多模型 `run_once/extract_once`；没有相应 purpose 的 lane 不调用接口。
 对应 Core 与部署补丁由集成负责人统一接入；这些条件未全部验证前，不宣称统一调度已完成。
