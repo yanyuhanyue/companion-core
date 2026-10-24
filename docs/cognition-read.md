@@ -79,24 +79,22 @@ from companion.cognition_api import register_cognition_routes
 register_cognition_routes(app, control_auth)
 ```
 
-The module test registers this route explicitly; it does **not** claim that the
-real application entry point already exposes it. Before acceptance, integration
-must test the registered `create_app` with its real control token, STOP state and
-an independent worker using mocked provider transport. No live acceptance was run.
+The route is registered by `create_app`. Integration checks exercise its real
+owner-control authentication, STOP state and records produced by independent
+workers using mocked provider transport. Real environment acceptance is pending.
 
 This is the initial native-record projection. Historical candidate alternatives
 are `NOT_RECORDED`; Life's saved structured reason is returned as `decision_reason` with
 `kind=decision_reason`, distinct from raw reasoning. It must agree with the saved
 proposal, is capped at 160 characters, and applies the existing secret-redaction
 and sensitive-content rules. Missing reasons are `NOT_RECORDED`, disagreement is
-`UNKNOWN`, and sensitive reasons are `REDACTED` without their text. N1/N2/N3 are read directly from the stable `steps_json` fields inspected at
-`7b8def23`; missing fields remain `NOT_RECORDED`. REM waits for the final Life
-interface. Life exposes the native topic/revision candidate reference, destination
+`UNKNOWN`, and sensitive reasons are `REDACTED` without their text. N1/N2/N3 are
+read directly from the native `steps_json` fields; missing fields remain
+`NOT_RECORDED`. REM metadata is described below. Life exposes the native topic/revision candidate reference, destination
 and job state. It does not reconstruct unrecorded alternative candidates. Model usage
 is separately paginated; a full cross-kind execution graph and UI remain pending.
 
-Verification: `scripts/check.ps1 -TestFiles tests/test_cognition_read.py` passed
-24 cases, covering empty kinds without execution, native wake decisions and
+`tests/test_cognition_read.py` covers empty kinds without execution, native wake decisions and
 pagination, native goal provenance with an independent Core instance, erasure,
 privacy races, measurement filtering, native paid reservation/settlement with MockTransport, UNKNOWN usage,
 waiting/cancelled goal steps, missing-record NOT_RECORDED and the explicit module HTTP contract.
@@ -117,12 +115,12 @@ reference exposes the original topic/revision, saved source IDs, material hash a
 authority hash. The full historical allowed-item list was not persisted and is
 explicitly `NOT_RECORDED`; current permissions are not substituted for it.
 
-The reason/epoch follow-up passed 30 focused cases across `test_cognition_read.py`
-and `test_cognition_reason.py`. Native Life decisions and a generated Diary remain
+Checks in `test_cognition_read.py` and `test_cognition_reason.py` verify that
+native Life decisions and a generated Diary remain
 observable after an unrelated real Memory addition; source erasure retracts them.
 Saved credential-like and sensitive reasons do not appear in responses. Pending
-records do not acquire an inferred reason. These are module-level checks; real
-entry registration remains the integration owner's responsibility.
+records do not acquire an inferred reason. `test_cognition_api.py` covers the
+registered application route and its owner-control authentication.
 
 
 ## REM metadata
@@ -132,6 +130,14 @@ projection reads frozen `rem_records`, the original job and its `scenario=rem`
 usage. It reuses `MemoryContext.revalidate` from the native REM reader, checks that
 stored memory/event references agree with that proof, and retains the outer
 request-wide custody/version fence. Missing records are `NOT_RECORDED`.
+
+Life-origin creations reuse `rem.life_record` to validate the original settled
+Life result, exact content digest, native REM job binding and full event-source
+closure. Their source Memory list is empty because saving fiction creates no
+fact. Saving the retained text makes no new model call: its REM `usage` is null
+and `usage_status=NOT_RECORDED`, while the original Life model usage remains on
+that Life job. Known Life source, pause and reconciliation failures are exposed
+as bounded error codes.
 
 Every row is labelled `kind=FICTION`, `audience=owner_only`, and
 `content_kind=private_fiction`; question metadata is `UNVERIFIED`. No title,
@@ -146,9 +152,10 @@ status. REM disabling is not an execution permission for this owner-control read
 The native `rem.records` reader only supports the newest N rows; this adapter
 adds the cognition native-ID cursor without rebuilding a second history store.
 
-The read-side tests use real Memory evidence and pinned proofs with synthetic
-retained rows in the frozen REM schema. They verify the actual registered owner
-API, paging, missing IDs, expiry, ledger erasure, native scrub, reference mismatch,
-version races and unchanged accounting. They do not execute REM. Root integration `a10ec3c` includes the frozen shared
-Core/config/authority/erasure hooks; these reader checks use that integration.
-Independent-worker generation acceptance remains with R1/Life.
+`test_cognition_rem.py` uses real Memory evidence and pinned proofs with synthetic
+retained rows to verify the registered owner API, paging, missing IDs, expiry,
+ledger erasure, native scrub, reference mismatch, version races and unchanged accounting.
+`test_rem_life_entrypoint.py` and `test_life_rem_cognition.py` also inspect records
+produced through signed HTTP input and independent Life/REM workers. The latter
+checks exact retained creation, source/output tampering, recall and queued-save
+failure through the real cognition HTTP route, with no body exposure or accounting writes.

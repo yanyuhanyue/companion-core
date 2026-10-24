@@ -10,7 +10,9 @@ ERRORS = frozenset("REM_SOURCE_ERASED REM_INTERRUPTED REM_JOB_FENCED REM_POLICY_
                    "REM_SENSITIVE_CONTENT REM_INVALID_RESULT BACKGROUND_YIELD_TO_CHAT "
                    "MODEL_USAGE_UNRESOLVED SCENARIO_BUDGET_DISABLED SCENARIO_CALL_LIMIT "
                    "DAILY_BUDGET_EXHAUSTED SCENARIO_MONTHLY_BUDGET_EXHAUSTED PRIVACY_CHANGED "
-                   "OWNER_AUTHORITY_DISABLED OWNER_AUTHORITY_EXPIRED".split())
+                   "OWNER_AUTHORITY_DISABLED OWNER_AUTHORITY_EXPIRED LIFE_DRAFT_CHANGED "
+                   "LIFE_DRAFT_EXPIRED LIFE_SETTLED_DRAFT_REQUIRED LIFE_CONSUMPTION_PAUSED "
+                   "LIFE_RECONCILIATION_REQUIRED".split())
 
 
 def _ids(value, limit):
@@ -39,12 +41,20 @@ def record(core, row, now):
         try:
             mids = _ids(row["source_memory_ids_json"], 3)
             eids = _ids(row["source_event_ids_json"], 100)
-            proof = json.loads(row["source_snapshot_json"])["proof"]
-            if (not mids or not eids or len(proof["rows"]) > 3
-                or set(mids) != {memory["memory_id"] for memory in proof["rows"]}
-                or set(eids) != set(proof["source_event_ids"])):
-                raise ValueError("source identities differ from original proof")
-            core.memory_context.revalidate(proof, now)
+            snapshot = json.loads(row["source_snapshot_json"])
+            if "life" in snapshot:
+                from companion import rem
+
+                if mids or not eids:
+                    raise ValueError("Life creation retains event sources, not new facts")
+                rem.life_record(core.store, core.settings, lambda: now, row, snapshot)
+            else:
+                proof = snapshot["proof"]
+                if (not mids or not eids or len(proof["rows"]) > 3
+                    or set(mids) != {memory["memory_id"] for memory in proof["rows"]}
+                    or set(eids) != set(proof["source_event_ids"])):
+                    raise ValueError("source identities differ from original proof")
+                core.memory_context.revalidate(proof, now)
             output = json.loads(row["output_json"])
             if not isinstance(output, dict):
                 raise ValueError("invalid output object")
