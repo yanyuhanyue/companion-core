@@ -12,6 +12,7 @@ from companion import budget
 from companion.config import Settings
 from companion.model import ModelClient
 from companion.social_autonomy import SocialAutonomy
+from companion.social_autonomy_runtime import run_once
 from companion.store import Store, encode
 
 
@@ -20,7 +21,7 @@ async def main():
     settings = Settings.model_validate(args["settings"])
     if settings.mode == "live" and settings.model_url != "https://synthetic.invalid/v1":
         raise ValueError("SYNTHETIC_PROVIDER_REQUIRED")
-    mode = args["mode"]
+    mode = args["mode"].removeprefix("retry_")
     original_reserve, original_complete = budget.reserve, budget.complete
 
     def reserve(*args, **kwargs):
@@ -33,7 +34,8 @@ async def main():
 
     async def complete(*args, **kwargs):
         result = await original_complete(*args, **kwargs)
-        os._exit(23)
+        if mode == "settled":
+            os._exit(23)
         return result
 
     def provider(request):
@@ -50,7 +52,10 @@ async def main():
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
             module = SocialAutonomy(store, settings, ModelClient(settings, client),
                                     lambda: args["now"])
-            await module.plan("crashed-social-plan", source_ids=[args["source_id"]])
+            if args["mode"].startswith("retry_"):
+                await run_once(store, settings, module.model, module.clock, worker_id="child")
+            else:
+                await module.plan("crashed-social-plan", source_ids=[args["source_id"]])
     finally:
         store.close()
 

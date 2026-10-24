@@ -1253,7 +1253,8 @@ class Core(Runtime):
                 return True
             from companion.social_autonomy_runtime import run_once as social_autonomy_once
 
-            return await social_autonomy_once(self.store, self.settings, self.model, self.clock)
+            return await social_autonomy_once(self.store, self.settings, self.model, self.clock,
+                                             worker_id=worker_id)
         started_ns = time.perf_counter_ns()
         emit(
             "t_job_started",
