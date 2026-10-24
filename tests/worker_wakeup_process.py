@@ -1,0 +1,202 @@
+"""Fixed native CLI worker entry point with mock provider I/O and bounded lifetime."""
+
+import asyncio
+import importlib
+import json
+import os
+import sys
+from pathlib import Path
+from time import monotonic, process_time
+
+import httpx
+
+from companion import __main__, worker_wakeup
+from companion.config import Settings
+from companion.retrieval import SemanticIndex
+from companion.store import Store
+
+
+def main():
+    args = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    settings = Settings.model_validate(args["settings"])
+    if settings.mode == "live" and settings.model_url != "https://synthetic.invalid/v1":
+        raise ValueError("SYNTHETIC_PROVIDER_REQUIRED")
+    role = args["role"]
+    module_name, entry, service_name, method = {
+        "worker": ("companion.__main__", "worker", "companion.core.Core", "run_once"),
+        "content-worker": (
+            "companion.content_worker",
+            "content_worker",
+            "companion.content.ContentService",
+            "run_batch",
+        ),
+        "executive-worker": (
+            "companion.executive_worker",
+            "executive_worker",
+            "companion.executive.Executive",
+            "run_one",
+        ),
+        "diary-worker": (
+            "companion.diary_worker",
+            "diary_worker",
+            "companion.diary.DiaryService",
+            "generate_once",
+        ),
+        "life-worker": (
+            "companion.life_worker",
+            "life_worker",
+            "companion.consolidation.NightlyConsolidator",
+            "run_once",
+        ),
+    }[role]
+    module = importlib.import_module(module_name)
+    SemanticIndex.warmup = lambda self: None
+    stats = {
+        "sql": 0,
+        "scans": 0,
+        "provider_calls": 0,
+        "recorder_writes": 0,
+        "wait_entries": 0,
+        "hints": 0,
+    }
+    start, watchers, wakeups = {}, [], []
+    original_store = Store.__init__
+
+    def trace(sql):
+        stats["sql"] += 1
+        if sql.startswith("INSERT OR REPLACE INTO runtime_meta") and "worker_loop" in sql:
+            stats["recorder_writes"] += 1
+
+    def store_init(self, *a, **kw):
+        original_store(self, *a, **kw)
+        self.db.set_trace_callback(trace)
+
+    Store.__init__ = store_init
+    service_module, service_class = service_name.rsplit(".", 1)
+    service = getattr(importlib.import_module(service_module), service_class)
+    native_scan = getattr(service, method)
+
+    async def scan(self, *a, **kw):
+        stats["scans"] += 1
+        return await native_scan(self, *a, **kw)
+
+    setattr(service, method, scan)
+    native_enter = worker_wakeup.Wakeup.__enter__
+
+    def enter(self):
+        result = native_enter(self)
+        watchers.append(self.watcher)
+        wakeups.append(self)
+        return result
+
+    worker_wakeup.Wakeup.__enter__ = enter
+    native_wait = worker_wakeup.Wakeup.wait
+
+    async def wait(self, *a):
+        stats["wait_entries"] += 1
+        return await native_wait(self, *a)
+
+    worker_wakeup.Wakeup.wait = wait
+    native_client = httpx.AsyncClient
+
+    def provider(request):
+        assert request.url.host == "synthetic.invalid"
+        stats["provider_calls"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "Synthetic reply."}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+            },
+        )
+
+    def client(**kw):
+        kw.setdefault("transport", httpx.MockTransport(provider))
+        return native_client(**kw)
+
+    httpx.AsyncClient = client
+    if args.get("one_second_baseline"):
+        # Fixed reproduction of the old idle waiting/Recorder policy, using the same
+        # native services. This is not a loader for arbitrary source or a product mode.
+        class OneSecondWait:
+            def __init__(self, *_):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                pass
+
+            def before_scan(self):
+                pass
+
+            async def wait(self, *_):
+                stats["wait_entries"] += 1
+                await asyncio.sleep(1)
+                return "commit"
+
+        module.Wakeup = OneSecondWait
+        if role == "worker":
+            completed = module.Recorder.completed
+
+            def old_record(self, *, maintenance=False, waiting=False):
+                return completed(self, maintenance=maintenance)
+
+            module.Recorder.completed = old_record
+    native_worker = getattr(module, entry)
+
+    async def bounded(config):
+        task = asyncio.current_task()
+        stop = asyncio.get_running_loop().call_later(args.get("duration", 6), task.cancel)
+
+        async def ready():
+            await asyncio.sleep(args.get("settle", 1))
+            stats["hints"] = sum(w.notifications for w in wakeups)
+            start.update(stats)
+            start["cpu"] = process_time()
+            start["at"] = monotonic()
+            await asyncio.to_thread(Path(args["ready"]).write_text, "ready", encoding="utf-8")
+
+        signal = asyncio.create_task(ready())
+        try:
+            await native_worker(config)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            stop.cancel()
+            signal.cancel()
+            await asyncio.gather(signal, return_exceptions=True)
+
+    setattr(module, entry, bounded)
+    Settings.load = classmethod(lambda cls: settings)
+    sys.argv = ["companion", role]
+    code = 0
+    try:
+        __main__.main()
+    except SystemExit as error:
+        code = error.code
+    closed = 0
+    for watcher in watchers:
+        try:
+            watcher.watch(50, 10, 1, None)
+        except RuntimeError:
+            closed += 1
+    stats["hints"] = sum(w.notifications for w in wakeups)
+    result = {
+        "pid": os.getpid(),
+        "role": role,
+        "exit_code": code,
+        "total": stats,
+        "steady": {key: stats[key] - start.get(key, 0) for key in stats},
+        "steady_seconds": monotonic() - start.get("at", monotonic()),
+        "steady_cpu_seconds": process_time() - start.get("cpu", process_time()),
+        "watchers": len(watchers),
+        "closed_watchers": closed,
+    }
+    Path(args["report"]).write_text(json.dumps(result), encoding="utf-8")
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()

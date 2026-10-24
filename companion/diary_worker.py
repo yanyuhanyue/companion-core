@@ -1,5 +1,3 @@
-import asyncio
-
 import httpx
 
 from companion import live_text, private_life
@@ -8,6 +6,7 @@ from companion.diary import DiaryService
 from companion.model import ModelClient
 from companion.runtime import Runtime
 from companion.store import uid
+from companion.worker_wakeup import Maintenance, Wakeup
 
 
 async def diary_worker(settings):
@@ -28,21 +27,24 @@ async def diary_worker(settings):
                 (runtime.clock(),) if private_life.enabled(settings) else (),
             )
             worker_id = uid("diary_worker")
-            ticks = 0
-            while True:
-                if private_life.enabled(settings):
-                    try:
-                        live_text.guard(runtime.store, settings, runtime.clock)
-                    except CoreError:
-                        await asyncio.sleep(1)
-                        continue
-                    if private_life.busy(runtime.store, runtime.clock()):
-                        await asyncio.sleep(1)
-                        continue
-                if ticks % 60 == 0:
-                    runtime.expire_raw_events()
-                    diary.schedule_due()
-                worked = await diary.generate_once(worker_id)
-                ticks += 1
-                if not worked:
-                    await asyncio.sleep(1)
+            maintenance = Maintenance()
+            force_maintenance = False
+            with Wakeup(runtime.store, settings, "diary-worker", runtime.clock) as wake:
+                while True:
+                    wake.before_scan()
+                    if private_life.enabled(settings):
+                        try:
+                            live_text.guard(runtime.store, settings, runtime.clock)
+                        except CoreError:
+                            await wake.wait()
+                            continue
+                        if private_life.busy(runtime.store, runtime.clock()):
+                            await wake.wait()
+                            continue
+                    if maintenance.due() or force_maintenance:
+                        runtime.expire_raw_events()
+                        diary.schedule_due()
+                        maintenance.completed()
+                    force_maintenance = False
+                    if not await diary.generate_once(worker_id):
+                        force_maintenance = await wake.wait(maintenance.next_at) == "deadline"

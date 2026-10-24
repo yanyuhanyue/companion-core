@@ -532,7 +532,9 @@ function renderOverview(data) {
   const worker = runtime.worker || {};
   const ready = runtime.state === "READY";
   const statusText = runtime.state ? (ready ? "当前运行状态正常" : "有些状态需要留意") : "尚未取得运行状态";
-  const workerText = worker.state === "RECORDED" ? "最近有运行记录" : STATUS[worker.state] || "尚无工作进程记录";
+  const workerText = ["WAITING_AFTER_POLL", "WAITING_AFTER_MAINTENANCE"].includes(worker.stage)
+    ? "上次完成后进入等待（当前存活未验证）"
+    : worker.state === "RECORDED" ? "最近有运行记录" : STATUS[worker.state] || "尚无工作进程记录";
   const focus = el("section", { class: "focus-card" }, el("span", { class: "focus-symbol" }, icon(ready ? "pulse" : "clock")),
     el("div", { class: "focus-copy" }, el("span", { class: "eyebrow" }, "当前状态"), el("h2", {}, statusText),
       el("p", {}, workerText + "。" + (runtime.mode === "live" ? "当前使用正式运行模式。" : runtime.mode === "demo" ? "当前使用演示运行模式。" : "运行模式尚未记录。"))),

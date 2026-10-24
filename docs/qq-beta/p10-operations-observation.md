@@ -42,8 +42,9 @@ API instance 改变、失败或已观察阻断都会断开 clear segment。不�
 0，摘要只给最后一段实际观察跨度，不累加缺失间隔或多段时长。
 命令正常退出只表示完成诊断或采样，仍须读取 blockers/failures，不能据退出码签收健康。
 
-Core 聊天 worker 在同一循环完成 poll 及本轮维护后，最多每两秒更新一条
+Core 聊天 worker 在同一循环完成 poll 及本轮维护后，运行阶段最多每两秒更新一条
 `runtime_meta.worker_loop`：匿名 session、递增 sequence、UTC 完成时间和固定完成阶段。
+进入／离开等待阶段时会记录状态转换；连续空闲通知不会刷新完成时间。
 没有独立后台 heartbeat；poll 或维护卡住时不会继续写。该记录不改变业务、租约或预算，
 `run_once=True` 也可能代表失败处理，不能据此计作成功。worker 自身仍会执行原有保留期
 清理等维护，启动它并非只读观察操作。
@@ -66,3 +67,32 @@ API alive、schema 可读、空队列及按时采样都不能证明 worker 正�
 本轮验证使用本地合成 SQLite/HTTP 和秒级实际等待。没有真实 QQ、供应商、付费模型、
 告警联系人或真实小时/天数运行证据。观察文件不是第二份收件、发送或预算账本，
 不会改变任何额度、UNKNOWN、租约、遗忘记录或业务状态。
+
+
+## 本地 SQLite worker 唤醒
+
+chat、content、executive、diary、life 五个本地 worker 使用 watchfiles 1.3.0 监听数据库父目录，
+以覆盖 WAL 的创建、删除与替换。通知仅作为检查提示；SQLite 中的状态、预算、租约仍是唯一权威。
+每次启动先订阅，再在同一 Store 连接取得 `PRAGMA data_version`，执行扫描，等待前再次检查版本。
+自己的提交不会改变该连接的 data_version，因此自身完成记录不会触发业务自旋；不得比较不同连接
+的版本数值。合并或重复通知只导致重新核对，通知本身不会创建任务或扩大执行许可。
+
+等待同时受原生 next_attempt_at、lease_until、业务期限、本地日界与维护截止时间约束。
+原来按 ticks 计数的维护改为单调时间每分钟截止；新通知不会加速维护节奏。无新写入的 retry/租约
+仍按最近期限唤醒。每分钟的轻量版本核对补偿可能遗漏的文件通知；版本未变化且没有到期事项时，
+content/executive 不重复业务扫描。墙钟跳变会重新核对；业务对时间、STOP、擦除和权限的原有判断
+保持不变。取消时先唤醒并等待阻塞的 watch 调用退出，再关闭 native watcher，最后关闭 Store；
+既有单 worker OS 锁仍覆盖其完整生命周期。
+
+`WAITING_AFTER_POLL` / `WAITING_AFTER_MAINTENANCE` 只说明最近一次完成后进入过等待。
+十秒内投影为 WAITING，超过十秒仍为 STALE；不证明当前进程存活，也不算连续健康活动。
+观察器使用 LOOP_WAITING_UNVERIFIED 断开活动区间，Console 保留最近完成时间和未验证说明。
+未知 stage/state、额外字段及非法类型继续拒绝，不能为了长等待放宽公开观测校验。
+
+复用依据：[watchfiles watch](https://watchfiles.helpmanual.io/api/watch/)、
+[可显式关闭并提供订阅边界的 Rust backend](https://watchfiles.helpmanual.io/api/rust_backend/)、
+[SQLite data_version](https://www.sqlite.org/pragma.html#pragma_data_version) 与
+[DSH 有序取消／等待退出](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/agent-loop/src/index.ts)。
+实现使用该固定版本的 watchfiles 默认环境／WSL backend 选择；无法使用原生通知或显式启用
+WATCHFILES_FORCE_POLLING 时可能退化为库的文件轮询，不能宣称所有平台纯事件或零 OS 线程唤醒。
+源 Reader 网络限速、Bridge 发送节流、voice 租约、诊断采样以及协作性 sleep(0) 不属于这项改动。

@@ -108,6 +108,11 @@ def worker_fixture(core, monkeypatch):
         core.clock.advance(2)
         await original_sleep(0)
 
+    async def fake_wait(self, *_):
+        await asyncio.sleep(1)
+        return "commit"
+
+    monkeypatch.setattr(__main__.Wakeup, "wait", fake_wait)
     monkeypatch.setattr(__main__.asyncio, "sleep", fast_sleep)
     return ticks, original_sleep
 
@@ -126,9 +131,9 @@ def test_actual_worker_idle_loops_advance_only_after_native_maintenance(core, mo
     monkeypatch.setattr(__main__.asyncio, "sleep", stop_after_three)
     with pytest.raises(asyncio.CancelledError):
         run(__main__.worker(core.settings))
-    assert [row["sequence"] for row in snapshots] == [1, 2, 3]
-    assert snapshots[0]["stage"] == "POLL_AND_MAINTENANCE_COMPLETED"
-    assert snapshots[1]["stage"] == "POLL_COMPLETED"
+    assert [row["sequence"] for row in snapshots] == [2, 2, 2]
+    assert snapshots[0]["stage"] == "WAITING_AFTER_POLL"
+    assert snapshots[1]["stage"] == "WAITING_AFTER_POLL"
     assert len({row["session"] for row in snapshots}) == 1
 
 

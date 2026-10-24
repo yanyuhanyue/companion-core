@@ -237,7 +237,10 @@ class _LoopActivity:
                     current = worker_loop.project_public(
                         value, datetime.fromisoformat(snapshot["observed_at"]),
                     )
-                    if current["state"] == "STALE":
+                    if current["state"] == "WAITING":
+                        reasons.append("LOOP_WAITING_UNVERIFIED")
+                        current = None
+                    elif current["state"] == "STALE":
                         reasons.append("LOOP_RECORD_STALE")
                         current = None
             except (ValueError, TypeError, KeyError, OverflowError):

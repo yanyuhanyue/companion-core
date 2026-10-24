@@ -52,12 +52,12 @@ def run_isolated_worker(settings_path, now):
         kwargs.setdefault("transport", httpx.MockTransport(provider))
         return original_client(**kwargs)
 
-    async def stop(_seconds):
+    async def stop(*_args):
         raise asyncio.CancelledError
 
     life_worker.Core = partial(Core, clock=lambda: now)
     life_worker.httpx.AsyncClient = offline_client
-    life_worker.asyncio.sleep = stop
+    life_worker.Wakeup.wait = stop
     try:
         asyncio.run(life_worker.life_worker(settings))
     except asyncio.CancelledError:
