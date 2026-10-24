@@ -36,6 +36,8 @@
 页面只用 DOM 构建内容，样式通过 CSSOM 设置，与现有 `script-src 'self'`、`style-src 'self'`
 策略兼容；`tests/test_console_static.py` 检查这些约束。
 
+`app.js` 是不需要编译的原生 JavaScript，文件开头的 `// @ts-check` 和 JSDoc 类型（接口记录、配置字段、请求选项等）由 CI 用 `npx typescript@5.9.3 tsc -p tsconfig.console.json` 检查，不生成任何文件。本地检查同一命令即可。
+
 ## 设计稿中尚未实现的部分
 
 下列功能需要新的后端机制，按仓库规则先单独讨论范围和取舍，再实现：

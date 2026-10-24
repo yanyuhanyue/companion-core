@@ -1,4 +1,14 @@
+// @ts-check
 "use strict";
+/**
+ * 接口返回的通用记录（console_read.entry）。
+ * @typedef {{ id: string|number, kind: string, title: string, status: string, occurred_at: string|null, summary: string, detail: Record<string, any> }} ConsoleItem
+ * @typedef {{ items: ConsoleItem[], next_cursor: string|number|null, observed_at: string, meta?: Record<string, any> }} Collection
+ * @typedef {{ key: string, label: string, group?: string, type: string, value: any, active_value?: any, nullable?: boolean, configured?: boolean, description?: string, minimum?: number, maximum?: number, schema?: Record<string, any> }} ConfigField
+ * @typedef {{ version: number, active_version: number, pending_restart: boolean, fields: ConfigField[], history: Array<{version: number, created_at: string, fields: string[]}>, cloud_budget?: any }} Configuration
+ * @typedef {{ cls?: string, symbol?: string, type?: "button"|"submit", disabled?: boolean, label?: string }} ButtonOptions
+ * @typedef {{ method?: string, body?: any, signal?: AbortSignal, authenticate?: boolean, validate?: (value: any) => boolean }} RequestOptions
+ */
 /* Companion 主人控制台。
    只调用同源 /v1/console；写操作带 CSRF 与幂等键，结果不明时不换键重试。
    页面通过 DOM 构建（不拼接 HTML），样式只经 CSSOM 设置，满足 style-src 'self'。 */
@@ -49,6 +59,7 @@ function icon(name, cls = "i") {
   return el("svg", { class: cls, viewBox: "0 0 24 24", "aria-hidden": "true" }, el("path", { d: PATHS[name] || PATHS.spark }));
 }
 
+/** @type {Array<[string, Array<[string, string, string]>]>} */
 const ROUTES = [
   ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["thinking", "思考与决策", "spark"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"]]],
   ["内容", [["content", "阅读与文件", "book"], ["memes", "表情素材", "smile"], ["voice", "语音与节点", "mic"], ["account-actions", "QQ 资料行为", "qq"]]],
@@ -98,6 +109,7 @@ const ACTIVITY_TITLES = {
   "tool.cancelled_before_dispatch": "工具任务在执行前取消", "live_text.handoff_aborted": "实时窗口交接已中止",
 };
 const activityTitle = item => ACTIVITY_TITLES[item.title] || item.title || "未命名记录";
+/** @type {Array<[string, string, string[]]>} */
 const LANES = [
   ["chat", "对话", ["event.", "reply.", "delivery.", "poke.", "live_text.", "job."]],
   ["auto", "主动与自主", ["social.", "goal.", "tool.", "affect.", "wake.", "proactive."]],
@@ -122,6 +134,7 @@ const CAP_NAMES = {
   "memes.search": "表情搜索", "memes.semantic": "表情语义理解", "media.voice": "网页语音会话", "media.camera": "摄像头",
   "media.android": "安卓设备", executive: "执行任务",
 };
+/** @type {Array<[string, string[]]>} */
 const CAP_GROUPS = [
   ["记忆与日记", ["memory.manage", "memory.recall", "diary", "consolidation", "reflection", "goals", "affect"]],
   ["主动与自主", ["proactive", "wake", "exploration", "social", "qq.poke", "qq.poke.native"]],
@@ -269,6 +282,7 @@ class ApiError extends Error {
 }
 const api = {
   attempts: new Map(),
+  /** @param {string} path @param {RequestOptions} [options] @returns {Promise<any>} */
   async request(path, { method = "GET", body, signal, authenticate = true, validate } = {}) {
     const mutation = method !== "GET";
     const headers = { Accept: "application/json" };
@@ -314,7 +328,9 @@ const api = {
       throw new ApiError(controller.signal.aborted ? "CONSOLE_TIMEOUT" : "CONSOLE_NETWORK_ERROR", 0, [], mutation);
     } finally { clearTimeout(timeout); signal?.removeEventListener("abort", abort); }
   },
+  /** @param {string} path @param {AbortSignal} [signal] */
   get(path, signal) { return this.request(path, { signal }); },
+  /** @param {string} path @param {any} body @param {string} [method] @param {(value: any) => boolean} [validate] */
   write(path, body, method = "POST", validate) { return this.request(path, { method, body, validate }); },
 };
 
@@ -398,6 +414,7 @@ function sheet(title, body, link, cls = "") {
     el("div", { class: "sheet-body" }, body));
 }
 const linkTo = (route, text) => el("a", { class: "link", href: "#" + route }, text, icon("arrow"));
+/** @param {string} text @param {(event: MouseEvent) => any} onclick @param {ButtonOptions} [options] */
 function btn(text, onclick, { cls = "", symbol, type = "button", disabled = false, label } = {}) {
   return el("button", { type, class: "btn " + cls, onclick, disabled, "aria-label": label }, symbol ? icon(symbol) : null, text);
 }
@@ -618,7 +635,7 @@ async function loadRoute({ reset = false, more = false } = {}) {
 
 function render({ keepScroll = false } = {}) {
   if (!state.session || !state.data) return;
-  const y = scrollY, active = document.activeElement, focusId = active?.id, caret = active?.selectionStart;
+  const y = scrollY, active = /** @type {HTMLInputElement|null} */ (document.activeElement), focusId = active?.id, caret = active?.selectionStart;
   // 页面内可以单独滚动的区域（例如能力列表）在重绘后回到原来的位置。
   const inner = Object.fromEntries($$("[data-keep-scroll]").map(n => [n.dataset.keepScroll, n.scrollTop]));
   const focusKey = active?.dataset?.k;
@@ -761,7 +778,7 @@ PAGES.activity = data => {
           tag(i.status), el("span", { class: "tl-more" }, detailList(i.detail)));
         return b;
       })))) : empty("这里还没有记录", state.actFrom || state.actTo ? "这段日期里没有符合条件的记录。" : state.actKind === "all" ? "发生新的接收、发送或操作后，会出现在这里。" : "换一个类型看看。"),
-    data.next_cursor ? el("div", { class: "more" }, btn("加载更早的记录", e => { e.currentTarget.disabled = true; loadRoute({ more: true }); })) : null);
+    data.next_cursor ? el("div", { class: "more" }, btn("加载更早的记录", e => { /** @type {HTMLButtonElement} */ (e.currentTarget).disabled = true; loadRoute({ more: true }); })) : null);
 };
 
 /* ================= 记忆 ================= */
@@ -1280,6 +1297,7 @@ function setIn(obj, path, value) {
   cur[path.at(-1)] = value; return copy;
 }
 function fieldError(node, text) { const p = $(".pf-err", node.closest(".pf, .sub-row")); if (p) { p.textContent = text; p.hidden = !text; } }
+/** @param {{ id: string, key: string, type: string, value: any, nullable?: boolean, lo?: number, hi?: number, onValue: (value: any) => void }} options */
 function numberInput({ id, key, type, value, nullable, lo, hi, onValue }) {
   const u = unitFor(key, type);
   const input = el("input", { class: "input", id, "data-k": id, inputmode: "decimal", value: value === null || value === undefined ? "" : String(+(value / u.scale).toFixed(u.money ? 6 : 4)),
@@ -1773,6 +1791,7 @@ function secretsSection(list) {
       el("p", { class: "note mt" }, "传输令牌、主人控制令牌和读取适配器凭据在部署环境里更换。主人控制令牌同时用来加密配置版本，直接更换会导致旧版本无法解密。")));
 }
 function cloudBudget(policy) {
+  /** @type {Array<[string, string, number, string, string?]>} */
   const defs = [["daily_micro_cny", "每日云端限额", 1e6, "¥"], ["video_per_item_micro_cny", "单个视频任务上限", 1e6, "¥"], ["asr_per_item_micro_cny", "单个语音任务上限", 1e6, "¥"],
     ["usd_to_cny_micro", "美元汇率（每 1 美元）", 1e6, "¥"], ["fx_source", "汇率依据", 1, ""], ["fx_validity_seconds", "汇率有效期", 86400, "", "天"]];
   const form = el("form", { class: "cloud-grid", id: "budget-form" }, defs.map(([k, n, scale, pre, unit]) => {
@@ -1840,8 +1859,8 @@ function showTip(target) {
   t.style.left = Math.max(8, Math.min(innerWidth - w - 8, r.left + r.width / 2 - w / 2)) + "px";
   t.style.top = Math.max(8, r.top - t.offsetHeight - 8) + "px";
 }
-document.addEventListener("pointerover", e => { const m = e.target.closest?.(".mark"); if (m) showTip(m); else tip().hidden = true; });
-document.addEventListener("focusin", e => { const m = e.target.closest?.(".mark"); if (m) showTip(m); else tip().hidden = true; });
+document.addEventListener("pointerover", e => { const m = /** @type {Element} */ (e.target).closest?.(".mark"); if (m) showTip(m); else tip().hidden = true; });
+document.addEventListener("focusin", e => { const m = /** @type {Element} */ (e.target).closest?.(".mark"); if (m) showTip(m); else tip().hidden = true; });
 
 $("#login-form").addEventListener("submit", async e => {
   e.preventDefault();

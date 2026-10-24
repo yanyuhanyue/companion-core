@@ -60,6 +60,9 @@ jobs:
         run: python scripts/ci_reuse.py validate
       - if: ${{ needs.preflight.outputs.profile == 'full' }}
         run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
+      - name: Type-check the owner console
+        if: ${{ needs.preflight.outputs.profile == 'full' }}
+        run: npx --yes typescript@5.9.3 tsc -p tsconfig.console.json
       - name: Validate documentation privacy, references and evidence
         if: ${{ needs.preflight.outputs.profile == 'docs' }}
         run: uv run --extra onebot python scripts/ci_policy.py docs
