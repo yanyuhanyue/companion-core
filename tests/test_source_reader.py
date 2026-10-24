@@ -4,6 +4,7 @@ import hashlib
 import json
 import socket
 import ssl
+from contextlib import closing
 from pathlib import Path
 
 import httpcore
@@ -34,6 +35,7 @@ from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
 from tests.test_exploration import URL, configure, discover
 from tests.test_observations import enable_observations, observation
+from tests.test_test_fixtures import historical_database
 
 NOW = "2026-10-19T04:00:00+00:00"
 CAPTION = "https://aisubtitle.hdslb.com/bfs/subtitle/example.json?auth_key=transient-reference"
@@ -539,7 +541,9 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
 
 
 @pytest.mark.parametrize("reservation", [1, 4])
-def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, reservation):
+def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
+    core, reservation, tmp_path,
+):
     configure(core)
     core.settings.content_enabled = True
     core.settings.observation_adapters["bili"].reader_max_requests = reservation
@@ -553,37 +557,40 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, re
         for key, value in before.items()
         if key not in {"source_grant_id", "source_grant_epoch"}
     }
+    database = historical_database(core.store, tmp_path / "reader.db", "0014_reader_budget")
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
-    if reservation == 4:
-        with pytest.raises(RuntimeError, match="READER_BUDGET_DOWNGRADE"):
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
+    with closing(Store(database)) as store:
+        if reservation == 4:
+            with pytest.raises(RuntimeError, match="READER_BUDGET_DOWNGRADE"):
+                command.downgrade(cfg, "0013_content")
+            assert (
+                store.one(
+                    "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+                )
+                == before_0014
+            )
+            assert (
+                store.one("SELECT version_num FROM alembic_version")["version_num"]
+                == "0014_reader_budget"
+            )
+        else:
             command.downgrade(cfg, "0013_content")
-        assert (
-            core.store.one(
+            after = store.one(
                 "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
             )
-            == before_0014
-        )
-        assert (
-            core.store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0014_reader_budget"
-        )
-    else:
-        command.downgrade(cfg, "0013_content")
-        after = core.store.one(
-            "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
-        )
-        assert after == {
-            key: value
-            for key, value in before.items()
-            if key
-            not in {"reserved_requests", "used_requests", "source_grant_id", "source_grant_epoch"}
-        }
-        migrate(core.settings.database)
-        assert (
-            core.store.one(
-                "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+            assert after == {
+                key: value
+                for key, value in before.items()
+                if key
+                not in {"reserved_requests", "used_requests",
+                        "source_grant_id", "source_grant_epoch"}
+            }
+            migrate(database)
+            assert (
+                store.one(
+                    "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+                )
+                == before
             )
-            == before
-        )

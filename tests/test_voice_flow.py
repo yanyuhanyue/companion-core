@@ -91,7 +91,8 @@ def delivery_check(envelope):
     binding = envelope.binding
     return {"binding_sha256": envelope.binding_sha256, "job_id": binding.job_id,
             "generation": binding.generation, "result_sha256": binding.result_sha256,
-            "audio_sha256": binding.audio_sha256, "audio_bytes": binding.audio_bytes}
+            "audio_sha256": binding.audio_sha256, "audio_bytes": binding.audio_bytes,
+            "retirement_token": binding.retirement_token}
 
 
 def source_records(core, event_id, capture_key, count):
@@ -427,7 +428,8 @@ def test_restore_invalidates_flow_metadata_even_before_audio_upload(core, monkey
     prepare(core, flow, message_id)
     with core.store.transaction():
         restore_voice_jobs(core.store)
-    values = core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_%'")
+    values = core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_input:%' "
+                             "OR key LIKE 'voice_reply:%'")
     assert values and all(json.loads(row["value"])["state"] == "FENCED" for row in values)
     with pytest.raises(CoreError, match="VOICE_FLOW_FENCED"):
         flow.input_status(event_id)

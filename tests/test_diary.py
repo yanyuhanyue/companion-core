@@ -8,13 +8,9 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
-from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import create_engine
 
 from companion import budget
 from companion.api import create_app
@@ -30,6 +26,7 @@ from companion.transport import enqueue
 from companion.worker_lock import single_worker
 from tests.conftest import FakeModel, ingest, run
 from tests.test_m1 import remember
+from tests.test_test_fixtures import historical_database
 
 DAY = date(2026, 10, 18)
 
@@ -587,23 +584,23 @@ def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core,
         migration = Config()
         migration.set_main_option("script_location", str(Path("migrations").resolve()))
         migration.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
+        cost_database = historical_database(
+            old.store, tmp_path / "cost-guard.db", "0026_cloud_budget")
+        migration.set_main_option("sqlalchemy.url", "sqlite:///" + cost_database.as_posix())
         costs = old.store.rows("SELECT * FROM cloud_cost_snapshots")
         with pytest.raises(RuntimeError, match="CLOUD_BUDGET_DOWNGRADE"):
             command.downgrade(migration, "0003_memory_index")
-        assert old.store.rows("SELECT * FROM cloud_cost_snapshots") == costs
+        with closing(Store(cost_database)) as guarded:
+            assert guarded.rows("SELECT * FROM cloud_cost_snapshots") == costs
         assert old.diary.get_day(DAY, "10001")
-        # The later cost-custody guard is encountered first. The original diary
-        # migration must independently retain its own destructive-downgrade guard.
-        engine = create_engine("sqlite:///" + path.as_posix())
-        try:
-            with engine.connect() as connection:
-                with Operations.context(MigrationContext.configure(connection)):
-                    with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
-                        ScriptDirectory.from_config(migration).get_revision(
-                            "0004_diary",
-                        ).module.downgrade()
-        finally:
-            engine.dispose()
+        # Exercise the original diary guard on its own historical schema as well.
+        diary_database = historical_database(old.store, tmp_path / "diary-guard.db", "0004_diary")
+        migration.set_main_option("sqlalchemy.url", "sqlite:///" + diary_database.as_posix())
+        with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
+            command.downgrade(migration, "0003_memory_index")
+        with closing(Store(diary_database)) as guarded:
+            assert guarded.rows("SELECT entry_id FROM diary_entries") == old.store.rows(
+                "SELECT entry_id FROM diary_entries")
     finally:
         old.store.close()
 

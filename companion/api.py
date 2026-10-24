@@ -77,7 +77,7 @@ class BodyLimit:
             else self.meme_limit
             if scope["path"] == "/internal/v1/memes/captions"
             else self.voice_limit
-            if re.fullmatch(r"/internal/v1/voice-node/jobs/voice_[a-f0-9]{32}/result",
+            if re.fullmatch(r"/internal/v2/voice-node/jobs/voice_[a-f0-9]{32}/result",
                             scope["path"])
             else self.voice_input_limit
             if re.fullmatch(r"/internal/v1/voice-inputs/[^/]+", scope["path"])

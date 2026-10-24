@@ -1,5 +1,6 @@
 """Erasure keeps only frozen non-content authority needed to resolve an attempted send."""
 
+import hashlib
 import json
 
 import pytest
@@ -11,7 +12,9 @@ from tests.test_voice_flow import finish_node, flow_fixture, prepare
 
 
 @pytest.mark.parametrize("action", ["erase", "restore", "revision"])
-def test_voice_fence_removes_audio_but_retains_original_delivery_binding(core, monkeypatch, action):
+def test_voice_fence_retires_content_and_keeps_only_random_prior_delivery_proof(
+    core, monkeypatch, action
+):
     flow, jobs, message_id, event_id, _ = flow_fixture(core, monkeypatch)
     prepare(core, flow, message_id)
     finish_node(jobs)
@@ -33,14 +36,18 @@ def test_voice_fence_removes_audio_but_retains_original_delivery_binding(core, m
     retained = json.loads(
         core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))["value"]
     )
-    assert set(retained) == {"state", "reason", "job_id", "binding", "binding_sha256"}
+    assert set(retained) == {"state", "reason", "job_id", "retired"}
     assert retained["state"] == "FENCED"
-    assert {name: retained[name] for name in ("job_id", "binding", "binding_sha256")} == {
-        name: original[name] for name in ("job_id", "binding", "binding_sha256")
-    }
+    assert retained["job_id"] == original["job_id"]
+    proof = retained["retired"]
+    assert proof["kind"] == "capability"
+    assert proof["verifier"] == hashlib.sha256(
+        original["binding"]["retirement_token"].encode()).hexdigest()
+    for field in ("reply_sha256", "result_sha256", "source_sha256", "audio_sha256"):
+        assert original["binding"][field] not in json.dumps(retained)
     row = core.store.one("SELECT * FROM voice_jobs WHERE job_id=?", (retained["job_id"],))
     assert row["input_blob"] is None and row["result_blob"] is None
-    assert row["result_sha256"] == original["binding"]["result_sha256"]
+    assert row["result_sha256"] is None
     with pytest.raises(CoreError, match="VOICE_FLOW_FENCED"):
         prepare(core, flow, message_id)
 

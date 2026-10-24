@@ -191,6 +191,8 @@ Bridge 仅处理当前原始 record 段，`get_record` 的返回须与原来源�
 TTS 绑定原 outbox 的 message ID、delivery key、文本、窗口和音频摘要。
 发声使用原发送责任，不另建文字尝试；QQ 发送 UNKNOWN 不自动补发文字。
 节点失联、取消、源撤回、租约或资源隔离失败时停止，原资源/回执不确定性按节点协议保留。
+Core、节点和 Bridge 须同步升级语音 v2；递增领取序号、恢复、离线清理和 Core 清理确认
+的操作见[语音清理与恢复](../voice-cleanup-operations.md)。本地清理成功不代表 Core 已确认。
 
 ## QQ 账号动作、素材和基线
 
@@ -275,7 +277,7 @@ UNKNOWN。擦除后的来源只保留核对所需摘要，不能从决定、旧�
 当前请求排除、前台回复保留和未知费用处理沿用原规则。
 
 语音投递绑定与音频 envelope 属于无存储职责的 `voice_protocol`；Core 的发送前检查和
-停机核对复用独立投递协议的六字段校验。非法 `voice` 仍返回 `400 INVALID_CONTRACT`，
+停机核对复用独立投递协议的绑定校验。非法 `voice` 仍返回 `400 INVALID_CONTRACT`，
 字段位置统一为 `body.voice`，不回显提交值；有效形状但绑定或租约失效仍返回语义错误。
 
 ## 验证范围

@@ -1,7 +1,6 @@
 import base64
 import hashlib
 import json
-import uuid
 from datetime import timedelta, timezone
 
 import pytest
@@ -22,8 +21,11 @@ from companion.voice_jobs import (
 from companion.voice_protocol import (
     VoiceAudioResult,
     VoiceClaimRequest,
+    VoiceCleanup,
     VoiceControlRequest,
     VoiceLeaseRef,
+    VoiceStopRef,
+    VoiceStopRequest,
     VoiceTranscriptResult,
     make_voice_result,
     verify_voice_lease,
@@ -124,10 +126,12 @@ def create_asr(core, jobs, event_id, key, *, data=None, partial=False, proof_cha
 
 
 def claim(jobs, **updates):
+    session = jobs.session("local")
     request = VoiceClaimRequest(
         **{
             "node_id": "local",
-            "request_id": "claim_" + uuid.uuid4().hex,
+            "incarnation": session.incarnation,
+            "sequence": session.last_sequence + 1,
             "manifest_sha256": "b" * 64,
             "resource_state": "READY",
         }
@@ -258,7 +262,7 @@ def test_running_fences_wipe_and_commit_before_rejecting_input(core, monkeypatch
     assert row["state"] == "UNKNOWN" and row["input_blob"] is row["result_blob"] is None
     assert jobs.result(job["job_id"]) is None
     assert create_tts(core, jobs, message_id)["job_id"] == job["job_id"]
-    with pytest.raises(CoreError, match="VOICE_RESULT_FENCED"):
+    with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
         jobs.submit("local", result(ref))
 
 
@@ -266,19 +270,27 @@ def test_lease_expiry_responsibility_and_node_quarantine(core, monkeypatch):
     jobs, message_id, _, _ = prepared(core, monkeypatch)
     job, request, response, ref = start(core, jobs, message_id)
     core.clock.advance(31)
-    assert jobs.claim("local", request) == response
+    with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
+        jobs.claim("local", request)
     assert core.store.one("SELECT state FROM voice_jobs WHERE job_id=?", (job["job_id"],))[
         "state"] == "UNKNOWN"
     assert (
         core.store.one("SELECT active_job_id FROM voice_node_state")["active_job_id"]
         == (job["job_id"])
     )
-    assert control(jobs, ref, "UNKNOWN", "QUARANTINED").action == "EXPIRED"
+    with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
+        control(jobs, ref, "UNKNOWN", "QUARANTINED")
+    stop = VoiceStopRequest(
+        ref=VoiceStopRef.from_lease(response.lease), outcome="UNKNOWN",
+        resource_state="QUARANTINED", cleanup_epoch=response.lease.privacy_epoch,
+        cleanup=VoiceCleanup(cache_removed=True, journal_removed=True, temp_removed=False),
+    )
+    assert not jobs.stop("local", stop).custody_closed
     assert core.store.one("SELECT resource_state FROM voice_node_state")["resource_state"] == (
         "QUARANTINED"
     )
     assert claim(jobs)[1].lease is None
-    assert control(jobs, ref, "UNKNOWN", "READY").action == "EXPIRED"
+    assert jobs.stop("local", stop.model_copy(update={"resource_state": "READY"})).custody_closed
     assert core.store.one("SELECT active_job_id FROM voice_node_state")["active_job_id"] is None
     assert create_tts(core, jobs, message_id)["state"] == "UNKNOWN"
 
@@ -306,7 +318,7 @@ def test_erasure_restore_and_revision_hooks_never_requeue(core, monkeypatch, sta
     assert jobs.status(job["job_id"])["state"] == ("UNKNOWN" if started else "CANCELLED")
     assert jobs.result(job["job_id"]) is None
     assert create_tts(core, jobs, message_id)["job_id"] == job["job_id"]
-    with pytest.raises(CoreError, match="VOICE_RESULT_FENCED"):
+    with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
         jobs.submit("local", result(ref))
 
 
@@ -420,13 +432,13 @@ def test_erasure_withdraws_completed_audio_and_keeps_only_metadata(core, monkeyp
     assert jobs.status(job["job_id"])["state"] == "CANCELLED"
     assert jobs.result(job["job_id"]) is None
     row = core.store.one("SELECT * FROM voice_jobs")
-    assert row["result_sha256"] == value.result_sha256
+    assert row["result_sha256"] is None
     assert row["input_blob"] is row["result_blob"] is None
     audit = encode(
         core.store.rows("SELECT safe_detail_json FROM audit_log WHERE action LIKE 'voice.%'")
     )
     assert TOKEN not in audit and TEXT not in audit and value.payload.audio_base64 not in audit
-    with pytest.raises(CoreError, match="VOICE_RESULT_FENCED"):
+    with pytest.raises(CoreError, match="VOICE_LEASE_RETIRED"):
         jobs.submit("local", value)
 
 
