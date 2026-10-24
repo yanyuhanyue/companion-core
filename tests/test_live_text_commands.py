@@ -7,32 +7,32 @@ import pytest
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
 from tests.conftest import run
-from tests.test_live_text_window import live_clients, live_fixture
+from tests.test_live_text_window import (
+    live_clients,
+    live_fixture,
+    native_admit,
+    native_clients,
+    native_send,
+)
 from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import input_approval, stage
+from tests.test_onebot_window import input_approval
 
 
 @pytest.mark.parametrize("text", ["暂停写日记", "暂停主动分享", "记住这个：我喜欢绿茶"])
 def test_command_words_are_ordinary_live_text_without_control_side_effects(core, tmp_path, text):
-    cfg, plan = live_fixture(core, tmp_path)
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core, text=text)
-                result = await window.send_once(client, protocol, approval)
-                assert len(model_calls) == len(sends) == 1
-                assert result["attempt_states"] == {"ACK": 1}
-                body = json.loads(core.store.one("SELECT body_json FROM events")["body_json"])
-                assert not body.get("diary_command") and not body.get("control_command")
-                assert not core.store.rows(
-                    "SELECT * FROM runtime_meta WHERE key IN "
-                    "('diary_paused','proactive_paused','life_paused')"
-                )
-                assert not core.store.rows("SELECT * FROM memories")
-
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx, text=text)
+            assert await ctx.worker.run_once()
+            assert await native_send(ctx)
+            assert len(ctx.calls) == len(ctx.sends) == 1
+            assert ctx.spool.db.execute("SELECT state FROM window_attempts").fetchone()[0] == "ACK"
+            body = json.loads(core.store.one("SELECT body_json FROM events")["body_json"])
+            assert not body.get("diary_command") and not body.get("control_command")
+            assert not core.store.rows(
+                "SELECT * FROM runtime_meta WHERE key IN "
+                "('diary_paused','proactive_paused','life_paused')")
+            assert not core.store.rows("SELECT * FROM memories")
     run(scenario())
 
 

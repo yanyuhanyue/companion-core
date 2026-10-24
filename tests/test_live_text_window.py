@@ -1,4 +1,4 @@
-"""Synthetic paid chat and the existing five-send window, never live evidence."""
+"""Native paid chat boundaries and retained historical window evidence."""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -16,8 +16,114 @@ from tests.conftest import run
 from tests.support.onebot import provider
 from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import input_approval, plan_fixture, reply_approval, stage
+from tests.test_onebot_window import plan_fixture
 from tests.test_paid_model_gate import approved_live
+
+
+@asynccontextmanager
+async def native_clients(core, tmp_path, *, respond=None, receipt=None, paid_options=None,
+                         bridge_options=None):
+    """Real signed native ingress/HTTP and an independent SDK worker connection.
+
+    Only external provider and OneBot transports are synthetic. The existing
+    OwnerRuntime, paid journal, SDK hooks and final send checks run unchanged.
+    """
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from companion import paid_budget
+    from companion.core import Core
+    from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
+    from companion_onebot_bridge.config import BridgeConfig
+    from companion_onebot_bridge.network import private_http_client
+    from companion_onebot_bridge.owner_runtime import OwnerRuntime
+    from tests.sdk_reader_fixture import answer
+    from tests.test_onebot_capture import real_core_http
+    from tests.test_owner_authority import activate
+
+    approved_live(core, tmp_path, **(paid_options or {}))
+    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    core.settings.control_token = SecretStr("native-window-test-owner-control")
+    key = Ed25519PrivateKey.generate()
+    cfg = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
+        bot_qq_id=core.settings.bot_qq_id,
+        bridge_token=core.settings.bridge_token.get_secret_value(), onebot_token="s" * 32,
+        protocol_epoch="native-window-test", capture_signing_key=key.private_bytes_raw().hex(),
+        data_dir=str(tmp_path / "native-bridge"), **{
+            "onebot_http_url": "http://127.0.0.1:3000",
+            "onebot_ws_url": "ws://127.0.0.1:3001", **(bridge_options or {})})
+    policy = OwnerGrantPolicy(owner_qq_id=cfg.owner_qq_id, purposes=["chat"],
+        authorization_sha256="d" * 64,
+        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
+        max_reply_chars=500, expires_at=core.clock.now + timedelta(seconds=600),
+        capture={"public_key": cfg.capture_public_key, "protocol_epoch": cfg.protocol_epoch,
+                 "identity_sha256": paid_budget.sha([cfg.owner_qq_id, cfg.bot_qq_id])})
+    authority = activate(core, policy)[0]["authority"]
+    calls, sends = [], []
+
+    def response(request):
+        calls.append(request)
+        return respond(request) if respond else httpx.Response(200, json=answer("合成文字回复"))
+
+    async with real_core_http(core) as port, httpx.AsyncClient(
+        base_url=f"http://127.0.0.1:{port}", trust_env=False,
+        headers={"Authorization": "Bearer " + cfg.bridge_token},
+    ) as client, httpx.AsyncClient(transport=httpx.MockTransport(response)) as model_http:
+        cfg = replace(cfg, core_url=str(client.base_url).rstrip("/"), owner_authority=authority)
+        async with private_http_client(cfg.onebot_http_url, cfg.onebot_token,
+            transport=httpx.MockTransport(lambda request: provider(request, sends, receipt)),
+        ) as protocol:
+            with Core(core.settings, ModelClient(core.settings, model_http), core.clock) as worker:
+                assert worker.store is not core.store
+                with Spool(cfg) as spool:
+                    runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                    yield SimpleNamespace(core=core, worker=worker, runtime=runtime, config=cfg,
+                        client=client, protocol=protocol, model_http=model_http, calls=calls,
+                        sends=sends, policy=policy, authority=authority, spool=spool)
+
+
+async def native_admit(ctx, number=1, text="合成主人输入"):
+    from companion.store import encode
+    from companion_onebot_bridge.event_normalizer import normalize
+
+    raw = encode(raw_event(number, text=text, time=int(ctx.core.clock.now.timestamp())))
+    value = normalize(raw, ctx.config, now=ctx.core.clock.now.timestamp())
+    assert value is not None
+    assert ctx.runtime.persist_capture(value, raw, received_at=ctx.core.clock.now,
+                                       peer=("127.0.0.1", 3001))
+    assert await ctx.runtime.flush_one(ctx.client)
+    return value
+
+
+async def native_send(ctx, *, protocol=None, runtime=None):
+    from companion_onebot_bridge.outbound import deliver_tick
+    from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
+
+    runtime = runtime or ctx.runtime
+    guard = OwnerSendGuard(runtime, ctx.client)
+    return await deliver_tick(ctx.client, OwnerOneBot(guard, protocol or ctx.protocol),
+                              runtime.spool, guard=guard)
+
+
+async def native_recall(ctx):
+    from companion.store import encode
+    from companion_onebot_bridge import owner_notices
+
+    frame = encode({"time": int(ctx.core.clock.now.timestamp()),
+        "self_id": int(ctx.config.bot_qq_id), "user_id": int(ctx.config.owner_qq_id),
+        "post_type": "notice", "notice_type": "friend_recall", "message_id": 1})
+    assert owner_notices.put(ctx.runtime, frame, ctx.core.clock.now, ("127.0.0.1", 3001))
+    assert await owner_notices.flush_one(ctx.runtime, ctx.client)
+
+
+async def native_stop(ctx):
+    response = await ctx.client.post("/internal/v1/owner-authority/stop",
+        headers={"Authorization": "Bearer native-window-test-owner-control"},
+        json={"authority": ctx.authority, "operation_id": "stop-native-window-test"})
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def test_existing_demo_window_still_rejects_live_core(core, tmp_path):
@@ -82,44 +188,22 @@ def live_fixture(
     return cfg, WindowPlan(value, cfg, inventory)
 
 
-def test_synthetic_live_model_and_existing_five_send_window_are_compatible(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
-    model_calls, sends = [], []
-
-    def reply(request):
-        model_calls.append(request)
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": "合成文本回复"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
-
+def test_native_five_paid_replies_keep_original_cost_and_send_receipts(core, tmp_path):
     async def scenario():
-        async with (
-            core_client(core) as client,
-            httpx.AsyncClient(transport=httpx.MockTransport(reply)) as model_http,
-            httpx.AsyncClient(base_url=cfg.onebot_http_url, transport=httpx.MockTransport(
-                lambda r: provider(r, sends)
-            ), headers={"Authorization": "Bearer " + cfg.onebot_token}) as protocol,
-        ):
-            client.base_url = cfg.core_url
-            core.model = ModelClient(core.settings, model_http)
-            with Spool(cfg) as spool:
-                await TestWindow(spool, plan, clock=lambda: core.clock.now).open(client)
+        async with native_clients(core, tmp_path, paid_options={"window_calls": 5}) as ctx:
             for number in range(1, 6):
-                with Spool(cfg) as spool:
-                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                    approval = await stage(window, client, core, number)
-                    status = await window.send_once(client, protocol, approval)
-                    assert status["attempts_reserved"] == number
-                    assert status["model_attempts"] == number
-                    assert status["attempt_states"] == {"ACK": number}
-                    assert status["phone_receipts"] is None
-                    assert status["state"] == ("STOPPED" if number == 5 else "OPEN")
-
+                await native_admit(ctx, number)
+                assert await ctx.worker.run_once()
+                assert await native_send(ctx)
+                assert ctx.spool.db.execute(
+                    "SELECT count(*) FROM window_attempts WHERE state='ACK'"
+                ).fetchone()[0] == number
+            assert len(ctx.calls) == len(ctx.sends) == 5
+            assert all(item["message"][0]["data"]["text"] == "合成文字回复" for item in ctx.sends)
+            usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
+            assert len(usage) == 5 and all(
+                row["state"] == "SETTLED" and row["billed_micro_usd"] > 0 for row in usage)
     run(scenario())
-    assert len(model_calls) == len(sends) == 5
-    assert all(item["message"][0]["data"]["text"] == "合成文本回复" for item in sends)
-    assert core.status()["live_text_window"]["model_attempts"] == 5
 
 
 def test_core_and_bridge_allow_fifteen_model_attempts_without_raising_input_or_reply_caps(
@@ -173,25 +257,21 @@ async def live_clients(core, cfg, *, respond=None, receipt=None):
         yield client, protocol, model_calls, sends
 
 
-def test_outbox_body_cannot_be_replaced_even_with_new_individual_reply_approval(core, tmp_path):
+def test_native_outbox_body_cannot_be_replaced_with_a_new_content_hash(core, tmp_path):
     from companion.store import encode
     from companion.transport import digest
 
-    cfg, plan = live_fixture(core, tmp_path)
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                await stage(window, client, core)
-                body = {"text": "替换后的正文"}
-                core.store.execute("UPDATE outbox SET content_json=?,content_sha256=?",
-                                   (encode(body), digest(body)))
-                with pytest.raises(httpx.HTTPStatusError):
-                    await window.send_once(client, protocol, reply_approval(plan, core))
-                assert len(model_calls) == 1 and sends == []
-
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            body = {"text": "替换后的正文"}
+            core.store.execute("UPDATE outbox SET content_json=?,content_sha256=?",
+                               (encode(body), digest(body)))
+            assert not await native_send(ctx)
+            assert len(ctx.calls) == 1 and ctx.sends == []
+            assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
+            assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     run(scenario())
 
 
@@ -209,25 +289,14 @@ def test_live_text_cannot_send_historical_context_without_its_own_approval(core,
 
 
 def test_confirmed_core_stop_prevents_already_queued_model_attempt(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                response = await client.post("/internal/v1/live-text/stop", json={
-                    "window_sha256": plan.sha256,
-                })
-                assert response.status_code == 200
-                assert response.json() == {"stopped": True}
-                assert await core.run_once()
-                assert model_calls == sends == []
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-                assert core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] == 0
-
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            await native_stop(ctx)
+            await ctx.worker.run_once()
+            assert ctx.calls == ctx.sends == []
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert not core.store.rows("SELECT * FROM model_usage")
     run(scenario())
 
 
@@ -236,57 +305,38 @@ def test_real_dns_pin_hook_accepts_original_hostname_authority(
     core, tmp_path, monkeypatch, address,
 ):
     from companion_onebot_bridge import network
-    from companion_onebot_bridge.onebot_client import http_client
-
-    cfg, plan = live_fixture(core, tmp_path, bridge_options={
-        "onebot_http_url": "http://localhost:3000", "onebot_ws_url": "ws://localhost:3001",
-    })
-    sends, destinations = [], []
-
+    destinations = []
     async def resolve(host, port):
         assert (host, port) == ("localhost", 3000)
         return address
-
-    def response(request):
-        destinations.append((request.url.host, request.headers["Host"],
-                             request.extensions["sni_hostname"]))
-        return provider(request, sends)
-
     monkeypatch.setattr(network, "resolve_private", resolve)
-    monkeypatch.setattr(network, "http_client", lambda url, token: http_client(
-        url, token, transport=httpx.MockTransport(response)
-    ))
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, _sends):
-            async with network.private_http_client(
-                cfg.onebot_http_url, cfg.onebot_token
-            ) as protocol:
-                with Spool(cfg) as spool:
-                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                    await window.open(client)
-                    approval = await stage(window, client, core)
-                    if address == "127.0.0.1":
-                        status = await window.send_once(client, protocol, approval)
-                        assert status["attempt_states"] == {"ACK": 1}
-                        assert len(model_calls) == len(sends) == 1
-                    else:
-                        with pytest.raises(ValueError):
-                            await window.send_once(client, protocol, approval)
-                        assert sends == [] and destinations == []
-
+        async with native_clients(core, tmp_path, bridge_options={
+            "onebot_http_url": "http://localhost:3000",
+            "onebot_ws_url": "ws://localhost:3001"}) as ctx:
+            def response(request):
+                destinations.append((request.url.host, request.headers["Host"],
+                                     request.extensions["sni_hostname"]))
+                assert network.private_request_matches(request, ctx.config.onebot_http_url,
+                                                       request.url.path)
+                assert network.private_request_matches(request, ctx.config.onebot_http_url,
+                    request.url.path, synthetic=True) == (address == "127.0.0.1")
+                return provider(request, ctx.sends)
+            ctx.protocol._transport = httpx.MockTransport(response)
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            assert await native_send(ctx)
+            assert ctx.spool.db.execute("SELECT state FROM window_attempts").fetchone()[0] == "ACK"
+            assert len(ctx.calls) == len(ctx.sends) == 1
     run(scenario())
-    if address == "127.0.0.1":
-        assert destinations and all(value == ("127.0.0.1", "localhost:3000", "localhost")
-                                    for value in destinations)
+    assert destinations and all(value == (address, "localhost:3000", "localhost")
+                                for value in destinations)
 
 
 @pytest.mark.parametrize("change", ["body", "header", "deadline", "privacy", "key", "endpoint"])
 def test_model_http_request_drift_is_rejected_after_async_hooks(core, tmp_path, change):
-    cfg, plan = live_fixture(core, tmp_path)
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, sends):
+        async with native_clients(core, tmp_path) as ctx:
             async def mutate(request):
                 if change == "body":
                     request._content = b'{"messages":[],"model":"different"}'
@@ -294,27 +344,21 @@ def test_model_http_request_drift_is_rejected_after_async_hooks(core, tmp_path, 
                 elif change == "header":
                     request.headers["Authorization"] = "Bearer different-synthetic-key"
                 elif change == "deadline":
-                    core.clock.now = plan.end
+                    core.clock.now = ctx.policy.expires_at
                 elif change == "privacy":
-                    from companion.privacy import advance_epoch
-
-                    advance_epoch(core.store)
+                    await native_recall(ctx)
                 elif change == "key":
                     core.settings.model_key = SecretStr("rotated-synthetic-key")
                 else:
                     request.url = request.url.copy_with(host="different.invalid")
-
-            core.model.client.event_hooks["request"].append(mutate)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                assert await core.run_once()
-                assert model_calls == sends == []
-                assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-
+            ctx.model_http.event_hooks["request"].append(mutate)
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            assert ctx.calls == ctx.sends == []
+            usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
+            # The checked transport proves that no provider request was dispatched.
+            assert usage == {"state": "SETTLED", "billed_micro_usd": 0}
+            assert not core.store.rows("SELECT * FROM outbox")
     run(scenario())
 
 
@@ -377,7 +421,7 @@ def test_live_input_cannot_bypass_individual_approval_through_generic_inbox(core
                 response = await client.post("/internal/v1/inbox/events", json=event,
                                              headers={"X-Idempotency-Key": event["event_id"]})
                 assert response.status_code == 403
-                assert response.json()["error"] == "LIVE_TEXT_APPROVED_INPUT_REQUIRED"
+                assert response.json()["error"] == "OWNER_AUTHORITY_DISABLED"
                 assert model_calls == sends == []
                 assert core.store.one("SELECT COUNT(*) AS n FROM events")["n"] == 0
 
@@ -392,44 +436,40 @@ def test_live_input_cannot_bypass_individual_approval_through_generic_inbox(core
 def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
     core, tmp_path, result, expected,
 ):
-    from companion.privacy import advance_epoch
-
-    cfg, plan = live_fixture(core, tmp_path)
-
-    def respond(_request):
-        if result == "timeout":
-            raise httpx.ReadTimeout("synthetic lost reply")
-        if result == "deadline":
-            core.clock.now = plan.end
-        elif result == "privacy":
-            advance_epoch(core.store)
-        elif result == "revocation":
-            core.settings.live_text_window = None
-        elif result == "rate_change":
-            core.settings.input_rate += 1
-        body = {"choices": [{"message": {"content": "X" * 501 if result == "oversize"
-                                         else "合成迟到回复"}}]}
-        if result != "missing_usage":
-            body["usage"] = {"prompt_tokens": 100, "completion_tokens": 20}
-        return httpx.Response(200, json=body)
+    from companion import owner_authority
+    from companion.owner_authority_protocol import AuthorityStop
+    from tests.sdk_reader_fixture import answer
 
     async def scenario():
-        async with live_clients(core, cfg, respond=respond) as (client, _, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                assert await core.run_once()
-                usage = core.store.one("SELECT * FROM model_usage")
-                assert usage["state"] == expected and usage["billed_micro_usd"] > 0
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-                assert len(model_calls) == 1 and sends == []
-                core.clock.advance(10)
-                assert not await core.run_once()
-                assert len(model_calls) == 1
-                assert core.status()["live_text_window"]["approved"] is False
-
+        async with native_clients(core, tmp_path) as ctx:
+            async def respond(_request):
+                ctx.calls.append(_request)
+                if result == "timeout":
+                    raise httpx.ReadTimeout("synthetic lost reply")
+                if result == "deadline":
+                    core.clock.now = ctx.policy.expires_at
+                elif result == "privacy":
+                    await native_recall(ctx)
+                elif result == "revocation":
+                    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                        operation_id="stop-during-native-model", authority=ctx.authority))
+                elif result == "rate_change":
+                    core.settings.input_rate += 1
+                body = answer("X" * 501 if result == "oversize" else "合成迟到回复")
+                if result == "missing_usage":
+                    body.pop("usage")
+                return httpx.Response(200, json=body)
+            ctx.model_http._transport = httpx.MockTransport(respond)
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            usage = core.store.one("SELECT * FROM model_usage")
+            assert usage["state"] == expected and usage["billed_micro_usd"] > 0
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert len(ctx.calls) == 1 and ctx.sends == []
+            core.clock.advance(10)
+            await ctx.worker.run_once()
+            assert len(ctx.calls) == 1
+            assert core.store.one("SELECT * FROM model_usage") == usage
     run(scenario())
 
 
@@ -437,80 +477,73 @@ def test_model_late_or_unknown_results_retain_costs_and_never_enqueue(
 def test_after_network_wait_send_revalidates_core_and_keeps_spent_reservation(
     core, tmp_path, drift,
 ):
-    from pathlib import Path
-
-    from companion.privacy import advance_epoch
-
-    cfg, plan = live_fixture(core, tmp_path)
+    from companion import owner_authority
+    from companion.owner_authority_protocol import AuthorityStop
+    from companion_onebot_bridge.owner_runtime import OwnerRuntime
 
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, model_calls, sends):
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
             async def network_wait(request):
                 if request.url.path != "/send_private_msg":
                     return
+                await asyncio.sleep(0)
                 if drift == "deadline":
-                    core.clock.now = plan.end
+                    core.clock.now = ctx.policy.expires_at
                 elif drift == "privacy":
-                    advance_epoch(core.store)
+                    await native_recall(ctx)
                 elif drift == "revocation":
-                    core.settings.live_text_window = None
+                    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                        authority=ctx.authority, operation_id="stop-during-send-hook"))
                 elif drift == "lease":
-                    core.store.execute("UPDATE outbox SET lease_until='2000-01-01T00:00:00+00:00'")
+                    core.clock.advance(core.settings.lease_seconds + 1)
                 else:
+                    from pathlib import Path
                     await asyncio.to_thread(
-                        Path(core.settings.paid_model.journal_path).write_text, "{}\n", "utf-8"
-                    )
-
-            protocol.event_hooks["request"].append(network_wait)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core)
-                if drift == "journal":
-                    with pytest.raises(ValueError, match="LIVE_TEXT_CORE_STOP_UNCONFIRMED"):
-                        await window.send_once(client, protocol, approval)
-                    status = window.status()
-                else:
-                    status = await window.send_once(client, protocol, approval)
-                assert status["attempts_reserved"] == 1
-                assert status["attempt_states"] == {"UNKNOWN": 1}
-                assert status["state"] == (
-                    "CORE_STOP_UNCONFIRMED" if drift == "journal" else "STOPPED"
-                )
-                assert len(model_calls) == 1 and sends == []
-                assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
-                assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
-            with Spool(cfg) as spool:
-                restarted = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                with pytest.raises(ValueError):
-                    await restarted.send_once(client, protocol, approval)
-                assert restarted.status()["attempts_reserved"] == 1
-                assert len(model_calls) == 1 and sends == []
-
+                        Path(core.settings.paid_model.journal_path).write_text, "{}\n", "utf-8")
+            ctx.protocol.event_hooks["request"].append(network_wait)
+            assert await native_send(ctx)
+            assert len(ctx.calls) == 1 and ctx.sends == []
+            # Source recall supplies original pre-send cancellation proof. Expired
+            # authority/lease or broken journal cannot confirm cancellation.
+            expected = "NOT_SENT" if drift == "privacy" else "UNKNOWN"
+            assert ctx.spool.db.execute(
+                "SELECT state FROM window_attempts").fetchone()[0] == expected
+            assert core.store.one("SELECT state FROM outbox")["state"] == (
+                "CANCELLED" if drift == "privacy" else "DELIVERY_UNCERTAIN")
+            assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+            cfg = ctx.config
+        with Spool(cfg) as spool:
+            restarted = OwnerRuntime(spool, clock=lambda: core.clock.now)
+            assert spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 1
+            if drift != "privacy":
+                with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                    restarted.verify()
     run(scenario())
 
 
 def test_onebot_ack_loss_is_one_external_attempt_across_restart(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
+    from companion_onebot_bridge.owner_runtime import OwnerRuntime
 
     async def scenario():
-        async with live_clients(core, cfg, receipt=httpx.ReadTimeout("synthetic ACK lost")) as (
-            client, protocol, model_calls, sends,
-        ):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core)
-                result = await window.send_once(client, protocol, approval)
-                assert result["attempt_states"] == {"UNKNOWN": 1}
-                assert result["phone_receipts"] is None
-            with Spool(cfg) as spool:
-                restarted = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                with pytest.raises(ValueError):
-                    await restarted.send_once(client, protocol, approval)
-            assert len(model_calls) == len(sends) == 1
+        async with native_clients(core, tmp_path,
+                                  receipt=httpx.ReadTimeout("synthetic ACK lost")) as ctx:
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            assert await native_send(ctx)
+            assert ctx.spool.db.execute(
+                "SELECT state FROM window_attempts").fetchone()[0] == "UNKNOWN"
+            assert len(ctx.calls) == len(ctx.sends) == 1
             assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
-
+            cfg = ctx.config
+        with Spool(cfg) as spool:
+            restarted = OwnerRuntime(spool, clock=lambda: core.clock.now)
+            with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                restarted.verify()
+            assert spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 1
+            assert spool.db.execute("SELECT state FROM window_attempts").fetchone()[0] == "UNKNOWN"
+        assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     run(scenario())
 
 
@@ -519,40 +552,37 @@ def test_sqlite_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
     import threading
     import time
 
-    cfg, plan = live_fixture(core, tmp_path)
-    locked = threading.Event()
-
-    def hold():
-        connection = sqlite3.connect(core.settings.database)
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            locked.set()
-            time.sleep(0.1)
-            core.clock.now = plan.end
-            connection.commit()
-        finally:
-            connection.close()
-
-    thread = threading.Thread(target=hold)
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, _model_calls, sends):
+        async with native_clients(core, tmp_path) as ctx:
+            locked = threading.Event()
+            def hold():
+                connection = sqlite3.connect(core.settings.database)
+                try:
+                    connection.execute("BEGIN IMMEDIATE")
+                    locked.set()
+                    time.sleep(0.1)
+                    core.clock.now = ctx.policy.expires_at
+                    connection.commit()
+                finally:
+                    connection.close()
+            thread = threading.Thread(target=hold)
             async def lock_before_dispatch(request):
                 if request.url.path == "/send_private_msg":
                     thread.start()
                     assert locked.wait(3)
-
-            protocol.event_hooks["request"].append(lock_before_dispatch)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core)
-                result = await window.send_once(client, protocol, approval)
-                assert result["attempt_states"] == {"UNKNOWN": 1}
-                assert sends == []
-        thread.join(3)
-        assert not thread.is_alive()
-
+            ctx.protocol.event_hooks["request"].append(lock_before_dispatch)
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            try:
+                assert await native_send(ctx)
+                assert ctx.sends == []
+                assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+                assert ctx.spool.db.execute(
+                    "SELECT state FROM window_attempts").fetchone()[0] == "UNKNOWN"
+                assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
+            finally:
+                thread.join(3)
+                assert not thread.is_alive()
     run(scenario())
 
 
@@ -561,168 +591,125 @@ def test_sqlite_lock_wait_cannot_authorize_send_after_deadline(core, tmp_path):
     {"window_micro_usd": 1}, {"max_input_tokens": 1},
 ])
 def test_existing_paid_approval_and_amount_limits_are_not_relaxed(core, tmp_path, limits):
-    cfg, plan = live_fixture(core, tmp_path, paid_options=limits)
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                assert await core.run_once()
-                assert model_calls == sends == []
-                assert core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] == 0
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-                assert window.status()["attempts_reserved"] == 0
-
+        async with native_clients(core, tmp_path, paid_options=limits) as ctx:
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            assert ctx.calls == ctx.sends == []
+            assert not core.store.rows("SELECT * FROM model_usage")
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert ctx.spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 0
     run(scenario())
 
 
-def test_existing_global_reservation_blocks_live_window_without_new_io(core, tmp_path):
+def test_existing_global_reservation_blocks_native_model_without_new_io(core, tmp_path):
     from companion import budget
-
-    cfg, plan = live_fixture(core, tmp_path)
-    approval = core.settings.live_text_window
-    core.settings.live_text_window = None
-    request_id = budget.reserve(core.store, core.settings, None, "chat",
-                                [{"role": "user", "content": "synthetic other admission"}],
-                                core.clock())
-    core.settings.live_text_window = approval
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, sends):
-            with Spool(cfg) as spool:
-                with pytest.raises(httpx.HTTPStatusError):
-                    await TestWindow(spool, plan, clock=lambda: core.clock.now).open(client)
-            assert model_calls == sends == []
+        async with native_clients(core, tmp_path, paid_options={"concurrency": 1}) as ctx:
+            first = await native_admit(ctx)
+            first_job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
+                                       (first["event_id"],))
+            job = core.claim_job("held-original-reservation", job_id=first_job["job_id"])
+            request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat",
+                core.context(job), core.clock(), clock=core.clock)
+            await native_admit(ctx, 2)
+            await ctx.worker.run_once()
+            assert ctx.calls == ctx.sends == []
             assert core.store.one("SELECT state FROM model_usage WHERE request_id=?",
                                   (request_id,))["state"] == "RESERVED"
-
+            assert len(core.store.rows("SELECT * FROM model_usage")) == 1
+            assert not core.store.rows("SELECT * FROM outbox")
     run(scenario())
 
 
-def test_cancel_after_window_journal_io_started_never_replays_after_restart(core, tmp_path):
-    from companion.api import create_app
-
-    cfg, plan = live_fixture(core, tmp_path)
+def test_cancel_after_native_journal_io_started_never_replays_after_restart(core, tmp_path):
+    from companion_onebot_bridge.owner_runtime import OwnerRuntime
 
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, model_calls, sends):
-            app = create_app(core.settings)
-            app.state.core = core
-            real_core = httpx.ASGITransport(app=app)
-
-            class DisconnectOnFinalCheck(httpx.AsyncBaseTransport):
-                async def handle_async_request(self, request):
-                    if request.url.path == "/internal/v1/live-text/send-check":
-                        raise asyncio.CancelledError()
-                    return await real_core.handle_async_request(request)
-
-            client._transport = DisconnectOnFinalCheck()
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core)
-                with pytest.raises(asyncio.CancelledError):
-                    await window.send_once(client, protocol, approval)
-                assert window.status()["attempts_reserved"] == 1
-                assert window.status()["attempt_states"] == {"IO_STARTED": 1}
-            with Spool(cfg) as spool:
-                restarted = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                with pytest.raises(ValueError):
-                    await restarted.send_once(client, protocol, approval)
-                assert restarted.status()["attempts_reserved"] == 1
-            assert len(model_calls) == 1 and sends == []
-            assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            def cancelled(request):
+                if request.url.path == "/send_private_msg":
+                    raise asyncio.CancelledError()
+                return provider(request, ctx.sends)
+            # Cancellation happens at the external transport, after the real
+            # send-check and durable IO_STARTED, without inventing a receipt.
+            ctx.protocol._transport = httpx.MockTransport(cancelled)
+            with pytest.raises(asyncio.CancelledError):
+                await native_send(ctx)
+            assert ctx.spool.db.execute(
+                "SELECT state FROM window_attempts").fetchone()[0] == "IO_STARTED"
+            assert len(ctx.calls) == 1 and ctx.sends == []
             assert core.store.one("SELECT state FROM outbox")["state"] == "SENDING"
-
+            cfg = ctx.config
+        with Spool(cfg) as spool:
+            restarted = OwnerRuntime(spool, clock=lambda: core.clock.now)
+            with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                restarted.verify()
+            assert spool.db.execute("SELECT count(*) FROM window_attempts").fetchone()[0] == 1
+        assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     run(scenario())
 
 
 @pytest.mark.parametrize("stage_name", ["queued", "model_preflight"])
 def test_owner_stop_entrypoint_fences_core_before_new_model_io(core, tmp_path, stage_name):
-    cfg, plan = live_fixture(core, tmp_path)
     confirmed = []
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                if stage_name == "queued":
-                    result = await window.stop_live(client)
-                    assert result["state"] == "STOPPED"
-                    confirmed.append(True)
-                else:
-                    async def owner_stop(_request):
-                        result = await window.stop_live(client)
-                        assert result["state"] == "STOPPED"
-                        confirmed.append(True)
-
-                    core.model.client.event_hooks["request"].append(owner_stop)
-                assert await core.run_once()
-                assert model_calls == sends == []
-                assert confirmed == [True]
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-                if stage_name == "model_preflight":
-                    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
-                else:
-                    assert core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] == 0
-
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            async def stop(_request=None):
+                confirmed.append(await native_stop(ctx))
+            if stage_name == "queued":
+                await stop()
+            else:
+                ctx.model_http.event_hooks["request"].append(stop)
+            await ctx.worker.run_once()
+            assert ctx.calls == ctx.sends == [] and len(confirmed) == 1
+            assert not core.store.rows("SELECT * FROM outbox")
+            usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
+            assert usage == ([{"state": "SETTLED", "billed_micro_usd": 0}]
+                             if stage_name == "model_preflight" else [])
     run(scenario())
 
 
-def test_core_stop_survives_old_db_without_its_stop_marker(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
+def test_core_stop_survives_old_db_without_its_native_projection(core, tmp_path):
+    import sqlite3
+    from contextlib import closing
 
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                response = await client.post("/internal/v1/live-text/stop", json={
-                    "window_sha256": plan.sha256,
-                })
-                assert response.status_code == 200
-                core.store.execute("DELETE FROM runtime_meta WHERE key='live_text_stopped'")
-                assert await core.run_once()
-                assert model_calls == sends == []
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-                assert core.store.one("SELECT COUNT(*) AS n FROM model_usage")["n"] == 0
-
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            with closing(sqlite3.connect(tmp_path / "before-stop.db")) as old_db:
+                core.store.db.backup(old_db)
+                await native_stop(ctx)
+                old_db.backup(core.store.db)
+            await ctx.worker.run_once()
+            assert ctx.calls == ctx.sends == []
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert not core.store.rows("SELECT * FROM model_usage")
+            response = await ctx.client.post("/internal/v1/owner-authority/check",
+                json={"authority": ctx.authority, "purpose": "chat"})
+            assert response.status_code != 200
     run(scenario())
 
 
-def test_synthetic_window_never_dispatches_an_unproved_provider_transport(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
+def test_native_custom_transport_cannot_bypass_current_owner_authority(core, tmp_path):
     dispatched = []
-
     class UnprovedTransport(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):
             dispatched.append(request)
-            return httpx.Response(200, json={
-                "choices": [{"message": {"content": "synthetic unproved transport"}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            })
-
+            raise AssertionError("unproved external transport was reached")
     async def scenario():
-        async with live_clients(core, cfg) as (client, _, _model_calls, sends):
-            async with httpx.AsyncClient(transport=UnprovedTransport()) as model_http:
-                core.model = ModelClient(core.settings, model_http)
-                with Spool(cfg) as spool:
-                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                    await window.open(client)
-                    raw = raw_event(1)
-                    await window.ingest(client, raw, input_approval(plan, raw))
-                    assert await core.run_once()
-                    assert dispatched == sends == []
-                    assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-
+        async with native_clients(core, tmp_path) as ctx:
+            ctx.model_http._transport = UnprovedTransport()
+            async def revoke_before_dispatch(_request):
+                await native_stop(ctx)
+            ctx.model_http.event_hooks["request"].append(revoke_before_dispatch)
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            assert dispatched == ctx.sends == []
+            assert not core.store.rows("SELECT * FROM outbox")
     run(scenario())
 
 
@@ -731,41 +718,25 @@ def test_cli_persists_explicit_unconfirmed_core_stop(core, tmp_path, monkeypatch
     import sys
 
     from companion_onebot_bridge import app
-    from companion_onebot_bridge import window as window_module
     from companion_onebot_bridge.config import BridgeConfig
+    from companion_onebot_bridge.owner_runtime import OwnerRuntime
 
-    cfg, plan = live_fixture(core, tmp_path)
-
-    async def setup():
-        async with live_clients(core, cfg) as (client, _, _model_calls, _sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-
-    run(setup())
-
-    def disconnected(_request):
-        raise httpx.ConnectError("SYNTHETIC_PRIVATE_EXCEPTION_MUST_NOT_LEAK")
-
+    async def scenario():
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            return ctx.config
+    cfg = run(scenario())
     monkeypatch.setattr(BridgeConfig, "load", classmethod(lambda cls, path: cfg))
-    monkeypatch.setattr(window_module, "private_http_client", lambda url, token: httpx.AsyncClient(
-        base_url=url, headers={"Authorization": "Bearer " + token},
-        transport=httpx.MockTransport(disconnected),
-    ))
-    monkeypatch.setattr(sys, "argv", ["bridge", "window-stop"])
-    with pytest.raises(SystemExit) as exit_info:
-        app.main()
-    assert exit_info.value.code == 1
+    monkeypatch.setattr(sys, "argv", ["bridge", "owner-stop"])
+    app.main()
     output = capsys.readouterr()
     result = json.loads(output.out)
-    assert result == {"state": "CORE_STOP_UNCONFIRMED", "error": "LIVE_TEXT_CORE_STOP_UNCONFIRMED"}
-    assert "SYNTHETIC_PRIVATE_EXCEPTION" not in output.out + output.err
+    assert result["state"] == "STOPPED" and result["core_stop_confirmed"] is False
+    assert result["authority"] == cfg.owner_authority
     with Spool(cfg) as spool:
-        status = TestWindow(spool, plan).status()
-        assert status["state"] == "CORE_STOP_UNCONFIRMED"
-        assert status["local_state"] == "STOPPED" and status["core_stop_confirmed"] is False
+        with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+            OwnerRuntime(spool, clock=lambda: core.clock.now).verify()
+    assert not core.store.rows("SELECT * FROM model_usage")
 
 
 def test_synthetic_core_dns_pin_cannot_dispatch_to_nonloopback(core, tmp_path, monkeypatch):
@@ -797,29 +768,28 @@ def test_synthetic_core_dns_pin_cannot_dispatch_to_nonloopback(core, tmp_path, m
     run(scenario())
 
 
-def test_unfinished_sending_blocks_next_model_input_approval(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
-
+def test_unfinished_native_send_keeps_custody_when_new_input_arrives(core, tmp_path):
     async def scenario():
-        async with live_clients(core, cfg) as (client, _protocol, model_calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                await stage(window, client, core)
-                lease = (await client.post("/internal/v1/deliveries/lease", json={
-                    "worker_id": "synthetic-interrupted-worker", "limit": 1,
-                })).json()["items"][0]
-                response = await client.post(
-                    f"/internal/v1/deliveries/{lease['message_id']}/begin-send",
-                    json={"lease_token": lease["lease_token"]},
-                )
-                assert response.status_code == 200
-                raw = raw_event(2)
-                response = await client.post("/internal/v1/live-text/inputs/approve",
-                                             json=input_approval(plan, raw))
-                assert response.status_code == 503
-                assert len(model_calls) == 1 and sends == []
-
+        async with native_clients(core, tmp_path) as ctx:
+            await native_admit(ctx)
+            assert await ctx.worker.run_once()
+            response = await ctx.client.post("/internal/v1/deliveries/lease", json={
+                "worker_id": "synthetic-interrupted-worker", "limit": 1,
+                "authority": ctx.authority})
+            assert response.status_code == 200, response.text
+            item = response.json()["items"][0]
+            response = await ctx.client.post(
+                f"/internal/v1/deliveries/{item['message_id']}/begin-send",
+                json={"lease_token": item["lease_token"]})
+            assert response.status_code == 200, response.text
+            await native_admit(ctx, 2)
+            # Native ingress may accept the newer owner turn; it cannot erase or
+            # replay a prior send whose external outcome is still unresolved.
+            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+                                  (item["message_id"],))["state"] == "SENDING"
+            assert not await native_send(ctx)
+            assert len(ctx.calls) == 1 and ctx.sends == []
+            assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     run(scenario())
 
 
@@ -831,43 +801,34 @@ def test_model_dispatch_rechecks_time_after_last_blocking_journal_read(
 
     from companion import paid_budget
 
-    cfg, plan = live_fixture(core, tmp_path)
     real_journal = paid_budget.journal
     preflight_started, advanced = [], []
-
-    def slow_journal(*args, **kwargs):
-        value = real_journal(*args, **kwargs)
-        record = args[2] if len(args) > 2 else kwargs.get("record")
-        if preflight_started and not advanced and record is None:
-            if boundary == "window":
-                core.clock.now = plan.end
-            elif boundary == "paid":
-                core.settings.paid_model = core.settings.paid_model.model_copy(
-                    update={"expires_at": core.clock.now}
-                )
-            else:
-                job = core.store.one("SELECT lease_until FROM jobs WHERE state='RUNNING'")
-                core.clock.now = datetime.fromisoformat(job["lease_until"]) + timedelta(seconds=1)
-            advanced.append(True)
-        return value
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, _protocol, model_calls, sends):
+        async with native_clients(core, tmp_path) as ctx:
+            def slow_journal(*args, **kwargs):
+                value = real_journal(*args, **kwargs)
+                record = args[2] if len(args) > 2 else kwargs.get("record")
+                if preflight_started and not advanced and record is None:
+                    if boundary == "window":
+                        core.clock.now = ctx.policy.expires_at
+                    elif boundary == "paid":
+                        core.settings.paid_model = core.settings.paid_model.model_copy(
+                            update={"expires_at": core.clock.now})
+                    else:
+                        job = core.store.one("SELECT lease_until FROM jobs WHERE state='RUNNING'")
+                        core.clock.now = (datetime.fromisoformat(job["lease_until"])
+                                          + timedelta(seconds=1))
+                    advanced.append(True)
+                return value
             async def start_final_preflight(_request):
                 preflight_started.append(True)
-
-            core.model.client.event_hooks["request"].append(start_final_preflight)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                monkeypatch.setattr(paid_budget, "journal", slow_journal)
-                assert await core.run_once()
-                assert advanced == [True]
-                assert model_calls == sends == []
-                usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
-                assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
-                assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 0
-
+            ctx.model_http.event_hooks["request"].append(start_final_preflight)
+            await native_admit(ctx)
+            monkeypatch.setattr(paid_budget, "journal", slow_journal)
+            assert await ctx.worker.run_once()
+            assert preflight_started and advanced
+            assert ctx.calls == ctx.sends == []
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+                "state": "SETTLED", "billed_micro_usd": 0}
     run(scenario())
