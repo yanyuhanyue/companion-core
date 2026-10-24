@@ -8,10 +8,19 @@ from zoneinfo import ZoneInfo
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from companion import cumulative, dialogue_history, paid_budget, private_life, reply_revision
+from companion import (
+    cumulative,
+    dialogue_history,
+    owner_authority,
+    owner_input,
+    paid_budget,
+    private_life,
+    reply_revision,
+)
 from companion.contracts import CoreError
 from companion.poke_protocol import (
     ACTION,
+    OwnerPokeCapture,
     PokeCapture,
     PokeDecision,
     PokePolicy,
@@ -20,7 +29,7 @@ from companion.poke_protocol import (
     decide,
     signed_payload,
 )
-from companion.store import after, encode, uid
+from companion.store import after, encode, uid, utcnow
 
 RULES = (
     "主人刚在QQ私聊拍了你一下。这是原生互动通知，不是主人写下的文字，"
@@ -40,25 +49,26 @@ def enabled(settings):
     return bool(getattr(getattr(settings, "poke_policy", None), "enabled", False))
 
 
-def policy(settings, approval):
+def policy(settings, view):
     value = getattr(settings, "poke_policy", None)
-    if (not isinstance(value, PokePolicy) or not value.enabled
-        or not private_life.enabled(settings)
-        or getattr(approval, "poke_scope", "none") != "owner_poke_v1"
-        or getattr(approval, "poke_policy_sha256", None) != paid_budget.sha(value.model_dump())
-        or not approval.capture_public_key):
+    grant = getattr(view, "policy", None)
+    if (not isinstance(value, PokePolicy) or not value.enabled or grant is None
+        or "poke" not in grant.purposes or grant.capture is None
+        or grant.capability_policies.get("poke") != paid_budget.sha(value.model_dump())):
         raise CoreError("PRIVATE_POKE_SCOPE_REQUIRED", 403)
     return value
 
 
-def input_count(store, window_sha256):
+def input_count(store, authority):
     """Non-content admission identities survive erasure, without recreating facts."""
+    field = "authority" if isinstance(authority, dict) else "window_sha256"
+    value = encode(authority) if isinstance(authority, dict) else authority
     return store.one("SELECT COUNT(*) AS n FROM runtime_meta WHERE key LIKE ? "
-                     "AND json_extract(value,'$.window_sha256')=?",
-                     (INPUT + "%", window_sha256))["n"]
+                     "AND json_extract(value,?)=?",
+                     (INPUT + "%", "$." + field, value))["n"]
 
 
-def _verify(settings, approval, capture):
+def _verify_legacy(settings, approval, capture):
     try:
         value = capture.notice.model_dump(mode="json")
         canonical_notice({"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
@@ -83,6 +93,70 @@ def _verify(settings, approval, capture):
     return source
 
 
+def verify_original(store, settings, value):
+    """Original signed notice only; STOP and expiry do not grant or revoke this read."""
+    try:
+        capture = OwnerPokeCapture.model_validate(value)
+        view = owner_authority.evidence(store, settings, capture.authority)
+        identity = view.policy.capture
+        notice = capture.notice.model_dump(mode="json")
+        canonical_notice({"post_type": "notice", "notice_type": "notify", "sub_type": "poke",
+                          **notice}, owner_qq_id=view.policy.owner_qq_id,
+                         bot_qq_id=settings.bot_qq_id)
+        source = canonical_source(notice)
+        if identity is None or "poke" not in view.policy.purposes:
+            raise ValueError()
+        Ed25519PublicKey.from_public_bytes(bytes.fromhex(identity.public_key)).verify(
+            bytes.fromhex(capture.signature), signed_payload(capture))
+        original = store.one("SELECT created_at FROM owner_authority_revisions "
+            "WHERE grant_id=? AND revision=?", (view.authority.grant_id, view.authority.revision))
+        if (capture.event_id != source["event_id"]
+            or capture.source_event_id != source["source_event_id"]
+            or capture.identity_sha256 != identity.identity_sha256
+            or capture.protocol_epoch != identity.protocol_epoch
+            or capture.identity_sha256 != paid_budget.sha(
+                [view.policy.owner_qq_id, settings.bot_qq_id])
+            or capture.occurred_at.timestamp() != capture.notice.time
+            or datetime.fromisoformat(original["created_at"]) > capture.occurred_at
+            or not 0 <= (capture.received_at - capture.occurred_at).total_seconds() <= 30
+            or (view.policy.expires_at is not None
+                and capture.received_at >= view.policy.expires_at)):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError, InvalidSignature):
+        raise CoreError("PRIVATE_POKE_CAPTURE_INVALID", 403) from None
+    return capture, view, source
+
+
+def original_source(store, settings, event_id):
+    """Validate retained native provenance without requiring current execution permission."""
+    event = store.one("SELECT e.*,c.scope,c.owner_actor_id,c.platform_session_key "
+                      "FROM events e JOIN conversations c USING(conversation_id) "
+                      "WHERE e.event_id=?", (event_id,))
+    marker = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event_id,))
+    try:
+        body = json.loads(event["body_json"]) if event else {}
+        saved = json.loads(marker["value"]) if marker else {}
+        capture, view, source = verify_original(store, settings, body["capture"])
+        if (not event or event["redacted"]
+            or (event["source"], event["actor_id"], event["privacy_scope"], event["event_type"],
+                event["scope"], event["owner_actor_id"])
+            != ("qq.onebot", "owner", "private", "notice.poke", "private", "owner")
+            or event_id != capture.event_id
+            or event["platform_session_key"] != source["platform_session_key"]
+            or body.get("poke") != capture.notice.model_dump(mode="json")
+            or event["source_event_id"] != capture.source_event_id
+            or datetime.fromisoformat(event["occurred_at"]) != capture.occurred_at
+            or event["fingerprint"] != source["notice_sha256"]
+            or saved != {"authority": capture.authority,
+                          "source_sha256": source["notice_sha256"],
+                          "capture_sha256": paid_budget.sha(capture.model_dump(mode="json"))}
+            or store.one("SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event_id,))):
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        raise CoreError("PRIVATE_POKE_SOURCE_CHANGED", 403) from None
+    return event, capture, view, source
+
+
 def _received(store, capture, source, existing):
     if store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                  ("erased_event:" + capture.event_id,)) or existing["redacted"]:
@@ -101,41 +175,47 @@ def _received(store, capture, source, existing):
 
 def receive(store, settings, clock, capture):
     """Ingest a signed notice; never advance or cancel an owner text turn."""
-    from companion import input_protocol, live_text
+    from companion import input_protocol
 
-    capture = PokeCapture.model_validate(capture)
+    value = capture.model_dump(mode="json") if hasattr(capture, "model_dump") else capture
+    native = isinstance(value, dict) and "authority" in value
+    capture = (OwnerPokeCapture if native else PokeCapture).model_validate(value)
     with _transaction(store):
         existing = store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
         erased = store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                             ("erased_event:" + capture.event_id,))
         if existing or erased:
-            # A lost intake ACK can be recovered after STOP. This read path does
-            # not create authority, advance custody or revive any work.
-            approval = input_protocol.approval_for_receipt(
-                store, settings, capture.window_sha256,
-            )
-            source = _verify(settings, approval, capture)
+            # A lost intake ACK can be recovered after STOP; no work is revived.
+            if native:
+                capture, _, source = verify_original(store, settings, capture)
+                if not erased:
+                    _, original, _, _ = original_source(store, settings, capture.event_id)
+                    if original.authority != capture.authority:
+                        raise CoreError("PRIVATE_POKE_SOURCE_CHANGED", 409)
+            else:
+                original = input_protocol.approval_for_receipt(
+                    store, settings, capture.window_sha256)
+                source = _verify_legacy(settings, original, capture)
             if erased:
                 raise CoreError("EVENT_ERASED", 410)
             return _received(store, capture, source, existing)
-        approval, _, _ = live_text.guard(store, settings, clock, input_only=True)
-        configured = policy(settings, approval)
-        source = _verify(settings, approval, capture)
+        if not native:
+            raise CoreError("PRIVATE_POKE_NATIVE_AUTHORITY_REQUIRED", 403)
+        view = owner_authority.current(store, settings, clock, purpose="poke",
+                                       authority=capture.authority)
+        configured = policy(settings, view)
+        capture, _, source = verify_original(store, settings, capture)
         now = clock()
         age = (datetime.fromisoformat(now) - capture.received_at).total_seconds()
         if not -2 <= age <= configured.max_pending_seconds:
             raise CoreError("PRIVATE_POKE_CAPTURE_EXPIRED", 403)
-        input_protocol._bound_epoch(store, approval, capture.protocol_epoch)
-        notices = input_count(store, approval.plan_sha256)
-        texts = store.one("SELECT COUNT(*) AS n FROM runtime_meta WHERE key LIKE ? "
-                          "AND json_extract(value,'$.window_sha256')=?",
-                          (live_text.INPUT + "%", approval.plan_sha256))["n"]
-        if notices >= 2000 or notices + texts >= approval.max_inputs:
-            raise CoreError("LIVE_TEXT_INPUT_CAP", 429)
+        if input_count(store, capture.authority) >= 2000:
+            raise CoreError("PRIVATE_POKE_INPUT_CAP", 429)
         cumulative.admit_operation(store, settings, now, "input", capture.event_id,
                                    source["notice_sha256"], at=capture.received_at)
-        store.insert("runtime_meta", key=INPUT + capture.event_id,
-                     value=encode({"window_sha256": approval.plan_sha256}))
+        store.insert("runtime_meta", key=INPUT + capture.event_id, value=encode({
+            "authority": capture.authority, "source_sha256": source["notice_sha256"],
+            "capture_sha256": paid_budget.sha(capture.model_dump(mode="json"))}))
         conversation = store.one("SELECT * FROM conversations WHERE platform='qq.onebot' "
                                  "AND platform_session_key=?", (source["platform_session_key"],))
         conversation_id = conversation["conversation_id"] if conversation else uid("conv")
@@ -154,7 +234,7 @@ def receive(store, settings, clock, capture):
                      body_json=encode({"poke": capture.notice.model_dump(mode="json"),
                                        "capture": capture.model_dump(mode="json")}))
         batch = store.one(
-            "SELECT p.*,j.state FROM poke_batches p JOIN jobs j USING(job_id) "
+            "SELECT p.*,j.state,j.authority_json FROM poke_batches p JOIN jobs j USING(job_id) "
             "WHERE p.conversation_id=? AND j.state IN ('QUEUED','RUNNING','RETRY_WAIT') "
             "ORDER BY j.rowid LIMIT 1", (conversation_id,),
         )
@@ -166,7 +246,7 @@ def receive(store, settings, clock, capture):
                               (batch["job_id"],))["n"]
             if (batch["state"] == "QUEUED" and batch["claimed_at"] is None
                 and now <= batch["coalesce_until"] and count < configured.max_coalesced
-                and batch["window_sha256"] == approval.plan_sha256
+                and json.loads(batch["authority_json"]) == capture.authority
                 and batch["policy_sha256"] == paid_budget.sha(configured.model_dump())):
                 store.insert("job_sources", job_id=batch["job_id"], event_id=capture.event_id)
                 result.update(job_id=batch["job_id"], state="QUEUED", coalesced=True)
@@ -176,9 +256,10 @@ def receive(store, settings, clock, capture):
                          state="QUEUED", idempotency_key="poke-response:" + capture.event_id,
                          max_attempts=1, created_at=now, updated_at=now, context_tracked=1,
                          next_attempt_at=after(now, configured.coalesce_seconds))
+            owner_authority.bind_job(store, settings, clock, job_id, purpose="poke")
             store.insert("job_sources", job_id=job_id, event_id=capture.event_id)
             store.insert("poke_batches", job_id=job_id, conversation_id=conversation_id,
-                         window_sha256=approval.plan_sha256,
+                         window_sha256="",
                          policy_sha256=paid_budget.sha(configured.model_dump()),
                          coalesce_until=after(now, configured.coalesce_seconds),
                          expires_at=after(now, configured.max_pending_seconds))
@@ -199,17 +280,9 @@ def _boundary_busy(store, conversation_id):
     ))
 
 
-def _sources(store, settings, job, cutoff):
-    approval = settings.live_text_window
-    sources = dialogue_history.recent_context_sources(
-        store, job["conversation_id"], job["event_id"], approval.max_history_turns,
-        cutoff_rowid=cutoff,
-    )
-    while sources and sum(len(message["content"].encode("utf-8")) for source in sources
-                          for message in dialogue_history.turn_messages(source)
-                          ) > approval.max_history_utf8_bytes:
-        sources.pop(0)
-    return sources
+def _sources(store, settings, job, cutoff, clock):
+    return owner_input.history_sources(store, settings, clock, job,
+                                        purpose="poke", cutoff_rowid=cutoff)
 
 
 def _snapshot(sources):
@@ -228,14 +301,12 @@ def _cancel(store, job_id, reason, now):
 
 def claim_ready(store, settings, clock, worker_id):
     """Claim after current work; one attempt reserves the rate slot even on no reply."""
-    from companion import live_text
-
     if not enabled(settings):
         return None
     with _transaction(store):
         now = clock()
-        approval, _, _ = live_text.guard(store, settings, clock)
-        configured = policy(settings, approval)
+        view = owner_authority.current(store, settings, clock, purpose="poke")
+        configured = policy(settings, view)
         for expired in store.rows("SELECT job_id FROM jobs WHERE kind='poke' AND state='RUNNING' "
                                   "AND lease_until<=?", (now,)):
             store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE job_id=? "
@@ -248,12 +319,19 @@ def claim_ready(store, settings, clock, worker_id):
             "WHERE j.kind='poke' AND j.state='QUEUED' ORDER BY j.rowid",
         )
         for job in rows:
-            if (job["expires_at"] <= now or job["window_sha256"] != approval.plan_sha256
+            if (job["expires_at"] <= now
+                or json.loads(job["authority_json"]) != view.authority.as_dict()
                 or job["policy_sha256"] != paid_budget.sha(configured.model_dump())):
                 _cancel(store, job["job_id"], "POKE_AUTHORITY_EXPIRED", now)
                 continue
+            try:
+                check_job(store, settings, view, job, clock=clock)
+            except CoreError as error:
+                _cancel(store, job["job_id"], error.code, now)
+                continue
             if (job["coalesce_until"] > now or private_life.busy(store, now)
-                or private_life.owner_waiting(store, settings, now)
+                or owner_authority.owner_waiting(store, settings, now,
+                                                authority=view.authority.as_dict())
                 or _boundary_busy(store, job["conversation_id"])):
                 continue
             day = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone)).replace(
@@ -274,7 +352,7 @@ def claim_ready(store, settings, clock, worker_id):
                                "WHERE conversation_id=?", (job["conversation_id"],))["n"]
             revision = store.one("SELECT reply_revision FROM conversations WHERE conversation_id=?",
                                  (job["conversation_id"],))["reply_revision"]
-            sources = _sources(store, settings, job, cutoff)
+            sources = _sources(store, settings, job, cutoff, clock)
             token = uid("lease")
             store.execute("UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,"
                           "lease_until=?,attempts=attempts+1,updated_at=? WHERE job_id=?",
@@ -285,16 +363,17 @@ def claim_ready(store, settings, clock, worker_id):
                           (now, cutoff, revision, encode(_snapshot(sources)), job["job_id"]))
             claimed = {**job, "lease_token": token, "attempts": job["attempts"] + 1}
             reply_revision.remember_sources(store, claimed, [row["event_id"] for row in sources])
-            check_job(store, settings, approval, claimed)
+            check_job(store, settings, view, claimed, clock=clock)
             return claimed
         return None
 
 
-def check_job(store, settings, approval, job):
-    configured = policy(settings, approval)
+def check_job(store, settings, view, job, *, clock=utcnow):
+    view = owner_authority.check_job(store, settings, clock, job, purpose="poke")
+    configured = policy(settings, view)
     reply_revision.check_job(store, job)
     batch = store.one("SELECT * FROM poke_batches WHERE job_id=?", (job["job_id"],))
-    if (job["kind"] != "poke" or not batch or batch["window_sha256"] != approval.plan_sha256
+    if (job["kind"] != "poke" or not batch or batch["window_sha256"]
         or batch["policy_sha256"] != paid_budget.sha(configured.model_dump())):
         raise CoreError("PRIVATE_POKE_JOB_REQUIRED", 403)
     job = {**job, "conversation_id": batch["conversation_id"]}
@@ -311,40 +390,32 @@ def check_job(store, settings, approval, job):
     if not notices or job["event_id"] not in {row["event_id"] for row in notices}:
         raise CoreError("PRIVATE_POKE_SOURCE_CHANGED", 403)
     for event in notices:
-        try:
-            body = json.loads(event["body_json"])
-            capture = PokeCapture.model_validate(body["capture"])
-            source = _verify(settings, approval, capture)
-            if (event["redacted"] or event["event_id"] != capture.event_id
-                or event["conversation_id"] != batch["conversation_id"]
-                or event["source"] != "qq.onebot" or event["actor_id"] != "owner"
-                or event["privacy_scope"] != "private"
-                or body["poke"] != capture.notice.model_dump()
-                or event["source_event_id"] != capture.source_event_id
-                or event["occurred_at"] != capture.occurred_at.astimezone(UTC).isoformat(
-                    timespec="microseconds")
-                or event["fingerprint"] != source["notice_sha256"]):
-                raise ValueError()
-        except (ValueError, KeyError, TypeError):
-            raise CoreError("PRIVATE_POKE_SOURCE_CHANGED", 403) from None
+        _, capture, original, _ = original_source(store, settings, event["event_id"])
+        age = (datetime.fromisoformat(clock()) - capture.received_at).total_seconds()
+        if (original.authority != view.authority
+            or event["conversation_id"] != batch["conversation_id"]
+            or not 0 <= age < 86400 * min(view.policy.source_retention_days,
+                                          settings.raw_event_retention_days)):
+            raise CoreError("PRIVATE_POKE_SOURCE_CHANGED", 403)
     if batch["claimed_at"] is not None:
         current = store.one("SELECT reply_revision FROM conversations WHERE conversation_id=?",
                             (batch["conversation_id"],))
         if current["reply_revision"] != batch["reply_revision"]:
             raise CoreError("POKE_CONTEXT_SUPERSEDED", 409)
-        if _snapshot(_sources(store, settings, job, batch["context_cutoff"])) != json.loads(
+        if _snapshot(_sources(store, settings, job, batch["context_cutoff"], clock)) != json.loads(
             batch["context_json"],
         ):
             raise CoreError("POKE_CONTEXT_CHANGED", 409)
     return batch
 
 
-def context(store, settings, job):
-    batch = check_job(store, settings, settings.live_text_window, job)
+def context(store, settings, job, *, clock=utcnow):
+    view = owner_authority.check_job(store, settings, clock, job, purpose="poke")
+    batch = check_job(store, settings, view, job, clock=clock)
     if batch["claimed_at"] is None:
         raise CoreError("POKE_CLAIM_REQUIRED", 409)
-    sources = _sources(store, settings, job, batch["context_cutoff"])
-    configured = policy(settings, settings.live_text_window)
+    sources = _sources(store, settings, job, batch["context_cutoff"], clock)
+    configured = policy(settings, view)
     notices = store.rows("SELECT e.body_json FROM events e JOIN job_sources s USING(event_id) "
                          "WHERE s.job_id=? AND e.event_type='notice.poke' ORDER BY e.rowid",
                          (job["job_id"],))
@@ -363,7 +434,7 @@ def finish(store, settings, approval, job, decision, now):
     from companion.transport import enqueue
 
     with _transaction(store):
-        batch = check_job(store, settings, approval, job)
+        batch = check_job(store, settings, approval, job, clock=lambda: now)
         configured = policy(settings, approval)
         decision = PokeDecision.model_validate(decision)
         if decision.kind == "text":
@@ -394,13 +465,17 @@ def finish(store, settings, approval, job, decision, now):
         store.execute("UPDATE poke_batches SET decision_kind=?,decision_sha256=?,"
                       "response_message_id=? WHERE job_id=?",
                       (decision.kind, digest, message_id, job["job_id"]))
+        if message_id:
+            from companion.owner_delivery import record_poke_reply
+
+            record_poke_reply(store, settings, lambda: now, job, [message_id])
         store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
                       "WHERE job_id=?",
                       (now, job["job_id"]))
         return [message_id] if message_id else []
 
 
-def check_delivery(store, settings, approval, message_id):
+def check_delivery(store, settings, approval, message_id, *, clock=utcnow):
     row = store.one("SELECT o.*,j.job_id,j.kind,j.event_id FROM outbox o JOIN poke_batches p "
                     "ON p.response_message_id=o.message_id JOIN jobs j USING(job_id) "
                     "WHERE o.message_id=?", (message_id,))
@@ -408,7 +483,7 @@ def check_delivery(store, settings, approval, message_id):
         raise CoreError("PRIVATE_POKE_DELIVERY_REQUIRED", 403)
     job = store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
                     "WHERE j.job_id=?", (row["job_id"],))
-    batch = check_job(store, settings, approval, job)
+    batch = check_job(store, settings, approval, job, clock=clock)
     content = json.loads(row["content_json"])
     expected = ({"kind": "poke", "target_user_id": settings.owner_qq_id}
                 if batch["decision_kind"] == "poke" else content)

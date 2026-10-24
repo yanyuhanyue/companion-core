@@ -48,3 +48,11 @@ notice codec retains those identities and rejects group notifications. The share
 standard-library wire codec signs the original owner authority reference under a
 separate v2 domain. Historical v1 receipts retain their original signature bytes;
 their existence cannot create a new native execution grant.
+
+Native poke intake pins its original authority in the existing job. Coalescing,
+cooldown, daily slots and the one-attempt rule remain in the existing tables.
+Context uses the same authenticated history reader as chat, with the independent
+history purpose, retention/byte bounds and the poke batch's original cutoff.
+`verify_original` and `original_source` only inspect retained provenance, including
+after STOP. New intake, claim and source use separately recheck the current grant.
+Shared API, delivery binding and Bridge acceptance are required before activation.
