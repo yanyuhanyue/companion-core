@@ -25,7 +25,9 @@ generation. No eligible source means no Life model call. PREVIEW makes no new ta
 Topic candidacy means there is an actual experience to consider, not that a model has established
 an unresolved fact. One active conversational topic groups up to eight actual inputs. A newer
 input changes the snapshot and postpones consideration; it cannot commit an older in-flight
-proposal. A read result binds to an owner conversation through its source ancestry. Model-derived
+proposal. If the latest owner input cannot fit within the topic source bound, generation stops
+rather than considering an older incomplete context. A read result binds to an owner conversation
+through its source ancestry. Model-derived
 memory, fabricated daily routines, quoted/rich-only inputs, private-group crossovers and management
 commands are not new Life sources. Model selection can always SKIP.
 

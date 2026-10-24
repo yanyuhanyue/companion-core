@@ -217,6 +217,18 @@ def test_owner_close_after_generation_withdraws_the_reviewable_draft(core):
     assert core.store.rows("SELECT * FROM model_usage") == usage
 
 
+def test_latest_input_cannot_be_silently_omitted_from_bounded_topic(core):
+    bug(core)
+    for number in range(2, 10):
+        ingest(core, number, "还有一条新信息" if number < 9 else "这个问题已经解决了")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+    core.clock.advance(86400)
+    assert core.life_topics.schedule() is None
+    assert core.life_topics.schedule() is None
+    assert not core.model.calls
+    assert not core.store.rows("SELECT * FROM life_activity_results")
+
+
 @pytest.mark.parametrize("action", ["SKIP", "EXPLORE", "DEFER"])
 def test_bounded_choices_do_not_dispatch_and_defer_cannot_loop_forever(core, action):
     bug(core)

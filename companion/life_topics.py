@@ -536,6 +536,13 @@ class LifeTopics:
             "ORDER BY rowid DESC LIMIT 1",
             (topic["conversation_id"],),
         )
+        if topic["kind"] == "conversation" and (
+            latest_owner is None
+            or latest_owner["event_id"] not in {source["event_id"] for source in sources}
+        ):
+            # Do not ask the model about an old bug while a bounded-out newer input
+            # may have closed it. The owner can close the topic or supply a fresh one.
+            raise CoreError("LIFE_LATEST_INPUT_NOT_INCLUDED", 409)
         goals = s.rows(
             "SELECT DISTINCT g.goal_id,g.state FROM goals g JOIN goal_evidence e "
             "USING(goal_id) WHERE e.event_id IN (SELECT event_id FROM life_topic_sources "
