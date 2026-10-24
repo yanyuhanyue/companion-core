@@ -86,6 +86,9 @@ class Core(Runtime):
                 self.store, settings, self.goals, self.reflections, self.affect, clock,
             )
             self.social = SocialPlanner(self.store, settings, clock)
+            from companion.life_topics import LifeTopics
+
+            self.life_topics = LifeTopics(self.store, settings, clock)
             # These finite callbacks expose only the read/model operations each service needs.
             self.content = ContentService(
                 self.store, settings, self.observations,
@@ -293,7 +296,7 @@ class Core(Runtime):
         expire_voice_jobs(s, now)
         recover_deliveries(s, now)
 
-    def claim_job(self, worker_id):
+    def claim_job(self, worker_id, *, job_id=None):
         s, now = self.store, self.clock()
         with s.transaction():
             self.recover(now)
@@ -311,12 +314,13 @@ class Core(Runtime):
                 "FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
                 "AND j.kind IN ('chat','activity') "
+                "AND (? IS NULL OR j.job_id=?) "
                 "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
                 "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
                 "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
                 "AND b.kind IN ('chat','activity') "
                 "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) ORDER BY j.rowid LIMIT 1",
-                (now,),
+                (job_id, job_id, now),
             )
             if not row:
                 return None
@@ -1251,9 +1255,11 @@ class Core(Runtime):
                                  error_code=code)
         return True
 
-    async def run_once(self, worker_id="worker"):
-        job = self.claim_job(worker_id)
+    async def run_once(self, worker_id="worker", *, job_id=None):
+        job = self.claim_job(worker_id, job_id=job_id)
         if job is None:
+            if job_id is not None:
+                return False
             if await self._run_poke_once(worker_id):
                 return True
             if await self.memes.run_once(worker_id):
@@ -1543,6 +1549,8 @@ class Core(Runtime):
                     )
 
     def schedule_proactive(self):
+        if self.settings.life_loop.mode != "OFF":
+            return bool(self.life_topics.schedule())
         cfg, s, now = self.settings, self.store, self.clock()
         if not cfg.pricing_known:
             return False

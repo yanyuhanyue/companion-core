@@ -204,6 +204,11 @@ def admit_model(store, settings, clock, job_id, scenario):
     from companion import live_text, notices
 
     approval, _, attempts = live_text.guard(store, settings, clock)
+    job = store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
+                    "WHERE job_id=?", (job_id,)) if job_id else None
+    life_shadow = scenario == "activity" and notices.shadow(job)
+    if life_shadow:
+        notices.validate(store, settings, job, clock())
     feature = ("goals" if scenario == "activity" and notices.required(store, job_id)
                else SCENARIOS.get(scenario))
     allowed_feature = (
@@ -211,7 +216,7 @@ def admit_model(store, settings, clock, job_id, scenario):
         settings.social_autonomy.enabled if scenario == "social_autonomy" else
         feature is not None and getattr(settings, feature + "_enabled")
     )
-    if not allowed_feature:
+    if not allowed_feature and not life_shadow:
         raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     if attempts >= approval.max_model_attempts:
         raise CoreError("LIVE_TEXT_MODEL_ATTEMPT_CAP", 429)

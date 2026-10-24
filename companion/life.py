@@ -20,6 +20,8 @@ COMMANDS = (
     "接受目标",
     "取消目标",
     "安排任务",
+    "结束话题",
+    "不再跟进",
 )
 STATES = {
     "CANDIDATE": "候选",
@@ -53,6 +55,21 @@ class LifeService:
         if command not in COMMANDS:
             return None
         text = command + (" " + arguments if arguments else "")
+        if command in {"结束话题", "不再跟进"}:
+            from companion.life_topics import LifeTopics
+
+            source = self.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+                                    (event_id,))
+            topics = self.store.rows(
+                "SELECT topic_id FROM life_topics WHERE conversation_id=? "
+                "AND state<>'EXPIRED' AND reason_code<>'OWNER_CLOSED' "
+                "AND expires_at>? AND (?='' OR topic_id=?)",
+                (source["conversation_id"], self.clock(), arguments, arguments),
+            )
+            service = LifeTopics(self.store, self.settings, self.clock)
+            for topic in topics:
+                service.close(topic["topic_id"], event_id)
+            return "已结束跟进，不会再为这些话题生成提醒。" if topics else "目前没有待跟进的话题。"
         if text in {"暂停自主活动", "恢复自主活动"}:
             self.goals.pause_autonomy(text.startswith("暂停"))
             return (

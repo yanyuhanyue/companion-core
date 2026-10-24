@@ -36,6 +36,21 @@ def required(store, job_id):
     return bool(isinstance(value, dict) and value.get("kind") == "commitment")
 
 
+def shadow(job):
+    value = reference(job)
+    return isinstance(value, dict) and value.get("kind") == "life"
+
+
+def _key(store, kind, ref):
+    key = "notice:" + kind + ":" + ref
+    if kind == "life":
+        topic = store.one("SELECT revision FROM life_topics WHERE topic_id=?", (ref,))
+        if not topic:
+            raise CoreError("LIFE_TOPIC_UNAVAILABLE", 409)
+        key += ":" + str(topic["revision"])
+    return key
+
+
 def _source(store, event_id):
     row = store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
     if not row or row["redacted"] or row["privacy_scope"] != "private":
@@ -46,6 +61,10 @@ def _source(store, event_id):
 
 
 def _material(store, settings, kind, ref, now):
+    if kind == "life":
+        from companion.life_topics import LifeTopics
+
+        return LifeTopics(store, settings, lambda: now).material(ref)
     if kind == "share":
         from companion.social import _share_url, share_source, text_key
 
@@ -114,7 +133,7 @@ def _material(store, settings, kind, ref, now):
 
 def schedule(store, settings, kind, ref, conversation_id, now):
     """Reserve one native activity job; never create a deliverable before wording exists."""
-    key = "notice:" + kind + ":" + ref
+    key = _key(store, kind, ref)
     with nullcontext() if store.db.in_transaction else store.transaction():
         previous = store.one("SELECT job_id FROM jobs WHERE idempotency_key=?", (key,))
         if previous:
@@ -153,7 +172,7 @@ def validate(store, settings, job, now):
     if value is None:
         return None
     if (not isinstance(value, dict) or set(value) != {"kind", "ref", "material_sha256"}
-        or value["kind"] not in {"share", "commitment"}
+        or value["kind"] not in {"share", "commitment", "life"}
         or not isinstance(value["ref"], str) or not 1 <= len(value["ref"]) <= 128
         or not isinstance(value["material_sha256"], str)
         or not re.fullmatch(r"[a-f0-9]{64}", value["material_sha256"])
@@ -161,7 +180,7 @@ def validate(store, settings, job, now):
         or current["privacy_scope"] != "private" or current["scope"] != "private"
         or current["owner_actor_id"] != "owner" or current["platform"] != "qq.onebot"
         or current["actor_id"] != "system" or current["event_type"] != "activity.tick"
-        or current["source_event_id"] != "notice:" + value["kind"] + ":" + value["ref"]
+        or current["source_event_id"] != _key(store, value["kind"], value["ref"])
         or current["event_id"] != "evt_" + sha(current["source_event_id"])):
         raise CoreError("NOTICE_SCOPE_INVALID", 403)
     data = _material(store, settings, value["kind"], value["ref"], now)
@@ -189,7 +208,12 @@ def messages(store, settings, job, now, principles):
     if data is None:
         return None
     payload = {key: value for key, value in data.items() if key != "source_events"}
-    result = [{"role": "system", "content": principles + "\n" + RULES},
+    rules = RULES
+    if data["kind"] == "life":
+        from companion.life_topics import RULES as LIFE_RULES
+
+        rules = LIFE_RULES
+    result = [{"role": "system", "content": principles + "\n" + rules},
               {"role": "user", "content": encode(payload)}]
     while (payload["text"]
            and (excess := measure_request(settings, result, "activity").reserved_input_tokens
@@ -201,6 +225,11 @@ def messages(store, settings, job, now, principles):
 
 
 def parts(store, settings, job, text, now):
+    if shadow(job):
+        from companion.life_topics import LifeTopics
+
+        LifeTopics(store, settings, lambda: now).commit(job, text)
+        return []
     data = validate(store, settings, job, now)
     if data is None:
         return None
@@ -221,6 +250,8 @@ def parts(store, settings, job, text, now):
 def record(store, settings, job, message_ids, now):
     value = reference(job)
     if not value:
+        return
+    if value["kind"] == "life":
         return
     if value["kind"] == "share":
         store.execute("UPDATE social_candidates SET message_id=?,updated_at=? "

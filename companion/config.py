@@ -23,6 +23,7 @@ from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
+from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
 from companion.operator_config import ConsoleConfig
 from companion.poke_protocol import PokePolicy
@@ -189,6 +190,9 @@ class LiveTextWindowApproval(BaseModel):
     companion_approval_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
     )
+    life_shadow: LifeShadowApproval | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
     starts_at: datetime
@@ -260,6 +264,12 @@ class LiveTextWindowApproval(BaseModel):
     @model_validator(mode="after")
     def valid_interval(self):
         companion = self.companion_scope == "owner_private_v1"
+        if self.life_shadow is not None and not companion:
+            raise ValueError("Life SHADOW requires private companion approval")
+        if self.life_shadow is not None and not (
+            self.starts_at < self.life_shadow.expires_at <= self.ends_at
+        ):
+            raise ValueError("Life SHADOW expiry must stay inside the private window")
         if companion:
             if (not self.automatic_reply or not self.companion_approval_sha256
                 or self.memory_scope != "owner_private" or self.history_scope != "owner_private"
@@ -438,6 +448,10 @@ class Settings(BaseModel):
     goals_max_active: int = Field(default=10, ge=1, le=50)
     goal_max_attempts: int = Field(default=3, ge=1, le=3)
     wake_enabled: bool = False
+    life_loop: LifeLoopConfig = Field(
+        default_factory=LifeLoopConfig,
+        exclude_if=lambda value: value == LifeLoopConfig(),
+    )
     wake_min_interval_minutes: int = Field(default=180, ge=1, le=1440)
     wake_max_daily_runs: int = Field(default=3, ge=0, le=20)
     exploration_enabled: bool = False

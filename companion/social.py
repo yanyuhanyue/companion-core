@@ -249,7 +249,7 @@ class SocialPlanner:
         }
 
     def consider(self, event_id):
-        if not self.settings.social_enabled:
+        if not self.settings.social_enabled or self.settings.life_loop.mode != "OFF":
             return None
         s, now, captured = self.store, self.clock(), epoch(self.store)
         if expired_sources(
@@ -330,7 +330,7 @@ class SocialPlanner:
 
     def flush(self):
         cfg, s, now = self.settings, self.store, self.clock()
-        if not cfg.social_enabled or not cfg.pricing_known:
+        if not cfg.social_enabled or not cfg.pricing_known or cfg.life_loop.mode != "OFF":
             return False
         with s.transaction():
             if not proactive_allowed(s, cfg, now):

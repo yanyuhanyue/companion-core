@@ -370,6 +370,14 @@ class WindowPlan:
             if "cumulative" in scope:
                 expected_scope.add("cumulative")
                 cumulative.validate(scope["cumulative"], config, self.start, self.end)
+            if "life_shadow" in scope:
+                # Core owns this no-delivery extension. Carry it in the frozen window
+                # identity without interpreting it as Bridge send authority.
+                shadow = scope["life_shadow"]
+                if (not companion or not isinstance(shadow, dict)
+                    or shadow.get("scope") != "owner_private_life_shadow_v1"):
+                    raise ValueError("INVALID_LIFE_SHADOW_SCOPE")
+                expected_scope.add("life_shadow")
             if "automatic_reply" in scope:
                 expected_scope.add("automatic_reply")
                 if (scope["automatic_reply"] is not True or not scope["capture_public_key"]
