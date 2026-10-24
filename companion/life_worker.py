@@ -55,6 +55,8 @@ async def life_worker(settings):
                             result = await run_native_unit(
                                 partial(core.run_once, worker_id, job_id=pending["job_id"]),
                             )
+                            if result.progressed and settings.life_loop.read_goals_enabled:
+                                core.exploration.schedule_goal()
                         if not result.progressed:
                             result = await run_native_unit(core.consolidation.run_once, worker_id)
                         if (not result.progressed and due

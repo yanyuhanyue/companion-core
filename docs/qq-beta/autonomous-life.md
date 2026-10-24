@@ -40,9 +40,26 @@ meaning; changing mode does not erase or replay them.
 ## Actions and destinations
 
 The strict proposal uses SKIP, CONTINUE, EXPLORE, FOLLOW_UP, SHARE or DEFER. Source IDs must belong
-to the captured input. CONTINUE must refer to an existing source-linked goal. In SHADOW,
-CONTINUE/EXPLORE record reviewable intentions without starting a new read. Existing authorized
-Goal/Reader tasks keep using their original execution path.
+to the captured input. CONTINUE must refer to an existing source-linked self goal. EXPLORE can
+carry the native `GoalProposal` (`topic`, `source_event_ids`, `scope`, optional `priority`).
+The default-false `life_loop.read_goals_enabled` switch submits these choices to the existing
+GoalEngine only in SHADOW. It grants no read permission: existing goal, adapter/source, budget,
+pause and window checks still apply. Without a concrete goal or with the switch disabled, the
+result remains a reviewable intention. Terminal deduplicated goals are not executed again.
+
+Submission happens in the original activity commit transaction. The Life worker schedules the
+native goal; the independent Reader v3 worker returns its ordinary evidence and usage receipt.
+Migration `0038_life_goal_binding` adds only the nullable native goal ID to the activity result.
+Readback exposes the current native goal state, result event and error code. No extra execution
+queue or retry policy is introduced. Wake's automatic new-goal selection yields while Life
+read-goal submission is enabled; accepted goals and commitments retain their original paths.
+
+Only a completed native goal result linked to a successful, settled Life choice under the same
+private approval can supply the next private Life decision. Its original goal evidence must
+remain in that approval's exact source set, with unchanged fingerprints and current validity.
+Unrelated reads and arbitrary descendant events cannot inherit this purpose. QZone draft
+permission still requires exact per-result grants. A failed or uncertain read supplies no SHARE
+evidence; native recovery and accounting remain authoritative.
 
 FOLLOW_UP targets only a conversational topic and PRIVATE_MESSAGE_DRAFT. SHARE can choose
 PRIVATE_MESSAGE_DRAFT or PRIVATE_DIARY; QZONE_DRAFT additionally needs explicit per-source purpose
@@ -115,3 +132,8 @@ withdrawal/expiry, pause/OFF, new input, restart, duplicate claiming, budget den
 bounded DEFER, purpose isolation and erasure replay. Exact candidate checks and eventual CI are
 recorded once in the lane receipt. Finite live Beta still needs explicit dates, source/purpose
 scope, request/cost/item caps, destination/audience and stop/reconciliation responsibility.
+
+The execution follow-up additionally verifies owner HTTP input → independent Life/model worker →
+native Goal → independent Reader v3 with mocked source transport → actual receipt → independent
+Life SHARE, including same-approval private-purpose checks and zero outbox items. Model output
+is synthetic; this does not establish live model decision quality.

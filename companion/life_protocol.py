@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
 from companion.contracts import StrictModel
+from companion.goals import GoalProposal
 
 
 class LifeLoopConfig(StrictModel):
@@ -15,6 +16,7 @@ class LifeLoopConfig(StrictModel):
     follow_up_delay_seconds: int = Field(default=86400, ge=60, le=7 * 86400)
     max_daily_decisions: int = Field(default=2, ge=0, le=10)
     min_interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    read_goals_enabled: bool = False
 
 
 class LifeQZoneSourceGrant(StrictModel):
@@ -66,6 +68,7 @@ class LifeDecision(StrictModel):
     reason: str = Field(min_length=1, max_length=160)
     text: str = Field(default="", max_length=500)
     goal_id: str | None = Field(default=None, max_length=128)
+    goal: GoalProposal | None = None
     defer_seconds: int | None = Field(default=None, ge=60, le=86400)
 
     @model_validator(mode="after")
@@ -83,6 +86,12 @@ class LifeDecision(StrictModel):
             raise ValueError("continuation requires an existing goal")
         if self.action not in {"CONTINUE", "EXPLORE"} and self.goal_id is not None:
             raise ValueError("unrelated goal reference")
+        if self.goal is not None and (
+            self.action != "EXPLORE"
+            or self.goal_id is not None
+            or not set(self.goal.source_event_ids) <= set(self.source_event_ids)
+        ):
+            raise ValueError("new exploration uses one native goal within the proposed source set")
         if len(set(self.source_event_ids)) != len(self.source_event_ids):
             raise ValueError("duplicate source references")
         return self
