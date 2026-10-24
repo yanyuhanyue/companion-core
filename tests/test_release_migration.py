@@ -61,6 +61,7 @@ REVISION_CHAIN = (
     "0037_life_topics",
     "0038_life_goal_binding",
     "0039_evaluation",
+    "0040_owner_authority",
 )
 LEGACY_TABLES = (
     "principals",
@@ -332,9 +333,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0039_evaluation"]
+    assert scripts.get_heads() == [REVISION_CHAIN[-1]]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0039_evaluation")
+    revisions, current = [], scripts.get_revision(REVISION_CHAIN[-1])
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -342,7 +343,7 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
     assert tuple(reversed(revisions)) == REVISION_CHAIN
 
 
-def test_voice_v2_downgrade_keeps_custody_and_accounting_unchanged(core):
+def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core):
     tables = ("runtime_meta", "voice_jobs", "voice_node_state", "model_usage", "outbox")
     before = table_snapshot(core.store, tables)
     config = Config()
@@ -351,12 +352,12 @@ def test_voice_v2_downgrade_keeps_custody_and_accounting_unchanged(core):
     )
     config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.store.path).as_posix())
     with pytest.raises(
-        RuntimeError, match="VOICE_V2_DOWNGRADE_REQUIRES_EXPLICIT_CUSTODY_RECONCILIATION"
+        RuntimeError, match="OWNER_AUTHORITY_DOWNGRADE_REQUIRES_EXPLICIT_CUSTODY_RECONCILIATION"
     ):
         command.downgrade(config, "0033_model_usage_job_index")
     assert table_snapshot(core.store, tables) == before
     assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-        "0034_voice_retention_v2"
+        REVISION_CHAIN[-1]
     )
 
 
@@ -377,6 +378,10 @@ def test_populated_historical_upgrade_preserves_every_old_column_and_repeats(tmp
         incarnation = store.one("SELECT * FROM runtime_meta WHERE key='voice_incarnation'")
         assert incarnation and re.fullmatch(r"[a-f0-9]{32}", incarnation["value"])
         first_upgrade["runtime_meta"]["rows"].append(incarnation)
+        first_upgrade["runtime_meta"]["rows"].extend([
+            {"key": "owner_authority_restore_generation", "value": "initial"},
+            {"key": "owner_authority_mode", "value": "OFF"},
+        ])
         assert_old_columns_unchanged(store, first_upgrade)
         for row in store.rows("SELECT * FROM outbox"):
             assert {key: row[key] for key in SEGMENT_DEFAULTS} == SEGMENT_DEFAULTS
@@ -417,7 +422,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0039_evaluation"}
+            {"version_num": REVISION_CHAIN[-1]}
         ]
         voice_incarnation = restored.one(
             "SELECT * FROM runtime_meta WHERE key='voice_incarnation'"
@@ -462,6 +467,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 expected = {
                     **old, **SEGMENT_DEFAULTS,
                     "delivery_lane": "owner_private", "native_ack_json": None,
+                    "authority_json": "{}",
                 }
                 if active:
                     expected.update(
@@ -490,8 +496,10 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
             }
             unchanged["runtime_meta"] = {
                 **before["runtime_meta"],
-                "rows": before["runtime_meta"]["rows"] + [voice_incarnation, generation,
-                                                           restore_block] + [
+                "rows": before["runtime_meta"]["rows"] + [voice_incarnation] + [
+                    restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
+                    for name in ("owner_authority_restore_generation", "owner_authority_mode")
+                ] + [generation, restore_block] + [
                     restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
                     for name in ("social_autonomy_restore_required", "voice_restore_required",
                                  "bili_video_restore_required")

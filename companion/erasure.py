@@ -54,6 +54,7 @@ def cleanup_contracts():
     from companion.media import erase_media_links
     from companion.meme_core import erase_captions
     from companion.observation import erase_observations
+    from companion.owner_authority import erase_sources as erase_owner_authority
     from companion.poke import erase as erase_poke
     from companion.reading import erase_reading
     from companion.reflection import erase_reflections
@@ -61,6 +62,7 @@ def cleanup_contracts():
     from companion.voice_jobs import erase_voice_jobs
 
     return (
+        event_cleanup("owner_authority", erase_owner_authority),
         event_cleanup("observations", erase_observations),
         event_cleanup("affect", erase_affect),
         DerivedCleanup(

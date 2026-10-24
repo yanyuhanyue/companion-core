@@ -26,6 +26,7 @@ from companion.image_input import ImageInputPolicy
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
 from companion.operator_config import ConsoleConfig
+from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.poke_protocol import PokePolicy
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
@@ -369,6 +370,7 @@ class LiveTextWindowApproval(BaseModel):
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
     _operator_config_version: int = PrivateAttr(default=0)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)

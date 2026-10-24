@@ -6,7 +6,6 @@ from pydantic import SecretStr
 
 from companion import api
 from companion.core import Core
-from companion.memory_projection_api import register_memory_projection_routes
 from tests.test_m1 import remember
 from tests.test_next_memory_context import episode
 
@@ -19,12 +18,7 @@ def projection_client(core, monkeypatch):
     monkeypatch.setattr(api, "Core", lambda settings, model=None:
                         Core(settings, core.model, core.clock))
     app = api.create_app(core.settings)
-    # Exercise the native control dependency while the shared API registration
-    # hook is integrated separately with the authority cutover.
-    if not any(getattr(route, "path", None) == PATH for route in app.routes):
-        controlled = next(route for route in app.routes
-                          if getattr(route, "path", None) == "/internal/v2/timeline")
-        register_memory_projection_routes(app, controlled.dependencies)
+    assert any(getattr(route, "path", None) == PATH for route in app.routes)
     with TestClient(app) as client:
         yield client, {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
 
