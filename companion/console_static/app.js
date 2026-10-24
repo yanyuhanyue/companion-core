@@ -619,11 +619,14 @@ async function loadRoute({ reset = false, more = false } = {}) {
 function render({ keepScroll = false } = {}) {
   if (!state.session || !state.data) return;
   const y = scrollY, active = document.activeElement, focusId = active?.id, caret = active?.selectionStart;
+  // 页面内可以单独滚动的区域（例如能力列表）在重绘后回到原来的位置。
+  const inner = Object.fromEntries($$("[data-keep-scroll]").map(n => [n.dataset.keepScroll, n.scrollTop]));
   const focusKey = active?.dataset?.k;
   const body = PAGES[state.route](state.data), bar = saveBar();
   $("#page").replaceChildren(body, el("footer", { class: "foot-note" }, el("span", {}, "Companion Core 主人控制台"),
     el("span", {}, "本页读取于 " + fmtTime(state.updatedAt))), ...(bar ? [bar] : []));
   $("#page").classList.toggle("has-savebar", !!$("#page .savebar"));
+  if (keepScroll) for (const n of $$("[data-keep-scroll]")) if (n.dataset.keepScroll in inner) n.scrollTop = inner[n.dataset.keepScroll];
   PAGES[state.route].after?.();
   if (keepScroll) window.scrollTo(0, y); else window.scrollTo(0, 0);
   const target = focusId ? document.getElementById(focusId) : focusKey ? $(`[data-k="${CSS.escape(focusKey)}"]`) : null;
@@ -1536,7 +1539,7 @@ PAGES.caps = data => {
       icon("right", "i chev"), el("span", {}, name), el("small", {}, list.filter(c => !["DISABLED", "UNAVAILABLE"].includes(c.state)).length + "/" + list.length)),
       open ? shown.map(c => {
         return el("div", { class: "ci-row" + (c === sel ? " sel" : "") + (["DISABLED", "UNAVAILABLE"].includes(c.state) ? " off" : "") },
-          el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; } },
+          el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; state.capScrolled = c.id; state.capTop = innerWidth <= 860; } },
             el("span", { class: "dot " + statusOf(c.state)[1], title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
             ...capMarks(c.id)),
           capSwitch(c.id, CAP_NAMES[c.id] || "", true));
@@ -1548,10 +1551,17 @@ PAGES.caps = data => {
         searchBox("cap-q", state.capQ, "搜索能力或参数", v => { state.capQ = v; rerender(); }),
         el("div", { class: "ci-filter", role: "group", "aria-label": "筛选" }, [["all", "全部"], ["on", "已开启"], ["off", "未开启"], ["warn", "需留意"]].map(([k, n]) =>
           el("button", { type: "button", "aria-pressed": String(state.capF === k), onclick: () => { state.capF = k; rerender(); } }, n + " ", el("span", { class: "num" }, String(filterCount(k)))))),
-        el("div", { class: "ci-list" }, index.some(Boolean) ? index : el("div", { class: "empty" }, el("h3", {}, "没有符合条件的能力"), el("p", {}, "换个关键词，或选择“全部”。")))),
+        el("div", { class: "ci-list", "data-keep-scroll": "caps" }, index.some(Boolean) ? index : el("div", { class: "empty" }, el("h3", {}, "没有符合条件的能力"), el("p", {}, "换个关键词，或选择“全部”。")))),
       el("section", { class: "cap-detail" }, sel ? capDetail(sel) : el("p", { class: "note" }, "还没有能力状态。"))));
 };
-PAGES.caps.after = () => { const s = $(".ci-row.sel"); if (s && !state.capMobile) s.scrollIntoView?.({ block: "nearest" }); };
+/* 只在第一次打开（例如从别处链接进来）时把选中的能力滚进列表可见范围，不移动整页 */
+PAGES.caps.after = () => {
+  if (state.capTop) { state.capTop = false; window.scrollTo(0, 0); }
+  if (state.capScrolled === state.sub) return; state.capScrolled = state.sub;
+  const s = $(".ci-row.sel"), list = $(".ci-list"); if (!s || !list) return;
+  const top = s.offsetTop - list.offsetTop;
+  if (top < list.scrollTop || top > list.scrollTop + list.clientHeight - s.offsetHeight) list.scrollTop = top - list.clientHeight / 3;
+};
 function capDetail(c) {
   const name = CAP_NAMES[c.id] || "未命名能力", fields = capFieldsOf(c.id), main = capMain(c.id), rt = CAP_RUNTIME[c.id];
   const paused = (c.reason_codes || []).some(r => /PAUSED/.test(r));
