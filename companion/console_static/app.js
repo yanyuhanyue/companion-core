@@ -1464,7 +1464,36 @@ function capMarks(id) {
     proposals ? el("span", { class: "pdot", title: proposals + " 条提议等你批准" }) : null,
     capFieldsOf(id).some(f => state.draft.has(f.key)) || state.autoDraft?.[id] ? el("span", { class: "ddot", title: "有没保存的修改" }) : null];
 }
-const capMain = id => capFieldsOf(id).find(f => f.type === "boolean" && /_enabled$/.test(f.key));
+/* 每项能力的总开关：配置键，或对象配置里的子项路径。共用一个开关的能力会同时变化 */
+const CAP_SWITCH = {
+  "memory.manage": "memory_enabled", "memory.recall": "memory_enabled", diary: "diary_enabled", consolidation: "consolidation_enabled",
+  reflection: "reflection_enabled", goals: "goals_enabled", affect: "affect_enabled", proactive: "proactive_enabled", wake: "wake_enabled",
+  exploration: "exploration_enabled", social: "social_enabled", "qq.poke": "poke_policy.enabled", "qq.poke.native": "poke_policy.allow_native",
+  "reading.web": "web_reading_enabled", "reading.bilibili": "observation_enabled", "reading.heybox": "observation_enabled",
+  "bilibili.video": "bili_video.enabled", "model.understand_video": "bili_video.enabled", "qq.images": "content_enabled", "qq.animation": "content_enabled",
+  "qq.files": "private_files.enabled", expression: "expression_enabled", expression_learning: "expression_learning_enabled",
+  "unicode.emoji": "expression_enabled", "qq.face_names": "expression_enabled", "qq.face_images": "expression_enabled",
+  "memes.catalog": "meme_discovery_enabled", "memes.search": "meme_discovery_enabled", "memes.community_import": "meme_discovery_enabled",
+  "memes.semantic": "meme_semantics_enabled", "qq.voice.asr": "voice.asr.enabled", "qq.voice.tts": "voice.reply.enabled",
+  "media.voice": "voice_enabled", "media.camera": "camera_enabled", "media.android": "android_enabled",
+  "qq.profile.observe": "social_autonomy.enabled", "qq.account.signature": "social_autonomy.signature_enabled",
+  "qq.account.nickname": "social_autonomy.nickname_enabled", "qq.account.avatar": "social_autonomy.avatar_enabled",
+  "qq.account.qzone_publish": "social_autonomy.qzone_enabled",
+};
+function capMain(id) {
+  const spec = CAP_SWITCH[id]; if (!spec) return null;
+  const [key, ...path] = spec.split("."), f = fieldOf(key); if (!f) return null;
+  const read = () => { let v = draftVal(f); for (const k of path) v = v?.[k]; return Boolean(v); };
+  if (path.length && (draftVal(f) === null || typeof draftVal(f) !== "object")) return null;
+  return { f, read, toggle: () => setDraft(f, path.length ? setIn(draftVal(f), path, !read()) : !read()),
+    shared: Object.entries(CAP_SWITCH).filter(([other, k]) => k === spec && other !== id).map(([other]) => CAP_NAMES[other] || other) };
+}
+function capSwitch(id, name, small) {
+  const m = capMain(id);
+  if (!m) return el("span", { class: "sw-lock", title: "开关在部署配置里" }, icon("lock"));
+  return el("button", { type: "button", class: "switch" + (small ? " sm" : ""), role: "switch", "aria-checked": String(m.read()), "data-k": "sw-" + id,
+    "aria-label": name + "总开关", title: m.shared.length ? "和" + m.shared.join("、") + "共用这个开关" : null, onclick: m.toggle });
+}
 /* 这些能力的开关或服务地址由部署配置保管，浏览器不能修改 */
 const CAP_DEPLOY = {
   "media.voice": "网页语音会话的服务商地址、费用上限和会话时长在服务器部署配置的 [media] 段设置。",
@@ -1487,12 +1516,12 @@ PAGES.caps = data => {
     const open = q || !state.capCollapsed.has(name);
     return el("div", { class: "ci-group" }, el("button", { type: "button", class: "ci-ghead", "aria-expanded": String(Boolean(open)), onclick: () => { state.capCollapsed.has(name) ? state.capCollapsed.delete(name) : state.capCollapsed.add(name); rerender(); } },
       icon("right", "i chev"), el("span", {}, name), el("small", {}, list.filter(c => !["DISABLED", "UNAVAILABLE"].includes(c.state)).length + "/" + list.length)),
-      open ? shown.map(c => { const main = capMain(c.id);
+      open ? shown.map(c => {
         return el("div", { class: "ci-row" + (c === sel ? " sel" : "") + (["DISABLED", "UNAVAILABLE"].includes(c.state) ? " off" : "") },
           el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; } },
             el("span", { class: "dot " + statusOf(c.state)[1], title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
             ...capMarks(c.id)),
-          main ? el("button", { type: "button", class: "switch sm", role: "switch", "aria-checked": String(Boolean(draftVal(main))), "aria-label": (CAP_NAMES[c.id] || "") + "总开关", onclick: () => setDraft(main, !draftVal(main)) }) : null);
+          capSwitch(c.id, CAP_NAMES[c.id] || "", true));
       }) : null);
   });
   return el("div", {}, head("能力与开关", "左边找能力，右边看它的状态和参数。总开关和参数保存为新版本后重启生效；暂停立即生效。", currencySwitch()),
@@ -1512,7 +1541,8 @@ function capDetail(c) {
   const reasons = [...new Set((c.reason_codes || []).map(reasonText))];
   return el("div", {}, btn("全部能力", () => { state.capMobile = false; rerender(); }, { cls: "sm quiet cd-back", symbol: "left" }),
     el("header", { class: "cd-head" }, el("div", {}, el("h2", {}, name), el("p", {}, c.summary || "")),
-      el("div", { class: "cd-switch" }, tag(c.state), main ? el("label", {}, el("span", {}, "总开关"), control(main)) : null)),
+      el("div", { class: "cd-switch" }, tag(c.state), el("label", {}, el("span", {}, "总开关"), capSwitch(c.id, name)),
+        main?.shared.length ? el("span", { class: "note" }, "和" + main.shared.join("、") + "共用") : !main ? el("span", { class: "note" }, "在部署配置里开关") : null)),
     reasons.length ? el("ul", { class: "needs" }, reasons.map(r => el("li", { class: "no" }, icon("close"), el("span", {}, r)))) : null,
     CAP_DEPLOY[c.id] ? el("p", { class: "lockline" }, icon("lock"), el("span", {}, CAP_DEPLOY[c.id])) : null,
     el("div", { class: "cd-stats" },
