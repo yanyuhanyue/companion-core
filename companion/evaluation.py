@@ -13,6 +13,12 @@ from pydantic import Field
 
 from companion import input_recall, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError, StrictModel
+from companion.evaluation_measurement import (
+    measurement_profile as _measurement_profile,
+)
+from companion.evaluation_measurement import (
+    request_measurement as _request_measurement,
+)
 from companion.model import ModelClient, model_payload
 from companion.observation import expired_sources
 from companion.policy import ConsentService
@@ -62,6 +68,11 @@ def _plan(settings, manifest):
             plan["plan_sha256"]
         ):
             raise ValueError("plan digest")
+        version = plan.get("schema_version", 1)
+        if type(version) is not int or version not in {1, 2}:
+            raise ValueError("plan version")
+        if version == 2 and plan.get("measurement_profile") != _measurement_profile(settings):
+            raise ValueError("measurement policy, source or route changed")
         rows = plan["requests"]
         if (plan["request_count"] != CALLS or len(rows) != CALLS or plan["case_count"] != 1
             or plan["actual_provider_calls"] != 0 or plan["actual_cost_micro_usd"] != 0
@@ -78,6 +89,7 @@ def _plan(settings, manifest):
         ):
             raise ValueError("configured rates changed")
         shared = set()
+        measured_costs = []
         for row in rows:
             messages = row["payload"]["messages"]
             if (not 2 <= len(messages) <= 60 or messages[0]["role"] != "system"
@@ -93,7 +105,17 @@ def _plan(settings, manifest):
                 or row["planned_max_output_tokens"] != settings.max_output_tokens
                 or settings.max_output_tokens > 2048):
                 raise ValueError("fixed payload")
+            if version == 2:
+                measured = _request_measurement(settings, payload)
+                if measured["budget_input_tokens"] is None or any(
+                    row.get(key) != value for key, value in measured.items()
+                ):
+                    raise ValueError("unsupported or changed measurement")
+                measured_costs.append(measured["estimated_reservation_micro_usd"])
             shared.add(digest)
+        if version == 2 and (plan.get("repetitions") != 3 or
+            plan.get("estimated_reservation_micro_usd") != sum(measured_costs)):
+            raise ValueError("measurement total or repetition count")
         if len(shared) != 1 or len(set(manifest["source_event_ids"])) != len(
             manifest["source_event_ids"]
         ):

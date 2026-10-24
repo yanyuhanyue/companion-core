@@ -14,10 +14,14 @@ Core 上下文；加入策略后超过输入预算就拒绝，不单独裁剪某
 字段复用 `budget.cost` 和明确配置的费率，不是发票、最高收费保证或执行授权。
 
 `measurement_profile` 记录计量策略、路由、输入安全比例、输入预算、输出额度、费率，
-以及 `companion.model`、`companion.token_measurement`、`companion.paid_budget` 源文件
+以及 `companion.model`、`companion.token_measurement`、`companion.paid_budget`、
+`companion.budget` 和共享 `companion.evaluation_measurement` 源文件
 的 LF 归一化 SHA256。它不包含 token、密钥、许可或 OwnerAuthority。校验会按明确提供的
 当前 Settings 重新生成 profile、完整计量回执和费用，拒绝更换策略、工件、formatter、
 路由或预算输入后仍沿用旧计划。JSON 自身 hash 不能替代这一复算。
+
+离线脚本与 Core 执行入口共用 `evaluation_measurement` 的 profile 和 request 计量函数。
+完整组合候选变更后须重新准备新计划；原冻结文件不重写。
 
 - `estimate`：使用现有原生估算器；未配置 renderer 时，默认离线 Settings 使用字节估算。
 - `exact_local_render`：仅表示固定官方 renderer/tokenizer 的本地文本渲染精确计数。

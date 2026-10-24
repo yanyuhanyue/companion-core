@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from companion import token_measurement
 from scripts import evaluate_r1_conversation as experiment
 
 CASES = experiment.load_cases()
@@ -161,10 +162,10 @@ def _v2_plan(settings=None):
 
 def _exact_settings(policy="prefer_exact"):
     settings = experiment.measurement_defaults()
-    settings.token_measurement = experiment.token_measurement.TokenMeasurementConfig(
+    settings.token_measurement = token_measurement.TokenMeasurementConfig(
         policy=policy, provider="deepseek", endpoint="https://api.deepseek.com",
         model="deepseek-flash", renderer="deepseek-v4.1-flash-1017",
-        revision=experiment.token_measurement.REVISION)
+        revision=token_measurement.REVISION)
     return settings
 
 
@@ -177,7 +178,7 @@ def test_v2_native_receipt_and_route_identity(kind):
     plan = _v2_plan(settings)
     experiment.validate_plan(plan, settings)
     row = plan["requests"][0]
-    native = experiment.token_measurement.measure_payload(settings, row["payload"], "evaluation")
+    native = token_measurement.measure_payload(settings, row["payload"], "evaluation")
     assert row["measurement"] == native.receipt()
     assert row["measurement"]["count_kind"] == kind
     assert row["measurement"]["payload_sha256"] == row["payload_sha256"]
@@ -185,7 +186,7 @@ def test_v2_native_receipt_and_route_identity(kind):
         assert row["budget_input_tokens"] is None
         assert plan["estimated_reservation_micro_usd"] is None
     elif kind == "exact_local_render":
-        assert row["measurement"]["artifact_hashes"] == experiment.token_measurement.ARTIFACTS
+        assert row["measurement"]["artifact_hashes"] == token_measurement.ARTIFACTS
         assert row["budget_input_tokens"] == native.reserved_input_tokens
 
 
@@ -202,7 +203,7 @@ def test_v2_rehashed_measurement_tampering_is_rejected(field):
         row["measurement"]["artifact_hashes"]["encoding.py"] = "0" * 64
     elif field == "contract_artifact":
         plan["measurement_profile"]["count_contract"]["artifact_hashes"]["encoding.py"] = "0" * 64
-        assert experiment.token_measurement.ARTIFACTS["encoding.py"] != "0" * 64
+        assert token_measurement.ARTIFACTS["encoding.py"] != "0" * 64
     elif field == "policy":
         plan["measurement_profile"]["count_contract"]["policy"] = "exact_required"
     elif field == "formatter":
@@ -246,7 +247,7 @@ def test_v2_does_not_count_unsupported_surface_as_exact_or_trim_one_arm(change):
             row["payload"]["messages"][-1]["content"] = "unique words " * 20000
         row["payload_sha256"] = experiment.sha(row["payload"])
         row["shared_context_sha256"] = experiment.sha(row["payload"]["messages"][1:])
-    with pytest.raises((ValueError, experiment.token_measurement.CoreError)):
+    with pytest.raises((ValueError, token_measurement.CoreError)):
         experiment.validate_plan(_rehash(plan), settings)
 
 

@@ -20,11 +20,14 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from companion import budget, model, paid_budget, token_measurement  # noqa: E402
 from companion.config import Settings  # noqa: E402
 from companion.contracts import Candidate, InboundEvent  # noqa: E402
 from companion.conversation_policy import PARTICIPATION_V1, apply_strategy  # noqa: E402
 from companion.core import Core  # noqa: E402
+from companion.evaluation_measurement import (  # noqa: E402
+    measurement_profile,
+    request_measurement,
+)
 from companion.model import model_payload  # noqa: E402
 from companion.reply_segments import SegmentedReplyConfig  # noqa: E402
 from companion.store import after, encode, migrate  # noqa: E402
@@ -169,38 +172,6 @@ def measurement_defaults():
     return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="r1-offline-" * 4,
                     max_output_tokens=2048, context_soft_tokens=16000,
                     input_rate=300000, cached_input_rate=6000, output_rate=1200000)
-
-
-def measurement_profile(settings):
-    """Only count/price inputs; this projection contains no grant or credential."""
-    approval = settings.paid_model
-    return {
-        "scenario": "evaluation", "route": list(model.model_route(settings, "evaluation")),
-        "count_contract": json.loads(encode(token_measurement.count_contract(settings))),
-        "input_estimate_safety_percent": (
-            approval.input_estimate_safety_percent if approval else None),
-        "context_soft_tokens": settings.context_soft_tokens,
-        "approved_max_input_tokens": approval.max_input_tokens if approval else None,
-        "max_output_tokens": settings.output_tokens("evaluation"),
-        "rates_micro_usd_per_million": {"input": settings.input_rate,
-            "cached_input": settings.cached_input_rate, "output": settings.output_rate},
-        "source_sha256": {module.__name__: hashlib.sha256(
-            Path(module.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-            for module in (model, token_measurement, paid_budget)},
-    }
-
-
-def request_measurement(settings, payload):
-    measured = token_measurement.measure_payload(settings, payload, "evaluation")
-    reserved = (None if measured.count_kind == "unsupported"
-                else measured.reserved_input_tokens)
-    if reserved is not None and (reserved > settings.context_soft_tokens or (
-        settings.paid_model and reserved > settings.paid_model.max_input_tokens
-    )):
-        raise ValueError("Frozen input exceeds configured context/input limit; do not trim one arm")
-    return {"measurement": measured.receipt(), "budget_input_tokens": reserved,
-            "estimated_reservation_micro_usd": (None if reserved is None else budget.cost(
-                settings, reserved, measured.output_allowance, scenario="evaluation"))}
 
 
 def prepare(cases, output, *, repetitions=1, measurement_settings=None):
