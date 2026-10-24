@@ -16,10 +16,10 @@ from tests.test_paid_model_gate import approved_live
 from tests.test_voice_jobs import voice_config
 
 
-def native_voice(core, tmp_path, *, record=True, expires_seconds=None, voice=True):
+def native_voice(core, tmp_path, *, record=True, expires_seconds=None, voice=True, config=None):
     approved_live(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
-    core.settings.voice = voice_config(reply={"mode": "auto"})
+    core.settings.voice = config or voice_config(reply={"mode": "auto"})
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
     key = Ed25519PrivateKey.generate()
     identity = paid_budget.sha([core.settings.owner_qq_id, core.settings.bot_qq_id])
