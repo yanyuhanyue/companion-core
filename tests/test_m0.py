@@ -21,7 +21,7 @@ from companion.model import ModelClient
 from companion.store import Store, migrate
 from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
 from tests.conftest import event, ingest, run
-from tests.support.astrbot_delivery import deliver_one
+from tests.support.astrbot_delivery import StreamingAPI, deliver_one
 
 
 def lease(core):
@@ -94,7 +94,10 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
         class AsyncAPI:
             async def post(self, path, **kwargs):
                 merged = {**headers, **kwargs.pop("headers", {})}
-                return client.post(path, headers=merged, **kwargs)
+                result = client.post(path, headers=merged, **kwargs)
+                return httpx.Response(result.status_code, content=result.content,
+                                      headers=result.headers,
+                                      request=httpx.Request("POST", str(result.request.url)))
 
         async def send(origin, text):
             sent.append((origin, text))
@@ -104,9 +107,9 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
         with pytest.raises(httpx.HTTPStatusError):
             run(deliver_one(AsyncAPI(), item, send, spool=spool))
         assert len(sent) == 1
-        run(spool.flush_one(AsyncAPI()))
+        run(spool.flush_one(StreamingAPI(AsyncAPI())))
         assert spool.db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0] == 0
-    spool.db.close()
+    spool.close()
 
 
 @pytest.mark.parametrize("failure", [429, 503, "timeout"])

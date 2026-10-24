@@ -52,7 +52,7 @@ def test_standard_onebot_inbox_path_is_backend_independent(core, tmp_path, backe
         assert run(core.run_once("chat"))
         assert core.store.one("SELECT state FROM jobs")["state"] == "SUCCEEDED"
     finally:
-        spool.db.close()
+        spool.close()
 
 
 def test_switch_and_rollback_keep_conversation_and_isolate_message_ids(core, tmp_path):
@@ -78,7 +78,7 @@ def test_switch_and_rollback_keep_conversation_and_isolate_message_ids(core, tmp
         with pytest.raises(ValueError, match="fresh protocol_epoch"):
             spool.bind_backend("napcat", "")
     finally:
-        spool.db.close()
+        spool.close()
 
 
 def test_switch_requires_drained_inbox_and_generation_survives_restart(tmp_path):
@@ -88,7 +88,7 @@ def test_switch_requires_drained_inbox_and_generation_survives_restart(tmp_path)
     spool.put(*normalize(astrbot_event(), "10001", "10002"))
     with pytest.raises(ValueError, match="drain"):
         spool.bind_backend("snowluma", "fresh-0001")
-    spool.db.close()
+    spool.close()
     reopened = Spool(path)
     try:
         reopened.bind_backend("napcat", "")
@@ -96,7 +96,7 @@ def test_switch_requires_drained_inbox_and_generation_survives_restart(tmp_path)
             reopened.bind_backend("snowluma", "fresh-0001")
         assert reopened.db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0] == 1
     finally:
-        reopened.db.close()
+        reopened.close()
 
 
 @pytest.mark.parametrize("segment", ["image", "record", "reply", "json"])

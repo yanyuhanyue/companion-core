@@ -19,6 +19,7 @@ class Spool(DeliveryReceipts):
 
     def __init__(self, config, *, reconciliation_only=False):
         self.config, self.db, self.lock = config, None, None
+        self.handoff_lock = None
         self.reconciliation_only = reconciliation_only
         self.quiesced_at = None
         self.directory = Path(config.data_dir)
@@ -39,24 +40,16 @@ class Spool(DeliveryReceipts):
             ):
                 if path.is_symlink():
                     raise ValueError("SYMLINK_REFUSED")
-            self.lock = lock_path.open("a+b")
-            if os.name != "nt":
-                os.chmod(lock_path, 0o600)
-            if lock_path.stat().st_size == 0:
-                self.lock.write(b"0")
-                self.lock.flush()
-            self.lock.seek(0)
+            from .instance_lock import acquire
+
             try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    msvcrt.locking(self.lock.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(self.lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.lock = acquire(lock_path)
             except OSError as error:
                 raise RuntimeError("BRIDGE_ALREADY_RUNNING") from error
+            if config.astrbot_handoff_path is not None:
+                from .astrbot_handoff import acquire_handoff
+
+                self.handoff_lock = acquire_handoff(config)
             if reconciliation_only:
                 self.quiesced_at = datetime.now(UTC).isoformat()
             self.db = sqlite3.connect(database)
@@ -76,6 +69,9 @@ class Spool(DeliveryReceipts):
             identity = encode(
                 [config.owner_qq_id, config.bot_qq_id, config.origin, config.protocol_epoch]
             )
+            if config.astrbot_handoff_path is not None:
+                identity = encode([config.owner_qq_id, config.bot_qq_id, config.origin,
+                                   config.protocol_epoch, config.astrbot_handoff_sha256])
             row = self.db.execute("SELECT value FROM identity").fetchone()
             if row and row[0] != identity:
                 raise ValueError("BRIDGE_IDENTITY_CHANGED")
@@ -100,6 +96,9 @@ class Spool(DeliveryReceipts):
         if self.db:
             self.db.close()
             self.db = None
+        if self.handoff_lock:
+            self.handoff_lock.close()
+            self.handoff_lock = None
         if self.lock:
             # Closing the descriptor releases the OS lock, including on process death.
             self.lock.close()
@@ -163,16 +162,7 @@ class Spool(DeliveryReceipts):
             self.remove_capture_text(row[0])
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return json.loads(row[1])
-        if (
-            not isinstance(result, dict)
-            or result.get("event_id") != row[0]
-            or not isinstance(result.get("job_id"), str)
-            or not result["job_id"].startswith("job_")
-            or type(result.get("duplicate")) is not bool
-            or result.get("state")
-            not in {"QUEUED", "RUNNING", "RETRY_WAIT", "SUCCEEDED", "FAILED", "CANCELLED"}
-        ):
-            raise ValueError("INVALID_CORE_ACCEPTANCE")
+        validate_acceptance(result, row[0])
         with self.db:
             self.db.execute("UPDATE inbox SET state='accepted',body=NULL WHERE key=?", (row[0],))
         self.remove_capture_text(row[0])
@@ -216,3 +206,16 @@ class Spool(DeliveryReceipts):
             else None
         )
         return row[0] if row else None
+
+
+def validate_acceptance(result, event_id):
+    if (
+        not isinstance(result, dict)
+        or result.get("event_id") != event_id
+        or not isinstance(result.get("job_id"), str)
+        or not result["job_id"].startswith("job_")
+        or type(result.get("duplicate")) is not bool
+        or result.get("state")
+        not in {"QUEUED", "RUNNING", "RETRY_WAIT", "SUCCEEDED", "FAILED", "CANCELLED"}
+    ):
+        raise ValueError("INVALID_CORE_ACCEPTANCE")

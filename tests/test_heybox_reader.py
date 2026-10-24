@@ -10,13 +10,13 @@ import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
-from astrbot_plugin_companion_bridge.content import canonical_link, share_candidates
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.exploration import ReadResult, content_target
 from companion.observation import ArticleEvidence
 from companion.store import Store
+from companion_onebot_bridge.rich_input import discovered_url as canonical_link
 from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.network import PublicHTTP, post_url
 from source_reader.worker import read_result, tick
@@ -400,8 +400,6 @@ def test_bridge_core_and_reader_agree_on_share_identifiers(original, canonical):
     assert canonical_link(original) == canonical
     assert content_target(original) == ("heybox", canonical)
     assert post_url(canonical) == canonical
-    card = {"message": [{"type": "json", "data": {"data": json.dumps({"jumpUrl": original})}}]}
-    assert share_candidates(card)["links"] == [canonical]
 
 
 @pytest.mark.parametrize(

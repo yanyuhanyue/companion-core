@@ -5,14 +5,11 @@ import sqlite3
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
+
 from companion_onebot_bridge.delivery_receipts import DeliveryReceipts
-
-
-def _unique_fields(items):
-    fields = dict(items)
-    if len(fields) != len(items):
-        raise ValueError("duplicate receipt field")
-    return fields
+from companion_onebot_bridge.instance_lock import acquire
+from companion_onebot_bridge.onebot_client import bounded_post
 
 
 def normalize(event, owner_id, bot_id, token="", protocol_epoch=""):
@@ -68,7 +65,12 @@ class Spool(DeliveryReceipts):
         self.path = path
         self.reconciliation_only = False
         self.config = SimpleNamespace(max_voice_lease_bytes=65536)
-        self.db = sqlite3.connect(path)
+        self.lock = acquire(str(path) + ".lock")
+        try:
+            self.db = sqlite3.connect(path)
+        except BaseException:
+            self.lock.close()
+            raise
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA secure_delete=ON")
@@ -84,7 +86,17 @@ class Spool(DeliveryReceipts):
                         "(message_id TEXT PRIMARY KEY,body TEXT NOT NULL,"
                         "state TEXT NOT NULL DEFAULT 'pending')")
         self.db.execute("CREATE TABLE IF NOT EXISTS delivery_identity (value TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS retired_inbox "
+                        "(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         self.db.commit()
+
+    def close(self):
+        self.db.close()
+        self.lock.close()
+
+    def sealed(self):
+        return bool(self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='native_handoff'").fetchone())
 
     def bind_backend(self, backend, epoch):
         if backend not in {"napcat", "snowluma"}:
@@ -113,6 +125,8 @@ class Spool(DeliveryReceipts):
             self.db.execute("INSERT INTO protocol_generations VALUES (?,?)", (epoch, backend))
 
     def put(self, key, payload):
+        if self.sealed():
+            raise ValueError("ASTRBOT_INPUT_RETIRED")
         self.bind_origin(payload)
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with self.db:
@@ -122,35 +136,44 @@ class Spool(DeliveryReceipts):
             self.db.execute("INSERT OR IGNORE INTO inbox(key,body) VALUES (?,?)", (key, body))
 
     async def flush_one(self, client):
+        if self.sealed():
+            raise ValueError("ASTRBOT_INPUT_RETIRED")
         row = self.db.execute(
             "SELECT key,body FROM inbox WHERE state='pending' ORDER BY rowid LIMIT 1"
         ).fetchone()
         if not row:
-            return
-        response = await client.post(
-            "/internal/v1/inbox/events",
-            content=row[1].encode(),
-            headers={"X-Idempotency-Key": row[0], "Content-Type": "application/json"},
-        )
-        erased = False
-        if response.status_code == 410 and len(response.content) <= 65536:
-            try:
-                erased = response.json(object_pairs_hook=_unique_fields) == {
-                    "error": "EVENT_ERASED"
-                }
-            except (ValueError, UnicodeError, RecursionError):
-                pass
-        if erased:
-            with self.db:
-                self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
-            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            return
+            return False
+        payload = json.loads(row[1])
+        try:
+            status, result = await bounded_post(
+                client, "/internal/v1/inbox/events", payload,
+                headers={"X-Idempotency-Key": row[0]}, statuses=(202, 410), with_status=True,
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {400, 403, 409, 422}:
+                with self.db:
+                    self.db.execute("UPDATE inbox SET state='rejected' WHERE key=?", (row[0],))
+            raise
+        if status == 410:
+            if result != {"error": "EVENT_ERASED"}:
+                raise ValueError("INVALID_ERASURE_RECEIPT")
+            state = "erased"
+        else:
+            from companion_onebot_bridge.spool import validate_acceptance
+
+            validate_acceptance(result, payload["event_id"])
+            state = "accepted"
+        receipt = {"event_id": payload["event_id"], "state": state,
+                   "body_sha256": hashlib.sha256(row[1].encode()).hexdigest(),
+                   "image_slots": [item["slot"] for item in payload["payload"].get(
+                       "shared_content", []) if item.get("kind") == "image"],
+                   "core_receipt": result}
         with self.db:
-            if response.status_code == 202:
-                self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
-            elif response.status_code in {400, 403, 409, 422}:
-                self.db.execute("UPDATE inbox SET state='rejected' WHERE key=?", (row[0],))
-        response.raise_for_status()
+            self.db.execute("INSERT OR REPLACE INTO retired_inbox VALUES (?,?)",
+                            (row[0], json.dumps(receipt, sort_keys=True)))
+            self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return True
 
 
     def bind_origin(self, payload):

@@ -44,5 +44,5 @@ def package_bridge(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path,
-                        default=ROOT / "dist/astrbot_plugin_companion_bridge-v0.5.0.zip")
+                        default=ROOT / "dist/astrbot_plugin_companion_bridge-v0.6.0.zip")
     print(package_bridge(parser.parse_args().output))

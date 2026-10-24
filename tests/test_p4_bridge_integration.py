@@ -9,13 +9,14 @@ import copy
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpcore
 import httpx
 import pytest
 from cryptography.fernet import Fernet
 
-from astrbot_plugin_companion_bridge.bridge import Spool
+from astrbot_plugin_companion_bridge.bridge import Spool, normalize
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.model import ModelResponse
@@ -27,8 +28,6 @@ from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import tick
 from tests.conftest import FakeModel, run
 from tests.support.astrbot_delivery import deliver_expression
-from tests.test_content_bridge import bridge_module  # noqa: F401
-from tests.test_content_bridge import config as bridge_config
 from tests.test_content_bridge import event as bridge_event
 from tests.test_exploration import configure
 from tests.test_heybox_reader import URL, mock_pool
@@ -58,21 +57,15 @@ class EvidenceReply(FakeModel):
 
 
 @pytest.fixture
-def rehearsal(core, bridge_module, tmp_path):  # noqa: F811
+def rehearsal(core, tmp_path):
     configure(core)
     core.settings.content_enabled = True
     core.model = EvidenceReply()
-    bridge = bridge_module.CompanionBridge(
-        object(),
-        bridge_config(
-            bridge_token=core.settings.bridge_token.get_secret_value(), content_enabled=True
-        ),
-    )
-    bridge.spool = Spool(str(tmp_path / "spool.db"))
+    bridge = SimpleNamespace(spool=Spool(str(tmp_path / "spool.db")))
     app = create_app(core.settings)
     app.state.core = core
     yield core, bridge, app
-    bridge.spool.db.close()
+    bridge.spool.close()
 
 
 def client(app, token):
@@ -84,11 +77,17 @@ def client(app, token):
     )
 
 
-async def submit(bridge, http, text=URL, *, raw=None, number=1):
-    order = []
-    await bridge.on_private_message(bridge_event(order, text=text, raw=raw, message_id=str(number)))
-    assert order == ["stop"]
-    body = json.loads(bridge.spool.db.execute("SELECT body FROM inbox").fetchone()[0])
+def pending(bridge, text=URL, number=1, manifest=None):
+    # Seed a historical inbox record; the retired plugin no longer receives new input.
+    key, body = normalize(bridge_event([], text=text, message_id=str(number)), "10001", "10002")
+    if manifest:
+        body["payload"]["shared_content"] = manifest
+    bridge.spool.put(key, body)
+    return body
+
+
+async def submit(bridge, http, text=URL, *, manifest=None, number=1):
+    body = pending(bridge, text, number, manifest)
     await bridge.spool.flush_one(http)
     assert not bridge.spool.db.execute("SELECT 1 FROM inbox").fetchone()
     return body["event_id"]
@@ -146,18 +145,8 @@ def test_p4_ten_redacted_source_samples_reach_bridge_reply(rehearsal, tmp_path, 
 
     async def scenario():
         async with client(app, core.settings.bridge_token.get_secret_value()) as http:
-            # Exercise both link and QQ JSON-card extraction with the same frozen samples.
-            raw = {
-                "message": [
-                    {
-                        "type": "json",
-                        "data": {
-                            "data": json.dumps({"meta": {"news": {"jumpUrl": sample["url"]}}})
-                        },
-                    }
-                ]
-            }
-            root = await submit(bridge, http, "看看这篇", raw=raw)
+            root = await submit(bridge, http, "看看这篇", manifest=[
+                {"kind": "link", "url": sample["url"]}])
             assert (await read_source(core, app, tmp_path, response(article(sample))))[0]
             assert await core.run_once()
             sent = []
@@ -266,17 +255,17 @@ def test_p4_spool_restart_duplicate_does_not_repeat_source_or_delivery(rehearsal
 
     async def scenario():
         async with client(app, core.settings.bridge_token.get_secret_value()) as http:
-            await bridge.on_private_message(bridge_event([], text=URL))
-            bridge.spool.db.close()
+            pending(bridge, URL)
+            bridge.spool.close()
             bridge.spool = Spool(str(tmp_path / "spool.db"))
-            await bridge.on_private_message(bridge_event([], text=URL))
+            pending(bridge, URL)
             await bridge.spool.flush_one(http)
             _, backend = await read_source(core, app, tmp_path, response(article()))
             assert len(backend.requests) == 1
             core.clock.advance(31)  # Unprocessed article image references have a bounded wait.
             assert await core.run_once()
             await receipt(http, [], spool=bridge.spool)
-            await bridge.on_private_message(bridge_event([], text=URL))
+            pending(bridge, URL)
             await bridge.spool.flush_one(http)
             assert not await core.run_once()
             assert core.exploration.lease("heybox") is None
@@ -320,28 +309,17 @@ def test_p4_bilibili_source_scope_reaches_bridge_reply(rehearsal, subtitles):
 
 
 @pytest.mark.parametrize("slots", [1, 2])
-def test_p4_qq_image_manifests_use_mock_analysis_without_storing_signed_urls(rehearsal, slots):
+def test_p4_historical_image_manifests_remain_readable_in_core(rehearsal, slots):
     from tests.test_content import enable, png
 
     core, bridge, _ = rehearsal
     _, vision = enable(core)
     app = create_app(core.settings)
     app.state.core = core
-    raw = {
-        "message": [
-            {
-                "type": "image",
-                "data": {
-                    "url": f"https://gchat.qpic.cn/image/{n}?rkey=synthetic-private-signature"
-                },
-            }
-            for n in range(slots)
-        ]
-    }
-
     async def scenario():
         async with client(app, core.settings.bridge_token.get_secret_value()) as http:
-            root = await submit(bridge, http, "看看这些图片", raw=raw)
+            root = await submit(bridge, http, "看看这些图片", manifest=[
+                {"kind": "image", "slot": n} for n in range(slots)])
             stored = core.store.one("SELECT body_json FROM events")["body_json"]
             assert "synthetic-private-signature" not in stored
             assert len(json.loads(stored)["shared_content"]) == slots
