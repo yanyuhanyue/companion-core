@@ -1456,6 +1456,14 @@ function saveDraft() {
 /* ================= 能力与开关 ================= */
 const capList = () => state.data?.capabilities?.capabilities || [];
 const capFieldsOf = id => (CAP_FIELDS[id] || []).map(fieldOf).filter(Boolean);
+/* 列表里的提示：火花表示交给了她决定，黄点表示有她的提议等你批准，空心圈表示有没保存的修改 */
+function capMarks(id) {
+  const a = state.data?.autonomy, d = (a?.capabilities || []).find(x => x.capability === id);
+  const proposals = (a?.adjustments || []).filter(x => x.capability === id && x.state === "PROPOSED").length;
+  return [d && d.mode !== "owner" ? el("span", { class: "auto-ic", title: d.mode === "self" ? "她在范围内自己调整" : "她提议，你批准" }, icon("spark")) : null,
+    proposals ? el("span", { class: "pdot", title: proposals + " 条提议等你批准" }) : null,
+    capFieldsOf(id).some(f => state.draft.has(f.key)) || state.autoDraft?.[id] ? el("span", { class: "ddot", title: "有没保存的修改" }) : null];
+}
 const capMain = id => capFieldsOf(id).find(f => f.type === "boolean" && /_enabled$/.test(f.key));
 /* 这些能力的开关或服务地址由部署配置保管，浏览器不能修改 */
 const CAP_DEPLOY = {
@@ -1483,7 +1491,7 @@ PAGES.caps = data => {
         return el("div", { class: "ci-row" + (c === sel ? " sel" : "") + (["DISABLED", "UNAVAILABLE"].includes(c.state) ? " off" : "") },
           el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; } },
             el("span", { class: "dot " + statusOf(c.state)[1], title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
-            capFieldsOf(c.id).some(f => state.draft.has(f.key)) ? el("span", { class: "pdot", title: "有没保存的修改" }) : null),
+            ...capMarks(c.id)),
           main ? el("button", { type: "button", class: "switch sm", role: "switch", "aria-checked": String(Boolean(draftVal(main))), "aria-label": (CAP_NAMES[c.id] || "") + "总开关", onclick: () => setDraft(main, !draftVal(main)) }) : null);
       }) : null);
   });
