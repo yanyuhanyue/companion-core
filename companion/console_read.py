@@ -1,5 +1,6 @@
 """Bounded owner-facing projections of the existing ledgers and source-backed records."""
 
+import json
 from datetime import datetime
 
 from companion import capabilities, worker_loop
@@ -254,3 +255,65 @@ def diagnostics(core):
                                redact(row["last_error_code"] or "", core.settings),
                                **delivery))
     return collection(core, items)
+
+
+def _table_exists(store, name):
+    return bool(store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+
+
+def decisions(core, limit=40):
+    """Recorded decisions with their trigger, options, outcome and the bounded facts they used.
+
+    Only native decision records are read. Ordinary replies and proactive chat do not keep a
+    per-turn decision trace yet, and the model's reasoning is not requested, so neither is shown.
+    """
+    s, items = core.store, []
+    for row in s.rows(
+        "SELECT w.*,g.topic FROM wake_decisions w LEFT JOIN goals g "
+        "ON g.goal_id=w.goal_id AND g.redacted=0 "
+        "ORDER BY w.created_at DESC LIMIT ?", (limit,),
+    ):
+        snapshot = json.loads(row["budget_snapshot"] or "{}")
+        items.append(entry(row["decision_id"], "wake", "自主活动调度", row["decision"],
+                           row["created_at"], row["reason_code"],
+                           trigger="event" if row["trigger_event_id"] else "schedule",
+                           options=["EXPLORE", "OBSERVE", "SKIP"],
+                           daily_runs=snapshot.get("daily_runs"), limit=snapshot.get("limit"),
+                           goal=row["topic"]))
+    for row in s.rows(
+        "SELECT c.candidate_id,c.state,c.reason_code,c.created_at,c.message_id,o.state AS sent "
+        "FROM social_candidates c LEFT JOIN outbox o USING(message_id) "
+        "WHERE c.state<>'ERASED' ORDER BY c.created_at DESC LIMIT ?", (limit,),
+    ):
+        items.append(entry(row["candidate_id"], "share", "主动分享候选", row["state"],
+                           row["created_at"], row["reason_code"] or "",
+                           options=["SHARE", "SKIP"], delivery_state=row["sent"]))
+    if _table_exists(s, "social_autonomy_plans"):
+        for row in s.rows(
+            "SELECT plan_id,state,last_error_code,created_at FROM social_autonomy_plans "
+            "WHERE redacted=0 ORDER BY created_at DESC LIMIT ?", (limit,),
+        ):
+            items.append(entry(row["plan_id"], "account", "QQ 资料改动", row["state"],
+                               row["created_at"], row["last_error_code"] or "",
+                               options=["PLAN", "SKIP"]))
+    for row in s.rows(
+        "SELECT r.run_id,r.state,r.last_error_code,r.local_date,r.created_at,"
+        "(SELECT COUNT(*) FROM reflection_suggestions x WHERE x.run_id=r.run_id "
+        "AND x.state<>'REDACTED') suggestions,"
+        "(SELECT COUNT(*) FROM reflection_evidence e WHERE e.run_id=r.run_id) sources "
+        "FROM reflection_runs r ORDER BY r.created_at DESC LIMIT ?", (limit,),
+    ):
+        adjustments = s.one(
+            "SELECT COUNT(*) n FROM capability_overrides c JOIN reflection_suggestions x "
+            "USING(suggestion_id) WHERE x.run_id=?", (row["run_id"],),
+        )["n"] if _table_exists(s, "capability_overrides") else 0
+        items.append(entry(row["run_id"], "reflection", "每日反思", row["state"],
+                           row["created_at"], row["last_error_code"] or "",
+                           options=["SUGGEST", "SKIP"], local_date=row["local_date"],
+                           suggestions=row["suggestions"], sources=row["sources"],
+                           adjustments=adjustments))
+    items.sort(key=lambda item: item["occurred_at"] or "", reverse=True)
+    return {**collection(core, items[:limit]),
+            "reasoning": {"state": "NOT_REQUESTED",
+                          "provider_thinking": "disabled" if core.settings.provider == "deepseek"
+                          else "unknown"}}

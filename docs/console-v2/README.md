@@ -15,6 +15,7 @@
 | 阅读与文件、表情素材、语音与节点、QQ 资料行为 | `content`、`memes`、`voice`、`account-actions` | 无 |
 | 能力与开关 | `overview` 的能力快照、`configuration` | `configuration`、`mode` |
 | 运行诊断 | `diagnostics` | `deliveries/{id}/reconcile` |
+| 思考与决策 | `decisions` | 无 |
 | 配置 | `configuration` | `configuration`、`cloud-budget` |
 
 “今天”的时间带由当天的审计记录按动作前缀分行；超过一次读取上限时提示去时间线查看。时间线按日期筛选时会继续向前翻页，最多读取 20 页。
@@ -25,6 +26,12 @@
 部署保管的项目（例如 `observation_adapters`、`executive`）仍不进入浏览器。网页阅读的网站名单已从读取适配器配置拆出为 `web_reading_hosts`，在网页阅读能力里填写。
 
 “交给她决定”在日记和自主活动调度的详情里设置：只由我控制、她提议我批准、她在范围内自己调整。她的调整只能让能力少运行，经每天的反思提出并引用原话，立即生效、可撤销；引用的原话被遗忘时调整撤回，从备份恢复后全部作废。接口为 `autonomy`、`autonomy/{capability}` 和 `autonomy/adjustments/{id}/decision`。
+
+思考与决策只读取已有的决策记录：自主活动调度、主动分享候选、QQ 资料计划和每日反思。普通回复和主动私聊“发不发”还没有逐轮记录，模型推理没有请求（DeepSeek 思考模式关闭），页面会明确写出来，不补写。
+
+“交给她决定”的接口覆盖所有可以安全减少运行或费用的能力，`autonomy` 返回每项能力的 `wired` 字段，列出运行逻辑已经读取她调整的参数；目前只有日记暂停和自主活动调度。其余能力的运行接入按同一接口另行完成，界面会提示尚未接入。
+
+语音页按字幕显示：`voice` 条目的 `detail.transcript`（你发的是转写，她发的是合成原文）和可选的 `detail.transcript_truncated`。后端目前不返回语音内容，字幕处显示“字幕没有在控制台保留”；接入后超过三行的字幕先折叠，可以展开全文。
 
 页面只用 DOM 构建内容，样式通过 CSSOM 设置，与现有 `script-src 'self'`、`style-src 'self'`
 策略兼容；`tests/test_console_static.py` 检查这些约束。

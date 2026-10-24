@@ -50,7 +50,7 @@ function icon(name, cls = "i") {
 }
 
 const ROUTES = [
-  ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"]]],
+  ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["thinking", "思考与决策", "spark"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"]]],
   ["内容", [["content", "阅读与文件", "book"], ["memes", "表情素材", "smile"], ["voice", "语音与节点", "mic"], ["account-actions", "QQ 资料行为", "qq"]]],
   ["管理", [["caps", "能力与开关", "toggle"], ["diagnostics", "运行诊断", "pulse"], ["configuration", "配置", "gear"]]],
 ];
@@ -259,7 +259,7 @@ const state = {
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
   actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
-  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in",
+  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", decKind: "all", decSel: null, decTab: "record",
 };
 
 class ApiError extends Error {
@@ -499,7 +499,7 @@ const LOADERS = {
   memories: signal => api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: signal => api.get("/life", signal), content: signal => api.get("/content", signal), memes: signal => api.get("/memes", signal),
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
-  diagnostics: signal => api.get("/diagnostics", signal),
+  diagnostics: signal => api.get("/diagnostics", signal), thinking: signal => api.get("/decisions", signal),
   caps: async signal => {
     const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
       api.get("/autonomy", signal).catch(e => { if (e.name === "AbortError") throw e; return null; })]);
@@ -1037,6 +1037,17 @@ PAGES.memes = data => {
 };
 
 /* ================= 语音与节点 ================= */
+/* 字幕：接口在 detail.transcript 返回时显示（你发的是转写，她发的是合成的原文）。
+   超过三行先折叠，可以展开全文；没有返回时明确说明，不用状态说明冒充字幕。 */
+function subtitle(j) {
+  const text = typeof j.detail?.transcript === "string" ? j.detail.transcript.trim() : "";
+  if (!text) return el("p", { class: "vtext none" }, "字幕没有在控制台保留");
+  const p = el("p", { class: "vtext clamp" }, text);
+  const long = text.length > 90 || text.split("\n").length > 3;
+  if (!long) return p;
+  const toggle = btn("展开全文", () => { const open = p.classList.toggle("clamp"); toggle.textContent = open ? "展开全文" : "收起"; }, { cls: "sm quiet vmore" });
+  return el("div", { class: "vsub" }, p, j.detail?.transcript_truncated ? el("p", { class: "note" }, "字幕较长，控制台只保留了前 " + text.length + " 字。") : null, toggle);
+}
 const mmss = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
 PAGES.voice = data => {
   const meta = data.meta || {}, items = data.items || [], nodes = items.filter(i => i.kind === "voice_node"), jobs = items.filter(i => i.kind === "voice_job");
@@ -1062,12 +1073,13 @@ PAGES.voice = data => {
           el("span", { class: "vplay", title: "录音不在控制台保留", "aria-label": "录音不在控制台保留" }, icon("lock")),
           el("div", { class: "vmain" }, el("div", { class: "vtop" }, el("span", { class: "vwave", "aria-hidden": "true" }, wave.map(h => el("i", { style: { height: h + "px" } }))),
               el("span", { class: "vtime num" }, typeof secs === "number" ? mmss(secs) : "—")),
-            el("p", { class: "vtext" }, j.summary || (out ? "她的语音回复" : "你发的语音")),
+            subtitle(j),
             el("div", { class: "vmeta" }, el("span", {}, fmtDate(j.occurred_at)), j.detail?.node_id ? el("span", {}, j.detail.node_id) : null, tag(j.status, j.detail?.state_label),
-              j.detail?.delivery_state ? tag(j.detail.delivery_state) : null, j.detail?.partial ? el("span", {}, "音频不完整") : null, el("span", { class: "muted" }, "录音不保留"))));
+              j.detail?.delivery_state ? tag(j.detail.delivery_state) : null, j.detail?.partial ? el("span", {}, "音频不完整") : null,
+              j.summary ? el("span", { class: "muted" }, j.summary) : null)));
       }))
         : el("p", { class: "sheet-body note" }, out ? "还没有她的语音回复。" : "还没有你发的语音。"),
-      el("p", { class: "sheet-body note vnote" }, "录音和转写文字不会出现在控制台：任务结束后录音即清除，转写只进入对话。")));
+      el("p", { class: "sheet-body note vnote" }, "录音在任务结束后清除，不能回放。字幕由接口返回时才显示。")));
 };
 
 /* ================= QQ 资料行为 ================= */
@@ -1132,6 +1144,75 @@ function reconcileBox(item) {
   form.append(el("div", { class: "row-gap" }, buttons));
   return form;
 }
+
+/* ================= 思考与决策 ================= */
+const WAKE_REASON = { PAUSED: "你暂停了自主活动", COMPANION_PAUSED: "她自己先停一下", QUIET_HOURS: "现在是免打扰时段", OWNER_REQUESTED_PAUSE: "你让她先别打扰",
+  RESOURCE_UNAVAILABLE: "价格未知或内容发现没有开启", DAILY_LIMIT: "今天已到每日上限", COOLDOWN: "离上次运行还没到间隔", NO_CANDIDATE: "没有到期的目标",
+  GOAL_DUE: "有目标到期", DISCOVERY_DUE: "可以去发现新内容" };
+const SHARE_REASON = { DUPLICATE_CONTENT: "和之前分享过的内容重复", SIMILAR_CONTENT: "和最近分享的内容相似", SOURCE_EXPIRED: "来源已经过期",
+  SOURCE_CHANGED: "来源内容已经变化", DEDUPE_UNAVAILABLE: "去重检查暂时不可用", DEDUPE_CONTENDED: "去重检查正忙" };
+const DK = {
+  wake: { name: "自主活动", ic: "timeline", options: { EXPLORE: "读到期的目标", OBSERVE: "发现新内容", SKIP: "这一轮不安排" },
+    result: { EXPLORE: "已安排阅读", OBSERVE: "已安排内容发现", SKIP: "未运行" } },
+  share: { name: "主动分享", ic: "spark", options: { SHARE: "分享给你", SKIP: "不分享" },
+    decision: { CANDIDATE: "等待发送评估", QUEUED: "安排发送", SKIPPED: "不分享", EXPIRED: "已过期" } },
+  account: { name: "QQ 资料", ic: "qq", options: { PLAN: "改动资料", SKIP: "不改" },
+    decision: { PLANNING: "正在规划", READY: "计划改动", SKIPPED: "这次不改", REJECTED: "计划未通过", CANCELLED: "已取消" } },
+  reflection: { name: "反思", ic: "memory", options: { SUGGEST: "提出建议", SKIP: "不提出" },
+    decision: { COMMITTED: "提出建议", SKIPPED: "不提出", FAILED: "整理失败", CANCELLED: "已取消", RUNNING: "整理中" } },
+};
+const DEC_TONE = { SKIP: "off", SKIPPED: "off", EXPIRED: "off", CANCELLED: "off", FAILED: "bad", REJECTED: "bad", RUNNING: "run", PLANNING: "run", CANDIDATE: "warn" };
+function decisionView(i) {
+  const d = i.detail || {}, k = DK[i.kind] || { name: "其他", ic: "spark", options: {} };
+  const decisionText = i.kind === "wake" ? k.options[i.status] : (k.decision || {})[i.status] || statusOf(i.status)[0];
+  const why = i.kind === "wake" ? WAKE_REASON[i.summary] || reasonText(i.summary) : i.kind === "share" ? SHARE_REASON[i.summary] || reasonText(i.summary)
+    : i.kind === "reflection" ? (i.status === "COMMITTED" ? `当天有 ${d.sources ?? "—"} 条互动可以引用` : reasonText(i.summary) || "来源不足") : reasonText(i.summary) || "没有记录原因";
+  const trigger = i.kind === "wake" ? (d.trigger === "event" ? "收到你的消息后" : "定时醒来") : i.kind === "share" ? "发现了一条可以分享的内容"
+    : i.kind === "reflection" ? (d.local_date || "") + " 的日记整理完成" : "资料行为定时检查";
+  const result = i.kind === "wake" ? k.result[i.status] : i.kind === "share" ? (d.delivery_state ? statusOf(d.delivery_state)[0] : "未发送")
+    : i.kind === "reflection" ? (d.suggestions ? `${d.suggestions} 条建议等你查看` + (d.adjustments ? `，其中 ${d.adjustments} 条是能力调整` : "") : "没有建议") : statusOf(i.status)[0];
+  const context = i.kind === "wake" ? [["每日次数", "已采用", d.limit != null ? `${d.daily_runs ?? 0} / ${d.limit}` : ""], ["到期目标", d.goal ? "已采用" : "无", d.goal || ""]]
+    : i.kind === "share" ? [["内容去重", i.summary ? "已采用" : "已采用", i.summary ? SHARE_REASON[i.summary] || "" : "没有重复"], ["发送记录", d.delivery_state ? "已采用" : "无", d.delivery_state ? statusOf(d.delivery_state)[0] : ""]]
+    : i.kind === "reflection" ? [["当天互动", d.sources ? "已采用" : "无", d.sources ? d.sources + " 条" : ""], ["她可以调整的能力", d.adjustments ? "已采用" : "无", d.adjustments ? d.adjustments + " 条调整" : ""]]
+    : [["资料观测与次数", "已采用", "详见 QQ 资料行为"]];
+  return { k, decisionText, why, trigger, result, context, options: (d.options || []).map(o => k.options[o] || o) };
+}
+PAGES.thinking = data => {
+  const items = (data.items || []).filter(i => state.decKind === "all" || i.kind === state.decKind);
+  const sel = items.find(i => String(i.id) === state.decSel) || items[0];
+  const today = localDay(new Date().toISOString()), todays = (data.items || []).filter(i => localDay(i.occurred_at) === today);
+  const n = f => todays.filter(f).length;
+  const stats = el("div", { class: "dk-stats" }, [["今天的决策", todays.length], ["已执行", n(i => ["EXPLORE", "OBSERVE", "QUEUED", "READY", "COMMITTED"].includes(i.status))],
+    ["暂缓或跳过", n(i => ["SKIP", "SKIPPED", "CANDIDATE"].includes(i.status))], ["失败", n(i => ["FAILED", "REJECTED"].includes(i.status))]]
+    .map(([t, v]) => el("div", {}, el("b", { class: "num" }, String(v)), el("span", {}, t))));
+  const filters = el("div", { class: "toolbar" }, el("div", { class: "seg" }, [["all", "全部"], ...Object.entries(DK).map(([k, v]) => [k, v.name])].map(([k, t]) =>
+    el("button", { type: "button", "aria-pressed": String(state.decKind === k), onclick: () => { state.decKind = k; state.decSel = null; rerender(); } }, t))));
+  if (!sel) return el("div", {}, head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"), stats, filters,
+    empty("还没有决策记录", "自主活动调度、主动分享、QQ 资料行为和每日反思做出决定后，会出现在这里。"));
+  const v = decisionView(sel);
+  const tabs = [["record", "决策记录"], ["context", "上下文"], ["reasoning", "原始推理"]];
+  const r = data.reasoning || {};
+  const body = state.decTab === "context" ? [el("h3", { class: "dk-title" }, "本轮实际可用信息"), el("p", { class: "note" }, "展示经过权限和来源校验的上下文，区分已采用与未采用。"),
+      el("ul", { class: "dk-ctx" }, v.context.map(([name, st, extra]) => el("li", {}, el("span", { class: "dk-n" }, name),
+        el("span", { class: "tag " + ({ "已采用": "ok", "未采用": "warn" }[st] || "off") }, st), el("span", { class: "note" }, extra))))]
+    : state.decTab === "reasoning" ? [el("h3", { class: "dk-title" }, "模型推理诊断"),
+      el("div", { class: "alert" }, icon("warn"), el("span", {}, r.provider_thinking === "disabled" ? "当前配置关闭了 DeepSeek 思考模式，这一轮没有生成推理内容。" : "这一轮没有采集推理内容。")),
+      el("p", { class: "note" }, "这里只显示服务商实际返回的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。"),
+      el("p", { class: "note mt" }, sel.kind === "wake" ? "自主活动调度按规则判断，不调用模型。" : "普通回复和主动私聊“发不发”的逐轮记录还没有采集，暂时不在这里显示。")]
+    : [el("h3", { class: "dk-title" }, sel.title, el("span", { class: "note" }, fmtDate(sel.occurred_at))),
+      el("dl", { class: "dk-rows" }, [["触发原因", v.trigger], ["可选行动", v.options.join(" / ") || "未记录"],
+        ["她的决定", el("b", {}, v.decisionText || "未记录")],
+        ["决策说明", v.why], ["执行结果", v.result]].map(([dt, dd]) => el("div", {}, el("dt", {}, dt), el("dd", {}, dd))))];
+  return el("div", {}, head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"), stats, filters,
+    el("div", { class: "dk-wrap" }, el("ul", { class: "dk-list" }, items.map(i => { const k = DK[i.kind] || { name: "其他", ic: "spark" };
+        return el("li", {}, el("button", { type: "button", class: i === sel ? "sel" : "", onclick: () => { state.decSel = String(i.id); rerender(); } },
+          el("span", { class: "ic" }, icon(k.ic)), el("span", { class: "dk-l" }, el("b", {}, i.title), el("small", {}, fmtDate(i.occurred_at) + "，" + k.name)),
+          el("span", { class: "tag " + (DEC_TONE[i.status] || "ok") }, decisionView(i).decisionText || statusOf(i.status)[0]))); })),
+      el("section", { class: "dk-card" }, el("div", { class: "dk-head" }, el("div", {}, el("h2", {}, "思考与决策"), el("p", { class: "note" }, sel.title + "，" + fmtDate(sel.occurred_at))),
+          el("span", { class: "dk-ic" }, icon("spark"))),
+        el("div", { class: "dk-tabs", role: "tablist" }, tabs.map(([k, t]) => el("button", { type: "button", role: "tab", "aria-selected": String(state.decTab === k),
+          onclick: () => { state.decTab = k; rerender(); } }, t))), el("div", { class: "dk-body" }, body))));
+};
 
 /* ================= 配置字段（能力页与配置页共用一份草稿） ================= */
 /* 服务端标签里的计价单位由输入框旁的单位显示，这里去掉，避免选人民币时仍写着美元 */

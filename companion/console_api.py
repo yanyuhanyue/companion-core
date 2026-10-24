@@ -225,6 +225,10 @@ def register_console_routes(app, settings):
         return _operation(core, request, idempotency_key, body.model_dump(), lambda:
             core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content))
 
+    @app.get(prefix + "/decisions", dependencies=auth)
+    async def decisions():
+        return console_read.decisions(app.state.core)
+
     @app.get(prefix + "/life", dependencies=auth)
     async def life():
         return console_read.life(app.state.core)
