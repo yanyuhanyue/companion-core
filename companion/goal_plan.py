@@ -3,7 +3,7 @@
 import json
 from contextlib import nullcontext
 from datetime import UTC
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AwareDatetime, Field, model_validator
 
@@ -14,7 +14,8 @@ from companion.store import after
 class GoalContinuationDecision(StrictModel):
     expected_version: int = Field(ge=1, strict=True)
     action: Literal["CONTINUE", "WAIT", "ABANDON"]
-    step_order: list[str] = Field(default_factory=list, max_length=3)
+    step_order: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
+        default_factory=list, max_length=3)
     wait_until: AwareDatetime | None = None
 
     @model_validator(mode="after")
@@ -75,13 +76,14 @@ def plan(engine, goal_id):
     for step in steps:
         step["source_event_ids"] = engine.step_source_ids(step["step_id"])
         engine.validate_sources(step["source_event_ids"])
+    actions = (["CONTINUE"] if engine.clock() >= goal["next_due_at"] else []) + ["WAIT", "ABANDON"]
     return {"goal_id": goal_id, "version": goal["version"], "kind": goal["kind"],
         "state": goal["state"], "scope": json.loads(goal["scope_json"]),
         "next_due_at": goal["next_due_at"], "unknown": uncertain,
         "steps": [{**{key: step[key] for key in (
             "step_id", "position", "state", "attempts", "last_error_code", "outcome_event_id",
             "source_event_ids")}, "scope": json.loads(step["scope_json"])} for step in steps],
-        "allowed_actions": ["CONTINUE", "WAIT", "ABANDON"] if allowed else []}
+        "allowed_actions": actions if allowed else []}
 
 
 def continue_plan(engine, goal_id, decision, *, autonomous=False):
@@ -122,6 +124,8 @@ def continue_plan(engine, goal_id, decision, *, autonomous=False):
         else:
             if now < goal["next_due_at"]:
                 raise CoreError("GOAL_WAIT_NOT_DUE", 409)
+            original_ids = {row["step_id"] for row in s.rows(
+                "SELECT step_id FROM goal_steps WHERE goal_id=?", (goal_id,))}
             pending = s.rows("SELECT * FROM goal_steps WHERE goal_id=? "
                              "AND state='WAITING_DECISION' ORDER BY position", (goal_id,))
             if (set(decision.step_order) != {step["step_id"] for step in pending}
@@ -143,6 +147,14 @@ def continue_plan(engine, goal_id, decision, *, autonomous=False):
                       (state, now, first))
             s.execute("UPDATE goals SET state=?,next_due_at=?,version=version+1,updated_at=? "
                        "WHERE goal_id=? AND version=?", (state, now, now, goal_id, goal["version"]))
+            final = s.rows("SELECT step_id,position,state FROM goal_steps WHERE goal_id=? "
+                           "ORDER BY position", (goal_id,))
+            if (not 1 <= len(final) <= 3
+                or [step["position"] for step in final] != list(range(1, len(final) + 1))
+                or {step["step_id"] for step in final} != original_ids
+                or {step["step_id"] for step in final if step["state"] != "DONE"}
+                != set(decision.step_order)):
+                raise CoreError("GOAL_PLAN_ORDER_INVALID", 409)
         s.audit("goal.continued", goal_id, goal_id, now, decision=decision.action,
                 expected_version=decision.expected_version)
     return plan(engine, goal_id)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import sys
 from datetime import datetime
 
@@ -31,7 +32,7 @@ def test_existing_scope_serialization_and_hash_shape_is_unchanged():
     assert GoalScope(operation="read_content", url=URLS[0]).model_dump() == {
         "operation": "read_content", "url": URLS[0]}
     for value in ([], [URLS[0], URLS[0]], [*URLS, URLS[0]], ["http://example.org"],
-                  ["https://user:password@example.org"]):
+                  ["https://user:password@example.org"], ["https://:password@example.org"]):
         with pytest.raises(ValidationError):
             GoalScope(operation="read_plan", urls=value)
 
@@ -259,4 +260,29 @@ def test_reader_process_loss_after_dispatch_retains_unknown_without_new_request(
             assert json.loads((await child(client)).splitlines()[-1]) == {
                 "worked": False, "calls": 0}
             assert core.store.rows("SELECT * FROM exploration_requests") == before
+    run(scenario())
+
+
+def test_reorder_sql_failure_rolls_back_parking_positions_and_step_identities(core, tmp_path):
+    async def scenario():
+        async with prepared(core, tmp_path) as (client, source, _):
+            goal_id = await create(client, source)
+            assert core.exploration.schedule_goal()
+            assert await read(client, core.clock(), URLS[0]) == (True, 3)
+            before = core.store.rows("SELECT * FROM goal_steps ORDER BY step_id")
+            parent = core.goals.get(goal_id)
+            order = list(reversed([step["step_id"] for step in core.goals.plan(goal_id)["steps"]
+                                   if step["state"] == "WAITING_DECISION"]))
+            core.store.execute("CREATE TEMP TRIGGER fail_position_refill BEFORE UPDATE OF position "
+                "ON goal_steps WHEN OLD.position>3 AND NEW.position<=3 BEGIN "
+                "SELECT RAISE(ABORT,'synthetic_position_refill_failure'); END")
+            try:
+                with pytest.raises(sqlite3.IntegrityError,
+                                   match="synthetic_position_refill_failure"):
+                    core.goals.continue_plan(goal_id, decision(core, goal_id, order=order))
+            finally:
+                core.store.execute("DROP TRIGGER fail_position_refill")
+            assert core.store.rows("SELECT * FROM goal_steps ORDER BY step_id") == before
+            assert core.goals.get(goal_id) == parent
+            assert not core.store.one("SELECT 1 FROM goal_steps WHERE position>3")
     run(scenario())

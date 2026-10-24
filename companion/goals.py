@@ -78,7 +78,7 @@ class GoalScope(StrictModel):
             for target in self.targets():
                 url = urlsplit(target)
                 if (len(target) > 2048 or url.scheme != "https" or not url.hostname
-                    or url.username or url.fragment):
+                    or url.username is not None or url.fragment):
                     raise ValueError("read requires an HTTPS URL without credentials")
         elif self.url:
             raise ValueError("investigate has no fixed URL")
@@ -179,9 +179,14 @@ class GoalEngine:
         ]
 
     def step_source_ids(self, step_id):
-        return [row["event_id"] for row in self.store.rows(
+        ids = [row["event_id"] for row in self.store.rows(
             "SELECT event_id FROM goal_step_evidence WHERE step_id=? ORDER BY event_id",
             (step_id,))]
+        step = self.store.one("SELECT goal_id FROM goal_steps WHERE step_id=?", (step_id,))
+        if (not step or not 1 <= len(ids) <= 256
+            or not set(self.source_ids(step["goal_id"])) <= set(ids)):
+            raise CoreError("GOAL_SOURCE_UNAVAILABLE", 409)
+        return ids
 
     def plan(self, goal_id):
         return goal_plan.plan(self, goal_id)

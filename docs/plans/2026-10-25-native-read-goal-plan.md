@@ -1,11 +1,11 @@
-# 原生有限多步 read-goal：复用提案
+# 原生有限多步 read-goal：合同与实现
 
-状态：2026-10-25 完成只读研究，提交 Root 决定；尚未修改 Goals/Reader 域。
-基线包含 Root `77687e7`。迁移号 0045 由 R1 预留，本文不占用或提交迁移。
+状态：2026-10-25 Root 已批准，Goal 域候选 `f3bafdb` 已实现；共享入口验收继续收口。
+研究基线为 Root `77687e7`。0045 由 R1 提供，含 `44456b8` 的有界临时位置重排修正。
 
 ## 确认的缺口
 
-任务书 P3.2 要求分步规划并根据结果调整后续步骤。目前：
+任务书 P3.2 要求分步规划并根据结果调整后续步骤。研究基线存在以下缺口，本片据此改造：
 
 - `migrations/versions/0008_goals.py` 对 `goal_steps.goal_id` 设置 UNIQUE，数据库只能存一步。
 - `GoalEngine.accept()` 只创建一条 step；investigate 没有具体 URL 时进入 WAITING_INPUT。
@@ -48,10 +48,11 @@ Root 需要协调这项小型契约扩展；本文不编辑 LifeTopics/Social。
 
 ## 数据与迁移必要性
 
-0045 必须移除每 Goal 一步的 UNIQUE 并补有界 step 身份，不能只改 Python 循环。
-建议 R1 采用原表迁移：
+0045 移除每 Goal 一步的 UNIQUE 并补有界 step 身份，复用原表迁移：
 
-- `goal_steps` 增加顺序位置与每步 `scope_json`，唯一 `(goal_id, position)`；每 Goal 最多 3 步由事务验证。
+- `goal_steps` 增加顺序位置与每步 `scope_json`，唯一 `(goal_id, position)`。
+  数据库允许整数位置 1–6，4–6 仅用于同事务重排停车；触发器限制每 Goal 最多三行。
+  域在提交前复核最终位置连续且位于 1–3，并保持原 step ID 与未执行步骤集合。
 - 增加用于未获续行决策的等待状态；第一步可排队，后续默认等待，不能被通用 claim 同时领走。
 - 每步实际使用的来源用规范化 `goal_step_evidence(step_id,event_id)` 关联。
   原 `goal_evidence` 继续保留创建时的原始依据；结果来源不会改写创建授权。
@@ -61,7 +62,7 @@ Root 需要协调这项小型契约扩展；本文不编辑 LifeTopics/Social。
   保存原 step_id、租约、次数、结果、UNKNOWN、Goal authority 和承诺 hash。
   非空多步状态不得静默降级为旧单步 schema；降级失败应明确。
 
-新范围和 step 状态的精确字段名由 Root/R1 在实施前冻结；这是必要的持久结构变化，
+新范围和 WAITING_DECISION 步骤态已经冻结；这是必要的持久结构变化，
 不是把任意新协议称为适配器。可行备选是串联多个独立 Goal，但会丢失父目标总体完成条件、
 准确取消与原授权范围，因此不推荐。
 
@@ -102,10 +103,28 @@ Root 需要协调这项小型契约扩展；本文不编辑 LifeTopics/Social。
 
 ## 实施门槛与验收
 
-待 Root 确认有限 read_plan 范围、schema shape、Social 决策入口及 Tools 内部结果回调合同后实施。
-单独“把一个 Goal 变成多个 step”不足以完成任务。
+范围和持久结构已由 Root 冻结。Social 决策入口、Tools 内部结果回调与 R1 control API
+按共享 Python 合同接线，单独增加多个 step 不代表完整认知生产者已经验收。
 
 最少验收：真实入口创建两目标计划；第一步真实回执后仍未 DONE；有界续行选择后第二步完成；
 顺序调整、等待、放弃；错误/跨步回执拒绝；重启不重做已完成步骤；派发后退出保留 UNKNOWN；
 换授权/STOP/撤源及旧备份恢复；单步历史迁移与既有承诺不变；每个 selector turn 仍至多一个原生单元。
 合成模型只证明上述合同。规划是否有用、依据结果调整是否合理以及长期任务体验需另做模型和真实验收。
+
+## 已冻结的 Python 入口
+
+`GoalScope(operation="read_plan", urls=[...])` 只适用于新 self Goal。
+旧单目标与 investigate 的序列化不增加 urls，已接受承诺的原 scope/hash 保持。
+`GoalEngine.plan(goal_id)` 提供版本、原范围、有界步骤、实际结果引用和可用动作；
+等待期限前不列出 CONTINUE。调用不调度或执行 Reader。
+
+`GoalEngine.continue_plan(goal_id, GoalContinuationDecision(...), autonomous=True)`
+接受 `expected_version`、`action`、`step_order` 和仅 WAIT 使用的 `wait_until`。
+CONTINUE 必须枚举全部尚未开始步骤且各一次；WAIT 严格处于当前时刻之后七天以内。
+原生事务完成 CAS、来源复验、队列状态与审计，返回新的 plan 视图。
+相同旧版本重试被拒绝，不创建第二次执行。
+
+`GoalEngine.fail(..., execution_uncertain=True)` 接收 Reader 的不确定结果；
+同时核对原 exploration/reading 持久状态，防止遗漏标记后重放 UNKNOWN。
+只有明确没有派发的失败才能消耗原有限重试次数。
+主人仍可通过原 Goal cancel 结束未来意图，已完成步骤与未知费用责任保留。
