@@ -119,3 +119,49 @@ def recall_signing_payload(value):
             raise ValueError("OWNER_RECALL_INVALID")
         result[key] = parsed.isoformat()
     return RECALL_DOMAIN + canonical(result)
+
+
+IMAGE_UPLOAD_DOMAIN = b"companion-core/owner-image/v2\x00"
+
+
+def image_upload_signing_payload(value):
+    """Bind original pixels to an admitted source, slot and finite Core upload lease."""
+    from companion_delivery_protocol import canonical, hash_value, identifier
+
+    fields = {"authority", "event_id", "slot", "source_sha256", "lease_token",
+              "media_sha256", "mime"}
+    if (not isinstance(value, dict) or set(value) != fields
+        or not identifier(value["event_id"], r"evt_[a-f0-9]{64}")
+        or type(value["slot"]) is not int or not 0 <= value["slot"] < 64
+        or not identifier(value["lease_token"], r"content_lease_[a-f0-9]{32}")
+        or not hash_value(value["source_sha256"]) or not hash_value(value["media_sha256"])
+        or value["mime"] not in {
+            "image/png", "image/jpeg", "image/webp", "image/gif", "image/apng"}):
+        raise ValueError("OWNER_IMAGE_UPLOAD_INVALID")
+    return IMAGE_UPLOAD_DOMAIN + canonical({
+        **value, "authority": validate_authority_ref(value["authority"]),
+    })
+
+
+FILE_UPLOAD_DOMAIN = b"companion-core/owner-file/v2\x00"
+
+
+def file_upload_signing_payload(value):
+    """Bind original file bytes to their signed source and finite upload lease."""
+    from companion_delivery_protocol import canonical, hash_value, identifier
+
+    fields = {"authority", "event_id", "slot", "source_sha256", "lease_token",
+              "file_id", "filename", "media_sha256", "mime", "bytes"}
+    if (not isinstance(value, dict) or set(value) != fields
+        or not identifier(value["event_id"], r"evt_[a-f0-9]{64}")
+        or type(value["slot"]) is not int or not 0 <= value["slot"] < 64
+        or not identifier(value["lease_token"], r"content_lease_[a-f0-9]{32}")
+        or not hash_value(value["source_sha256"]) or not hash_value(value["media_sha256"])
+        or type(value["bytes"]) is not int or not 1 <= value["bytes"] <= 2**53 - 1
+        or any(not isinstance(value[key], str) or not 1 <= len(value[key]) <= maximum
+               or re.search(r"[\x00-\x1f\x7f]", value[key])
+               for key, maximum in (("file_id", 512), ("filename", 255), ("mime", 256)))):
+        raise ValueError("OWNER_FILE_UPLOAD_INVALID")
+    return FILE_UPLOAD_DOMAIN + canonical({
+        **value, "authority": validate_authority_ref(value["authority"]),
+    })
