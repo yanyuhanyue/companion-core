@@ -138,7 +138,7 @@ def validate_quiescence(value, *, signed=True):
 
 
 def validate_voice_check(value):
-    """The six exact VoiceDeliveryCheck fields, without importing runtime services."""
+    """The six exact voice delivery check fields, without importing runtime services."""
     if (not isinstance(value, dict) or set(value) != VOICE_CHECK_FIELDS
         or not identifier(value["job_id"], r"voice_[a-f0-9]{32}")
         or type(value["generation"]) is not int or not 1 <= value["generation"] <= 2**63 - 1

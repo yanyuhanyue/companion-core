@@ -222,9 +222,10 @@ def _model_room(store, settings, job_id, request_id=None):
     if settings.paid_model is None:
         raise CoreError("PAID_VIDEO_APPROVAL_REQUIRED", 503)
     used = store.rows(
-        "SELECT m.scenario,m.state FROM model_usage m "
-        "LEFT JOIN model_admissions a USING(request_id) "
-        "WHERE (m.job_id=? OR a.logical_request_id=?) AND m.request_id<>?",
+        "SELECT m.scenario,m.state FROM model_usage m WHERE m.request_id IN ("
+        "SELECT request_id FROM model_usage WHERE job_id=? UNION "
+        "SELECT request_id FROM model_admissions WHERE logical_request_id=?"
+        ") AND m.request_id<>?",
         (job_id, job_id, request_id or ""),
     )
     finished = {row["scenario"] for row in used if row["state"] == "SETTLED"}

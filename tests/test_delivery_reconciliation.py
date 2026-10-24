@@ -215,7 +215,7 @@ def account_authority(core, content, window_sha256):
 
 
 def voice_authority(core, event, content, message_id, window_sha256):
-    from companion.voice_flow import VoiceDeliveryBinding
+    from companion.voice_protocol import VoiceDeliveryBinding
 
     job_id = uid("voice")
     delivery_key = "synthetic-original:" + message_id
@@ -424,6 +424,18 @@ def test_voice_wire_rejects_non_exact_check(field, value):
              "result_sha256": "b" * 64, "audio_sha256": "c" * 64, "audio_bytes": 100}
     with pytest.raises(ValueError, match="VOICE_CHECK"):
         wire.validate_voice_check({**check, field: value})
+
+
+def test_voice_check_validation_returns_a_detached_dictionary():
+    value = {"binding_sha256": "a" * 64, "job_id": "voice_" + "1" * 32, "generation": 1,
+             "result_sha256": "b" * 64, "audio_sha256": "c" * 64, "audio_bytes": 100}
+    checked = wire.validate_voice_check(value)
+    assert checked == value and checked is not value
+    checked["generation"] = 2
+    assert value["generation"] == 1
+    for missing in ({}, {key: item for key, item in value.items() if key != "audio_bytes"}):
+        with pytest.raises(ValueError, match="VOICE_CHECK"):
+            wire.validate_voice_check(missing)
 
 
 def test_shared_wire_imports_without_core_or_bridge(tmp_path):

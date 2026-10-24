@@ -133,7 +133,7 @@ def _invalidate_flow(store, row, reason):
 def _invalidate_receipts(store, where, parameters, reason):
     # Keep only validated, content-free delivery authority for later owner resolution.
     # Input transcripts, audio bytes, and arbitrary/corrupt receipt fields are erased.
-    from companion.voice_flow import VoiceDeliveryBinding
+    from companion.voice_protocol import VoiceDeliveryBinding
 
     for row in store.rows("SELECT key,value FROM runtime_meta WHERE " + where, parameters):
         value = {"state": "FENCED", "reason": reason}
@@ -453,7 +453,7 @@ class VoiceJobs:
 
     def _delivery_binding(self, row):
         """A selected result may survive Outbox leasing; this never grants execution."""
-        from companion.voice_flow import VoiceDeliveryBinding
+        from companion.voice_protocol import VoiceDeliveryBinding
 
         receipt = self.store.one(
             "SELECT value FROM runtime_meta WHERE key=?", (REPLY_RECEIPT + str(row["message_id"]),)
@@ -671,7 +671,11 @@ class VoiceJobs:
         with self._transaction():
             if node_id != request.node_id:
                 raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
-            for row in self.store.rows("SELECT * FROM voice_jobs WHERE node_id=?", (node_id,)):
+            states = sorted(ACTIVE | COMPLETED)
+            for row in self.store.rows(
+                "SELECT * FROM voice_jobs WHERE node_id=? AND state IN "
+                f"({','.join('?' for _ in states)})", (node_id, *states),
+            ):
                 self._reconcile(row)
             _, node = self._node(node_id)
             previous = self.store.one(

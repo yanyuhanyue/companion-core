@@ -1,4 +1,4 @@
-"""Storage-free contracts for Core and an outbound-only local voice worker."""
+"""Storage-free voice execution, result, and delivery contracts."""
 
 import base64
 import binascii
@@ -266,6 +266,47 @@ class VoiceAudioResult(VoiceDTO):
             raise ValueError("Voice WAV content is invalid") from None
         if abs(self.frames / self.sample_rate - self.duration_seconds) > 1e-9:
             raise ValueError("Voice duration does not match the frame count")
+        return self
+
+
+class VoiceDeliveryBinding(VoiceDTO):
+    schema_version: Literal[1] = 1
+    job_id: JobId
+    generation: Generation
+    message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
+    delivery_key: str = Field(min_length=1, max_length=512)
+    event_id: str = Field(min_length=1, max_length=128)
+    window_sha256: Digest
+    source_sha256: Digest
+    identity_sha256: Digest
+    privacy_epoch: int = Field(ge=0, strict=True)
+    reply_revision: int = Field(ge=0, strict=True)
+    node_id: NodeId
+    manifest_sha256: Digest
+    node_config_sha256: Digest
+    voice_policy_sha256: Digest
+    content_sha256: Digest
+    reply_sha256: Digest
+    result_sha256: Digest
+    audio_sha256: Digest
+    audio_bytes: int = Field(ge=44, le=4_000_000, strict=True)
+    expires_at: AwareDatetime
+
+
+class VoiceDeliveryEnvelope(VoiceDTO):
+    binding: VoiceDeliveryBinding
+    binding_sha256: Digest
+    audio: VoiceAudioResult
+
+    @model_validator(mode="after")
+    def bound_audio(self):
+        if (
+            self.binding_sha256 != digest(self.binding)
+            or self.binding.result_sha256 != digest(self.audio)
+            or self.binding.audio_sha256 != self.audio.audio_sha256
+            or self.binding.audio_bytes != len(self.audio.audio_bytes())
+        ):
+            raise ValueError("Voice delivery audio differs from its frozen binding")
         return self
 
 

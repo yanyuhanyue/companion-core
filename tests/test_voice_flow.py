@@ -15,9 +15,9 @@ from companion.qq_rich import input_digest
 from companion.retrieval import SemanticIndex
 from companion.store import encode
 from companion.voice_config import VoiceASRPolicy, VoiceNode, VoiceReplyPolicy
-from companion.voice_flow import VoiceDeliveryCheck, VoiceDeliveryEnvelope, VoiceFlow
+from companion.voice_flow import VoiceFlow
 from companion.voice_jobs import erase_voice_jobs, restore_voice_jobs, sign_asr_proof
-from companion.voice_protocol import VoiceLeaseRef, canonical_bytes, digest
+from companion.voice_protocol import VoiceDeliveryEnvelope, VoiceLeaseRef, canonical_bytes, digest
 from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
@@ -87,6 +87,13 @@ def leased(core, message_id):
     return items[0]
 
 
+def delivery_check(envelope):
+    binding = envelope.binding
+    return {"binding_sha256": envelope.binding_sha256, "job_id": binding.job_id,
+            "generation": binding.generation, "result_sha256": binding.result_sha256,
+            "audio_sha256": binding.audio_sha256, "audio_bytes": binding.audio_bytes}
+
+
 def source_records(core, event_id, capture_key, count):
     event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
     body = json.loads(event["body_json"])
@@ -140,7 +147,7 @@ def test_tts_single_outbox_receipt_binding_and_native_ack(core, monkeypatch):
     with core.store.transaction():
         envelope = flow.delivery_envelope(message_id, item["lease_token"])
         flow.validate_send(
-            message_id, item["lease_token"], VoiceDeliveryCheck.from_envelope(envelope)
+            message_id, item["lease_token"], delivery_check(envelope)
         )
     assert envelope.audio == value.payload
     assert jobs.result(envelope.binding.job_id) is None  # generic reads cannot fetch after handoff
@@ -152,7 +159,7 @@ def test_tts_single_outbox_receipt_binding_and_native_ack(core, monkeypatch):
         flow.validate_send(message_id, item["lease_token"], None)
     with core.store.transaction():
         flow.validate_send(
-            message_id, item["lease_token"], VoiceDeliveryCheck.from_envelope(envelope)
+            message_id, item["lease_token"], delivery_check(envelope)
         )
     transport.delivery_result(
         core.store,
@@ -180,10 +187,21 @@ def test_audio_send_check_rejects_tampering(core, monkeypatch, change):
     item = leased(core, message_id)
     with core.store.transaction():
         envelope = flow.delivery_envelope(message_id, item["lease_token"])
-    check = VoiceDeliveryCheck.from_envelope(envelope)
-    wrong = check.model_copy(update={change: 44 if change == "audio_bytes" else "0" * 64})
+    check = delivery_check(envelope)
+    wrong = check | {change: 44 if change == "audio_bytes" else "0" * 64}
     with core.store.transaction(), pytest.raises(CoreError, match="VOICE_DELIVERY_BINDING_CHANGED"):
         flow.validate_send(message_id, item["lease_token"], wrong)
+
+
+def test_text_delivery_accepts_absent_voice_but_rejects_an_empty_check(core, monkeypatch):
+    flow, _, message_id, _, _ = flow_fixture(
+        core, monkeypatch, reply=VoiceReplyPolicy(enabled=False))
+    assert prepare(core, flow, message_id).state == "TEXT"
+    item = leased(core, message_id)
+    with core.store.transaction():
+        flow.validate_send(message_id, item["lease_token"], None)
+    with core.store.transaction(), pytest.raises(CoreError, match="VOICE_DELIVERY_BINDING_CHANGED"):
+        flow.validate_send(message_id, item["lease_token"], {})
 
 
 @pytest.mark.parametrize("mode", ["offline", "running", "failed", "late_result"])
@@ -621,10 +639,25 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
                         "reply_sha256": transport.digest(TEXT),
                         "reply_revision": event["reply_revision"],
                         "lease_token": item["lease_token"],
-                        "voice": VoiceDeliveryCheck.from_envelope(envelope).model_dump(mode="json"),
+                        "voice": delivery_check(envelope),
                     }
                     checked = await client.post("/internal/v1/live-text/send-check", json=check)
                     assert checked.status_code == 200, checked.text
+                    for invalid in (
+                        {}, check["voice"] | {"generation": True},
+                        check["voice"] | {"audio_sha256": "private-invalid-digest"},
+                    ):
+                        rejected = await client.post("/internal/v1/live-text/send-check",
+                            json=check | {"voice": invalid})
+                        assert rejected.status_code == 400
+                        assert rejected.json() == {
+                            "error": "INVALID_CONTRACT", "fields": ["body.voice"],
+                        }
+                    for invalid in (None, check["voice"] | {"binding_sha256": "0" * 64}):
+                        rejected = await client.post("/internal/v1/live-text/send-check",
+                            json=check | {"voice": invalid})
+                        assert rejected.status_code == 409
+                        assert rejected.json() == {"error": "VOICE_DELIVERY_BINDING_CHANGED"}
                     wrong = dict(check)
                     wrong.pop("voice")
                     denied = await client.post("/internal/v1/live-text/send-check", json=wrong)

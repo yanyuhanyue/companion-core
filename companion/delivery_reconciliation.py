@@ -15,6 +15,7 @@ import companion_delivery_protocol as wire
 from companion import cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import encode, utcnow
+from companion.voice_protocol import VoiceDeliveryBinding
 
 KIND = "quota_send_resolution"
 PREPARED = "delivery_quiescence:"
@@ -162,9 +163,7 @@ def _voice_binding(store, proof, history, row, content_hash):
         if value and value.get("binding"):
             raise ValueError("original voice send check missing")
         return
-    from companion.voice_flow import VoiceDeliveryBinding, VoiceDeliveryCheck
-
-    VoiceDeliveryCheck.model_validate(given)
+    given = wire.validate_voice_check(given)
     if not value or value.get("state") not in {"AUDIO", "FENCED"}:
         raise ValueError("original voice binding missing")
     binding = VoiceDeliveryBinding.model_validate(value["binding"]).model_dump(mode="json")

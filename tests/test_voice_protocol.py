@@ -1,6 +1,9 @@
 import base64
 import hashlib
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -21,6 +24,33 @@ from companion.voice_protocol import (
     verify_voice_lease,
 )
 from tests.test_local_voice_providers import wav_bytes
+
+
+def test_delivery_contracts_import_without_runtime_or_bridge_packages(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    package = tmp_path / "companion"
+    package.mkdir()
+    for name in ("__init__.py", "voice_protocol.py"):
+        (package / name).write_bytes((root / "companion" / name).read_bytes())
+    source = """
+import importlib.abc, sys
+sys.path.insert(0, sys.argv[1])
+class NoRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {'companion.voice_flow', 'companion.voice_jobs', 'companion.live_text',
+                        'companion.core', 'companion.store', 'companion.private_life',
+                        'companion_delivery_protocol', 'companion_onebot_bridge',
+                        'companion_voice_node'}:
+            raise ImportError('RUNTIME_DEPENDENCY:' + fullname)
+sys.meta_path.insert(0, NoRuntime())
+from companion.voice_protocol import VoiceDeliveryBinding, VoiceDeliveryEnvelope
+assert VoiceDeliveryEnvelope.model_fields['binding'].annotation is VoiceDeliveryBinding
+print('standalone voice delivery contracts loaded')
+"""
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", source, str(tmp_path)],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=15, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "standalone voice delivery contracts loaded"
 
 
 def lease_values(**changes):

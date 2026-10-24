@@ -266,8 +266,9 @@ def test_lease_expiry_responsibility_and_node_quarantine(core, monkeypatch):
     jobs, message_id, _, _ = prepared(core, monkeypatch)
     job, request, response, ref = start(core, jobs, message_id)
     core.clock.advance(31)
-    assert jobs.status(job["job_id"])["state"] == "UNKNOWN"
     assert jobs.claim("local", request) == response
+    assert core.store.one("SELECT state FROM voice_jobs WHERE job_id=?", (job["job_id"],))[
+        "state"] == "UNKNOWN"
     assert (
         core.store.one("SELECT active_job_id FROM voice_node_state")["active_job_id"]
         == (job["job_id"])
@@ -390,16 +391,23 @@ def test_tts_requires_intact_native_capture_and_voice_scope(core, monkeypatch):
         create_tts(core, jobs, message_id)
 
 
-def test_rotated_policy_claim_persists_revocation(core, monkeypatch):
+@pytest.mark.parametrize("started", [False, True])
+def test_rotated_policy_claim_persists_revocation(core, monkeypatch, started):
     jobs, message_id, _, _ = prepared(core, monkeypatch)
-    job, _, _, _ = start(core, jobs, message_id)
+    job = create_tts(core, jobs, message_id)
+    _, response = claim(jobs)
+    if started:
+        jobs.input("local", VoiceLeaseRef.from_lease(response.lease))
     core.settings.voice = voice_config(lease_ttl_seconds=31)
     with pytest.raises(CoreError, match="VOICE_SCOPE_REQUIRED"):
         claim(jobs)
     row = core.store.one(
         "SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=?", (job["job_id"],)
     )
-    assert row == {"state": "UNKNOWN", "input_blob": None, "result_blob": None}
+    assert row == {"state": "UNKNOWN" if started else "CANCELLED",
+                   "input_blob": None, "result_blob": None}
+    assert core.store.one("SELECT active_job_id FROM voice_node_state")["active_job_id"] == (
+        job["job_id"] if started else None)
 
 
 def test_erasure_withdraws_completed_audio_and_keeps_only_metadata(core, monkeypatch):
