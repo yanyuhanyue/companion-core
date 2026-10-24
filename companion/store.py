@@ -140,7 +140,9 @@ class Store:
             "consolidation_evidence": {"event_id", "run_id"},
             "goals": {"scope_json", "state", "redacted", "reflection_suggestion_id"},
             "goal_evidence": {"event_id", "goal_id"},
-            "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts"},
+            "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts", "position",
+                           "scope_json"},
+            "goal_step_evidence": {"step_id", "event_id"},
             "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},
             "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
             "exploration_requests": {
