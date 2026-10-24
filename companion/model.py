@@ -208,7 +208,11 @@ class ModelClient:
                 raise CoreError(code, status)
             try:
                 message = body["choices"][0]["message"]
-                calls = message.get("tool_calls") or []
+                calls = message.get("tool_calls")
+                if calls is None:
+                    calls = []
+                if not isinstance(calls, list):
+                    raise ValueError("invalid tool calls")
                 if calls and (
                     "tools" not in payload or not isinstance(calls, list) or len(calls) != 1
                     or not isinstance(calls[0], dict) or len(json.dumps(calls)) > 4096

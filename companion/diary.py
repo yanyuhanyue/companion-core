@@ -778,7 +778,9 @@ class DiaryService:
                 "DIARY_SOURCES_CHANGED",
             }:
                 state = "CANCELLED"
-            elif not unknown and (code in {"MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE"}
+            elif not unknown and (code in {
+                "MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE", "MODEL_EMPTY_RESPONSE",
+            }
                                   or isinstance(error, ValidationError)):
                 state = "RETRY_WAIT" if run["attempts"] < run["max_attempts"] else "FAILED"
             self.repo.finish(run, state, code, retry_at=retry_at)

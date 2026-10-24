@@ -80,6 +80,12 @@ def test_skip_gets_one_new_native_attempt_and_retains_both_charges(core, outcome
     [
         "skip",
         "empty",
+        "empty_null_calls",
+        "empty_list_calls",
+        "empty_dict_calls",
+        "empty_string_calls",
+        "empty_false_calls",
+        "empty_zero_calls",
         "missing_usage",
         "empty_missing_usage",
         "oversized_empty",
@@ -104,8 +110,14 @@ def test_only_received_known_empty_required_reply_gets_another_reservation(core,
         }
         if len(calls) == 1:
             body["choices"][0]["message"]["content"] = (
-                " " if first in {"empty", "empty_missing_usage"} else "[SKIP]"
+                " " if first.startswith("empty") else "[SKIP]"
             )
+            if first.endswith("_calls"):
+                body["choices"][0]["message"]["tool_calls"] = {
+                    "empty_null_calls": None, "empty_list_calls": [],
+                    "empty_dict_calls": {}, "empty_string_calls": "",
+                    "empty_false_calls": False, "empty_zero_calls": 0,
+                }[first]
             if first == "oversized_empty":
                 body["choices"][0]["message"]["content"] = " " * 32001
             if first in {"missing_usage", "empty_missing_usage"}:
@@ -123,10 +135,15 @@ def test_only_received_known_empty_required_reply_gets_another_reservation(core,
             core.model = ModelClient(core.settings, transport)
             assert await core.run_once()
             before = core.store.rows("SELECT * FROM model_usage")
-            known = first in {"skip", "empty"}
+            known = first in {"skip", "empty", "empty_null_calls", "empty_list_calls"}
             current = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
             assert current["state"] == ("RETRY_WAIT" if known else "FAILED")
             assert current["max_attempts"] == (2 if known else 1)
+            if first.endswith("_calls"):
+                assert current["last_error_code"] == (
+                    "MODEL_EMPTY_RESPONSE" if known else "MODEL_INVALID_RESPONSE"
+                )
+                assert before[0]["state"] == "SETTLED"
             core.clock.advance(6)
             assert await core.run_once() is known
             assert len(calls) == (2 if known else 1)
