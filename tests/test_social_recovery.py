@@ -11,15 +11,14 @@ from threading import Barrier
 import pytest
 from pydantic import SecretStr
 
-from companion import budget, live_text, social_plan_jobs
+from companion import budget, social_plan_jobs
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.social_autonomy_runtime import _expire, run_once
 from companion.store import Store
 from tests.conftest import ingest, run
-from tests.test_onebot_capture import pinned_plan
-from tests.test_private_companion import companion_options
 from tests.test_social_autonomy import MockPlanner, background, extra_public, planned
+from tests.test_social_owner_authority import authorize
 
 
 def crash(core, tmp_path, ref, mode):
@@ -64,14 +63,7 @@ def test_actual_process_death_retires_only_expired_known_planning(core, tmp_path
 
 def test_settled_admission_lease_is_not_retired_while_other_worker_can_finish(core, tmp_path):
     module, ref, _ = background(core, plan_ttl_seconds=1, max_output_tokens=128)
-    options = companion_options(core)
-    options.update(account_actions_scope="qq_social_v1",
-                   account_actions_authorization_sha256=module.config.authorization_sha256)
-    options["core_options"].update(social_autonomy=module.config, content_enabled=False,
-                                   observation_adapters={})
-    _, window = pinned_plan(core, tmp_path, 3001, live=True, approved=True, scope_options=options)
-    live_text.open_window(core.store, core.settings, core.clock,
-                          live_text.OpenWindow(window_sha256=window.sha256))
+    authorize(core, tmp_path)
     crash(core, tmp_path, ref, "settled")
     usage = core.store.rows("SELECT * FROM model_usage")
     admission = core.store.one("SELECT * FROM model_admissions")

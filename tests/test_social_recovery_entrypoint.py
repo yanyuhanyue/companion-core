@@ -1,4 +1,4 @@
-"""Real HTTP window and delivery with two independent Core worker subprocesses."""
+"""Real owner-authority HTTP delivery with two independent native worker processes."""
 
 import asyncio
 import json
@@ -10,13 +10,14 @@ import httpx
 from pydantic import SecretStr
 
 from tests.conftest import run
-from tests.test_onebot_capture import pinned_plan, real_core_http
-from tests.test_private_companion import companion_options
+from tests.test_onebot_capture import real_core_http
 from tests.test_social_autonomy import background
+from tests.test_social_owner_authority import authorize
 
 
-def test_http_window_independent_worker_resumes_same_unadmitted_social_job(core, tmp_path):
+def test_http_authority_independent_worker_resumes_same_unadmitted_social_job(core, tmp_path):
     module, ref, _ = background(core, max_output_tokens=128)
+    _, authority = authorize(core, tmp_path)
 
     async def child(mode):
         config, result = tmp_path / (mode + ".json"), tmp_path / (mode + "-result.json")
@@ -37,21 +38,13 @@ def test_http_window_independent_worker_resumes_same_unadmitted_social_job(core,
         return outcome
 
     async def scenario():
-        options = companion_options(core)
-        options.update(account_actions_scope="qq_social_v1",
-                       account_actions_authorization_sha256=module.config.authorization_sha256)
-        options["core_options"].update(social_autonomy=module.config, content_enabled=False,
-                                       observation_adapters={})
         async with real_core_http(core) as port:
-            cfg, window = pinned_plan(core, tmp_path, 3001, core_port=port, live=True,
-                                      approved=True, scope_options=options)
             async with httpx.AsyncClient(
-                base_url=cfg.core_url, trust_env=False,
-                headers={"Authorization": "Bearer " + cfg.bridge_token},
+                base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                headers={
+                    "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
+                },
             ) as api:
-                opened = await api.post("/internal/v1/live-text/open",
-                                        json={"window_sha256": window.sha256})
-                assert opened.status_code == 200, opened.text
                 first = await child("core_defer")
                 before = core.store.one("SELECT * FROM social_autonomy_plans")
                 job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
@@ -73,7 +66,7 @@ def test_http_window_independent_worker_resumes_same_unadmitted_social_job(core,
                 assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
                 leased = await api.post("/internal/v1/deliveries/lease", json={
                     "worker_id": "synthetic-bridge", "limit": 1, "delivery_lane": "qq_account",
-                    "window_sha256": window.sha256,
+                    "authority": authority,
                     "account_actions_authorization_sha256": module.config.authorization_sha256,
                 })
                 assert leased.status_code == 200, leased.text

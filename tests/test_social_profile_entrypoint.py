@@ -12,10 +12,10 @@ from pydantic import SecretStr
 from companion.console_api import COOKIE
 from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
-from tests.test_onebot_capture import pinned_plan, real_core_http
+from tests.test_onebot_capture import real_core_http
 from tests.test_owner_console import ORIGIN, PASSWORD
-from tests.test_private_companion import companion_options
 from tests.test_social_autonomy import background
+from tests.test_social_owner_authority import authorize
 
 
 def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget(core, tmp_path):
@@ -25,23 +25,16 @@ def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget
     core.settings.console.enabled = True
     core.settings.console.public_origin = ORIGIN
     core.settings.control_token = SecretStr(PASSWORD)
+    _, authority = authorize(core, tmp_path)
 
     async def scenario():
-        options = companion_options(core)
-        options.update(account_actions_scope="qq_social_v1",
-                       account_actions_authorization_sha256=module.config.authorization_sha256)
-        options["core_options"].update(social_autonomy=module.config, content_enabled=False,
-                                       observation_adapters={})
         async with real_core_http(core) as port:
-            cfg, window = pinned_plan(core, tmp_path, 3001, core_port=port, live=True,
-                                      approved=True, scope_options=options)
             async with httpx.AsyncClient(
-                base_url=cfg.core_url, trust_env=False,
-                headers={"Authorization": "Bearer " + cfg.bridge_token},
+                base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                headers={
+                    "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
+                },
             ) as api:
-                opened = await api.post("/internal/v1/live-text/open",
-                                        json={"window_sha256": window.sha256})
-                assert opened.status_code == 200, opened.text
                 session = await api.post("/v1/console/session", json={"password": PASSWORD},
                                          headers={"Origin": ORIGIN})
                 assert session.status_code == 200, session.text
@@ -54,9 +47,9 @@ def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget
                                            json={"decision": "confirm"}, headers=owner_headers)
                 assert confirmed.status_code == 200, confirmed.text
                 baseline = await api.post("/internal/v1/account-actions/profile-baselines", json={
-                    "window_sha256": window.sha256,
+                    "authority": authority,
                     "authorization_sha256": module.config.authorization_sha256,
-                    "profiles": [{"bot_qq_id": cfg.bot_qq_id, "field": "nickname",
+                    "profiles": [{"bot_qq_id": core.settings.bot_qq_id, "field": "nickname",
                                   "value": "External baseline instruction",
                                   "observed_at": core.clock(),
                                   "receipt_sha256": "b" * 64}],
@@ -87,7 +80,7 @@ def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget
                 assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
                 leased = await api.post("/internal/v1/deliveries/lease", json={
                     "worker_id": "synthetic-profile", "limit": 1, "delivery_lane": "qq_account",
-                    "window_sha256": window.sha256,
+                    "authority": authority,
                     "account_actions_authorization_sha256": module.config.authorization_sha256,
                 })
                 assert leased.status_code == 200, leased.text

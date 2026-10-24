@@ -9,11 +9,13 @@ from pathlib import Path
 import httpx
 
 from companion import budget
+from companion.autonomous_selector import native_selector
 from companion.config import Settings
 from companion.model import ModelClient
 from companion.social_autonomy import SocialAutonomy
 from companion.social_autonomy_runtime import run_once
 from companion.store import Store, encode
+from tests.social_model_transport import next_social_turn
 
 
 async def main():
@@ -65,8 +67,9 @@ async def main():
             cloud_budget.reserve = refuse
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
             with Core(settings, ModelClient(settings, client), lambda: args["now"]) as worker:
-                worked = await worker.run_once(mode)
-                idle = not await worker.run_once(mode + "-idle")
+                selector = native_selector(worker, mode)
+                worked = await next_social_turn(selector)
+                idle = not await next_social_turn(selector)
         await asyncio.to_thread(Path(args["result_path"]).write_text, json.dumps({
             "pid": os.getpid(), "worked": worked, "idle": idle, "provider_calls": len(calls),
             "payloads": payloads,

@@ -7,6 +7,19 @@ import httpx
 from companion.model import ModelClient
 
 
+async def next_social_turn(selector):
+    """Observe one actual Social lane invocation without using retired Core fallthrough."""
+    for _ in range(len(selector.lanes) + 1):
+        if not selector.remaining:
+            selector.resume()
+        selected = await selector.step()
+        if selected.blocked:
+            return False
+        if selected.lane == "social":
+            return selected.result.progressed
+    raise AssertionError("native selector did not reach its Social lane")
+
+
 class NativeTestModel(ModelClient):
     def __init__(self, settings, stub, scenario):
         self.stub = stub
