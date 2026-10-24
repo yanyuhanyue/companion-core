@@ -182,7 +182,7 @@ def accept(service, original, data, mime, lease_token, proof):
                 "duplicate": False, "input_ready": True}
 
 
-def _prepared(store, settings, clock, job, item_id):
+def _prepared(store, settings, clock, job, item_id, *, executing=True):
     if not enabled(settings):
         raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 403)
     row = store.one("SELECT c.*,p.proof_json,p.mime,p.expires_at FROM captured_images p "
@@ -190,7 +190,8 @@ def _prepared(store, settings, clock, job, item_id):
                     (item_id,))
     if not row or row["state"] != "SUCCEEDED" or row["expires_at"] <= clock():
         raise CoreError("LIVE_IMAGE_ORIGINAL_UNAVAILABLE", 410)
-    view = owner_authority.check_job(store, settings, clock, job, purpose="image", executing=True)
+    view = owner_authority.check_job(store, settings, clock, job, purpose="image",
+                                     executing=executing)
     source, body, original_job = owner_input.source(store, settings, view,
         row["owner_event_id"], clock(), history=row["owner_event_id"] != job["event_id"])
     consumer = store.one("SELECT conversation_id FROM events WHERE event_id=?", (job["event_id"],))
@@ -225,10 +226,11 @@ def _prepared(store, settings, clock, job, item_id):
     return row, image, prepared
 
 
-def inputs(store, settings, clock, job):
+def inputs(store, settings, clock, job, *, executing=True):
     rows = store.rows("SELECT item_id FROM agent_image_inputs WHERE job_id=? ORDER BY position",
                       (job["job_id"],))
-    return [_prepared(store, settings, clock, job, row["item_id"]) for row in rows]
+    return [_prepared(store, settings, clock, job, row["item_id"], executing=executing)
+            for row in rows]
 
 
 def waiting(core, job):

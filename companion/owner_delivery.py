@@ -17,19 +17,43 @@ def _job(store, job_id):
                      "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
 
 
-def _history_proof(store, job):
+def _snapshots(store, job):
     if job["kind"] != "chat" or reply_revision.control_job(store, job):
         return []
     row = store.one("SELECT phase,snapshots_json FROM agent_conversations WHERE job_id=?",
                      (job["job_id"],))
     try:
         snapshots = json.loads(row["snapshots_json"]) if row else []
-        history = [item["proof"] for item in snapshots if item["kind"] == "history"]
-        if not row or row["phase"] not in {"OUTPUT", "COMPLETE"} or len(history) != 1:
+        if not row or row["phase"] not in {"OUTPUT", "COMPLETE"} or not isinstance(snapshots, list):
+            raise ValueError("original context snapshots required")
+        return snapshots
+    except (ValueError, KeyError, TypeError) as error:
+        raise CoreError(reply_revision.CANCELLED, 409) from error
+
+
+def _history_proof(store, job):
+    if job["kind"] != "chat" or reply_revision.control_job(store, job):
+        return []
+    try:
+        history = [item["proof"] for item in _snapshots(store, job) if item["kind"] == "history"]
+        if len(history) != 1:
             raise ValueError("original history snapshot required")
         return history[0]
     except (ValueError, KeyError, TypeError) as error:
         raise CoreError(reply_revision.CANCELLED, 409) from error
+
+
+def _images(store, settings, clock, job, *, executing):
+    from companion import agent_images
+
+    try:
+        saved = [item["item_ids"] for item in _snapshots(store, job) if item["kind"] == "images"]
+        actual = [row["item_id"] for row, _, _ in agent_images.inputs(
+            store, settings, clock, job, executing=executing)]
+        if saved != ([actual] if actual else []):
+            raise ValueError("original image snapshots changed")
+    except (ValueError, KeyError, TypeError, CoreError) as error:
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
 def _sources(store, settings, clock, job, *, executing=False):
@@ -43,6 +67,7 @@ def _sources(store, settings, clock, job, *, executing=False):
     if job["kind"] == "chat":
         owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
         owner_input.check_history(store, settings, clock, job, _history_proof(store, job))
+        _images(store, settings, clock, job, executing=executing)
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
     elif job["kind"] == "poke":
@@ -81,6 +106,7 @@ def _material(store, row, job, view, requests):
             "event_sha256": event_digest(event), "content_sha256": row["content_sha256"],
             "delivery_key": row["delivery_key"], "action_type": row["action_type"],
             "history_sha256": paid_budget.sha(_history_proof(store, job)),
+            "context_sha256": paid_budget.sha(_snapshots(store, job)),
             "request_ids": requests}
 
 

@@ -82,6 +82,13 @@ STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送�
 领取租约与最终发送校验均比较当前版本；隐私版本变化后阻止旧回复发送，保留原模型费用。
 尚未开始发送的旧回复取消；已进入发送阶段则沿用既有取消证明与交付不确定性规则。
 
+原生回复还固定 SDK 上下文快照摘要。领取与最终发送时重用 `agent_images.inputs`，
+核对原图签名、字节摘要、来源、用途、租约绑定与原有效期；此处读取已完成任务的原证据，
+不会重开执行租约、下载或模型调用。复用 DSH
+[固定版本的附件保存与本地消费职责划分](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/attachment.ts)，
+以及 [Pydantic AI 的会话消息保存](https://ai.pydantic.dev/message-history/)；
+授权、有效期和来源校验继续由 Core 的既有证据机制负责。
+
 原生分段回复沿用 `continuous.segment_pacing_pending` 的本地 ACK 计时原则：
 RESERVED 保存既有 `reply_segments.journal_value`，下一次领取租约前读取原 ACK
 journal 时间并等待该段间隔，重启后仍使用同一证据。缺少分段元数据的历史 ACK
