@@ -3,6 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_LINK_MODE=copy HF_HUB_DISABL
 WORKDIR /app
 RUN pip install --no-cache-dir uv==0.12.10
 COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 COPY companion ./companion
 COPY source_reader ./source_reader
 COPY companion_onebot_bridge ./companion_onebot_bridge

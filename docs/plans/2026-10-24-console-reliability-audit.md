@@ -54,9 +54,21 @@ checks verify terminal rejection behavior alongside trusted proxy attribution.
 The main Dockerfile copies sources before uv sync, invalidating the dependency layer on source
 changes. The source-reader image already separates dependencies. The official uv remedy is
 --no-install-project before source COPY, followed by the original project sync. Local Docker
-Desktop Linux engine is unavailable. The user subsequently supplied a remote Docker host; it has
-running services, so only an isolated resource-limited build experiment is authorized. Dockerfile
-is unchanged until the measured candidate is validated; no speedup/build pass is yet claimed. Fresh CI without persisted layers would not automatically get a warm-build benefit.
+Desktop Linux engine is unavailable. The user subsequently supplied a remote Docker host with
+running services. A dedicated buildx docker-container builder, limited to one CPU and 2 GiB RAM,
+compared the tracked source at 89a71d3 with the single dependency-layer addition. Each variant
+received a cache-only seed, then a source-only comment change and an image-load build. Baseline
+source-change build took 155.202 seconds; the layered version took 134.270 seconds (13.5% less).
+The final sync/user setup step fell from 28.4 to 6.2 seconds; the intermediate dependency step
+was cached. Image export still dominated both runs. Seed times (63.982 and 42.947 seconds) are
+not a cold-build comparison because the later variant shared the Python/pip layers.
+
+Both images passed network-disabled imports of all six packaged modules and UID 10001 checks.
+Installed package/version inventories were compared for equality. The measured dependency-layer
+addition is now in Dockerfile. This single-host, single-run result is scoped to source-only
+rebuilds; fresh CI without persisted layers would not automatically gain this benefit. The
+dedicated builder and two uniquely tagged images were removed successfully; existing services
+were not changed. Local benchmark logs and inventories are linked from the audit receipt.
 
 The session migrated_database fixture and SQLite backup already exist in tests/conftest.py.
 PR102 already measured full disjoint file shards and receipt reuse; neither is reimplemented.
