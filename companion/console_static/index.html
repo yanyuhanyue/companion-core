@@ -4,107 +4,64 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <meta name="referrer" content="same-origin">
-  <title>主人控制台 · Companion</title>
+  <meta name="referrer" content="no-referrer">
+  <title>Companion 主人控制台</title>
   <link rel="stylesheet" href="./app.css">
-  <script type="module" src="./app.js"></script>
+  <script src="./app.js" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">跳到主要内容</a>
+  <div id="boot" class="loading" role="status"><span class="spin"></span>正在恢复会话…</div>
 
-  <div id="boot" class="boot" role="status">
-    <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
-    <p>正在恢复会话<span class="loading-dots" aria-hidden="true">…</span></p>
+  <div id="login" class="login" hidden>
+    <section class="login-art" aria-hidden="true">
+      <span class="brand"><span class="brand-mark"><i></i><i></i></span><span><b>Companion</b><small>主人控制台</small></span></span>
+      <div class="moon"></div>
+      <h1>她今天做了什么，<br>想记住什么，花了多少。</h1>
+      <p>只有你能打开这里。每一条记忆都能追到原话，每一笔费用都有账可查。</p>
+    </section>
+    <section class="login-form">
+      <form id="login-form" novalidate>
+        <h2>登录控制台</h2>
+        <label class="field"><span>控制台密码</span>
+          <input class="input" id="pw" type="password" autocomplete="current-password" required>
+        </label>
+        <p class="err" id="login-err" role="alert" hidden></p>
+        <button class="btn primary" id="login-submit" type="submit">登录</button>
+        <p class="hint">密码不会保存在浏览器里。退出后，页面上的私人内容会被清除。</p>
+      </form>
+    </section>
   </div>
 
-  <section id="login" class="auth-shell" aria-labelledby="login-title" hidden>
-    <div class="auth-story">
-      <a class="brand" href="#overview" aria-label="Companion 主人控制台">
-        <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
-        <span>Companion<span class="brand-caption">主人控制台</span></span>
-      </a>
-      <div class="auth-intro">
-        <span class="eyebrow">陪伴的日常，有迹可循</span>
-        <h1>看见此刻，<br>也记得一路走来。</h1>
-        <p>状态、记忆与每一次活动，<br>都在一个安静的地方。</p>
-      </div>
-      <p class="auth-footnote"><span data-icon="shield" aria-hidden="true"></span>仅向主人开放</p>
-    </div>
-    <div class="auth-entry">
-      <form id="login-form" class="login-card">
-        <span class="eyebrow">欢迎回来</span>
-        <h2 id="login-title">登录控制台</h2>
-        <p class="muted">使用控制台密码，继续查看和管理。</p>
-        <label for="password">控制台密码</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
-        <p id="login-error" class="form-error" role="alert" hidden></p>
-        <button class="button primary login-submit" type="submit">登录控制台<span data-icon="arrow-right" aria-hidden="true"></span></button>
-        <p class="field-hint">密码不会保存在浏览器中。</p>
-      </form>
-    </div>
-  </section>
-
-  <div id="app" class="app-shell" hidden>
-    <button id="nav-scrim" class="nav-scrim" aria-label="关闭导航菜单" tabindex="-1" hidden></button>
-    <aside id="sidebar" class="sidebar" aria-label="主导航">
-      <div class="sidebar-brand">
-        <a class="brand" href="#overview">
-          <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
-          <span>Companion<span class="brand-caption">主人控制台</span></span>
-        </a>
-        <button id="nav-close" class="icon-button mobile-only" aria-label="关闭导航菜单"><span data-icon="close" aria-hidden="true"></span></button>
-      </div>
-      <nav class="navigation">
-        <p class="nav-label">日常</p>
-        <a href="#overview" data-route="overview"><span data-icon="overview" aria-hidden="true"></span><span>概览</span></a>
-        <a href="#activity" data-route="activity"><span data-icon="activity" aria-hidden="true"></span><span>活动时间线</span></a>
-        <a href="#memories" data-route="memories"><span data-icon="memory" aria-hidden="true"></span><span>记忆</span></a>
-        <a href="#life" data-route="life"><span data-icon="life" aria-hidden="true"></span><span>成长与日记</span></a>
-        <p class="nav-label">内容</p>
-        <a href="#content" data-route="content"><span data-icon="content" aria-hidden="true"></span><span>阅读与文件</span></a>
-        <a href="#memes" data-route="memes"><span data-icon="image" aria-hidden="true"></span><span>表情素材</span></a>
-        <a href="#voice" data-route="voice"><span data-icon="microphone" aria-hidden="true"></span><span>语音与节点</span></a>
-        <a href="#account-actions" data-route="account-actions"><span data-icon="account" aria-hidden="true"></span><span>QQ 自主行为</span></a>
-        <p class="nav-label">管理</p>
-        <a href="#diagnostics" data-route="diagnostics"><span data-icon="pulse" aria-hidden="true"></span><span>运行诊断</span></a>
-        <a href="#configuration" data-route="configuration"><span data-icon="settings" aria-hidden="true"></span><span>配置</span></a>
-      </nav>
-      <div class="sidebar-session">
-        <span class="session-icon" data-icon="shield" aria-hidden="true"></span>
-        <div><strong>主人会话</strong><span id="session-expiry">已登录</span></div>
-        <button id="logout" class="icon-button" aria-label="退出登录" title="退出登录"><span data-icon="logout" aria-hidden="true"></span></button>
+  <div id="app" class="shell" hidden>
+    <aside class="side" id="side" aria-label="主导航">
+      <a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true"><i></i><i></i></span><span><b>Companion</b><small>主人控制台</small></span></a>
+      <div class="presence" id="presence"></div>
+      <nav class="nav" id="nav"></nav>
+      <div class="side-foot">
+        <div><strong>主人会话</strong><span id="session-left"></span></div>
+        <button class="icon-btn" id="logout" type="button" title="退出登录" aria-label="退出登录"><span data-icon="logout"></span></button>
       </div>
     </aside>
-
-    <div id="workspace" class="workspace">
-      <header class="topbar">
-        <div class="topbar-location">
-          <button id="nav-toggle" class="icon-button mobile-only" aria-label="打开导航菜单" aria-expanded="false" aria-controls="sidebar"><span data-icon="menu" aria-hidden="true"></span></button>
-          <span class="location-root">工作台</span><span class="location-divider" aria-hidden="true">/</span><span id="location-title">概览</span>
-        </div>
-        <div class="topbar-actions">
-          <span id="connection" class="connection" role="status"><span class="status-dot"></span><span>正在连接</span></span>
-          <span class="topbar-divider" aria-hidden="true"></span>
-          <button id="refresh" class="icon-button" aria-label="刷新当前页面" title="刷新当前页面"><span data-icon="refresh" aria-hidden="true"></span></button>
-        </div>
+    <div class="main">
+      <header class="top" id="top">
+        <button class="icon-btn menu-btn" id="menu" type="button" aria-label="打开导航"><span data-icon="menu"></span></button>
+        <span class="crumb" id="crumb"></span>
+        <button class="search-btn" id="search-open" type="button"><span data-icon="search"></span><span class="sb-text">跳转到页面</span><kbd>Ctrl K</kbd></button>
+        <span class="conn" id="conn" role="status"><i></i><span>正在连接</span></span>
+        <button class="icon-btn" id="refresh" type="button" title="刷新" aria-label="刷新当前页面"><span data-icon="refresh"></span></button>
       </header>
-
-      <main id="main" tabindex="-1">
-        <div class="page-heading">
-          <div><p id="page-eyebrow" class="eyebrow">此刻与近况</p><h1 id="page-title">概览</h1><p id="page-description" class="page-description">状态与记录，放在一起看。</p></div>
-          <span id="page-date" class="page-date"></span>
-        </div>
+      <main class="page-wrap">
         <div id="notice" class="notice" role="status" hidden></div>
-        <div id="view" aria-busy="false"></div>
-        <footer class="workspace-footer"><span>Companion Core</span><span id="updated-at">等待同步</span></footer>
+        <div class="page" id="page" tabindex="-1" aria-busy="false"></div>
       </main>
     </div>
   </div>
 
-  <dialog id="action-dialog" aria-labelledby="dialog-title">
-    <div class="dialog-heading"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="关闭对话框"><span data-icon="close" aria-hidden="true"></span></button></div>
-    <div id="dialog-content"></div>
-  </dialog>
+  <dialog id="dlg"></dialog>
+  <dialog id="palette" class="palette" aria-label="跳转到页面"></dialog>
+  <div id="drawer-scrim" class="drawer-scrim" hidden></div>
+  <aside id="drawer" class="drawer" aria-hidden="true"></aside>
+  <div id="tip" class="tip" hidden></div>
   <div id="toast" class="toast" role="status" hidden></div>
 </body>
 </html>
