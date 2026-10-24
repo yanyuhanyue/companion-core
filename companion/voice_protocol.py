@@ -11,7 +11,9 @@ from typing import Annotated, Literal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from companion_delivery_protocol.authority import validate_authority_ref
 
 PROTOCOL_VERSION = 2
 LEASE_DOMAIN = b"companion-core/voice-node-lease/v2\x00"
@@ -325,15 +327,13 @@ class VoiceAudioResult(VoiceDTO):
         return self
 
 
-class VoiceDeliveryBinding(VoiceDTO):
-    schema_version: Literal[2] = 2
+class _VoiceDeliveryMaterial(VoiceDTO):
     retirement_token: LeaseToken
     job_id: JobId
     generation: Generation
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     delivery_key: str = Field(min_length=1, max_length=512)
     event_id: str = Field(min_length=1, max_length=128)
-    window_sha256: Digest
     source_sha256: Digest
     identity_sha256: Digest
     privacy_epoch: int = Field(ge=0, strict=True)
@@ -350,6 +350,23 @@ class VoiceDeliveryBinding(VoiceDTO):
     expires_at: AwareDatetime
 
 
+class LegacyVoiceDeliveryBinding(_VoiceDeliveryMaterial):
+    """Read-only schema used to retire historical v2 delivery custody."""
+
+    schema_version: Literal[2] = 2
+    window_sha256: Digest
+
+
+class VoiceDeliveryBinding(_VoiceDeliveryMaterial):
+    schema_version: Literal[3] = 3
+    authority: dict
+
+    @field_validator("authority")
+    @classmethod
+    def original_authority(cls, value):
+        return validate_authority_ref(value)
+
+
 class VoiceRetiredBinding(VoiceDTO):
     kind: Literal["capability", "legacy_signature"]
     verifier: Digest
@@ -358,9 +375,18 @@ class VoiceRetiredBinding(VoiceDTO):
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     event_id: str = Field(min_length=1, max_length=128)
     delivery_key: str = Field(min_length=1, max_length=512)
-    window_sha256: Digest
+    window_sha256: Digest | None = Field(default=None, exclude_if=lambda value: value is None)
+    authority: dict | None = Field(default=None, exclude_if=lambda value: value is None)
     voice_policy_sha256: Digest
     reply_revision: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def original_scope(self):
+        if (self.window_sha256 is None) == (self.authority is None):
+            raise ValueError("retirement requires exactly one original authority")
+        if self.authority is not None:
+            validate_authority_ref(self.authority)
+        return self
 
 
 class VoiceDeliveryEnvelope(VoiceDTO):

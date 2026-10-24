@@ -6,13 +6,13 @@ import json
 import secrets
 import uuid
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import datetime
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import Field
+from pydantic import Field, field_validator
 
-from companion import live_text, paid_budget, private_life, qq_source, reply_revision
+from companion import paid_budget, private_life, reply_revision, voice_authority
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.qq_rich import input_digest
@@ -32,9 +32,10 @@ from companion.voice_protocol import (
     digest,
     sign_voice_lease,
 )
+from companion_delivery_protocol.authority import validate_authority_ref
 from companion_voice_node.providers import LocalVoiceError, WAVLimits, validate_wav
 
-UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v1\x00"
+UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v2\x00"
 ACTIVE = {"QUEUED", "LEASED", "RUNNING"}
 COMPLETED = {"READY", "TRANSCRIBED"}
 REPLY_RECEIPT = "voice_reply:"
@@ -44,7 +45,13 @@ INPUT_RECEIPT = "voice_input:"
 class VoiceASRProof(VoiceDTO):
     """Capture-key attestation binding one native record segment to uploaded WAV bytes."""
 
-    plan_sha256: Digest
+    authority: dict
+
+    @field_validator("authority")
+    @classmethod
+    def authority_ref(cls, value):
+        return validate_authority_ref(value)
+
     event_id: str = Field(min_length=1, max_length=128)
     source_event_id: str = Field(min_length=1, max_length=256)
     source_input_sha256: Digest
@@ -56,7 +63,7 @@ class VoiceASRProof(VoiceDTO):
 
 
 def sign_asr_proof(private_key, **material):
-    """For the authenticated capture adapter; canonical encoding is protocol v1 JSON."""
+    """Capture adapter signature over the existing canonical JSON and v2 owner reference."""
     unsigned = VoiceASRProof(**material, signature="0" * 128).model_dump(
         mode="json", exclude={"signature"}
     )
@@ -83,7 +90,7 @@ def _retire_content(store, row):
         "UPDATE voice_jobs SET input_blob=NULL,result_blob=NULL,input_sha256=NULL,"
         "result_sha256=NULL,source_sha256=NULL,source_input_sha256=NULL,source_proof_sha256=NULL,"
         "outbox_content_sha256=NULL,identity_sha256=NULL,window_sha256=NULL,manifest_sha256=NULL,"
-        "config_sha256=NULL,config_json='{}',input_bytes=NULL,input_duration_seconds=NULL,"
+        "config_sha256=NULL,config_json='{}',authority_json='{}',input_bytes=NULL,input_duration_seconds=NULL,"
         "result_bytes=NULL,lease_json=NULL,lease_token_sha256=NULL,content_retired=1,"
         "cleanup_epoch=?,cleanup_state=CASE WHEN stop_token_sha256 IS NULL "
         "OR cleanup_state='CONFIRMED' THEN 'CONFIRMED' ELSE 'PENDING' END WHERE job_id=?",
@@ -194,14 +201,20 @@ def retired_delivery_binding(binding, *, legacy_signature=None):
         raise CoreError("VOICE_LEGACY_PROOF_REQUIRED", 409)
     verifier = hashlib.sha256(bytes.fromhex(legacy_signature) if legacy_signature
                               else token.encode()).hexdigest()
-    return {"kind": "legacy_signature" if legacy_signature else "capability",
+    scope = {"authority": binding["authority"]} if "authority" in binding else {
+        "window_sha256": binding["window_sha256"]}
+    return {"kind": "legacy_signature" if legacy_signature else "capability", **scope,
             "verifier": verifier, **{key: binding[key] for key in (
                 "job_id", "generation", "message_id", "event_id", "delivery_key",
-                "window_sha256", "voice_policy_sha256", "reply_revision")}}
+                "voice_policy_sha256", "reply_revision")}}
 
 
 def _invalidate_receipts(store, where, parameters, reason):
-    from companion.voice_protocol import VoiceDeliveryBinding, VoiceRetiredBinding
+    from companion.voice_protocol import (
+        LegacyVoiceDeliveryBinding,
+        VoiceDeliveryBinding,
+        VoiceRetiredBinding,
+    )
 
     for row in store.rows("SELECT key,value FROM runtime_meta WHERE " + where, parameters):
         value = {"state": "FENCED", "reason": reason}
@@ -228,7 +241,10 @@ def _invalidate_receipts(store, where, parameters, reason):
                     pass
             else:
                 try:
-                    binding = VoiceDeliveryBinding.model_validate(previous.get("binding"))
+                    raw = previous.get("binding")
+                    codec = (LegacyVoiceDeliveryBinding if isinstance(raw, dict)
+                             and raw.get("schema_version") == 2 else VoiceDeliveryBinding)
+                    binding = codec.model_validate(raw)
                     if (previous.get("state") in {"AUDIO", "FENCED"}
                         and previous.get("binding_sha256") == digest(binding)
                         and previous.get("job_id") == binding.job_id
@@ -285,14 +301,7 @@ class VoiceJobs:
 
     def _node(self, node_id=None, operation=None):
         config = self.settings.voice
-        if not config.enabled or not private_life.enabled(self.settings):
-            raise CoreError("VOICE_DISABLED", 403)
-        approval = self.settings.live_text_window
-        if (
-            approval.voice_scope != "owner_voice_v1"
-            or approval.voice_policy_sha256 != config.authority_sha256()
-        ):
-            raise CoreError("VOICE_SCOPE_REQUIRED", 403)
+        voice_authority.current(self.store, self.settings, self.clock)
         if node_id is None:
             node_id = next(
                 (
@@ -308,7 +317,7 @@ class VoiceJobs:
         return node_id, node
 
     def _tts_source(self, message_id, text=None, *, delivery_token=None, retained_ready=False):
-        row = private_life.check_delivery(self.store, self.settings, self.clock, message_id)
+        row = voice_authority.delivery(self.store, self.settings, self.clock, message_id)
         reply_revision.check_delivery(self.store, message_id)
         content = json.loads(row["content_json"])
         valid_stage = row["state"] == "PENDING" and row["attempt_count"] == 0
@@ -334,20 +343,13 @@ class VoiceJobs:
         if not event or not reply_revision.source_active(self.store, event["event_id"]):
             raise CoreError("VOICE_SOURCE_CHANGED", 403)
         if event["source"] == "qq.onebot":
-            qq_source.source(
-                self.store,
-                self.settings,
-                self.settings.live_text_window,
-                event["event_id"],
-                allow_commands=True,
-            )
+            voice_authority.source(self.store, self.settings, self.clock, event["event_id"],
+                                   allow_commands=True)
         return event, row
 
     def _asr_source(self, event_id, segment_index):
-        approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
-        if approval.rich_input_scope != "references_v1":
-            raise CoreError("VOICE_ASR_SCOPE_REQUIRED", 403)
-        event, body, job = qq_source.source(self.store, self.settings, approval, event_id)
+        _, event, body, job = voice_authority.source(
+            self.store, self.settings, self.clock, event_id)
         reply_revision.require_current(self.store, event_id)
         reply_revision.check_job(self.store, job)
         segment = next(
@@ -380,12 +382,8 @@ class VoiceJobs:
             or event["privacy_scope"] != "private"
         ):
             raise CoreError("VOICE_PRIVATE_SOURCE_REQUIRED", 403)
-        deadline = min(
-            after(now, config.job_ttl_seconds),
-            self.settings.live_text_window.ends_at.astimezone(UTC).isoformat(
-                timespec="microseconds"
-            ),
-        )
+        view = voice_authority.current(self.store, self.settings, self.clock)
+        deadline = voice_authority.deadline(view, after(now, config.job_ttl_seconds))
         return dict(
             job_id=uid("voice"),
             operation=operation,
@@ -394,7 +392,8 @@ class VoiceJobs:
             conversation_id=event["conversation_id"],
             source_sha256=private_life.event_digest(event),
             identity_sha256=paid_budget.sha([self.settings.owner_qq_id, self.settings.bot_qq_id]),
-            window_sha256=self.settings.live_text_window.plan_sha256,
+            window_sha256=None,
+            authority_json=encode(view.authority.as_dict()),
             captured_privacy_epoch=epoch(self.store),
             captured_reply_revision=revision["reply_revision"],
             node_id=node_id,
@@ -497,7 +496,8 @@ class VoiceJobs:
             )
             proof = VoiceASRProof.model_validate(upload_proof)
             expected = dict(
-                plan_sha256=self.settings.live_text_window.plan_sha256,
+                authority=voice_authority.current(
+                    self.store, self.settings, self.clock).authority.as_dict(),
                 event_id=owner_event_id,
                 source_event_id=event["source_event_id"],
                 source_input_sha256=input_digest(body),
@@ -509,7 +509,8 @@ class VoiceJobs:
             if proof.model_dump(mode="json", exclude={"signature"}) != expected:
                 raise ValueError()
             Ed25519PublicKey.from_public_bytes(
-                bytes.fromhex(self.settings.live_text_window.capture_public_key)
+                bytes.fromhex(voice_authority.current(
+                    self.store, self.settings, self.clock).policy.capture.public_key)
             ).verify(bytes.fromhex(proof.signature), UPLOAD_DOMAIN + canonical_bytes(expected))
         except (ValueError, TypeError, InvalidSignature, LocalVoiceError):
             raise CoreError("VOICE_ASR_UPLOAD_PROOF_REQUIRED", 403) from None
@@ -570,7 +571,7 @@ class VoiceJobs:
                 "content_sha256": row["outbox_content_sha256"],
                 "delivery_key": row["outbox_delivery_key"],
                 "source_sha256": row["source_sha256"],
-                "window_sha256": row["window_sha256"],
+                "authority": voice_authority.saved(row),
                 "identity_sha256": row["identity_sha256"],
                 "privacy_epoch": row["captured_privacy_epoch"],
                 "reply_revision": row["captured_reply_revision"],
@@ -595,10 +596,10 @@ class VoiceJobs:
 
     def _authority(self, row, *, delivery_token=None):
         node_id, _ = self._node(row["node_id"], row["operation"])
-        approval = self.settings.live_text_window
+        voice_authority.current(self.store, self.settings, self.clock,
+                                authority=voice_authority.saved(row))
         if (
             row["config_sha256"] != self.settings.voice.node_fingerprint(node_id)
-            or row["window_sha256"] != approval.plan_sha256
             or row["captured_privacy_epoch"] != epoch(self.store)
             or row["identity_sha256"]
             != paid_budget.sha([self.settings.owner_qq_id, self.settings.bot_qq_id])
