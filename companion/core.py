@@ -289,6 +289,8 @@ class Core(Runtime):
                 (state, now, job["job_id"]),
             )
         budget.expire_cancelled_reservations(s, self.settings, now)
+        from companion.voice_jobs import expire_voice_jobs
+        expire_voice_jobs(s, now)
         recover_deliveries(s, now)
 
     def claim_job(self, worker_id):

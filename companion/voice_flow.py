@@ -81,7 +81,7 @@ class VoiceFlow:
     def _transaction(self):
         return nullcontext() if self.store.db.in_transaction else self.store.transaction()
 
-    def _read(self, key):
+    def _read(self, key, *, allow_expired_input=False):
         row = self.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
         if row is None:
             return None
@@ -89,7 +89,10 @@ class VoiceFlow:
             value = json.loads(row["value"])
             if not isinstance(value, dict):
                 raise ValueError()
-            if value.get("state") == "FENCED":
+            if value.get("state") == "FENCED" and not (
+                allow_expired_input and key.startswith(INPUT_RECEIPT)
+                and value.get("reason") == "VOICE_EXPIRED"
+            ):
                 raise CoreError("VOICE_FLOW_FENCED", 409)
             return value
         except (ValueError, TypeError):
@@ -366,8 +369,10 @@ class VoiceFlow:
                 return VoiceInputStatus(state="NONE")
             event, body, job = self._input_source(event_id, chat_job_id)
             records, policy = _records(body), self.settings.voice.asr
-            value = self._read(INPUT_RECEIPT + event_id)
+            value = self._read(INPUT_RECEIPT + event_id, allow_expired_input=True)
             authority = self._input_authority(event)
+            expired_input = bool(value and value.get("state") == "FENCED"
+                                 and value.get("reason") == "VOICE_EXPIRED")
             if value is None:
                 value = {
                     **authority,
@@ -376,14 +381,15 @@ class VoiceFlow:
                     "record_count": len(records),
                     "wait_until": self._input_wait_until(event),
                 }
-            elif self._stale_input_epoch(value, authority):
+            elif expired_input or self._stale_input_epoch(value, authority):
                 if job["state"] not in {"QUEUED", "RETRY_WAIT"}:
                     raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
                 # A different source's erasure invalidates old media authority,
                 # but must not strand this still-authenticated conversation.
                 # Discard all prior audio/transcripts, retaining native UNKNOWN
                 # resource responsibility for any input already released.
-                reason = "VOICE_INPUT_PRIVACY_EPOCH_CHANGED"
+                reason = ("VOICE_TRANSCRIPTION_EXPIRED" if expired_input
+                          else "VOICE_INPUT_PRIVACY_EPOCH_CHANGED")
                 for row in self.store.rows("SELECT job_id FROM voice_jobs "
                                            "WHERE event_id=? AND operation='asr'", (event_id,)):
                     self.jobs.withdraw(row["job_id"], reason)
@@ -540,10 +546,14 @@ class VoiceFlow:
             if not indices:
                 raise CoreError("VOICE_ASR_SOURCE_INVALID", 403)
             authority = self._input_authority(event)
-            value = self._read(INPUT_RECEIPT + event_id)
-            stale_epoch = bool(value and self._stale_input_epoch(value, authority))
+            value = self._read(INPUT_RECEIPT + event_id, allow_expired_input=True)
+            expired_input = bool(value and value.get("state") == "FENCED"
+                                 and value.get("reason") == "VOICE_EXPIRED")
+            stale_epoch = bool(value and not expired_input
+                               and self._stale_input_epoch(value, authority))
             until = datetime.fromisoformat(self._input_wait_until(event))
-            state = "FALLBACK" if stale_epoch else value["state"] if value else "WAITING"
+            state = ("FALLBACK" if stale_epoch or expired_input
+                     else value["state"] if value else "WAITING")
             if state == "WAITING" and (until <= datetime.fromisoformat(self.clock())
                                         or job["state"] not in {"QUEUED", "RETRY_WAIT"}
                                         or not self._asr_available()):
@@ -554,9 +564,12 @@ class VoiceFlow:
                 row = self.store.one("SELECT * FROM voice_jobs WHERE event_id=? "
                                      "AND operation='asr' AND source_segment_index=?",
                                      (event_id, index))
-                if row and (row["source_input_sha256"] != source_hash
-                            or row["window_sha256"] != authority["window_sha256"]
-                            or row["captured_reply_revision"] != authority["reply_revision"]):
+                if row and (
+                    row["captured_reply_revision"] != authority["reply_revision"]
+                    or not row["content_retired"] and (
+                        row["source_input_sha256"] != source_hash
+                        or row["window_sha256"] != authority["window_sha256"])
+                ):
                     raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
                 records.append({
                     "index": index, "state": row["state"] if row else "MISSING",
