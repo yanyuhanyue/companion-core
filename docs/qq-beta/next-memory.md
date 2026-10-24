@@ -160,6 +160,14 @@ done 同时要求原 Goal/step 完成、完全一致的结果 ID、成功 FETCHE
 不能证明目标完成。DELIVERY_UNCERTAIN 和草稿均不算 told。最多读取 20 个关联目标及 20 条回复，
 超过时显式标记 truncated，消费者不得把有界结果说成全部历史。
 
+目标来源与事实来源使用不同的原生边界：Memory 事实仍要求 owner 证据；Goal 可以同时引用
+owner 输入和真实 observation，后者仍保留 companion 身份，逐项核验私有来源闭包、TTL、撤回和
+显式 allowlist。不会将观察伪装成主人发言。执行视图还按原 `goal_step_json` 中的 goal/step ID
+读取关联 Reader request 与 reading_attempt 状态，返回 `executions` 中的原 request/step ID。
+最多展示 20 项，UNKNOWN 优先且单独标记截断；请求来源也须满足同样的授权及有效性检查。
+任何仍可见的 UNKNOWN 执行保持投影 UNKNOWN，即使原目标已因重试耗尽变成 FAILED；
+`native_state` 保留真实目标状态。投影不结算、释放或重试这些原生责任。
+
 每次查询复用 `MemorySources`、来源有效期和 Ledger custody/epoch 复核，从同一 Core DB 重建。
 没有持久投影或第二事实源，因此没有新增表、擦除 handler 或后台任务；原生删除和擦除重放后重新查询
 不能复活记忆。按调用方实际使用传 `used_memory_ids`，不要把“候选被检索到”冒充“已经使用”。

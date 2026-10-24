@@ -7,11 +7,13 @@ from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
+from companion.goals import GoalProposal, GoalScope
 from companion.memory import Memory
+from companion.memory_context import MemorySources
 from companion.memory_projections import MemoryProjections
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, lease_deliveries, reconcile_delivery
-from tests.conftest import run
+from tests.conftest import ingest, run
 from tests.test_goals import setup_goal
 from tests.test_m1 import remember
 from tests.test_next_memory_context import episode
@@ -196,3 +198,115 @@ def test_goal_done_label_alone_is_insufficient(core, damage):
         core.store.execute("UPDATE events SET privacy_scope='public' WHERE event_id=?", (result,))
     snapshot = MemoryProjections(core.memory).snapshot(core.clock(), episode_ids=[eid])
     assert snapshot["episodes"][0]["goals"][0]["state"] == "UNKNOWN"
+
+
+def mixed_goal(core):
+    original = setup_goal(core)
+    core.settings.memory_enabled = True
+    eid = episode(core, 1)
+    core.clock.advance(8 * 86400)
+    result = fetched(core, original)
+    goal = core.goals.propose(GoalProposal(
+        topic="根据实际文章继续阅读", source_event_ids=["evt_test_1", result],
+        scope=GoalScope(operation="read_content", url="https://example.org/next"),
+    ))
+    core.goals.accept(goal)
+    return eid, goal, result
+
+
+@pytest.mark.parametrize("boundary", ["valid", "withdrawn", "ttl", "allowlist", "ancestor"])
+def test_native_mixed_goal_roots_keep_observation_identity_and_source_boundaries(core, boundary):
+    eid, goal, observed = mixed_goal(core)
+    view = MemoryProjections(core.memory)
+    scope = {"episode_ids": [eid]}
+    first = view.snapshot(core.clock(), **scope)["episodes"][0]
+    assert first["temperature"] == "Hot"
+    projected = next(row for row in first["goals"] if row["goal_id"] == goal)
+    assert projected["source_event_ids"] == core.goals.source_ids(goal)
+    # Broader Goal evidence does not relax owner-only Memory evidence.
+    assert MemorySources(core.memory, core.clock()).event(observed, require_text=False) is None
+    if boundary == "valid":
+        scope["event_ids"] = ["evt_test_1", observed]
+        assert view.snapshot(core.clock(), **scope)["episodes"][0] == first
+        return
+    if boundary == "withdrawn":
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, [observed], core.clock())
+    elif boundary == "ttl":
+        core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
+    elif boundary == "allowlist":
+        scope["event_ids"] = ["evt_test_1"]
+    else:
+        core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
+    snapshot = view.snapshot(core.clock(), **scope)
+    assert not any(row["goal_id"] == goal for item in snapshot["episodes"] for row in item["goals"])
+
+
+def timed_out_reads(core):
+    goal = setup_goal(core)
+    core.settings.memory_enabled = True
+    eid = episode(core, 1)
+    enable_observations(core, "web")
+    core.settings.web_reading_enabled = True
+    core.settings.observation_adapters["reader"].allowed_hosts = ["example.org"]
+    core.settings.exploration_daily_requests = core.settings.exploration_monthly_requests = 100
+    core.settings.exploration_daily_deep_reads = 100
+    core.settings.exploration_daily_bytes = 100 * core.settings.exploration_max_response_bytes
+    core.goals.accept(goal)
+    requests = []
+    for _ in range(3):
+        assert core.exploration.schedule_goal()
+        leased = core.exploration.lease("reader", reading=True)
+        assert leased
+        requests.append(leased["request_id"])
+        core.clock.advance(31)
+        core.exploration.recover()
+        core.clock.advance(300)
+    assert core.goals.get(goal)["state"] == "FAILED"
+    assert {row["state"] for row in core.store.rows("SELECT state FROM exploration_requests")} == {
+        "UNKNOWN"}
+    return eid, goal, requests
+
+
+@pytest.mark.parametrize("boundary", ["valid", "withdrawn", "ttl", "allowlist"])
+def test_native_reader_retry_exhaustion_preserves_unknown_and_accounting(core, boundary):
+    eid, goal, requests = timed_out_reads(core)
+    view = MemoryProjections(core.memory)
+    before = core.store.rows("SELECT * FROM exploration_requests")
+    snapshot = view.snapshot(core.clock(), episode_ids=[eid])
+    projected = snapshot["episodes"][0]["goals"][0]
+    assert projected["goal_id"] == goal and projected["native_state"] == "FAILED"
+    assert projected["state"] == "UNKNOWN" and not projected["closed"]
+    assert snapshot["episodes"][0]["temperature"] == "Hot"
+    assert {row["request_id"] for row in projected["executions"]} == set(requests)
+    assert all(row["state"] == "UNKNOWN" for row in projected["executions"])
+    assert before == core.store.rows("SELECT * FROM exploration_requests")
+    if boundary == "valid":
+        return
+    if boundary == "withdrawn":
+        with core.store.transaction():
+            core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
+    elif boundary == "ttl":
+        core.clock.advance((core.settings.raw_event_retention_days + 1) * 86400)
+    result = view.snapshot(core.clock(), episode_ids=[eid],
+                           event_ids=[] if boundary == "allowlist" else None)
+    assert result["episodes"] == []
+
+
+def test_goal_observation_expiry_does_not_hide_live_owner_episode(core):
+    original = setup_goal(core)
+    core.settings.memory_enabled = True
+    observed = fetched(core, original)
+    core.clock.advance(8 * 86400)
+    ingest(core, 2, "继续研究上次那篇文章")
+    eid = episode(core, 2)
+    goal = core.goals.propose(GoalProposal(
+        topic="继续研究文章", source_event_ids=["evt_test_2", observed],
+        scope=GoalScope(operation="read_content", url="https://example.org/next"),
+    ))
+    core.goals.accept(goal)
+    view = MemoryProjections(core.memory)
+    assert view.snapshot(core.clock(), episode_ids=[eid])["episodes"][0]["temperature"] == "Hot"
+    core.settings.raw_event_retention_days = 7
+    item = view.snapshot(core.clock(), episode_ids=[eid])["episodes"][0]
+    assert item["goals"] == [] and item["temperature"] == "Warm"

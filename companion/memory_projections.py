@@ -121,7 +121,7 @@ class MemoryProjections:
                 (goal["goal_id"],),
             )]
             if (not 1 <= len(roots) <= 100 or allowed is not None and not set(roots) <= allowed
-                or any(sources.event(key, require_text=False) is None for key in roots)):
+                or any(not self._goal_source(key, sources) for key in roots)):
                 continue
             step = self.store.one("SELECT * FROM goal_steps WHERE goal_id=?", (goal["goal_id"],))
             state = "discussed"
@@ -136,6 +136,10 @@ class MemoryProjections:
                 state = "done" if completed else "UNKNOWN"
             if step and step["state"] == "EXECUTION_UNCERTAIN":
                 state = "UNKNOWN"
+            executions, executions_truncated = self._executions(goal, step, sources, allowed)
+            if any(item["state"] == "UNKNOWN" or item["attempt_state"] == "UNKNOWN"
+                   for item in executions):
+                state = "UNKNOWN"
             commitment = self.store.one(
                 "SELECT c.state,c.feedback_outcome,o.state AS delivery_state "
                 "FROM commitments c LEFT JOIN outbox o ON o.message_id=c.feedback_message_id "
@@ -148,8 +152,43 @@ class MemoryProjections:
             )
             result.append({"goal_id": goal["goal_id"], "kind": goal["kind"],
                            "native_state": goal["state"], "state": state,
+                           "executions": executions, "executions_truncated": executions_truncated,
                            "told": told, "closed": closed, "source_event_ids": roots})
         return result, len(rows) > 20
+
+    def _goal_source(self, key, sources):
+        # Facts remain owner-only. Native goals may also cite actual observations.
+        if sources.event(key, require_text=False) is not None:
+            return True
+        observation = self.store.one(
+            "SELECT 1 FROM observations o JOIN events e USING(event_id) "
+            "WHERE o.event_id=? AND o.redacted=0 AND e.event_type='content.observed'",
+            (key,),
+        )
+        return bool(observation and self._live_lineage(list(sources._lineage(key)), sources))
+
+    def _executions(self, goal, step, sources, allowed):
+        if not step:
+            return [], False
+        rows = self.store.rows(
+            "SELECT r.request_id,r.state,a.state AS attempt_state FROM exploration_requests r "
+            "LEFT JOIN reading_attempts a USING(request_id) WHERE r.redacted=0 "
+            "AND r.operation='read' AND json_extract(r.goal_step_json,'$.goal_id')=? "
+            "AND json_extract(r.goal_step_json,'$.step_id')=? "
+            "ORDER BY (r.state='UNKNOWN' OR COALESCE(a.state='UNKNOWN',0)) DESC,"
+            "r.created_at DESC,r.request_id LIMIT 21", (goal["goal_id"], step["step_id"]),
+        )
+        executions = []
+        for row in rows[:20]:
+            ids = [r["event_id"] for r in self.store.rows(
+                "SELECT event_id FROM exploration_evidence WHERE request_id=? "
+                "ORDER BY event_id LIMIT 101", (row["request_id"],),
+            )]
+            if (not 1 <= len(ids) <= 100 or allowed is not None and not set(ids) <= allowed
+                or any(not self._goal_source(key, sources) for key in ids)):
+                continue
+            executions.append({**row, "step_id": step["step_id"]})
+        return executions, len(rows) > 20
 
     def _completed(self, goal, step, roots, sources, allowed):
         key = goal["result_event_id"]
@@ -163,8 +202,14 @@ class MemoryProjections:
         if not receipt or receipt["result_status"] not in {"FETCHED", "WATCHED"}:
             return False
         lineage = list(sources._lineage(key))
-        now = datetime.fromisoformat(sources.now)
         if not set(roots) <= {event["source_id"] for event in lineage}:
+            return False
+        return self._live_lineage(lineage, sources)
+
+    @staticmethod
+    def _live_lineage(lineage, sources):
+        now = datetime.fromisoformat(sources.now)
+        if not lineage:
             return False
         for event in lineage:
             if (event["event_id"] is None or event["redacted"] or event["erased"]
