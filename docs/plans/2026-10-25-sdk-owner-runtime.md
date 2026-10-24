@@ -236,3 +236,24 @@ the validator leaves the database unchanged. This reuses the project's existing 
 validator separation. The inspected [DSH file-send tool](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/media/send-file-tool.ts)
 returns native send receipts; the project's original custody, uncertainty and accounting remain
 necessary for historical reconciliation.
+
+### SDK selection of Bili media
+
+`analyze_shared_video(url)` reuses the existing Reader deferred-tool binding and Bili
+prepare/preview/clip phases. The model first selects `read_content`; only its original
+metadata observation can supply the video target. Native reading completion does not
+automatically start media analysis. Current `bili_video` permission, the original job's
+authority, captured owner input and original Reader grant remain mandatory at each phase
+and at model dispatch. The existing Bili row, paid reservation and per-phase receipts own
+idempotency and uncertainty; no replacement Reader request or media protocol is introduced.
+
+This reuses the inspected [DSH auxiliary vision tool](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/media/vision-tool.ts)
+separation and [Pydantic AI deferred tools](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/).
+Original tool-call IDs resume the SDK conversation after the independently running Reader
+returns its result. Existing bounded PyAV extraction and provenance remain unchanged.
+
+The synthetic acceptance runs real Core HTTP, independent SDK and isolated Reader processes,
+and actual local media extraction. Its short pytest temporary-directory name keeps the
+Windows child TEMP below the platform [GetTempPath limit](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppathw).
+A minimal launch probe reproduced a startup timeout with a 277-character TEMP and successful
+startup with a 74-character TEMP; the native extraction timeout was not relaxed.

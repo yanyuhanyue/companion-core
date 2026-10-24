@@ -28,7 +28,8 @@ from tests.test_owner_authority import activate, prepare
 
 
 @asynccontextmanager
-async def window(core, tmp_path, *, media=False, content=False, history=False, video=False):
+async def window(core, tmp_path, *, media=False, content=False, history=False, video=False,
+                 bili=False, model=None):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
@@ -50,6 +51,27 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
             "video_input": video_policy()})
         core.settings.content = core.settings.content.model_copy(update={
             "image_daily_micro_usd": 10000})
+    if bili:
+        from companion.bili_video_config import BiliVideoConfig
+        from companion.config import ObservationAdapterConfig
+
+        core.settings.bili_video = BiliVideoConfig(enabled=True)
+        core.settings.observation_enabled = core.settings.exploration_enabled = True
+        core.settings.observation_adapters = {"bili": ObservationAdapterConfig(
+            source="bilibili", media_analysis=True, reader_max_requests=8,
+            token="synthetic-bili-reader-token-123456")}
+        core.settings.exploration_daily_bytes = 200_000_000
+        core.settings.exploration_daily_requests = 100
+        core.settings.exploration_monthly_requests = 1000
+        core.settings.exploration_daily_deep_reads = 20
+        core.settings.exploration_max_response_bytes = 1_000_000
+        core.settings.content = core.settings.content.model_copy(update={
+            "image_daily_micro_usd": 1000000})
+        core.settings.paid_model = core.settings.paid_model.model_copy(update={
+            "per_request_calls": 6,
+            "image_input": core.settings.paid_model.image_input.model_copy(update={
+                "max_images_per_request": 4, "max_pixels_per_image": 512 * 512,
+                "max_bytes_per_image": 4000000})})
     key = Ed25519PrivateKey.generate()
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
         bot_qq_id=core.settings.bot_qq_id,
@@ -60,18 +82,20 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
     purposes = (["chat", "image", "file"] if media else ["chat"])
     purposes += ["content"] if content else []
     purposes += ["history"] if history else []
+    purposes += ["bili_video"] if bili else []
+    capability_names = (["image", "file"] if media else []) + (["bili_video"] if bili else [])
     policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
         "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
         "purposes": purposes,
         "history": {"scope": "owner_private", "not_before": core.clock(),
                     "max_turns": 16, "max_utf8_bytes": 64000} if history else {},
-        "capability_policies": {name: hashes[name] for name in ("image", "file")} if media else {},
+        "capability_policies": {name: hashes[name] for name in capability_names},
         "capture": {"public_key": key.public_key().public_bytes_raw().hex(),
             "identity_sha256": paid_budget.sha([config.owner_qq_id, config.bot_qq_id]),
             "protocol_epoch": config.protocol_epoch}})
     approved, _ = activate(core, policy)
     plan = SimpleNamespace(authority=approved["authority"], key=key)
-    with Core(core.settings, clock=core.clock) as http_core:
+    with Core(core.settings, model=model, clock=core.clock) as http_core:
         async with real_core_http(http_core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
             headers={"Authorization": "Bearer " + config.bridge_token},

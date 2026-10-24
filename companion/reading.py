@@ -334,7 +334,8 @@ class ReadingService:
                       "AND a.state='DEFERRED' AND c.phase='WAITING')",
                       (self.clock(), self.clock(), request_id))
             video = getattr(self, "video", None)
-            if video is not None and self.settings.bili_video.enabled and (
+            if (not owner_authority.required(s, self.settings)
+                and video is not None and self.settings.bili_video.enabled) and (
                 outcome["state"] == "DONE"
             ):
                 for content in s.rows("SELECT item_id FROM content_items WHERE read_request_id=? "

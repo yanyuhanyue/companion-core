@@ -206,6 +206,33 @@ def reader_tools(core, job, snapshots, persistence):
             metadata = persistence.bind_reader(ctx.tool_call_id, request_id)
         raise CallDeferred(metadata=metadata)
 
+    async def analyze_shared_video(ctx: RunContext,
+        url: Annotated[str, Field(max_length=2048)]) -> dict:
+        """Analyze bounded preview frames and optional clips of a previously read Bili link.
+
+        Args:
+            url: A shared Bilibili URL whose original Reader result contains video metadata.
+        """
+        check("bili_video")
+        source, canonical = content_target(url, web_hosts=web_hosts(core.settings))
+        item = next((row for row in catalog(core, job, snapshots) if row["url"] == canonical), None)
+        if source != "bilibili" or item is None or item["read_request_id"] is None:
+            return {"state": "UNAVAILABLE", "error_code": "BILI_VIDEO_PARENT_READING_REQUIRED"}
+        parent = reading_result(core, job, snapshots, item["read_request_id"])
+        observations = parent["items"] if parent else []
+        source_id = next((row["event_id"] for row in observations
+            if row["evidence"].get("read_observation", {}).get("evidence", {}).get("video")), None)
+        if source_id is None:
+            return {"state": "UNAVAILABLE", "error_code": "BILI_VIDEO_METADATA_REQUIRED"}
+        with core.store.transaction():
+            check("bili_video")
+            request_id = core.bili_video.schedule(item["item_id"], source_id, job_id=job["job_id"])
+            result = reading_result(core, job, snapshots, request_id)
+            metadata = persistence.bind_reader(ctx.tool_call_id, request_id)
+            if result is not None:
+                return result
+        raise CallDeferred(metadata=metadata)
+
     async def reading_status(request_id: str) -> dict:
         """Inspect an original Reader request; UNKNOWN never starts another attempt."""
         check()
@@ -226,6 +253,8 @@ def reader_tools(core, job, snapshots, persistence):
                     "state": "CANCELLED" if prior in {"QUEUED", "RUNNING"} else prior,
                     "execution_outcome": "UNKNOWN" if prior == "RUNNING" else prior}
 
-    return FunctionToolset([reading_catalog, read_content, discover_content,
-                            reading_status, cancel_reading],
-                           sequential=True, max_retries=1)
+    handlers = [reading_catalog, read_content, discover_content, reading_status, cancel_reading]
+    view = owner_authority.check_job(core.store, core.settings, core.clock, job, purpose="content")
+    if core.settings.bili_video.enabled and "bili_video" in view.policy.purposes:
+        handlers.append(analyze_shared_video)
+    return FunctionToolset(handlers, sequential=True, max_retries=1)
