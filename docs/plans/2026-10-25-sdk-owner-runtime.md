@@ -207,3 +207,23 @@ without adding a model loop or media downloader. Synthetic checks decode the act
 received by the video model, verify changing frames, and exercise GIF/APNG through an
 independent SDK process. The authenticated WebSocket daemon also carries a GIF through the
 same queue, Core upload, independent SDK tool and one final reply.
+
+
+### Original account send-check evidence
+
+`account_original_proof.validate_original_account_send_check` is a pure validator for the
+existing account receipt, Outbox row, reservation and frozen social plan. The caller authenticates
+the historical OwnerGrantPolicy, signed reconciliation proof and quiescence first. The helper
+has no Store, settings, clock, permission lookup, reservation or send capability. It returns the
+exact original `SendCheck` fields: authority, message_id, lease_token, content_sha256 and
+payload_sha256. Account proofs use `account_payload_sha256` and the original account_plan_id.
+
+The retained `account_action_delivery:<message_id>` receipt binds the old lease and both hashes.
+An intact plan is checked against its original JSON and policy; an erased plan uses the original
+retained hashes and matching erased projections. STOP, elapsed time and current configuration
+changes do not relabel the original evidence. Seven checks use real native planning and HTTP
+leasing, then verify STOP, expiry/configuration drift, five binding mutations and source erasure;
+the validator leaves the database unchanged. This reuses the project's existing historical-voice
+validator separation. The inspected [DSH file-send tool](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/media/send-file-tool.ts)
+returns native send receipts; the project's original custody, uncertainty and accounting remain
+necessary for historical reconciliation.
