@@ -246,11 +246,16 @@ def cancel_proactive_work(store, now):
 
 
 def lease_deliveries(store, settings, request, now):
-    from companion import account_actions, poke, private_life
+    from companion import account_actions, owner_authority, owner_delivery, poke, private_life
     from companion.social import proactive_allowed, share_delivery_problem
 
     with store.transaction():
         recover_deliveries(store, now)
+        owner = owner_authority.required(store, settings)
+        if owner:
+            if request.authority is None:
+                raise CoreError("OWNER_AUTHORITY_REFERENCE_REQUIRED", 403)
+            owner_authority.current(store, settings, lambda: now, authority=request.authority)
         account = request.delivery_lane == "qq_account"
         approval = (account_actions.scope(store, settings, lambda: now,
             request.window_sha256, request.account_actions_authorization_sha256)
@@ -278,6 +283,8 @@ def lease_deliveries(store, settings, request, now):
         )
         items = []
         for row in rows:
+            if owner:
+                owner_delivery.check_delivery(store, settings, lambda: now, row["message_id"])
             try:
                 reply_revision.check_delivery(store, row["message_id"])
             except CoreError as error:
@@ -306,6 +313,8 @@ def lease_deliveries(store, settings, request, now):
                     raise
             voice_flow = None
             if (not account and settings.voice.enabled
+                and (not owner or "voice" in owner_authority.current(
+                    store, settings, lambda: now).policy.purposes)
                 and row["action_type"] in {"qq.private.reply", "qq.private.proactive"}
                 and not store.one("SELECT 1 FROM poke_batches WHERE response_message_id=?",
                                   (row["message_id"],))):
@@ -357,6 +366,16 @@ def lease_deliveries(store, settings, request, now):
                                  window_sha256=approval.plan_sha256,
                                  content_sha256=row["content_sha256"])
                 continue
+            if owner:
+                items[-1].update(authority=json.loads(row["authority_json"]),
+                                 origin_event_id=row["origin_event_id"],
+                                 content_sha256=row["content_sha256"])
+                if reply_revision.owner_input(store, row["origin_event_id"]):
+                    items[-1]["reply_revision"] = store.one(
+                        "SELECT reply_revision FROM events WHERE event_id=?",
+                        (row["origin_event_id"],),
+                    )["reply_revision"]
+                continue
             from companion.private_life import enabled
 
             if enabled(settings):
@@ -378,7 +397,7 @@ def lease_deliveries(store, settings, request, now):
 def begin_send(store, message_id, token, now, settings=None, *, clock=None):
     problem = None
     with store.transaction():
-        from companion import live_text
+        from companion import live_text, owner_authority, owner_delivery
 
         if not store.one("SELECT 1 FROM outbox WHERE message_id=? AND state='LEASED' "
                          "AND lease_token=? AND lease_until>?", (message_id, token, now)):
@@ -386,7 +405,12 @@ def begin_send(store, message_id, token, now, settings=None, *, clock=None):
         reply_revision.check_delivery(store, message_id)
         account = store.one("SELECT 1 FROM outbox WHERE message_id=? "
                             "AND delivery_lane='qq_account'", (message_id,))
-        if account:
+        if settings is not None and owner_authority.required(store, settings):
+            if clock is None:
+                raise CoreError("OWNER_DELIVERY_CLOCK_REQUIRED", 503)
+            owner_delivery.check_delivery(store, settings, clock, message_id)
+            now = clock()
+        elif account:
             from companion import account_actions
 
             if settings is None or clock is None:

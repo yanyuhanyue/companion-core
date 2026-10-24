@@ -1,6 +1,7 @@
 """Versioned signatures prove provenance without reviving stopped execution."""
 
 import hashlib
+import json
 from datetime import datetime
 
 import pytest
@@ -47,6 +48,90 @@ def test_capture_admission_is_idempotent_and_signature_bound(core, tmp_path):
     altered = capture.model_copy(update={"input_sha256": "f" * 64})
     with pytest.raises(CoreError, match="OWNER_CAPTURE_INVALID"):
         owner_input.approve(core.store, core.settings, core.clock, altered)
+
+
+def inbound(core, capture):
+    from tests.conftest import event
+
+    message = event(core, text="synthetic owner input", origin="onebot-direct:FriendMessage:10001")
+    return message.model_copy(
+        update={"event_id": capture.event_id, "source_event_id": capture.source_event_id})
+
+
+def test_input_requires_admitted_capture_and_exact_content(core, tmp_path):
+    capture, _ = captured(core, tmp_path)
+    message = inbound(core, capture)
+    with pytest.raises(CoreError, match="OWNER_APPROVED_INPUT_REQUIRED"):
+        owner_input.check_input(core.store, core.settings, core.clock, message)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    checked = owner_input.check_input(core.store, core.settings, core.clock, message)
+    assert checked.authority.as_dict() == capture.authority
+    changed = message.model_copy(update={
+        "payload": message.payload.model_copy(update={"text": "changed"})})
+    with pytest.raises(CoreError, match="OWNER_APPROVED_INPUT_REQUIRED"):
+        owner_input.check_input(core.store, core.settings, core.clock, changed)
+
+
+@pytest.mark.parametrize("boundary", ["stop", "restore", "revision", "expiry"])
+def test_admitted_input_cannot_cross_runtime_authority_boundary(core, tmp_path, boundary):
+    from companion.store import after
+
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    message = inbound(core, capture)
+    if boundary == "stop":
+        owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+            operation_id="operation-stop-input", authority=capture.authority))
+    elif boundary == "restore":
+        owner_authority.restore(core.store)
+    elif boundary == "revision":
+        policy = owner_authority.current(core.store, core.settings, core.clock).policy
+        activate(core, policy, revision=1, operation="operation-new-input-revision")
+    else:
+        core.clock = lambda: after(capture.received_at.isoformat(), 366 * 86400)
+    with pytest.raises(CoreError):
+        owner_input.check_input(core.store, core.settings, core.clock, message)
+
+
+def test_native_ingest_binds_job_and_rejects_stopped_duplicate(core, tmp_path):
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    message = inbound(core, capture)
+    result = core.ingest(message, "owner-native-input")
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (result["job_id"],))
+    assert json.loads(job["authority_json"]) == capture.authority
+    assert core.ingest(message, "owner-native-input")["duplicate"]
+    assert not core.store.rows("SELECT * FROM model_usage")
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="operation-stop-native-input", authority=capture.authority))
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
+        core.ingest(message, "owner-native-input")
+
+
+def test_bridge_api_capture_signature_required_before_native_ingest(core, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from companion.api import create_app
+
+    capture, _ = captured(core, tmp_path)
+    app = create_app(core.settings)
+    app.state.core = core
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
+    path = "/internal/v1/owner-authority/inputs/approve"
+    assert client.post(path, json=capture.model_dump(mode="json")).status_code == 401
+    invalid = capture.model_dump(mode="json")
+    invalid["input_sha256"] = "0" * 64
+    assert client.post(path, json=invalid, headers=headers).status_code == 403
+    response = client.post(path, json=capture.model_dump(mode="json"), headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.headers["Cache-Control"] == "no-store"
+    response = client.post("/internal/v1/inbox/events", json=inbound(core, capture).model_dump(
+        mode="json"), headers={**headers, "X-Idempotency-Key": "owner-api-native-input"})
+    assert response.status_code == 202, response.text
+    row = core.store.one("SELECT authority_json FROM jobs WHERE job_id=?",
+                         (response.json()["job_id"],))
+    assert json.loads(row["authority_json"]) == capture.authority
 
 
 def test_v1_domain_cannot_sign_v2_capture(core, tmp_path):

@@ -75,10 +75,18 @@ class LeaseRequest(StrictModel):
     worker_id: str = Field(min_length=1, max_length=128)
     limit: int = Field(default=5, ge=1, le=20)
     delivery_lane: Literal["owner_private", "qq_account"] = "owner_private"
+    authority: dict | None = None
     window_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     account_actions_authorization_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$",
     )
+
+    @field_validator("authority")
+    @classmethod
+    def owner_reference(cls, value):
+        from companion_delivery_protocol.authority import validate_authority_ref
+
+        return validate_authority_ref(value) if value is not None else None
 
     @model_validator(mode="after")
     def account_authority(self):

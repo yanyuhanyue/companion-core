@@ -14,14 +14,17 @@ from companion import (
     input_recall,
     live_text,
     notices,
+    owner_authority,
+    owner_delivery,
     owner_exploration,
+    owner_input,
     poke,
     private_life,
     qq_images,
     qq_rich,
     reply_revision,
 )
-from companion.affect import AffectEngine
+from companion.affect import NEUTRAL, AffectEngine
 from companion.commands import command_parts, is_memory_command
 from companion.consolidation import NightlyConsolidator
 from companion.content import CONTEXT_RULES, ContentService
@@ -44,7 +47,7 @@ from companion.reading import ReadingService
 from companion.reflection import ReflectionService
 from companion.reply_segments import split_text
 from companion.runtime import Runtime
-from companion.social import SocialPlanner, proactive_allowed, proactive_counts
+from companion.social import SocialPlanner, proactive_allowed
 from companion.store import after, encode, uid, utcnow
 from companion.telemetry import emit
 from companion.transport import (
@@ -131,7 +134,10 @@ class Core(Runtime):
         fingerprint = digest(raw)
         try:
             with s.transaction():
-                bounded_text = live_text.check_input(s, cfg, self.clock, event)
+                authority = owner_input.check_input(s, cfg, self.clock, event) if (
+                    owner_authority.required(s, cfg)) else None
+                bounded_text = False if authority else live_text.check_input(
+                    s, cfg, self.clock, event)
                 native_controls = not bounded_text or private_life.enabled(cfg)
                 if (event.payload.rich and not bounded_text
                     and cfg.rich_input_scope != "references_v1"):
@@ -235,21 +241,26 @@ class Core(Runtime):
                     memory_processed=int(diary_command or control_command),
                 )
                 revision = 0
-                if private_life.enabled(cfg):
+                if authority or private_life.enabled(cfg):
                     revision = reply_revision.advance(s, conversation_id, event.event_id, now)
                 else:
                     cancel_interrupted_replies(s, conversation_id, now)
-                if private_life.enabled(cfg):
+                if authority or private_life.enabled(cfg):
                     cancel_proactive_work(s, now)
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
+                if authority:
+                    owner_authority.bind_job(s, cfg, self.clock, job_id, purpose="chat")
                 if (not diary_command and not control_command
                     and not body["text"].lstrip().startswith("/")):
-                    self.content.schedule(event.event_id)
-                    self.content.followup(event.event_id)
-                    owner_exploration.schedule(self, event.event_id)
+                    if not authority or "content" in authority.policy.purposes:
+                        self.content.schedule(event.event_id)
+                        self.content.followup(event.event_id)
+                    if not authority or "exploration" in authority.policy.purposes:
+                        owner_exploration.schedule(self, event.event_id)
                 if native_controls and command == "重置互动" and not arguments:
                     self.affect.reset(cfg.owner_qq_id, event.event_id, self.ledger)
-                self.affect.observe(event.event_id)
+                if not authority or "affect" in authority.policy.purposes:
+                    self.affect.observe(event.event_id)
                 s.audit("event.accepted", event.event_id, event.trace_id, now)
                 return {
                     "event_id": event.event_id,
@@ -285,6 +296,19 @@ class Core(Runtime):
         s = self.store
         recover_evaluation(s, now)
         image_spool.cleanup(s, now)
+        # The autonomous selector no longer consumes old fixed-timer greetings.
+        # Only unadmitted queued work can be retired; retain all model/send custody.
+        for job in s.rows(
+            "SELECT j.job_id,j.event_id,e.trace_id FROM jobs j JOIN events e USING(event_id) "
+            "WHERE j.kind='activity' AND j.state IN ('QUEUED','RETRY_WAIT') "
+            "AND e.source='system.timer' AND e.event_type='activity.tick' "
+            "AND json_type(e.body_json,'$.notice') IS NULL "
+            "AND NOT EXISTS (SELECT 1 FROM model_usage m WHERE m.job_id=j.job_id) "
+            "AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.origin_event_id=j.event_id)",
+        ):
+            s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                      "last_error_code='LEGACY_TIMER_RETIRED' WHERE job_id=?", (now, job["job_id"]))
+            s.audit("activity.legacy_timer_retired", job["job_id"], job["trace_id"], now)
         expired = s.rows("SELECT * FROM jobs WHERE state='RUNNING' "
                          "AND kind IN ('chat','activity') AND lease_until<=?", (now,))
         for job in expired:
@@ -321,17 +345,31 @@ class Core(Runtime):
                 "FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
                 "AND j.kind IN ('chat','activity','evaluation') "
-                "AND (? IS NULL OR j.job_id=?) "
+                "AND ((? IS NULL AND j.kind IN ('chat','evaluation')) OR j.job_id=?) "
                 "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
                 "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
                 "WHERE be.conversation_id=e.conversation_id AND b.rowid<j.rowid "
-                "AND b.kind IN ('chat','activity') "
+                "AND (b.kind='chat' OR (b.kind='activity' "
+                "AND (j.kind<>'chat' OR b.state='RUNNING'))) "
                 "AND b.state IN ('QUEUED','RUNNING','RETRY_WAIT')) "
                 "ORDER BY CASE WHEN j.kind='evaluation' THEN 1 ELSE 0 END,j.rowid LIMIT 1",
                 (job_id, job_id, now),
             )
             if not row:
                 return None
+            if row["kind"] == "activity" and (
+                budget.chat_pending(s, now) or private_life.enabled(self.settings)
+                and private_life.owner_waiting(s, self.settings, now)
+            ):
+                return None
+            if owner_authority.required(s, self.settings):
+                try:
+                    owner_authority.check_job(s, self.settings, self.clock, row,
+                        purpose=owner_authority.model_purpose(s, row["kind"], row["job_id"]))
+                except CoreError as error:
+                    s.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL,updated_at=?,"
+                              "last_error_code=? WHERE job_id=?", (now, error.code, row["job_id"]))
+                    return None
             if self.memes.waiting_offer(row, now):
                 return None
             body = json.loads(row["body_json"])
@@ -425,15 +463,21 @@ class Core(Runtime):
 
     def _check_context_snapshots(self, job, snapshots, *, current_request=None):
         reply_revision.check_job(self.store, job)
+        authority = self._owner_job_view(job)
         if private_life.strict(self.store, self.settings):
             live_text.check_job(self.store, self.settings, self.clock, job,
                                 current_request=current_request)
         for snapshot in snapshots:
             try:
+                purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
+                           "voice": "voice"}.get(snapshot["kind"])
+                if authority and purpose and purpose not in authority.policy.purposes:
+                    raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
                 if snapshot["kind"] == "memory":
                     self.memory_context.revalidate(snapshot["proof"], self.clock())
                 elif snapshot["kind"] == "growth":
-                    current = self._expression_learning_reference(job, self.affect.snapshot())
+                    current = self._expression_learning_reference(
+                        job, self._affect_context(authority))
                     if current is None or current["snapshot"] != snapshot["proof"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
                 elif snapshot["kind"] == "affect":
@@ -442,7 +486,7 @@ class Core(Runtime):
                     conversation_policy.revalidate(snapshot["proof"],
                         self.settings.conversation_policy,
                         current_text=json.loads(job["body_json"]).get("text", ""),
-                        affect=self.affect.snapshot())
+                        affect=self._affect_context(authority))
                 elif snapshot["kind"] == "voice":
                     self.voice.check_context(job, snapshot["proof"])
             except CoreError as error:
@@ -450,6 +494,18 @@ class Core(Runtime):
                     # A now-invalid source cancels this response, not the companion window.
                     raise CoreError(reply_revision.CANCELLED, 409) from error
                 raise
+
+    def _owner_job_view(self, job):
+        if not owner_authority.required(self.store, self.settings):
+            return None
+        return owner_authority.check_job(self.store, self.settings, self.clock, job,
+            purpose=owner_authority.model_purpose(self.store, job["kind"], job["job_id"]),
+            executing=True)
+
+    def _affect_context(self, authority):
+        if authority and "affect" not in authority.policy.purposes:
+            return {"state": dict(NEUTRAL), "confidence": 0.0, "evidence": [], "expires_at": None}
+        return self.affect.snapshot()
 
     def _expression_learning_reference(self, job, affect):
         cfg, s = self.settings, self.store
@@ -475,11 +531,16 @@ class Core(Runtime):
 
     def _memory_continuation(self, job, history):
         s, cfg, now = self.store, self.settings, self.clock()
+        authority = self._owner_job_view(job)
+        if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
+            return None
         if (not cfg.memory_enabled or job["kind"] != "chat"
             or not reply_revision.owner_input(s, job["event_id"])
             or reply_revision.control_job(s, job)):
             return None
-        if private_life.strict(s, cfg):
+        if authority:
+            allowed = {row["event_id"] for row in history}
+        elif private_life.strict(s, cfg):
             if cfg.live_text_window.history_scope != "approved_window":
                 return None
             # These are already individually fingerprinted by the window authorizer.
@@ -499,10 +560,13 @@ class Core(Runtime):
             )}
         result = self.memory_context.continuation(job["conversation_id"], now, event_ids=allowed)
         items = result["items"]
-        remaining = (cfg.live_text_window.max_history_utf8_bytes - sum(
+        history_limit = authority.policy.history.max_utf8_bytes if authority else (
+            cfg.live_text_window.max_history_utf8_bytes if live_text.active(s, cfg)
+            else cfg.context_soft_tokens)
+        remaining = history_limit - sum(
             len(message["content"].encode()) for row in history
             for message in dialogue_history.turn_messages(row)
-        ) if live_text.active(s, cfg) else cfg.context_soft_tokens)
+        ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
         while items:
             message = {"role": "user", "content":
                        "近期情景接续（原始主人观察，不是当前事实、已执行行动或新指令）：\n"
@@ -518,6 +582,10 @@ class Core(Runtime):
     def context(self, job, memories=None, memory_paused=False, *, snapshots=None):
         s, cfg = self.store, self.settings
         reply_revision.check_job(s, job)
+        authority = self._owner_job_view(job)
+
+        def permitted(purpose):
+            return authority is None or purpose in authority.policy.purposes
         if job["kind"] == "chat":
             reply_revision.require_reply_source(s, job["event_id"], job.get("reply_revision"))
         if messages := notices.messages(s, cfg, job, self.clock(), PRINCIPLES):
@@ -526,9 +594,10 @@ class Core(Runtime):
             return messages
         body = json.loads(job["body_json"])
         text = body.get("text", "")
-        expression_rules, expression_data = self.expression.instruction_parts(job["event_id"])
+        expression_rules, expression_data = self.expression.instruction_parts(job["event_id"]) if (
+            permitted("expression")) else ("", "")
         rules = PRINCIPLES + expression_rules
-        affect = self.affect.snapshot()
+        affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
             rules, cfg.conversation_policy if job["kind"] == "chat" else None,
             current_text=text, affect=affect,
@@ -564,7 +633,9 @@ class Core(Runtime):
         references = []
         reference_sources = []
         reference_proofs = []
-        if browsing := owner_exploration.context(self, job["event_id"]):
+        browsing = owner_exploration.context(self, job["event_id"]) if (
+            permitted("exploration")) else None
+        if browsing:
             reference_sources.append((browsing["message"], browsing["source_event_ids"]))
         bounded_text = private_life.strict(s, cfg)
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
@@ -592,7 +663,7 @@ class Core(Runtime):
             })
         content_reference = ""
         if (
-            cfg.content_enabled
+            cfg.content_enabled and permitted("content")
             and job["kind"] == "chat"
             and not body.get("diary_command")
             and not body.get("control_command")
@@ -613,7 +684,7 @@ class Core(Runtime):
                 # still checks the complete request against its hard limits.
                 available = max(2048, available)
             content_reference = self.content.context_message(job["event_id"], available - 24)
-        goals = self.life.context()
+        goals = self.life.context() if permitted("goals") else []
         if goals:
             references.append(
                 {
@@ -638,12 +709,14 @@ class Core(Runtime):
             reference_sources.append((references[-1],
                                       {row["event_id"] for row in affect["evidence"]}))
             reference_proofs.append((references[-1], {"kind": "affect", "proof": affect}))
-        if learned := self._expression_learning_reference(job, affect):
+        learned = self._expression_learning_reference(job, affect) if (
+            permitted("expression")) else None
+        if learned:
             references.append(learned["message"])
             reference_sources.append((learned["message"], learned["source_event_ids"]))
             reference_proofs.append((learned["message"],
                                      {"kind": "growth", "proof": learned["snapshot"]}))
-        if cfg.memory_enabled:
+        if cfg.memory_enabled and permitted("memory"):
             allowed = live_text.memory_ids(s, cfg, self.clock, job) if bounded_text else None
             hits = self.memory_context.recall(
                 text or "*", self.clock(), memory_ids=allowed, project_query=text,
@@ -687,7 +760,11 @@ class Core(Runtime):
                     | {item["event_id"] for trait in trait_rows for item in trait["evidence"]}))
                 reference_proofs.append((memory_reference,
                                          {"kind": "memory", "proof": memory_proof}))
-        if bounded_text:
+        if authority:
+            sources = owner_input.history_sources(s, cfg, self.clock, job) if (
+                job["kind"] == "chat") else []
+            turns = [dialogue_history.turn_messages(source) for source in sources]
+        elif bounded_text:
             sources = live_text.history_sources(s, cfg, self.clock, job)
             turns = [dialogue_history.turn_messages(source) for source in sources]
         else:
@@ -708,7 +785,7 @@ class Core(Runtime):
             current_input.append(browsing["message"])
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
-        if cfg.voice.enabled and job["kind"] == "chat":
+        if cfg.voice.enabled and permitted("voice") and job["kind"] == "chat":
             voice_reference = self.voice.for_context(job["event_id"], job)
             if voice_reference is not None:
                 from companion.voice_flow import CONTEXT_RULES as VOICE_CONTEXT_RULES
@@ -779,6 +856,9 @@ class Core(Runtime):
     async def recall_for_reply(self, job):
         """A bounded LLM relevance check over candidates, never a full-log prompt."""
         reply_revision.check_job(self.store, job)
+        authority = self._owner_job_view(job)
+        if authority and "memory" not in authority.policy.purposes:
+            return [], False
         query = json.loads(job["body_json"]).get("text", "")
         bounded_text = private_life.strict(self.store, self.settings)
         image_context = (
@@ -792,7 +872,9 @@ class Core(Runtime):
         history = live_text.history_sources(self.store, self.settings, self.clock, job) if (
             bounded_text and self.settings.live_text_window.history_scope == "approved_window"
         ) else []
-        if private_life.enabled(self.settings):
+        if authority:
+            history = owner_input.history_sources(self.store, self.settings, self.clock, job)
+        elif private_life.enabled(self.settings):
             history = private_life.recent_history(self.store, self.settings, job)
         recent = [message for source in history
                   for message in dialogue_history.turn_messages(source)]
@@ -1060,6 +1142,8 @@ class Core(Runtime):
 
     def add_memories(self, candidates, resolutions, now, confirmed=False):
         """Caller owns the transaction and checks the captured privacy revision first."""
+        if owner_authority.required(self.store, self.settings):
+            owner_authority.current(self.store, self.settings, self.clock, purpose="memory")
         if private_life.strict(self.store, self.settings):
             raise CoreError("LIVE_TEXT_MEMORY_READ_ONLY", 403)
         private_life.ensure_active(self.store, self.settings, self.clock)
@@ -1089,6 +1173,18 @@ class Core(Runtime):
         if command == "重置互动" and not arguments:
             self.affect.reset(self.settings.owner_qq_id, job["event_id"], self.ledger)
             return "已重置互动反馈；之后的新反馈会重新生效。"
+        if owner_authority.required(s, self.settings):
+            purpose = ({"目标列表": "goals", "承诺列表": "goals", "接受目标": "goals",
+                        "安排任务": "goals", "反思列表": "reflection", "当前交互状态": "affect",
+                        "为什么形成偏好": "expression", "恢复自主活动": "life",
+                        "恢复主动分享": "proactive"}.get(command)
+                       or ("memory" if is_memory_command(text)
+                           and command != "忘记这一条" else None)
+                       or ("diary" if is_diary_command(text)
+                           and command not in {"暂停写日记", "删除日记"} else None))
+            if purpose:
+                owner_authority.check_job(s, self.settings, self.clock, job,
+                                          purpose=purpose, executing=True)
         if command in {"读日记", "日记列表", "目标列表", "承诺列表", "反思列表",
                        "当前交互状态", "为什么形成偏好", "你记得什么"}:
             # These service responses do not yet expose complete source receipts.
@@ -1294,10 +1390,7 @@ class Core(Runtime):
                 return True
             if await self.memes.run_once(worker_id):
                 return True
-            from companion.social_autonomy_runtime import run_once as social_autonomy_once
-
-            return await social_autonomy_once(self.store, self.settings, self.model, self.clock,
-                                             worker_id=worker_id)
+            return False
         started_ns = time.perf_counter_ns()
         emit(
             "t_job_started",
@@ -1311,7 +1404,8 @@ class Core(Runtime):
         context_snapshots = []
         try:
             reply_revision.check_job(self.store, job)
-            bounded_text = live_text.active(self.store, self.settings)
+            authority = self._owner_job_view(job)
+            bounded_text = authority is None and live_text.active(self.store, self.settings)
             generated_reply = False
             if bounded_text:
                 live_text.check_job(self.store, self.settings, self.clock, job)
@@ -1424,7 +1518,9 @@ class Core(Runtime):
                     intent = (
                         self.expression.intent(job["event_id"], reply, now)
                         if policy and generated_reply and job["kind"] == "chat"
-                        and self.settings.expression_enabled else None
+                        and self.settings.expression_enabled
+                        and (authority is None or "expression" in authority.policy.purposes)
+                        else None
                     )
                     if notice_parts is not None:
                         action = ("qq.private.reply" if notices.required(self.store, job["job_id"])
@@ -1460,12 +1556,18 @@ class Core(Runtime):
                             self.store, job, parts, policy.interval_ms, now,
                         ) if parts else []
                     else:
-                        message_ids = [self.expression.enqueue(
+                        create_reply = self.expression.enqueue if (
+                            authority is None or "expression" in authority.policy.purposes
+                        ) else lambda *args, **kwargs: enqueue(self.store, *args, **kwargs)
+                        message_ids = [create_reply(
                             job["event_id"], job["conversation_id"], reply, now,
                             action="qq.private.proactive" if job["kind"] == "activity"
                             else "qq.private.reply",
                         )]
-                    if bounded_text and message_ids:
+                    if authority and message_ids:
+                        owner_delivery.record_replies(
+                            self.store, self.settings, self.clock, job, message_ids)
+                    elif bounded_text and message_ids:
                         live_text.record_replies(
                             self.store, self.settings, self.clock, job, message_ids,
                         )
@@ -1579,62 +1681,6 @@ class Core(Runtime):
                         f"这次回复暂时失败（{code}）。消息已记录，可以稍后再试。",
                         now,
                     )
-
-    def schedule_proactive(self):
-        if self.settings.life_loop.mode != "OFF":
-            return bool(self.life_topics.schedule())
-        cfg, s, now = self.settings, self.store, self.clock()
-        if not cfg.pricing_known:
-            return False
-        with s.transaction():
-            if private_life.enabled(cfg):
-                try:
-                    live_text.guard(s, cfg, self.clock)
-                except CoreError:
-                    return False
-            if not proactive_allowed(s, cfg, now):
-                return False
-            conversation = s.one(
-                "SELECT * FROM conversations WHERE scope='private' AND platform='qq.onebot' "
-                "ORDER BY last_event_at DESC LIMIT 1"
-            )
-            if not conversation or conversation["last_event_at"] > after(
-                now, -cfg.proactive_idle_seconds
-            ):
-                return False
-            if s.one("SELECT 1 FROM jobs WHERE state IN ('QUEUED','RUNNING','RETRY_WAIT')"):
-                return False
-            if s.one(
-                "SELECT 1 FROM outbox WHERE state IN "
-                "('PENDING','LEASED','SENDING','RETRY_WAIT','DELIVERY_UNCERTAIN')"
-            ):
-                return False
-            count, recent = proactive_counts(s, cfg, now)
-            if count >= cfg.proactive_daily_limit or recent:
-                return False
-            event_id = uid("activity")
-            prompt = (
-                "现在适合进行一次简短的私聊分享。只基于真实共同对话，分享一个想法或轻松问候，"
-                "不编造生活、浏览经历，不要求回复；没有值得分享的内容只输出 [SKIP]。"
-            )
-            s.insert(
-                "events",
-                event_id=event_id,
-                schema_version=1,
-                source="system.timer",
-                source_event_id=event_id,
-                conversation_id=conversation["conversation_id"],
-                actor_id="system",
-                event_type="activity.tick",
-                occurred_at=now,
-                ingested_at=now,
-                privacy_scope="private",
-                body_json=encode({"text": prompt}),
-                trace_id=event_id,
-                memory_processed=1,
-            )
-            self.new_job(event_id, "activity", event_id, now)
-            return True
 
     async def extract_once(self, local_day=None):
         if private_life.strict(self.store, self.settings) or (

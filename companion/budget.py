@@ -129,7 +129,7 @@ def reserve(
             raise CoreError("MODEL_OUTPUT_LIMIT", 429)
     estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
-        from companion import live_text
+        from companion import live_text, owner_authority
 
         if job_id is not None:
             from companion.reply_revision import check_job
@@ -159,11 +159,15 @@ def reserve(
             scenario=scenario, logical_request_id=logical_request_id,
         ) != video_binding:
             raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
+        owner_view = None
         if scenario == "evaluation":
             from companion import evaluation
 
             evaluation.admit(store, settings, clock, job_id, request_id, messages,
                              estimate, estimated_input)
+        elif owner_authority.required(store, settings):
+            owner_view = owner_authority.admit_model(
+                store, settings, clock or (lambda: now), job_id, scenario)
         else:
             live_text.reserve_model(store, settings, clock, job_id, scenario)
         request_id = request_id or uid("model")
@@ -344,7 +348,10 @@ def reserve(
             )
             from companion.private_life import freeze_model
 
-            if scenario != "evaluation":
+            if owner_view is not None:
+                store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
+                              (encode(owner_view.authority.as_dict()), request_id))
+            elif scenario != "evaluation":
                 freeze_model(store, settings, request_id)
             else:
                 from companion import owner_authority
@@ -811,10 +818,12 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
 
 
 def _model_scope(store, settings, clock, request_id, scenario):
-    from companion import evaluation, live_text
+    from companion import evaluation, live_text, owner_authority
 
     if scenario == "evaluation":
         return evaluation.check_request(store, settings, clock, request_id)
+    if owner_authority.required(store, settings):
+        return owner_authority.check_model(store, settings, clock, request_id)
     return live_text.check_model(store, settings, clock, request_id)
 
 
@@ -823,7 +832,7 @@ async def _dispatch(
     source_check=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
-    from companion import live_text, notices
+    from companion import live_text, notices, owner_authority
 
     if source_check is not None:
         source_check()
@@ -840,9 +849,8 @@ async def _dispatch(
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
-    if live_text.active(store, settings) or scenario in {
-        "content_vision", *VIDEO_SCENARIOS, "meme_caption",
-    }:
+    if (owner_authority.required(store, settings) or live_text.active(store, settings)
+        or scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"}):
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
         target_url = (settings.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
@@ -994,7 +1002,7 @@ async def _dispatch(
                     source_check()
             with store.transaction():
                 cloud_budget.mark_dispatched(store, "model", request_id, clock())
-            if live_text.active(store, settings):
+            if live_text.active(store, settings) and not owner_authority.required(store, settings):
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport
                 ):
@@ -1006,12 +1014,10 @@ async def _dispatch(
             else:
                 paid = paid_budget.contract(settings, clock())
                 lease_deadline = datetime.fromisoformat(current["lease_until"])
-                if scenario == "evaluation":
+                if owner_authority.required(store, settings):
                     # Budget synchronization can race a separate owner's STOP.
                     # Re-read its native authority/consent before the final clock sample.
-                    from companion import evaluation
-
-                    current_job = evaluation.check_request(store, settings, clock, request_id)
+                    current_job = _model_scope(store, settings, clock, request_id, scenario)
                 # All preceding checks are complete. One final sample must fence
                 # every time limit, not only the longer admission lease.
                 dispatch_now = datetime.fromisoformat(clock())
@@ -1021,10 +1027,11 @@ async def _dispatch(
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
-                if scenario == "evaluation" and dispatch_now >= datetime.fromisoformat(
+                if current_job and dispatch_now >= datetime.fromisoformat(
                     current_job["lease_until"]
                 ):
-                    raise CoreError("EVALUATION_JOB_FENCED", 409)
+                    raise CoreError("EVALUATION_JOB_FENCED" if scenario == "evaluation"
+                                    else "JOB_LEASE_LOST", 409)
                 cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
             if dispatch is not None:
                 # The checked model transport calls its delegate immediately after

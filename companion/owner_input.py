@@ -14,7 +14,7 @@ from companion.owner_authority_protocol import OwnerCapture
 from companion.privacy import epoch
 from companion.qq_rich import input_digest
 from companion.store import encode
-from companion_delivery_protocol.authority import CAPTURE_DOMAIN
+from companion_delivery_protocol.authority import capture_signing_payload
 
 INPUT = "owner_input:"
 
@@ -28,10 +28,8 @@ def verify(store, settings, value):
         if identity is None:
             raise ValueError("capture identity absent")
         signed = capture.model_dump(mode="json", exclude={"signature"})
-        for key in ("received_at", "occurred_at"):
-            signed[key] = getattr(capture, key).isoformat()
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(identity.public_key)).verify(
-            bytes.fromhex(capture.signature), CAPTURE_DOMAIN + encode(signed).encode())
+            bytes.fromhex(capture.signature), capture_signing_payload(signed))
         prefix = (f"{settings.bot_qq_id}:onebot-direct:FriendMessage:{view.policy.owner_qq_id}:"
                   f"epoch:{identity.protocol_epoch}:")
         row = store.one("SELECT created_at FROM owner_authority_revisions "
@@ -92,6 +90,49 @@ def approve(store, settings, clock, capture):
         return {"approved": True, "duplicate": False}
 
 
+def check_input(store, settings, clock, event):
+    """Bind an inbound event to its already admitted, signed capture before storing it."""
+    view = owner_authority.current(store, settings, clock, purpose="chat")
+    receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event.event_id,))
+    try:
+        value = json.loads(receipt["value"]) if receipt else {}
+        capture, _ = verify(store, settings, value["capture"])
+        body = event.payload.model_dump(mode="json")
+        if (
+            capture.authority != view.authority.as_dict()
+            or value.get("authority") != capture.authority
+            or value.get("event_id") != event.event_id
+            or capture.event_id != event.event_id
+            or capture.source_event_id != event.source_event_id
+            or capture.occurred_at != event.occurred_at
+            or capture.input_sha256 != input_digest(body)
+            or value.get("input_sha256") != capture.input_sha256
+            or type(value.get("privacy_epoch")) is not int
+            or not 0 <= value["privacy_epoch"] <= epoch(store)
+            or event.source != "qq.onebot" or event.event_type != "message.received"
+            or event.actor.platform_user_id != view.policy.owner_qq_id
+            or event.conversation.platform_session_key != (
+                "onebot-direct:FriendMessage:" + view.policy.owner_qq_id)
+            or body.get("media")
+            or len(body["text"]) > view.policy.max_input_chars
+            or not (body["text"].strip() or body.get("rich"))
+            or body.get("rich") and settings.rich_input_scope != "references_v1"
+            or any(item.kind not in view.policy.purposes for item in event.payload.shared_content)
+        ):
+            raise ValueError("capture binding changed")
+        now = datetime.fromisoformat(clock())
+        if (now - capture.received_at).total_seconds() >= (
+            86400 * min(view.policy.source_retention_days, settings.raw_event_retention_days)
+        ) or (capture.received_at - now).total_seconds() > 2:
+            raise ValueError("capture outside source lifetime")
+    except (ValueError, KeyError, TypeError):
+        raise CoreError("OWNER_APPROVED_INPUT_REQUIRED", 403) from None
+    input_recall.require_not_recalled(store, event.source_event_id)
+    if store.one("SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event.event_id,)):
+        raise CoreError("EVENT_ERASED", 410)
+    return view
+
+
 def source(store, settings, view, event_id, now, *, allow_commands=False, history=False):
     """Read an admitted private source; history requires an explicit current source scope."""
     view = owner_authority.current(store, settings, lambda: now,
@@ -105,6 +146,7 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
         if (not event or event["redacted"] or not isinstance(body, dict)
             or (event["source"], event["actor_id"], event["scope"], event["owner_actor_id"])
             != ("qq.onebot", "owner", "private", "owner")
+            or event["privacy_scope"] != "private"
             or event["event_type"] != "message.received" or body.get("media")
             or not isinstance(body.get("text"), str)
             or not allow_commands and (body.get("control_command") or body.get("diary_command")
@@ -138,6 +180,28 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
     if len(jobs) != 1 or json.loads(jobs[0]["authority_json"]) != original.authority.as_dict():
         raise CoreError("OWNER_SOURCE_JOB_BINDING_REQUIRED", 403)
     return event, body, jobs[0]
+
+
+def history_sources(store, settings, clock, job):
+    """Apply explicit current history bounds to native source-bound dialogue turns."""
+    from companion.dialogue_history import recent_context_sources, turn_messages
+
+    view = owner_authority.check_job(store, settings, clock, job, purpose="chat")
+    if "history" not in view.policy.purposes:
+        return []
+    scope = view.policy.history
+    result = []
+    for item in recent_context_sources(store, job["conversation_id"], job["event_id"],
+                                       scope.max_turns):
+        try:
+            source(store, settings, view, item["event_id"], clock(), history=True)
+        except CoreError:
+            continue
+        result.append(item)
+    while result and sum(len(message["content"].encode()) for item in result
+                         for message in turn_messages(item)) > scope.max_utf8_bytes:
+        result.pop(0)
+    return result
 
 
 def erase(store, event_ids):

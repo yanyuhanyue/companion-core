@@ -67,6 +67,18 @@ def _custody(store, message_id):
     projection = _meta(store, cumulative.PROJECTION)
     if projection:
         return SimpleNamespace(journal_path=projection["journal_path"])
+    original = store.one("SELECT authority_json FROM outbox WHERE message_id=?", (message_id,))
+    if original and original["authority_json"] != "{}":
+        from companion_delivery_protocol.authority import AuthorityRef
+
+        ref = AuthorityRef.from_dict(json.loads(original["authority_json"]))
+        revision = store.one("SELECT * FROM owner_authority_revisions "
+                             "WHERE grant_id=? AND revision=?", (ref.grant_id, ref.revision))
+        from companion.owner_authority import reference
+
+        if revision is None or reference(revision) != ref:
+            raise ValueError("original owner delivery authority missing")
+        return SimpleNamespace(journal_path=revision["journal_path"])
     authority = _authority(store, message_id)
     history = _meta(store, "live_text_window:" + authority["plan_sha256"]) if authority else None
     if history:

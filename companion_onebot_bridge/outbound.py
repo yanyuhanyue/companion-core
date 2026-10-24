@@ -2,6 +2,8 @@ import re
 import time
 from datetime import datetime
 
+from companion_delivery_protocol.authority import validate_authority_ref
+
 from . import account_actions, reply_segments
 from .native_actions import prepare
 from .onebot_client import bounded_post
@@ -92,6 +94,8 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
     if not onebot.config.delivery_enabled and guard is None:
         return False
     request = {"worker_id": getattr(onebot, "worker_id", "onebot-direct"), "limit": 1}
+    if guard is not None and getattr(guard, "authority", None) is not None:
+        request["authority"] = validate_authority_ref(guard.authority)
     if delivery_lane == "qq_account":
         if guard is None or not getattr(onebot, "account_scope", False):
             raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
@@ -113,6 +117,12 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
 async def deliver_item(client, onebot, spool, item, *, metrics=None, guard=None,
                        delivery_lane="owner_private"):
     """The single leased-item dispatch lifecycle for all transport drivers."""
+    if "authority" in item:
+        expected = validate_authority_ref(item["authority"])
+        if guard is None or getattr(guard, "authority", None) is None or (
+            validate_authority_ref(guard.authority) != expected
+        ):
+            raise ValueError("OWNER_AUTHORITY_GUARD_REQUIRED")
     voice_scope = bool(getattr(onebot, "voice_scope", False))
     if item.get("delivery_lane", "owner_private") != delivery_lane:
         raise ValueError("INVALID_DELIVERY_LANE")

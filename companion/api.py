@@ -21,6 +21,9 @@ from companion import (
     live_text,
     meme_core,
     meme_service,
+    owner_authority,
+    owner_delivery,
+    owner_input,
     poke,
     qq_images,
     qq_rich,
@@ -50,6 +53,7 @@ from companion.memory_control import (
     stopped_workers,
 )
 from companion.model import ModelClient
+from companion.owner_authority_protocol import OwnerCapture, OwnerSendCheck
 from companion.poke_protocol import PokeCapture
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
@@ -601,6 +605,18 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
         return app.state.core.ingest(event, x_idempotency_key)
 
+    @app.post(prefix + "/owner-authority/inputs/approve", dependencies=auth)
+    async def owner_input_approve(body: OwnerCapture, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return owner_input.approve(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/owner-authority/send-check", dependencies=auth)
+    async def owner_send_check(body: OwnerSendCheck, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return owner_delivery.send_check(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/open", dependencies=auth)
     async def live_text_open(body: live_text.OpenWindow):
         core = app.state.core
@@ -804,7 +820,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/memories/search", dependencies=auth)
     async def search(body: SearchRequest):
         def check_scope():
-            if live_text.active(app.state.core.store, settings):
+            core = app.state.core
+            if owner_authority.required(core.store, settings):
+                owner_authority.current(core.store, settings, core.clock, purpose="memory")
+            elif live_text.active(core.store, settings):
                 raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
 
         check_scope()
@@ -818,7 +837,9 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/memories/{memory_id}/decisions", dependencies=auth)
     async def decide(memory_id: str, body: MemoryDecision):
         core = app.state.core
-        if live_text.active(core.store, settings):
+        if owner_authority.required(core.store, settings):
+            owner_authority.current(core.store, settings, core.clock, purpose="memory")
+        elif live_text.active(core.store, settings):
             raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
         return core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content)
 

@@ -130,3 +130,20 @@ class OwnerCapture(AuthorityReference):
     received_at: AwareDatetime
     occurred_at: AwareDatetime
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
+
+
+class OwnerSendCheck(AuthorityReference):
+    event_id: str = Field(pattern=r"^[A-Za-z0-9_:-]{8,128}$")
+    message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
+    content_sha256: str = Field(pattern=SHA)
+    lease_token: str = Field(pattern=r"^lease_[a-f0-9]{32}$")
+    reply_revision: int | None = Field(default=None, ge=0, lt=2**53, strict=True,
+                                       exclude_if=lambda value: value is None)
+    voice: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @field_validator("voice")
+    @classmethod
+    def voice_binding(cls, value):
+        from companion_delivery_protocol import validate_voice_check
+
+        return validate_voice_check(value) if value is not None else None
