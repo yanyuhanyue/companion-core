@@ -161,6 +161,10 @@ def check_job(store, settings, approval, job):
     from companion.reply_revision import check_job as check_reply_job
 
     check_reply_job(store, job)
+    if job["kind"] == "social_plan":
+        from companion.social_plan_jobs import validate_binding
+
+        return validate_binding(store, settings, job)
     if job["kind"] == "meme_caption":
         from companion.meme_core import check_caption_job
 
@@ -222,6 +226,7 @@ def admit_model(store, settings, clock, job_id, scenario):
             "activity": {"activity", "memory_review"},
             "meme_caption": {"meme_caption"},
             "poke": {"qq_poke"},
+            "social_plan": {"social_autonomy"},
         }
         if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)

@@ -8,7 +8,7 @@ through the authenticated evidence interfaces on SocialAutonomy.
 import hashlib
 import json
 
-from companion import budget
+from companion import budget, social_plan_jobs
 from companion.contracts import CoreError
 from companion.social_autonomy import SocialAutonomy, public_source
 from companion.store import after, encode, utcnow
@@ -124,6 +124,7 @@ def _cancel(store, plan_id, code, now):
 
 def _expire(store, now):
     with store.transaction():
+        recovered_jobs = social_plan_jobs.recover(store, now)
         rows = store.rows("SELECT p.plan_id FROM social_autonomy_plans p WHERE p.state='READY' "
                           "AND p.expires_at<=? AND NOT EXISTS (SELECT 1 FROM "
                           "social_autonomy_reservations r WHERE r.plan_id=p.plan_id) "
@@ -149,7 +150,8 @@ def _expire(store, now):
                           (code, now, row["plan_id"]))
             store.audit("social.runtime_cancelled", row["plan_id"], row["plan_id"], now,
                         error_code=code)
-    return bool(rows or abandoned)
+            social_plan_jobs.cancel_plans(store, [row["plan_id"]], code, now)
+    return bool(rows or abandoned or recovered_jobs)
 
 
 def _enqueue(module, plan_id, conversation):
@@ -165,7 +167,7 @@ def _enqueue(module, plan_id, conversation):
         return True
 
 
-async def run_once(store, settings, model, clock=utcnow) -> bool:
+async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-worker") -> bool:
     """Return True only after durable work; False means idle, yielded or fenced.
 
     No caller transaction may span this call's model await. Invalid or expired
@@ -199,29 +201,40 @@ async def run_once(store, settings, model, clock=utcnow) -> bool:
         return _enqueue(module, ready["plan_id"], conversation) or changed
     if model is None:
         return changed
+    retry = social_plan_jobs.claim(module, worker_id)
+    if retry:
+        row = store.one("SELECT p.* FROM social_autonomy_jobs r JOIN social_autonomy_plans p "
+                        "USING(plan_id) WHERE r.job_id=?", (retry["job_id"],))
+        try:
+            messages, _ = module._messages(json.loads(row["input_snapshot_json"]), module.config)
+            plan = await module._run_plan(row["plan_id"], row["model_request_id"], messages,
+                                          job=retry)
+        except Exception as error:
+            code = error.code if isinstance(error, CoreError) else "SOCIAL_RETRY_FAILED"
+            with store.transaction():
+                social_plan_jobs.fail(module, retry, code)
+            return True
+        if plan["state"] == "READY":
+            _enqueue(module, plan["plan_id"], conversation)
+        return True
     candidate = _candidates(module)
     if not candidate:
         return changed
     key, inputs = candidate
     previous = store.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
-    if previous and not module.retryable_unadmitted(previous):
-        return changed
     if previous:
-        # The semantic key survives an equivalent Reader refetch. Retry the exact
-        # original input, never rebind its authority to the newer observation ID.
-        snapshot = json.loads(previous["input_snapshot_json"])
-        inputs = {
-            "source_ids": sorted(source["ref"] for source in snapshot["sources"]),
-            "asset_ids": sorted(asset["asset_id"] for asset in snapshot["assets"]),
-            "profile_fields": sorted(profile["field"] for profile in snapshot["profiles"]),
-        }
+        if (module.retryable_unadmitted(previous)
+            and social_plan_jobs.get(store, previous["plan_id"]) is None):
+            # Upgrade an old, provably unadmitted refusal to a native waiting job.
+            # It retains its original sources even after an equivalent refetch.
+            try:
+                return bool(social_plan_jobs.queue(module, previous["plan_id"])) or changed
+            except CoreError:
+                return changed
+        return changed
     try:
         plan = await module.plan(key, **inputs)
     except CoreError:
-        if previous:
-            # A refused native retry is rolled back; let the normal worker idle
-            # wait run instead of spinning or creating another plan/usage record.
-            return changed
         return bool(store.one("SELECT 1 FROM social_autonomy_plans WHERE idempotency_key=?",
                               (key,))) or changed
     except Exception:

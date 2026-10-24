@@ -342,6 +342,8 @@ class SocialAutonomy:
         return {"field": baseline.field, "observed_at": baseline.observed_at}
 
     def get(self, plan_id):
+        from companion import social_plan_jobs
+
         row = self.store.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?", (plan_id,))
         if not row:
             raise CoreError("SOCIAL_PLAN_NOT_FOUND", 404)
@@ -349,9 +351,13 @@ class SocialAutonomy:
             "SELECT o.message_id,o.state FROM social_autonomy_reservations r "
             "JOIN outbox o USING(message_id) WHERE r.plan_id=?", (plan_id,),
         )
+        retry = social_plan_jobs.get(self.store, plan_id)
         return {"plan_id": plan_id, "state": row["state"], "error_code": row["last_error_code"],
                 "plan": json.loads(row["plan_json"]), "delivery": delivery,
-                "model_request_id": row["model_request_id"]}
+                "model_request_id": row["model_request_id"],
+                "retry_job": {key: retry[key] for key in
+                              ("job_id", "state", "next_attempt_at", "last_error_code")}
+                if retry else None}
 
     def _planning_room(self, cfg, now, timezone, *, excluding=None):
         s = self.store
@@ -375,10 +381,14 @@ class SocialAutonomy:
                        (SCENARIO,))["at"]
         if latest and _instant(now) < _instant(after(latest, cfg.decision_interval_seconds)):
             raise CoreError("SOCIAL_DECISION_COOLDOWN", 429)
-        pending = s.one("SELECT COUNT(*) n FROM social_autonomy_plans p WHERE state='READY' "
-                        "AND redacted=0 AND expires_at>? AND NOT EXISTS "
-                        "(SELECT 1 FROM social_autonomy_reservations r WHERE r.plan_id=p.plan_id)",
-                        (now,))["n"]
+        pending = s.one(
+            "SELECT COUNT(*) n FROM social_autonomy_plans p WHERE p.plan_id<>? "
+            "AND p.redacted=0 AND p.expires_at>? AND ((p.state='READY' AND NOT EXISTS "
+            "(SELECT 1 FROM social_autonomy_reservations r WHERE r.plan_id=p.plan_id)) "
+            "OR (p.state='REJECTED' AND EXISTS (SELECT 1 FROM social_autonomy_jobs r "
+            "JOIN jobs j USING(job_id) WHERE r.plan_id=p.plan_id "
+            "AND j.state IN ('QUEUED','RETRY_WAIT','RUNNING'))))", (excluding or "", now),
+        )["n"]
         if pending >= cfg.max_pending_plans:
             raise CoreError("SOCIAL_PENDING_LIMIT", 429)
 
@@ -424,13 +434,30 @@ class SocialAutonomy:
             )
         )
 
-    def admit_model(self, request_id, logical_request_id, messages):
+    def check_retry_job(self, job):
+        from companion import social_plan_jobs
+
+        event = social_plan_jobs.validate_binding(self.store, self.settings, job)
+        if (not event["job_lease_until"]
+            or _instant(event["job_lease_until"]) <= _instant(self.clock())
+            or _instant(event["plan_expires_at"]) <= _instant(self.clock())):
+            raise CoreError("SOCIAL_RETRY_JOB_FENCED", 409)
+        return event
+
+    def admit_model(self, request_id, logical_request_id, messages, *, job_id=None):
         """Native reserve transaction owns retry claim, current sources and budget together."""
+        from companion import social_plan_jobs
+
         _require_tx(self.store)
         row = self.store.one("SELECT * FROM social_autonomy_plans WHERE model_request_id=?",
                              (request_id,))
         if not row or logical_request_id != "social:" + row["plan_id"]:
             raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
+        retry_job = social_plan_jobs.get(self.store, row["plan_id"])
+        if (retry_job and retry_job["job_id"] != job_id or not retry_job and job_id is not None):
+            raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
+        if retry_job:
+            self.check_retry_job(retry_job)
         retrying = self.retryable_unadmitted(row)
         if row["state"] != "PLANNING" and not retrying:
             raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
@@ -459,17 +486,6 @@ class SocialAutonomy:
         request = {"sources": list(source_ids), "assets": list(asset_ids),
                    "profile_fields": list(profile_fields)}
         request_sha = _sha(request)
-        previous = s.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?",
-                         (idempotency_key,))
-        if previous:
-            if previous["request_sha256"] != request_sha:
-                raise CoreError("IDEMPOTENCY_CONFLICT", 409)
-            if not self.retryable_unadmitted(previous):
-                return self.get(previous["plan_id"])
-            if self.model is None:
-                raise CoreError("SOCIAL_MODEL_REQUIRED", 503)
-            messages, _ = self._messages(json.loads(previous["input_snapshot_json"]), cfg)
-            return await self._run_plan(previous["plan_id"], previous["model_request_id"], messages)
         with _tx(s):
             previous = s.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?",
                              (idempotency_key,))
@@ -516,19 +532,31 @@ class SocialAutonomy:
                 return self.get(plan_id)
         return await self._run_plan(plan_id, request_id, messages)
 
-    async def _run_plan(self, plan_id, request_id, messages):
+    async def _run_plan(self, plan_id, request_id, messages, *, job=None):
+        from companion import social_plan_jobs
+
         s, admitted = self.store, False
         try:
-            budget.reserve(s, self.settings, None, SCENARIO, messages, self.clock(),
+            budget.reserve(s, self.settings, job["job_id"] if job else None,
+                           SCENARIO, messages, self.clock(),
                            request_id=request_id, logical_request_id="social:" + plan_id,
-                           clock=self.clock)
+                           clock=self.clock,
+                           source_check=(lambda: self.check_retry_job(job)) if job else None)
             admitted = True
+
+            def check():
+                self.validate_model(request_id)
+                if job:
+                    self.check_retry_job(job)
+
             response = await budget.complete(
                 self.model, s, self.settings, request_id, messages, SCENARIO, self.clock,
-                source_check=lambda: self.validate_model(request_id),
+                source_check=check,
             )
             proposal = proposal_adapter.validate_json(response.text)
             with _tx(s):
+                if job:
+                    self.check_retry_job(job)
                 row = self._validate_plan(plan_id)
                 usage = s.one("SELECT state,scenario FROM model_usage WHERE request_id=?",
                               (request_id,))
@@ -543,6 +571,10 @@ class SocialAutonomy:
                            self.clock(), plan_id))
                 s.audit("social.plan_decided", plan_id, plan_id, self.clock(),
                         outcome="skip" if isinstance(frozen, Skip) else frozen.action_type)
+                if job:
+                    s.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
+                              "WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+                              (self.clock(), job["job_id"], job["lease_token"]))
         except BaseException as error:
             code = (error.code if isinstance(error, CoreError) else "SOCIAL_PLAN_INVALID"
                     if isinstance(error, ValidationError) else "SOCIAL_PLANNING_INTERRUPTED")
@@ -559,16 +591,29 @@ class SocialAutonomy:
                     if changed or admitted:
                         s.audit("social.plan_failed", plan_id, plan_id, self.clock(),
                                 error_code=code)
+                if job:
+                    social_plan_jobs.fail(self, job, code)
+                elif not admitted:
+                    row = s.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?", (plan_id,))
+                    if self.retryable_unadmitted(row):
+                        try:
+                            social_plan_jobs.queue(self, plan_id)
+                        except CoreError:
+                            # No deferral is authorized once its source/policy changed.
+                            pass
             if isinstance(error, ValidationError):
                 raise CoreError(code, 400) from error
             raise
         return self.get(plan_id)
 
-    def _validate_plan(self, plan_id, *, current_request=None, current_delivery=None):
+    def _validate_plan(self, plan_id, *, current_request=None, current_delivery=None,
+                       allow_unadmitted=False):
         cfg = self._authorized(current_request=current_request, current_delivery=current_delivery)
         now = self.clock()
         row = self.store.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?", (plan_id,))
-        if not row or row["redacted"] or row["state"] in {"CANCELLED", "REJECTED", "SKIPPED"}:
+        if (not row or row["redacted"] or row["state"] in {"CANCELLED", "SKIPPED"}
+            or row["state"] == "REJECTED" and not (
+                allow_unadmitted and self.retryable_unadmitted(row))):
             raise CoreError("SOCIAL_PLAN_UNAVAILABLE", 409)
         if (_instant(now) >= _instant(row["expires_at"])
             or row["binding_sha256"] != self._binding()
@@ -586,10 +631,19 @@ class SocialAutonomy:
         return row
 
     def validate_model(self, request_id):
+        from companion import social_plan_jobs
+
         row = self.store.one("SELECT plan_id,state FROM social_autonomy_plans "
                              "WHERE model_request_id=?", (request_id,))
         if not row or row["state"] != "PLANNING":
             raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
+        retry = social_plan_jobs.get(self.store, row["plan_id"])
+        if retry:
+            self.check_retry_job(retry)
+            usage = self.store.one("SELECT job_id FROM model_usage WHERE request_id=?",
+                                   (request_id,))
+            if not usage or usage["job_id"] != retry["job_id"]:
+                raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
         return self._validate_plan(row["plan_id"], current_request=request_id)
 
     def _freeze(self, row, proposal):
@@ -840,12 +894,15 @@ class SocialAutonomy:
 
 def erase_social_autonomy(store, event_ids):
     """Ledger hook. Remove source-derived content without changing native cost accounting."""
+    from companion import social_plan_jobs
+
     _require_tx(store)
     if not store.one("SELECT 1 FROM sqlite_master WHERE name='social_autonomy_plans'"):
         return
     for plan in store.rows("SELECT DISTINCT plan_id FROM social_autonomy_sources WHERE event_id "
                             "IN (SELECT value FROM json_each(?))", (encode(sorted(event_ids)),)):
         plan_id = plan["plan_id"]
+        social_plan_jobs.cancel_plans(store, [plan_id], "SOCIAL_SOURCE_ERASED", utcnow())
         store.execute("UPDATE social_autonomy_plans SET state='CANCELLED',redacted=1,"
                       "plan_json='{}',input_snapshot_json='{}',"
                       "last_error_code='SOCIAL_SOURCE_ERASED' "
@@ -868,10 +925,18 @@ def erase_social_autonomy(store, event_ids):
 
 def restore_social_autonomy(store, now):
     """Backup cannot prove complete account-action history; there is no automatic rearm."""
+    from companion import social_plan_jobs
+
     _require_tx(store)
     store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (RESTORE_REQUIRED, "1"))
     if not store.one("SELECT 1 FROM sqlite_master WHERE name='social_autonomy_plans'"):
         return
+    if social_plan_jobs.available(store):
+        plans = store.rows("SELECT plan_id FROM social_autonomy_jobs")
+        social_plan_jobs.cancel_plans(
+            store, [row["plan_id"] for row in plans],
+            "SOCIAL_RESTORE_RECONCILIATION_REQUIRED", now,
+        )
     store.execute(
         "UPDATE social_autonomy_plans SET state='CANCELLED',updated_at=?,"
         "last_error_code='SOCIAL_RESTORE_RECONCILIATION_REQUIRED' "

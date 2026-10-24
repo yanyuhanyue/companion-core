@@ -256,9 +256,12 @@ def _plans(core, now):
         "SELECT p.plan_id,p.state,p.plan_json,p.payload_sha256,p.redacted,"
         "p.created_at,p.expires_at,"
         "p.last_error_code,r.message_id,r.action_type,r.dispatched_at,r.receipt_json,r.receipt_sha256,"
-        "o.state AS delivery_state,o.lease_token FROM social_autonomy_plans p "
+        "o.state AS delivery_state,o.lease_token,j.job_id AS retry_job_id,"
+        "j.state AS retry_state,j.next_attempt_at FROM social_autonomy_plans p "
         "LEFT JOIN social_autonomy_reservations r USING(plan_id) "
         "LEFT JOIN outbox o USING(message_id) "
+        "LEFT JOIN social_autonomy_jobs retry ON retry.plan_id=p.plan_id "
+        "LEFT JOIN jobs j ON j.job_id=retry.job_id "
         "ORDER BY p.created_at DESC,p.plan_id LIMIT 60"
     )
     items = []
@@ -341,6 +344,11 @@ def _plans(core, now):
                 "FAILED": "投递失败",
                 "CANCELLED": "投递已取消",
             }.get(state, label)
+        elif not row["redacted"] and row["state"] == "REJECTED" and row["retry_state"] in {
+            "QUEUED", "RETRY_WAIT", "RUNNING",
+        }:
+            state = row["retry_state"]
+            label = "正在重新检查计划" if state == "RUNNING" else "等待重新检查预算"
         items.append(
             _entry(
                 row["plan_id"],
@@ -361,6 +369,9 @@ def _plans(core, now):
                 dispatched_at=row["dispatched_at"],
                 expires_at=row["expires_at"],
                 last_error_code=row["last_error_code"],
+                retry_job_id=row["retry_job_id"],
+                retry_state=row["retry_state"],
+                next_attempt_at=row["next_attempt_at"],
                 sources=sources,
             )
         )

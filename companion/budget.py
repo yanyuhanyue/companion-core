@@ -71,7 +71,7 @@ def reader_video_binding(store, settings, clock, request_id, *, job_id=None, sce
 
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
-    clock=None, cloud_task_kind=None, cloud_task_id=None,
+    clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None,
 ):
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
@@ -138,6 +138,8 @@ def reserve(
             job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
             if job:
                 check_job(store, job)
+        if source_check is not None:
+            source_check()
 
         if job_id is None and scenario in {"memory_extract", "memory_review"} and chat_pending(
             store, clock() if callable(clock) else now,
@@ -165,10 +167,10 @@ def reserve(
         if scenario == "social_autonomy":
             from companion.social_autonomy import SocialAutonomy
 
-            if job_id is not None:
+            if job_id is not None and source_check is None:
                 raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
             SocialAutonomy(store, settings, clock=clock or (lambda: now)).admit_model(
-                request_id, logical_request_id, messages,
+                request_id, logical_request_id, messages, job_id=job_id,
             )
         if scenario in {"content_vision", *VIDEO_SCENARIOS}:
             if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
