@@ -233,3 +233,18 @@ def test_native_history_selector_keeps_only_proven_legacy_sent_prefix(core, tmp_
         (old_job["event_id"], "Already sent.")]
     core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'private_life_delivery:%'")
     assert owner_input.history_sources(core.store, core.settings, core.clock, job) == []
+
+
+@pytest.mark.parametrize("boundary", ["input", "sent"])
+def test_clock_rollback_does_not_expose_future_legacy_history(core, tmp_path, boundary):
+    _, view, job, mids, _ = archived(core, tmp_path)
+    item = turn(core, job)
+    if boundary == "input":
+        core.clock.advance(-61)  # One second before the original signed frame.
+    else:
+        # Archived delivery occurred 30 seconds after input, before grant creation.
+        core.store.execute("UPDATE outbox SET sent_at=? WHERE message_id=?",
+                           (after(core.clock(), -30), mids[0]))
+        core.clock.advance(-45)  # Input is past, but the confirmed delivery is future.
+    with pytest.raises(CoreError):
+        legacy_owner_input.validate_turn(core.store, core.settings, view, item, core.clock())

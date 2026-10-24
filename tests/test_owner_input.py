@@ -58,6 +58,25 @@ def inbound(core, capture):
         update={"event_id": capture.event_id, "source_event_id": capture.source_event_id})
 
 
+def test_history_rejects_future_capture_after_clock_rollback(core, tmp_path):
+    from companion.store import after
+
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    core.ingest(inbound(core, capture), "future-history-input")
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    original = owner_authority.current(core.store, core.settings, core.clock)
+    policy = OwnerGrantPolicy.model_validate({**original.policy.model_dump(),
+        "purposes": ["chat", "history"], "history": {"scope": "owner_private",
+            "not_before": after(core.clock(), -3600), "max_turns": 8, "max_utf8_bytes": 8192}})
+    activate(core, policy, revision=1, operation="history-before-clock-rollback")
+    current = owner_authority.current(core.store, core.settings, core.clock)
+    core.clock.advance(-1)
+    with pytest.raises(CoreError, match="OWNER_SOURCE_CHANGED"):
+        owner_input.source(core.store, core.settings, current, capture.event_id,
+                            core.clock(), history=True)
+
+
 def test_input_requires_admitted_capture_and_exact_content(core, tmp_path):
     capture, _ = captured(core, tmp_path)
     message = inbound(core, capture)

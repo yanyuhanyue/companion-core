@@ -178,7 +178,8 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
             raise ValueError("current source revision changed")
         lifetime = 86400 * min(original.policy.source_retention_days,
                                view.policy.source_retention_days, settings.raw_event_retention_days)
-        if (datetime.fromisoformat(now) - capture.received_at).total_seconds() >= lifetime:
+        age = (datetime.fromisoformat(now) - capture.received_at).total_seconds()
+        if age < (0 if history else -2) or age >= lifetime:
             raise ValueError("source expired")
     except (ValueError, KeyError, TypeError):
         raise CoreError("OWNER_SOURCE_CHANGED", 403) from None
@@ -202,6 +203,13 @@ def history_sources(store, settings, clock, job):
                                        scope.max_turns):
         try:
             source(store, settings, view, item["event_id"], clock(), history=True)
+            parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
+            for part in parts:
+                sent = store.one("SELECT sent_at FROM outbox WHERE message_id=?",
+                                  (part["message_id"],))
+                if (not sent or not sent["sent_at"] or datetime.fromisoformat(sent["sent_at"])
+                    > datetime.fromisoformat(clock())):
+                    raise CoreError("OWNER_HISTORY_FUTURE_DELIVERY", 403)
             if not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (INPUT + item["event_id"],)):
                 from companion import legacy_owner_input
 

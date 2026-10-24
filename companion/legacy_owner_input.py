@@ -149,6 +149,7 @@ def source(store, settings, view, event_id, now, *, purpose="history", allow_com
         receipt = _meta(store, "live_text_input:" + event_id)
         received = datetime.fromisoformat(receipt["capture"]["received_at"])
         if (event["privacy_scope"] != "private" or json.loads(job["authority_json"]) != {}
+            or received > datetime.fromisoformat(now)
             or store.one("SELECT 1 FROM runtime_meta WHERE key=?", ("erased_event:" + event_id,))
             or (datetime.fromisoformat(now) - received).total_seconds() >= 86400 * min(
                 view.policy.source_retention_days, settings.raw_event_retention_days)
@@ -223,7 +224,8 @@ def _validate_turn(store, settings, view, item, now):
             # against this exact native outcome, including owner-confirmed SENT.
             acknowledged = row["provider_message_id"] or _meta(
                 store, "delivery_resolution:" + row["message_id"])
-            if (not row["sent_at"] or not acknowledged
+            if (not row["sent_at"] or datetime.fromisoformat(row["sent_at"])
+                    > datetime.fromisoformat(now) or not acknowledged
                 or row["origin_event_id"] != event["event_id"]
                 or row["conversation_id"] != event["conversation_id"]
                 or row["action_type"] != "qq.private.reply"
