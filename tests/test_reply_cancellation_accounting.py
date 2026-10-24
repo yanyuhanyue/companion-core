@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from companion import budget, live_text
+from companion import api, budget, live_text
 from companion.core import Core
 from companion.model import ModelClient
 from tests.conftest import run
@@ -16,6 +16,10 @@ from tests.test_input_protocol import admit, environment
 def test_supersession_in_last_http_hook_never_calls_old_provider_or_freezes_budget(
     core, tmp_path, monkeypatch,
 ):
+    # API and worker use independent stores but must share the same test timeline.
+    monkeypatch.setattr(api, "Core", lambda settings, model=None: Core(
+        settings, model, core.clock))
+
     async def scenario():
         async with environment(core, tmp_path, monkeypatch) as (client, config, plan, now):
             calls, hooks = [], []
@@ -49,8 +53,11 @@ def test_supersession_in_last_http_hook_never_calls_old_provider_or_freezes_budg
                     assert core.store.one("SELECT 1 FROM audit_log "
                                           "WHERE action='model.not_dispatched'")
                     assert not live_text.stopped(core.store, plan.sha256)
+                    assert worker.clock() >= core.store.one(
+                        "SELECT MAX(ingested_at) AS latest FROM events")["latest"]
                     assert await worker.run_once("latest-input")
-            assert len(calls) == 1
+            assert len(calls) == 1, core.store.rows(
+                "SELECT kind,state,last_error_code FROM jobs")
             assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
                                   (first["event_id"],))["state"] == "CANCELLED"
             assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 2
