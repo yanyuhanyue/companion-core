@@ -119,10 +119,20 @@ def permitted_url(value):
     video_url(value)
 
 
+def global_address(value):
+    """Require native public unicast addresses, matching the media transport policy."""
+    try:
+        ip = ipaddress.ip_address(value)
+        return (ip.is_global and not ip.is_multicast
+                and (ip.version == 4 or not (ip.ipv4_mapped or ip.sixtofour or ip.teredo)))
+    except ValueError:
+        return False
+
+
 async def public_addresses(host, port):
     entries = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
     addresses = sorted({row[4][0] for row in entries})
-    if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
+    if not addresses or any(not global_address(ip) for ip in addresses):
         raise ReadFailure("READER_NONPUBLIC_ADDRESS")
     return addresses
 
@@ -144,7 +154,7 @@ class PublicNetwork(httpcore.AsyncNetworkBackend):
         # the original origin for Host, TLS SNI and certificate validation.
         async with asyncio.timeout(timeout or 10):
             addresses = await self.resolver(host, port)
-            if not addresses or any(not ipaddress.ip_address(ip).is_global for ip in addresses):
+            if not addresses or any(not global_address(ip) for ip in addresses):
                 raise ReadFailure("READER_NONPUBLIC_ADDRESS")
             return await self.backend.connect_tcp(
                 addresses[0],

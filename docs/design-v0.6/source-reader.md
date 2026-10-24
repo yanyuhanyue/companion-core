@@ -38,6 +38,12 @@ ErasureLedger 会清除正文及读取证据。
 外部响应只接受未压缩数据，拒绝跳转、压缩炸弹和超额内容。
 DNS 每次解析后检查所有地址，只连接已校验的公网数字 IP，保留原始 Host、TLS SNI 和证书验证。
 只允许固定 B站页面／API 路径及两种字幕 CDN，拒绝内网、元数据、混合公网／私网 DNS 响应。
+公网检查还拒绝组播、IPv4-mapped IPv6、6to4 和 Teredo 地址；系统解析与最终连接入口使用同一规则。
+它复用 Bridge 已有的地址分类策略，通过标准库
+[`ipaddress`](https://docs.python.org/3.12/library/ipaddress.html) 独立实现，保持读取器的部署边界。
+已对照 DSH `22ddee3792402c3e70ec5f86a63c3e3e895a2f60` 的
+[HTTP fetch provider](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/web/web-fetch-http/src/provider.ts)：
+其 URL／重定向限制与传输分层可参考，实际请求交给进程 dispatcher，不能代替本读取器的 DNS 地址检查与连接固定。
 不继承 HTTP 代理、Cookie 或 Core 请求头。
 
 ## 隔离环境启用
