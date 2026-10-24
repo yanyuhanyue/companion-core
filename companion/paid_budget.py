@@ -96,7 +96,7 @@ def contract(settings, now):
     return approval
 
 
-def estimate_input_tokens(approval, messages, scenario):
+def estimate_input_tokens(approval, messages, scenario, *, tools=()):
     """Estimate approved input locally, without claiming a provider-side token bound.
 
     UTF-8 bytes / 3 approximates mixed Chinese/Latin text, with per-message and
@@ -106,6 +106,13 @@ def estimate_input_tokens(approval, messages, scenario):
     """
     try:
         estimate = 32
+        if tools and scenario != "chat":
+            raise CoreError("MODEL_TOOLS_SCOPE_REQUIRED", 503)
+        if scenario == "chat":
+            from companion.agent_messages import estimate_messages
+
+            messages, tool_estimate = estimate_messages(messages, tools)
+            estimate += tool_estimate
         if scenario == "content_video_preview":
             from companion.video_input import preview_text_and_estimate
 

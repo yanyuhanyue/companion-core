@@ -54,12 +54,17 @@ M0 多轮必须单独批准 `approved_window` 历史范围：同一窗口、主�
 `revision="1bae0e1088993b9b82de08f59de5be5a34e42170"`。
 未配置时保持估算；未知模型不自动映射。`exact_local_render` 仅表示已固定官方文本渲染与
 tokenizer 对完整本地请求的精确计数，不证明托管模型的预处理或最终账单相同。
-结构化输出、工具及图片/视频未验证完整预处理时保持 `estimate`；`exact_required` 在预留前拒绝。
+普通文本和 SDK 的函数工具声明、调用及文本结果使用固定官方编码器计数。工具请求必须
+采用已验证的首条 system 消息映射和 `tool_choice=auto`；实际网络 payload 不改写。
+结构化输出、图片/视频及其他未验证格式保持 `estimate`；`exact_required` 在预留前拒绝。
 `provider_count` 是独立证据类型，本片不启用任何远程计数请求，也不在运行时下载文件。
 
 复用依据：[官方 V4.1 编码](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/encoding/README.md)
 及同 revision 的 MIT tokenizer；文件、大小、SHA256 见包内
 `companion/token_artifacts/deepseek_v41/manifest.json`。
+工具映射复用同一 `encoding.py` 的 `load_cases` 和 `encode_messages`，将工具 schema
+加入首条 system 的渲染副本，保留原请求哈希。工具连续回合的测试直接对照官方 case
+loader，并在真实 ModelClient 的模拟 transport 边界核对声明被篡改时不会发送。
 [官方用量说明](https://api-docs.deepseek.com/quick_start/token_usage/)以返回 usage 为准。
 计量与实际用量分离、预留输出空间复用
 [DSH token-meter](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/llm/token-meter/src/types.ts)

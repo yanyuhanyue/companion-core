@@ -10,6 +10,7 @@ from companion import budget
 from companion.contracts import CoreError
 from companion.model import ModelClient
 from tests.conftest import run
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 MESSAGES = [{"role": "user", "content": "synthetic accounting boundary"}]
@@ -17,7 +18,7 @@ MESSAGES = [{"role": "user", "content": "synthetic accounting boundary"}]
 
 def rejected_response(core, response):
     request_id = budget.reserve(
-        core.store, core.settings, None, "chat", MESSAGES, core.clock(),
+        core.store, core.settings, authorized_job(core), "chat", MESSAGES, core.clock(),
     )
     received = []
 
@@ -66,7 +67,8 @@ def test_invalid_reply_preserves_large_known_usage_and_blocks_new_io(
     assert records[-1]["minimum_micro_usd"] >= 90000
     assert any(row["kind"] == "blocked" for row in records)
     with pytest.raises(CoreError, match="RECONCILIATION"):
-        budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        budget.reserve(core.store, core.settings, authorized_job(core),
+            "chat", MESSAGES, core.clock())
 
 
 @pytest.mark.parametrize("status,code", [
@@ -88,7 +90,7 @@ def test_unusable_response_with_known_usage_within_limits_settles_and_keeps_erro
     )
     assert usage["billed_micro_usd"] == 50
     assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
-    budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    budget.reserve(core.store, core.settings, authorized_job(core), "chat", MESSAGES, core.clock())
 
 
 @pytest.mark.parametrize("status", [400, 429, 503])

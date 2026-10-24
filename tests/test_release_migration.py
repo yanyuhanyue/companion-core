@@ -62,6 +62,7 @@ REVISION_CHAIN = (
     "0038_life_goal_binding",
     "0039_evaluation",
     "0040_owner_authority",
+    "0041_agent_conversations",
 )
 LEGACY_TABLES = (
     "principals",
@@ -356,8 +357,10 @@ def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core):
     ):
         command.downgrade(config, "0033_model_usage_job_index")
     assert table_snapshot(core.store, tables) == before
+    # Empty newer custody tables can be removed before the authority migration's
+    # permanent downgrade fence. Its original state and accounting still survive.
     assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-        REVISION_CHAIN[-1]
+        "0040_owner_authority"
     )
 
 

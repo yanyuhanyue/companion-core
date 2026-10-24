@@ -10,6 +10,7 @@ from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
 from companion.store import after
 from tests.conftest import ingest, run
+from tests.owner_model_fixtures import authorized_job
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY, generate, seed_day
 from tests.test_paid_model_gate import approved_live
@@ -21,7 +22,8 @@ MESSAGES = [{"role": "user", "content": "synthetic completion"}]
 def test_complete_returns_only_after_settling_usage(core, tmp_path, live):
     if live:
         approved_live(core, tmp_path)
-    request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", MESSAGES, core.clock())
 
     async def exercise():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(
@@ -48,7 +50,10 @@ def test_complete_returns_only_after_settling_usage(core, tmp_path, live):
 @pytest.mark.parametrize("failure", ["transport", "cancelled", "expired"])
 def test_failed_completion_retains_reservation_without_caller_cleanup(core, tmp_path, failure):
     approval = approved_live(core, tmp_path)
-    request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    # Keep the independent job lease alive while probing model admission expiry.
+    job_id = authorized_job(core, lease_seconds=core.settings.lease_seconds * 2)
+    request_id = budget.reserve(core.store, core.settings, job_id,
+        "chat", MESSAGES, core.clock())
     reserved = core.store.one("SELECT billed_micro_usd FROM model_usage")["billed_micro_usd"]
     calls = []
 
@@ -76,11 +81,14 @@ def test_failed_completion_retains_reservation_without_caller_cleanup(core, tmp_
                 with pytest.raises(asyncio.CancelledError):
                     await task
             else:
-                with pytest.raises(CoreError, match="MODEL_ADMISSION_LEASE_EXPIRED"
+                with pytest.raises(CoreError, match="JOB_LEASE_LOST"
                                    if failure == "expired" else "MODEL_RETRYABLE"):
                     await invocation
 
     run(exercise())
+    if failure == "expired":
+        assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
+                              (job_id,))["lease_until"] > core.clock()
     assert len(calls) == (0 if failure == "expired" else 1)
     assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
         "state": "UNKNOWN", "billed_micro_usd": reserved,
@@ -107,11 +115,12 @@ def test_business_binding_failure_settles_before_the_calling_seam(core, monkeypa
 
 
 def test_journal_history_uses_constant_query_count_and_still_checks_missing_rows(core, tmp_path):
-    approval = approved_live(core, tmp_path)
+    approval = approved_live(core, tmp_path, per_request_calls=10)
     counts = []
     request_ids = []
     for index in range(8):
-        request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+            "chat", MESSAGES, core.clock())
         request_ids.append(request_id)
         budget.settle(core.store, core.settings, request_id, ModelResponse("ok", 80, 3))
         if index in {0, 7}:

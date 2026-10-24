@@ -2,6 +2,7 @@
 
 import gzip
 import hashlib
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -98,26 +99,69 @@ def _local_encoder():
         raise CoreError("MODEL_TOKEN_ARTIFACT_INVALID", 503) from error
 
 
+def _tool_call(call):
+    if (not isinstance(call, dict) or set(call) != {"id", "type", "function"}
+        or call["type"] != "function" or not isinstance(call["id"], str)):
+        return False
+    function = call["function"]
+    return (isinstance(function, dict) and set(function) == {"name", "arguments"}
+            and all(isinstance(function[key], str) for key in function))
+
+
+def _text_message(message):
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if role == "tool":
+        return (set(message) == {"role", "content", "tool_call_id"}
+                and isinstance(message["content"], str)
+                and isinstance(message["tool_call_id"], str))
+    if role == "assistant" and "tool_calls" in message:
+        calls = message["tool_calls"]
+        return (set(message) == {"role", "content", "tool_calls"}
+                and (message["content"] is None or isinstance(message["content"], str))
+                and isinstance(calls, list) and bool(calls) and all(map(_tool_call, calls)))
+    return (role in {"system", "user", "assistant"} and set(message) == {"role", "content"}
+            and isinstance(message["content"], str))
+
+
+def _tool_definition(tool):
+    if (not isinstance(tool, dict) or set(tool) != {"type", "function"}
+        or tool["type"] != "function"):
+        return False
+    function = tool["function"]
+    return (isinstance(function, dict)
+            and {"name", "parameters"} <= set(function) <= {
+                "name", "parameters", "description", "strict"}
+            and isinstance(function["name"], str) and isinstance(function["parameters"], dict)
+            and ("description" not in function or isinstance(function["description"], str))
+            and ("strict" not in function or type(function["strict"]) is bool))
+
+
 def _exact_supported(config, provider, endpoint, payload):
     if (provider, endpoint, payload["model"]) != (
         config.provider, config.endpoint, config.model,
     ):
         return "route_mismatch"
-    if set(payload) != {"model", "messages", "max_tokens", "stream", "thinking"}:
+    fields = {"model", "messages", "max_tokens", "stream", "thinking"}
+    tools = payload.get("tools")
+    if tools:
+        fields |= {"tools", "tool_choice"}
+        if (payload.get("tool_choice") != "auto" or not isinstance(tools, list)
+            or not all(map(_tool_definition, tools))):
+            return "tool_format_not_verified"
+    if set(payload) != fields:
         return "request_format_not_verified"
     if payload["thinking"] != {"type": "disabled"} or payload["stream"] is not False:
         return "request_mode_not_verified"
-    if not payload["messages"] or any(
-        not isinstance(message, dict) or set(message) != {"role", "content"}
-        or message["role"] not in {"system", "user", "assistant"}
-        or not isinstance(message["content"], str)
-        for message in payload["messages"]
-    ):
+    if not payload["messages"] or not all(map(_text_message, payload["messages"])):
         return "message_format_not_verified"
+    if tools and payload["messages"][0]["role"] != "system":
+        return "tool_system_mapping_not_verified"
     return None
 
 
-def measure_payload(settings, payload, scenario):
+def measure_payload(settings, payload, scenario, *, tools=()):
     """Measure the same complete generated payload used by admission and model transport.
 
     Provider-count is a distinct evidence kind; no remote backend is enabled here.
@@ -127,7 +171,8 @@ def measure_payload(settings, payload, scenario):
     from companion.model import model_payload, model_route
 
     messages = payload.get("messages")
-    if not isinstance(messages, list) or payload != model_payload(settings, messages, scenario):
+    if not isinstance(messages, list) or payload != model_payload(
+        settings, messages, scenario, tools=tools):
         raise CoreError("MODEL_TOKEN_PAYLOAD_INVALID", 503)
     approval = settings.paid_model
     provider, _, endpoint = model_route(settings, scenario)
@@ -141,7 +186,13 @@ def measure_payload(settings, payload, scenario):
         if reason is None:
             renderer, tokenizer = _local_encoder()
             try:
-                rendered = renderer.encode_messages(messages, thinking_mode="chat")
+                rendered_messages = deepcopy(messages)
+                if payload.get("tools"):
+                    # The pinned upstream load_cases maps top-level OpenAI tools
+                    # onto the first system message before encoding. Wire input
+                    # and admission payload remain byte-for-byte unchanged.
+                    rendered_messages[0]["tools"] = deepcopy(payload["tools"])
+                rendered = renderer.encode_messages(rendered_messages, thinking_mode="chat")
                 tokens = len(tokenizer.encode(rendered, add_special_tokens=False).ids)
             except (ValueError, AssertionError, TypeError, KeyError) as error:
                 reason = "renderer_rejected_input"
@@ -150,25 +201,35 @@ def measure_payload(settings, payload, scenario):
             else:
                 percent = approval.input_estimate_safety_percent if approval else 100
                 margin = (tokens * percent + 99) // 100 - tokens
+                tool_history = payload.get("tools") or any(
+                    message["role"] == "tool" or "tool_calls" in message for message in messages)
+                method = "deepseek-v41-chat-tools-v1" if tool_history else "deepseek-v41-chat-v1"
                 return Measurement(**common, count_kind="exact_local_render", input_tokens=tokens,
-                                   reservation_margin=margin, method="deepseek-v41-chat-v1",
+                                   reservation_margin=margin, method=method,
                                    artifact_revision=REVISION, artifact_hashes=dict(ARTIFACTS))
         if config.policy == "exact_required":
             return Measurement(**common, count_kind="unsupported", input_tokens=None,
                                reservation_margin=0, method="none", reason=reason)
     if approval:
         base = approval.model_copy(update={"input_estimate_safety_percent": 100})
-        tokens = paid_budget.estimate_input_tokens(base, messages, scenario)
-        reserved = paid_budget.estimate_input_tokens(approval, messages, scenario)
+        tokens = paid_budget.estimate_input_tokens(base, messages, scenario, tools=tools)
+        reserved = paid_budget.estimate_input_tokens(approval, messages, scenario, tools=tools)
         method = "utf8-third-v1"
     else:
-        tokens = reserved = byte_estimate(messages)
+        from companion.agent_messages import estimate_messages, tool_payload
+        from companion.store import encode
+
+        plain, _ = estimate_messages(messages)
+        metadata = {"tools": tool_payload(tools), "tool_choice": "auto"} if tools else {}
+        tokens = reserved = byte_estimate(plain) + (
+            len(encode(metadata).encode()) if metadata else 0)
         method = "utf8-byte-v1"
     return Measurement(**common, count_kind="estimate", input_tokens=tokens,
                        reservation_margin=reserved - tokens, method=method, reason=reason)
 
 
-def measure_request(settings, messages, scenario="chat"):
+def measure_request(settings, messages, scenario="chat", *, tools=()):
     from companion.model import model_payload
 
-    return measure_payload(settings, model_payload(settings, messages, scenario), scenario)
+    return measure_payload(settings, model_payload(settings, messages, scenario, tools=tools),
+                           scenario, tools=tools)

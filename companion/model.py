@@ -95,7 +95,11 @@ def model_route(settings, scenario):
         settings.provider, settings.model_name, settings.model_url.rstrip("/"))
 
 
-def model_payload(settings, messages, scenario):
+def model_payload(settings, messages, scenario, *, tools=()):
+    from companion.agent_messages import tool_payload
+
+    if tools and scenario != "chat":
+        raise CoreError("MODEL_TOOLS_SCOPE_REQUIRED", 503)
     video = (settings.paid_model.video_input
              if scenario in {"content_video", "content_video_preview"}
              and settings.paid_model else None)
@@ -114,6 +118,8 @@ def model_payload(settings, messages, scenario):
         from companion.video_input import TOOL
 
         payload.update(tools=[TOOL], tool_choice="auto")
+    if tools:
+        payload.update(tools=tool_payload(tools), tool_choice="auto")
     return payload
 
 
@@ -122,7 +128,7 @@ class ModelClient:
         self.settings = settings
         self.client = client
 
-    async def complete(self, messages, scenario, *, admission=None):
+    async def complete(self, messages, scenario, *, admission=None, tools=()):
         if self.settings.mode == "demo":
             if scenario == "qq_poke":
                 return ModelResponse('{"kind":"none"}', 0, 0)
@@ -142,7 +148,7 @@ class ModelClient:
             return ModelResponse(text, 0, 0)
         from companion.paid_budget import sha
 
-        payload = model_payload(self.settings, messages, scenario)
+        payload = model_payload(self.settings, messages, scenario, tools=tools)
         if (
             not isinstance(admission, ModelAdmission)
             or admission.consumed
@@ -218,15 +224,37 @@ class ModelClient:
                 raise CoreError(code, status)
             try:
                 message = body["choices"][0]["message"]
+                if not isinstance(message, dict):
+                    raise ValueError("invalid model message")
                 calls = message.get("tool_calls")
                 if calls is None:
                     calls = []
                 if not isinstance(calls, list):
                     raise ValueError("invalid tool calls")
-                if calls and (
-                    "tools" not in payload or not isinstance(calls, list) or len(calls) != 1
-                    or not isinstance(calls[0], dict) or len(json.dumps(calls)) > 4096
-                ):
+                if calls and "tools" not in payload:
+                    raise ValueError("invalid tool calls")
+                if scenario == "chat":
+                    # Check only the provider envelope. Unknown tool names and
+                    # malformed argument JSON are returned intact for SDK validation.
+                    if message.get("content") is not None and not isinstance(
+                        message["content"], str,
+                    ):
+                        raise ValueError("invalid message content")
+                    if message.get("tool_calls") is not None and not isinstance(
+                        message["tool_calls"], list,
+                    ):
+                        raise ValueError("invalid tool calls")
+                    for call in calls:
+                        if (not isinstance(call, dict) or call.get("type") != "function"
+                            or not isinstance(call.get("id"), str)
+                            or not isinstance(call.get("function"), dict)
+                            or not isinstance(call["function"].get("name"), str)
+                            or not isinstance(call["function"].get("arguments"), str)):
+                            raise ValueError("invalid function call envelope")
+                elif calls and (not isinstance(calls, list) or len(calls) != 1
+                                 or not isinstance(calls[0], dict)
+                                 or len(json.dumps(calls)) > 4096):
+                    # Existing content_vision owns understand_video's contract.
                     raise ValueError("invalid tool calls")
                 text = message.get("content") or ""
                 if (isinstance(message.get("content"), str) and len(text) <= 32000

@@ -18,6 +18,7 @@ from companion.contracts import CoreError
 from companion.dialogue_history import fit_context
 from companion.model import ModelClient, model_payload
 from companion.store import encode
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
@@ -107,7 +108,8 @@ def test_context_and_admission_measure_same_full_payload(core, tmp_path):
     limit = tm.measure_request(core.settings, required).reserved_input_tokens
     fitted = fit_context(rules, references, turns, MESSAGES, limit, settings=core.settings)
     assert fitted == required
-    request = budget.reserve(core.store, core.settings, None, "chat", fitted, core.clock())
+    request = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", fitted, core.clock())
     row = core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
     assert row["input_bound"] == limit
     assert json.loads(row["measurement_json"]) == (
@@ -131,7 +133,8 @@ def test_artifact_corruption_fails_before_native_reservation(core, tmp_path, mon
     monkeypatch.setattr(tm, "ARTIFACT_DIRECTORY", tmp_path)
     try:
         with pytest.raises(CoreError, match="MODEL_TOKEN_ARTIFACT_INVALID"):
-            budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+            budget.reserve(core.store, core.settings, authorized_job(core),
+                "chat", MESSAGES, core.clock())
         assert core.store.rows("SELECT * FROM model_usage") == []
     finally:
         tm._local_encoder.cache_clear()
@@ -158,7 +161,8 @@ def test_corrupt_gzip_rejected_before_decompression(core, tmp_path, monkeypatch)
     monkeypatch.setattr(tm, "ARTIFACT_DIRECTORY", artifacts)
     try:
         with pytest.raises(CoreError, match="MODEL_TOKEN_ARTIFACT_INVALID"):
-            budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+            budget.reserve(core.store, core.settings, authorized_job(core),
+                "chat", MESSAGES, core.clock())
         assert core.store.rows("SELECT * FROM model_usage") == []
     finally:
         tm._local_encoder.cache_clear()
@@ -174,7 +178,8 @@ def test_exact_required_rejects_before_reserve(core, tmp_path):
 @pytest.mark.parametrize("mutation", ["receipt", "payload", "route", "configuration"])
 def test_final_transport_hook_cannot_change_count_evidence(core, tmp_path, mutation):
     configure(core, tmp_path)
-    request = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    request = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", MESSAGES, core.clock())
     calls = []
 
     async def hook(req):
@@ -204,7 +209,8 @@ def test_journal_detects_measurement_loss_after_settlement(core, tmp_path):
     from companion.model import ModelResponse
 
     configure(core, tmp_path)
-    request = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    request = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", MESSAGES, core.clock())
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 9, 3))
     with core.store.transaction():
         paid_budget.journal(core.store, core.settings.paid_model)
@@ -231,7 +237,8 @@ def test_images_never_claim_text_exactness(core, tmp_path):
 
 def test_legacy_empty_measurement_keeps_original_journal_contract(core, tmp_path):
     approval = approved_live(core, tmp_path)
-    request = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    request = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", MESSAGES, core.clock())
     snapshot = core.store.one("SELECT snapshot_json FROM model_admissions")["snapshot_json"]
     # Reconstruct the pre-0035 journal format from the same reservation fields.
     path = Path(approval.journal_path)
