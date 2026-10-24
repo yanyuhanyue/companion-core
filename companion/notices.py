@@ -242,6 +242,59 @@ def _settled(store, job_id):
     ) and not store.one("SELECT 1 FROM model_usage WHERE job_id=? AND state<>'SETTLED'", (job_id,)))
 
 
+def retry_required_wording(store, settings, job, code, now):
+    """One additional native job attempt for a known, charged, empty required reply."""
+    if code not in {"NOTICE_MODEL_REPLY_REQUIRED", "MODEL_EMPTY_RESPONSE"}:
+        return False
+    if not store.db.in_transaction:
+        raise RuntimeError("NOTICE_RETRY_TRANSACTION_REQUIRED")
+    current = store.one(
+        "SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) WHERE job_id=?",
+        (job["job_id"],),
+    )
+    value = reference(current)
+    if (not isinstance(value, dict) or value.get("kind") != "commitment"
+        or not isinstance(value.get("ref"), str) or current["state"] != "RUNNING"
+        or current["lease_token"] != job["lease_token"]
+        or (current["attempts"], current["max_attempts"]) not in {(1, 1), (2, 2)}
+        or not _settled(store, job["job_id"])):
+        return False
+    usages = store.rows("SELECT scenario,state FROM model_usage WHERE job_id=?",
+                        (job["job_id"],))
+    if (len(usages) != current["attempts"]
+        or any(row != {"scenario": "activity", "state": "SETTLED"}
+               for row in usages)
+        or store.one("SELECT 1 FROM outbox WHERE origin_event_id=? OR reply_group_id=?",
+                     (current["event_id"], job["job_id"]))):
+        return False
+    commitment = store.one(
+        "SELECT feedback_message_id,state FROM commitments WHERE commitment_id=?", (value["ref"],),
+    )
+    if (not commitment or commitment["feedback_message_id"] is not None
+        or commitment["state"] != "IN_PROGRESS"):
+        return False
+    from companion import live_text, paid_budget
+
+    try:
+        validate(store, settings, current, now)
+        if settings.mode == "live":
+            paid_budget.contract(settings, now)
+        if live_text.active(store, settings):
+            live_text.guard(store, settings, lambda: now)
+    except CoreError:
+        return False
+    state = "RETRY_WAIT" if current["attempts"] == 1 else "FAILED"
+    # Keep the original attempt count and charges; next claim/admission owns a fresh request.
+    store.execute(
+        "UPDATE jobs SET state=?,max_attempts=2,last_error_code=?,next_attempt_at=?,"
+        "lease_token=NULL,updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+        (state, code, after(now, 5 * 2 ** (current["attempts"] - 1)), now,
+         job["job_id"], job["lease_token"]),
+    )
+    store.audit("job.failed", job["job_id"], job["trace_id"], now, code=code, state=state)
+    return True
+
+
 def delivery_job(store, message_id):
     delivery = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     if not delivery:

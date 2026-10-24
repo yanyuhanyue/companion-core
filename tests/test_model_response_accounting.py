@@ -44,19 +44,21 @@ def rejected_response(core, response):
     return code, usage
 
 
-@pytest.mark.parametrize("choices", [
-    [{"message": {"content": None}}],
-    [{"message": {"content": " "}}],
-    [{"message": {"content": "x" * 32001}}],
-    [],
+@pytest.mark.parametrize("choices,expected_code", [
+    ([{"message": {"content": None}}], "MODEL_INVALID_RESPONSE"),
+    ([{"message": {"content": " "}}], "MODEL_EMPTY_RESPONSE"),
+    ([{"message": {"content": "x" * 32001}}], "MODEL_INVALID_RESPONSE"),
+    ([], "MODEL_INVALID_RESPONSE"),
 ])
-def test_invalid_reply_preserves_large_known_usage_and_blocks_new_io(core, tmp_path, choices):
+def test_invalid_reply_preserves_large_known_usage_and_blocks_new_io(
+    core, tmp_path, choices, expected_code,
+):
     approval = approved_live(core, tmp_path)
     code, usage = rejected_response(core, httpx.Response(200, json={
         "choices": choices,
         "usage": {"prompt_tokens": 50000, "completion_tokens": 20000},
     }))
-    assert code == "MODEL_INVALID_RESPONSE"
+    assert code == expected_code
     assert usage["state"] == "UNKNOWN"
     assert (usage["input_tokens"], usage["output_tokens"]) == (50000, 20000)
     assert usage["billed_micro_usd"] == 90000

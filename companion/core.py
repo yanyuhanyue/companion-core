@@ -1471,6 +1471,8 @@ class Core(Runtime):
                     "updated_at=? WHERE job_id=?", (code, now, job["job_id"]),
                 )
                 return
+            if notices.retry_required_wording(self.store, self.settings, job, code, now):
+                return
             if notices.reference(job) is not None and code in {
                 "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
                 "DAILY_BUDGET_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",

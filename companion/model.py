@@ -215,6 +215,11 @@ class ModelClient:
                 ):
                     raise ValueError("invalid tool calls")
                 text = message.get("content") or ""
+                if (isinstance(message.get("content"), str) and len(text) <= 32000
+                    and not text.strip() and not calls):
+                    # Distinguish a received empty string from malformed/missing response data.
+                    # Budget still decides whether the reported usage is actually SETTLED.
+                    raise ModelResponseError("MODEL_EMPTY_RESPONSE", 502, received)
                 if (not isinstance(text, str) or len(text) > 32000
                     or (not text.strip() and not calls)):
                     raise ValueError("invalid model response")
