@@ -1,7 +1,7 @@
 import asyncio
 import json
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -102,6 +102,7 @@ def test_stop_during_core_check_blocks_continuation(config):
             runtime.stop()
             return httpx.Response(200, json={"approved": True, "authority": runtime.authority,
                 "purpose": "chat", "expires_at": None,
+                "capability_policies": {},
                 "budget_journal_id": "budget_" + "e" * 32,
                 "capture": {"public_key": config.capture_public_key,
                     "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),
@@ -114,6 +115,29 @@ def test_stop_during_core_check_blocks_continuation(config):
                     await runtime.check(client)
 
         asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose,policies,accepted", [
+    ("chat", {}, True), ("voice", {"voice": "a" * 64}, True),
+    ("voice", {}, False), ("voice", {"image": "a" * 64}, False),
+    ("chat", {"unknown": "a" * 64}, False),
+    ("chat", {"voice": "A" * 64}, False), ("chat", [], False),
+])
+def test_current_capability_metadata_has_a_closed_shape(config, purpose, policies, accepted):
+    from companion_onebot_bridge.owner_runtime import check_receipt
+
+    value = {"approved": True, "authority": config.owner_authority,
+        "purpose": purpose, "expires_at": None, "capability_policies": policies,
+        "budget_journal_id": "budget_" + "e" * 32,
+        "capture": {"public_key": config.capture_public_key,
+            "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),
+            "protocol_epoch": config.protocol_epoch}}
+    if accepted:
+        assert check_receipt(config, config.owner_authority, purpose,
+                             value, datetime.now(UTC)) == value
+    else:
+        with pytest.raises(ValueError, match="OWNER_AUTHORITY_CHECK_REJECTED"):
+            check_receipt(config, config.owner_authority, purpose, value, datetime.now(UTC))
 
 
 def test_v1_journal_codec_and_projection_head_are_preserved(tmp_path):

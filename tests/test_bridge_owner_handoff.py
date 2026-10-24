@@ -27,6 +27,7 @@ def core_handler(config, successor):
                 "quiescence_proven": False})
         return httpx.Response(200, json={"approved": True, "authority": successor,
             "purpose": "chat", "expires_at": None, "budget_journal_id": "budget_" + "f" * 32,
+            "capability_policies": {},
             "capture": {"public_key": config.capture_public_key,
                 "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),
                 "protocol_epoch": config.protocol_epoch}})

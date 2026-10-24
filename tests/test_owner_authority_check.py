@@ -34,6 +34,7 @@ def test_bridge_current_check_is_exact_and_does_not_mint_an_execution_lease(
         assert response.status_code == 200, response.text
         view = owner_authority.current(core.store, core.settings, core.clock)
         assert response.json() == {"approved": True, **body, "expires_at": None,
+            "capability_policies": view.policy.capability_policies,
             "budget_journal_id": view.journal_id,
             "capture": view.policy.capture.model_dump(mode="json")}
         assert response.headers["Cache-Control"] == "no-store"
@@ -42,3 +43,27 @@ def test_bridge_current_check_is_exact_and_does_not_mint_an_execution_lease(
     assert not core.store.rows("SELECT * FROM jobs")
     assert not core.store.rows("SELECT * FROM model_usage")
     assert not core.store.rows("SELECT * FROM outbox")
+
+
+@pytest.mark.parametrize("boundary", ["active", "purpose", "drift"])
+def test_capability_metadata_keeps_independent_purpose_and_policy_fences(core, tmp_path, boundary):
+    from tests.voice_owner_fixtures import native_voice
+
+    capture, _, _ = native_voice(core, tmp_path)
+    expected_hash = core.settings.voice.authority_sha256()
+    if boundary == "drift":
+        core.settings.voice = core.settings.voice.model_copy(update={
+            "max_pending_jobs": core.settings.voice.max_pending_jobs + 1})
+    app = create_app(core.settings)
+    app.state.core = core
+    before = list(core.store.db.iterdump())
+    response = TestClient(app).post("/internal/v1/owner-authority/check", json={
+        "authority": capture.authority,
+        "purpose": "account_actions" if boundary == "purpose" else "voice"}, headers={
+            "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()})
+    if boundary == "active":
+        assert response.status_code == 200, response.text
+        assert response.json()["capability_policies"] == {"voice": expected_hash}
+    else:
+        assert response.status_code in {403, 409}, response.text
+    assert list(core.store.db.iterdump()) == before

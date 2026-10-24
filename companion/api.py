@@ -643,6 +643,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
                                        authority=body.authority, purpose=body.purpose)
         return {"approved": True, "authority": view.authority.as_dict(),
                 "purpose": body.purpose,
+                "capability_policies": dict(view.policy.capability_policies),
                 "budget_journal_id": view.journal_id,
                 "capture": (view.policy.capture.model_dump(mode="json")
                             if view.policy.capture else None),

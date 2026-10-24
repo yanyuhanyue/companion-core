@@ -31,8 +31,14 @@ OwnerAuthority 保存主人的持久用途授权。付费策略继续使用原 B
 使用 owner control 凭据。Bridge 凭据不能创建或扩大授权。
 
 Bridge 可通过 `POST /owner-authority/check` 提交精确的 `authority` 和 `purpose`，
-查询该用途当前是否允许执行。成功响应包含 `approved=true`、原引用、原用途及可空的
-`expires_at`，并设置 `Cache-Control: no-store`。它不创建执行租约，也不消耗预算；
+查询该用途当前是否允许执行。成功响应包含 `approved=true`、原引用、原用途、可空的
+`expires_at`、原 `budget_journal_id`、捕获身份 `capture` 和当前已验证策略中的
+`capability_policies` 哈希字典，并设置 `Cache-Control: no-store`。
+Bridge 只接受已知能力名与小写 SHA-256；请求具体能力时必须存在对应哈希。
+这些元数据复用已认证的 introspection 边界（参见
+[RFC 7662 §2.2](https://www.rfc-editor.org/rfc/rfc7662.html#section-2.2)），
+用于核对冻结输入和构造已有 lane 请求；每条 lane 仍需独立用途与最终发送检查。
+它不创建执行租约，也不消耗预算；
 STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送仍必须通过下面的有限租约检查。
 
 同时允许 memory 与 history 时，情景接续可以选择超过七天但仍在来源保留期内的

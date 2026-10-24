@@ -13,11 +13,19 @@ from .spool import encode
 
 
 def check_receipt(config, authority, purpose, result, now):
+    known_policies = {"image", "file", "meme", "poke", "voice", "account_actions",
+                      "bili_video", "rem"}
+    policies = result.get("capability_policies") if isinstance(result, dict) else None
     expected_capture = {"public_key": config.capture_public_key,
         "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),
         "protocol_epoch": config.protocol_epoch}
-    if (set(result) != {"approved", "authority", "purpose", "expires_at",
-                        "budget_journal_id", "capture"}
+    if (not isinstance(result, dict)
+        or set(result) != {"approved", "authority", "purpose", "expires_at",
+                           "budget_journal_id", "capture", "capability_policies"}
+        or not isinstance(policies, dict) or not policies.keys() <= known_policies
+        or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value)
+               for value in policies.values())
+        or purpose in known_policies and purpose not in policies
         or result["approved"] is not True or result["authority"] != authority
         or result["purpose"] != purpose or result["capture"] != expected_capture
         or not isinstance(result["budget_journal_id"], str)
