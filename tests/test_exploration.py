@@ -7,6 +7,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 
+from companion.autonomous_selector import native_selector
 from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError, LeaseRequest
@@ -218,6 +219,9 @@ def test_erase_during_read_rejects_old_output_and_restore_clears_sources(core, t
 
 
 def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
+    from companion.social import proactive_counts
+    from tests.test_autonomous_selector import drain
+
     configure(core, social=True)
     core.settings.proactive_enabled = True
     core.settings.proactive_daily_limit = 1
@@ -238,9 +242,10 @@ def test_sharing_uses_same_outbox_and_common_proactive_limit(core, monkeypatch):
         ),
     )
     assert core.social.flush()
-    assert run(core.run_once("share-wording"))
+    turns = run(drain(native_selector(core, "share-wording")))
+    assert any(turn.lane == "activity" and turn.result.progressed for turn in turns)
     assert not core.social.flush()
-    assert not core.schedule_proactive()
+    assert proactive_counts(core.store, core.settings, core.clock()) == (1, True)
     outbox = core.store.one("SELECT * FROM outbox WHERE action_type='qq.private.proactive'")
     assert json.loads(outbox["content_json"])["text"] == core.model.activity
     assert [json.loads(row["content_json"])["text"] for row in core.store.rows(
