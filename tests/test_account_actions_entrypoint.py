@@ -6,15 +6,17 @@ import httpx
 import pytest
 
 from companion import paid_budget
+from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from companion.social_autonomy_protocol import FrozenPlan, SocialAutonomyConfig
 from companion.store import encode
 from tests.conftest import ingest, run
-from tests.test_onebot_capture import pinned_plan, real_core_http
-from tests.test_private_companion import companion_options
+from tests.social_model_transport import next_social_turn
+from tests.test_onebot_capture import real_core_http
 from tests.test_social_autonomy import read_public
+from tests.test_social_owner_authority import authorize
 
 
 @pytest.mark.parametrize("outcome", ["SUCCEEDED", "REJECTED", "UNKNOWN", "CANCELLED", "ERASED"])
@@ -35,6 +37,10 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
         enabled=True, scope="qq_social_v1", authorization_sha256="a" * 64, qzone_enabled=True,
         max_output_tokens=128,
     )
+    core.settings.social_autonomy = policy
+    core.settings.content_enabled = False
+    core.settings.observation_adapters = {}
+    _, authority = authorize(core, tmp_path)
     calls = []
 
     def provider(request):
@@ -61,40 +67,23 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
         )
 
     async def scenario():
-        options = companion_options(core)
-        options.update(
-            account_actions_scope="qq_social_v1",
-            account_actions_authorization_sha256=policy.authorization_sha256,
-        )
-        options["core_options"].update(social_autonomy=policy, content_enabled=False,
-                                       observation_adapters={})
         async with real_core_http(core) as port:
-            cfg, plan = pinned_plan(
-                core,
-                tmp_path,
-                3001,
-                core_port=port,
-                live=True,
-                approved=True,
-                scope_options=options,
-            )
             async with (
                 httpx.AsyncClient(
-                    base_url=cfg.core_url,
+                    base_url=f"http://127.0.0.1:{port}",
                     trust_env=False,
-                    headers={"Authorization": "Bearer " + cfg.bridge_token},
+                    headers={
+                        "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
+                    },
                 ) as client,
                 httpx.AsyncClient(transport=httpx.MockTransport(provider)) as external,
             ):
-                opened = await client.post(
-                    "/internal/v1/live-text/open", json={"window_sha256": plan.sha256}
-                )
-                assert opened.status_code == 200, opened.text
                 with Core(
                     core.settings, ModelClient(core.settings, external), core.clock
                 ) as worker:
                     assert worker.store is not core.store
-                    assert await worker.run_once("independent-social-worker")
+                    selector = native_selector(worker, "independent-social-worker")
+                    assert await next_social_turn(selector)
                     planned = core.store.one("SELECT plan_json FROM social_autonomy_plans")
                     frozen = FrozenPlan.model_validate_json(planned["plan_json"])
                     assert core.store.one("SELECT conversation_id FROM outbox")[
@@ -106,14 +95,16 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                     }
                     assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
                     private = await client.post(
-                        "/internal/v1/deliveries/lease", json={"worker_id": "private-only"}
+                        "/internal/v1/deliveries/lease",
+                        json={"worker_id": "private-only", "authority": authority},
                     )
+                    assert private.status_code == 200, private.text
                     assert private.json() == {"items": []}
                     request = {
                         "worker_id": "account-bridge",
                         "limit": 1,
                         "delivery_lane": "qq_account",
-                        "window_sha256": plan.sha256,
+                        "authority": authority,
                         "account_actions_authorization_sha256": policy.authorization_sha256,
                     }
                     denied = await client.post(
@@ -127,7 +118,7 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                     assert item["message_id"] == frozen.message_id
                     assert item["content"]["audience"] == {
                         "ugc_right": 16,
-                        "target_uins": [cfg.owner_qq_id],
+                        "target_uins": [core.settings.owner_qq_id],
                     }
                     path = "/internal/v1/deliveries/" + item["message_id"]
                     begun = await client.post(
@@ -135,7 +126,7 @@ def test_account_action_http_uses_distinct_scope_native_budget_and_original_outb
                     )
                     assert begun.status_code == 200, begun.text
                     check = {
-                        "window_sha256": plan.sha256,
+                        "authority": authority,
                         "message_id": frozen.message_id,
                         "lease_token": item["lease_token"],
                         "content_sha256": item["content_sha256"],
