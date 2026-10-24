@@ -35,6 +35,11 @@ Bridge 可通过 `POST /owner-authority/check` 提交精确的 `authority` 和 `
 `expires_at`，并设置 `Cache-Control: no-store`。它不创建执行租约，也不消耗预算；
 STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送仍必须通过下面的有限租约检查。
 
+同时允许 memory 与 history 时，情景接续可以选择超过七天但仍在来源保留期内的
+未完成 Hot 事项。Core 先为接续来源保留历史条数和 UTF-8 字节额度，再放入较新的
+普通对话；满额近期历史不会自动挤掉 Hot 事项。原签名、当前历史许可和完整情景来源
+仍逐一复核，最终模型请求继续受既有 token 与付费上限约束。
+
 1. `POST /owner-authority/inputs/approve` 接收 `OwnerCapture`。
    字段为 `authority`、`kind=authenticated_onebot_ws`、`event_id`、`source_event_id`、
    `input_sha256`、`frame_sha256`、`evidence_sha256`、`identity_sha256`、`protocol_epoch`、

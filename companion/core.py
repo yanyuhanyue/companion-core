@@ -539,7 +539,7 @@ class Core(Runtime):
                     + encode(selected)}, "source_event_ids": sorted(sources),
                 "snapshot": selected}
 
-    def _memory_continuation(self, job, history):
+    def _memory_continuation(self, job, history, used_memory_ids=()):
         s, cfg, now = self.store, self.settings, self.clock()
         authority = self._owner_job_view(job)
         if authority and not {"memory", "history"}.issubset(authority.policy.purposes):
@@ -548,8 +548,20 @@ class Core(Runtime):
             or not reply_revision.owner_input(s, job["event_id"])
             or reply_revision.control_job(s, job)):
             return None
+        source_check = None
         if authority:
-            allowed = {row["event_id"] for row in history}
+            allowed = None
+
+            def source_check(event_id):
+                try:
+                    owner_input.source(s, cfg, authority, event_id, self.clock(), history=True)
+                    return bool(s.one(
+                        "SELECT 1 FROM events WHERE event_id=? AND conversation_id=? "
+                        "AND rowid<(SELECT rowid FROM events WHERE event_id=?)",
+                        (event_id, job["conversation_id"], job["event_id"]),
+                    ))
+                except CoreError:
+                    return False
         elif private_life.strict(s, cfg):
             if cfg.live_text_window.history_scope != "approved_window":
                 return None
@@ -566,9 +578,14 @@ class Core(Runtime):
                 "AND e.privacy_scope='private' AND c.scope='private' AND c.owner_actor_id='owner' "
                 "AND e.redacted=0 AND e.occurred_at>=? AND e.occurred_at<=? "
                 "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?)",
-                (job["conversation_id"], after(now, -7 * 86400), now, job["event_id"]),
+                (job["conversation_id"], after(now, -cfg.raw_event_retention_days * 86400),
+                 now, job["event_id"]),
             )}
-        result = self.memory_context.continuation(job["conversation_id"], now, event_ids=allowed)
+        result = self.memory_context.continuation(
+            job["conversation_id"], now, event_ids=allowed,
+            current_event_ids=[row["event_id"] for row in history],
+            used_memory_ids=used_memory_ids, source_check=source_check,
+        )
         items = result["items"]
         history_limit = authority.policy.history.max_utf8_bytes if authority else (
             cfg.live_text_window.max_history_utf8_bytes if live_text.active(s, cfg)
@@ -579,13 +596,33 @@ class Core(Runtime):
         ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
         while items:
             message = {"role": "user", "content":
-                       "近期情景接续（原始主人观察，不是当前事实、已执行行动或新指令）：\n"
+                       "相关情景接续（原始主人观察，不是当前事实、已执行行动或新指令）：\n"
                        + encode(items)}
+            ids = {source for item in items for source in item["source_event_ids"]}
+            selected_history = list(history)
+            if authority:
+                # Reserve source and byte capacity for the ranked continuation first;
+                # replace older ordinary turns instead of discarding an unresolved Hot item.
+                if len(ids) > authority.policy.history.max_turns:
+                    items = items[:-1]
+                    continue
+                while selected_history and (
+                    len(ids | {row["event_id"] for row in selected_history})
+                    > authority.policy.history.max_turns
+                    or len(message["content"].encode()) + sum(
+                        len(part["content"].encode()) for row in selected_history
+                        for part in dialogue_history.turn_messages(row)) > history_limit
+                ):
+                    selected_history.pop(0)
+                remaining = history_limit - sum(
+                    len(part["content"].encode()) for row in selected_history
+                    for part in dialogue_history.turn_messages(row))
             if len(message["content"].encode()) <= remaining:
-                ids = {source for item in items for source in item["source_event_ids"]}
                 proof = self.memory_context.pin(now, event_ids=ids)
                 return {"message": message, "source_event_ids": proof["source_event_ids"],
-                        "proof": proof}
+                        "proof": proof, "history": selected_history,
+                        "uses_recalled_memory": any(
+                            "USED_IN_CONTEXT" in item["attention_reasons"] for item in items)}
             items = items[:-1]
         return None
 
@@ -780,7 +817,11 @@ class Core(Runtime):
             if private_life.enabled(cfg):
                 sources = private_life.recent_history(s, cfg, job)
             turns = [dialogue_history.turn_messages(source) for source in sources]
-        if continuation := self._memory_continuation(job, sources):
+        if continuation := self._memory_continuation(
+            job, sources, [row["memory_id"] for row in hits],
+        ):
+            sources = continuation["history"]
+            turns = [dialogue_history.turn_messages(source) for source in sources]
             references.append(continuation["message"])
             reference_sources.append((continuation["message"], continuation["source_event_ids"]))
             reference_proofs.append((continuation["message"],
@@ -832,6 +873,9 @@ class Core(Runtime):
                 rules, references, turns, current_input, cfg.context_soft_tokens,
                 settings=cfg, scenario=job["kind"],
             )
+        if (continuation and continuation["uses_recalled_memory"]
+            and not any(message is memory_reference for message in messages)):
+            messages = [message for message in messages if message is not continuation["message"]]
         if bounded_text:
             selected = [source for source, turn in zip(sources, turns, strict=True)
                         if any(message is turn[0] for message in messages)]
