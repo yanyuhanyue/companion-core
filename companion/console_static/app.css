@@ -817,3 +817,23 @@ h3.sub.first { margin-top: 0; }
 .vtext { margin-top: 6px; font-family: var(--serif); font-size: 14px; color: #2b2f48; }
 .vrow.gone .vplay { background: #e2e5ee; color: var(--faint); }
 .vrow.gone.out .vplay { background: var(--lamp-soft); color: #9a6a00; }
+.mode-pick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.mode-pick button { text-align: left; border: 1px solid var(--line); background: var(--surface); border-radius: 10px; padding: 12px 14px; display: grid; gap: 3px; }
+.mode-pick button b { font-size: 13px; } .mode-pick button span { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.mode-pick button[aria-checked="true"] { border-color: var(--ink); background: #f3f4fa; box-shadow: inset 0 0 0 1px var(--ink); }
+.ck { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; font-size: 13px; }
+.ck input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--ink); flex: none; }
+.ck.big { margin-top: 14px; padding: 12px 14px; border-radius: 10px; background: var(--surface); border: 1px solid var(--line); }
+.ck.big small { display: block; color: var(--muted); font-size: 12px; }
+.sub2 { font-size: 12.5px; font-weight: 700; margin: 16px 0 4px; }
+.ranges li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px dashed var(--line); flex-wrap: wrap; font-size: 13px; }
+.rng { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.rng .input { width: 74px; height: 32px; text-align: right; font-family: var(--num); }
+.rng em { font-style: normal; }
+.clog li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 12px; padding: 12px 0; border-bottom: 1px dashed var(--line); align-items: start; }
+.clog li.prop { background: var(--lamp-soft); margin: 6px -12px; padding: 12px; border-radius: 10px; border: 0; }
+.clog b { font-size: 13px; font-weight: 600; } .clog p { font-size: 12.5px; color: var(--muted); } .clog small { display: block; font-size: 11.5px; color: var(--faint); margin-top: 2px; }
+.who { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+.who.it { background: var(--lamp); color: var(--ink); }
+.clog-r { display: grid; justify-items: end; gap: 6px; } .clog-r span { display: flex; gap: 6px; }
+@media (max-width: 1100px) { .mode-pick { grid-template-columns: minmax(0, 1fr); } }

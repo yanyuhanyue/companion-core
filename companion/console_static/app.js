@@ -501,8 +501,9 @@ const LOADERS = {
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
   caps: async signal => {
-    const [o, c] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal)]);
-    return { ...o, configuration: c };
+    const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
+      api.get("/autonomy", signal).catch(e => { if (e.name === "AbortError") throw e; return null; })]);
+    return { ...o, configuration: c, autonomy: a };
   },
   configuration: async signal => { const c = await api.get("/configuration", signal); const fx = c.cloud_budget?.config?.usd_to_cny_micro; if (Number.isSafeInteger(fx) && fx > 0) state.fx = fx; return { configuration: c }; },
 };
@@ -688,6 +689,7 @@ function todoList(data) {
   const uncertain = (data.diagnostics?.items || []).filter(i => i.status === "DELIVERY_UNCERTAIN");
   if (uncertain.length) out.push(["bad", uncertain.length, "条投递结果不明", "不会自动重发，请到 QQ 里看看是否已出现", "去核对", "diagnostics"]);
   if (counts.review_memories) out.push(["", counts.review_memories, "条记忆等你确认", "确认后她才会在对话里用到", "去确认", "memories"]);
+  if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下，等你批准", "去看看", "caps/wake"]);
   if (counts.unknown_calls) out.push(["", counts.unknown_calls, "次模型调用结果不明", "相关费用会一直占用额度，直到核对完成", "查看诊断", "diagnostics"]);
   if (b.reconciliation_required || b.restore_reconciliation_required) out.push(["bad", "!", "费用记录需要核对", b.admission_blocked ? "云调用已暂停，需核对独立账本" : "请核对独立费用记录", "查看诊断", "diagnostics"]);
   if (b.fx_expired) out.push(["bad", "!", "汇率已过期", "过期后不会发起新的云调用", "更新汇率", "configuration/budget"]);
@@ -1432,8 +1434,62 @@ function capDetail(c) {
       el("div", {}, el("span", {}, "由谁使用"), el("b", {}, (c.invocation || []).map(x => ({ automatic: "她自动使用", owner_command: "你的指令", tool: "工具调用", owner: "你发起" })[x] || "其他方式").join("、") || "未记录"),
         el("small", {}, c.runtime_observation && c.runtime_observation !== "UNOBSERVED" ? "运行观测：" + statusOf(c.runtime_observation)[0] : "还没有运行观测"))),
     ["proactive", "diary", "consolidation"].includes(c.id) ? el("section", { class: "cd-sec" }, el("h3", {}, "作息时间"), scheduleStrip()) : null,
+    autonomySection(c.id),
     el("section", { class: "cd-sec" }, el("h3", {}, "参数", el("span", {}, fields.length ? "保存为新版本后生效" : "")),
       fields.length ? el("div", { class: "pf-list" }, fields.map(f => fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
+}
+/* ================= 交给她决定 ================= */
+const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，你批准后才生效。"],
+  ["self", "她在范围内自己调整", "在你划定的范围内她可以直接调整，事后可以撤销。"]];
+const AUTO_FIELDS = { pause: "暂停到第二天 08:00", wake_max_daily_runs: "每天最多运行", wake_min_interval_minutes: "两次之间至少间隔" };
+const ADJ_STATE = { PROPOSED: ["待你批准", "warn"], ACTIVE: ["生效中", "ok"], REJECTED: ["已拒绝", "off"], REVERTED: ["已撤销", "off"], EXPIRED: ["已结束", "off"],
+  SUPERSEDED: ["已被新的调整替代", "off"], DISCARDED: ["恢复备份后作废", "off"] };
+function autonomySection(id) {
+  const a = state.data?.autonomy; if (!a) return null;
+  const cap = (a.capabilities || []).find(x => x.capability === id); if (!cap) return null;
+  const draft = state.autoDraft?.[id] || { mode: cap.mode, allow_pause: cap.allow_pause, ranges: JSON.parse(JSON.stringify(cap.ranges || {})) };
+  const set = patch => { state.autoDraft = { ...(state.autoDraft || {}), [id]: { ...draft, ...patch } }; rerender(); };
+  const changed = !!state.autoDraft?.[id] && JSON.stringify(state.autoDraft[id]) !== JSON.stringify({ mode: cap.mode, allow_pause: cap.allow_pause, ranges: cap.ranges || {} });
+  const rangeRow = field => {
+    const lim = cap.limits?.[field]; if (!lim) return null;
+    const floor = lim.kind === "floor", key = floor ? "min" : "max", on = !!draft.ranges[field];
+    const unit = field === "wake_min_interval_minutes" ? "分钟" : "次";
+    return el("li", { class: on ? "on" : "" }, el("label", { class: "ck" }, el("input", { type: "checkbox", checked: on, onchange: e => {
+        const ranges = { ...draft.ranges }; if (e.target.checked) ranges[field] = { [key]: floor ? Math.max(0, lim.configured - 1) : Math.min(1440, lim.configured * 2) }; else delete ranges[field]; set({ ranges }); } }),
+        el("span", {}, AUTO_FIELDS[field])),
+      on ? el("span", { class: "rng" }, floor ? "最少" : "最多", el("input", { class: "input", inputmode: "numeric", value: String(draft.ranges[field][key]), "aria-label": AUTO_FIELDS[field],
+        onchange: e => { const n = Number(e.target.value); if (!Number.isInteger(n)) return; set({ ranges: { ...draft.ranges, [field]: { [key]: n } } }); } }), el("em", {}, unit),
+        el("span", { class: "muted" }, floor ? `到你的设置 ${lim.configured} ${unit}` : `从你的设置 ${lim.configured} ${unit} 起`))
+        : el("span", { class: "muted" }, `你的设置 ${lim.configured} ${unit}`));
+  };
+  const adjustments = (a.adjustments || []).filter(x => x.capability === id).slice(0, 8);
+  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "立即生效，不需要重启")),
+    el("div", { class: "mode-pick", role: "radiogroup", "aria-label": "由谁决定" }, AUTO_MODES.map(([m, n, d]) =>
+      el("button", { type: "button", role: "radio", "aria-checked": String(draft.mode === m), onclick: () => set({ mode: m }) }, el("b", {}, n), el("span", {}, d)))),
+    draft.mode !== "owner" ? [
+      el("label", { class: "ck big" }, el("input", { type: "checkbox", checked: draft.allow_pause, onchange: e => set({ allow_pause: e.target.checked }) }),
+        el("span", {}, el("b", {}, "允许她暂停这项能力"), el("small", {}, "最长到第二天 08:00，到时自动恢复。她不能恢复你暂停的，也不能打开你关掉的能力。"))),
+      Object.keys(cap.limits || {}).length ? [el("p", { class: "sub2" }, "她可以调整的参数"), el("ul", { class: "ranges" }, Object.keys(cap.limits).map(rangeRow))] : null,
+      el("p", { class: "note mt" }, "她只能让这项能力少运行：减少次数、拉长间隔或暂停，不能增加次数或费用。她的提议来自每天的反思，必须引用你们的原话作为理由。从备份恢复后，她的调整全部作废。")] : null,
+    changed ? el("div", { class: "row-gap mt" }, btn("保存授权", () => saveAutonomy(id, state.autoDraft[id]), { cls: "sm primary" }),
+      btn("还原", () => { delete state.autoDraft[id]; rerender(); }, { cls: "sm quiet" })) : null,
+    adjustments.length ? [el("p", { class: "sub2" }, "她的调整"), el("ul", { class: "clog" }, adjustments.map(x => { const [label, tone] = ADJ_STATE[x.state] || ["其他状态", "off"];
+      return el("li", { class: x.state === "PROPOSED" ? "prop" : "" }, el("span", { class: "who it" }, "她"),
+        el("div", {}, el("b", {}, x.field === "pause" ? "暂停这项能力" : `${AUTO_FIELDS[x.field]}改为 ${x.value} ${x.field === "wake_min_interval_minutes" ? "分钟" : "次"}`),
+          x.reason ? el("p", {}, "理由：" + x.reason) : null, el("small", {}, fmtDate(x.created_at) + (x.expires_at && x.state === "ACTIVE" ? "，" + fmtDate(x.expires_at) + " 自动恢复" : ""))),
+        el("div", { class: "clog-r" }, el("span", { class: "tag " + tone }, label),
+          x.state === "PROPOSED" ? el("span", {}, btn("批准", () => decideAdjustment(x, "approve"), { cls: "sm primary" }), btn("拒绝", () => decideAdjustment(x, "reject"), { cls: "sm danger" })) : null,
+          x.state === "ACTIVE" ? btn("撤销", () => decideAdjustment(x, "revert"), { cls: "sm" }) : null));
+    }))] : null);
+}
+async function saveAutonomy(id, body) {
+  try { await api.write("/autonomy/" + id, body, "PUT", r => r.state === "COMPLETE"); delete state.autoDraft[id]; toast("已保存授权，立即生效"); await loadRoute({ reset: true }); }
+  catch (error) { notice(errorText(error)); }
+}
+async function decideAdjustment(x, decision) {
+  try { await api.write("/autonomy/adjustments/" + encodeURIComponent(x.override_id) + "/decision", { decision }, "POST", r => typeof r.state === "string");
+    toast({ approve: "已批准，立即生效", reject: "已拒绝", revert: "已撤销，回到你的设置" }[decision]); await loadRoute({ reset: true }); }
+  catch (error) { notice(errorText(error)); }
 }
 function runtimeToggle(target, paused) {
   const name = { diary: "写日记", life: "自主活动", proactive: "主动私聊" }[target];
