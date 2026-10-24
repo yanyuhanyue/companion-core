@@ -287,12 +287,15 @@ def lease_deliveries(store, settings, request, now):
             if account:
                 account_actions.scope(store, settings, lambda: now, request.authority,
                     request.account_actions_authorization_sha256, message_id=row["message_id"])
-            elif owner:
-                owner_delivery.check_delivery(store, settings, lambda: now, row["message_id"])
             try:
+                if owner and not account:
+                    owner_delivery.check_delivery(store, settings, lambda: now, row["message_id"])
                 reply_revision.check_delivery(store, row["message_id"])
             except CoreError as error:
-                if error.code not in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED}:
+                if error.code not in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
+                                      reply_revision.CANCELLED, "OWNER_SOURCE_CHANGED",
+                                      "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED",
+                                      "OWNER_DELIVERY_SOURCE_CHANGED"}:
                     raise
                 store.execute(
                     "UPDATE outbox SET state='CANCELLED',lease_token=NULL,updated_at=?,"

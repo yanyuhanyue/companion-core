@@ -16,6 +16,21 @@ def _job(store, job_id):
                      "JOIN events e USING(event_id) WHERE job_id=?", (job_id,))
 
 
+def _history_proof(store, job):
+    if job["kind"] != "chat" or reply_revision.control_job(store, job):
+        return []
+    row = store.one("SELECT phase,snapshots_json FROM agent_conversations WHERE job_id=?",
+                     (job["job_id"],))
+    try:
+        snapshots = json.loads(row["snapshots_json"]) if row else []
+        history = [item["proof"] for item in snapshots if item["kind"] == "history"]
+        if not row or row["phase"] not in {"OUTPUT", "COMPLETE"} or len(history) != 1:
+            raise ValueError("original history snapshot required")
+        return history[0]
+    except (ValueError, KeyError, TypeError) as error:
+        raise CoreError(reply_revision.CANCELLED, 409) from error
+
+
 def _sources(store, settings, clock, job, *, executing=False):
     if job is None:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
@@ -26,6 +41,7 @@ def _sources(store, settings, clock, job, *, executing=False):
     reply_revision.check_job(store, job)
     if job["kind"] == "chat":
         owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
+        owner_input.check_history(store, settings, clock, job, _history_proof(store, job))
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
     elif job["kind"] == "poke":
@@ -62,6 +78,7 @@ def _material(store, row, job, view, requests):
             "message_id": row["message_id"], "event_id": row["origin_event_id"],
             "event_sha256": event_digest(event), "content_sha256": row["content_sha256"],
             "delivery_key": row["delivery_key"], "action_type": row["action_type"],
+            "history_sha256": paid_budget.sha(_history_proof(store, job)),
             "request_ids": requests}
 
 

@@ -56,6 +56,15 @@ share the existing measurement and final transport check; see
 The integration owner retains the single final CI receipt. This lane does not run full PR CI,
 activate services, make paid calls, send QQ messages, push a PR, or merge branches.
 
+Native conversation history also keeps a digest of each actual selected input and delivered
+reply prefix in the existing Conversation snapshot. Model hooks revalidate those original
+sources, and the Outbox's original delivery material pins the same history digest for the
+final send check. History omitted by the context bound creates no dependency. Invalidated
+pending replies are cancelled without refunding settled calls or replaying uncertain work.
+This reuses the original signed input, `dialogue_history` projection and SDK persistence,
+following the inspected DSH pre-step context boundary and Pydantic Conversation storage
+references above; it introduces no additional history store or execution authority.
+
 
 ## Reader selection and continuation
 

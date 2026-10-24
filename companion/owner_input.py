@@ -8,7 +8,7 @@ from datetime import datetime
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from companion import cumulative, input_recall, owner_authority
+from companion import cumulative, input_recall, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import OwnerCapture
 from companion.privacy import epoch
@@ -230,3 +230,31 @@ def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid
 def erase(store, event_ids):
     for event_id in event_ids:
         store.execute("DELETE FROM runtime_meta WHERE key=?", (INPUT + event_id,))
+
+
+def history_proof(sources):
+    """Pin the exact admitted input and delivered prefix used by this context."""
+    return [{"event_id": item["event_id"], "source_sha256": paid_budget.sha(item)}
+            for item in sources]
+
+
+def check_history(store, settings, clock, job, proof):
+    """Recheck selected history, including its original signed input and sent text."""
+    try:
+        if (not isinstance(proof, list) or len(proof) > 64
+            or any(not isinstance(item, dict) or set(item) != {"event_id", "source_sha256"}
+                   or not isinstance(item["event_id"], str)
+                   or not isinstance(item["source_sha256"], str)
+                   or not re.fullmatch(r"[a-f0-9]{64}", item["source_sha256"])
+                   for item in proof)
+            or len({item["event_id"] for item in proof}) != len(proof)):
+            raise ValueError("invalid history proof")
+        if not proof:
+            return
+        current = {item["event_id"]: item for item in history_sources(
+            store, settings, clock, job)}
+        actual = history_proof([current[item["event_id"]] for item in proof])
+        if actual != proof:
+            raise ValueError("history changed")
+    except (ValueError, KeyError, TypeError, CoreError) as error:
+        raise CoreError(reply_revision.CANCELLED, 409) from error

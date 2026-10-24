@@ -13,9 +13,9 @@ from companion.model import ModelClient
 from companion.qq_faces import FACE_NAMES
 from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
-from tests.test_onebot_capture import bootstrap_frames, capture_approval, source_window
+from tests.support.native_context import source_window
+from tests.test_onebot_capture import bootstrap_frames
 from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
 from tests.test_qq_rich_input import rich_event
 
 
@@ -85,15 +85,16 @@ def test_signed_emoji_crosses_real_api_and_independent_worker(core, tmp_path, me
         })
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                rich_input_scope="references_v1") as (window, client, protocol, _, sends):
+        async with source_window(core, tmp_path, source,
+                rich_input_scope="references_v1", media=True) as (
+                    window, client, protocol, _, sends):
             assert (await window.capture_once(client, protocol))["new_inputs"] == 1
             captured = json.loads(window.db.execute(
                 "SELECT capture_json FROM window_inputs").fetchone()[0])
             queued = json.loads(window.db.execute("SELECT body FROM inbox").fetchone()[0])
             assert queued["payload"]["text"].encode() == owner_text.encode()
             assert captured["input_sha256"] == qq_rich.input_digest(queued["payload"])
-            await window.approve_captured(client, capture_approval(window))
+            await window.runtime.flush_one(client)
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model_http:
                 with Core(core.settings, ModelClient(core.settings, model_http),
                           core.clock) as worker:
@@ -102,7 +103,7 @@ def test_signed_emoji_crosses_real_api_and_independent_worker(core, tmp_path, me
             assert len(calls) == 1
             messages = calls[0]["messages"]
             assert expected in messages[-2]["content"]
-            assert messages[-1]["content"] == (owner_text or "请看看我分享的内容。")
+            assert messages[-1]["content"] == (owner_text or "主人发送了一条非文本消息。")
             stored = core.store.one("SELECT * FROM events")
             assert json.loads(stored["body_json"])["text"] == owner_text
             if not owner_text:
@@ -111,7 +112,7 @@ def test_signed_emoji_crosses_real_api_and_independent_worker(core, tmp_path, me
                         fact_key="emoji-fact", content="喜欢汪汪",
                         evidence_event_id=stored["event_id"], evidence_quote="汪汪"))
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
-            sent = await window.send_once(client, protocol, reply_approval(window.plan, core))
+            sent = await window.send(client, protocol)
             assert sent["attempt_states"] == {"ACK": 1} and len(sends) == 1
 
     run(scenario())

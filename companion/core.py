@@ -501,6 +501,9 @@ class Core(Runtime):
                     self.diary.revalidate_context(snapshot["proof"])
                 elif snapshot["kind"] == "sources":
                     self.goals.validate_sources(snapshot["event_ids"])
+                elif snapshot["kind"] == "history":
+                    owner_input.check_history(self.store, self.settings, self.clock,
+                                              job, snapshot["proof"])
                 elif snapshot["kind"] == "images":
                     from companion import agent_images
 
@@ -908,6 +911,10 @@ class Core(Runtime):
         reply_revision.remember_sources(s, job, actual_sources)
         retained = [proof for reference, proof in reference_proofs
                     if any(message is reference for message in messages)]
+        if authority and job["kind"] == "chat":
+            selected = [source for source, turn in zip(sources, turns, strict=True)
+                        if any(message is turn[0] for message in messages)]
+            retained.append({"kind": "history", "proof": owner_input.history_proof(selected)})
         if conversation_decision.mode == "ENABLED":
             retained.append({"kind": "conversation_policy",
                              "proof": conversation_decision.receipt()})
@@ -1567,7 +1574,8 @@ class Core(Runtime):
                 or current["lease_token"] != job["lease_token"]):
                 return
             if code in {reply_revision.SUPERSEDED, reply_revision.SOURCE_RECALLED,
-                        reply_revision.CANCELLED, "INPUT_RECALLED"}:
+                        reply_revision.CANCELLED, "INPUT_RECALLED", "OWNER_SOURCE_CHANGED",
+                        "OWNER_CAPTURE_INVALID", "OWNER_SOURCE_JOB_BINDING_REQUIRED"}:
                 self.store.execute(
                     "UPDATE jobs SET state='CANCELLED',lease_token=NULL,last_error_code=?,"
                     "updated_at=? WHERE job_id=?", (code, now, job["job_id"]),
