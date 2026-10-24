@@ -175,6 +175,7 @@ def test_real_http_capture_asr_independent_chat_worker_and_tts_native_delivery(c
             assert len(model_calls) == 1
             context = json.dumps(model_calls[0], ensure_ascii=False)
             assert "untrusted_transcription" in context and "不可信转写" in context
+            assert "readable_content" not in context  # ASR arrives through a rich record source.
             assert core.store.one("SELECT redacted FROM events WHERE event_type="
                                   "'message.received'")["redacted"] == 0
             assert not await tick(window, client, protocol)
