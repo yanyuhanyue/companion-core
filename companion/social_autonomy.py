@@ -554,25 +554,8 @@ class SocialAutonomy:
                 if self.model is None:
                     raise CoreError("SOCIAL_MODEL_REQUIRED", 503)
             plan_id, request_id = uid("social"), uid("model")
-            s.insert("social_autonomy_plans", plan_id=plan_id, idempotency_key=idempotency_key,
-                     request_sha256=request_sha, candidate_sha256=candidate, state="PLANNING",
-                     policy_version=cfg.policy_version, policy_sha256=_sha(cfg.model_dump()),
-                     authorization_sha256=cfg.authorization_sha256, binding_sha256=self._binding(),
-                     timezone=timezone, policy_json=encode(cfg.model_dump()),
-                     input_snapshot_json=encode(context), source_snapshot_sha256=_sha(context),
-                     model_request_id=request_id if allowed != ["skip"] else None,
-                     created_at=now, expires_at=after(now, cfg.plan_ttl_seconds), updated_at=now)
-            dependencies = {}
-            content_ids = {row["ref"] for row in context["sources"]}
-            for source in context["sources"]:
-                for dependency in source["dependencies"]:
-                    dependencies[dependency["event_id"]] = dependency["source_sha256"]
-            for material in context.get("profile_material", []):
-                dependencies.update(material["proof"]["sources"])
-            for event_id, fingerprint in dependencies.items():
-                s.insert("social_autonomy_sources", plan_id=plan_id, event_id=event_id,
-                         role="content" if event_id in content_ids else "dependency",
-                         source_sha256=fingerprint)
+            self._store_plan(plan_id, idempotency_key, request_sha, candidate, context, cfg,
+                             timezone, now, request_id if allowed != ["skip"] else None)
             s.audit("social.plan_started", plan_id, plan_id, now,
                     policy_version=cfg.policy_version, candidate_sha256=candidate)
             if allowed == ["skip"]:
@@ -581,6 +564,91 @@ class SocialAutonomy:
                                               plan_id))
                 return self.get(plan_id)
         return await self._run_plan(plan_id, request_id, messages)
+
+    def _store_plan(self, plan_id, key, request_sha, candidate, context, cfg, timezone, now,
+                    request_id, *, expires_at=None):
+        """One native plan and source ledger, whether wording is new or already settled."""
+        s = self.store
+        _require_tx(s)
+        s.insert("social_autonomy_plans", plan_id=plan_id, idempotency_key=key,
+                 request_sha256=request_sha, candidate_sha256=candidate, state="PLANNING",
+                 policy_version=cfg.policy_version, policy_sha256=_sha(cfg.model_dump()),
+                 authorization_sha256=cfg.authorization_sha256, binding_sha256=self._binding(),
+                 timezone=timezone, policy_json=encode(cfg.model_dump()),
+                 input_snapshot_json=encode(context), source_snapshot_sha256=_sha(context),
+                 model_request_id=request_id, created_at=now,
+                 expires_at=expires_at or after(now, cfg.plan_ttl_seconds), updated_at=now)
+        dependencies = {}
+        content_ids = {row["ref"] for row in context["sources"]}
+        for source in context["sources"]:
+            for dependency in source["dependencies"]:
+                dependencies[dependency["event_id"]] = dependency["source_sha256"]
+        for material in context.get("profile_material", []):
+            dependencies.update(material["proof"]["sources"])
+        for event_id, fingerprint in dependencies.items():
+            s.insert("social_autonomy_sources", plan_id=plan_id, event_id=event_id,
+                     role="content" if event_id in content_ids else "dependency",
+                     source_sha256=fingerprint)
+
+    def _life_draft(self, job_id):
+        from companion.life_topics import LifeTopics, _paused
+
+        if self.settings.life_loop.mode != "SHADOW" or _paused(
+            self.store, self.settings, self.clock(),
+        ):
+            raise CoreError("LIFE_CONSUMPTION_PAUSED", 409)
+        data = LifeTopics(self.store, self.settings, self.clock).retained_result(
+            job_id, destination="QZONE_DRAFT",
+        )
+        draft = data["qzone_draft"]
+        proof = {"job_id": job_id, "content_sha256": draft["content_sha256"],
+                 "source_snapshot_sha256": draft["source_snapshot_sha256"]}
+        return data, proof
+
+    def consume_life_draft(self, job_id, authority, expected_content_sha256):
+        """Explicitly publish an exact public-source draft without a second model decision."""
+        from companion.account_actions import scope
+
+        s, now = self.store, self.clock()
+        with _tx(s):
+            cfg = self._policy()
+            scope(s, self.settings, self.clock, authority, cfg.authorization_sha256)
+            data, proof = self._life_draft(job_id)
+            if proof["content_sha256"] != expected_content_sha256:
+                raise CoreError("LIFE_DRAFT_CHANGED", 409)
+            # Validate the entire original model context, not just selected citations.
+            # A private source cannot be relabelled public or hidden behind owner_only.
+            context = self.context(source_ids=[source["event_id"] for source in data["sources"]])
+            candidate = _sha({k: v for k, v in context.items() if k != "authority"})
+            context["life_result"] = proof
+            request_sha = _sha({"life_result": proof, "authority": authority})
+            key = "life:qzone:" + job_id
+            previous = s.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
+            if previous:
+                if previous["request_sha256"] != request_sha:
+                    raise CoreError("IDEMPOTENCY_CONFLICT", 409)
+                self._validate_plan(previous["plan_id"])
+                self.reserve(previous["plan_id"], data["job"]["conversation_id"])
+                return self.get(previous["plan_id"])
+            if s.one("SELECT 1 FROM social_autonomy_plans WHERE candidate_sha256=?", (candidate,)):
+                raise CoreError("SOCIAL_CANDIDATE_ALREADY_CONSIDERED", 409)
+            timezone = self._bind()
+            self._advance_clock(now)
+            plan_id = uid("social")
+            expires = min(_instant(data["qzone_draft"]["expires_at"]),
+                          _instant(after(now, cfg.plan_ttl_seconds)))
+            self._store_plan(plan_id, key, request_sha, candidate, context, cfg, timezone, now,
+                             None, expires_at=expires.isoformat(timespec="microseconds"))
+            row = s.one("SELECT * FROM social_autonomy_plans WHERE plan_id=?", (plan_id,))
+            frozen = self._freeze(row, Publish(kind="qzone_publish", text=data["result"]["text"],
+                                               source_refs=data["decision"].source_event_ids))
+            s.execute("UPDATE social_autonomy_plans SET state='READY',plan_json=?,"
+                      "payload_sha256=? WHERE plan_id=?",
+                      (frozen.model_dump_json(), frozen.payload_sha256, plan_id))
+            self.reserve(plan_id, data["job"]["conversation_id"])
+            s.audit("life.draft_consumed", job_id, job_id, now, channel_action="qzone.publish",
+                    plan_id=plan_id, message_id=frozen.message_id)
+            return self.get(plan_id)
 
     async def _run_plan(self, plan_id, request_id, messages, *, job=None):
         from companion import social_plan_jobs
@@ -685,6 +753,17 @@ class SocialAutonomy:
             [profile["field"] for profile in original["profiles"]], ignore_plan=plan_id,
             profile_memory_ids=[item["memory_id"] for item in original.get("profile_material", [])],
         )
+        if "life_result" in original:
+            try:
+                data, proof = self._life_draft(original["life_result"]["job_id"])
+            except (KeyError, TypeError) as error:
+                raise CoreError("LIFE_DRAFT_CHANGED", 409) from error
+            if proof != original["life_result"] or (
+                {x["event_id"] for x in data["sources"]}
+                != {x["ref"] for x in original["sources"]}
+            ):
+                raise CoreError("LIFE_DRAFT_CHANGED", 409)
+            current["life_result"] = proof
         if _sha(current) != row["source_snapshot_sha256"]:
             raise CoreError("SOCIAL_SOURCE_CHANGED", 409)
         return row

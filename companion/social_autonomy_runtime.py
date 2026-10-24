@@ -252,7 +252,10 @@ async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-wo
             _enqueue(module, plan["plan_id"], conversation)
         return True
     candidate = None
-    for build in (_profile_candidate, _candidates):
+    builders = (_profile_candidate, _candidates) if settings.life_loop.mode == "OFF" else (
+        _profile_candidate,
+    )
+    for build in builders:
         try:
             candidate = build(module)
         except CoreError:

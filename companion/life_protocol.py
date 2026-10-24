@@ -6,6 +6,7 @@ from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_va
 
 from companion.contracts import StrictModel
 from companion.goals import GoalProposal
+from companion_delivery_protocol.authority import validate_authority_ref
 
 
 class LifeLoopConfig(StrictModel):
@@ -99,6 +100,19 @@ class LifeDecision(StrictModel):
 
 class TopicClosure(StrictModel):
     source_event_id: str = Field(min_length=1, max_length=128)
+
+
+class LifeConsumeRequest(StrictModel):
+    """Owner-controlled release of an exact retained draft, never a model proposal."""
+
+    authority: dict
+    action: Literal["qq.private.proactive", "diary.save", "qzone.publish"]
+    expected_content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("authority")
+    @classmethod
+    def exact_authority(cls, value):
+        return validate_authority_ref(value)
 
 
 class LifeQZoneDraft(StrictModel):

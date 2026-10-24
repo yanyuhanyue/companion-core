@@ -316,14 +316,18 @@ def test_uncertain_delivery_blocks_new_decision_without_mutating_original_send(c
 
 @pytest.mark.parametrize("mode", ["PREVIEW", "SHADOW"])
 def test_new_pipeline_does_not_run_legacy_generic_proactive_in_parallel(core, mode):
+    from companion.autonomous_selector import native_selector
+    from tests.test_autonomous_selector import drain
+
     configure(core, mode)
     core.settings.proactive_enabled = core.settings.social_enabled = True
     ingest(core)
     core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
     core.clock.advance(3601)
-    assert core.schedule_proactive() is False  # Topic is not due; no generic fallback.
+    run(drain(native_selector(core, "life-no-fallback")))
     assert core.social.flush() is False
     assert not core.store.rows("SELECT * FROM jobs WHERE kind='activity'")
+    assert not core.model.calls
     assert_no_delivery(core)
 
 

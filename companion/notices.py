@@ -196,6 +196,10 @@ def validate(store, settings, job, now):
         or current["source_event_id"] != _key(store, value["kind"], value["ref"])
         or current["event_id"] != "evt_" + sha(current["source_event_id"])):
         raise CoreError("NOTICE_SCOPE_INVALID", 403)
+    if value["kind"] == "life" and current["job_state"] == "SUCCEEDED":
+        from companion.life_topics import LifeTopics
+
+        return LifeTopics(store, settings, lambda: now).delivery_material(job["job_id"])
     data = _material(store, settings, value["kind"], value["ref"], now)
     dependencies = {row["source_event_id"] for row in store.rows(
         "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (current["event_id"],))}
@@ -390,6 +394,10 @@ def delivery_problem(store, settings, message_id, now, *, job=None):
             or delivery["content_sha256"] != sha(json.loads(delivery["content_json"]))
             or not _settled(store, job["job_id"])):
             raise CoreError("NOTICE_JOB_UNSETTLED", 409)
+        if data["kind"] == "life" and json.loads(delivery["content_json"]) != {
+            "text": data["text"],
+        }:
+            raise CoreError("LIFE_DRAFT_CHANGED", 409)
     except (CoreError, KeyError, TypeError, ValueError) as error:
         return error.code if isinstance(error, CoreError) else "NOTICE_SOURCE_CHANGED"
     return None

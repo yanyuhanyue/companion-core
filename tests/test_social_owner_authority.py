@@ -6,12 +6,13 @@ import pytest
 from pydantic import ValidationError
 
 from companion import account_actions, notices, owner_authority, paid_budget, social_plan_jobs
+from companion.affect import AffectEngine
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
 from companion.life_protocol import LifeShadowApproval
 from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy, OwnerRuntimeConfig
 from companion.store import after, uid
-from tests.conftest import run
+from tests.conftest import ingest, run
 from tests.social_model_transport import NativeTestModel
 from tests.test_life_topics import bug, due, proposal
 from tests.test_owner_authority import activate
@@ -27,14 +28,15 @@ def close_provider_clients(core):
         run(client.aclose())
 
 
-def authorize(core, tmp_path, *, life=None, account=True, module=None):
+def authorize(core, tmp_path, *, life=None, account=True, module=None, additional_purposes=()):
     approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
                   per_request_micro_usd=200000)
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
-    purposes = ["life"] if life else ["social"]
+    purposes = (["life"] if life else ["social"]) + list(additional_purposes)
     capability = {}
     if account and not life:
         purposes.append("account_actions")
+    if "account_actions" in purposes:
         capability["account_actions"] = core.settings.social_autonomy.authorization_sha256
     policy = OwnerGrantPolicy(
         owner_qq_id=core.settings.owner_qq_id, purposes=purposes,
@@ -44,7 +46,7 @@ def authorize(core, tmp_path, *, life=None, account=True, module=None):
     )
     result, _ = activate(core, policy)
     target = module if module is not None else core
-    if not isinstance(target.model, NativeTestModel):
+    if (life is not None or module is not None) and not isinstance(target.model, NativeTestModel):
         target.model = NativeTestModel(core.settings, target.model,
                                        "social_autonomy" if module else "activity")
         core.authority_test_clients.append(target.model.client)
@@ -235,3 +237,35 @@ def test_owner_bound_source_erasure_during_model_keeps_cost_and_removes_draft(co
         "state": "CANCELLED", "redacted": 1,
     }
     assert core.store.rows("SELECT * FROM outbox") == []
+
+
+@pytest.mark.parametrize("allow_affect", [False, True])
+def test_social_and_life_do_not_read_feedback_without_affect_purpose(
+    core, tmp_path, monkeypatch, allow_affect,
+):
+    from companion.life_topics import _paused
+    from companion.social import proactive_allowed
+    from tests.test_social_autonomy import service
+
+    core.settings.affect_enabled = core.settings.proactive_enabled = True
+    core.settings.quiet_start = core.settings.quiet_end = 0
+    ingest(core, text="目前不想聊")
+    assert core.store.one("SELECT new_state FROM affect_evidence") == {"new_state": "pause"}
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    service(core)
+    authorize(core, tmp_path, account=False,
+              additional_purposes=["proactive", *(["affect"] if allow_affect else [])])
+    calls = []
+    snapshot = AffectEngine.snapshot
+
+    def observed_snapshot(engine):
+        calls.append(True)
+        return snapshot(engine)
+
+    monkeypatch.setattr(AffectEngine, "snapshot", observed_snapshot)
+    assert proactive_allowed(core.store, core.settings, core.clock()) is (not allow_affect)
+    assert _paused(core.store, core.settings, core.clock()) is allow_affect
+    assert len(calls) == (2 if allow_affect else 0)
+    core.clock.advance(core.settings.affect_decay_minutes * 60 + 1)
+    assert proactive_allowed(core.store, core.settings, core.clock())
+    assert core.model.calls == []

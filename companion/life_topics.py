@@ -8,14 +8,18 @@ from zoneinfo import ZoneInfo
 from pydantic import ValidationError
 
 from companion import budget, owner_authority, private_life, reply_revision
-from companion.affect import AffectEngine
 from companion.contracts import CoreError
 from companion.diary import DiaryDraft, is_management_command, render_draft
-from companion.life_protocol import LifeDecision, LifeQZoneDraft, LifeQZoneSourceGrant
+from companion.life_protocol import (
+    LifeConsumeRequest,
+    LifeDecision,
+    LifeQZoneDraft,
+    LifeQZoneSourceGrant,
+)
 from companion.observation import expired_sources
 from companion.paid_budget import sha
 from companion.privacy import epoch, redact, sensitive
-from companion.social import SocialPlanner, quiet_hours
+from companion.social import SocialPlanner, feedback_paused, quiet_hours
 from companion.store import after, encode
 
 RULES = """依据真实来源作一次有界生活判断，只输出JSON，不执行工具或发送。
@@ -44,7 +48,7 @@ def _paused(store, settings, now):
             "SELECT 1 FROM runtime_meta WHERE key IN ('life_paused','proactive_paused') "
             "AND value='1'",
         )
-        or AffectEngine(store, settings, lambda: now).snapshot()["state"]["engagement"] == "pause"
+        or feedback_paused(store, settings, now)
     )
 
 
@@ -53,6 +57,19 @@ def _uncertain(store):
         store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN' LIMIT 1")
         or store.one("SELECT 1 FROM outbox WHERE state IN ('SENDING','DELIVERY_UNCERTAIN') LIMIT 1")
     )
+
+
+def _draft_text(decision, sources, settings, now):
+    if decision.destination != "PRIVATE_DIARY":
+        return decision.text
+    day = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone)).date().isoformat()
+    draft = DiaryDraft(
+        schema_version=1, local_date=day, title="生活想法", worth_saving=True,
+        sections=[{"kind": "reflection", "text": decision.text,
+                   "evidence": [{"source_id": "event:" + key, "exact_quote": ""}
+                                for key in decision.source_event_ids]}],
+    )
+    return render_draft(draft, sources, day, settings)
 
 
 def _qzone_readback(store, settings, result, topic, sources, approved, now):
@@ -314,6 +331,141 @@ class LifeTopics:
                 (topic_id,),
             )
         ]
+
+    def retained_result(self, job_id, *, destination=None):
+        """Validate a settled draft without reopening its consumed topic or model job."""
+        from companion import notices
+
+        s, now = self.store, self.clock()
+        result = s.one("SELECT * FROM life_activity_results WHERE job_id=?", (job_id,))
+        job = s.one("SELECT j.*,e.conversation_id,e.body_json,e.reply_revision FROM jobs j "
+                    "JOIN events e USING(event_id) WHERE j.job_id=?", (job_id,))
+        if (not result or result["state"] != "SHADOW" or not job
+            or job["state"] != "SUCCEEDED" or not notices.shadow(job)
+            or not notices._settled(s, job_id)
+            or destination is not None and result["destination"] != destination):
+            raise CoreError("LIFE_SETTLED_DRAFT_REQUIRED", 409)
+        topic = s.one("SELECT * FROM life_topics WHERE topic_id=?", (result["topic_id"],))
+        if (not topic or topic["state"] != "CLOSED" or topic["reason_code"] != "CONSUMED"
+            or topic["expires_at"] <= now or topic["closed_event_id"] is not None):
+            raise CoreError("LIFE_DRAFT_EXPIRED", 409)
+        notice = notices.reference(job)
+        if (notice.get("ref") != result["topic_id"]
+            or notice.get("material_sha256") != result["source_sha256"]
+            or topic["revision"] != result["topic_revision"]):
+            raise CoreError("LIFE_DRAFT_CHANGED", 409)
+        reply_revision.check_job(s, job)
+        if owner_authority.required(s, self.settings):
+            owner_authority.check_job(s, self.settings, self.clock, job, purpose="life")
+        sources = self.sources(topic["topic_id"])
+        approved = authority(s, self.settings, topic["conversation_id"], sources, now,
+                             topic_id=topic["topic_id"], check_limit=False)
+        try:
+            value = json.loads(result["proposal_json"])
+            if not isinstance(value, dict):
+                raise ValueError("draft must be an object")
+            decision = LifeDecision.model_validate({k: v for k, v in value.items()
+                                                    if k != "qzone_draft"})
+            valid = (
+                approved["sha256"] == result["authority_sha256"]
+                and json.loads(result["source_fingerprints_json"])
+                == {x["event_id"]: x["source_sha256"] for x in sources}
+                and decision.destination in {"NONE", *approved["destinations"]}
+                and set(decision.source_event_ids) <= {x["event_id"] for x in sources}
+                and decision.action == result["action"]
+                and decision.destination == result["destination"]
+                and decision.reason == result["reason"]
+                and _draft_text(decision, sources, self.settings, result["updated_at"])
+                == result["text"]
+            )
+        except (TypeError, ValueError, ValidationError) as error:
+            raise CoreError("LIFE_DRAFT_CHANGED", 409) from error
+        if not valid or sensitive(result["text"]) or redact(result["text"], self.settings) != (
+            result["text"]
+        ):
+            raise CoreError("LIFE_DRAFT_CHANGED", 409)
+        draft = None
+        if result["destination"] == "QZONE_DRAFT":
+            draft = _qzone_readback(s, self.settings, result, topic, sources, approved, now)
+            if draft is None:
+                raise CoreError("LIFE_QZONE_DRAFT_REQUIRED", 403)
+        return {"result": result, "job": job, "topic": topic, "sources": sources,
+                "decision": decision, "qzone_draft": draft}
+
+    def delivery_material(self, job_id):
+        """Original settled wording and current private-send fences for native Outbox."""
+        from companion.social import proactive_allowed
+
+        data = self.retained_result(job_id, destination="PRIVATE_MESSAGE_DRAFT")
+        s, now = self.store, self.clock()
+        owner_authority.check_job(s, self.settings, self.clock, data["job"], purpose="proactive")
+        if (self.settings.life_loop.mode != "SHADOW"
+            or not proactive_allowed(s, self.settings, now)
+            or budget.chat_pending(s, now)):
+            raise CoreError("LIFE_PRIVATE_DELIVERY_PAUSED", 409)
+        conversation = s.one("SELECT reply_revision FROM conversations WHERE conversation_id=?",
+                             (data["job"]["conversation_id"],))
+        if conversation["reply_revision"] != data["result"]["conversation_revision"]:
+            raise CoreError(reply_revision.SUPERSEDED, 409)
+        return {"kind": "life", "text": data["result"]["text"],
+                "source_events": {x["event_id"]: x["source_sha256"] for x in data["sources"]},
+                "authority_sha256": data["result"]["authority_sha256"]}
+
+    def consume(self, job_id, body: LifeConsumeRequest, *, diary=None):
+        """Release an exact owner-reviewed draft through its existing native channel."""
+        from companion import owner_delivery
+        from companion.social import proactive_counts
+        from companion.transport import enqueue_reply_parts
+
+        s, now = self.store, self.clock()
+        destinations = {"qq.private.proactive": "PRIVATE_MESSAGE_DRAFT",
+                        "diary.save": "PRIVATE_DIARY", "qzone.publish": "QZONE_DRAFT"}
+        with _transaction(s):
+            owner_authority.current(s, self.settings, self.clock, purpose="life",
+                                    authority=body.authority)
+            data = self.retained_result(job_id, destination=destinations[body.action])
+            if sha({"text": data["result"]["text"]}) != body.expected_content_sha256:
+                raise CoreError("LIFE_DRAFT_CHANGED", 409)
+            if self.settings.life_loop.mode != "SHADOW" or _paused(s, self.settings, now):
+                raise CoreError("LIFE_CONSUMPTION_PAUSED", 409)
+            if body.action == "diary.save":
+                owner_authority.current(s, self.settings, self.clock, purpose="diary",
+                                        authority=body.authority)
+                save = getattr(diary, "save_life_expression", None)
+                if not callable(save):
+                    raise CoreError("NATIVE_DIARY_EXPRESSION_REQUIRED", 503)
+                return save(job_id, expected_content_sha256=body.expected_content_sha256,
+                            authority=body.authority)
+            if body.action == "qzone.publish":
+                from companion.social_autonomy import SocialAutonomy
+
+                return SocialAutonomy(s, self.settings, clock=self.clock).consume_life_draft(
+                    job_id, body.authority, body.expected_content_sha256,
+                )
+            self.delivery_material(job_id)
+            existing = s.rows("SELECT message_id,state FROM outbox WHERE origin_event_id=? "
+                              "AND action_type='qq.private.proactive' ORDER BY rowid",
+                              (data["job"]["event_id"],))
+            if not existing:
+                if _uncertain(s):
+                    raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
+                count, recent = proactive_counts(s, self.settings, now)
+                if count >= self.settings.proactive_daily_limit or recent:
+                    raise CoreError("LIFE_PRIVATE_DELIVERY_LIMIT", 429)
+                record = getattr(owner_delivery, "record_life_draft", None)
+                if not callable(record):
+                    raise CoreError("NATIVE_LIFE_DELIVERY_REQUIRED", 503)
+                messages = enqueue_reply_parts(s, data["job"], [data["result"]["text"]], 0,
+                                                now, action="qq.private.proactive")
+                record(s, self.settings, self.clock, data["job"], messages)
+                s.audit("life.draft_consumed", job_id, job_id, now,
+                        channel_action=body.action, message_ids=messages)
+                existing = s.rows("SELECT message_id,state FROM outbox WHERE origin_event_id=? "
+                                  "AND action_type='qq.private.proactive' ORDER BY rowid",
+                                  (data["job"]["event_id"],))
+            for delivery in existing:
+                owner_delivery.check_delivery(s, self.settings, self.clock, delivery["message_id"])
+            return {"job_id": job_id, "action": body.action, "deliveries": existing}
 
     def preview(self, requester):
         if requester != self.settings.owner_qq_id:
@@ -745,31 +897,7 @@ class LifeTopics:
             for term in ("不理我", "抛弃我", "不要离开我", "你不回复我", "让我失望")
         ):
             raise CoreError("LIFE_PRESSURE_REJECTED", 400)
-        prose = decision.text
-        if decision.destination == "PRIVATE_DIARY":
-            day = (
-                datetime.fromisoformat(now)
-                .astimezone(ZoneInfo(self.settings.timezone))
-                .date()
-                .isoformat()
-            )
-            draft = DiaryDraft(
-                schema_version=1,
-                local_date=day,
-                title="生活想法",
-                worth_saving=True,
-                sections=[
-                    {
-                        "kind": "reflection",
-                        "text": prose,
-                        "evidence": [
-                            {"source_id": "event:" + key, "exact_quote": ""}
-                            for key in decision.source_event_ids
-                        ],
-                    }
-                ],
-            )
-            prose = render_draft(draft, data["sources"], day, self.settings)
+        prose = _draft_text(decision, data["sources"], self.settings, now)
         proposal = decision.model_dump(mode="json")
         if decision.destination == "QZONE_DRAFT":
             expires = min(

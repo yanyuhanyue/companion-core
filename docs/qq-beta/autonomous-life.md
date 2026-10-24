@@ -99,9 +99,35 @@ Readback revalidates the DTO, native successful job and settled usage, retained 
 exact current unique source grants, audience/owner and effective expiry. A malformed or changed
 artifact is hidden individually without writing during GET or failing the whole view.
 
-Lane C can validate this DTO offline. A future authorized publication must revalidate current
-grants and exact content/source snapshot through the existing account-action path. Current code
-does not create a publication task. Visibility expansion beyond owner-only is outside this MVP.
+`LifeTopics.consume` accepts an exact retained draft and an explicit execution action:
+`qq.private.proactive`, `diary.save` or `qzone.publish`. The request binds the original owner
+authority and `sha({"text": retained_text})`; it cannot supply replacement prose or sources.
+This is separate from generating or viewing a draft and never calls a second model to rewrite it.
+
+For `qzone.publish`, all original model-context sources must pass the existing `public_source`
+checks. Exact private-source draft grants permit owner review only: private chat, uploads and
+fiction cannot become publication evidence, even with owner-only visibility. The current `social`
+and `account_actions` purposes and the independently configured QZone action are required.
+The consumer freezes the same text into the native SocialAutonomy plan and reserves its original
+Outbox once in one transaction. Source roots, exact draft, current reference, STOP/OFF/DND and
+native action quotas remain checked before dispatch. UNKNOWN retains the native reservation.
+Visibility expansion beyond owner-only is outside this stage.
+
+Private delivery additionally requires `proactive`, the original conversation revision and
+native pause/DND/daily/cooldown limits. Life SHADOW/SKIP results reserve no send slot; the common
+counter counts a Life-origin private Outbox group once at enqueue. Feedback affects these checks
+only with the independent current `affect` purpose. Source-backed prior modules remain the
+consumers; the selector does not create expression candidates from idle time or lack of reply.
+While Life is PREVIEW/SHADOW, SocialAutonomy does not independently regenerate public-source
+wording. Its separately scoped account-profile handling and retained native work remain native.
+
+Shared HTTP/Outbox integration supplies `owner_delivery.record_life_draft` for the completed
+activity job; the ordinary running-job `record_replies` contract is unchanged. Diary owns
+`DiaryService.save_life_expression` and the daily evidence/revision lifecycle. Missing native
+interfaces fail closed rather than reopening a completed job, relabelling an owner correction,
+or paying for another daily generation. REM remains Life-owned and requires explicit fiction,
+owner scope and source/erasure identity before any private expression consumer can accept it.
+The domain slice alone does not certify these shared integrations or real publication.
 
 ## Recovery and erasure
 
