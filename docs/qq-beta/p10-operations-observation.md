@@ -143,6 +143,11 @@ Wake 在推进或过期处理目标前同时要求 `wake`、`goals`、`explorati
 创建一个原生 REM job 或执行一次指定 job；原预算准入负责每日调用数和日／月费用上限。
 REM 沿用同一轮转，预算拒绝或空闲不会占用其他 N1–N3 lane 的下一轮机会，输出仅为私人虚构记录。
 
+`poke` 与 `meme_caption` lane 只在 live 模式、对应开关开启且当前独立用途获授权时，调用
+`Core._run_poke_once` 与 `MemeCaptionService.run_once`。它们不依赖空闲聊天入口的 fallback；
+原生 job 负责领取、恢复、原授权复核和计费。Poke 合并期限沿用 `jobs.next_attempt_at` 的原
+deadline 投影，未增加轮询或生产者。M0/M1 不调用这两个外部能力操作。
+
 Life、Diary、Social 的默认关闭／SHADOW、DND、每日次数、冷却、SKIP/DEFER 都由原生模块处理。
 静默的一次检查不调用模型；SKIP 消费原候选，不新增消息。公平性只保证进程持续运行且存在
 空闲资源时，持续可用的后台 lane 获得有限轮转机会；不保证持续前台流量下后台按时完成。

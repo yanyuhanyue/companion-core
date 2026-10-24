@@ -227,6 +227,16 @@ def native_selector(core, worker_id) -> RoundRobin:
         )
         return UnitResult(result)
 
+    async def poke():
+        if core.settings.mode != "live" or not core.settings.poke_policy.enabled:
+            return UnitResult(False)
+        return await run_native_unit(core._run_poke_once, worker_id)
+
+    async def meme_caption():
+        if core.settings.mode != "live" or not core.settings.meme_semantics_enabled:
+            return UnitResult(False)
+        return await run_native_unit(core.memes.run_once, worker_id)
+
     return RoundRobin((
         maintenance("retention", core.expire_raw_events),
         maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
@@ -237,6 +247,8 @@ def native_selector(core, worker_id) -> RoundRobin:
         lane("life_topic", life_topic, ("life",)),
         lane("private_share", private_share, ("proactive",)),
         lane("activity", activity),
+        lane("poke", poke, ("poke",)),
+        lane("meme_caption", meme_caption, ("meme",)),
         lane("diary", diary, ("diary",)),
         lane("consolidation", consolidation, ("consolidation",)),
         lane("memory", memory, ("memory",)),
