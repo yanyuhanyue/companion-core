@@ -44,6 +44,16 @@ def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
+def config_matches(config, expected):
+    value = asdict(config)
+    if digest(value) == expected:
+        return True
+    # Historical v1 evidence predates the optional native authority field.
+    if value.pop("owner_authority", None) is None:
+        return digest(value) == expected
+    return False
+
+
 def delivery_origin(item):
     # Account plans have their own actual reference; they are never owner input events.
     return item["content"]["plan_id"] if account_actions.is_account(item) else (
@@ -632,7 +642,7 @@ class WindowPlan:
             config.delivery_enabled
             or value["protocol_epoch"] != config.protocol_epoch
             or value["identity_sha256"] != digest([config.owner_qq_id, config.bot_qq_id])
-            or value["config_sha256"] != digest(asdict(config))
+            or not config_matches(config, value["config_sha256"])
         ):
             raise ValueError("WINDOW_CONFIG_MISMATCH")
         expected = {
@@ -830,7 +840,7 @@ class TestWindow:
         if digest(self.plan.value) != self.plan.sha256:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
         if (active or dispatch) and (
-            digest(asdict(self.plan.config)) != self.plan.value["config_sha256"]
+            not config_matches(self.plan.config, self.plan.value["config_sha256"])
             or (self.plan.mode == "live_text" and (
                 self.plan.value["live_text"]["bridge_code_sha256"] != bridge_code_sha256()
             ))
@@ -1024,55 +1034,24 @@ class TestWindow:
         return self.status() | {"cancelled_inputs": changed}
 
     def read_journal(self):
-        path = self.plan.journal
-        info = path.lstat()
+        from . import journal
+
         maximum = (32 * 1048576
                    if self.plan.value.get("live_text", {}).get("automatic_reply") else 1048576)
-        if (
-            path.is_symlink()
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_size > maximum
-            or (os.name != "nt" and info.st_mode & 0o077)
-        ):
-            raise ValueError("INVALID_WINDOW_JOURNAL")
-        records, head = [], "0" * 64
-        for line in path.read_text("utf-8").splitlines():
-            record = decode(line, 65536)
-            if record.get("previous") != head or record.get("seq") != len(records) + 1:
-                raise ValueError("INVALID_WINDOW_JOURNAL")
-            head = digest(record)
-            records.append(record)
-        return records, head
+        return journal.read(self.plan.journal, maximum=maximum)
 
     def append(self, kind, data, *, create=False):
+        from . import journal
+
         if not create and kind in {"CAPTURED", "INPUT", "RESERVED"}:
             cumulative.admit(self, "send_attempts" if kind == "RESERVED" else "owner_inputs",
                              data["message_hash"] if kind == "RESERVED" else data["event_hash"])
-        records, previous = ([], "0" * 64) if create else self.read_journal()
-        if not create and previous != self.row()["journal_head"]:
-            raise ValueError("WINDOW_JOURNAL_RECONCILIATION_REQUIRED")
-        record = {
-            "seq": len(records) + 1,
-            "previous": previous,
-            "at": self.clock().isoformat(),
-            "kind": kind,
-            "data": data,
-        }
-        flags = os.O_WRONLY | (os.O_CREAT | os.O_EXCL if create else os.O_APPEND)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(self.plan.journal, flags, 0o600)
-        with os.fdopen(descriptor, "ab") as handle:
-            handle.write((encode(record) + "\n").encode())
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Persist the newly created directory entry on POSIX too.
-        if create and os.name != "nt":
-            directory = os.open(self.plan.journal.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        return digest(record)
+        maximum = (32 * 1048576
+                   if self.plan.value.get("live_text", {}).get("automatic_reply") else 1048576)
+        return journal.append(
+            self.plan.journal, kind, data, at=self.clock().isoformat(), create=create,
+            expected_head="0" * 64 if create else self.row()["journal_head"], maximum=maximum,
+        )
 
     async def core_counts(self, client, *, initial=False):
         if self.plan.mode == "live_text":
@@ -1318,7 +1297,7 @@ class TestWindow:
     def check_opening(self):
         if digest(self.plan.value) != self.plan.sha256:
             raise ValueError("WINDOW_IMMUTABLE_OR_MISSING")
-        if digest(asdict(self.plan.config)) != self.plan.value["config_sha256"] or (
+        if not config_matches(self.plan.config, self.plan.value["config_sha256"]) or (
             self.plan.mode == "live_text"
             and self.plan.value["live_text"]["bridge_code_sha256"] != bridge_code_sha256()
         ):
@@ -1354,7 +1333,7 @@ class TestWindow:
         if self.plan.mode != "live_text" or not scope:
             raise ValueError("WINDOW_HANDOFF_APPROVAL_REQUIRED")
         if digest(self.plan.value) != self.plan.sha256 or (
-            digest(asdict(self.plan.config)) != self.plan.value["config_sha256"]
+            not config_matches(self.plan.config, self.plan.value["config_sha256"])
             or self.plan.value["live_text"]["bridge_code_sha256"] != bridge_code_sha256()
         ):
             raise ValueError("LIVE_TEXT_RUNTIME_CHANGED")
@@ -2277,7 +2256,7 @@ class SendOperation:
             or any(self.approval.get(key) != value or value != attempt["text_hash"]
                    for key, value in approval_hash(item).items())
             or digest(self.window.plan.value) != self.window.plan.sha256
-            or digest(asdict(self.window.plan.config)) != self.window.plan.value["config_sha256"]
+            or not config_matches(self.window.plan.config, self.window.plan.value["config_sha256"])
             or row["state"] != "OPEN"
             or row["fence"] != self.current[1]
             or attempt["state"] != state
@@ -2502,6 +2481,10 @@ def check_protocol_request(window, request, *, reference_read=False, file_read=F
 
 
 async def command(config, args):
+    if args.command in {"window-open", "window-handoff", "window-abort-handoff",
+                        "window-ingest", "window-capture-once", "window-approve-input",
+                        "window-send-once", "window-run"}:
+        raise ValueError("LEGACY_WINDOW_EXECUTION_RETIRED")
     if args.command in {"window-delivery-prepare", "window-delivery-reconcile"}:
         from .owner_resolution import command as reconcile_command
 

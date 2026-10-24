@@ -56,6 +56,7 @@ class BridgeConfig:
     max_disk_bytes: int = 67108864
     poll_seconds: float = 0.1
     capture_signing_key: str | None = None
+    owner_authority: dict | None = None
     rich_input_scope: str = "none"
     meme_directory: str | None = None
     meme_enabled: bool = False
@@ -74,6 +75,13 @@ class BridgeConfig:
     account_asset_max_dimension: int = 2048
 
     def __post_init__(self):
+        if self.owner_authority is not None:
+            from companion_delivery_protocol.authority import validate_authority_ref
+
+            object.__setattr__(self, "owner_authority", validate_authority_ref(
+                self.owner_authority))
+            if self.capture_signing_key is None:
+                raise ValueError("OWNER_CAPTURE_SIGNING_KEY_REQUIRED")
         if type(self.ingress_after) is not int or not 0 <= self.ingress_after <= 4102444800:
             raise ValueError("INVALID_INGRESS_BOUNDARY")
         if self.astrbot_handoff_path is not None:

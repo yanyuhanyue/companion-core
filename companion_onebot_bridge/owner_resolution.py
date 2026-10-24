@@ -70,6 +70,16 @@ def resolved(window):
 def pending_result(spool):
     done = set()
     if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (TABLE,)).fetchone():
+        if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_runtime'").fetchone():
+            from .owner_native_resolution import rows as native_rows
+            from .owner_runtime import OwnerRuntime
+
+            runtime = OwnerRuntime(spool)
+            runtime.verify(active=False)
+            done = {row["message_id"] for row in native_rows(runtime) if row["receipt_json"]}
+            return next((row for row in spool.db.execute(
+                "SELECT message_id,body FROM results WHERE state='pending' ORDER BY rowid")
+                if row[0] not in done), None)
         from .window import TestWindow, stored_plan
 
         saved = spool.db.execute("SELECT plan_json FROM test_window WHERE singleton=1").fetchone()
