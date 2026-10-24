@@ -20,7 +20,7 @@ from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
 from companion.reflection import REFLECTION_RULES
 from companion.reply_segments import SegmentedReplyConfig
 from companion.runtime import Runtime
-from companion_onebot_bridge import continuous
+from companion_onebot_bridge import capture, continuous
 from tests.conftest import run
 from tests.test_continuous_private_replies import worker
 from tests.test_onebot_capture import capture_approval, source_window
@@ -486,11 +486,13 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
     run(scenario())
 
 
+@pytest.mark.parametrize("first_response_delay", [0.0, capture.MAX_CLOCK_DRIFT_SECONDS + 0.1])
 def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
-    core, tmp_path, monkeypatch
+    core, tmp_path, monkeypatch, first_response_delay,
 ):
     from companion import __main__, api
     from companion import core as core_module
+    from tests.test_owner_recall_bridge_media import advance_clock
 
     calls, instances = [], []
     next_input = asyncio.Event()
@@ -506,8 +508,10 @@ def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
         instances.append(instance)
         return instance
 
-    def respond(request):
+    async def respond(request):
         calls.append(json.loads(request.content)["messages"])
+        if len(calls) == 1:
+            await asyncio.sleep(first_response_delay)
         return httpx.Response(
             200,
             json={
@@ -542,6 +546,8 @@ def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
                             pause.set()
 
                 monkeypatch.setattr(continuous, "emit", emitted)
+                clock_stop = asyncio.Event()
+                clock_task = asyncio.create_task(advance_clock(core, clock_stop))
                 task = asyncio.create_task(__main__.worker(core.settings))
                 try:
                     result = await asyncio.wait_for(
@@ -549,8 +555,9 @@ def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
                     )
                     assert result["attempt_states"] == {"ACK": 2}
                 finally:
+                    clock_stop.set()
                     task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+                    await asyncio.gather(task, clock_task, return_exceptions=True)
         assert len(instances) == 2 and all(instance is not core for instance in instances)
         assert instances[0].store is not instances[1].store
         assert len(calls) == len(sends) == 2

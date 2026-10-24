@@ -35,6 +35,8 @@ def evidence(benchmark_workspace):
     with (
         patch("companion.retrieval.SemanticIndex.warmup", side_effect=AssertionError("encoder")),
         patch("companion.retrieval.SemanticIndex.scores", side_effect=AssertionError("retrieval")),
+        patch("companion.retrieval.SemanticIndex.scores_async",
+              side_effect=AssertionError("retrieval")),
         patch("httpx.Client.send", side_effect=AssertionError("network")),
         patch("httpx.AsyncClient.send", side_effect=AssertionError("network")),
         patch("socket.create_connection", side_effect=AssertionError("network")),
