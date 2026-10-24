@@ -170,6 +170,11 @@ def reserve(
                 store, settings, clock or (lambda: now), job_id, scenario)
         else:
             live_text.reserve_model(store, settings, clock, job_id, scenario)
+        if scenario == "rem":
+            from companion import rem
+
+            rem.admit(store, settings, clock or (lambda: now), job_id,
+                      estimated_input, estimate)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
@@ -208,6 +213,9 @@ def reserve(
             if scenario in {"memory_extract", "memory_review"}:
                 scenarios = ("memory_extract", "memory_review")
                 limit = settings.memory_daily_micro_usd
+            elif scenario == "rem":
+                scenarios = ("rem",)
+                limit = settings.rem.daily_micro_usd
             elif scenario == "diary":
                 scenarios = ("diary",)
                 limit = settings.diary_daily_micro_usd

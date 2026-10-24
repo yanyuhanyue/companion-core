@@ -29,6 +29,7 @@ from companion.media_config import ContentConfig, MediaConfig
 from companion.operator_config import ConsoleConfig
 from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.poke_protocol import PokePolicy
+from companion.rem_protocol import RemConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.sources import ObservationSource
@@ -372,6 +373,7 @@ class LiveTextWindowApproval(BaseModel):
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
+    rem: RemConfig = Field(default_factory=RemConfig)
     _operator_config_version: int = PrivateAttr(default=0)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)
@@ -573,6 +575,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "rem":
+            return self.rem.max_output_tokens
         if scenario == "social_autonomy":
             return self.social_autonomy.max_output_tokens
         if scenario == "meme_caption":

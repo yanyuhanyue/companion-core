@@ -44,9 +44,12 @@ class Runtime:
         self.store.close()
 
     def expire_raw_events(self):
+        from companion.rem import expire as expire_rem
+
         now = self.clock()
         cutoff = after(now, -86400 * self.settings.raw_event_retention_days)
         with self.store.transaction():
+            expire_rem(self.store, self.ledger, now)
             rows = self.store.rows(
                 "SELECT event_id FROM events WHERE redacted=0 AND ingested_at<? "
                 "ORDER BY rowid LIMIT 1000",

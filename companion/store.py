@@ -99,6 +99,8 @@ class Store:
             "events": {"event_id", "redacted", "memory_processed", "fingerprint", "reply_revision"},
             "jobs": {"lease_token", "state", "context_tracked", "authority_json"},
             "job_sources": {"job_id", "event_id"},
+            "rem_records": {"rem_id", "job_id", "source_snapshot_json", "output_json",
+                            "source_event_ids_json", "redacted", "expires_at"},
             "agent_conversations": {"job_id", "phase", "conversation_json", "snapshots_json",
                                     "request_id", "output_text"},
             "agent_tool_calls": {"job_id", "tool_call_id", "state", "request_id"},

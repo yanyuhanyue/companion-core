@@ -62,6 +62,7 @@ def cleanup_contracts():
     from companion.poke import erase as erase_poke
     from companion.reading import erase_reading
     from companion.reflection import erase_reflections
+    from companion.rem import erase as erase_rem
     from companion.social_autonomy import erase_social_autonomy
     from companion.voice_jobs import erase_voice_jobs
 
@@ -79,6 +80,7 @@ def cleanup_contracts():
             ),
         ),
         event_cleanup("consolidation", erase_consolidation),
+        event_cleanup("rem", erase_rem),
         event_cleanup("memory-work", erase_memory_work),
         event_cleanup("goals", erase_goals),
         event_cleanup("life-topics", erase_topics),

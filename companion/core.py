@@ -292,6 +292,9 @@ class Core(Runtime):
 
         s = self.store
         recover_evaluation(s, now)
+        from companion.rem import recover_interrupted
+
+        recover_interrupted(s, now)
         image_spool.cleanup(s, now)
         # The autonomous selector no longer consumes old fixed-timer greetings.
         # Only unadmitted queued work can be retired; retain all model/send custody.
@@ -345,7 +348,7 @@ class Core(Runtime):
                 "SELECT j.*,e.conversation_id,e.body_json,e.trace_id,e.redacted,e.reply_revision "
                 "FROM jobs j "
                 "JOIN events e ON e.event_id=j.event_id WHERE j.state IN ('QUEUED','RETRY_WAIT') "
-                "AND j.kind IN ('chat','activity','evaluation') "
+                "AND j.kind IN ('chat','activity','evaluation','rem') "
                 "AND ((? IS NULL AND j.kind IN ('chat','evaluation')) OR j.job_id=?) "
                 "AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=?) AND e.redacted=0 "
                 "AND NOT EXISTS (SELECT 1 FROM jobs b JOIN events be ON be.event_id=b.event_id "
@@ -358,7 +361,7 @@ class Core(Runtime):
             )
             if not row:
                 return None
-            if row["kind"] == "activity" and (
+            if row["kind"] in {"activity", "rem"} and (
                 budget.chat_pending(s, now) or private_life.enabled(self.settings)
                 and private_life.owner_waiting(s, self.settings, now)
             ):
@@ -1313,6 +1316,10 @@ class Core(Runtime):
             from companion.evaluation import run as run_evaluation
 
             return await run_evaluation(self, job)
+        if job is not None and job["kind"] == "rem":
+            from companion.rem import run as run_rem
+
+            return await run_rem(self, job)
         if job is None:
             if job_id is not None:
                 return False
