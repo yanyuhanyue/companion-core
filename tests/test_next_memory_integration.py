@@ -2,37 +2,20 @@
 
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
-from companion import api, live_text, owner_authority
+from companion import owner_authority
 from companion.core import Core
-from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
+from companion.model import EXTRACT_RULES, ModelClient
 from companion.store import after, encode
-from tests import test_input_protocol as protocol_fixtures
-from tests.conftest import event, ingest, run
+from tests.conftest import ingest, run
 from tests.support.owner_memory import environment as owner_memory_environment
-from tests.test_input_protocol import environment, notice
-from tests.test_m1 import remember
 from tests.test_next_life_growth import feedback_days
-from tests.test_paid_model_gate import approved_live
-from tests.test_private_companion import companion_options
-from tests.test_reply_revision_api import admit
+from tests.test_onebot_capture import real_core_http
 
 FACT = "青禾项目下一步检查配色"
-
-
-@pytest.fixture(autouse=True)
-def window_capacity_for_provenance_cases(monkeypatch):
-    def options(core):
-        value = companion_options(core)
-        value["max_inputs"] = 20
-        value["window_options"] = {**value["window_options"], "max_new_inputs": 20}
-        return value
-    monkeypatch.setattr(protocol_fixtures, "companion_options", options)
 
 
 def response(text):
@@ -41,8 +24,17 @@ def response(text):
                                    "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
 
+def recall_request(query):
+    return httpx.Response(200, json={"choices": [{"message": {
+        "role": "assistant", "content": None, "tool_calls": [{
+            "id": "recall-fact", "type": "function", "function": {
+                "name": "memory_recall", "arguments": encode({"query": query})}}]},
+        "finish_reason": "tool_calls"}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+
+
 def test_authorized_history_can_exceed_individual_memory_search_query_limit(
-    core, tmp_path, monkeypatch,
+    core, tmp_path,
 ):
     async def scenario():
         prompts = []
@@ -51,56 +43,70 @@ def test_authorized_history_can_exceed_individual_memory_search_query_limit(
             prompts.append(json.loads(request.content)["messages"])
             return response("合成回复")
 
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
+        async with owner_memory_environment(core, tmp_path) as (admit, recall, reference):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
                     texts = [f"设计记录第{number}段：" + "线条" * 190 for number in range(1, 4)]
                     assert sum(map(len, texts)) > 1000
                     for number, text in enumerate(texts, 1):
-                        _, accepted = await admit(client, config, plan, number, text)
+                        _, accepted = await admit(number, text)
                     # Earlier unanswered inputs remain authorized context after supersession.
                     assert await worker.run_once("long-history-chat")
                     assert worker.store.one("SELECT state FROM jobs WHERE job_id=?",
                                             (accepted["job_id"],))["state"] == "SUCCEEDED"
                     assert len(prompts) == 1
                     assert all(text in encode(prompts[-1]) for text in texts)
-                    assert not live_text.stopped(core.store, plan.sha256)
+                    assert owner_authority.current(core.store, core.settings, core.clock
+                        ).authority.as_dict() == reference
     run(scenario())
 
 
-@pytest.mark.parametrize("stage", ["review", "chat"])
+@pytest.mark.parametrize("stage", ["before-dispatch", "during-response"])
 def test_every_fact_source_is_tracked_before_await_and_recall_keeps_independent_fact(
-    core, tmp_path, monkeypatch, stage,
+    core, tmp_path, stage,
 ):
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
         calls = []
 
-        async def provider(request):
+        async def before_dispatch(request):
             messages = json.loads(request.content)["messages"]
-            kind = "review" if messages[0]["content"] == RECALL_RULES else "chat"
-            calls.append(kind)
-            if kind == stage:
+            if stage == "before-dispatch" and any(m["role"] == "tool" for m in messages):
                 entered.set()
                 await release.wait()
-            return response('{"relevant":["m0"]}' if kind == "review" else "合成回答")
 
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
+        async def provider(request):
+            messages = json.loads(request.content)["messages"]
+            kind = "chat" if any(m["role"] == "tool" for m in messages) else "recall-request"
+            calls.append(kind)
+            if kind == "recall-request":
+                return recall_request("青禾项目")
+            assert FACT in encode(messages)
+            if stage == "during-response":
+                entered.set()
+                await release.wait()
+            return response("合成回答")
+
+        async with owner_memory_environment(core, tmp_path) as (admit, recall, reference):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider),
+                event_hooks={"request": [before_dispatch]}) as transport:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
                     assert worker.store is not core.store
-                    sources = []
+                    sources, captures = [], []
                     for number in range(1, 10):
-                        source, _ = await admit(client, config, plan, number, "/记住这个 " + FACT)
+                        source, _ = await admit(number, "/记住这个 " + FACT)
                         assert await worker.run_once("seed-control")
-                        sources.append(source["event_id"])
+                        sources.append(source.event_id)
+                        captures.append(source)
                     assert calls == []
                     projected = worker.memory_context.recall("*", worker.clock())["facts"][0]
                     assert len(projected["evidence"]) == 8 and projected["evidence_truncated"]
                     assert set(projected["evidence_ids"]) == set(sources)
                     assert sources[0] not in {row["event_id"] for row in projected["evidence"]}
                     question, accepted = await admit(
-                        client, config, plan, 10, "青禾项目下一步做什么？",
+                        10, "青禾项目下一步做什么？",
                     )
                     task = asyncio.create_task(worker.run_once("actual-memory-reply"))
                     try:
@@ -109,9 +115,8 @@ def test_every_fact_source_is_tracked_before_await_and_recall_keeps_independent_
                             "SELECT event_id FROM job_sources WHERE job_id=?",
                             (accepted["job_id"],),
                         )}
-                        assert set(sources) | {question["event_id"]} <= tracked
-                        recalled = await client.post("/internal/v1/live-text/inputs/recall", json=
-                            notice(config, plan, datetime.now(UTC), number=1))
+                        assert set(sources) | {question.event_id} <= tracked
+                        recalled = await recall(captures[0])
                         assert recalled.status_code == 200, recalled.text
                         release.set()
                         assert await asyncio.wait_for(task, 10)
@@ -121,18 +126,20 @@ def test_every_fact_source_is_tracked_before_await_and_recall_keeps_independent_
                     assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
                                           (accepted["job_id"],))["state"] == "CANCELLED"
                     assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
-                                               (question["event_id"],))
+                                               (question.event_id,))
                     assert core.store.one("SELECT redacted FROM events WHERE event_id=?",
-                                          (question["event_id"],))["redacted"] == 0
+                                          (question.event_id,))["redacted"] == 0
                     assert not core.store.rows("SELECT * FROM event_dependencies WHERE event_id=?",
-                                               (question["event_id"],))
+                                               (question.event_id,))
                     assert core.store.one("SELECT status FROM memories")["status"] == "CONFIRMED"
                     assert core.store.one("SELECT COUNT(*) n FROM memory_evidence")["n"] == 8
-                    assert core.store.rows("SELECT state FROM model_usage") == [
-                        {"state": "SETTLED"} for _ in calls
-                    ]
-                    assert calls == (["review"] if stage == "review" else ["review", "chat"])
-                    assert not live_text.stopped(core.store, plan.sha256)
+                    charged = core.store.rows(
+                        "SELECT state FROM model_usage WHERE billed_micro_usd>0")
+                    assert charged == [{"state": "SETTLED"} for _ in calls]
+                    assert calls == (["recall-request"] if stage == "before-dispatch"
+                                     else ["recall-request", "chat"])
+                    assert owner_authority.current(core.store, core.settings, core.clock
+                        ).authority.as_dict() == reference
     run(scenario())
 
 
@@ -199,13 +206,6 @@ def test_continuation_uses_full_episode_proof_including_undisplayed_sources(
 
 
 def test_expired_fact_is_absent_from_real_http_search_and_independent_worker(core, tmp_path):
-    core.clock.now = datetime.now(UTC)
-    mid = remember(core, 1, FACT, confirmed=True)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    core.store.execute("UPDATE events SET memory_processed=1")
-    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
-                       (after(core.clock(), -1), mid))
-    approved_live(core, tmp_path)
     calls = []
 
     def provider(request):
@@ -213,65 +213,73 @@ def test_expired_fact_is_absent_from_real_http_search_and_independent_worker(cor
         assert FACT not in encode(calls[-1])
         return response("当前没有可用记录")
 
-    with TestClient(api.create_app(core.settings)) as client:
-        headers = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
-        result = client.post("/internal/v1/memories/search", headers=headers,
-                             json={"query": "*", "requester_actor_id": "owner"})
-        assert result.status_code == 200 and result.json() == {"items": []}
-        current = event(core, 2, "这个项目还有记录吗？").model_dump(mode="json")
-        result = client.post("/internal/v1/inbox/events", json=current,
-                             headers={**headers, "X-Idempotency-Key": "expiry-question"})
-        assert result.status_code == 202
-
-        async def work():
+    async def work():
+        async with owner_memory_environment(core, tmp_path, history=False) as (admit, _, _):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
                     assert worker.store is not core.store
+                    await admit(1, "/记住这个 " + FACT)
+                    assert await worker.run_once("seed-valid-fact")
+                    assert calls == []
+                    mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
+                    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+                                       (after(core.clock(), -1), mid))
+                    async with real_core_http(worker) as port, httpx.AsyncClient(
+                        base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                        headers={"Authorization": "Bearer "
+                                 + core.settings.bridge_token.get_secret_value()},
+                    ) as client:
+                        result = await client.post("/internal/v1/memories/search",
+                            json={"query": "*", "requester_actor_id": "owner"})
+                        assert result.status_code == 200, result.text
+                        assert result.json() == {"items": []}
+                    await admit(2, "这个项目还有记录吗？")
                     assert await worker.run_once()
-        run(work())
+    run(work())
     assert len(calls) == 1
 
 
-def test_fact_validity_is_rechecked_after_review_await_without_refunding_usage(core, tmp_path):
-    core.clock.now = datetime.now(UTC)
-    mid = remember(core, 1, FACT, confirmed=True)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    core.store.execute("UPDATE events SET memory_processed=1")
-    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
-                       (after(core.clock(), 1), mid))
-    approved_live(core, tmp_path)
-    accepted = ingest(core, 2, "青禾项目下一步做什么？")
+def test_fact_validity_is_rechecked_after_model_await_without_refunding_usage(core, tmp_path):
     calls = []
 
     def provider(request):
         calls.append(json.loads(request.content)["messages"])
-        assert calls[-1][0]["content"] == RECALL_RULES
+        if not any(message["role"] == "tool" for message in calls[-1]):
+            return recall_request("青禾项目")
+        assert FACT in encode(calls[-1])
         core.clock.advance(2)
-        return response('{"relevant":["m0"]}')
+        return response("合成回答")
 
     async def work():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-            with Core(core.settings, ModelClient(core.settings, transport), core.clock) as worker:
-                assert await worker.run_once()
+        async with owner_memory_environment(core, tmp_path, history=False) as (admit, _, _):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    await admit(1, "/记住这个 " + FACT)
+                    assert await worker.run_once("seed-valid-fact")
+                    assert calls == []
+                    mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
+                    question, accepted = await admit(2, "青禾项目下一步做什么？")
+                    core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+                                       (after(core.clock(), 1), mid))
+                    assert await worker.run_once()
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        (accepted["job_id"],)) == {"state": "CANCELLED"}
+                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                                               (question.event_id,))
     run(work())
-    assert len(calls) == 1
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (accepted["job_id"],)) == {
-        "state": "CANCELLED",
-    }
-    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
-    assert not core.store.rows("SELECT * FROM outbox")
+    assert len(calls) == 2
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}] * 2
 
 
 @pytest.mark.parametrize("mode", ["enabled", "disabled", "transient"])
 def test_expression_hook_uses_actual_owner_sources_and_short_feedback_wins(
-    core, tmp_path, monkeypatch, mode,
+    core, tmp_path, mode,
 ):
     core.settings.expression_learning_enabled = mode != "disabled"
+    core.settings.expression_enabled = True
     core.settings.affect_enabled = True
-    core.clock.now = datetime.now(UTC) - timedelta(days=7)
-    feedback_days(core)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    historical = {row["event_id"] for row in core.store.rows("SELECT event_id FROM events")}
     calls = []
 
     def provider(request):
@@ -279,11 +287,19 @@ def test_expression_hook_uses_actual_owner_sources_and_short_feedback_wins(
         return response("合成回复")
 
     async def scenario():
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            source, accepted = await admit(client, config, plan, 100,
+        async with owner_memory_environment(core, tmp_path, history=False,
+            additional_purposes=("affect", "expression")) as (admit, _, reference):
+            historical = set()
+            for number in range(1, 8):
+                source, _ = await admit(number, "简短一点")
+                historical.add(source.event_id)
+                core.clock.advance(86400)
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
+            source, accepted = await admit(100,
                                            "简短一点" if mode == "transient" else "今天聊点什么")
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
                     assert await worker.run_once()
             prompt = encode(calls[-1])
             assert ("主人长期表达偏好参考" in prompt) is (mode == "enabled")
@@ -292,14 +308,15 @@ def test_expression_hook_uses_actual_owner_sources_and_short_feedback_wins(
             tracked = {row["event_id"] for row in core.store.rows(
                 "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],),
             )}
-            assert source["event_id"] in tracked
+            assert source.event_id in tracked
             assert (historical <= tracked) is (mode == "enabled")
-            assert not live_text.stopped(core.store, plan.sha256)
+            assert owner_authority.current(core.store, core.settings, core.clock
+                        ).authority.as_dict() == reference
     run(scenario())
 
 
 def test_history_is_explicit_and_current_recall_does_not_reintroduce_revision_text(
-    core, tmp_path, monkeypatch,
+    core, tmp_path,
 ):
     old, new = "项目配色为青色", "项目配色为紫色"
     calls = []
@@ -308,30 +325,33 @@ def test_history_is_explicit_and_current_recall_does_not_reintroduce_revision_te
         messages = json.loads(request.content)["messages"]
         calls.append(messages)
         assert old not in encode(messages)
-        return response('{"relevant":["m0"]}' if messages[0]["content"] == RECALL_RULES
-                        else "现在是紫色")
+        if not any(message["role"] == "tool" for message in messages):
+            return recall_request("项目配色")
+        assert new in encode(messages)
+        return response("现在是紫色")
 
     async def scenario():
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
+        async with owner_memory_environment(core, tmp_path) as (admit, recall, reference):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    await admit(client, config, plan, 1, "/记住这个 " + old)
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    await admit(1, "/记住这个 " + old)
                     assert await worker.run_once()
                     mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
-                    await admit(client, config, plan, 2, f"/纠正这一条 {mid} {new}")
+                    await admit(2, f"/纠正这一条 {mid} {new}")
                     assert await worker.run_once()
                     revised = core.store.one("SELECT memory_id FROM memories WHERE status="
                                              "'CONFIRMED'")["memory_id"]
-                    source, _ = await admit(client, config, plan, 3,
+                    source, _ = await admit(3,
                                             f"/你记得什么 历史 {revised}")
                     assert await worker.run_once()
                     reply = core.store.one(
                         "SELECT content_json FROM outbox WHERE origin_event_id=?",
-                        (source["event_id"],),
+                        (source.event_id,),
                     )["content_json"]
                     assert old in reply and new in reply and "SUPERSEDED" in reply
                     assert not calls
-                    await admit(client, config, plan, 4, "项目配色是什么？")
+                    await admit(4, "项目配色是什么？")
                     assert await worker.run_once()
                     assert len(calls) == 2
     run(scenario())
