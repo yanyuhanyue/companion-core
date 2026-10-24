@@ -5,7 +5,7 @@ import re
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from companion import qq_source, reply_revision
+from companion import qq_rich, qq_source, reply_revision
 from companion.contracts import CoreError
 from companion.file_evidence import safe_file_id, safe_filename
 from companion.store import encode
@@ -15,7 +15,7 @@ UPLOAD_DOMAIN = b"companion-core/onebot-owner-file/v1\x00"
 
 
 def manifest(body):
-    files = [item for item in (body.get("rich") or {}).get("segments", [])
+    files = [item for item in qq_rich.media_segments(body.get("rich"))
              if item.get("type") == "file" and item.get("coverage") == "UNREAD"]
     shared = [item for item in body.get("shared_content", []) if item.get("kind") == "file"]
     if not files and not shared:
@@ -27,11 +27,16 @@ def manifest(body):
             raise ValueError()
         previous_index = -1
         for slot, item in enumerate(files):
+            nested = "path" in item
+            if nested:
+                qq_rich.validate_media(item, item["index"])
             if (set(item) != {"index", "type", "actor", "coverage", "slot", "file_id",
-                              "filename", "size", "source_sha256"}
+                              "filename", "size", "source_sha256"} | (
+                                  {"path", "origin"} if nested else set())
                 or item["actor"] != "UNVERIFIED" or type(item["slot"]) is not int
                 or item["slot"] != slot or type(item["index"]) is not int
-                or not previous_index < item["index"] < 64
+                or not 0 <= item["index"] < 64
+                or (not nested and item["index"] <= previous_index)
                 or not isinstance(item["source_sha256"], str)
                 or not re.fullmatch(r"[a-f0-9]{64}", item["source_sha256"])
                 or (item["size"] is not None and (
@@ -39,7 +44,8 @@ def manifest(body):
                 raise ValueError()
             safe_file_id(item["file_id"])
             safe_filename(item["filename"])
-            previous_index = item["index"]
+            if not nested:
+                previous_index = item["index"]
     except (ValueError, KeyError, TypeError):
         raise CoreError("PRIVATE_FILE_MANIFEST_INVALID", 403) from None
     return files

@@ -268,3 +268,28 @@ accounting outcomes, and cancellations whose settled usage is unavailable. The o
 request, observed counters and reservations remain intact; duplicate receipts do not call
 Life again. Native goal/Reader checks cover UNKNOWN, uncertain cancellation and a known
 failure against the shared Goal continuation contract.
+
+
+### Captured reference media in the native owner runtime
+
+Reference images and files reuse the existing bounded OneBot traversal and its
+[get_msg/get_forward_msg APIs](https://github.com/botuniverse/onebot-11/blob/master/api/public.md).
+The inspected [DSH attachment implementation](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/attachment.ts)
+provides the download-once pattern with native tools consuming the retained bytes.
+The authenticated receive path resolves references once, records each original leaf's
+path, origin and source hash in the signed projection, and keeps transport descriptors
+private. Queue reconstruction compares those descriptors with the captured projection;
+it does not resolve references again. Quoted authors remain unverified content.
+
+Image and file purposes are checked before capture persistence. Native media workers
+reuse the original lease, upload proof and receipt recovery. Later conversation turns
+reuse that capture's original expiry and recall boundary: expired or recalled image
+bytes are removed and original-upload replay remains denied. This does not establish
+new authority or provenance merely because an embedded message ID matches another event.
+
+Synthetic checks cover authenticated WebSocket reply/forward ingress for images and
+files, real Core HTTP and independent SDK/file workers, one reference lookup and one
+original download, signed descriptor tampering, later-turn reuse, expiry, recall and
+missing media permission. External protocol/CDN/provider transport is mocked. The queue
+integration patch targets the frozen native Voice host baseline and preserves its record
+handling and owner-history verification.

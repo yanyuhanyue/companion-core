@@ -8,6 +8,64 @@ from urllib.parse import parse_qs, urlsplit
 from .spool import encode
 
 MAX_RICH_BYTES = 16384
+
+
+def media_segments(rich):
+    segments = (rich or {}).get("segments", [])
+    yield from segments
+    for item in segments:
+        yield from item.get("body", {}).get("media", [])
+
+
+def media_location(index, path, origin):
+    if not path:
+        if origin is not None:
+            raise ValueError("INVALID_MEDIA_ORIGIN")
+        return
+    if (not isinstance(path, (tuple, list)) or not 2 <= len(path) <= 8
+        or any(type(value) is not int or not 0 <= value < 64 for value in path)
+        or path[0] != index or not isinstance(origin, dict)
+        or set(origin) != {"kind", "reference", "capture_sha256"}
+        or origin["kind"] not in {"inline", "reply", "forward"}
+        or not isinstance(origin["reference"], str) or len(origin["reference"]) > 256
+        or (origin["kind"] == "inline" and origin["reference"] != "")
+        or (origin["kind"] == "reply" and not re.fullmatch(
+            r"-?(?:0|[1-9][0-9]{0,19})", origin["reference"]))
+        or (origin["kind"] == "forward" and not re.fullmatch(
+            r"[A-Za-z0-9_+/=-]{1,256}", origin["reference"]))
+        or not isinstance(origin["capture_sha256"], str)
+        or not re.fullmatch(r"[a-f0-9]{64}", origin["capture_sha256"])):
+        raise ValueError("INVALID_MEDIA_ORIGIN")
+
+
+def assign_reference_slots(event):
+    rich = event["payload"].get("rich") or {}
+    slots = {"image": 0, "file": 0}
+    for item in media_segments(rich):
+        if item["coverage"] != "UNREAD":
+            continue
+        kind = "image" if item["type"] in {"image", "face"} else item["type"]
+        if kind in slots:
+            item["slot"] = slots[kind]
+            slots[kind] += 1
+    return shared_media(event)
+
+
+def shared_media(event):
+    """Keep original top-level slots and append captured reference slots deterministically."""
+    media = list(media_segments(event["payload"].get("rich")))
+    shared = [item for item in event["payload"].get("shared_content", [])
+              if item.get("kind") not in {"image", "file"}]
+    for kind, types in (("image", {"image", "face"}), ("file", {"file"})):
+        rows = sorted((item for item in media if item["type"] in types
+                       and item["coverage"] == "UNREAD"), key=lambda item: item["slot"])
+        if [item["slot"] for item in rows] != list(range(len(rows))):
+            raise ValueError("INVALID_RICH_MEDIA_SLOTS")
+        shared.extend({"kind": kind, "slot": item["slot"]} for item in rows)
+    event["payload"]["shared_content"] = shared
+    return event
+
+
 CARD_PATHS = (
     ("title",),
     ("desc",),

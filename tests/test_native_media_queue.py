@@ -172,7 +172,9 @@ def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
     run(scenario())
 
 
-@pytest.mark.parametrize("kind", ["image", "file", "animation"])
+@pytest.mark.parametrize("kind", [
+    "image", "file", "animation", "reply_image", "forward_image", "reply_file", "forward_file",
+])
 def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, kind):
     from websockets.asyncio.server import serve
 
@@ -183,18 +185,23 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
     from tests.test_native_file_pipeline import configure
 
     async def scenario():
-        if kind == "file":
+        if kind.endswith("file"):
             configure(core)
         async with window(core, tmp_path, media=True, content=True,
                           video=kind == "animation") as (client, config, plan):
             stop, wake, uploaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
-            media_kind = "file" if kind == "file" else "image"
+            media_kind = "file" if kind.endswith("file") else "image"
             mime = "image/gif" if kind == "animation" else "image/png"
             data = pixels(mime) if media_kind == "image" else b"first\n\nsecond"
             segment = ({"type": "image", "data": {"url": "https://gchat.qpic.cn/daemon-original"}}
                 if media_kind == "image" else {"type": "file", "data": {"file_id": "daemon-file",
                     "file": "notes.txt", "file_size": len(data)}})
-            frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[segment]))
+            reference = kind.split("_", 1)[0] if "_" in kind else None
+            inbound = ({"type": reference, "data": {
+                "id": "-42" if reference == "reply" else "original-forward"}}
+                if reference else segment)
+            frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[inbound]))
+            lookups, downloads = [], []
 
             async def server(socket):
                 assert socket.request.headers["Authorization"] == "Bearer " + config.onebot_token
@@ -206,11 +213,19 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
                 return ["8.8.8.8"]
 
             async def downloaded(request):
+                downloads.append(str(request.url))
                 return httpx.Response(200, content=data, headers={
                     "content-type": mime if media_kind == "image" else "text/plain"})
 
             async def lookup(request):
-                assert kind == "file" and request.url.path == "/get_private_file_url"
+                lookups.append(request.url.path)
+                if request.url.path in {"/get_msg", "/get_forward_msg"}:
+                    value = ({"message_id": -42, "message": [segment]} if reference == "reply"
+                             else {"messages": [{"type": "node", "data": {
+                                 "name": "引用作者", "content": [segment]}}]})
+                    return httpx.Response(200, json={"status": "ok", "retcode": 0,
+                                                    "data": value})
+                assert media_kind == "file" and request.url.path == "/get_private_file_url"
                 return httpx.Response(200, json={"status": "ok", "retcode": 0,
                     "data": {"url": "https://files.example.test/daemon-file"}})
 
@@ -260,9 +275,18 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, k
                 finally:
                     spool.close()
             job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
+            assert len(downloads) == 1
+            if reference:
+                action = "/get_msg" if reference == "reply" else "/get_forward_msg"
+                assert lookups.count(action) == 1
+                body = json.loads(core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                                                 (job["event_id"],))["body_json"])
+                nested = body["rich"]["segments"][0]["body"]["media"][0]
+                assert nested["origin"]["kind"] == reference
+                assert nested["path"] == ([0, 0] if reference == "reply" else [0, 0, 0])
             config_path, output = tmp_path / "queue-worker.pickle", tmp_path / "queue-wire.json"
             arguments = ((core.settings, core.clock.now, job["job_id"],
-                [answer("原图已经收到。")], "SUCCEEDED", str(output)) if kind == "image" else
+                [answer("原图已经收到。")], "SUCCEEDED", str(output)) if media_kind == "image" else
                 (core.settings, core.clock.now, job["job_id"], data, str(output)))
             if kind == "animation":
                 from tests.test_native_video import responses

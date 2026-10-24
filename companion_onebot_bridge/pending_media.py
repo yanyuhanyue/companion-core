@@ -60,20 +60,28 @@ def prepare(window):
 
 def queue_owner(runtime, event, media, capture, raw):
     """Persist private originals in the existing queue, inside CAPTURED's transaction."""
+    from .reference_reader import captured_media
+    from .rich_input import media_segments
+
     images = [OriginalImage(**value) for value in media.get("images", [])]
     files = [OriginalFile(**value) for value in media.get("files", [])]
     records = [OriginalRecord(**value) for value in media.get("records", [])]
-    if set(media) - {"images", "files", "records"}:
+    if set(media) - {"images", "files", "records", "references"}:
         raise ValueError("AUTOMATIC_MEDIA_CHANGED")
     if not images and not files and not records:
         return
-    projected = event["payload"].get("rich", {}).get("segments", [])
+    projected = list(media_segments(event["payload"].get("rich")))
+    expected_images, expected_files = captured_media(event, raw["message"],
+                                                     media.get("references", ()))
     originals = [*images, *files]
+
+    def location(item):
+        return item["index"], item.get("path", [])
     if (not 1 <= len(originals) + len(records) <= 64
-        or images != original_images(raw["message"])
-        or files != original_files(raw["message"])
-        or sorted((item.projection() for item in originals), key=lambda item: item["index"])
-        != [item for item in projected if item.get("type") in {"image", "file", "face"}]
+        or images != expected_images or files != expected_files
+        or sorted((item.projection() for item in originals), key=location)
+        != sorted((item for item in projected if item.get("type") in {"image", "file", "face"}
+                   and item.get("coverage") == "UNREAD"), key=location)
         or any(image.slot != slot or image.url != source_url(image)
                for slot, image in enumerate(images))
         or any(file.slot != slot for slot, file in enumerate(files))

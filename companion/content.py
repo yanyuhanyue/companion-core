@@ -23,6 +23,7 @@ from companion import (
     owner_input,
     qq_files,
     qq_images,
+    qq_rich,
     video_input,
 )
 from companion.contracts import CoreError
@@ -263,7 +264,7 @@ class ContentService:
         links = (shared_links(body.get("text", ""), allowed_web)
                  if not bounded or owner_links else [])
         if not bounded or link_scope:
-            for segment in (body.get("rich") or {}).get("segments", []):
+            for segment in qq_rich.media_segments(body.get("rich")):
                 if segment.get("type") != "json":
                     continue
                 for field in segment.get("fields", []):

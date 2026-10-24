@@ -39,6 +39,14 @@ class OriginalImage:
     source_sha256: str
     url: str
     face_id: str | None = None
+    path: tuple[int, ...] = ()
+    origin: dict | None = None
+
+    def __post_init__(self):
+        from .rich_input import media_location
+
+        media_location(self.index, self.path, self.origin)
+        object.__setattr__(self, "path", tuple(self.path))
 
     def projection(self):
         value = {
@@ -51,6 +59,8 @@ class OriginalImage:
         }
         if self.face_id is not None:
             value.update(type="face", face_id=self.face_id)
+        if self.path:
+            value.update(path=list(self.path), origin=self.origin)
         return value
 
 

@@ -21,7 +21,7 @@ from . import cumulative
 from .event_normalizer import decode, identifier, normalize, redact
 from .network import checked_http_client, private_request_matches, websocket
 from .onebot_client import OneBotClient
-from .reference_reader import enrich, restore
+from .reference_reader import captured_media, enrich, restore
 from .rich_input import MAX_RICH_BYTES, input_digest
 from .spool import encode
 from .window import SHA, check_protocol_request, digest, private_json, seal_protocol_content
@@ -151,8 +151,13 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
     event = normalize(frame, config, now=received_at.timestamp(),
                       image_scope="owner_image_v1" if images else "none",
                       file_scope="owner_file_v1" if files else "none")
+    references = []
     await enrich(event, raw["message"], _OwnerReferences(runtime, core_client, onebot),
-                 lambda text: redact(text, config))
+                 lambda text: redact(text, config), image_scope=rich, file_scope=rich,
+                 originals=references)
+    images, files = captured_media(event, raw["message"], references)
+    purposes = [kind for kind, items in (("image", images), ("file", files),
+                                        ("voice", records)) if items]
     # Reference reads yield to external I/O. Recheck every selected purpose before
     # handing the projection to the original runtime's persistence boundary.
     for purpose in ("chat", *purposes):
@@ -162,7 +167,8 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
     return {"event": event, "frame_sha256": hashlib.sha256(original).hexdigest(),
             "media": {"images": [asdict(image) for image in images],
                       "files": [asdict(file) for file in files],
-                      **({"records": [asdict(record) for record in records]} if records else {})}}
+                      **({"records": [asdict(record) for record in records]} if records else {}),
+                      **({"references": references} if references else {})}}
 
 
 def diagnostic_fields(error):

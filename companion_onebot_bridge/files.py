@@ -48,10 +48,16 @@ class OriginalFile:
     filename: str
     size: int | None
     file_hash: str = ""
+    path: tuple[int, ...] = ()
+    origin: dict | None = None
 
     def __post_init__(self):
+        from .rich_input import media_location
+
+        media_location(self.index, self.path, self.origin)
+        object.__setattr__(self, "path", tuple(self.path))
         if (type(self.index) is not int or not 0 <= self.index < 64
-            or type(self.slot) is not int or not 0 <= self.slot <= self.index
+            or type(self.slot) is not int or not 0 <= self.slot < 64
             or not isinstance(self.source_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None
             or not _opaque(self.file_id, 512)
@@ -63,10 +69,13 @@ class OriginalFile:
             raise ValueError("INVALID_FILE_SEGMENT")
 
     def projection(self):
-        return {"index": self.index, "type": "file", "actor": "UNVERIFIED",
+        value = {"index": self.index, "type": "file", "actor": "UNVERIFIED",
                 "coverage": "UNREAD", "slot": self.slot, "file_id": self.file_id,
                 "filename": self.filename, "size": self.size,
                 "source_sha256": self.source_sha256}
+        if self.path:
+            value.update(path=list(self.path), origin=self.origin)
+        return value
 
 
 @dataclass(frozen=True, repr=False)

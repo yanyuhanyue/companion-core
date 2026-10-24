@@ -7,7 +7,7 @@ import re
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from companion import image_spool, paid_budget, qq_source
+from companion import image_spool, paid_budget, qq_rich, qq_source
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.store import encode
@@ -51,7 +51,7 @@ def manifest(body):
     shared = [item for item in body.get("shared_content", []) if item.get("kind") != "file"]
     images = [
         item
-        for item in (body.get("rich") or {}).get("segments", [])
+        for item in qq_rich.media_segments(body.get("rich"))
         if item.get("type") in {"image", "face"} and item.get("coverage") == "UNREAD"
     ]
     if not images:
