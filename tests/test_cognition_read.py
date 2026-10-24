@@ -50,6 +50,41 @@ def test_wake_native_choice_and_cursor(core):
         read.page("wake", before="absent")
 
 
+def test_all_same_source_goals_remain_reachable(core):
+    from companion.goals import GoalProposal, GoalScope
+
+    first = setup_goal(core)
+    core.goals.cancel(first)
+    ids = [first]
+    for index in range(24):
+        goal = core.goals.propose(GoalProposal(
+            topic=f"synthetic topic {index}", source_event_ids=["evt_test_1"],
+            scope=GoalScope(operation="read_content", url="https://example.org/article"),
+        ))
+        core.goals.cancel(goal)
+        ids.append(goal)
+    seen, before = [], None
+    while True:
+        page = CognitionRead(core).page("goal", limit=7, before=before)
+        seen.extend(row["id"] for row in page["items"])
+        before = page["next_cursor"]
+        if before is None:
+            break
+    assert set(seen) == set(ids)
+    assert len(seen) == len(ids)
+
+
+def test_timer_wake_rechecks_selected_goal_sources(core):
+    goal = setup_goal(core)
+    assert core.wake.evaluate()[0]["goal_id"] == goal
+    view = CognitionRead(core)
+    row = view.page("wake")["items"][0]
+    assert row["source_event_ids"] == ["evt_test_1"]
+    assert row["reason_code"] == "GOAL_DUE"
+    core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
+    assert view.page("wake")["items"] == []
+
+
 def test_privacy_change_during_read_fails_closed(core, monkeypatch):
     setup_goal(core)
     view = CognitionRead(core)
@@ -72,6 +107,70 @@ def test_measurement_is_saved_numeric_metadata_only():
                                    "reservation_margin": 3, "output_allowance": 20}))
     assert value == {"state": "RECORDED", "count_kind": "estimate", "input_tokens": 37,
                      "reservation_margin": 3, "output_allowance": 20}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_missing_record_is_explicit(core, kind):
+    assert CognitionRead(core).page(kind, record_id="absent")["record_status"] == "NOT_RECORDED"
+
+
+def test_native_goal_wait_and_cancel(core):
+    goal = setup_goal(core)
+    core.goals.accept(goal)
+    step = core.goals.claim()
+    assert step
+    assert core.goals.fail(step, "RESOURCE_UNAVAILABLE", resource=True)
+    view = CognitionRead(core)
+    item = view.page("goal", record_id=goal)["items"][0]
+    assert item["state"] == item["step"]["state"] == "WAITING_RESOURCE"
+    core.goals.cancel(goal)
+    item = view.page("goal", record_id=goal)["items"][0]
+    assert item["state"] == item["step"]["state"] == "CANCELLED"
+
+
+@pytest.mark.parametrize("response_usage", [True, False])
+def test_native_model_measurement_and_unknown(core, tmp_path, response_usage):
+    import httpx
+
+    from companion import budget, paid_budget
+    from companion.model import ModelClient
+    from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
+    from tests.conftest import run
+    from tests.test_owner_authority import activate
+    from tests.test_token_measurement import MESSAGES, configure
+
+    configure(core, tmp_path)
+    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    activate(core, OwnerGrantPolicy(
+        owner_qq_id=core.settings.owner_qq_id, purposes=["diary"], authorization_sha256="d" * 64,
+        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
+    ))
+    request = budget.reserve(core.store, core.settings, None, "diary", MESSAGES, core.clock())
+    payload = {"choices": [{"message": {"content": "synthetic result"}}]}
+    if response_usage:
+        payload["usage"] = {"prompt_tokens": 20, "completion_tokens": 2}
+
+    async def execute():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda _: httpx.Response(200, json=payload),
+        )) as client:
+            try:
+                await budget.complete(ModelClient(core.settings, client), core.store,
+                                      core.settings, request, MESSAGES, "diary", core.clock)
+            except CoreError:
+                if response_usage:
+                    raise
+
+    run(execute())
+    item = CognitionRead(core).page("model", record_id=request)["items"][0]
+    saved = core.store.one("SELECT measurement_json FROM model_admissions WHERE request_id=?",
+                           (request,))
+    assert item["measurement"] == measurement(saved["measurement_json"])
+    assert item["measurement"]["count_kind"] == "estimate"
+    assert item["state"] == ("SETTLED" if response_usage else "UNKNOWN")
+    assert "synthetic result" not in json.dumps(item)
+    if response_usage:
+        assert item["usage"]["input_tokens"] == 20
 
 
 def test_explicit_route_contract(core):

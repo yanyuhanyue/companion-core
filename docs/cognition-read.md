@@ -8,7 +8,8 @@ authenticated owner from inspecting metadata. Responses use `Cache-Control: no-s
 Request: `{"kind":"goal","limit":30,"before":null}`. Supported kinds are wake,
 life, goal, diary, reflection, nightly and model. Limits are 1–50. Pagination uses
 the native primary-key cursor with SQLite append order, not lexical UUID order.
-A missing cursor returns `COGNITION_CURSOR_UNAVAILABLE`; it does not silently
+Optional `record_id` selects an exact native record; a missing or unavailable record
+is `NOT_RECORDED`. It cannot be combined with `before`. A missing cursor returns `COGNITION_CURSOR_UNAVAILABLE`; it does not silently
 restart. Pages bound scanned records, so privacy filtering can produce an empty
 page with a continuation. `truncated` means more native rows exist.
 
@@ -16,8 +17,8 @@ The projection reads existing records and never creates a history ledger, runs a
 model, or recalculates a historical measurement. Source checks reuse
 `MemorySources` and `MemoryProjections`; custody and privacy versions are checked
 before and after reads. Invalid, expired or erased source chains are suppressed.
-Goal execution metadata reuses the existing source-backed completion and delivery
-projection. Native UNKNOWN and execution uncertainty remain visible.
+Goal execution metadata reuses the existing source-backed completion and execution-receipt
+checks. Native UNKNOWN and execution uncertainty remain visible.
 
 Free-form reasons, prompt bodies, topics, diary text, reflection suggestions,
 credentials, model endpoints and raw reasoning are excluded. Reason codes and
@@ -55,12 +56,19 @@ must test the registered `create_app` with its real control token, STOP state an
 an independent worker using mocked provider transport. No live acceptance was run.
 
 This is the initial native-record projection. Historical candidate alternatives
-are `NOT_RECORDED`; Life's free-form reason is `NOT_EXPOSED`. N1/N2/N3 and REM
-semantics require the final Life/Nightly schema rather than inventing mappings
-from the older coordinator's memory/diary/reflection/goals step names. Model usage
+are `NOT_RECORDED`; Life's free-form reason is `NOT_EXPOSED`. N1/N2/N3 are read directly from the stable `steps_json` fields inspected at
+`7b8def23`; missing fields remain `NOT_RECORDED`. REM waits for the final Life
+interface. Life exposes the native topic/revision candidate reference, destination
+and job state. It does not reconstruct unrecorded alternative candidates. Model usage
 is separately paginated; a full cross-kind execution graph and UI remain pending.
 
 Verification: `scripts/check.ps1 -TestFiles tests/test_cognition_read.py` passed
-12 cases, covering empty kinds without execution, native wake decisions and
+24 cases, covering empty kinds without execution, native wake decisions and
 pagination, native goal provenance with an independent Core instance, erasure,
-privacy races, measurement filtering and the explicit module HTTP contract.
+privacy races, measurement filtering, native paid reservation/settlement with MockTransport, UNKNOWN usage,
+waiting/cancelled goal steps, missing-record NOT_RECORDED and the explicit module HTTP contract.
+
+Goal pages project the selected native goal directly, reusing execution and result
+validators without querying a second truncated same-source goal list. Regression
+coverage includes 25 same-source historical goals and timer-triggered wake records
+whose selected goal source is subsequently erased.

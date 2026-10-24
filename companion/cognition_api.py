@@ -13,6 +13,7 @@ class CognitionSelection(StrictModel):
     kind: Literal["wake", "life", "goal", "diary", "reflection", "nightly", "model"]
     limit: int = Field(default=30, ge=1, le=50, strict=True)
     before: str | None = Field(default=None, min_length=1, max_length=160)
+    record_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 def register_cognition_routes(app, control_auth):

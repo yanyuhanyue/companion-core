@@ -4,7 +4,7 @@ import json
 
 from companion.contracts import CoreError
 from companion.memory_context import MemorySources, check_version, read_version
-from companion.memory_projections import MemoryProjections
+from companion.memory_projections import ACTIVE, MemoryProjections
 
 KINDS = {
     "wake": ("wake_decisions", "decision_id"),
@@ -53,7 +53,7 @@ class CognitionRead:
         self.core, self.store = core, core.store
         self.projections = MemoryProjections(core.memory)
 
-    def page(self, kind, *, limit=30, before=None):
+    def page(self, kind, *, limit=30, before=None, record_id=None):
         if kind not in KINDS or type(limit) is not int or not 1 <= limit <= 50:
             raise CoreError("INVALID_COGNITION_SELECTION", 400)
         # HTTP owner authentication is mandatory at registration; runtime feature
@@ -62,6 +62,8 @@ class CognitionRead:
         now = self.core.clock()
         sources = MemorySources(self.core.memory, now)
         table, key = KINDS[kind]
+        if record_id is not None and before is not None:
+            raise CoreError("INVALID_COGNITION_SELECTION", 400)
         cursor = None
         if before is not None:
             cursor = self.store.one(f"SELECT rowid AS position FROM {table} WHERE {key}=?",
@@ -70,8 +72,10 @@ class CognitionRead:
                 raise CoreError("COGNITION_CURSOR_UNAVAILABLE", 409)
         rows = self.store.rows(
             f"SELECT rowid AS position,* FROM {table} WHERE (? IS NULL OR rowid<?) "
+            f"AND (? IS NULL OR {key}=?) "
             "ORDER BY rowid DESC LIMIT ?",
-            (cursor and cursor["position"], cursor and cursor["position"], limit + 1),
+            (cursor and cursor["position"], cursor and cursor["position"],
+             record_id, record_id, limit + 1),
         )
         items = []
         for row in rows[:limit]:
@@ -82,11 +86,22 @@ class CognitionRead:
         return {"kind": kind, "items": items, "as_of": now, "privacy_epoch": version[0],
                 "next_cursor": rows[limit - 1][key] if len(rows) > limit else None,
                 "truncated": len(rows) > limit, "reasoning": "NOT_EXPOSED",
-                "candidate_set": "NOT_RECORDED"}
+                "candidate_set": "NOT_RECORDED",
+                "record_status": "RECORDED" if items else "NOT_RECORDED"}
 
     def _roots(self, kind, row):
         if kind == "wake":
-            return [row["trigger_event_id"]] if row["trigger_event_id"] else []
+            roots = [row["trigger_event_id"]] if row["trigger_event_id"] else []
+            if row["goal_id"]:
+                goal = self.store.one("SELECT * FROM goals WHERE goal_id=? AND redacted=0",
+                                      (row["goal_id"],))
+                if goal is None:
+                    return [None]
+                evidence = self._roots("goal", goal)
+                if not evidence:
+                    return [None]
+                roots.extend(evidence)
+            return list(dict.fromkeys(roots))
         if kind == "life":
             query, identifier = "life_topic_sources WHERE topic_id=?", row["topic_id"]
         elif kind == "goal":
@@ -109,7 +124,7 @@ class CognitionRead:
     def _record(self, kind, row, sources, current_epoch):
         roots = self._roots(kind, row)
         if (row.get("redacted") or len(roots) > 100 or any(
-            not self.projections._goal_source(key, sources) for key in roots
+            not key or not self.projections._goal_source(key, sources) for key in roots
         )):
             return None
         captured = row.get("captured_privacy_epoch")
@@ -131,19 +146,37 @@ class CognitionRead:
             item.update(topic_id=row["topic_id"], choice=symbol(row["action"], {
                 "SKIP", "CONTINUE", "EXPLORE", "FOLLOW_UP", "SHARE", "DEFER"}),
                 reason_code="NOT_EXPOSED")
+            item["destination"] = symbol(row["destination"], {
+                "NONE", "PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "QZONE_DRAFT"})
+            item["candidate_reference"] = {"topic_id": row["topic_id"],
+                                           "topic_revision": row["topic_revision"]}
+            job = self.store.one("SELECT job_id,state FROM jobs WHERE job_id=?", (row["job_id"],))
+            item["job"] = ({"job_id": job["job_id"], "state": symbol(job["state"], STATES)}
+                           if job else {"state": "NOT_RECORDED"})
         elif kind == "goal":
-            goals, _ = self.projections._goals(roots, sources, None)
-            match = next((g for g in goals if g["goal_id"] == row["goal_id"]), None)
-            if match is None:
-                return None
-            item["execution"] = match
-            step = self.store.one("SELECT step_id,state,attempts,max_attempts FROM goal_steps "
+            step = self.store.one("SELECT * FROM goal_steps "
                                   "WHERE goal_id=?", (row["goal_id"],))
-            item["step"] = step
+            executions, truncated = self.projections._executions(row, step, sources, None)
+            state = "discussed"
+            if row["state"] in ACTIVE:
+                state = "running" if row["state"] == "RUNNING" else "planned"
+            elif row["state"] in {"FAILED", "CANCELLED"}:
+                state = "failed" if row["state"] == "FAILED" else "closed"
+            elif row["state"] == "DONE":
+                state = "done" if self.projections._completed(
+                    row, step, roots, sources, None) else "UNKNOWN"
+            if step and step["state"] == "EXECUTION_UNCERTAIN" or any(
+                e["state"] == "UNKNOWN" or e["attempt_state"] == "UNKNOWN" for e in executions
+            ):
+                state = "UNKNOWN"
+            item["execution"] = {"state": state, "receipts": executions,
+                                 "truncated": truncated}
+            item["step"] = {key: step[key] for key in (
+                "step_id", "state", "attempts", "max_attempts")} if step else None
         elif kind == "nightly":
             steps = object_value(row["steps_json"])
-            item["steps"] = {name: symbol(steps.get(name), STATES)
-                             for name in ("memory", "diary", "reflection", "goals")}
+            item["steps"] = {name: symbol(steps.get(name), STATES) for name in (
+                "n1", "n2", "n3", "memory", "diary", "reflection", "goals")}
         elif kind == "model":
             item["usage"] = {key: row[key] for key in (
                 "input_tokens", "cached_input_tokens", "output_tokens", "billed_micro_usd",
