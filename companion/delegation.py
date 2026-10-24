@@ -21,14 +21,60 @@ from companion.store import encode, uid
 
 # Capability -> field -> (kind, config attribute). "floor" fields may only be lowered from the
 # configured value, "ceiling" fields may only be raised (a longer interval means fewer runs).
+PAUSE = ("pause", None)
+
+
+def _floor(attribute):
+    return ("floor", attribute)
+
+
+def _ceiling(attribute):
+    return ("ceiling", attribute)
+
+
 DELEGABLE = {
-    "diary": {"pause": ("pause", None)},
-    "wake": {
-        "pause": ("pause", None),
-        "wake_max_daily_runs": ("floor", "wake_max_daily_runs"),
-        "wake_min_interval_minutes": ("ceiling", "wake_min_interval_minutes"),
-    },
+    "memory.recall": {"pause": PAUSE, "memory_daily_micro_usd": _floor("memory_daily_micro_usd"),
+                      "extraction_min_events": _ceiling("extraction_min_events"),
+                      "extraction_idle_seconds": _ceiling("extraction_idle_seconds")},
+    "diary": {"pause": PAUSE, "diary_daily_micro_usd": _floor("diary_daily_micro_usd")},
+    "consolidation": {"pause": PAUSE},
+    "reflection": {"pause": PAUSE,
+                   "reflection_daily_max_suggestions": _floor("reflection_daily_max_suggestions"),
+                   "reflection_max_daily_calls": _floor("reflection_max_daily_calls"),
+                   "reflection_daily_micro_usd": _floor("reflection_daily_micro_usd")},
+    "goals": {"pause": PAUSE, "goals_max_active": _floor("goals_max_active")},
+    "affect": {"pause": PAUSE},
+    "proactive": {"pause": PAUSE, "proactive_daily_limit": _floor("proactive_daily_limit"),
+                  "proactive_interval_seconds": _ceiling("proactive_interval_seconds"),
+                  "proactive_idle_seconds": _ceiling("proactive_idle_seconds")},
+    "wake": {"pause": PAUSE, "wake_max_daily_runs": _floor("wake_max_daily_runs"),
+             "wake_min_interval_minutes": _ceiling("wake_min_interval_minutes"),
+             "autonomous_daily_micro_usd": _floor("autonomous_daily_micro_usd")},
+    "exploration": {"pause": PAUSE,
+                    "exploration_daily_candidate_limit":
+                        _floor("exploration_daily_candidate_limit"),
+                    "exploration_daily_deep_reads": _floor("exploration_daily_deep_reads"),
+                    "exploration_daily_requests": _floor("exploration_daily_requests")},
+    "expression": {"pause": PAUSE,
+                   "expression_cooldown_minutes": _ceiling("expression_cooldown_minutes"),
+                   "expression_selection_probability": _floor("expression_selection_probability")},
+    "expression_learning": {"pause": PAUSE},
+    "memes.semantic": {"pause": PAUSE,
+                       "meme_caption_daily_micro_usd": _floor("meme_caption_daily_micro_usd")},
+    "reading.web": {"pause": PAUSE}, "reading.bilibili": {"pause": PAUSE},
+    "bilibili.video": {"pause": PAUSE}, "qq.images": {"pause": PAUSE},
+    "qq.poke": {"pause": PAUSE}, "qq.voice.tts": {"pause": PAUSE},
 }
+# Capabilities whose runtime already reads the adjustments. The others accept delegation and
+# adjustments through the same interface; their consumers are integrated separately.
+WIRED = {"diary": {"pause"}, "wake": {"pause", "wake_max_daily_runs", "wake_min_interval_minutes"}}
+ENABLED = {"diary": "diary_enabled", "wake": "wake_enabled", "proactive": "proactive_enabled",
+           "consolidation": "consolidation_enabled", "reflection": "reflection_enabled",
+           "goals": "goals_enabled", "affect": "affect_enabled",
+           "exploration": "exploration_enabled",
+           "expression": "expression_enabled", "expression_learning": "expression_learning_enabled",
+           "memes.semantic": "meme_semantics_enabled", "reading.web": "web_reading_enabled",
+           "memory.recall": "memory_enabled"}
 MODES = ("owner", "propose", "self")
 CURRENT = ("PROPOSED", "ACTIVE")
 DAILY_COMPANION_CHANGES = 3
@@ -56,9 +102,22 @@ def _bounds(settings, capability, field, ranges):
     configured = getattr(settings, attribute)
     if kind == "floor":
         low = ranges.get(field, {}).get("min")
-        return (configured if low is None else max(0, min(int(low), configured)), configured)
+        return (configured if low is None else max(0, min(low, configured)), configured)
     high = ranges.get(field, {}).get("max")
-    return (configured, configured if high is None else max(configured, min(int(high), 1440)))
+    return (configured, configured if high is None
+            else max(configured, min(high, _ceiling_limit(attribute, configured))))
+
+
+def _ceiling_limit(attribute, configured):
+    if attribute.endswith("_minutes"):
+        return 1440
+    if attribute.endswith("_seconds"):
+        return 7 * 86400
+    return max(configured * 10, 10)
+
+
+def _number(value, configured):
+    return type(value) is int or (isinstance(configured, float) and type(value) is float)
 
 
 def validate_ranges(settings, capability, ranges):
@@ -71,11 +130,12 @@ def validate_ranges(settings, capability, ranges):
             raise CoreError("DELEGATION_RANGES_INVALID", 400)
         key = "min" if kind == "floor" else "max"
         value = bound.get(key)
-        if set(bound) != {key} or type(value) is not int:
+        attribute = DELEGABLE[capability][field][1]
+        configured = getattr(settings, attribute)
+        if set(bound) != {key} or not _number(value, configured):
             raise CoreError("DELEGATION_RANGES_INVALID", 400)
-        configured = getattr(settings, DELEGABLE[capability][field][1])
         if (kind == "floor" and not 0 <= value <= configured) or (
-            kind == "ceiling" and not configured <= value <= 1440
+            kind == "ceiling" and not configured <= value <= _ceiling_limit(attribute, configured)
         ):
             raise CoreError("DELEGATION_RANGE_OUTSIDE_CONFIGURATION", 400)
         clean[field] = {key: value}
@@ -135,11 +195,13 @@ def _check(store, settings, capability, field, value, now):
     if field == "pause":
         if not current["allow_pause"] or value is not True:
             raise CoreError("DELEGATION_FIELD_NOT_ALLOWED", 403)
-        enabled = settings.diary_enabled if capability == "diary" else settings.wake_enabled
-        if not enabled:
+        attribute = ENABLED.get(capability)
+        if attribute and not getattr(settings, attribute):
             raise CoreError("DELEGATION_CAPABILITY_DISABLED", 409)
         return current
-    if field not in current["ranges"] or type(value) is not int:
+    if field not in current["ranges"] or not _number(
+        value, getattr(settings, DELEGABLE[capability][field][1])
+    ):
         raise CoreError("DELEGATION_FIELD_NOT_ALLOWED", 403)
     low, high = _bounds(settings, capability, field, current["ranges"])
     if not low <= value <= high:
@@ -281,7 +343,7 @@ def erase_suggestions(store, suggestion_ids, now):
 def prompt_scope(store, settings, now):
     """What the companion may adjust today, for the reflection prompt; empty when nothing."""
     scope = []
-    for capability, fields in DELEGABLE.items():
+    for capability, fields in WIRED.items():
         current = delegation(store, capability)
         if current["mode"] == "owner":
             continue
@@ -314,6 +376,7 @@ def view(store, settings, now):
             limits[field] = {"kind": kind, "configured": getattr(settings, attribute),
                              "effective": effective(store, settings, capability, field, now)}
         capabilities.append({**current, "fields": list(fields), "limits": limits,
+                             "wired": sorted(WIRED.get(capability, ())),
                              "paused": paused(store, capability, now)})
     return {"capabilities": capabilities, "adjustments": [
         {**row, "value": json.loads(row.pop("value_json"))} for row in rows]}

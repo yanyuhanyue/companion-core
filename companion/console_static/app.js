@@ -1431,8 +1431,9 @@ function capDetail(c) {
         : el("small", {}, "这项能力没有单独的额度")),
       el("div", {}, el("span", {}, "运行状态"), el("b", {}, statusOf(c.state)[0]), rt ? btn(paused ? "恢复" : "暂停", () => runtimeToggle(rt, paused), { cls: "sm", symbol: paused ? "refresh" : "pause" }) : null,
         el("small", {}, rt ? "立即生效，不需要重启" : "没有单独的暂停")),
-      el("div", {}, el("span", {}, "由谁使用"), el("b", {}, (c.invocation || []).map(x => ({ automatic: "她自动使用", owner_command: "你的指令", tool: "工具调用", owner: "你发起" })[x] || "其他方式").join("、") || "未记录"),
-        el("small", {}, c.runtime_observation && c.runtime_observation !== "UNOBSERVED" ? "运行观测：" + statusOf(c.runtime_observation)[0] : "还没有运行观测"))),
+      el("div", {}, el("span", {}, "由谁决定"), el("b", {}, (() => { const d = (state.data?.autonomy?.capabilities || []).find(x => x.capability === c.id);
+          return d ? (AUTO_MODES.find(m => m[0] === d.mode) || AUTO_MODES[0])[1] : "只由我控制"; })()),
+        el("small", {}, "调用方式：" + ((c.invocation || []).map(x => ({ automatic: "她自动使用", owner_command: "你的指令", tool: "工具调用", owner: "你发起" })[x] || "其他方式").join("、") || "未记录")))),
     ["proactive", "diary", "consolidation"].includes(c.id) ? el("section", { class: "cd-sec" }, el("h3", {}, "作息时间"), scheduleStrip()) : null,
     autonomySection(c.id),
     el("section", { class: "cd-sec" }, el("h3", {}, "参数", el("span", {}, fields.length ? "保存为新版本后生效" : "")),
@@ -1444,38 +1445,49 @@ const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任
 const AUTO_FIELDS = { pause: "暂停到第二天 08:00", wake_max_daily_runs: "每天最多运行", wake_min_interval_minutes: "两次之间至少间隔" };
 const ADJ_STATE = { PROPOSED: ["待你批准", "warn"], ACTIVE: ["生效中", "ok"], REJECTED: ["已拒绝", "off"], REVERTED: ["已撤销", "off"], EXPIRED: ["已结束", "off"],
   SUPERSEDED: ["已被新的调整替代", "off"], DISCARDED: ["恢复备份后作废", "off"] };
+const AUTO_LOCKED = "这项能力会改动对外可见的内容、私人文件或费用账本，只能由你控制。";
+function autoLabel(field) { return field === "pause" ? "暂停到第二天 08:00" : (fieldOf(field)?.label || AUTO_FIELDS[field] || subLabel(field)); }
+function autoValue(field, v) { if (field === "pause") return "暂停"; const u = unitFor(field, Number.isInteger(v) ? "integer" : "number"); return (u.pre || "") + (+(v / u.scale).toFixed(u.money ? 4 : 2)) + (u.unit ? " " + u.unit : ""); }
 function autonomySection(id) {
-  const a = state.data?.autonomy; if (!a) return null;
-  const cap = (a.capabilities || []).find(x => x.capability === id); if (!cap) return null;
-  const draft = state.autoDraft?.[id] || { mode: cap.mode, allow_pause: cap.allow_pause, ranges: JSON.parse(JSON.stringify(cap.ranges || {})) };
+  const a = state.data?.autonomy;
+  if (!a) return el("section", { class: "cd-sec" }, el("h3", {}, "交给她决定"), el("p", { class: "note" }, "授权接口暂时不可用，刷新后再试。"));
+  const cap = (a.capabilities || []).find(x => x.capability === id);
+  if (!cap) return el("section", { class: "cd-sec" }, el("h3", {}, "交给她决定"), el("p", { class: "lockline" }, icon("lock"), el("span", {}, AUTO_LOCKED)));
+  const base = { mode: cap.mode, allow_pause: cap.allow_pause, ranges: cap.ranges || {} };
+  const draft = state.autoDraft?.[id] || JSON.parse(JSON.stringify(base));
   const set = patch => { state.autoDraft = { ...(state.autoDraft || {}), [id]: { ...draft, ...patch } }; rerender(); };
-  const changed = !!state.autoDraft?.[id] && JSON.stringify(state.autoDraft[id]) !== JSON.stringify({ mode: cap.mode, allow_pause: cap.allow_pause, ranges: cap.ranges || {} });
+  const changed = !!state.autoDraft?.[id] && JSON.stringify(state.autoDraft[id]) !== JSON.stringify(base);
   const rangeRow = field => {
     const lim = cap.limits?.[field]; if (!lim) return null;
     const floor = lim.kind === "floor", key = floor ? "min" : "max", on = !!draft.ranges[field];
-    const unit = field === "wake_min_interval_minutes" ? "分钟" : "次";
+    const type = Number.isInteger(lim.configured) ? "integer" : "number", u = unitFor(field, type);
+    const show = v => +(v / u.scale).toFixed(u.money ? 4 : 2);
+    const dflt = floor ? (type === "integer" ? Math.floor(lim.configured / 2) : lim.configured / 2) : lim.configured * 2;
     return el("li", { class: on ? "on" : "" }, el("label", { class: "ck" }, el("input", { type: "checkbox", checked: on, onchange: e => {
-        const ranges = { ...draft.ranges }; if (e.target.checked) ranges[field] = { [key]: floor ? Math.max(0, lim.configured - 1) : Math.min(1440, lim.configured * 2) }; else delete ranges[field]; set({ ranges }); } }),
-        el("span", {}, AUTO_FIELDS[field])),
-      on ? el("span", { class: "rng" }, floor ? "最少" : "最多", el("input", { class: "input", inputmode: "numeric", value: String(draft.ranges[field][key]), "aria-label": AUTO_FIELDS[field],
-        onchange: e => { const n = Number(e.target.value); if (!Number.isInteger(n)) return; set({ ranges: { ...draft.ranges, [field]: { [key]: n } } }); } }), el("em", {}, unit),
-        el("span", { class: "muted" }, floor ? `到你的设置 ${lim.configured} ${unit}` : `从你的设置 ${lim.configured} ${unit} 起`))
-        : el("span", { class: "muted" }, `你的设置 ${lim.configured} ${unit}`));
+        const ranges = { ...draft.ranges }; if (e.target.checked) ranges[field] = { [key]: dflt }; else delete ranges[field]; set({ ranges }); } }),
+        el("span", {}, autoLabel(field))),
+      on ? el("span", { class: "rng" }, floor ? "最低" : "最高", u.pre ? el("i", {}, u.pre) : null,
+        el("input", { class: "input", inputmode: "decimal", value: String(show(draft.ranges[field][key])), "aria-label": autoLabel(field),
+          onchange: e => { const n = Number(e.target.value) * u.scale; if (!Number.isFinite(n)) return; set({ ranges: { ...draft.ranges, [field]: { [key]: type === "integer" ? Math.round(n) : n } } }); } }),
+        u.unit ? el("em", {}, u.unit) : null, el("span", { class: "muted" }, (floor ? "到你的设置 " : "从你的设置 ") + autoValue(field, lim.configured) + (floor ? "" : " 起")))
+        : el("span", { class: "muted" }, "你的设置 " + autoValue(field, lim.configured)));
   };
+  const wired = new Set(cap.wired || []), notWired = cap.fields.filter(f => !wired.has(f));
   const adjustments = (a.adjustments || []).filter(x => x.capability === id).slice(0, 8);
-  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "立即生效，不需要重启")),
+  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "保存后立即生效，不需要重启")),
     el("div", { class: "mode-pick", role: "radiogroup", "aria-label": "由谁决定" }, AUTO_MODES.map(([m, n, d]) =>
       el("button", { type: "button", role: "radio", "aria-checked": String(draft.mode === m), onclick: () => set({ mode: m }) }, el("b", {}, n), el("span", {}, d)))),
     draft.mode !== "owner" ? [
-      el("label", { class: "ck big" }, el("input", { type: "checkbox", checked: draft.allow_pause, onchange: e => set({ allow_pause: e.target.checked }) }),
-        el("span", {}, el("b", {}, "允许她暂停这项能力"), el("small", {}, "最长到第二天 08:00，到时自动恢复。她不能恢复你暂停的，也不能打开你关掉的能力。"))),
+      cap.fields.includes("pause") ? el("label", { class: "ck big" }, el("input", { type: "checkbox", checked: draft.allow_pause, onchange: e => set({ allow_pause: e.target.checked }) }),
+        el("span", {}, el("b", {}, "允许她暂停这项能力"), el("small", {}, "最长到第二天 08:00，到时自动恢复。她不能恢复你暂停的，也不能打开你关掉的能力。"))) : null,
       Object.keys(cap.limits || {}).length ? [el("p", { class: "sub2" }, "她可以调整的参数"), el("ul", { class: "ranges" }, Object.keys(cap.limits).map(rangeRow))] : null,
-      el("p", { class: "note mt" }, "她只能让这项能力少运行：减少次数、拉长间隔或暂停，不能增加次数或费用。她的提议来自每天的反思，必须引用你们的原话作为理由。从备份恢复后，她的调整全部作废。")] : null,
+      el("p", { class: "note mt" }, "她只能让这项能力少运行：减少次数和额度、拉长间隔或暂停，不能增加次数或费用。她的调整必须引用你们的原话作为理由。从备份恢复后，她的调整全部作废。"),
+      notWired.length ? el("p", { class: "lockline" }, icon("warn"), el("span", {}, (wired.size ? "其中" + notWired.map(autoLabel).join("、") : "这项能力") + "的运行逻辑还没有接入她的调整，授权可以先保存，接入后生效。")) : null] : null,
     changed ? el("div", { class: "row-gap mt" }, btn("保存授权", () => saveAutonomy(id, state.autoDraft[id]), { cls: "sm primary" }),
       btn("还原", () => { delete state.autoDraft[id]; rerender(); }, { cls: "sm quiet" })) : null,
     adjustments.length ? [el("p", { class: "sub2" }, "她的调整"), el("ul", { class: "clog" }, adjustments.map(x => { const [label, tone] = ADJ_STATE[x.state] || ["其他状态", "off"];
       return el("li", { class: x.state === "PROPOSED" ? "prop" : "" }, el("span", { class: "who it" }, "她"),
-        el("div", {}, el("b", {}, x.field === "pause" ? "暂停这项能力" : `${AUTO_FIELDS[x.field]}改为 ${x.value} ${x.field === "wake_min_interval_minutes" ? "分钟" : "次"}`),
+        el("div", {}, el("b", {}, x.field === "pause" ? "暂停这项能力" : `${autoLabel(x.field)}改为 ${autoValue(x.field, x.value)}`),
           x.reason ? el("p", {}, "理由：" + x.reason) : null, el("small", {}, fmtDate(x.created_at) + (x.expires_at && x.state === "ACTIVE" ? "，" + fmtDate(x.expires_at) + " 自动恢复" : ""))),
         el("div", { class: "clog-r" }, el("span", { class: "tag " + tone }, label),
           x.state === "PROPOSED" ? el("span", {}, btn("批准", () => decideAdjustment(x, "approve"), { cls: "sm primary" }), btn("拒绝", () => decideAdjustment(x, "reject"), { cls: "sm danger" })) : null,

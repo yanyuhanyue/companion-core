@@ -11,7 +11,7 @@ depends_on = None
 def upgrade():
     op.execute(
         "CREATE TABLE capability_delegations ("
-        "capability TEXT PRIMARY KEY CHECK(capability IN ('diary','wake')),"
+        "capability TEXT PRIMARY KEY,"
         "mode TEXT NOT NULL CHECK(mode IN ('owner','propose','self')),"
         "allow_pause INTEGER NOT NULL CHECK(allow_pause IN (0,1)),"
         "ranges_json TEXT NOT NULL,"
@@ -20,7 +20,7 @@ def upgrade():
     op.execute(
         "CREATE TABLE capability_overrides ("
         "override_id TEXT PRIMARY KEY,"
-        "capability TEXT NOT NULL CHECK(capability IN ('diary','wake')),"
+        "capability TEXT NOT NULL,"
         "field TEXT NOT NULL,"
         "value_json TEXT NOT NULL,"
         "suggestion_id TEXT REFERENCES reflection_suggestions(suggestion_id),"

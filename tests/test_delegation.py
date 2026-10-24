@@ -203,3 +203,18 @@ def test_console_autonomy_routes_require_session_and_are_idempotent(core, monkey
                             json={"decision": "approve"},
                             headers={**headers, "Idempotency-Key": "approve-2"})
         assert again.status_code == 409
+
+
+def test_every_delegable_capability_accepts_owner_ranges_and_reports_integration(core):
+    core.settings.proactive_daily_limit = 3
+    delegate(core, capability="proactive", ranges={"proactive_daily_limit": {"min": 1},
+                                                   "proactive_interval_seconds": {"max": 21600}})
+    with pytest.raises(CoreError, match="DELEGATION_RANGE_OUTSIDE_CONFIGURATION"):
+        delegate(core, capability="proactive", ranges={"proactive_interval_seconds": {"max": 1}})
+    view = delegation.view(core.store, core.settings, core.clock())
+    rows = {row["capability"]: row for row in view["capabilities"]}
+    assert set(rows) == set(delegation.DELEGABLE)
+    assert rows["proactive"]["wired"] == [] and rows["wake"]["wired"]
+    assert rows["proactive"]["limits"]["proactive_daily_limit"] == {
+        "kind": "floor", "configured": 3, "effective": 3}
+    assert "memory.manage" not in rows and "executive" not in rows
