@@ -43,9 +43,9 @@ from companion.reading_protocol import ReadObservation
 from companion.store import Store, encode
 from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
+from tests.legacy_reading_fixture import admit
 from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
-from tests.test_reading_followup import admit
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import queued
 from tests.test_test_fixtures import historical_database

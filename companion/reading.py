@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import UTC
 
-from companion import private_life, qq_source, reply_revision
+from companion import owner_authority, owner_input, reply_revision
 from companion.contracts import CoreError
 from companion.exploration import ReadItem, ReadResult
 from companion.observation import ArticleEvidence, ReadingEvidence
@@ -18,30 +18,30 @@ from companion.transport import digest
 FOLLOWUP = "reading_followup:"
 
 
-def followup_item(store, settings, event_id):
-    """Resolve a current consumer without changing the Reader's original authority."""
-    if not private_life.enabled(settings):
-        return None
-    record = store.one("SELECT value FROM runtime_meta WHERE key=?", (FOLLOWUP + event_id,))
-    if not record:
-        return None
-    value = json.loads(record["value"])
-    approval = settings.live_text_window
-    if (value["window_sha256"] != approval.plan_sha256
-        or value["privacy_epoch"] != epoch(store)):
+def followup_item(store, settings, event_id, *, clock=utcnow):
+    """Project a source-bound SDK tool selection through the existing Content view."""
+    if settings.owner_runtime.mode != "ENABLED" or not store.one(
+        "SELECT 1 FROM sqlite_master WHERE name='agent_tool_calls'"
+    ):
         return None
     item = store.one(
         "SELECT c.* FROM content_items c JOIN exploration_requests r "
-        "ON r.request_id=c.read_request_id WHERE c.item_id=? AND c.kind='link' "
-        "AND c.redacted=0 AND r.redacted=0 AND r.operation='read' AND r.goal_step_json='{}'",
-        (value["item_id"],),
+        "ON r.request_id=c.read_request_id JOIN agent_tool_calls a "
+        "ON a.request_id=r.request_id JOIN jobs j ON j.job_id=a.job_id "
+        "JOIN agent_conversations ac ON ac.job_id=j.job_id WHERE j.event_id=? "
+        "AND ac.phase<>'STOPPED' AND a.state IN ('DEFERRED','RETURNED') "
+        "AND c.kind='link' AND c.redacted=0 AND r.redacted=0 AND r.operation='read' "
+        "AND r.goal_step_json='{}' ORDER BY a.rowid DESC LIMIT 1", (event_id,),
     )
     if not item:
         return None
     try:
-        consumer, _, job = qq_source.source(store, settings, approval, event_id)
-        source, _, _ = qq_source.source(store, settings, approval, item["owner_event_id"])
-        reply_revision.check_job(store, {**job, "reply_revision": consumer["reply_revision"]})
+        job = store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+        view = owner_authority.check_job(store, settings, clock, job, purpose="content")
+        reply_revision.check_job(store, job)
+        consumer, _, _ = owner_input.source(store, settings, view, event_id, clock())
+        source, _, _ = owner_input.source(store, settings, view, item["owner_event_id"],
+                                          clock(), history=item["owner_event_id"] != event_id)
         if (source["conversation_id"] != consumer["conversation_id"]
             or not reply_revision.source_active(store, source["event_id"])):
             return None
@@ -92,11 +92,14 @@ class ReadingService:
         step = json.loads(row["goal_step_json"])
         root = step.get("goal_id", row["request_id"])
         if not step:
-            job = self.store.one(
-                "SELECT job_id FROM jobs WHERE kind='chat' AND event_id IN "
-                "(SELECT event_id FROM exploration_evidence WHERE request_id=?) ORDER BY rowid",
-                (row["request_id"],),
-            )
+            job = self.store.one("SELECT job_id FROM agent_tool_calls WHERE request_id=? "
+                                 "ORDER BY rowid LIMIT 1", (row["request_id"],))
+            if job is None:
+                job = self.store.one(
+                    "SELECT job_id FROM jobs WHERE kind='chat' AND event_id IN "
+                    "(SELECT event_id FROM exploration_evidence WHERE request_id=?) ORDER BY rowid",
+                    (row["request_id"],),
+                )
             if job:
                 root = job["job_id"]
         return ReadingContext(root_task_id=root, source=source, source_event_ids=sources,
@@ -107,28 +110,12 @@ class ReadingService:
         for source_id in context.source_event_ids:
             if not reply_revision.source_active(self.store, source_id):
                 raise CoreError("REPLY_SOURCE_RECALLED", 409)
-            # An accepted goal owns continuation. Ordinary direct reads own the current turn.
             if row["goal_step_json"] == "{}" and reply_revision.owner_input(self.store, source_id):
-                if reply_revision.current(self.store, source_id):
-                    continue
-                consumer = self.store.one(
-                    "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
-                    "WHERE e.conversation_id=(SELECT conversation_id FROM events WHERE event_id=?) "
-                    "AND e.reply_revision=c.reply_revision AND e.redacted=0",
-                    (source_id,),
-                )
-                item = followup_item(self.store, self.settings, consumer["event_id"]) if (
-                    consumer
-                ) else None
-                retained = bool(item and item["owner_event_id"] == source_id and (
-                    item["read_request_id"] == row["request_id"] or (
-                        self.store.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'")
-                        and self.store.one("SELECT 1 FROM bili_video_items WHERE item_id=? "
-                                           "AND request_id=? AND owner_event_id=? AND redacted=0",
-                                           (item["item_id"], row["request_id"], source_id))
-                    )
-                ))
-                if not retained:
+                if self.settings.owner_runtime.mode == "ENABLED":
+                    view = owner_authority.current(self.store, self.settings, self.clock,
+                                                   purpose="content")
+                    owner_input.source(self.store, self.settings, view, source_id, self.clock())
+                else:
                     reply_revision.require_current(self.store, source_id)
 
     def lease(self, adapter_id, source_grant=None, *, capabilities=()):
@@ -340,6 +327,12 @@ class ReadingService:
                 (outcome["state"], fingerprint, encode(outcome["event_ids"]),
                  result.observed_requests, result.observed_bytes, self.clock(), request_id),
             )
+            # Wake the original Core worker after committing the correlated Reader result.
+            s.execute("UPDATE jobs SET next_attempt_at=?,updated_at=? WHERE state='RETRY_WAIT' "
+                      "AND job_id IN (SELECT a.job_id FROM agent_tool_calls a "
+                      "JOIN agent_conversations c USING(job_id) WHERE a.request_id=? "
+                      "AND a.state='DEFERRED' AND c.phase='WAITING')",
+                      (self.clock(), self.clock(), request_id))
             video = getattr(self, "video", None)
             if video is not None and self.settings.bili_video.enabled and (
                 outcome["state"] == "DONE"

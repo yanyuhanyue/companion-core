@@ -9,25 +9,36 @@ import pytest
 
 from companion.core import Core
 from companion.model import ModelClient
-from companion.owner_exploration import requested_source
 from companion.store import encode
 from source_reader import worker_v1
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from tests.conftest import run
+from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.test_reading_followup import READER_AUTH, admit, window
 from tests.test_source_reader import META, Responses, response
 
 
-@pytest.mark.parametrize("text,source", [
-    ("你现在应该可以刷b站了吧", "bilibili"), ("去看看小黑盒吧", "heybox"),
-    ("请浏览 bilibili", "bilibili"), ("刷B站", "bilibili"),
-    ("不要刷B站", None), ("他说‘刷B站’", None), ("我昨天刷B站", None),
-    ("刷B站后给别人发消息", None), ("我想知道为什么他说不能刷B站", None),
-    ("你还是不能刷b站吗", None),
+@pytest.mark.parametrize("text", [
+    "你现在应该可以刷b站了吧", "去看看小黑盒吧", "请浏览 bilibili", "刷B站",
+    "不要刷B站", "他说‘刷B站’", "我昨天刷B站", "刷B站后给别人发消息",
+    "我想知道为什么他说不能刷B站", "你还是不能刷b站吗",
 ])
-def test_browsing_request_requires_an_explicit_whole_owner_utterance(text, source):
-    assert requested_source(text) == source
+def test_ingress_does_not_select_tools_by_phrase(core, tmp_path, monkeypatch, text):
+    async def scenario():
+        async with window(core, tmp_path, monkeypatch) as (client, config, plan):
+            await admit(client, core, config, plan, 1, text)
+            assert not core.store.one("SELECT 1 FROM exploration_requests")
+    run(scenario())
+
+
+async def select_discovery(core):
+    provider = Provider(answer(calls=(
+        call("source_discovery", "discover_content", {"source": "bilibili"}),
+    )), answer("根据原状态说明当前可用性。"))
+    async with worker_for(core, provider) as worker:
+        assert await worker.run_once("model-selected-discovery")
+    return provider
 
 
 @pytest.mark.parametrize("context_soft_tokens", [3200, 16000])
@@ -38,9 +49,10 @@ def test_signed_owner_request_runs_one_discovery_and_reports_its_real_coverage(
         async with window(core, tmp_path, monkeypatch,
                           context_soft_tokens=context_soft_tokens) as (client, config, plan):
             event, accepted = await admit(client, core, config, plan, 1, "你现在可以刷B站了吧")
+            await select_discovery(core)
             queued = core.store.one("SELECT * FROM exploration_requests")
             assert queued["operation"] == "discover" and queued["state"] == "QUEUED"
-            assert queued["request_key"] == "owner-browse:" + event["event_id"]
+            assert queued["request_key"] == "chat-tool:" + accepted["job_id"] + ":source_discovery"
             assert core.store.rows("SELECT event_id FROM exploration_evidence") == [
                 {"event_id": event["event_id"]},
             ]
@@ -57,7 +69,8 @@ def test_signed_owner_request_runs_one_discovery_and_reports_its_real_coverage(
             def provider(request):
                 payload = json.loads(request.content)
                 calls.append(payload)
-                assert "tools" not in payload
+                assert any(tool["function"]["name"] == "discover_content"
+                           for tool in payload["tools"])
                 return httpx.Response(200, json={
                     "choices": [{"message": {"content": "发现了一个恒星故事的标题，还没读正文。"}}],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 20},
@@ -81,7 +94,7 @@ def test_signed_owner_request_runs_one_discovery_and_reports_its_real_coverage(
             assert len(calls) == 1
             prompt = encode(calls[0]["messages"])
             assert "发现的恒星故事" in prompt and "DISCOVERED" in prompt
-            assert "只表示发现标题" in prompt and "系统未启用外部执行工具" not in prompt
+            assert "不是视频内容" in prompt and "系统未启用外部执行工具" not in prompt
             assert core.store.one("SELECT state FROM exploration_requests")["state"] == "DONE"
             assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (accepted["job_id"],))[
                 "state"] == "SUCCEEDED"
@@ -98,6 +111,7 @@ def test_paused_life_does_not_schedule_natural_browsing(core, tmp_path, monkeypa
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
             await admit(client, core, config, plan, 1, "刷B站")
+            await select_discovery(core)
             assert not core.store.rows("SELECT * FROM exploration_requests")
     run(scenario())
 
@@ -137,7 +151,8 @@ def test_capability_question_uses_current_system_facts_without_requesting_anothe
                     assert await restarted_worker.run_once("capability-question")
                     assert not await restarted_worker.run_once("no-replay")
             assert len(calls) == 2
-            assert all("tools" not in payload for payload in calls)
+            assert all(any(tool["function"]["name"] == "read_content"
+                           for tool in payload["tools"]) for payload in calls)
             messages = calls[1]["messages"]
             rules = messages[0]["content"]
             assert messages[0]["role"] == "system"
@@ -167,7 +182,8 @@ def test_capability_question_uses_current_system_facts_without_requesting_anothe
 def test_uncertain_browsing_keeps_the_original_attempt_and_expense(core, tmp_path, monkeypatch):
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
-            event, _ = await admit(client, core, config, plan, 1, "刷B站")
+            event, accepted = await admit(client, core, config, plan, 1, "刷B站")
+            await select_discovery(core)
             row = core.store.one("SELECT * FROM exploration_requests")
             core.store.execute("UPDATE exploration_requests SET state='UNKNOWN',"
                                "last_error_code='READER_NETWORK_UNKNOWN' WHERE request_id=?",
@@ -176,5 +192,5 @@ def test_uncertain_browsing_keeps_the_original_attempt_and_expense(core, tmp_pat
             assert len(core.store.rows("SELECT * FROM exploration_requests")) == 1
             assert core.store.one("SELECT state FROM exploration_requests")["state"] == "UNKNOWN"
             saved = core.store.one("SELECT request_key FROM exploration_requests")
-            assert saved["request_key"] == "owner-browse:" + event["event_id"]
+            assert saved["request_key"] == "chat-tool:" + accepted["job_id"] + ":source_discovery"
     run(scenario())

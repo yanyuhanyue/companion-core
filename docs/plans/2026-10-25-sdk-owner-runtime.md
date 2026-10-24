@@ -55,3 +55,25 @@ share the existing measurement and final transport check; see
 
 The integration owner retains the single final CI receipt. This lane does not run full PR CI,
 activate services, make paid calls, send QQ messages, push a PR, or merge branches.
+
+
+## Reader selection and continuation
+
+The SDK's `read_content` and `discover_content` tools select existing Reader work.
+Owner ingestion records shared-link identities without starting network reads. Neither
+browsing words nor continuation phrases dispatch tools. The persisted SDK tool call binds
+the original Reader request, and a later authorized turn reuses that request, including a
+FAILED or UNKNOWN outcome. Reader reservations, source receipts, and result provenance remain
+in the original services. A newer reply revision does not cancel an independently leased read;
+source recall, privacy epoch changes, authority STOP and finite Reader expiry still fence it.
+
+The [DSH resolved tool set](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/src/agent.ts)
+provides the reference for using the same declarations in context and dispatch. The
+[Pydantic AI deferred tools API](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/)
+provides `CallDeferred` and correlated deferred results; the existing `ConversationStore`
+persists those bindings. No additional intent parser, worker queue, or retry protocol is added.
+
+The Core integration owner removes the retired owner-exploration import and schedule/wait/context
+calls, and the old `Content.followup` call. Reader regression fixtures use real signed v2 input
+approval and the HTTP inbox, actual SDK calls, independent Core connections, and mocked external
+provider transport. The v1 capture helper remains only for frozen video-contract tests.
