@@ -3,9 +3,13 @@
 import hashlib
 import io
 import json
-from contextlib import asynccontextmanager
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, closing
 from datetime import UTC, timedelta, timezone
 from pathlib import Path
+from threading import Barrier
+from types import SimpleNamespace
 
 import av
 import httpx
@@ -17,6 +21,7 @@ from PIL import Image
 from companion import budget
 from companion.bili_video import (
     BiliVideoService,
+    _model_room,
     erase_bili_video,
     model_binding,
     restore_bili_video,
@@ -35,6 +40,7 @@ from companion.contracts import CoreError
 from companion.media_config import ContentConfig
 from companion.model import ModelClient
 from companion.reading_protocol import ReadObservation
+from companion.store import Store, encode
 from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
 from tests.test_onebot_capture import capture_approval, source_window
@@ -223,6 +229,140 @@ def final_result(
 
 def test_unbound_model_request_does_not_claim_legacy_media(core):
     assert model_binding(core.store, core.settings, core.clock, "unbound") is None
+
+
+@pytest.mark.parametrize("current,state_mode,required_calls", [
+    ("current", "original", 8), (None, "original", 9),
+    ("unrelated", "original", 9), ("job-only", "original", 8),
+    ("current", "all_unknown", 9), ("current", "settled_foreground", 8),
+])
+def test_model_room_counts_calls_once_and_preserves_foreground_slots(
+    core, current, state_mode, required_calls,
+):
+    s, now = core.store, core.clock()
+    rows = [
+        ("job-only", "target", None, "memory_review", "SETTLED"),
+        ("logical-only", "other", "target", "chat", "RESERVED"),
+        ("overlap", "target", "target", "content_video_preview", "UNKNOWN"),
+        ("null-job", None, "target", "content_video", "SETTLED"),
+        ("other-admission", "target", "other", "content_video_preview", "CANCELLED"),
+        ("same-fields", "target", None, "content_video_preview", "UNKNOWN"),
+        ("current", "target", "target", "chat", "SETTLED"),
+        ("unrelated", "other", "other", "memory_review", "SETTLED"),
+    ]
+    with s.transaction():
+        for job_id in ("target", "other"):
+            s.insert("jobs", job_id=job_id, kind="chat", state="RUNNING",
+                     idempotency_key=job_id, created_at=now, updated_at=now)
+        s.insert("model_budget_windows", window_id="headroom-window", contract_sha256="a" * 64)
+        for request, job_id, logical, scenario, state in rows:
+            if state_mode == "all_unknown":
+                state = "UNKNOWN"
+            elif state_mode == "settled_foreground" and scenario in {"chat", "memory_review"}:
+                state = "SETTLED"
+            s.insert("model_usage", usage_id="usage-" + request, request_id=request,
+                     job_id=job_id, scenario=scenario, provider="synthetic", model="synthetic",
+                     state=state, billed_micro_usd=123, occurred_at=now)
+            if logical is not None:
+                s.insert("model_admissions", request_id=request, logical_request_id=logical,
+                         attempt_id="attempt-" + request, attempt_number=1,
+                         window_id="headroom-window", contract_sha256="a" * 64,
+                         payload_sha256="b" * 64, snapshot_json=encode({"synthetic": True}),
+                         reserved_micro_usd=123, input_bound=10, output_bound=10,
+                         lease_token="lease-" + request, lease_until=now,
+                         journal_path="synthetic-not-opened", journal_id="synthetic")
+        admission = s.one("SELECT * FROM model_admissions WHERE request_id='overlap'")
+        # SQLite permits a NULL TEXT primary key; neither it nor a missing usage
+        # parent can add a call through the logical-request branch.
+        s.insert("model_admissions", **{**admission, "request_id": None, "attempt_id": "null"})
+        with pytest.raises(sqlite3.IntegrityError):
+            s.insert("model_admissions", **{**admission, "request_id": "absent",
+                                             "attempt_id": "absent"})
+    before = {table: s.rows(f"SELECT rowid,* FROM {table} ORDER BY rowid")
+              for table in ("model_usage", "model_admissions", "model_budget_windows")}
+    changes = s.db.total_changes
+    for limit in range(1, 11):
+        settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=limit))
+        if limit < required_calls:
+            with pytest.raises(CoreError, match="BILI_VIDEO_CHAT_HEADROOM_REQUIRED"):
+                _model_room(s, settings, "target", current)
+        else:
+            _model_room(s, settings, "target", current)
+    assert s.db.total_changes == changes
+    assert {table: s.rows(f"SELECT rowid,* FROM {table} ORDER BY rowid")
+            for table in before} == before
+    assert s.rows("PRAGMA foreign_key_check") == []
+
+
+def test_model_room_keeps_concurrent_reserved_call_visible_to_the_next_writer(core):
+    now, ready = core.clock(), Barrier(2)
+    core.store.insert("jobs", job_id="target", kind="chat", state="RUNNING",
+                      idempotency_key="headroom-target", created_at=now, updated_at=now)
+    settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=3))
+
+    def reserve(request):
+        with closing(Store(core.settings.database)) as store:
+            ready.wait(timeout=10)
+            try:
+                with store.transaction():
+                    _model_room(store, settings, "target", request)
+                    store.insert("model_usage", usage_id=request, request_id=request,
+                                 job_id="target", scenario="content_video_preview",
+                                 provider="synthetic", model="synthetic", state="RESERVED",
+                                 billed_micro_usd=123, occurred_at=now)
+            except CoreError as error:
+                assert error.code == "BILI_VIDEO_CHAT_HEADROOM_REQUIRED"
+                return "denied"
+            return "reserved"
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        assert sorted(workers.map(reserve, ("first", "second"))) == ["denied", "reserved"]
+    assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage") == [
+        {"state": "RESERVED", "billed_micro_usd": 123},
+    ]
+
+
+def test_model_room_vm_work_does_not_grow_with_unrelated_history(core):
+    s, now = core.store, core.clock()
+    settings = SimpleNamespace(paid_model=SimpleNamespace(per_request_calls=4))
+    with s.transaction():
+        for job in ("target", "other"):
+            s.insert("jobs", job_id=job, kind="chat", state="RUNNING",
+                     idempotency_key=job, created_at=now, updated_at=now)
+        s.insert("model_usage", usage_id="target", request_id="target", job_id="target",
+                 scenario="content_video_preview", provider="synthetic", model="synthetic",
+                 state="RESERVED", billed_micro_usd=123, occurred_at=now)
+
+    def steps():
+        _model_room(s, settings, "target")
+        count = 0
+
+        def progress():
+            nonlocal count
+            count += 1
+            return 0
+
+        changes = s.db.total_changes
+        s.db.set_progress_handler(progress, 1)
+        try:
+            _model_room(s, settings, "target")
+        finally:
+            s.db.set_progress_handler(None, 0)
+        assert s.db.total_changes == changes
+        return count
+
+    initial = steps()
+    with s.transaction():
+        s.db.executemany(
+            "INSERT INTO model_usage(usage_id,request_id,job_id,scenario,provider,model,"
+            "state,billed_micro_usd,occurred_at) VALUES (?,?,'other','chat','synthetic',"
+            "'synthetic',?,123,?)",
+            ((f"history-{index}", f"history-{index}",
+              ("SETTLED", "RESERVED", "UNKNOWN")[index % 3], now) for index in range(1000)),
+        )
+    # A wide deterministic bound catches a history scan without timing assertions
+    # or depending on a particular SQLite query-plan rendering.
+    assert steps() <= initial + 100
 
 
 def test_disabled_video_requires_explicit_configuration_without_changing_metadata(core):

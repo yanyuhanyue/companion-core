@@ -33,6 +33,8 @@ from pathlib import Path
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from companion_delivery_protocol import VOICE_CHECK_FIELDS
+
 from .event_normalizer import decode, normalize
 from .files import _destination, _get, _opaque
 from .images import _private_download, global_address, resolve_public
@@ -459,8 +461,7 @@ def prepare_delivery(item, config, *, plan_sha256, voice_policy_sha256, now):
         raise ValueError("VOICE_AUDIO_INVALID")
     message = [{"type": "record", "data": {"file": "base64://" + encoded}}]
     check = {"binding_sha256": envelope["binding_sha256"],
-             **{key: binding[key] for key in ("job_id", "generation", "result_sha256",
-                                             "audio_sha256", "audio_bytes")}}
+             **{key: binding[key] for key in VOICE_CHECK_FIELDS - {"binding_sha256"}}}
     return PreparedVoiceDelivery(
         envelope["binding_sha256"], binding["content_sha256"],
         digest({"user_id": int(config.owner_qq_id), "message": message, "auto_escape": True}),

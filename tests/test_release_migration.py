@@ -13,6 +13,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
 
+from companion import cloud_budget
 from companion.backup import backup, restore
 from companion.config import Settings
 from companion.core import Core
@@ -53,6 +54,7 @@ REVISION_CHAIN = (
     "0030_private_poke",
     "0031_voice_nodes",
     "0032_bili_video",
+    "0033_model_usage_job_index",
 )
 LEGACY_TABLES = (
     "principals",
@@ -324,9 +326,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0032_bili_video"]
+    assert scripts.get_heads() == ["0033_model_usage_job_index"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0032_bili_video")
+    revisions, current = [], scripts.get_revision("0033_model_usage_job_index")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -388,7 +390,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0032_bili_video"}
+            {"version_num": "0033_model_usage_job_index"}
         ]
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
@@ -601,3 +603,84 @@ def test_0021_retains_reflection_provenance_and_guards_pending_wait_downgrade(tm
     with closing(Store(str(database))) as store:
         assert table_snapshot(store, tables) == before
         assert store.rows("PRAGMA foreign_key_check") == []
+
+
+def test_0033_job_index_preserves_rows_rowids_budget_snapshots_and_erasure_ledger(tmp_path):
+    database, ledger, _ = seed_legacy(tmp_path, "0004_diary")
+    migrate(str(database), "0032_bili_video")
+    with closing(Store(str(database))) as store:
+        original = store.one("SELECT * FROM model_usage WHERE state='UNKNOWN'")
+        # A gap makes accidental table rebuilds visible, including the NULL-job case.
+        store.insert("model_usage", rowid=41, **{**original, "usage_id": "usage_null_job",
+                     "request_id": "request_null_job", "job_id": None})
+        store.insert("model_budget_windows", window_id="migration-window",
+                     contract_sha256="a" * 64)
+        for index, row in enumerate(store.rows("SELECT * FROM model_usage ORDER BY rowid")):
+            store.insert("model_admissions", request_id=row["request_id"],
+                         logical_request_id="job_keep", attempt_id=f"attempt_{index}",
+                         attempt_number=index + 1, window_id="migration-window",
+                         contract_sha256="a" * 64, payload_sha256="b" * 64,
+                         snapshot_json=encode({"historical_pricing": True}),
+                         reserved_micro_usd=row["billed_micro_usd"], input_bound=1000,
+                         output_bound=100, lease_token=f"lease_{index}",
+                         lease_until=TIMES["keep"], io_started_at=TIMES["keep"],
+                         journal_path=str(tmp_path / "retained-budget.jsonl"),
+                         journal_id="retained-budget")
+        cloud_budget.policy(store, settings_for(database, ledger), Clock()())
+        assert store.one("SELECT COUNT(*) n FROM cloud_cost_snapshots")["n"] == 4
+        tables = store.rows(
+            "SELECT name,sql FROM sqlite_master WHERE type='table' AND name<>'alembic_version' "
+            "ORDER BY name",
+        )
+        schema = store.rows("SELECT type,name,tbl_name,sql FROM sqlite_master "
+                            "WHERE name<>'alembic_version' ORDER BY name")
+
+        def rows_with_rowids(current):
+            snapshot = {}
+            for table in tables:
+                name = table["name"]
+                if "WITHOUT ROWID" in " ".join(table["sql"].upper().split()):
+                    primary = sorted((row for row in current.rows(f'PRAGMA table_info("{name}")')
+                                      if row["pk"]), key=lambda row: row["pk"])
+                    assert primary
+                    order = ",".join('"' + row["name"] + '"' for row in primary)
+                    query = f'SELECT * FROM "{name}" ORDER BY {order}'
+                else:
+                    query = f'SELECT rowid AS snapshot_rowid,* FROM "{name}" ORDER BY rowid'
+                snapshot[name] = current.rows(query)
+            return snapshot
+
+        before = rows_with_rowids(store)
+    ledger_bytes = ledger.read_bytes()
+    config = Config()
+    config.set_main_option(
+        "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
+    )
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
+    for operation in ("upgrade", "upgrade", "downgrade", "upgrade"):
+        if operation == "upgrade":
+            migrate(str(database), "0033_model_usage_job_index")
+        else:
+            command.downgrade(config, "0032_bili_video")
+        with closing(Store(str(database))) as store:
+            assert rows_with_rowids(store) == before
+            assert ledger.read_bytes() == ledger_bytes
+            assert store.rows("SELECT type,name,tbl_name,sql FROM sqlite_master "
+                              "WHERE name NOT IN ('alembic_version','idx_model_usage_job') "
+                              "ORDER BY name") == schema
+            assert store.rows("PRAGMA foreign_key_check") == []
+            assert store.one("PRAGMA integrity_check") == {"integrity_check": "ok"}
+            assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+                "0033_model_usage_job_index" if operation == "upgrade" else "0032_bili_video"
+            )
+            indexes = store.rows("PRAGMA index_list(model_usage)")
+            actual = [row for row in indexes if row["name"] == "idx_model_usage_job"]
+            if operation == "upgrade":
+                assert len(actual) == 1 and actual[0]["unique"] == 0
+                assert [row["name"] for row in store.rows(
+                    "PRAGMA index_info(idx_model_usage_job)")] == ["job_id"]
+                plan = store.rows("EXPLAIN QUERY PLAN SELECT request_id FROM model_usage "
+                                  "WHERE job_id=?", ("job_keep",))
+                assert any("idx_model_usage_job" in row["detail"] for row in plan)
+            else:
+                assert actual == []

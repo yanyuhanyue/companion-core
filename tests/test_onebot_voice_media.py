@@ -20,9 +20,13 @@ import pysilk
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from companion.voice_flow import VoiceDeliveryBinding, VoiceDeliveryCheck, VoiceDeliveryEnvelope
 from companion.voice_jobs import UPLOAD_DOMAIN, VoiceASRProof
-from companion.voice_protocol import VoiceAudioResult, canonical_bytes
+from companion.voice_protocol import (
+    VoiceAudioResult,
+    VoiceDeliveryBinding,
+    VoiceDeliveryEnvelope,
+    canonical_bytes,
+)
 from companion_onebot_bridge import voice_media as voice
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.onebot_client import OneBotClient, http_client
@@ -456,12 +460,18 @@ def prepared_delivery(item):
 
 def test_outbound_record_uses_verified_inline_pcm_and_exact_final_delivery_check():
     item = delivery()
+    envelope = VoiceDeliveryEnvelope.model_validate(item["voice"])
+    assert canonical_bytes(VoiceDeliveryEnvelope.model_validate_json(
+        envelope.model_dump_json())) == canonical_bytes(envelope)
     prepared = prepared_delivery(item)
     assert prepared.message == [{"type": "record", "data": {
         "file": "base64://" + item["voice"]["audio"]["audio_base64"],
     }}]
-    expected = VoiceDeliveryCheck.from_envelope(VoiceDeliveryEnvelope.model_validate(item["voice"]))
-    assert expected.model_dump(mode="json") == prepared.check
+    binding = item["voice"]["binding"]
+    assert prepared.check == {"binding_sha256": item["voice"]["binding_sha256"],
+        "job_id": binding["job_id"], "generation": binding["generation"],
+        "result_sha256": binding["result_sha256"], "audio_sha256": binding["audio_sha256"],
+        "audio_bytes": binding["audio_bytes"]}
     assert prepared.body_sha256 == voice.digest({
         "user_id": int(config().owner_qq_id), "message": prepared.message, "auto_escape": True,
     })
@@ -495,7 +505,8 @@ def test_voice_cannot_drop_an_existing_image_or_become_a_new_text_attempt():
 def test_voice_helper_imports_and_validates_without_core_or_pydantic(tmp_path):
     root = Path(__file__).resolve().parents[1]
     isolated = tmp_path / "isolated"
-    for package in ("companion_onebot_bridge", "companion_meme_protocol"):
+    for package in ("companion_onebot_bridge", "companion_meme_protocol",
+                    "companion_delivery_protocol"):
         shutil.copytree(root / package, isolated / package,
                         ignore=shutil.ignore_patterns("__pycache__"))
     script = """

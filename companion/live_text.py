@@ -18,6 +18,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import AwareDatetime, Field, field_validator, model_validator
 
+import companion_delivery_protocol as delivery_wire
 from companion import (
     cumulative,
     image_spool,
@@ -109,9 +110,7 @@ class SendCheck(WindowReference):
     @field_validator("voice")
     @classmethod
     def voice_binding(cls, value):
-        from companion.voice_flow import VoiceDeliveryCheck
-
-        return VoiceDeliveryCheck.model_validate(value).model_dump() if value is not None else None
+        return delivery_wire.validate_voice_check(value) if value is not None else None
 
     @model_validator(mode="after")
     def one_payload_digest(self):

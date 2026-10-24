@@ -5,21 +5,25 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
 
-from pydantic import AwareDatetime, Field, model_validator
+from pydantic import AwareDatetime
 
-from companion import live_text, paid_budget, private_life, qq_source, reply_revision
+import companion_delivery_protocol as delivery_wire
+from companion import (
+    live_text,
+    paid_budget,
+    private_life,
+    qq_source,
+    reply_revision,
+    voice_protocol,
+)
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.qq_rich import input_digest
 from companion.store import after, encode, utcnow
 from companion.voice_jobs import INPUT_RECEIPT, REPLY_RECEIPT, VoiceASRProof, VoiceJobs
 from companion.voice_protocol import (
-    Digest,
     ErrorCode,
-    Generation,
     JobId,
-    NodeId,
-    VoiceAudioResult,
     VoiceDTO,
     digest,
 )
@@ -51,67 +55,6 @@ class VoiceInputStatus(VoiceDTO):
     state: Literal["NONE", "WAITING", "READY", "FALLBACK"]
     wait_until: AwareDatetime | None = None
     reason: ErrorCode | None = None
-
-
-class VoiceDeliveryBinding(VoiceDTO):
-    schema_version: Literal[1] = 1
-    job_id: JobId
-    generation: Generation
-    message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
-    delivery_key: str = Field(min_length=1, max_length=512)
-    event_id: str = Field(min_length=1, max_length=128)
-    window_sha256: Digest
-    source_sha256: Digest
-    identity_sha256: Digest
-    privacy_epoch: int = Field(ge=0, strict=True)
-    reply_revision: int = Field(ge=0, strict=True)
-    node_id: NodeId
-    manifest_sha256: Digest
-    node_config_sha256: Digest
-    voice_policy_sha256: Digest
-    content_sha256: Digest
-    reply_sha256: Digest
-    result_sha256: Digest
-    audio_sha256: Digest
-    audio_bytes: int = Field(ge=44, le=4_000_000, strict=True)
-    expires_at: AwareDatetime
-
-
-class VoiceDeliveryEnvelope(VoiceDTO):
-    binding: VoiceDeliveryBinding
-    binding_sha256: Digest
-    audio: VoiceAudioResult
-
-    @model_validator(mode="after")
-    def bound_audio(self):
-        if (
-            self.binding_sha256 != digest(self.binding)
-            or self.binding.result_sha256 != digest(self.audio)
-            or self.binding.audio_sha256 != self.audio.audio_sha256
-            or self.binding.audio_bytes != len(self.audio.audio_bytes())
-        ):
-            raise ValueError("Voice delivery audio differs from its frozen binding")
-        return self
-
-
-class VoiceDeliveryCheck(VoiceDTO):
-    binding_sha256: Digest
-    job_id: JobId
-    generation: Generation
-    result_sha256: Digest
-    audio_sha256: Digest
-    audio_bytes: int = Field(ge=44, le=4_000_000, strict=True)
-
-    @classmethod
-    def from_envelope(cls, envelope):
-        return cls(
-            binding_sha256=envelope.binding_sha256,
-            **{
-                key: getattr(envelope.binding, key)
-                for key in cls.model_fields
-                if key != "binding_sha256"
-            },
-        )
 
 
 def _require_transaction(store):
@@ -274,7 +217,7 @@ class VoiceFlow:
             or row["outbox_delivery_key"] != outbox["delivery_key"]
         ):
             raise CoreError("VOICE_DELIVERY_FENCED", 409)
-        binding = VoiceDeliveryBinding(
+        binding = voice_protocol.VoiceDeliveryBinding(
             job_id=job_id,
             generation=row["generation"],
             message_id=outbox["message_id"],
@@ -321,14 +264,14 @@ class VoiceFlow:
         if value.get("state") != "AUDIO":
             raise CoreError("VOICE_REPLY_NOT_PREPARED", 409)
         try:
-            binding = VoiceDeliveryBinding.model_validate(value["binding"])
+            binding = voice_protocol.VoiceDeliveryBinding.model_validate(value["binding"])
         except (ValueError, KeyError, TypeError):
             raise CoreError("VOICE_FLOW_RECEIPT_INVALID", 409) from None
         if datetime.fromisoformat(self.clock()) >= binding.expires_at:
             raise CoreError("VOICE_DELIVERY_EXPIRED", 409)
         audio = self.jobs.delivery_audio(binding.job_id, message_id, lease_token)
         try:
-            return VoiceDeliveryEnvelope(
+            return voice_protocol.VoiceDeliveryEnvelope(
                 binding=binding, binding_sha256=value["binding_sha256"], audio=audio
             )
         except (ValueError, KeyError, TypeError):
@@ -339,10 +282,15 @@ class VoiceFlow:
         self._native_delivery(message_id)
         envelope = self.delivery_envelope(message_id, lease_token)
         try:
-            given = VoiceDeliveryCheck.model_validate(voice) if voice is not None else None
+            given = delivery_wire.validate_voice_check(voice) if voice is not None else None
         except (ValueError, TypeError):
             raise CoreError("VOICE_DELIVERY_BINDING_CHANGED", 409) from None
-        if given != (VoiceDeliveryCheck.from_envelope(envelope) if envelope else None):
+        expected = None if envelope is None else {
+            "binding_sha256": envelope.binding_sha256,
+            **{key: getattr(envelope.binding, key)
+               for key in delivery_wire.VOICE_CHECK_FIELDS - {"binding_sha256"}},
+        }
+        if given != expected:
             raise CoreError("VOICE_DELIVERY_BINDING_CHANGED", 409)
 
     def _input_source(self, event_id, chat_job_id=None, *, running_job=None):

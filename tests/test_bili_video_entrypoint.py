@@ -18,6 +18,7 @@ from companion import __main__, cloud_budget
 from companion import core as core_module
 from companion.core import Core
 from companion.model import ModelClient
+from companion.retrieval import SemanticIndex
 from companion_onebot_bridge import network
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow
@@ -153,6 +154,7 @@ def upstream(tmp_path):
 def test_capture_real_http_independent_reader_and_worker_preserve_bounded_evidence(
     core, tmp_path, monkeypatch, erase_during_model,
 ):
+    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     calls, instances, sends = [], [], []
     isolated = reader_files(tmp_path)
     metadata, media = upstream(tmp_path)
