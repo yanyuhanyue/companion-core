@@ -15,13 +15,12 @@ import tempfile
 import uuid
 from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from companion import budget, paid_budget  # noqa: E402
+from companion import budget, model, paid_budget, token_measurement  # noqa: E402
 from companion.config import Settings  # noqa: E402
 from companion.contracts import Candidate, InboundEvent  # noqa: E402
 from companion.conversation_policy import PARTICIPATION_V1, apply_strategy  # noqa: E402
@@ -166,13 +165,55 @@ def build_context(case, empty_database, directory):
         return settings, messages
 
 
-def prepare(cases, output, *, repetitions=1):
+def measurement_defaults():
+    return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="r1-offline-" * 4,
+                    max_output_tokens=2048, context_soft_tokens=16000,
+                    input_rate=300000, cached_input_rate=6000, output_rate=1200000)
+
+
+def measurement_profile(settings):
+    """Only count/price inputs; this projection contains no grant or credential."""
+    approval = settings.paid_model
+    return {
+        "scenario": "evaluation", "route": list(model.model_route(settings, "evaluation")),
+        "count_contract": json.loads(encode(token_measurement.count_contract(settings))),
+        "input_estimate_safety_percent": (
+            approval.input_estimate_safety_percent if approval else None),
+        "context_soft_tokens": settings.context_soft_tokens,
+        "approved_max_input_tokens": approval.max_input_tokens if approval else None,
+        "max_output_tokens": settings.output_tokens("evaluation"),
+        "rates_micro_usd_per_million": {"input": settings.input_rate,
+            "cached_input": settings.cached_input_rate, "output": settings.output_rate},
+        "source_sha256": {module.__name__: hashlib.sha256(
+            Path(module.__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+            for module in (model, token_measurement, paid_budget)},
+    }
+
+
+def request_measurement(settings, payload):
+    measured = token_measurement.measure_payload(settings, payload, "evaluation")
+    reserved = (None if measured.count_kind == "unsupported"
+                else measured.reserved_input_tokens)
+    if reserved is not None and (reserved > settings.context_soft_tokens or (
+        settings.paid_model and reserved > settings.paid_model.max_input_tokens
+    )):
+        raise ValueError("Frozen input exceeds configured context/input limit; do not trim one arm")
+    return {"measurement": measured.receipt(), "budget_input_tokens": reserved,
+            "estimated_reservation_micro_usd": (None if reserved is None else budget.cost(
+                settings, reserved, measured.output_allowance, scenario="evaluation"))}
+
+
+def prepare(cases, output, *, repetitions=1, measurement_settings=None):
     output = Path(output).resolve()
     if not output.is_relative_to(ROOT / ".local"):
         raise ValueError("Experiment artifacts must stay in this worktree's .local directory")
     if repetitions < 1 or repetitions > 3:
         raise ValueError("Use one to three predeclared repetitions")
-    output.mkdir(parents=True, exist_ok=False)
+    if output.exists():
+        raise FileExistsError(output)
+    counting = measurement_settings or measurement_defaults()
+    if counting.max_output_tokens != 2048 or not counting.pricing_known:
+        raise ValueError("Comparison requires fixed 2048 output allowance and configured prices")
     temporary = ROOT / ".local/test-temp"
     temporary.mkdir(parents=True, exist_ok=True)
     records = []
@@ -189,39 +230,38 @@ def prepare(cases, output, *, repetitions=1):
                     "participation_v1", "baseline")
                 for strategy in order:
                     messages = apply_strategy(base, strategy)
-                    payload = model_payload(settings, messages, "chat")
-                    estimate = paid_budget.estimate_input_tokens(
-                        SimpleNamespace(input_estimate_safety_percent=125), messages, "chat")
+                    payload = model_payload(counting, messages, "evaluation")
                     records.append({"case": case["name"], "repetition": repeat,
                                     "strategy": strategy, "metadata": case["metadata"],
                                     "payload": payload, "payload_sha256": sha(payload),
                                     "shared_context_sha256": sha(messages[1:]),
-                                    "estimated_input_tokens": estimate,
                                     "planned_max_output_tokens": settings.max_output_tokens,
-                                    "estimated_reservation_micro_usd": budget.cost(
-                                        settings, estimate, settings.max_output_tokens)})
-    plan = {"schema_version": 1, "status": "PREPARED_NO_MODEL_CALLS",
+                                    **request_measurement(counting, payload)})
+    profile = measurement_profile(counting)
+    costs = [r["estimated_reservation_micro_usd"] for r in records]
+    plan = {"schema_version": 2, "status": "PREPARED_NO_MODEL_CALLS",
             "case_count": len(cases), "repetitions": repetitions, "request_count": len(records),
-            "provider": "deepseek", "model": "deepseek-flash", "seed_sent": False,
+            "provider": counting.provider, "model": counting.model_name, "seed_sent": False,
             "temperature_sent": False, "provider_sampling_reproducible": False,
-            "rates_micro_usd_per_million": {"input": 300000, "cached_input": 6000,
-                                            "output": 1200000},
-            "cost_basis": "Configured rates; local estimates, not invoices or hard token bounds.",
-            "estimated_reservation_micro_usd": sum(
-                r["estimated_reservation_micro_usd"] for r in records),
+            "measurement_profile": profile,
+            "rates_micro_usd_per_million": profile["rates_micro_usd_per_million"],
+            "cost_basis": "Native Measurement reservation; exact_local_render is local only. "
+                          "Hosted preprocessing and billing equality are unverified.",
+            "estimated_reservation_micro_usd": (None if None in costs else sum(costs)),
             "actual_provider_calls": 0, "actual_cost_micro_usd": 0, "requests": records}
     plan["plan_sha256"] = sha(plan)
+    output.mkdir(parents=True, exist_ok=False)
     (output / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
                                       encoding="utf-8")
     return plan
 
 
-def blind_export(plan, observations, output, seed=20261024):
-    """Export actual complete pairs; keep strategy mapping separate from the ballot."""
+def validate_plan(plan, measurement_settings=None):
+    """Read v1 unchanged; recompute v2 evidence against explicit local count settings."""
     content = {key: value for key, value in plan.items() if key != "plan_sha256"}
     if sha(content) != plan["plan_sha256"]:
         raise ValueError("Plan changed after preparation")
-    if plan.get("schema_version") != 1:
+    if plan.get("schema_version") not in {1, 2}:
         raise ValueError("Unsupported experiment plan version")
     expected = {(r["case"], r["repetition"], r["strategy"]): r for r in plan["requests"]}
     if not expected or len(expected) != len(plan["requests"]):
@@ -240,6 +280,45 @@ def blind_export(plan, observations, output, seed=20261024):
     if any(set(pair) != {"baseline", "participation_v1"}
            or pair["baseline"] != pair["participation_v1"] for pair in pairs.values()):
         raise ValueError("Comparison requires the same input and model parameters")
+    if plan["schema_version"] == 2:
+        settings = measurement_settings or measurement_defaults()
+        profile = measurement_profile(settings)
+        if plan.get("measurement_profile") != profile:
+            raise ValueError("Measurement policy, source or route changed; prepare a new plan")
+        if (plan["rates_micro_usd_per_million"] != profile["rates_micro_usd_per_million"]
+            or (plan["provider"], plan["model"]) != (settings.provider, settings.model_name)
+            or plan["request_count"] != len(expected)
+            or plan["case_count"] != len({key[0] for key in expected})
+            or type(plan["repetitions"]) is not int or not 1 <= plan["repetitions"] <= 3
+            or set(expected) != {(case, repeat, strategy)
+                for case in {key[0] for key in expected}
+                for repeat in range(plan["repetitions"])
+                for strategy in ("baseline", "participation_v1")}):
+            raise ValueError("Plan scope or budget inputs changed")
+        costs = []
+        for row in expected.values():
+            messages = row["payload"]["messages"]
+            if any(set(message) != {"role", "content"}
+                   or not isinstance(message["content"], str)
+                   or message["role"] not in ({"system"} if i == 0 else {"user", "assistant"})
+                   for i, message in enumerate(messages)):
+                raise ValueError("Evaluation plans require text-only shared context")
+            if row["planned_max_output_tokens"] != 2048 or settings.output_tokens(
+                "evaluation"
+            ) != 2048:
+                raise ValueError("Output allowance changed")
+            measured = request_measurement(settings, row["payload"])
+            if any(row.get(key) != value for key, value in measured.items()):
+                raise ValueError("Measurement receipt or budget estimate changed")
+            costs.append(measured["estimated_reservation_micro_usd"])
+        if plan["estimated_reservation_micro_usd"] != (None if None in costs else sum(costs)):
+            raise ValueError("Plan reservation estimate changed")
+    return expected
+
+
+def blind_export(plan, observations, output, seed=20261024, *, measurement_settings=None):
+    """Export every declared pair; failures stay in the denominator, never get retried."""
+    expected = validate_plan(plan, measurement_settings)
     results = {}
     for row in observations:
         key = (row["case"], row["repetition"], row["strategy"])
@@ -247,7 +326,10 @@ def blind_export(plan, observations, output, seed=20261024):
             raise ValueError("Unknown or duplicate observation")
         if row["payload_sha256"] != expected[key]["payload_sha256"]:
             raise ValueError("Observation belongs to another input")
-        if row.get("evidence_type") not in {"MODEL_RESPONSE", "FAILED_ATTEMPT"} or not isinstance(
+        kinds = {"MODEL_RESPONSE", "FAILED_ATTEMPT"}
+        if plan["schema_version"] == 2:
+            kinds.add("SYNTHETIC_MODEL_RESPONSE")
+        if row.get("evidence_type") not in kinds or not isinstance(
             row.get("text"), str,
         ) or row.get("state") not in {"SETTLED", "UNKNOWN", "FAILED", "NOT_STARTED"}:
             raise ValueError("Blinded replies require observed outcomes")
@@ -270,8 +352,13 @@ def blind_export(plan, observations, output, seed=20261024):
                        "input": expected[(case, repeat, "baseline")]["payload"]["messages"][1:],
                        "A": responses[0]["text"], "B": responses[1]["text"],
                        "A_state": responses[0]["state"], "B_state": responses[1]["state"],
-                       "scorable": all(row["state"] == "SETTLED" and row["text"]
-                                       for row in responses),
+                       "scorable": all(row["state"] == "SETTLED" and row["text"] and (
+                           plan["schema_version"] == 1 or (
+                               row.get("complete_response") is True
+                               and row.get("finish_reason") == "stop"
+                               and row.get("text_redacted") is False
+                               and row["evidence_type"] == "MODEL_RESPONSE"))
+                           for row in responses),
                        "ratings": {axis: None for axis in (
                             "naturalness", "desire_to_continue", "deliberateness",
                             "factual_accuracy")},
@@ -295,20 +382,26 @@ def main():
     prepare_parser.add_argument("--private-baseline", type=Path)
     prepare_parser.add_argument("--repetitions", type=int, default=1)
     prepare_parser.add_argument("--output", type=Path, required=True)
+    prepare_parser.add_argument("--measurement-settings", type=Path,
+                                help="Explicit Settings JSON used only for counting/prices")
     export_parser = sub.add_parser("blind")
     export_parser.add_argument("--plan", type=Path, required=True)
     export_parser.add_argument("--observations", type=Path, required=True)
     export_parser.add_argument("--output", type=Path, required=True)
+    export_parser.add_argument("--measurement-settings", type=Path)
     args = parser.parse_args()
+    counting = (Settings.model_validate_json(args.measurement_settings.read_text("utf-8"))
+                if args.measurement_settings else None)
     if args.command == "prepare":
         cases = ([private_case(args.private_baseline)] if args.private_baseline
                  else load_cases(args.dataset))
-        plan = prepare(cases, args.output, repetitions=args.repetitions)
+        plan = prepare(cases, args.output, repetitions=args.repetitions,
+                       measurement_settings=counting)
         print(encode({key: value for key, value in plan.items() if key != "requests"}))
     else:
         plan = json.loads(args.plan.read_text("utf-8"))
         observations = json.loads(args.observations.read_text("utf-8"))
-        print(len(blind_export(plan, observations, args.output)))
+        print(len(blind_export(plan, observations, args.output, measurement_settings=counting)))
 
 
 if __name__ == "__main__":

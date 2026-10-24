@@ -136,10 +136,11 @@ reset 返回 `AFFECT_RESET_NOT_INTEGRATED`，不会伪报成功。Core 的显式
 真实 HTTP 与独立 Core worker 的合成检查覆盖上下文后重置阻断 dispatch、无需模型的
 重置命令，以及旧加密备份恢复后重放屏障。UNKNOWN 与原预算 journal 保持原状。
 
-36 个合成 case、v1 策略字节和 v1 计划格式保持原样。导出会重新校验计划 hash、每项
+36 个合成 case、v1 策略字节和历史 v1 计划保持原样。导出会重新校验计划 hash、每项
 payload hash、共同输入 hash，并检查同一对的历史、当前输入和模型参数完全一致。
-已有 JSON 计划不重写；v1 的估算仍按原合同解释，不补写成精确计量。若后续新计划要保存
-native `Measurement.receipt()`，须单独登记新版本及其来源字段，保留历史 v1 验证。
+已有 JSON 计划不重写；v1 的估算仍按原合同解释，不补写成精确计量。新 `prepare` 默认
+生成 [v2 计量计划](measurement-v2.md)，保存完整 payload 的原生 `Measurement.receipt()`、
+计量配置与源码身份，保留历史 v1 验证。v2 不改变原生评价用途的六请求执行范围。
 
 实现核对：
 

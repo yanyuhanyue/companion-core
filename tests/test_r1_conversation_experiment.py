@@ -134,3 +134,160 @@ def test_rehashed_plan_requires_same_inputs_and_model(tmp_path, monkeypatch, cha
     plan["plan_sha256"] = experiment.sha({k: v for k, v in plan.items() if k != "plan_sha256"})
     with pytest.raises(ValueError):
         experiment.blind_export(plan, _observations(), tmp_path / ".local/ballot")
+
+
+def _rehash(plan):
+    plan["plan_sha256"] = experiment.sha({k: v for k, v in plan.items() if k != "plan_sha256"})
+    return plan
+
+
+def _v2_plan(settings=None):
+    settings = settings or experiment.measurement_defaults()
+    plan = _plan()
+    for row in plan["requests"]:
+        row["payload"] = experiment.model_payload(
+            settings, row["payload"]["messages"], "evaluation")
+        row["payload_sha256"] = experiment.sha(row["payload"])
+        row["planned_max_output_tokens"] = 2048
+        row.update(experiment.request_measurement(settings, row["payload"]))
+    profile = experiment.measurement_profile(settings)
+    costs = [r["estimated_reservation_micro_usd"] for r in plan["requests"]]
+    plan.update(schema_version=2, measurement_profile=profile, request_count=2,
+                case_count=1, repetitions=1, provider=settings.provider, model=settings.model_name,
+                rates_micro_usd_per_million=profile["rates_micro_usd_per_million"],
+                estimated_reservation_micro_usd=None if None in costs else sum(costs))
+    return _rehash(plan)
+
+
+def _exact_settings(policy="prefer_exact"):
+    settings = experiment.measurement_defaults()
+    settings.token_measurement = experiment.token_measurement.TokenMeasurementConfig(
+        policy=policy, provider="deepseek", endpoint="https://api.deepseek.com",
+        model="deepseek-flash", renderer="deepseek-v4.1-flash-1017",
+        revision=experiment.token_measurement.REVISION)
+    return settings
+
+
+@pytest.mark.parametrize("kind", ["estimate", "exact_local_render", "unsupported"])
+def test_v2_native_receipt_and_route_identity(kind):
+    settings = experiment.measurement_defaults() if kind == "estimate" else _exact_settings()
+    if kind == "unsupported":
+        settings = _exact_settings("exact_required")
+        settings.model_name = "unverified-hosted-alias"
+    plan = _v2_plan(settings)
+    experiment.validate_plan(plan, settings)
+    row = plan["requests"][0]
+    native = experiment.token_measurement.measure_payload(settings, row["payload"], "evaluation")
+    assert row["measurement"] == native.receipt()
+    assert row["measurement"]["count_kind"] == kind
+    assert row["measurement"]["payload_sha256"] == row["payload_sha256"]
+    if kind == "unsupported":
+        assert row["budget_input_tokens"] is None
+        assert plan["estimated_reservation_micro_usd"] is None
+    elif kind == "exact_local_render":
+        assert row["measurement"]["artifact_hashes"] == experiment.token_measurement.ARTIFACTS
+        assert row["budget_input_tokens"] == native.reserved_input_tokens
+
+
+@pytest.mark.parametrize("field", [
+    "count", "artifact", "contract_artifact", "policy", "formatter", "budget", "total",
+])
+def test_v2_rehashed_measurement_tampering_is_rejected(field):
+    settings = _exact_settings()
+    plan = _v2_plan(settings)
+    row = plan["requests"][0]
+    if field == "count":
+        row["measurement"]["input_tokens"] += 1
+    elif field == "artifact":
+        row["measurement"]["artifact_hashes"]["encoding.py"] = "0" * 64
+    elif field == "contract_artifact":
+        plan["measurement_profile"]["count_contract"]["artifact_hashes"]["encoding.py"] = "0" * 64
+        assert experiment.token_measurement.ARTIFACTS["encoding.py"] != "0" * 64
+    elif field == "policy":
+        plan["measurement_profile"]["count_contract"]["policy"] = "exact_required"
+    elif field == "formatter":
+        plan["measurement_profile"]["source_sha256"]["companion.model"] = "0" * 64
+    elif field == "budget":
+        row["budget_input_tokens"] += 1
+    else:
+        plan["estimated_reservation_micro_usd"] += 1
+    with pytest.raises(ValueError):
+        experiment.validate_plan(_rehash(plan), settings)
+
+
+@pytest.mark.parametrize("change", ["route", "policy", "output", "context"])
+def test_v2_count_configuration_change_requires_new_plan(change):
+    settings = _exact_settings()
+    plan = _v2_plan(settings)
+    if change == "route":
+        settings.model_url = "https://different.example"
+    elif change == "policy":
+        settings.token_measurement = settings.token_measurement.model_copy(
+            update={"policy": "exact_required"})
+    elif change == "output":
+        settings.max_output_tokens = 1024
+    else:
+        settings.context_soft_tokens = 1000
+    with pytest.raises(ValueError):
+        experiment.validate_plan(plan, settings)
+
+
+@pytest.mark.parametrize("change", ["tools", "media", "overflow"])
+def test_v2_does_not_count_unsupported_surface_as_exact_or_trim_one_arm(change):
+    settings = _exact_settings("exact_required")
+    plan = _v2_plan(settings)
+    for row in plan["requests"]:
+        if change == "tools":
+            row["payload"]["tools"] = [{"type": "function", "function": {"name": "x"}}]
+        elif change == "media":
+            row["payload"]["messages"][-1]["content"] = [{"type": "image_url",
+                "image_url": {"url": "https://synthetic.invalid/image.png"}}]
+        else:
+            row["payload"]["messages"][-1]["content"] = "unique words " * 20000
+        row["payload_sha256"] = experiment.sha(row["payload"])
+        row["shared_context_sha256"] = experiment.sha(row["payload"]["messages"][1:])
+    with pytest.raises((ValueError, experiment.token_measurement.CoreError)):
+        experiment.validate_plan(_rehash(plan), settings)
+
+
+@pytest.mark.parametrize("failure", ["UNKNOWN", "FAILED", "NOT_STARTED", "truncated", "synthetic"])
+def test_v2_blind_restart_preserves_failure_denominator_and_complete_response(
+    tmp_path, monkeypatch, failure,
+):
+    monkeypatch.setattr(experiment, "ROOT", tmp_path)
+    plan = json.loads(json.dumps(_v2_plan()))
+    rows = [{**{k: r[k] for k in ("case", "repetition", "strategy", "payload_sha256")},
+             "evidence_type": "MODEL_RESPONSE", "text": "Export test only", "state": "SETTLED",
+             "complete_response": True, "finish_reason": "stop", "text_redacted": False}
+            for r in plan["requests"]]
+    if failure in {"UNKNOWN", "FAILED", "NOT_STARTED"}:
+        rows[0].update(state=failure, text="", evidence_type="FAILED_ATTEMPT",
+                       complete_response=False, finish_reason=None)
+    elif failure == "truncated":
+        rows[0].update(complete_response=False, finish_reason="length")
+    else:
+        rows[0]["evidence_type"] = "SYNTHETIC_MODEL_RESPONSE"
+    # Persist/reload as after interruption; no completion synthesis or denominator shrink.
+    source = tmp_path / "observations.json"
+    source.write_text(json.dumps(rows), encoding="utf-8")
+    ballot = experiment.blind_export(plan, json.loads(source.read_text("utf-8")),
+                                    tmp_path / ".local/ballot")
+    assert len(ballot) == 1 and ballot[0]["scorable"] is False
+    assert ballot[0]["input"] == plan["requests"][0]["payload"]["messages"][1:]
+    with pytest.raises(ValueError, match="All declared"):
+        experiment.blind_export(plan, rows[1:], tmp_path / ".local/incomplete")
+
+
+def test_prepare_defaults_to_v2_and_never_rewrites_existing_plan(tmp_path, monkeypatch):
+    monkeypatch.setattr(experiment, "ROOT", tmp_path)
+    monkeypatch.setattr(experiment, "build_context", lambda *args: (
+        experiment.measurement_defaults(), [{"role": "system", "content": "rules"},
+                                             {"role": "user", "content": "hello"}]))
+    output = tmp_path / ".local/v2"
+    plan = experiment.prepare(CASES[:1], output)
+    assert plan["schema_version"] == 2 and plan["actual_provider_calls"] == 0
+    experiment.validate_plan(plan)
+    original = (output / "plan.json").read_bytes()
+    with pytest.raises(FileExistsError):
+        experiment.prepare(CASES[:1], output)
+    assert (output / "plan.json").read_bytes() == original
