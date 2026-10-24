@@ -90,6 +90,11 @@ def refresh_importance(memory, row, now):
         return 0.5
     records = [record for record in saved if isinstance(record, dict)
                and type(record.get("salience")) is int and 1 <= record["salience"] <= 10
+               and isinstance(record.get("proof"), dict)
+               and record["proof"].get("event_ids") == [record.get("event_id")]
+               and memory.store.one("SELECT 1 FROM memory_evidence WHERE memory_id=? "
+                                    "AND event_id=? AND polarity=1",
+                                    (row["memory_id"], record.get("event_id")))
                and _valid(memory, record, now, _hash(row["content"]))] \
         if isinstance(saved, list) and len(saved) <= 20 else []
     value = sum(record["salience"] for record in records) / (10 * len(records)) if records else 0.5
