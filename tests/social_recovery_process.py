@@ -38,13 +38,36 @@ async def main():
             os._exit(23)
         return result
 
+    calls = []
+
     def provider(request):
+        calls.append(True)
         return httpx.Response(200, json={
             "choices": [{"message": {"content": encode({
                 "kind": "qzone_publish", "text": "合成公开阅读想法。",
                 "source_refs": [args["source_id"]],
             })}}], "usage": {"prompt_tokens": 100, "completion_tokens": 20},
         })
+
+    if mode in {"core_defer", "core_resume"}:
+        from companion import cloud_budget
+        from companion.contracts import CoreError
+        from companion.core import Core
+        from companion.retrieval import SemanticIndex
+
+        SemanticIndex.warmup = lambda self: None
+        if mode == "core_defer":
+            def refuse(*args, **kwargs):
+                raise CoreError("CLOUD_DAILY_BUDGET_EXHAUSTED", 429)
+            cloud_budget.reserve = refuse
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            with Core(settings, ModelClient(settings, client), lambda: args["now"]) as worker:
+                worked = await worker.run_once(mode)
+                idle = not await worker.run_once(mode + "-idle")
+        await asyncio.to_thread(Path(args["result_path"]).write_text, json.dumps({
+            "pid": os.getpid(), "worked": worked, "idle": idle, "provider_calls": len(calls),
+        }), encoding="utf-8")
+        return
 
     budget.reserve, budget.complete = reserve, complete
     store = Store(settings.database)
