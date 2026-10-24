@@ -3,6 +3,9 @@ import json
 import re
 import sqlite3
 from datetime import UTC, datetime
+from types import SimpleNamespace
+
+from companion_onebot_bridge.delivery_receipts import DeliveryReceipts
 
 
 def _unique_fields(items):
@@ -60,8 +63,11 @@ def normalize(event, owner_id, bot_id, token="", protocol_epoch=""):
     return key, payload
 
 
-class Spool:
+class Spool(DeliveryReceipts):
     def __init__(self, path):
+        self.path = path
+        self.reconciliation_only = False
+        self.config = SimpleNamespace(max_voice_lease_bytes=65536)
         self.db = sqlite3.connect(path)
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
@@ -74,6 +80,10 @@ class Spool:
             "CREATE TABLE IF NOT EXISTS protocol_generations "
             "(epoch TEXT PRIMARY KEY,backend TEXT NOT NULL)"
         )
+        self.db.execute("CREATE TABLE IF NOT EXISTS results "
+                        "(message_id TEXT PRIMARY KEY,body TEXT NOT NULL,"
+                        "state TEXT NOT NULL DEFAULT 'pending')")
+        self.db.execute("CREATE TABLE IF NOT EXISTS delivery_identity (value TEXT NOT NULL)")
         self.db.commit()
 
     def bind_backend(self, backend, epoch):
@@ -98,9 +108,12 @@ class Spool:
                 and self.db.execute("SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
             ):
                 raise ValueError("drain the existing bridge inbox before switching backend")
+            if self.db.execute("SELECT 1 FROM results WHERE state='pending' LIMIT 1").fetchone():
+                raise ValueError("reconcile delivery receipts before switching backend")
             self.db.execute("INSERT INTO protocol_generations VALUES (?,?)", (epoch, backend))
 
     def put(self, key, payload):
+        self.bind_origin(payload)
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with self.db:
             prior = self.db.execute("SELECT body FROM inbox WHERE key=?", (key,)).fetchone()
@@ -140,18 +153,43 @@ class Spool:
         response.raise_for_status()
 
 
-async def deliver_one(client, item, send):
-    message_id = item["message_id"]
-    body = {"lease_token": item["lease_token"]}
-    started = await client.post(f"/internal/v1/deliveries/{message_id}/begin-send", json=body)
-    started.raise_for_status()
-    # If begin-send times out, do not send: the server may already have committed SENDING.
-    try:
-        accepted = await send(item["conversation_platform_session_key"], item["content"]["text"])
-        outcome = "SENT" if accepted is True else "DELIVERY_UNCERTAIN"
-    except Exception:
-        outcome = "DELIVERY_UNCERTAIN"
-    result = await client.post(
-        f"/internal/v1/deliveries/{message_id}/result", json={**body, "result": outcome}
-    )
-    result.raise_for_status()
+    def bind_origin(self, payload):
+        origin = payload["conversation"]["platform_session_key"]
+        owner = payload["actor"]["platform_user_id"]
+        bot = payload["source_event_id"].split(":", 1)[0]
+        value = json.dumps([owner, bot, origin])
+        with self.db:
+            row = self.db.execute("SELECT value FROM delivery_identity").fetchone()
+            if row and row[0] != value:
+                raise ValueError("BRIDGE_IDENTITY_CHANGED")
+            if not row:
+                self.db.execute("INSERT INTO delivery_identity VALUES (?)", (value,))
+
+    def delivery_identity(self, owner, bot):
+        # Upgrade the original inbox in place; preserve each body and idempotency key.
+        for row in self.db.execute("SELECT body FROM inbox"):
+            self.bind_origin(json.loads(row[0]))
+        row = self.db.execute("SELECT value FROM delivery_identity").fetchone()
+        if not row:
+            return None
+        saved_owner, saved_bot, origin = json.loads(row[0])
+        if (owner, bot) != (saved_owner, saved_bot):
+            raise ValueError("BRIDGE_IDENTITY_CHANGED")
+        return origin
+
+    def check_backend(self, backend, epoch):
+        current = self.db.execute(
+            "SELECT epoch,backend FROM protocol_generations ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if current != (epoch, backend):
+            raise ValueError("BRIDGE_IDENTITY_CHANGED")
+
+    def capacity(self, extra_bytes=0):
+        from pathlib import Path
+
+        if sum(p.stat().st_size for p in Path(self.path).parent.glob(
+            Path(self.path).name + "*")) + extra_bytes >= 64 * 1024 * 1024:
+            raise ValueError("SPOOL_DISK_CAPACITY")
+
+    def trace_for(self, delivery_key):
+        return None

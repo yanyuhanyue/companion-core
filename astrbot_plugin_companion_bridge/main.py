@@ -3,12 +3,15 @@ import json
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
+
+from companion_onebot_bridge.outbound import deliver_tick
 
 from .bridge import Spool, normalize
 from .content import ImageQueue, prepare_shared, redact_image_urls, share_candidates
-from .expression_adapter import DEFAULT_CATEGORIES, MemeLibrary, deliver_expression
+from .delivery import host_driver
+from .expression_adapter import DEFAULT_CATEGORIES, MemeLibrary
 from .reader import reader_tick, validate_source_api
 
 
@@ -59,6 +62,7 @@ class CompanionBridge(Star):
             self.spool.bind_backend(
                 self.config.get("protocol_backend", "napcat"), self.protocol_epoch
             )
+            self.spool.delivery_identity(owner, bot)
             self.client = httpx.AsyncClient(
                 base_url=self.config.get("core_url", "http://companion-api:8765"),
                 headers={"Authorization": "Bearer " + token},
@@ -198,18 +202,11 @@ class CompanionBridge(Star):
         while True:
             try:
                 await self.spool.flush_one(self.client)
-                response = await self.client.post(
-                    "/internal/v1/deliveries/lease", json={"worker_id": "astrbot", "limit": 5}
-                )
-                response.raise_for_status()
-                for item in response.json()["items"]:
-                    await deliver_expression(
-                        self.client,
-                        item,
-                        self.meme_library,
-                        self.build_chain,
-                        self.context.send_message,
-                    )
+                if await self.spool.flush_result(self.client):
+                    continue
+                driver = host_driver(self.context, self.config, self.spool, self.meme_library)
+                if driver is not None:
+                    await deliver_tick(self.client, driver, self.spool)
                 failures = 0
             except Exception:
                 failures += 1
@@ -218,17 +215,6 @@ class CompanionBridge(Star):
                         "Companion bridge unavailable; inbox retained, send state preserved"
                     )
             await asyncio.sleep(min(30, max(1, failures * 2)))
-
-    async def send_text(self, origin, text):
-        return await self.context.send_message(origin, MessageChain().message(text))
-
-    @staticmethod
-    def build_chain(text, image):
-        if image is None:
-            return MessageChain().message(text)
-        from astrbot.api.message_components import Image, Plain
-
-        return MessageChain([Plain(text), Image.fromBytes(image)])
 
     async def terminate(self):
         tasks = self.reader_tasks + [task for task in (self.task, self.content_task) if task]

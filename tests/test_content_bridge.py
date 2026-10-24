@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from astrbot_plugin_companion_bridge import content
-from astrbot_plugin_companion_bridge.bridge import Spool
+from astrbot_plugin_companion_bridge.bridge import Spool, normalize
 
 
 @pytest.fixture
@@ -194,7 +194,7 @@ def test_share_parser_failure_retains_owner_text(bridge_module, tmp_path, monkey
 def test_queue_waits_for_durable_inbox_acceptance(tmp_path, monkeypatch):
     async def scenario():
         spool = Spool(str(tmp_path / "spool.db"))
-        spool.put("key", {"event_id": "event"})
+        spool.put("key", normalize(event([]), "10001", "10002")[1])
         order, finished = [], asyncio.Event()
 
         def state(key):
@@ -305,7 +305,13 @@ def test_slow_image_transfer_does_not_block_inbox_or_delivery_pump(bridge_module
         ) as client:
             bridge = bridge_module.CompanionBridge(object(), config(content_enabled=True))
             bridge.client = client
-            bridge.spool = types.SimpleNamespace(flush_one=flush)
+            async def no_result(*args):
+                return False
+
+            bridge.spool = types.SimpleNamespace(flush_one=flush, flush_result=no_result,
+                config=types.SimpleNamespace(max_voice_lease_bytes=65536))
+            monkeypatch.setattr(bridge_module, "host_driver", lambda *args:
+                types.SimpleNamespace(config=types.SimpleNamespace(delivery_enabled=True)))
             queue = content.ImageQueue(client, lambda key: None)
             queue.put("key", "event", [{"slot": 0, "url": "private"}])
             image_task = asyncio.create_task(queue.run())

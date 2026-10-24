@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
-from astrbot_plugin_companion_bridge.bridge import Spool, deliver_one, normalize
+from astrbot_plugin_companion_bridge.bridge import Spool, normalize
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.config import Settings
@@ -21,6 +21,7 @@ from companion.model import ModelClient
 from companion.store import Store, migrate
 from companion.transport import begin_send, delivery_result, enqueue, lease_deliveries
 from tests.conftest import event, ingest, run
+from tests.support.astrbot_delivery import deliver_one
 
 
 def lease(core):
@@ -97,11 +98,11 @@ def test_m0_03_bridge_normalizes_without_llm_and_sends_once(core, tmp_path):
 
         async def send(origin, text):
             sent.append((origin, text))
-            return True
+            return "42"
 
-        run(deliver_one(AsyncAPI(), item, send))
+        run(deliver_one(AsyncAPI(), item, send, spool=spool))
         with pytest.raises(httpx.HTTPStatusError):
-            run(deliver_one(AsyncAPI(), item, send))
+            run(deliver_one(AsyncAPI(), item, send, spool=spool))
         assert len(sent) == 1
         run(spool.flush_one(AsyncAPI()))
         assert spool.db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0] == 0

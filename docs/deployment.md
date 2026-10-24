@@ -43,7 +43,7 @@ docker network connect companion-internal <你的AstrBot容器名>
 uv run python scripts/package_bridge.py
 ```
 
-生成 `dist/astrbot_plugin_companion_bridge-v0.5.0.zip`。在 AstrBot 安装本地插件 ZIP，或把 `astrbot_plugin_companion_bridge/` 目录放入其插件目录，然后重载插件。私有仓库可用本地 ZIP，避免在 QQ 或插件配置里保存 GitHub token。
+生成 `dist/astrbot_plugin_companion_bridge-v0.5.0.zip`。在 AstrBot 安装本地插件 ZIP，然后重载插件。ZIP 将仓库中唯一的 transport/receipt 实现封装在插件命名空间内，不需要安装 Core；直接复制未打包的源码目录不足以安装共享依赖。私有仓库可用本地 ZIP，避免在 QQ 或插件配置里保存 GitHub token。
 
 配置插件：
 
@@ -58,7 +58,11 @@ uv run python scripts/package_bridge.py
 
 主人会话的 AstrBot 默认 Agent 应显式关闭。桥接监听器还会以高优先级调用 `stop_event()`，在任何 HTTP 请求前取得回复所有权；Core 故障时会把消息留在插件收件箱，不回落到第二个 LLM。其他插件仍可能在更早的优先级运行，必须在实机确认没有重复回复。不要对主人启用另一个独立聊天插件。
 
-`Context.send_message()` 在此版本仅返回是否匹配到平台，发送异常会向上传播。成功表示调用链完成，不表示主人已读；它不提供 OneBot 消息 ID，因此首版 `provider_message_id` 可以为空，状态不明需人工核对。
+桥接使用宿主 aiocqhttp 的原生 `get_client().call_action()`，并校验 `send_private_msg` 返回的非零消息 ID；`Context.send_message()` 的布尔值只表示找到平台，不能证明发送成功。AstrBot 与 OneBot 复用同一个 Outbox `deliver_item` 流程和持久化回执实现。原生 ACK 丢失保留 `DELIVERY_UNCERTAIN`；结果上报失败只重报原回执，不重发 QQ。
+
+本片 AstrBot 支持无窗口的主人私聊文字及已授权的本地表情图片。宿主高层接口没有最终传输钩子，因此 live window、分段回复、voice 和账户动作在此入口保持不可用；这些能力继续由原 OneBot 窗口路径处理，不能用布尔返回或更宽的权限模拟支持。只为同一机器人启用一个交付入口。
+
+升级前停止旧插件。继续使用原数据目录和 `inbox.sqlite3`：原 inbox 正文、source ID、幂等键和 `protocol_generations` 保持不变，初始化时从尚存 inbox 绑定目标身份，并新增回执表。旧版本没有留下的发送回执不会被推断成成功，Core 中已有 UNKNOWN 必须按原流程处理。若旧 inbox 已空且没有身份记录，插件等待下一条通过身份校验的主人输入后才领取新交付。存在待报告回执时不能切换协议 epoch；恢复进程先完成报告。Reader 和图片上传队列在本片保留原行为。
 
 ## 开启记忆
 
@@ -122,3 +126,10 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 自然到期在独立 ErasureLedger 中记录为 `raw_retention`，同时保存当次 `retention_cutoff`，恢复旧备份时按相同边界重放。既有删除记录继续执行原删除语义。写入新记录后，应用回退须使用支持该记录类型的版本，保留最新独立账本。
 
 在线 `/纠正这一条` 将原始命令事件与新事实一起提交。Worker 在事实提交后、成功回执登记前退出时，可恢复同一个新记忆 ID；租约、STOP、截止和遗忘仍在恢复与提交时复核。
+
+
+### Bridge 分层依据与验证
+
+本次复用 DSH QQ 网关的驱动分层（[gateway/bootstrap.ts](https://github.com/tencent-connect/dsh-qqbot/blob/main/src/gateway/bootstrap.ts)），保留本项目 Outbox 而不采用回调直接发送。AstrBot 上游 `e5e21b71aec5642f110eb115eb8e9a0d8028b7e5` 的 [Context.send_message](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/star/context.py) 只返回是否找到平台；其 aiocqhttp 的 `send_by_session` 丢弃原生结果。原生 action 客户端的 [公开实现](https://github.com/nonebot/aiocqhttp/blob/master/aiocqhttp/api_impl.py) 负责请求与返回数据，插件仅消费消息 ID。该边界不提供本项目窗口发送的最终 I/O 钩子。
+
+`tests/test_astrbot_delivery_convergence.py` 使用真实 HTTP Core、独立 worker 进程及模拟宿主 action，覆盖 text/image、发送前拒绝、ACK/报告丢失、重启、epoch 和旧 spool 升级，并从隔离子进程验证插件 ZIP 无 Core 包依赖。OneBot 分段、voice 及撤回的既有原生边界测试继续适用。

@@ -7,7 +7,8 @@ from .native_actions import prepare
 from .onebot_client import bounded_post
 
 
-def validate_item(item, config, *, companion=False, account_scope=False, voice_scope=False):
+def validate_item(item, config, *, companion=False, account_scope=False, voice_scope=False,
+                  image_scope=False):
     if not isinstance(item, dict):
         raise ValueError("INVALID_DELIVERY")
     if not companion and "window_origin_event_id" in item:
@@ -67,7 +68,7 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
         raise ValueError("TEXT_DELIVERY_REQUIRED")
     if "image" in content:
         image = content["image"]
-        if (not companion or item["action_type"] != "qq.private.reply"
+        if (not (companion or image_scope) or item["action_type"] != "qq.private.reply"
             or not isinstance(image, dict)
             or not isinstance(image.get("category"), str)
             or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", image["category"])):
@@ -90,7 +91,7 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
         return True
     if not onebot.config.delivery_enabled and guard is None:
         return False
-    request = {"worker_id": "onebot-direct", "limit": 1}
+    request = {"worker_id": getattr(onebot, "worker_id", "onebot-direct"), "limit": 1}
     if delivery_lane == "qq_account":
         if guard is None or not getattr(onebot, "account_scope", False):
             raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
@@ -105,10 +106,21 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
     if not batch["items"]:
         return False
     item = batch["items"][0]
+    return await deliver_item(client, onebot, spool, item, metrics=metrics, guard=guard,
+                              delivery_lane=delivery_lane)
+
+
+async def deliver_item(client, onebot, spool, item, *, metrics=None, guard=None,
+                       delivery_lane="owner_private"):
+    """The single leased-item dispatch lifecycle for all transport drivers."""
+    voice_scope = bool(getattr(onebot, "voice_scope", False))
     if item.get("delivery_lane", "owner_private") != delivery_lane:
         raise ValueError("INVALID_DELIVERY_LANE")
     validate_item(item, onebot.config, companion=getattr(onebot, "companion", False),
-                  account_scope=getattr(onebot, "account_scope", False), voice_scope=voice_scope)
+                  account_scope=getattr(onebot, "account_scope", False), voice_scope=voice_scope,
+                  image_scope=getattr(onebot, "image_scope", False))
+    if hasattr(onebot, "prepare_delivery"):
+        await onebot.prepare_delivery(item)
     if guard is not None:
         guard.reserve(item)
     trace = spool.trace_for(item.get("delivery_key"))
@@ -142,7 +154,8 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
         if guard is not None and await guard.cancel_before_send(item):
             return True
     ack_ns = time.perf_counter_ns()
-    spool.finish_delivery(message_id, provider_id)
+    spool.finish_delivery(message_id, provider_id,
+                          error_code=getattr(onebot, "preflight_error", None))
     if metrics:
         metrics.emit(
             "t_onebot_send_ack" if provider_id else "delivery_uncertain",

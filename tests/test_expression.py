@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 from PIL import Image
 from pydantic import ValidationError
 
-from astrbot_plugin_companion_bridge.expression_adapter import MemeLibrary, deliver_expression
+from astrbot_plugin_companion_bridge.expression_adapter import MemeLibrary
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult
 from companion.core import Core
@@ -15,6 +15,7 @@ from companion.expression import ExpressionEngine, ImageIntent, ResponseIntent
 from companion.store import Store
 from companion.transport import begin_send, delivery_result, digest
 from tests.conftest import ingest, run
+from tests.support.astrbot_delivery import deliver_expression, journal
 from tests.test_m0 import lease
 
 
@@ -308,9 +309,10 @@ def test_expression_single_chain_send_and_preflight_fallback(core, tmp_path, fai
         sent.append((origin, chain))
         if failure == "send_error":
             raise httpx.ReadTimeout("ambiguous platform result")
-        return failure != "send_false"
+        return None if failure == "send_false" else "42"
 
-    report = run(deliver_expression(CoreAPI(core), item, library, build, send))
+    report = run(deliver_expression(CoreAPI(core), item, library, build, send,
+                                    spool=journal(tmp_path)))
     assert len(sent) == 1 and sent[0][1]["text"] == "真不错。"
     assert (sent[0][1]["image"] is None) == (failure in {"missing", "builder"})
     assert report["result"] == (
@@ -319,7 +321,7 @@ def test_expression_single_chain_send_and_preflight_fallback(core, tmp_path, fai
     if failure in {"missing", "builder"}:
         assert report["error_code"] == "IMAGE_PREFLIGHT_SKIPPED"
     with pytest.raises(CoreError):
-        run(deliver_expression(CoreAPI(core), item, library, build, send))
+        run(deliver_expression(CoreAPI(core), item, library, build, send, spool=journal(tmp_path)))
     assert len(sent) == 1
     assert lease(core) == []
 
@@ -333,7 +335,7 @@ def test_expression_ack_timeout_never_replays_text_or_media(core, tmp_path, time
 
     async def send(origin, chain):
         sent.append(chain)
-        return True
+        return "42"
 
     api = CoreAPI(core, begin_timeout=timeout == "begin", result_timeout=timeout == "result")
     with pytest.raises(httpx.ReadTimeout):
@@ -343,7 +345,7 @@ def test_expression_ack_timeout_never_replays_text_or_media(core, tmp_path, time
                 item,
                 MemeLibrary(tmp_path, enabled=True),
                 lambda text, image: (text, image),
-                send,
+                send, spool=journal(tmp_path),
             )
         )
     assert len(sent) == (0 if timeout == "begin" else 1)
@@ -365,12 +367,13 @@ def test_erasure_after_image_preparation_prevents_any_platform_send(core, tmp_pa
 
     async def send(origin, chain):
         sent.append(chain)
-        return True
+        return "42"
 
     with pytest.raises(CoreError, match="STALE_DELIVERY_LEASE"):
         run(
             deliver_expression(
-                CoreAPI(core), item, MemeLibrary(tmp_path, enabled=True), build, send
+                CoreAPI(core), item, MemeLibrary(tmp_path, enabled=True), build, send,
+                spool=journal(tmp_path)
             )
         )
     assert sent == []

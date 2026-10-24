@@ -16,7 +16,6 @@ import pytest
 from cryptography.fernet import Fernet
 
 from astrbot_plugin_companion_bridge.bridge import Spool
-from astrbot_plugin_companion_bridge.expression_adapter import deliver_expression
 from companion.api import create_app
 from companion.backup import backup, restore
 from companion.model import ModelResponse
@@ -27,6 +26,7 @@ from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.worker import tick
 from tests.conftest import FakeModel, run
+from tests.support.astrbot_delivery import deliver_expression
 from tests.test_content_bridge import bridge_module  # noqa: F401
 from tests.test_content_bridge import config as bridge_config
 from tests.test_content_bridge import event as bridge_event
@@ -94,7 +94,7 @@ async def submit(bridge, http, text=URL, *, raw=None, number=1):
     return body["event_id"]
 
 
-async def receipt(http, sent, *, uncertain=False):
+async def receipt(http, sent, *, spool, uncertain=False):
     result = await http.post("/internal/v1/deliveries/lease", json={"worker_id": "p4-mock"})
     result.raise_for_status()
     items = result.json()["items"]
@@ -103,9 +103,9 @@ async def receipt(http, sent, *, uncertain=False):
     async def send(origin, text):
         assert origin == "qq:FriendMessage:10001"
         sent.append(text)
-        return None if uncertain else True
+        return None if uncertain else "42"
 
-    await deliver_expression(http, items[0], None, lambda text, image: text, send)
+    await deliver_expression(http, items[0], None, lambda text, image: text, send, spool=spool)
     return items[0]
 
 
@@ -161,7 +161,7 @@ def test_p4_ten_redacted_source_samples_reach_bridge_reply(rehearsal, tmp_path, 
             assert (await read_source(core, app, tmp_path, response(article(sample))))[0]
             assert await core.run_once()
             sent = []
-            await receipt(http, sent)
+            await receipt(http, sent, spool=bridge.spool)
             assert len(sent) == 1 and sample["title"] in sent[0]
             assert "原正文已脱敏移除" in sent[0] and SECRET not in sent[0]
             evidence = core.content.context(root)[0]
@@ -205,11 +205,11 @@ def test_p4_upstream_failure_does_not_block_chat(rehearsal, tmp_path, status, pa
             row = core.store.one("SELECT * FROM exploration_requests")
             assert row["last_error_code"] == code and len(backend.requests) == 1
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
             await submit(bridge, http, "继续普通聊天", number=2)
             assert await core.run_once()
             sent = []
-            await receipt(http, sent)
+            await receipt(http, sent, spool=bridge.spool)
             assert len(sent) == 1 and not core.store.rows("SELECT * FROM observations")
             assert not await core.run_once()
 
@@ -238,7 +238,7 @@ def test_p4_grant_disabled_blocks_io_before_get(rehearsal, tmp_path):
                 31
             )  # No lease was acquired; the existing bounded fallback still works.
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
 
     run(scenario())
 
@@ -256,7 +256,7 @@ def test_p4_network_unknown_retains_reservation_and_no_reread(rehearsal, tmp_pat
             assert core.exploration.lease("heybox") is None
             core.clock.advance(31)
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
 
     run(scenario())
 
@@ -275,7 +275,7 @@ def test_p4_spool_restart_duplicate_does_not_repeat_source_or_delivery(rehearsal
             assert len(backend.requests) == 1
             core.clock.advance(31)  # Unprocessed article image references have a bounded wait.
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
             await bridge.on_private_message(bridge_event([], text=URL))
             await bridge.spool.flush_one(http)
             assert not await core.run_once()
@@ -312,7 +312,7 @@ def test_p4_bilibili_source_scope_reaches_bridge_reply(rehearsal, subtitles):
             assert bool(reading["spans"]) is subtitles
             assert await core.run_once()
             sent = []
-            await receipt(http, sent)
+            await receipt(http, sent, spool=bridge.spool)
             assert "星空的颜色" in sent[0] and "看完" not in sent[0]
             assert len(backend.requests) == (3 if subtitles else 2)
 
@@ -358,7 +358,7 @@ def test_p4_qq_image_manifests_use_mock_analysis_without_storing_signed_urls(reh
             assert len(vision.calls) == slots
             assert await core.run_once()
             sent = []
-            await receipt(http, sent)
+            await receipt(http, sent, spool=bridge.spool)
             assert "图片中有一只猫" in sent[0]
             assert all(r["trust"] == "external_untrusted" for r in core.content.context(root))
 
@@ -384,10 +384,10 @@ def test_p4_timeout_stale_receipt_and_pause_leave_ordinary_fifo_usable(rehearsal
                 assert late.status_code == 409
             core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
             await submit(bridge, http, "普通聊天", number=2)
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
             assert not core.store.rows("SELECT * FROM observations")
             assert core.content.status(root)["pending"] is False
 
@@ -402,14 +402,14 @@ def test_p4_delivery_unknown_never_resends_and_following_reply_proceeds(rehearsa
             await submit(bridge, http, "普通问候")
             assert await core.run_once()
             sent = []
-            item = await receipt(http, sent, uncertain=True)
+            item = await receipt(http, sent, spool=bridge.spool, uncertain=True)
             core.clock.advance(3600)
             assert (
                 await http.post("/internal/v1/deliveries/lease", json={"worker_id": "restarted"})
             ).json()["items"] == []
             await submit(bridge, http, "下一条普通聊天", number=2)
             assert await core.run_once()
-            await receipt(http, sent)
+            await receipt(http, sent, spool=bridge.spool)
             assert len(sent) == 2
             assert (
                 core.store.one(
@@ -433,7 +433,7 @@ def test_p4_zero_budget_and_forged_authority_never_reach_source(rehearsal):
             assert denied.status_code == 401
             core.clock.advance(31)
             assert await core.run_once()
-            await receipt(http, [])
+            await receipt(http, [], spool=bridge.spool)
 
     run(scenario())
 
