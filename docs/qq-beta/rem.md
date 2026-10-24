@@ -1,8 +1,8 @@
 # 私人 REM 创作
 
 REM 使用已有 Memory 事实生成明确标为虚构的私人创作，默认关闭。
-本模块已经接入原生 Core job、预算与擦除链路；自动 selector 与控制台 API
-由集成候选接线。仅有模块测试通过不表示后台已自动运行，也不表示真实模型或 QQ 已验收。
+本模块已经接入原生 Core job、预算、擦除、Life selector 与主人 cognition 读取接口。
+合成入口验收通过不表示已启用后台运行，也不表示真实模型或 QQ 已验收。
 
 ## 配置和授权
 
@@ -39,6 +39,9 @@ REM 不提供模型工具，每次生成最多一次模型调用。
 
 `rem.records(core, limit=20)` 返回任务状态、明确的虚构标记、来源 ID、
 有效创作及原始 `model_usage` 摘要。外层控制接口必须验证主人身份。
+`POST /internal/v2/cognition` 的 `kind=rem, record_id=<rem_id>` 在主人认证后读取精确记录；
+该接口只返回 FICTION/UNVERIFIED 元数据、有效来源 ID 和原费用引用，隐藏标题、正文与问题文本。
+它不会触发调度或模型调用，也不是作品正文查看入口。
 来源失效、撤回或记录到期后不再返回正文、问题或来源列表。
 
 来源遗忘通过原有依赖与擦除注册表清除 REM 私有内容。
@@ -58,5 +61,7 @@ DSH 的执行前容量检查与终态结算约束用于对照检查；其进程�
 `tests/test_rem_native.py` 使用真实签名输入审批和 TCP ingest、原生 Core worker、
 原生 SDK/预算/擦除流程，仅模拟 provider HTTP。
 `tests/rem_process.py` 在独立进程验证正常完成、调用后退出及恢复不重付。
-测试回执由集成交接文件统一记录；自动调度、控制台入口与真实环境验收需要
-在最终组合候选上另行确认。
+`tests/test_rem_life_entrypoint.py` 补充真实签名 HTTP 输入到独立 Life worker、
+原 selector 创建及执行 REM 的连续证据。
+成功生成测试还验证 DREAM/SKIP 原生记录经真实 owner-control HTTP 按精确 ID 读取，
+费用引用相同且没有正文泄漏。测试回执由集成交接文件统一记录；真实环境验收仍未执行。
