@@ -1,125 +1,143 @@
 """Real Bridge wiring with public fixtures and Core HTTP transport substitutes."""
 
 import asyncio
-import base64
-import hashlib
 import json
 import sqlite3
-from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from companion_onebot_bridge.continuous import MemePump
 from companion_onebot_bridge.meme_caption import (
-    CaptionAsset,
     CaptionContext,
-    CaptionIdentity,
-    CaptionRequest,
-    digest,
-    parse,
     source_evidence,
 )
 from companion_onebot_bridge.meme_runtime import MemeRuntime
 from companion_onebot_bridge.meme_semantic_http import BASE, CaptionHTTP, SemanticHTTP
+from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.test_meme_runtime import RULE, CoreHTTP, Window, item, public_transport
+from tests.support.native_meme import CASES, capture, case, native_item, recall
+from tests.test_meme_runtime import RULE, CoreHTTP, public_transport
 from tests.test_next_memes_discovery import resolver
-from tests.test_next_memes_semantic import EMBEDDING, IDENTITY, MockCoreCaptionClient, MockEmbedder
-from tests.test_onebot_direct import config, normalized, raw_event
 
 
 @pytest.fixture
-def make_runtime(tmp_path):
-    spools = []
+def make_runtime(tmp_path, core_factory, monkeypatch):
+    from contextlib import ExitStack
 
-    def make():
-        cfg = config(
-            data_dir=str(tmp_path / str(len(spools))), meme_enabled=True,
-            meme_discovery_enabled=True, meme_semantics_enabled=True,
-            meme_trusted_sources=(RULE,),
-        )
-        spool = Spool(cfg)
-        spool.db.row_factory = sqlite3.Row
-        spools.append(spool)
-        window = Window(spool)
-        event = normalized(raw_event(text="我需要抱抱，想要小猫陪伴"), cfg)
-        window.add(event)
-        calls = []
-        runtime = MemeRuntime(window, transport=public_transport(calls, semantic=False),
-                              resolver=resolver)
-        window.memes = runtime
-        return runtime, event, calls
+    from companion import meme_core
+    from companion.retrieval import SemanticIndex
+    from tests.support.native_meme import NativeCase
 
-    yield make
-    for spool in spools:
-        spool.close()
+    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
+    monkeypatch.setattr(meme_core, "encoder", lambda *args, **kwargs: SimpleNamespace(
+        query_embed=lambda text: [[1.0] + [0.0] * 511],
+        passage_embed=lambda texts: [[1.0] + [0.0] * 511 for _ in texts]))
+    with ExitStack() as resources:
+        def make(*, discoveries=1):
+            core = resources.enter_context(core_factory(tmp_path))
+            core.settings.meme_discovery_daily_download_bytes = discoveries * 16 * 1024 * 1024
+            core.settings.meme_discovery_daily_storage_bytes = discoveries * 4 * 1024 * 1024
+            fixture = NativeCase(core, tmp_path, rules=(RULE,), semantic=True)
+            resources.callback(fixture.spool.close)
+            fixture.spool.db.row_factory = sqlite3.Row
+            calls = []
+            runtime = MemeRuntime(fixture.owner,
+                transport=public_transport(calls, semantic=False), resolver=resolver)
+            fixture.owner._memes = runtime
+            return runtime, capture(runtime, text="我需要抱抱，想要小猫陪伴"), calls
+        yield make
 
 
-def admit(runtime, event):
-    with runtime.db:
-        runtime.db.execute("INSERT INTO inbox VALUES (?, '', NULL, '', 'accepted')",
-                           (event["event_id"],))
+async def admit(runtime, event, client):
+    while await runtime.window.flush_one(client):
+        pass
+    assert runtime.db.execute("SELECT state FROM inbox WHERE key=?",
+                              (event["event_id"],)).fetchone()[0] == "accepted"
 
 
 class SemanticCore(CoreHTTP):
+    """Real caption/query/offer endpoints; only external model output is synthetic."""
+
     def __init__(self, runtime, event, **kwargs):
+        from companion import meme_core
+
         super().__init__(runtime, event, **kwargs)
-        self.caption = MockCoreCaptionClient(runtime.library)
+        self.caption = SimpleNamespace(submissions=[], polls=[], model_calls=[],
+                                       state="SUCCEEDED", after_get=None)
+        self.processed = set()
         self.semantic_calls = []
         self.query_started, self.query_release = asyncio.Event(), None
         self.query_change = None
         self.reject_offer = False
-        self.identity, self.embedding = IDENTITY, EMBEDDING
+        self.identity = self.original_identity = meme_core.identity(self.core.settings)
+        self.embedding = meme_core.SPEC
 
-    async def handle(self, request):
-        path, body = request.url.path, json.loads(request.content)
-        if path.startswith(BASE + "/discovery/"):
-            return super().handle(request)
-        assert request.headers["Authorization"] == "Bearer " + self.token
-        self.semantic_calls.append((path, body))
-        if path.endswith("/semantics/profile"):
-            result = {"identity": self.identity.model_dump(mode="json"),
-                      "embedding": self.embedding.model_dump(mode="json")}
-        elif path == BASE + "/captions":
-            asset = dict(body["asset"])
-            data = base64.b64decode(asset.pop("data_base64"))
-            caption_request = CaptionRequest(
-                CaptionAsset(data=data, **asset), parse(CaptionContext, body["context"]),
-                parse(CaptionIdentity, body["identity"]),
-            )
-            assert digest(body["source_evidence"]) == asset["source_evidence_sha256"]
-            assert hashlib.sha256(data).hexdigest() == asset["asset_sha256"]
-            result = await self.caption.submit(caption_request)
-        elif path.startswith(BASE + "/captions/"):
-            assert body == {}
-            result = await self.caption.get(path.rsplit("/", 1)[1])
-        elif path == BASE + "/embeddings":
-            assert set(body) == {"job_id", "event_id", "reply_revision"}
-            assert body["job_id"] in self.caption.jobs
-            if (body["event_id"] != self.claim["event_id"]
-                or body["reply_revision"] != self.claim["reply_revision"]):
-                return httpx.Response(409, json={"error": "REPLY_SUPERSEDED"})
-            result = await MockEmbedder().embed(("Core-owned caption",))
-        elif path == BASE + "/query":
+    async def worker(self, job_id):
+        from companion.core import Core
+        from companion.model import ModelClient
+        from tests.test_meme_core import CAPTION
+
+        def answer(request):
+            self.caption.model_calls.append(json.loads(request.content))
+            value = {"choices": [{"message": {"content": json.dumps(CAPTION)}}]}
+            if self.caption.state != "UNKNOWN":
+                value["usage"] = {"prompt_tokens": 1050, "completion_tokens": 100,
+                                  "total_tokens": 1150}
+            return httpx.Response(200, json=value)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as provider:
+            with Core(self.core.settings, ModelClient(self.core.settings, provider),
+                      self.core.clock) as independent:
+                assert independent.store is not self.core.store
+                assert await independent.run_once("native-meme-caption-fixture")
+        self.processed.add(job_id)
+
+    async def request(self, request):
+        await super().request(request)
+        path = request.url.path
+        if path.startswith(BASE + "/captions/"):
+            job_id = path.rsplit("/", 1)[1]
+            self.caption.polls.append(job_id)
+            if job_id not in self.processed:
+                await self.worker(job_id)
+        if path == BASE + "/query":
+            # The foreground-query tests inspect the pre-generation phase. The
+            # discovery tests above independently used completed foreground work.
+            self.core.store.execute("UPDATE jobs SET state='QUEUED' WHERE kind='chat' "
+                "AND state='SUCCEEDED' AND event_id=?",
+                (json.loads(request.content)["event_id"],))
             self.query_started.set()
             if self.query_release:
                 await self.query_release.wait()
-            result = {"job_id": "job_" + "9" * 32, **body, "query_sha256": "7" * 64,
-                      "query": {"text": "小猫抱抱陪伴", "intent": "comfort", "target": "recipient"},
-                      "embedding": await MockEmbedder().embed(("Core-owned query",))}
-            if self.query_change:
-                self.query_change(result)
-        elif path == BASE + "/offers":
-            if self.reject_offer:
-                return httpx.Response(409, json={"error": "MEME_OFFER_TOO_LATE"})
-            result = {key: body[key] for key in ("job_id", "event_id", "reply_revision")}
-            result["accepted"] = True
-        else:
-            raise AssertionError(path)
-        return httpx.Response(200, json=result)
+        if path == BASE + "/offers" and self.reject_offer:
+            self.core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE kind='chat'")
+
+    async def response(self, response):
+        path = response.request.url.path
+        if path.startswith(BASE + "/discovery/"):
+            return await super().response(response)
+        if not path.startswith(BASE + "/"):
+            return
+        await response.aread()
+        body = json.loads(response.request.content)
+        self.semantic_calls.append((path, body))
+        if response.status_code != 200:
+            return
+        value = response.json()
+        if path == BASE + "/semantics/profile":
+            # Explicit response-version injection exercises restart/profile
+            # validation while real Core still authorizes the original purpose.
+            value.update(identity=self.identity.model_dump(mode="json"),
+                         embedding=self.embedding.model_dump(mode="json"))
+        elif path == BASE + "/captions":
+            self.caption.submissions.append(body)
+        elif path.startswith(BASE + "/captions/") and self.caption.after_get:
+            self.caption.after_get(value)
+        elif path == BASE + "/query" and self.query_change:
+            self.query_change(value)
+        response._content = json.dumps(value).encode()
 
 
 def test_source_only_download_caption_index_and_bound_post_inbox_offer(make_runtime):
@@ -127,7 +145,6 @@ def test_source_only_download_caption_index_and_bound_post_inbox_offer(make_runt
     core = SemanticCore(runtime, event)
     assert runtime.prepare_offer(event) is None
     assert runtime.db.execute("SELECT COUNT(*) FROM meme_runtime_offers").fetchone()[0] == 0
-    admit(runtime, event)
 
     async def scenario():
         async with core.client() as client:
@@ -163,7 +180,7 @@ def test_source_only_download_caption_index_and_bound_post_inbox_offer(make_runt
     assert "小猫" not in saved and "vectors" not in saved
     assert runtime.db.execute("SELECT COUNT(*) FROM meme_runtime_offers").fetchone()[0] == 0
     restarted = MemeRuntime(runtime.window)
-    selected = restarted.prepare(item(event, sha), check=lambda: None)
+    selected = restarted.prepare(native_item(runtime, event, sha), check=lambda: None)
     assert selected.sha256 == sha
 
 
@@ -178,7 +195,7 @@ def test_lost_settlement_ack_restart_then_expired_download_lease_can_caption(mak
             count = len(calls)
             restarted = MemeRuntime(runtime.window, transport=runtime.transport, resolver=resolver)
             assert (await restarted.run_once(client))["status"] == "RESULT_RECONCILED"
-            runtime.window.now += timedelta(minutes=4)
+            case(runtime).core.clock.advance(240)
             assert (await restarted.run_once(client))["status"] == "CAPTION_PENDING"
             assert len(calls) == count
             assert len(core.caption.submissions) == 1
@@ -188,7 +205,7 @@ def test_lost_settlement_ack_restart_then_expired_download_lease_can_caption(mak
 
 
 def test_new_discovery_indexes_ready_caption_with_current_turn_and_original_paid_job(make_runtime):
-    runtime, first, public_calls = make_runtime()
+    runtime, first, public_calls = make_runtime(discoveries=2)
     core = SemanticCore(runtime, first)
 
     async def scenario():
@@ -203,14 +220,8 @@ def test_new_discovery_indexes_ready_caption_with_current_turn_and_original_paid
             original = dict(runtime.db.execute("SELECT * FROM meme_caption_bindings").fetchone())
             cached = dict(runtime.db.execute("SELECT * FROM meme_caption_cache").fetchone())
 
-            second = normalized(raw_event(43, text="我还想要抱抱"), runtime.config)
-            runtime.window.add(second)
-            admit(runtime, second)
-            core.claim = {
-                **core.claim, "event_id": second["event_id"], "reply_revision": 2,
-                "job_id": "job_" + "e" * 32, "attempt_key": "meme-attempt:" + "e" * 32,
-            }
-            core.leased = False
+            second = capture(runtime, 43, text="我还想要抱抱")
+            await core.provision(client, second, revision=2)
             rediscovered = await runtime.run_once(client)
             assert rediscovered["status"] == "completed" and rediscovered["accepted"] == [sha]
             assert (await runtime.run_once(client))["status"] == "SEMANTIC_READY"
@@ -265,7 +276,7 @@ def test_late_caption_receipt_preserves_usage_after_stop(make_runtime):
         async with core.client() as client:
             await runtime.run_once(client)
             await runtime.run_once(client)
-            core.caption.after_get = lambda _: setattr(runtime.window, "state", "STOPPED")
+            core.caption.after_get = lambda _: runtime.window.stop()
             assert (await runtime.run_once(client))["status"] == "CANCELLED"
 
     run(scenario())
@@ -278,7 +289,6 @@ def test_late_caption_receipt_preserves_usage_after_stop(make_runtime):
 def test_query_receipt_binding_rejected(make_runtime, change):
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
-    admit(runtime, event)
 
     def corrupt(value):
         if change == "revision":
@@ -305,20 +315,16 @@ def test_query_receipt_binding_rejected(make_runtime, change):
 
 @pytest.mark.parametrize("erased", [False, True])
 def test_foreground_query_starts_without_ack_and_never_blocks_delivery(make_runtime, erased):
+    from companion_onebot_bridge.owner_memes import MemePump
+
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
-    admit(runtime, event)
-    if erased:
-        with runtime.db:
-            runtime.db.execute("UPDATE inbox SET state='erased'")
-
-    async def input_state(client, row):
-        return {"reply_revision": 1}
-
-    runtime.window.input_state = input_state
 
     async def scenario():
         async with core.client() as client:
+            if erased:
+                with runtime.db:
+                    runtime.db.execute("UPDATE inbox SET state='erased'")
             core.query_release = asyncio.Event()
             pump = MemePump(runtime.window, client)
             pump.admitted(event["event_id"])
@@ -327,7 +333,7 @@ def test_foreground_query_starts_without_ack_and_never_blocks_delivery(make_runt
             else:
                 await asyncio.wait_for(core.query_started.wait(), 1)
                 assert pump.query_task is not None and not pump.query_task.done()
-                assert not pump.running
+                assert pump.task is None or pump.task.done()
                 pump.tick(idle=False)
                 assert not pump.query_task.cancelling()
                 pump.interrupt()
@@ -338,14 +344,10 @@ def test_foreground_query_starts_without_ack_and_never_blocks_delivery(make_runt
 
 
 def test_new_input_cancels_old_query_and_new_offer_can_proceed(make_runtime):
+    from companion_onebot_bridge.owner_memes import MemePump
+
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
-    admit(runtime, event)
-
-    async def input_state(client, row):
-        return {"reply_revision": 1}
-
-    runtime.window.input_state = input_state
 
     async def scenario():
         async with core.client() as client:
@@ -354,9 +356,8 @@ def test_new_input_cancels_old_query_and_new_offer_can_proceed(make_runtime):
             pump.admitted(event["event_id"])
             await asyncio.wait_for(core.query_started.wait(), 1)
             previous = pump.query_task
-            newer = normalized(raw_event(43), runtime.config)
-            runtime.window.add(newer)
-            admit(runtime, newer)
+            newer = capture(runtime, 43)
+            await admit(runtime, newer, client)
             core.query_release = None
             pump.admitted(newer["event_id"])
             await pump.query_task
@@ -403,7 +404,19 @@ def test_unknown_caption_never_repeats_submission_or_enters_index(make_runtime):
         async with core.client() as client:
             await runtime.run_once(client)
             assert (await runtime.run_once(client))["status"] == "CAPTION_PENDING"
-            assert (await runtime.run_once(client))["status"] == "CAPTION_QUARANTINED"
+            result = await runtime.run_once(client)
+            if result["status"] != "CAPTION_QUARANTINED":
+                job_id = core.core.store.one("SELECT job_id FROM meme_captions")["job_id"]
+                original = await client.post(BASE + "/captions/" + job_id, json={})
+                check = await client.post("/internal/v1/owner-authority/check", json={
+                    "authority": runtime.authority, "purpose": "meme"})
+                assert original.status_code == 200
+                assert original.json()["state"] == original.json()["usage"]["state"] == "UNKNOWN"
+                pytest.fail(json.dumps({
+                    "expected_bridge_status": "CAPTION_QUARANTINED", "bridge": result,
+                    "original_receipt": original.json(),
+                    "current_check": [check.status_code, check.json()]}, ensure_ascii=False))
+
             await runtime.run_once(client)
             assert (await runtime.run_once(client))["status"] == "IDLE"
 
@@ -417,24 +430,19 @@ def test_unknown_caption_never_repeats_submission_or_enters_index(make_runtime):
 
 @pytest.mark.parametrize("late", ["recall", "new_input", "offer", "timeout"])
 def test_late_query_is_optional_and_cannot_commit_stale_candidates(make_runtime, late):
+    from companion_onebot_bridge.owner_memes import MemePump
+
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
-    admit(runtime, event)
 
     def change(_):
         if late == "recall":
-            with runtime.db:
-                runtime.db.execute("UPDATE window_inputs SET state='RECALLED'")
+            recall(runtime)
         elif late == "new_input":
-            runtime.window.add(normalized(raw_event(43), runtime.config))
+            capture(runtime, 43)
 
     core.query_change = change
     core.reject_offer = late == "offer"
-
-    async def input_state(client, row):
-        return {"reply_revision": 1}
-
-    runtime.window.input_state = input_state
 
     async def scenario():
         async with core.client() as client:
@@ -443,7 +451,7 @@ def test_late_query_is_optional_and_cannot_commit_stale_candidates(make_runtime,
             pump = MemePump(runtime.window, client)
             pump.admitted(event["event_id"])
             await pump.query_task
-            assert not pump.running
+            assert pump.task is None or pump.task.done()
             await pump.close()
 
     run(scenario())
@@ -457,7 +465,6 @@ def test_late_query_is_optional_and_cannot_commit_stale_candidates(make_runtime,
 def test_restart_does_not_requery_uncertain_foreground_request(make_runtime):
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
-    admit(runtime, event)
 
     async def scenario():
         async with core.client() as client:
@@ -475,52 +482,55 @@ def test_restart_does_not_requery_uncertain_foreground_request(make_runtime):
 
 
 def test_core_profile_must_supply_prompt_version_before_public_io(make_runtime):
-    runtime, _, calls = make_runtime()
+    runtime, event, calls = make_runtime()
+    core = SemanticCore(runtime, event)
 
-    def handle(request):
-        assert request.url.path == BASE + "/semantics/profile"
-        return httpx.Response(200, json={
-            "identity": {"model_version": IDENTITY.model_version},
-            "embedding": EMBEDDING.model_dump(mode="json"),
-        })
+    async def omit_prompt(response):
+        if response.request.url.path == BASE + "/semantics/profile":
+            value = response.json()
+            del value["identity"]["prompt_version"]
+            response._content = json.dumps(value).encode()
 
     async def scenario():
-        async with httpx.AsyncClient(base_url="http://core",
-                                     transport=httpx.MockTransport(handle)) as client:
+        async with core.client() as client:
+            client.event_hooks["response"].append(omit_prompt)
             assert (await runtime.run_once(client))["status"] == "FAILED"
 
     run(scenario())
     assert calls == [] and runtime.semantics is None
 
 
-@pytest.mark.parametrize("new_window", [False, True])
-def test_reopened_spool_refreshes_current_model_prompt_and_embedding_once(make_runtime, new_window):
+@pytest.mark.parametrize("new_authority", [False, True])
+def test_reopened_spool_refreshes_current_model_prompt_and_embedding_once(
+    make_runtime, new_authority,
+):
     runtime, event, _ = make_runtime()
     core = SemanticCore(runtime, event)
 
     async def scenario():
         async with core.client() as client:
-            await runtime._ensure_semantics(client, runtime._window_check)
-            plan, now, cfg = runtime.window.plan, runtime.window.now, runtime.config
-            if new_window:
-                plan = SimpleNamespace(**{**vars(plan), "sha256": "e" * 64})
+            await runtime._ensure_semantics(client, runtime._owner_check)
+            fixture = case(runtime)
+            cfg = runtime.config
+            if new_authority:
+                cfg = await fixture.handoff(runtime, client)
             runtime.spool.close()
-            core.identity = IDENTITY.model_copy(update={
-                "model_version": "approved-model-v2", "prompt_version": "approved-prompt-v2",
-            })
-            core.embedding = EMBEDDING.model_copy(update={"model_version": "local-embedding-v2"})
+            core.identity = core.original_identity.model_copy(update={
+                "model_version": "approved-model-v2", "prompt_version": "approved-prompt-v2"})
+            core.embedding = core.embedding.model_copy(update={
+                "model_version": "local-embedding-v2"})
             with Spool(cfg) as spool:
                 spool.db.row_factory = sqlite3.Row
-                restarted = MemeRuntime(Window(spool, plan=plan, now=now))
-                # The saved profile remains available for frozen delivery restoration.
-                assert restarted.semantics.identity == IDENTITY
-                first = await restarted._ensure_semantics(client, restarted._window_check)
-                second = await restarted._ensure_semantics(client, restarted._window_check)
+                owner = OwnerRuntime(spool, clock=lambda: fixture.core.clock.now)
+                CASES[owner] = fixture
+                restarted = MemeRuntime(owner)
+                assert restarted.semantics.identity == core.original_identity
+                first = await restarted._ensure_semantics(client, restarted._owner_check)
+                second = await restarted._ensure_semantics(client, restarted._owner_check)
                 assert first is second and first.identity == core.identity
                 assert first.embedding_spec == core.embedding
                 saved = json.loads(spool.db.execute(
-                    "SELECT value FROM meme_semantic_config",
-                ).fetchone()[0])
+                    "SELECT value FROM meme_semantic_config").fetchone()[0])
                 assert saved["caption"] == core.identity.model_dump(mode="json")
                 assert saved["embedding"] == core.embedding.model_dump(mode="json")
 
@@ -534,38 +544,33 @@ def test_concurrent_new_work_shares_one_authoritative_profile_refresh(make_runti
 
     async def scenario():
         async with core.client() as client:
-            await runtime._ensure_semantics(client, runtime._window_check)
-        restarted = MemeRuntime(runtime.window)
-        started, release, requests = asyncio.Event(), asyncio.Event(), []
+            await runtime._ensure_semantics(client, runtime._owner_check)
+            restarted = MemeRuntime(runtime.window)
+            started, release, requests = asyncio.Event(), asyncio.Event(), []
 
-        async def profile(request):
-            requests.append(request.url.path)
-            started.set()
-            await release.wait()
-            return httpx.Response(200, json={
-                "identity": IDENTITY.model_dump(mode="json"),
-                "embedding": EMBEDDING.model_dump(mode="json"),
-            })
+            async def delay_profile(response):
+                if response.request.url.path == BASE + "/semantics/profile":
+                    requests.append(response.request.url.path)
+                    started.set()
+                    await release.wait()
 
-        async with httpx.AsyncClient(base_url="http://core",
-                                    transport=httpx.MockTransport(profile)) as client:
+            client.event_hooks["response"].append(delay_profile)
             first = asyncio.create_task(restarted._ensure_semantics(
-                client, restarted._window_check,
-            ))
-            await started.wait()
+                client, restarted._owner_check))
+            await asyncio.wait_for(started.wait(), 5)
             second_started = asyncio.Event()
 
             async def concurrent_work():
                 second_started.set()
-                return await restarted._ensure_semantics(client, restarted._window_check)
+                return await restarted._ensure_semantics(client, restarted._owner_check)
 
             second = asyncio.create_task(concurrent_work())
             await second_started.wait()
             release.set()
             refreshed = await asyncio.gather(first, second)
             assert refreshed[0] is refreshed[1]
-            await restarted._ensure_semantics(client, restarted._window_check)
-        assert requests == [BASE + "/semantics/profile"]
+            await restarted._ensure_semantics(client, restarted._owner_check)
+            assert requests == [BASE + "/semantics/profile"]
 
     run(scenario())
 
@@ -577,36 +582,35 @@ def test_failed_refresh_preserves_saved_profile_and_can_retry(make_runtime, fail
 
     async def scenario():
         async with core.client() as client:
-            await runtime._ensure_semantics(client, runtime._window_check)
-        restarted = MemeRuntime(runtime.window)
-        requests = []
-        updated = IDENTITY.model_copy(update={"model_version": "newly-approved-model"})
+            await runtime._ensure_semantics(client, runtime._owner_check)
+            restarted = MemeRuntime(runtime.window)
+            requests = []
+            updated = core.original_identity.model_copy(update={
+                "model_version": "newly-approved-model"})
+            core.identity = updated
 
-        def profile(request):
-            requests.append(request.url.path)
-            if len(requests) == 1:
-                if failure == "http":
-                    return httpx.Response(503, json={"error": "temporarily unavailable"})
-                if failure == "cancelled":
-                    raise asyncio.CancelledError()
-                return httpx.Response(200, json={"identity": {}, "embedding": {}})
-            return httpx.Response(200, json={
-                "identity": updated.model_dump(mode="json"),
-                "embedding": EMBEDDING.model_dump(mode="json"),
-            })
+            async def fail_profile(response):
+                if response.request.url.path != BASE + "/semantics/profile":
+                    return
+                requests.append(response.request.url.path)
+                if len(requests) == 1:
+                    if failure == "http":
+                        response.status_code = 503
+                    elif failure == "cancelled":
+                        raise asyncio.CancelledError()
+                    else:
+                        response._content = b'{"identity":{},"embedding":{}}'
 
-        async with httpx.AsyncClient(base_url="http://core",
-                                    transport=httpx.MockTransport(profile)) as client:
+            client.event_hooks["response"].append(fail_profile)
             expected = {"http": httpx.HTTPStatusError, "schema": ValueError,
                         "cancelled": asyncio.CancelledError}[failure]
             with pytest.raises(expected):
-                await restarted._ensure_semantics(client, restarted._window_check)
-            assert restarted.semantics.identity == IDENTITY
+                await restarted._ensure_semantics(client, restarted._owner_check)
+            assert restarted.semantics.identity == core.original_identity
             assert (await restarted._ensure_semantics(
-                client, restarted._window_check,
-            )).identity == updated
-            await restarted._ensure_semantics(client, restarted._window_check)
-        assert requests == [BASE + "/semantics/profile"] * 2
+                client, restarted._owner_check)).identity == updated
+            await restarted._ensure_semantics(client, restarted._owner_check)
+            assert requests == [BASE + "/semantics/profile"] * 2
 
     run(scenario())
 
@@ -624,20 +628,23 @@ def test_profile_refresh_after_restart_keeps_unknown_caption_receipt_without_res
             await runtime.run_once(client)
             assert (await runtime.run_once(client))["status"] == "CAPTION_QUARANTINED"
             original = tuple(runtime.db.execute("SELECT * FROM meme_caption_bindings").fetchone())
-            core.identity = IDENTITY.model_copy(update={"model_version": "approved-model-v2"})
-            core.embedding = EMBEDDING.model_copy(update={"model_version": "local-embedding-v2"})
-            cfg, plan, now = runtime.config, runtime.window.plan, runtime.window.now
+            core.identity = core.original_identity.model_copy(update={
+                "model_version": "approved-model-v2"})
+            core.embedding = core.embedding.model_copy(update={
+                "model_version": "local-embedding-v2"})
+            cfg, fixture = runtime.config, case(runtime)
             runtime.spool.close()
             with Spool(cfg) as spool:
                 spool.db.row_factory = sqlite3.Row
-                restarted = MemeRuntime(Window(spool, plan=plan, now=now))
+                owner = OwnerRuntime(spool, clock=lambda: fixture.core.clock.now)
+                CASES[owner] = fixture
+                restarted = MemeRuntime(owner)
                 assert (await restarted.run_once(client))["status"] == "SEMANTIC_QUARANTINED"
                 assert (await restarted.run_once(client))["status"] == "IDLE"
                 assert restarted.semantics.identity == core.identity
                 assert restarted.semantics.embedding_spec == core.embedding
                 assert tuple(spool.db.execute(
-                    "SELECT * FROM meme_caption_bindings",
-                ).fetchone()) == original
+                    "SELECT * FROM meme_caption_bindings").fetchone()) == original
 
     run(scenario())
     assert len(core.caption.submissions) == len(core.caption.polls) == 1
