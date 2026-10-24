@@ -1,10 +1,12 @@
 import asyncio
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta
 
 import pytest
+from filelock import FileLock
 
 from companion.config import Settings
 from companion.contracts import InboundEvent
@@ -97,11 +99,34 @@ def ingest(core, number=1, text="今天想聊聊茶", **kwargs):
 
 
 @pytest.fixture(scope="session")
-def migrated_database(tmp_path_factory):
-    """Run the real migration chain once; each test receives an independent database."""
-    path = tmp_path_factory.mktemp("schema") / "empty.db"
-    migrate(str(path))
+def migrated_database(tmp_path_factory, worker_id):
+    """One real schema per run across xdist workers; independent test backups below."""
+    base = tmp_path_factory.getbasetemp()
+    shared = base if worker_id == "master" else base.parent
+    path = shared / "empty-schema.db"
+    # pytest-xdist's documented shared-session fixture pattern. Publish only after
+    # migration succeeds, so a killed preparer cannot leave a usable partial DB.
+    with FileLock(str(path) + ".lock", timeout=120):
+        if not path.exists():
+            preparing = shared / "empty-schema.preparing.db"
+            migrate(str(preparing))
+            preparing.replace(path)
     return path
+
+
+@pytest.fixture(scope="session", autouse=True)
+def worker_scratch(tmp_path_factory):
+    """Children inherit their worker's scratch; the caller owns the enclosing round."""
+    path = tmp_path_factory.getbasetemp() / "process-tmp"
+    path.mkdir(exist_ok=True)
+    previous = {key: os.environ.get(key) for key in ("TEMP", "TMP", "TMPDIR")}
+    os.environ.update(dict.fromkeys(previous, str(path)))
+    yield
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @pytest.fixture
