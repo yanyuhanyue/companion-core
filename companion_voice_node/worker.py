@@ -268,11 +268,14 @@ class VoiceNodeWorker:
             raise VoiceProtocolError("VOICE_LEASE_EXPIRED")
         return time.monotonic() + remaining
 
-    async def _request(self, client, method, suffix, value, model, *, budget_seconds=None):
+    async def _request(self, client, method, suffix, value, model, *, budget_seconds=None,
+                       owner_token=None, recovery_missing=False):
         data = canonical_bytes(value) if value is not None else b""
         if len(data) > MAX_RESULT_BODY_BYTES:
             raise VoiceProtocolError("VOICE_CORE_REQUEST_TOO_LARGE")
         headers = {"Content-Type": "application/json"}
+        if owner_token is not None:
+            headers["Authorization"] = "Bearer " + owner_token
         if isinstance(value, VoiceClaimRequest):
             headers["Idempotency-Key"] = value.request_id
         elif method == "PUT":
@@ -286,6 +289,10 @@ class VoiceNodeWorker:
                     headers=headers,
                     content=data,
                 ) as response:
+                    if response.status_code == 404 and recovery_missing:
+                        raw = json.loads(await self._read(response, 65536))
+                        if isinstance(raw, dict) and raw.get("error") == "VOICE_JOB_NOT_FOUND":
+                            raise VoiceProtocolError("VOICE_RECOVERY_JOB_ABSENT")
                     if response.status_code in {409, 410}:
                         error = json.loads(await self._read(response, 65536)).get("error")
                         if error in {"VOICE_CLAIM_RETIRED", "VOICE_CLAIM_EPOCH_RETIRED",
@@ -472,7 +479,7 @@ class VoiceNodeWorker:
             job = state.job(response.lease.job_id, response.lease.generation)
         return job, 1
 
-    async def _stop_cleanup(self, client, state, job):
+    async def _stop_cleanup(self, client, state, job, *, recovery_missing=False):
         ref = state.stop_ref(job)
         for _ in range(2):  # An erasure epoch may have advanced since this lease was issued.
             job = state.job(ref.job_id, ref.generation)
@@ -481,13 +488,53 @@ class VoiceNodeWorker:
                 outcome=job["terminal_outcome"] or "UNKNOWN", cleanup=cleanup,
                 cleanup_epoch=job["cleanup_epoch"])
             response, _ = await self._request(client, "POST", f"/jobs/{ref.job_id}/stop",
-                                               body, VoiceStopResponse)
+                                               body, VoiceStopResponse,
+                                               recovery_missing=recovery_missing)
             state.acknowledge_cleanup(job, response)
             if state.job(ref.job_id, ref.generation) is None:
                 return "DISCARDED"
             if response.cleanup_epoch == body.cleanup_epoch or not cleanup.complete():
                 break
         return "RETRY"
+
+    async def recover_claims(self, state, *, owner_token, operator, service_instance, confirmation):
+        refs = state.prepare_owner_recovery()
+        old_cursor = state.meta("claim_cursor")
+        async with httpx.AsyncClient(
+            transport=self.transport, trust_env=False, follow_redirects=False,
+            timeout=self.config.request_timeout_seconds,
+            headers={"Authorization": "Bearer " + self.config.credential.get_secret_value(),
+                     "Accept-Encoding": "identity", "Accept": "application/json"},
+        ) as client:
+            initial, _ = await self._request(client, "GET", "/session", None, VoiceSession)
+            body = VoiceRecovery(incarnation=initial.incarnation, operator=operator,
+                                 service_instance=service_instance, confirmation=confirmation)
+            recovered, _ = await self._request(
+                client, "POST", f"/nodes/{self.config.node_id}/recover", body, VoiceSession,
+                owner_token=owner_token,
+            )
+            if recovered.incarnation != initial.incarnation or recovered.recovery_required:
+                raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+            missing = []
+            for ref in refs:
+                try:
+                    outcome = await self._stop_cleanup(
+                        client, state, state.job(ref.job_id, ref.generation), recovery_missing=True,
+                    )
+                except VoiceProtocolError as error:
+                    if error.code != "VOICE_RECOVERY_JOB_ABSENT":
+                        raise
+                    missing.append(ref)
+                else:
+                    if outcome != "DISCARDED":
+                        raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+            final, _ = await self._request(client, "GET", "/session", None, VoiceSession)
+            if (final.incarnation != recovered.incarnation
+                or final.last_sequence != recovered.last_sequence or final.recovery_required):
+                raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+            state.complete_owner_recovery(missing, final, node_id=self.config.node_id,
+                old_cursor=old_cursor, operator=operator, service_instance=service_instance,
+                confirmation=confirmation)
 
     async def _upload(self, client, state, job, lease):
         result = state.cached_result(job)
@@ -793,33 +840,12 @@ def main(argv=None, *, transport=None, supervisor_factory=None) -> int:
                 or arguments.confirmation != "inflight-execution-stopped"
                 or not arguments.operator or not arguments.service_instance):
                 raise VoiceProtocolError("VOICE_RECOVERY_CONFIRMATION_REQUIRED")
-            async def recover():
-                async with httpx.AsyncClient(
-                    transport=transport, trust_env=False,
-                    headers={"Authorization": "Bearer " + config.credential.get_secret_value()},
-                ) as client:
-                    worker = VoiceNodeWorker(config)
-                    session, _ = await worker._request(
-                        client, "GET", "/session", None, VoiceSession,
-                    )
-                    token = arguments.control_token_file.read_text(encoding="utf-8").strip()
-                    body = VoiceRecovery(
-                        incarnation=session.incarnation, operator=arguments.operator,
-                        service_instance=arguments.service_instance,
-                        confirmation=arguments.confirmation,
-                    )
-                    response = await client.post(config.core_origin + ROUTE_PREFIX +
-                        f"/nodes/{config.node_id}/recover", content=canonical_bytes(body),
-                        headers={"Authorization": "Bearer " + token,
-                                 "Content-Type": "application/json"})
-                    worker._check_response(response, "application/json")
-                    return VoiceSession.model_validate_json(await worker._read(response, 65536))
             with NodeState(config.state_directory) as state:
-                if (state.active_job() is not None or state.pending_cleanup() is not None
-                    or state.resource()["state"] != "READY"):
-                    raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
-                session = asyncio.run(recover())
-                state.bind_session(session, recovered=True)
+                token = arguments.control_token_file.read_text(encoding="utf-8").strip()
+                worker = VoiceNodeWorker(config, transport=transport)
+                asyncio.run(worker.recover_claims(state, owner_token=token,
+                    operator=arguments.operator, service_instance=arguments.service_instance,
+                    confirmation=arguments.confirmation))
             return 0
         if arguments.print_manifest:
             print(digest(local_manifest(config)))

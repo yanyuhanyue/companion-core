@@ -40,7 +40,7 @@ class NodeState:
     def __enter__(self):
         try:
             lock_path = self.directory / "node.lock"
-            if lock_path.exists() and (lock_path.is_symlink() or self._reparse(lock_path)):
+            if lock_path.is_symlink() or self._reparse(lock_path):
                 raise VoiceProtocolError("VOICE_STATE_PATH_INVALID")
             self._lock = lock_path.open("a+b")
             if self._lock.seek(0, 2) == 0:
@@ -61,7 +61,7 @@ class NodeState:
         try:
             database = self.directory / "journal.sqlite"
             marker = self.directory / "initialized"
-            if any(path.exists() and (path.is_symlink() or self._reparse(path))
+            if any(path.is_symlink() or self._reparse(path)
                    for path in (database, marker)):
                 raise VoiceProtocolError("VOICE_STATE_PATH_INVALID")
             if database.exists() != marker.exists():
@@ -173,6 +173,59 @@ class NodeState:
                         or pending.sequence != self.meta("claim_cursor")["sequence"] + 1
                         or session.last_sequence not in {pending.sequence - 1, pending.sequence}):
             raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+
+    def prepare_owner_recovery(self):
+        if self.resource()["state"] != "READY":
+            raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+        rows = [dict(row) for row in self.db.execute("SELECT * FROM jobs")]
+        for job in rows:
+            if job["lease_json"] is not None:
+                self.finish(self.stop_ref(job), outcome=job["terminal_outcome"] or "UNKNOWN",
+                            phase="UNKNOWN", error_code="VOICE_OWNER_RECOVERY_REQUESTED")
+        report = self.cleanup()
+        if report["pending_temp"] or report["unowned_temp"]:
+            raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+        for job in rows:
+            current = self.job(job["job_id"], job["generation"])
+            if not self.cleanup_receipt(current).complete():
+                raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+        return [self.stop_ref(job) for job in rows]
+
+    def complete_owner_recovery(self, missing, session, *, node_id, old_cursor,
+                                operator, service_instance, confirmation):
+        """Retire exact absent refs only after explicit, verified Core owner recovery."""
+        expected = {(ref.job_id, ref.generation) for ref in missing}
+        report = self.cleanup()
+        if (report["pending_temp"] or report["unowned_temp"] or session.recovery_required
+            or confirmation != "inflight-execution-stopped"):
+            raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            rows = [dict(row) for row in self.db.execute("SELECT * FROM jobs")]
+            if (self.resource()["state"] != "READY" or self.meta("claim_cursor") != old_cursor
+                or {(row["job_id"], row["generation"]) for row in rows} != expected
+                or any(row[field] is not None for row in rows for field in
+                       ("lease_json", "result_sha", "cache_file", "cache_expires", "temp_json"))
+                or {self.stop_ref(row) for row in rows} != set(missing)):
+                raise VoiceProtocolError("VOICE_STATE_RECOVERY_REQUIRED")
+            record = {
+                "source": "owner_control_recovery", "node_id": node_id,
+                "old_cursor": old_cursor,
+                "new_cursor": {"incarnation": session.incarnation,
+                               "sequence": session.last_sequence},
+                "operator": operator, "service_instance": service_instance,
+                "confirmation": confirmation, "recorded_at_unix": time.time(),
+                "missing_jobs": [{"job_id": row["job_id"], "generation": row["generation"],
+                                  "outcome": row["terminal_outcome"],
+                                  "core_cleanup_confirmed": False,
+                                  "local_cleanup_completed": True} for row in rows],
+            }
+            self.db.execute("INSERT INTO recovery_audit VALUES (?,?)",
+                            ("recovery_" + uuid.uuid4().hex, canonical_bytes(record).decode()))
+            self.db.executemany("DELETE FROM jobs WHERE job_id=? AND generation=?", expected)
+            self.db.execute("DELETE FROM meta WHERE key='pending_claim'")
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES ('claim_cursor',?)",
+                            (canonical_bytes(record["new_cursor"]).decode(),))
 
     def next_claim(self, node_id, manifest):
         previous = self.pending_claim()

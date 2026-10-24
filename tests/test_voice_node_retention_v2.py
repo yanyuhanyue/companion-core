@@ -305,6 +305,203 @@ def test_explicit_claim_recovery_retires_old_pending_identity_atomically(node):
         assert following.incarnation == "c" * 32 and following.sequence == 10
 
 
+@pytest.mark.parametrize("failure", [None, "wrong_token", "owner_loss", "generic404",
+    "invalid404", "stop_timeout", "changed_incarnation", "changed_sequence", "bad_session",
+    "quarantined", "unowned_temp", "pending_temp", "before_commit", "transaction_failure",
+    "stop_401", "stop_403", "stop_409", "stop_410", "stop_500",
+    "owner_incarnation", "owner_recovery_required"])
+def test_explicit_owner_recovery_only_retires_exact_observed_missing_refs(node, failure,
+                                                                       monkeypatch):
+    config, remote, lease = scope(node)
+    calls = []
+    session_calls = 0
+    cursor = {"incarnation": lease.incarnation, "sequence": lease.claim_sequence}
+    recovered = session(incarnation="c" * 32, sequence=7).model_dump()
+
+    def transport(request):
+        nonlocal session_calls
+        calls.append(request.url.path)
+        if request.url.path.endswith("/session"):
+            session_calls += 1
+            value = dict(recovered)
+            if session_calls == 2 and failure == "changed_incarnation":
+                value["incarnation"] = "d" * 32
+            if session_calls == 2 and failure == "changed_sequence":
+                value["last_sequence"] += 1
+            return httpx.Response(200, json=value)
+        if request.url.path.endswith("/recover"):
+            assert request.headers["authorization"] == "Bearer synthetic-owner-token"
+            if failure == "wrong_token":
+                return httpx.Response(401)
+            if failure == "owner_loss":
+                raise httpx.ReadError("synthetic owner ACK lost")
+            if failure == "owner_incarnation":
+                return httpx.Response(200, json=recovered | {"incarnation": "d" * 32})
+            if failure == "owner_recovery_required":
+                return httpx.Response(200, json=recovered | {"recovery_required": True})
+            return httpx.Response(200, json={} if failure == "bad_session" else recovered)
+        assert request.url.path.endswith("/stop")
+        assert request.headers["authorization"] == (
+            "Bearer " + config.credential.get_secret_value())
+        if failure == "stop_timeout":
+            raise httpx.ReadTimeout("synthetic stop timeout")
+        if failure and failure.startswith("stop_"):
+            return httpx.Response(int(failure.removeprefix("stop_")), json={"error": "REJECTED"})
+        if failure == "invalid404":
+            return httpx.Response(404, content=b"{broken")
+        return httpx.Response(404, json={"error": (
+            "OTHER_NOT_FOUND" if failure == "generic404" else "VOICE_JOB_NOT_FOUND")})
+
+    with NodeState(config.state_directory) as state:
+        state.accept_claim(lease)
+        if failure == "quarantined":
+            state.quarantine("SYNTHETIC_UNCONFIRMED")
+        if failure == "unowned_temp":
+            (config.state_directory / "child-temp" / "unowned").mkdir(parents=True)
+        if failure == "pending_temp":
+            state.prepare_temp(lease).mkdir(parents=True)
+        state.phase(lease, "UNKNOWN")
+        complete = state.complete_owner_recovery
+        if failure == "before_commit":
+            def fail_before_commit(*args, **kwargs):
+                raise VoiceProtocolError("SYNTHETIC_CRASH_BEFORE_COMMIT")
+            monkeypatch.setattr(state, "complete_owner_recovery", fail_before_commit)
+        if failure == "transaction_failure":
+            state.db.execute("CREATE TRIGGER fail_recovery_cursor BEFORE INSERT ON meta "
+                "WHEN NEW.key='claim_cursor' BEGIN SELECT RAISE(ABORT,'synthetic crash'); END")
+        worker = VoiceNodeWorker(config, transport=httpx.MockTransport(transport))
+        if failure:
+            with pytest.raises((VoiceProtocolError, sqlite3.IntegrityError)):
+                asyncio.run(worker.recover_claims(state, owner_token="synthetic-owner-token",
+                    operator="owner", service_instance="stopped-instance",
+                    confirmation="inflight-execution-stopped"))
+            assert state.stop_ref(state.active_job()).stop_token == lease.stop_token
+            assert state.meta("claim_cursor") == cursor
+            assert state.db.execute("SELECT COUNT(*) FROM recovery_audit").fetchone()[0] == 0
+            if failure in {"quarantined", "unowned_temp", "pending_temp"}:
+                assert calls == []
+            if failure in {"owner_loss", "before_commit", "transaction_failure"}:
+                if failure == "transaction_failure":
+                    state.db.execute("DROP TRIGGER fail_recovery_cursor")
+                monkeypatch.setattr(state, "complete_owner_recovery", complete)
+                failure = None
+                asyncio.run(worker.recover_claims(state, owner_token="synthetic-owner-token",
+                    operator="owner", service_instance="stopped-instance",
+                    confirmation="inflight-execution-stopped"))
+                assert state.active_job() is None
+                assert state.meta("claim_cursor")["sequence"] == 7
+        else:
+            asyncio.run(worker.recover_claims(state, owner_token="synthetic-owner-token",
+                operator="owner", service_instance="stopped-instance",
+                confirmation="inflight-execution-stopped"))
+            assert state.active_job() is None
+            assert state.meta("claim_cursor") == {"incarnation": "c" * 32, "sequence": 7}
+            record = json.loads(state.db.execute("SELECT record_json FROM recovery_audit")
+                                .fetchone()[0])
+            assert record["missing_jobs"] == [{"job_id": lease.job_id, "generation": 1,
+                "outcome": "UNKNOWN", "core_cleanup_confirmed": False,
+                "local_cleanup_completed": True}]
+            assert record["node_id"] == config.node_id and record["operator"] == "owner"
+            encoded = json.dumps(record)
+            assert lease.stop_token not in encoded and lease.input_sha256 not in encoded
+            assert state.next_claim(config.node_id, "a" * 64).sequence == 8
+    assert child_receipts(node[2]) == [] and remote.result_bodies == []
+
+
+def test_ordinary_worker_native_missing_job_never_counts_as_cleanup_ack(node):
+    config, _, lease = scope(node)
+    with NodeState(config.state_directory) as state:
+        state.accept_claim(lease)
+        state.phase(lease, "UNKNOWN")
+    worker = VoiceNodeWorker(config, transport=httpx.MockTransport(
+        lambda _: httpx.Response(404, json={"error": "VOICE_JOB_NOT_FOUND"})))
+    with pytest.raises(VoiceProtocolError, match="VOICE_CORE_UNAVAILABLE"):
+        asyncio.run(worker.run(once=True))
+    with NodeState(config.state_directory) as state:
+        assert state.active_job()["phase"] == "UNKNOWN"
+        assert state.meta("claim_cursor")["sequence"] == lease.claim_sequence
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_real_core_restore_owner_recovery_missing_or_existing_unknown(core, node, tmp_path,
+                                                                   monkeypatch, missing):
+    from cryptography.fernet import Fernet
+
+    from companion.backup import backup, restore
+    from companion.core import Core
+    from companion.voice_jobs import VoiceJobs
+    from companion.voice_protocol import VoiceLeaseRef
+    from tests.test_voice_jobs import TOKEN, claim, create_tts, prepared
+    from tests.test_voice_node_api import app_for
+
+    jobs, message, _, _ = prepared(core, monkeypatch)
+    archive, restored_path = tmp_path / "early.enc", tmp_path / "restored.db"
+    key = Fernet.generate_key()
+    if missing:
+        backup(core.settings.database, archive, key)
+    created = create_tts(core, jobs, message)
+    _, answer = claim(jobs)
+    lease = answer.lease
+    jobs.input("local", VoiceLeaseRef.from_lease(lease))
+    if not missing:
+        backup(core.settings.database, archive, key)
+    restore(archive, restored_path, key, core.settings.erasure_ledger)
+    config = node[0].model_copy(update={"node_id": "local",
+        "credential": type(node[0].credential)(TOKEN)})
+    settings = core.settings.model_copy(update={"database": str(restored_path)})
+    settings.control_token = type(config.credential)("synthetic-owner-control-" * 3)
+    with Core(settings, core.model, core.clock) as restored:
+        restored_jobs = VoiceJobs(restored.store, settings, core.clock)
+        with NodeState(config.state_directory) as state:
+            state.accept_claim(lease)
+            state.phase(lease, "UNKNOWN")
+            worker = VoiceNodeWorker(config, transport=httpx.ASGITransport(app=app_for(restored)))
+            asyncio.run(worker.recover_claims(state,
+                owner_token=settings.control_token.get_secret_value(), operator="synthetic-owner",
+                service_instance="restored-stopped-instance",
+                confirmation="inflight-execution-stopped"))
+            assert state.active_job() is None
+            current = restored_jobs.session("local")
+            assert state.meta("claim_cursor")["incarnation"] == current.incarnation
+            assert current.incarnation != lease.incarnation and not current.recovery_required
+            record = json.loads(state.db.execute("SELECT record_json FROM recovery_audit")
+                                .fetchone()[0])
+            assert len(record["missing_jobs"]) == int(missing)
+            if missing:
+                assert not record["missing_jobs"][0]["core_cleanup_confirmed"]
+            else:
+                retained = restored.store.one("SELECT * FROM voice_jobs WHERE job_id=?",
+                                              (created["job_id"],))
+                assert retained["state"] == "UNKNOWN"
+                assert retained["cleanup_state"] == "CONFIRMED"
+            audit = restored.store.one(
+                "SELECT * FROM audit_log WHERE action='voice.owner_recovered'",
+            )
+            detail = json.loads(audit["safe_detail_json"])
+            assert audit["entity_id"] == "local"
+            assert detail["incarnation"] == current.incarnation
+            assert detail["operator"] == record["operator"] == "synthetic-owner"
+            assert detail["service_instance"] == record["service_instance"]
+            assert not restored.store.rows("SELECT * FROM model_usage")
+            following = state.next_claim("local", "b" * 64)
+            assert following.sequence == current.last_sequence + 1
+
+            async def claim_after_recovery():
+                from companion.voice_protocol import ROUTE_PREFIX
+
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_for(restored)),
+                                             base_url="https://core.invalid") as client:
+                    reply = await client.post(ROUTE_PREFIX + "/claim",
+                        json=following.model_dump(), headers={"Authorization": "Bearer " + TOKEN,
+                            "Idempotency-Key": following.request_id})
+                    assert reply.status_code == 200, reply.text
+                    assert reply.json()["lease"] is None
+
+            asyncio.run(claim_after_recovery())
+            state.clear_claim()
+            assert restored_jobs.session("local").last_sequence == following.sequence
+
+
 def test_process_identity_is_durable_before_ready_wait_and_startup_failure_cleanup(node):
     config, remote, _ = scope(node)
     observations = []
@@ -365,6 +562,67 @@ def test_substituted_temp_link_never_deletes_target_or_acknowledges_cleanup(node
                 path.rmdir()
             else:
                 path.unlink()
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+@pytest.mark.parametrize("name", ["node.lock", "journal.sqlite", "initialized"])
+@pytest.mark.parametrize("link_kind", ["file", "junction", "stat_boundary"])
+def test_dangling_state_file_link_never_creates_external_target(
+    node, tmp_path, initialized, name, link_kind, monkeypatch,
+):
+    config, _, _ = node
+    if initialized:
+        with NodeState(config.state_directory):
+            pass
+    else:
+        config.state_directory.mkdir()
+    path = config.state_directory / name
+    path.unlink(missing_ok=True)
+    outside = tmp_path / "outside-state"
+    outside.mkdir()
+    target = outside / name
+    if link_kind == "junction":
+        if os.name != "nt":
+            pytest.skip("Windows native reparse fixture")
+        result = subprocess.run(["cmd", "/c", "mklink", "/J", str(path), str(target)],
+            capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+        assert result.returncode == 0, result.stderr
+        assert NodeState._reparse(path)
+    elif link_kind == "stat_boundary":
+        original = type(path).is_symlink
+        monkeypatch.setattr(type(path), "is_symlink",
+                            lambda current: current == path or original(current))
+    else:
+        try:
+            path.symlink_to(target)
+        except OSError as error:
+            if os.name == "nt" and error.winerror == 1314:
+                pytest.skip("File symlink needs Windows privilege; stat/junction run locally")
+            raise
+        assert path.is_symlink()
+    assert not path.exists() and not target.exists()
+    try:
+        with pytest.raises(VoiceProtocolError,
+                           match="VOICE_STATE_(PATH_INVALID|RECOVERY_REQUIRED)"):
+            with NodeState(config.state_directory):
+                pytest.fail("dangling state link must be rejected before open")
+        assert not target.exists() and list(outside.iterdir()) == []
+        assert path.is_symlink() or NodeState._reparse(path)
+    finally:
+        if link_kind == "junction":
+            path.rmdir()
+        elif link_kind == "file":
+            path.unlink()
+
+
+def test_absent_ordinary_state_files_still_initialize_and_reopen(node):
+    config, _, _ = node
+    assert not config.state_directory.exists()
+    with NodeState(config.state_directory) as state:
+        state.set_meta("synthetic_marker", {"value": "retained"})
+    with NodeState(config.state_directory) as state:
+        assert state.meta("synthetic_marker") == {"value": "retained"}
+        assert state.resource()["state"] == "READY"
 
 
 async def temp_crash_fixture(config_path, lease_path, counter, stage):
