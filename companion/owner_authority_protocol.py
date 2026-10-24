@@ -12,10 +12,10 @@ SHA = r"^[a-f0-9]{64}$"
 Purpose = Literal[
     "chat", "history", "memory", "diary", "affect", "consolidation", "reflection", "goals",
     "wake", "exploration", "social", "expression", "proactive", "content", "image", "file",
-    "meme", "poke", "voice", "account_actions", "bili_video", "life", "evaluation",
+    "meme", "poke", "voice", "account_actions", "bili_video", "life", "evaluation", "rem",
 ]
 CapabilityPolicy = Literal[
-    "image", "file", "meme", "poke", "voice", "account_actions", "bili_video",
+    "image", "file", "meme", "poke", "voice", "account_actions", "bili_video", "rem",
 ]
 
 
@@ -57,7 +57,7 @@ class OwnerGrantPolicy(StrictModel):
     history: HistoryPolicy = Field(default_factory=HistoryPolicy)
     memory_scope: Literal["none", "owner_private"] = "none"
     source_retention_days: int = Field(default=365, ge=1, le=3650, strict=True)
-    capability_policies: dict[CapabilityPolicy, str] = Field(default_factory=dict, max_length=7)
+    capability_policies: dict[CapabilityPolicy, str] = Field(default_factory=dict, max_length=8)
     life_shadow: LifeShadowApproval | None = None
     max_input_chars: int = Field(default=32000, ge=1, le=32000, strict=True)
     max_reply_chars: int = Field(default=32000, ge=1, le=32000, strict=True)
@@ -82,7 +82,7 @@ class OwnerGrantPolicy(StrictModel):
             raise ValueError("capability policies must match explicit purposes")
         if any(key in self.purposes and key not in self.capability_policies
                for key in ("image", "file", "meme", "poke", "voice", "account_actions",
-                           "bili_video")):
+                           "bili_video", "rem")):
             raise ValueError("capability purpose requires policy fingerprint")
         return self
 
@@ -107,3 +107,26 @@ class AuthorityStop(StrictModel):
     @classmethod
     def valid_reference(cls, value):
         return validate_authority_ref(value)
+
+
+class AuthorityReference(StrictModel):
+    authority: dict
+
+    @field_validator("authority")
+    @classmethod
+    def valid_reference(cls, value):
+        return validate_authority_ref(value)
+
+
+class OwnerCapture(AuthorityReference):
+    kind: Literal["authenticated_onebot_ws"]
+    event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
+    source_event_id: str = Field(min_length=1, max_length=512)
+    input_sha256: str = Field(pattern=SHA)
+    frame_sha256: str = Field(pattern=SHA)
+    evidence_sha256: str = Field(pattern=SHA)
+    identity_sha256: str = Field(pattern=SHA)
+    protocol_epoch: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+    received_at: AwareDatetime
+    occurred_at: AwareDatetime
+    signature: str = Field(pattern=r"^[a-f0-9]{128}$")

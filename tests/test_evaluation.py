@@ -27,6 +27,15 @@ def prepare(core, tmp_path):
     approved_live(core, tmp_path, provider="deepseek", model="deepseek-flash",
                   max_output_tokens=2048, input_rate=300000, cached_input_rate=6000,
                   output_rate=1200000)
+    from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
+    from tests.test_owner_authority import activate
+
+    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    activate(core, OwnerGrantPolicy(
+        owner_qq_id=core.settings.owner_qq_id, purposes=["evaluation"],
+        authorization_sha256="d" * 64,
+        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
+    ))
     rows = []
     for repetition in range(3):
         for strategy in (("baseline", "participation_v1") if repetition % 2 == 0 else (
@@ -130,10 +139,18 @@ def test_expired_source_is_not_reauthorized_by_fresh_consent(core, tmp_path):
 
 
 def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
+    from companion import owner_authority
+    from companion.owner_authority_protocol import OwnerGrantPolicy
     from tests.test_cumulative_budget import policy
+    from tests.test_owner_authority import activate
 
     manifest = prepare(core, tmp_path)
     policy(core, account={"model_attempts": 1})
+    prior_policy = OwnerGrantPolicy.model_validate_json(
+        owner_authority._latest(core.store)["policy_json"])
+    activate(core, prior_policy.model_copy(update={
+        "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
+    }), revision=1, operation="operation-cumulative-revision")
     prior = budget.reserve(core.store, core.settings, None, "chat",
                            [{"role": "user", "content": "prior responsibility"}], core.clock(),
                            clock=core.clock)

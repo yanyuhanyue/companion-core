@@ -114,6 +114,8 @@ def custody(store, settings, *, settlement=False):
 
 def current(store, settings, clock, *, purpose=None, authority=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
+    from companion import paid_budget
+
     if settings.owner_runtime.mode != "ENABLED" or _meta(store, MODE) != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
     row = _latest(store)
@@ -125,6 +127,10 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
     policy = OwnerGrantPolicy.model_validate_json(row["policy_json"])
     _check_policy(settings, policy)
+    if settings.paid_model is None or policy.paid_contract_sha256 != _sha(
+        paid_budget.snapshot(settings)
+    ):
+        raise CoreError("OWNER_AUTHORITY_PAID_POLICY_CHANGED", 409)
     if policy.owner_qq_id != settings.owner_qq_id:
         raise CoreError("OWNER_AUTHORITY_IDENTITY_CHANGED", 403)
     if policy.expires_at is not None and datetime.fromisoformat(clock()) >= policy.expires_at:
@@ -133,6 +139,58 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
     custody(store, settings)
     return OwnerAuthorityView(ref, policy, row["journal_id"], row["journal_path"])
+
+
+def evidence(store, settings, authority):
+    """Original policy for proof verification only; never grants execution permission."""
+    try:
+        ref = AuthorityRef.from_dict(authority)
+    except (ValueError, TypeError):
+        raise CoreError("OWNER_AUTHORITY_REFERENCE_INVALID", 400) from None
+    row = store.one("SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+                    (ref.grant_id, ref.revision))
+    if (not row or reference(row) != ref or row["state"] != "ACTIVE"
+        or row["policy_redacted"]):
+        raise CoreError("OWNER_AUTHORITY_EVIDENCE_REQUIRED", 403)
+    custody(store, settings, settlement=True)
+    return OwnerAuthorityView(ref, OwnerGrantPolicy.model_validate_json(row["policy_json"]),
+                              row["journal_id"], row["journal_path"])
+
+
+def bind_job(store, settings, clock, job_id, *, purpose):
+    """Pin a native job once, in its admission transaction; revisions never rebind it."""
+    if not store.db.in_transaction:
+        raise RuntimeError("authority binding requires the job admission transaction")
+    view = current(store, settings, clock, purpose=purpose)
+    row = store.one("SELECT authority_json,state FROM jobs WHERE job_id=?", (job_id,))
+    if not row or row["state"] != "QUEUED":
+        raise CoreError("OWNER_AUTHORITY_JOB_ADMISSION_REQUIRED", 409)
+    saved = json.loads(row["authority_json"])
+    if saved and saved != view.authority.as_dict():
+        raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
+    store.execute("UPDATE jobs SET authority_json=? WHERE job_id=?",
+                  (encode(view.authority.as_dict()), job_id))
+    return view
+
+
+def check_job(store, settings, clock, job, *, purpose, executing=False):
+    """Re-read native state and permission; a durable grant is never a native lease."""
+    row = store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    try:
+        ref = AuthorityRef.from_dict(json.loads(row["authority_json"])) if row else None
+    except (ValueError, TypeError):
+        ref = None
+    if ref is None:
+        raise CoreError("OWNER_AUTHORITY_JOB_BINDING_REQUIRED", 403)
+    view = current(store, settings, clock, purpose=purpose, authority=ref)
+    if executing and (
+        row["state"] != "RUNNING" or not row["lease_token"]
+        or row["lease_token"] != job["lease_token"]
+        or not row["lease_until"]
+        or datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock())
+    ):
+        raise CoreError("JOB_LEASE_LOST", 409)
+    return view
 
 
 def preview(store, settings, clock, request):
@@ -191,6 +249,7 @@ def capability_hashes(settings):
         if settings.social_autonomy.enabled else None,
         "bili_video": _sha(settings.bili_video.model_dump(mode="json"))
         if settings.bili_video.enabled else None,
+        "rem": None,  # Reserved purpose: unavailable until its concrete policy exists.
     }
 
 
@@ -250,7 +309,7 @@ def _append(store, settings, clock, operation, request_hash, policy, state, prev
 
 
 def activate(store, settings, clock, request):
-    from companion import live_text
+    from companion import cumulative, live_text
 
     with store.transaction():
         request_hash = _sha(request.model_dump(mode="json"))
@@ -268,6 +327,11 @@ def activate(store, settings, clock, request):
         old = live_text._meta(store, live_text.BINDING)
         if old and not live_text.stopped(store, old["plan_sha256"]):
             raise CoreError("OWNER_AUTHORITY_LEGACY_STOP_REQUIRED", 409)
+        if settings.paid_model.cumulative or _meta(store, cumulative.PROJECTION):
+            # The existing quota approval pins its pre-append journal cutoff.
+            # Accept it before appending the authority revision, as native open did.
+            cumulative.activate(store, settings, clock())
+            cumulative.check(store, settings, clock())
         previous = _latest(store)
         row = _append(store, settings, clock, request.operation_id, request_hash,
                       request.policy.model_dump(mode="json"), "ACTIVE", previous)

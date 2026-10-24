@@ -6,11 +6,12 @@ provider transport, delivery channel or second task executor.
 
 import json
 from contextlib import nullcontext
+from datetime import datetime
 
 import httpx
 from pydantic import Field
 
-from companion import input_recall, live_text, paid_budget, reply_revision
+from companion import input_recall, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError, StrictModel
 from companion.model import ModelClient, model_payload
 from companion.observation import expired_sources
@@ -127,11 +128,9 @@ def _sources(store, settings, ids, now):
 def _authority(store, settings, clock, current_request=None):
     _enabled(settings)
     paid_budget.contract(settings, clock())
-    if live_text.active(store, settings):
-        live_text.guard(store, settings, clock, current_request=current_request)
+    view = owner_authority.current(store, settings, clock, purpose="evaluation")
     return {"paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(settings)),
-            "window_sha256": (settings.live_text_window.plan_sha256
-                              if settings.live_text_window else None),
+            "authority": view.authority.as_dict(),
             "privacy_epoch": epoch(store)}
 
 
@@ -178,6 +177,7 @@ def submit(core, request):
                      privacy_scope="private", body_json=encode({"evaluation_id": evaluation_id}),
                      trace_id=evaluation_id, memory_processed=1)
         job_id = core.new_job(event_id, "evaluation", evaluation_id, now)
+        owner_authority.bind_job(store, settings, clock, job_id, purpose="evaluation")
         store.execute("UPDATE jobs SET max_attempts=1 WHERE job_id=?", (job_id,))
         for source_id in sources:
             store.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
@@ -200,6 +200,7 @@ def check_job(store, settings, clock, job_id, *, lease_token=None, current_reque
         not run["lease_until"] or run["lease_until"] <= clock()
     ) or lease_token is not None and lease_token != run["lease_token"]:
         raise CoreError("EVALUATION_JOB_FENCED", 409)
+    owner_authority.check_job(store, settings, clock, run, purpose="evaluation", executing=True)
     reply_revision.check_sources(store, job_id)
     ConsentService(store, settings, clock).require(
         run["consent_id"], CAPABILITY, DEVICE, run["manifest_sha256"])
@@ -243,18 +244,27 @@ def check_request(store, settings, clock, rid):
         raise CoreError("EVALUATION_REQUEST_FENCED", 409)
     run, manifest = check_job(store, settings, clock, usage["job_id"], current_request=rid)
     matching = [i for i in range(CALLS) if rid == request_id(run["manifest_sha256"], i)]
-    admission = store.one("SELECT payload_sha256 FROM model_admissions WHERE request_id=?", (rid,))
+    admission = store.one("SELECT payload_sha256,authority_json FROM model_admissions "
+                          "WHERE request_id=?", (rid,))
     if (len(matching) != 1 or not admission or admission["payload_sha256"] != (
         manifest["plan"]["requests"][matching[0]]["payload_sha256"]
     )):
         raise CoreError("EVALUATION_PAYLOAD_CHANGED", 409)
+    if json.loads(admission["authority_json"]) != json.loads(run["binding_json"])["authority"]:
+        raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
     consent = ConsentService(store, settings, clock).require(
         run["consent_id"], CAPABILITY, DEVICE, run["manifest_sha256"])
+    view = owner_authority.current(store, settings, clock, purpose="evaluation",
+                                   authority=json.loads(run["binding_json"])["authority"])
+    retention = min(settings.raw_event_retention_days, view.policy.source_retention_days)
     source_deadlines = [after(store.one("SELECT ingested_at FROM events WHERE event_id=?",
                                        (event_id,))["ingested_at"],
-                              86400 * settings.raw_event_retention_days)
+                              86400 * retention)
                         for event_id in manifest["source_event_ids"]]
-    return {"lease_until": min(run["lease_until"], consent["expires_at"], *source_deadlines)}
+    deadlines = [run["lease_until"], consent["expires_at"], *source_deadlines]
+    if view.policy.expires_at is not None:
+        deadlines.append(view.policy.expires_at.isoformat())
+    return {"lease_until": min(deadlines, key=lambda value: datetime.fromisoformat(value))}
 
 
 def recover(store, now):

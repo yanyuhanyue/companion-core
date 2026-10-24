@@ -346,6 +346,14 @@ def reserve(
 
             if scenario != "evaluation":
                 freeze_model(store, settings, request_id)
+            else:
+                from companion import owner_authority
+
+                view = owner_authority.check_job(store, settings, clock,
+                    store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)),
+                    purpose="evaluation", executing=True)
+                store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
+                              (encode(view.authority.as_dict()), request_id))
         return request_id
 
 
@@ -998,6 +1006,12 @@ async def _dispatch(
             else:
                 paid = paid_budget.contract(settings, clock())
                 lease_deadline = datetime.fromisoformat(current["lease_until"])
+                if scenario == "evaluation":
+                    # Budget synchronization can race a separate owner's STOP.
+                    # Re-read its native authority/consent before the final clock sample.
+                    from companion import evaluation
+
+                    current_job = evaluation.check_request(store, settings, clock, request_id)
                 # All preceding checks are complete. One final sample must fence
                 # every time limit, not only the longer admission lease.
                 dispatch_now = datetime.fromisoformat(clock())

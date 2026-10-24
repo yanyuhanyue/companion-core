@@ -194,3 +194,89 @@ def test_old_live_window_is_not_converted_to_grant(core, tmp_path, state):
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_LEGACY_STOP_REQUIRED"):
         activate(core, policy)
     assert core.store.rows("SELECT * FROM owner_authority_revisions") == []
+
+
+def test_stopped_policy_is_evidence_only(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    result, _ = activate(core, policy)
+    authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="operation-stop-evidence", authority=result["authority"],
+    ))
+    core.settings.paid_model = None
+    assert authority.evidence(core.store, core.settings, result["authority"]).policy == policy
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
+        authority.current(core.store, core.settings, core.clock, authority=result["authority"])
+
+
+def test_reserved_rem_purpose_cannot_be_activated(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    policy = OwnerGrantPolicy.model_validate({**policy.model_dump(), "purposes": ["rem"],
+                                              "capability_policies": {"rem": "a" * 64}})
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_CAPABILITY_CHANGED"):
+        activate(core, policy)
+    assert core.store.rows("SELECT * FROM owner_authority_revisions") == []
+
+
+def test_paid_policy_drift_is_fenced_before_first_model_admission(core, tmp_path):
+    from datetime import timedelta
+
+    policy = prepare(core, tmp_path)
+    result, _ = activate(core, policy)
+    assert core.store.rows("SELECT * FROM model_admissions") == []
+    paid = core.settings.paid_model
+    core.settings.paid_model = paid.model_copy(update={
+        "expires_at": paid.expires_at + timedelta(seconds=30),
+    })
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_PAID_POLICY_CHANGED"):
+        authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+    # Original proof and emergency STOP remain usable with drifted settings.
+    assert authority.evidence(core.store, core.settings, result["authority"]).policy == policy
+    authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="operation-stop-drift", authority=result["authority"]))
+
+
+def test_job_authority_requires_native_unexpired_lease(core, tmp_path):
+    from companion.store import after
+    from tests.conftest import ingest
+
+    policy = prepare(core, tmp_path)
+    activate(core, policy)
+    ingest(core)
+    job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
+    with core.store.transaction():
+        authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
+                           purpose="evaluation")
+    with pytest.raises(CoreError, match="JOB_LEASE_LOST"):
+        authority.check_job(core.store, core.settings, core.clock, job,
+                            purpose="evaluation", executing=True)
+    core.store.execute("UPDATE jobs SET state='RUNNING',lease_token='lease-owner-test',"
+                       "lease_until=? WHERE job_id=?", (after(core.clock(), 30), job["job_id"]))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    authority.check_job(core.store, core.settings, core.clock, job,
+                        purpose="evaluation", executing=True)
+    core.store.execute("UPDATE jobs SET lease_until=? WHERE job_id=?",
+                       (core.clock(), job["job_id"]))
+    with pytest.raises(CoreError, match="JOB_LEASE_LOST"):
+        authority.check_job(core.store, core.settings, core.clock, job,
+                            purpose="evaluation", executing=True)
+
+
+def test_revision_cannot_reauthorize_a_bound_job(core, tmp_path):
+    from tests.conftest import ingest
+
+    policy = prepare(core, tmp_path)
+    activate(core, policy)
+    ingest(core)
+    job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
+    with core.store.transaction():
+        authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
+                           purpose="evaluation")
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    activate(core, policy, revision=1, operation="operation-revision-2")
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
+        authority.check_job(core.store, core.settings, core.clock, job, purpose="evaluation")
+    core.store.execute("UPDATE jobs SET state='QUEUED'")
+    with core.store.transaction(), pytest.raises(CoreError,
+                                                match="OWNER_AUTHORITY_REVISION_CHANGED"):
+        authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
+                           purpose="evaluation")
