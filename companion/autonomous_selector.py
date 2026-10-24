@@ -7,6 +7,7 @@ from time import monotonic
 from companion import budget, owner_authority, private_life, social_autonomy_runtime
 from companion.contracts import CoreError
 from companion.store import encode
+from companion.wake import WAKE_PURPOSES
 from companion.worker_schedule import UnitResult, run_native_unit
 from companion.worker_wakeup import MAINTENANCE_SECONDS
 
@@ -68,22 +69,16 @@ class RoundRobin:
 
 
 def foreground_clear(core):
-    if budget.chat_pending(core.store, core.clock()):
-        return False
     if not owner_authority.required(core.store, core.settings):
-        return True
+        return not budget.chat_pending(core.store, core.clock())
     try:
         view = owner_authority.current(core.store, core.settings, core.clock)
     except CoreError:
         return False
     # This is a scheduling hint over the native signed input receipt, not a new
     # permission or input queue. Final admission remains owned by the domain.
-    pending = core.store.one(
-        "SELECT 1 FROM runtime_meta r LEFT JOIN events e "
-        "ON e.event_id=json_extract(r.value,'$.event_id') "
-        "WHERE r.key LIKE 'owner_input:%' AND e.event_id IS NULL "
-        "AND json_extract(r.value,'$.authority')=json(?) LIMIT 1",
-        (encode(view.authority.as_dict()),),
+    pending = owner_authority.owner_waiting(
+        core.store, core.settings, core.clock(), authority=view.authority.as_dict(),
     )
     return not pending and not private_life.busy(core.store, core.clock())
 
@@ -209,7 +204,7 @@ def native_selector(core, worker_id) -> RoundRobin:
         maintenance("diary_schedule", core.diary.schedule_due, ("diary",)),
         maintenance("consolidation_schedule", core.consolidation.schedule_due, ("consolidation",)),
         maintenance("commitment_expiry", core.goals.expire_commitments, ("goals",)),
-        lane("wake", wake_goal, ("wake", "exploration"), interval=MAINTENANCE_SECONDS),
+        lane("wake", wake_goal, WAKE_PURPOSES, interval=MAINTENANCE_SECONDS),
         lane("goal", schedule_goal, ("goals", "exploration")),
         lane("life_topic", life_topic, ("life",)),
         lane("private_share", private_share, ("proactive",)),
