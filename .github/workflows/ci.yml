@@ -22,6 +22,8 @@ jobs:
     outputs:
       profile: ${{ steps.plan.outputs.profile }}
       reuse: ${{ steps.plan.outputs.reuse }}
+      windows: ${{ steps.plan.outputs.windows }}
+      matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,25 +60,19 @@ jobs:
         env:
           CI_REUSE: ${{ needs.preflight.outputs.reuse }}
         run: python scripts/ci_reuse.py validate
-      - if: ${{ needs.preflight.outputs.profile == 'full' }}
+      - if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
         run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
       - name: Validate documentation privacy, references and evidence
         if: ${{ needs.preflight.outputs.profile == 'docs' }}
         run: uv run --extra onebot python scripts/ci_policy.py docs
   test:
+    name: test (${{ matrix.os }}, ${{ matrix.shard }})
     needs: preflight
-    if: ${{ needs.preflight.outputs.profile == 'full' }}
+    if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        shard: [0, 1]
-        include:
-          - os: ubuntu-latest
-            verify_shard: 0
-          - os: windows-latest
-            verify_shard: 1
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     env:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
@@ -122,7 +118,7 @@ jobs:
           retention-days: 7
   container:
     needs: preflight
-    if: ${{ needs.preflight.outputs.profile == 'full' }}
+    if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -208,7 +204,7 @@ jobs:
           companion-core:test init
   browser-reader:
     needs: preflight
-    if: ${{ needs.preflight.outputs.profile == 'full' }}
+    if: ${{ (needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected') && fromJSON(needs.preflight.outputs.windows).browser }}
     runs-on: windows-latest
     timeout-minutes: 10
     env:
@@ -235,7 +231,7 @@ jobs:
           tests/test_next_reading_browser.py --basetemp=.local/test-temp
   plugin-native:
     needs: preflight
-    if: ${{ needs.preflight.outputs.profile == 'full' }}
+    if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -282,23 +278,40 @@ jobs:
     needs: [preflight, quality, test, container, browser-reader, plugin-native]
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - name: Require the selected validation to succeed
         env:
           CI_PROFILE: ${{ needs.preflight.outputs.profile }}
           NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_WINDOWS: ${{ needs.preflight.outputs.windows }}
+          CI_REUSE: ${{ needs.preflight.outputs.reuse }}
+          CI_JOB_TIMINGS: 'true'
+          GH_TOKEN: ${{ github.token }}
         run: python scripts/ci_policy.py gate --profile "$CI_PROFILE"
       - name: Record the tree after every full check succeeded
         if: ${{ needs.preflight.outputs.profile == 'full' }}
         env:
           CI_PROFILE: ${{ needs.preflight.outputs.profile }}
+          CI_WINDOWS: ${{ needs.preflight.outputs.windows }}
         run: python scripts/ci_reuse.py record
       - uses: actions/upload-artifact@v4
         if: ${{ needs.preflight.outputs.profile == 'full' }}
         with:
           name: ci-full-${{ github.run_attempt }}
           path: .local/ci/verified-tree.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve actual selection and results, including failures
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: ci-validation-${{ github.run_attempt }}
+          path: .local/ci/validation.json
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7

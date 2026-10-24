@@ -176,7 +176,10 @@ def test_cli_event_failure_chooses_full_and_gate_failure_returns_nonzero(tmp_pat
     result = subprocess.run([sys.executable, "scripts/ci_policy.py", "plan"],
                             cwd=ROOT, env=env, capture_output=True, text=True)
     assert result.returncode == 0
-    assert output.read_text("utf-8") == "profile=full\nreuse=null\n"
+    outputs = dict(line.split("=", 1) for line in output.read_text("utf-8").splitlines())
+    assert outputs["profile"] == "full" and outputs["reuse"] == "null"
+    assert json.loads(outputs["windows"])["product"] is True
+    assert len(json.loads(outputs["matrix"])["include"]) == 8
     env["NEEDS_JSON"] = json.dumps(needs("docs"))
     result = subprocess.run([sys.executable, "scripts/ci_policy.py", "gate", "--profile", "full"],
                             cwd=ROOT, env=env, capture_output=True, text=True)
@@ -265,16 +268,15 @@ def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
                          Loader=yaml.BaseLoader)
     jobs = workflow["jobs"]
     assert set(jobs) == {"preflight", "quality", "ci", *FULL_JOBS}
-    assert jobs["test"]["strategy"]["matrix"]["os"] == ["ubuntu-latest", "windows-latest"]
-    assert jobs["test"]["strategy"]["matrix"]["shard"] == ["0", "1"]
-    assert jobs["test"]["strategy"]["matrix"]["include"] == [
-        {"os": "ubuntu-latest", "verify_shard": "0"},
-        {"os": "windows-latest", "verify_shard": "1"},
-    ]
+    assert jobs["test"]["strategy"]["matrix"] == (
+        "${{ fromJSON(needs.preflight.outputs.matrix) }}")
+    assert jobs["test"]["name"] == "test (${{ matrix.os }}, ${{ matrix.shard }})"
     assert jobs["test"]["strategy"]["fail-fast"] == "false"
     for name in FULL_JOBS:
         assert jobs[name]["needs"] == "preflight"
-        assert jobs[name]["if"] == "${{ needs.preflight.outputs.profile == 'full' }}"
+        assert "needs.preflight.outputs.profile == 'full'" in jobs[name]["if"]
+        assert "needs.preflight.outputs.profile == 'selected'" in jobs[name]["if"]
+    assert "fromJSON(needs.preflight.outputs.windows).browser" in jobs["browser-reader"]["if"]
     assert jobs["ci"]["if"] == "${{ always() }}"
     assert set(jobs["ci"]["needs"]) == {"preflight", "quality", *FULL_JOBS}
     # Choosing work must not wait for dependency installs or duplicate runtime tests.
