@@ -157,13 +157,66 @@ const CAP_FIELDS = {
   "reading.web": ["web_reading_enabled", "web_reading_hosts", "content_enabled"], "reading.bilibili": ["observation_enabled", "content_enabled"], "reading.heybox": ["observation_enabled", "content_enabled"],
   "bilibili.video": ["bili_video"], "model.understand_video": ["bili_video", "video_model_key"], "qq.images": ["content"], "qq.animation": ["content"], "qq.files": ["private_files"],
   expression: ["expression_enabled", "expression_cooldown_minutes", "expression_selection_probability", "expression_meme_categories"],
-  expression_learning: ["expression_learning_enabled"], "unicode.emoji": ["expression_enabled"], "qq.face_names": ["expression_enabled"], "qq.face_images": ["expression_enabled"],
-  "memes.catalog": ["meme_discovery_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
+  expression_learning: ["expression_learning_enabled"], "unicode.emoji": [], "qq.face_names": ["rich_input_scope"], "qq.face_images": ["content_enabled"],
+  "memes.catalog": ["expression_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
   "memes.community_import": ["meme_discovery_enabled", "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes"],
   "memes.semantic": ["meme_semantics_enabled", "meme_caption_daily_micro_usd", "meme_caption_max_output_tokens"],
   "qq.voice.asr": ["voice_enabled", "voice"], "qq.voice.tts": ["voice_enabled", "voice"], "media.voice": ["voice_enabled"], "media.camera": ["camera_enabled"], "media.android": ["android_enabled"],
   "qq.profile.observe": ["social_autonomy"], "qq.account.signature": ["social_autonomy"], "qq.account.nickname": ["social_autonomy"], "qq.account.avatar": ["social_autonomy"], "qq.account.qzone_publish": ["social_autonomy"],
 };
+// One release switch removes all backend implementation notes; runtime state remains separate.
+const SHOW_IMPLEMENTATION_STATUS = true;
+const CAPABILITY_IMPLEMENTATION = {
+  "memory.manage": ["已实现", "可查询、确认、纠正和忘记记忆。"],
+  "memory.recall": ["已实现", "已有来源约束的检索；控制台尚无原话摘录和召回解释。"],
+  diary: ["已实现", "已有日记读取、纠正、忘记与暂停；不包含未来睡眠阶段或梦境。"],
+  consolidation: ["已实现", "已有夜间整理；尚无 N1/N2/N3 阶段观察。"],
+  reflection: ["已实现", "已有来源支持的反思；控制台尚不能接受或拒绝建议。"],
+  goals: ["已实现", "已有目标与承诺；控制台目前只读，尚无逐步执行视图。"],
+  wake: ["已实现", "已有受限调度与暂停；尚未接入完整自主决策观察。"],
+  affect: ["已实现", "已有反馈与衰减；控制台尚无来源、重置和撤销视图。"],
+  expression: ["已实现", "已有受限表情选择及投递流程；实际表达效果仍需体验验证。"],
+  expression_learning: ["已实现", "已有有来源的表达偏好；尚无跨日变化与证据详情。"],
+  proactive: ["已实现", "已有主动私聊和暂停；尚无逐轮发送或跳过的决策视图。"],
+  social: ["已实现", "已有来源支持的分享候选；尚无统一表达意图视图。"],
+  "reading.web": ["已实现", "已有授权网站读取；控制台只读任务，授权由部署保管。"],
+  "reading.bilibili": ["已实现", "已有 B站读取回执；控制台尚无读取授权管理。"],
+  "reading.heybox": ["已实现", "已有小黑盒读取回执；控制台尚无读取授权管理。"],
+  exploration: ["已实现", "已有内容发现；控制台尚无逐步探索与来源授权操作。"],
+  "bilibili.video": ["已实现", "已有受限视频分析；控制台尚无采样范围详情。"],
+  "model.understand_video": ["已实现", "仅本轮实际开放工具时可调用；控制台尚无工具回执详情。"],
+  "qq.files": ["已实现", "已有私人文件解析和任务记录；尚无页级证据详情。"],
+  "qq.images": ["已实现", "已有认证图片理解；控制台尚无图像来源详情。"],
+  "qq.animation": ["已实现", "已有受限动图理解；控制台尚无帧级证据详情。"],
+  "qq.voice.asr": ["已实现", "已有语音转写与节点状态；控制台不提供字幕或音频回放。"],
+  "qq.voice.tts": ["已实现", "已有语音合成及原投递回执；控制台不提供音频回放。"],
+  "qq.poke": ["已实现", "已有受限拍一拍回应；控制台尚无批次详情。"],
+  "qq.poke.native": ["已实现", "已有独立许可与原生回拍回执；控制台尚无操作详情。"],
+  "qq.account.qzone_publish": ["已实现", "已有独立授权发布与回执；控制台尚不能审核草稿。"],
+  "qq.account.nickname": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
+  "qq.account.signature": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
+  "qq.account.avatar": ["已实现", "已有审核素材与回执；控制台尚无头像预览或计划决定。"],
+  "qq.profile.observe": ["已实现", "已有资料观测；缓存观测不能证明网络刷新或修改成功。"],
+  "unicode.emoji": ["已实现", "保留输入中的 Unicode 表情原文。"],
+  "qq.face_names": ["已实现", "在富媒体输入范围内识别 QQ 原生表情名称。"],
+  "qq.face_images": ["已实现", "在图片许可内接收认证表情图；是否看过以本轮回执为准。"],
+  "memes.catalog": ["已实现", "已有审核素材目录；控制台尚无编辑、上传或隔离操作。"],
+  "memes.community_import": ["已实现", "已有受限素材导入；控制台尚无素材审核操作。"],
+  "memes.search": ["已实现", "已有配置搜索服务的发现路径；控制台尚无搜索操作。"],
+  "memes.semantic": ["已实现", "已有带来源的理解任务；控制台目前只读任务记录。"],
+  "media.voice": ["已实现", "已有独立媒体会话；控制台尚无启动和关闭入口。"],
+  "media.camera": ["已实现", "已有受限摄像头观察；控制台尚无会话控制。"],
+  "media.android": ["已实现", "已有受限设备观察；不代表已实现设备操作。"],
+  executive: ["已实现", "已有独立审批执行器；控制台尚无任务提交、审批和撤销入口。"],
+};
+function implementationNote(id) {
+  const item = CAPABILITY_IMPLEMENTATION[id];
+  return SHOW_IMPLEMENTATION_STATUS && item ? el("small", {
+    class: "note cap-implementation", "data-implementation": id,
+    title: "能力后端：" + item[0] + "。" + item[1],
+    "aria-label": "能力后端" + item[0],
+  }, "后端" + item[0]) : null;
+}
 /* 可以立即暂停的能力对应 /mode 的 target */
 const CAP_RUNTIME = { diary: "diary", wake: "life", proactive: "proactive" };
 const REASONS = {
@@ -1481,7 +1534,7 @@ const capFieldsOf = id => (CAP_FIELDS[id] || []).map(fieldOf).filter(Boolean);
 function capMarks(id) {
   const a = state.data?.autonomy, d = (a?.capabilities || []).find(x => x.capability === id);
   const proposals = (a?.adjustments || []).filter(x => x.capability === id && x.state === "PROPOSED").length;
-  return [d && d.mode !== "owner" ? el("span", { class: "auto-ic", title: d.mode === "self" ? "她在范围内自己调整" : "她提议，你批准" }, icon("spark")) : null,
+  return [d && d.mode !== "owner" ? el("span", { class: "auto-ic", title: d.mode === "self" ? "已允许她调整；运行接入范围见详情" : "已允许她提议；运行接入范围见详情" }, icon("spark")) : null,
     proposals ? el("span", { class: "pdot", title: proposals + " 条提议等你批准" }) : null,
     capFieldsOf(id).some(f => state.draft.has(f.key)) || state.autoDraft?.[id] ? el("span", { class: "ddot", title: "有没保存的修改" }) : null];
 }
@@ -1503,6 +1556,10 @@ const CAP_SUB = {
   "qq.animation": { content: ["use_chat_model_for_vision", "max_image_bytes", "max_daily_images", "max_daily_image_bytes"] },
 };
 const CAP_SUB_LABEL = { social_autonomy: "相关设置", poke_policy: "相关设置", voice: "相关设置", bili_video: "相关设置", content: "相关设置" };
+const CAP_NO_SWITCH = {
+  "unicode.emoji": "输入协议能力，没有独立开关。",
+  "qq.face_names": "由富媒体输入范围和已批准窗口决定，没有独立开关。",
+};
 /* 每项能力的总开关：配置键，或对象配置里的子项路径。共用一个开关的能力会同时变化 */
 const CAP_SWITCH = {
   "memory.manage": "memory_enabled", "memory.recall": "memory_enabled", diary: "diary_enabled", consolidation: "consolidation_enabled",
@@ -1511,8 +1568,8 @@ const CAP_SWITCH = {
   "reading.web": "web_reading_enabled", "reading.bilibili": "observation_enabled", "reading.heybox": "observation_enabled",
   "bilibili.video": "bili_video.enabled", "model.understand_video": "bili_video.enabled", "qq.images": "content_enabled", "qq.animation": "content_enabled",
   "qq.files": "private_files.enabled", expression: "expression_enabled", expression_learning: "expression_learning_enabled",
-  "unicode.emoji": "expression_enabled", "qq.face_names": "expression_enabled", "qq.face_images": "expression_enabled",
-  "memes.catalog": "meme_discovery_enabled", "memes.search": "meme_discovery_enabled", "memes.community_import": "meme_discovery_enabled",
+  "qq.face_images": "content_enabled",
+  "memes.catalog": "expression_enabled", "memes.search": "meme_discovery_enabled", "memes.community_import": "meme_discovery_enabled",
   "memes.semantic": "meme_semantics_enabled", "qq.voice.asr": "voice.asr.enabled", "qq.voice.tts": "voice.reply.enabled",
   "media.voice": "voice_enabled", "media.camera": "camera_enabled", "media.android": "android_enabled",
   "qq.profile.observe": "social_autonomy.enabled", "qq.account.signature": "social_autonomy.signature_enabled",
@@ -1529,7 +1586,7 @@ function capMain(id) {
 }
 function capSwitch(id, name, small) {
   const m = capMain(id);
-  if (!m) return el("span", { class: "sw-lock", title: "开关在部署配置里" }, icon("lock"));
+  if (!m) return el("span", { class: "sw-lock", title: CAP_NO_SWITCH[id] || "开关在部署配置里" }, icon("lock"));
   return el("button", { type: "button", class: "switch" + (small ? " sm" : ""), role: "switch", "aria-checked": String(m.read()), "data-k": "sw-" + id,
     "aria-label": name + "总开关", title: m.shared.length ? "和" + m.shared.join("、") + "共用这个开关" : null, onclick: m.toggle });
 }
@@ -1540,6 +1597,7 @@ const CAP_DEPLOY = {
   "reading.bilibili": "B 站读取适配器和账号授权在部署环境里配置。", "reading.heybox": "小黑盒读取适配器在部署环境里配置。",
   "model.understand_video": "视频理解模型的审批窗口（paid_model）在部署配置里设置。",
   "qq.images": "付费图片理解的审批窗口（paid_model.image_input）在部署配置里设置。",
+  "qq.face_images": "共享内容开关只控制接收条件；认证捕获、图片审批和 Bridge 状态仍由后端核对。",
 };
 PAGES.caps = data => {
   const caps = capList(), known = new Set(CAP_GROUPS.flatMap(g => g[1]));
@@ -1559,7 +1617,7 @@ PAGES.caps = data => {
         return el("div", { class: "ci-row" + (c === sel ? " sel" : "") + (["DISABLED", "UNAVAILABLE"].includes(c.state) ? " off" : "") },
           el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; state.capScrolled = c.id; state.capTop = innerWidth <= 860; } },
             el("span", { class: "dot " + statusOf(c.state)[1], title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
-            ...capMarks(c.id)),
+            implementationNote(c.id), ...capMarks(c.id)),
           capSwitch(c.id, CAP_NAMES[c.id] || "", true));
       }) : null);
   });
@@ -1586,9 +1644,9 @@ function capDetail(c) {
   const limits = Object.entries(c.limits || {}).filter(([, v]) => v !== null && v !== undefined && v !== "");
   const reasons = [...new Set((c.reason_codes || []).map(reasonText))];
   return el("div", {}, btn("全部能力", () => { state.capMobile = false; rerender(); }, { cls: "sm quiet cd-back", symbol: "left" }),
-    el("header", { class: "cd-head" }, el("div", {}, el("h2", {}, name), el("p", {}, c.summary || "")),
-      el("div", { class: "cd-switch" }, tag(c.state), el("label", {}, el("span", {}, "总开关"), capSwitch(c.id, name)),
-        main?.shared.length ? el("span", { class: "note" }, "和" + main.shared.join("、") + "共用") : !main ? el("span", { class: "note" }, "在部署配置里开关") : null)),
+    el("header", { class: "cd-head" }, el("div", {}, el("h2", {}, name), implementationNote(c.id), el("p", {}, c.summary || "")),
+      el("div", { class: "cd-switch" }, tag(c.state), el("label", {}, el("span", {}, main ? "总开关" : "开关范围"), capSwitch(c.id, name)),
+        main?.shared.length ? el("span", { class: "note" }, "和" + main.shared.join("、") + "共用") : !main ? el("span", { class: "note" }, CAP_NO_SWITCH[c.id] || "在部署配置里开关") : null)),
     reasons.length ? el("ul", { class: "needs" }, reasons.map(r => el("li", { class: "no" }, icon("close"), el("span", {}, r)))) : null,
     CAP_DEPLOY[c.id] ? el("p", { class: "lockline" }, icon("lock"), el("span", {}, CAP_DEPLOY[c.id])) : null,
     el("div", { class: "cd-stats" },
@@ -1605,14 +1663,23 @@ function capDetail(c) {
       fields.length ? el("div", { class: "pf-list" }, fields.map(f => CAP_SUB[c.id]?.[f.key] ? fieldRow(f, CAP_SUB_LABEL[f.key], CAP_SUB[c.id][f.key]) : fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
 }
 /* ================= 交给她决定 ================= */
-const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，你批准后才生效。"],
-  ["self", "她在范围内自己调整", "在你划定的范围内她可以直接调整，事后可以撤销。"]];
+const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，由你批准。"],
+  ["self", "她在范围内自己调整", "在你划定的范围内调整已接入的参数，事后可以撤销。"]];
 const AUTO_FIELDS = { pause: "暂停到第二天 08:00", wake_max_daily_runs: "每天最多运行", wake_min_interval_minutes: "两次之间至少间隔" };
 const ADJ_STATE = { PROPOSED: ["待你批准", "warn"], ACTIVE: ["生效中", "ok"], REJECTED: ["已拒绝", "off"], REVERTED: ["已撤销", "off"], EXPIRED: ["已结束", "off"],
   SUPERSEDED: ["已被新的调整替代", "off"], DISCARDED: ["恢复备份后作废", "off"] };
-const AUTO_LOCKED = "这项能力会改动对外可见的内容、私人文件或费用账本，只能由你控制。";
+const AUTO_LOCKED = "这项能力没有开放自主调整；相关配置和授权仍由你控制。";
 function autoLabel(field) { return field === "pause" ? "暂停到第二天 08:00" : (fieldOf(field)?.label || AUTO_FIELDS[field] || subLabel(field)); }
 function autoValue(field, v) { if (field === "pause") return "暂停"; const u = unitFor(field, Number.isInteger(v) ? "integer" : "number"); return (u.pre || "") + (+(v / u.scale).toFixed(u.money ? 4 : 2)) + (u.unit ? " " + u.unit : ""); }
+function autonomyWiring(id) {
+  const a = state.data?.autonomy;
+  if (!a) return "自主调整：状态未读取";
+  const cap = (a.capabilities || []).find(x => x.capability === id);
+  if (!cap) return "自主调整：只由你控制";
+  const fields = cap.fields || [], wired = fields.filter(f => (cap.wired || []).includes(f));
+  return "自主调整：" + (!wired.length ? "尚未接入" :
+    wired.length < fields.length ? `部分接入（${wired.length}/${fields.length} 项）` : "已接入");
+}
 function autonomySection(id) {
   const a = state.data?.autonomy;
   if (!a) return el("section", { class: "cd-sec" }, el("h3", {}, "交给她决定"), el("p", { class: "note" }, "授权接口暂时不可用，刷新后再试。"));
@@ -1639,7 +1706,8 @@ function autonomySection(id) {
   };
   const wired = new Set(cap.wired || []), notWired = cap.fields.filter(f => !wired.has(f));
   const adjustments = (a.adjustments || []).filter(x => x.capability === id).slice(0, 8);
-  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "保存后立即生效，不需要重启")),
+  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "授权保存后，按已接入范围生效")),
+    el("p", { class: "note", "data-autonomy-wiring": id }, autonomyWiring(id)),
     el("div", { class: "mode-pick", role: "radiogroup", "aria-label": "由谁决定" }, AUTO_MODES.map(([m, n, d]) =>
       el("button", { type: "button", role: "radio", "aria-checked": String(draft.mode === m), onclick: () => set({ mode: m }) }, el("b", {}, n), el("span", {}, d)))),
     draft.mode !== "owner" ? [
@@ -1660,7 +1728,7 @@ function autonomySection(id) {
     }))] : null);
 }
 async function saveAutonomy(id, body) {
-  try { await api.write("/autonomy/" + id, body, "PUT", r => r.state === "COMPLETE"); delete state.autoDraft[id]; toast("已保存授权，立即生效"); await loadRoute({ reset: true }); }
+  try { await api.write("/autonomy/" + id, body, "PUT", r => r.state === "COMPLETE"); delete state.autoDraft[id]; toast("已保存授权；调整按已接入范围生效"); await loadRoute({ reset: true }); }
   catch (error) { notice(errorText(error)); }
 }
 async function decideAdjustment(x, decision) {
