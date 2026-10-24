@@ -86,26 +86,130 @@ def schedule_due(core):
         if material is None:
             return None
         inputs, proof, conversation, expires = material
-        rem_id, event_id, now = uid("rem"), uid("evt_rem"), clock()
-        store.insert("events", event_id=event_id, schema_version=1, source="system.control",
-                     source_event_id=rem_id, conversation_id=conversation, actor_id="system",
-                     event_type="rem.requested", occurred_at=now, ingested_at=now,
-                     privacy_scope="private", body_json=encode({"rem_id": rem_id}),
-                     trace_id=rem_id, memory_processed=1)
-        job_id = core.new_job(event_id, "rem", rem_id, now)
-        owner_authority.bind_job(store, cfg, clock, job_id, purpose="rem")
-        store.execute("UPDATE jobs SET max_attempts=1 WHERE job_id=?", (job_id,))
-        for key in proof["source_event_ids"]:
-            store.insert("event_dependencies", event_id=event_id, source_event_id=key)
-            store.insert("job_sources", job_id=job_id, event_id=key)
-        store.insert("rem_records", rem_id=rem_id, job_id=job_id, local_date=day,
-                     timezone=cfg.timezone, config_sha256=paid_budget.sha(cfg.rem.model_dump()),
-                     source_memory_ids_json=encode([row["memory_id"] for row in inputs]),
-                     source_event_ids_json=encode(proof["source_event_ids"]),
-                     source_snapshot_json=encode({"inputs": inputs, "proof": proof}),
-                     created_at=now, expires_at=expires)
-        store.audit("rem.scheduled", rem_id, rem_id, now, kind="FICTION")
-        return job_id
+        return _enqueue(store, cfg, clock, day, conversation, expires,
+            {"inputs": inputs, "proof": proof}, proof["source_event_ids"],
+            memory_ids=[row["memory_id"] for row in inputs])
+
+
+def _enqueue(store, settings, clock, day, conversation, expires, snapshot, sources,
+             *, memory_ids=(), idempotency_key=None):
+    """One existing REM job/record and its evidence commit atomically for either producer."""
+    if not store.db.in_transaction:
+        raise RuntimeError("REM_ADMISSION_TRANSACTION_REQUIRED")
+    rem_id, event_id, job_id, now = uid("rem"), uid("evt_rem"), uid("job"), clock()
+    store.insert("events", event_id=event_id, schema_version=1, source="system.control",
+                 source_event_id=rem_id, conversation_id=conversation, actor_id="system",
+                 event_type="rem.requested", occurred_at=now, ingested_at=now,
+                 privacy_scope="private", body_json=encode({"rem_id": rem_id}),
+                 trace_id=rem_id, memory_processed=1)
+    store.insert("jobs", job_id=job_id, event_id=event_id, kind="rem", state="QUEUED",
+                 idempotency_key=idempotency_key or rem_id, max_attempts=1,
+                 created_at=now, updated_at=now, context_tracked=1)
+    store.insert("job_sources", job_id=job_id, event_id=event_id)
+    owner_authority.bind_job(store, settings, clock, job_id, purpose="rem")
+    for key in sorted(set(sources)):
+        store.insert("event_dependencies", event_id=event_id, source_event_id=key)
+        store.insert("job_sources", job_id=job_id, event_id=key)
+    store.insert("rem_records", rem_id=rem_id, job_id=job_id, local_date=day,
+                 timezone=settings.timezone,
+                 config_sha256=paid_budget.sha(settings.rem.model_dump()),
+                 source_memory_ids_json=encode(list(memory_ids)),
+                 source_event_ids_json=encode(sorted(set(sources))),
+                 source_snapshot_json=encode(snapshot), created_at=now, expires_at=expires)
+    store.audit("rem.scheduled", rem_id, rem_id, now, kind="FICTION")
+    return job_id
+
+
+def _life_draft(store, settings, clock, reference):
+    from companion.life_topics import LifeTopics
+
+    if (not isinstance(reference, dict)
+        or set(reference) != {"job_id", "expected_content_sha256"}):
+        raise CoreError("LIFE_DRAFT_CHANGED", 409)
+    data = LifeTopics(store, settings, clock).retained_result(
+        reference["job_id"], destination="PRIVATE_CREATION",
+    )
+    if paid_budget.sha({"text": data["result"]["text"]}) != reference["expected_content_sha256"]:
+        raise CoreError("LIFE_DRAFT_CHANGED", 409)
+    return data
+
+
+def _life_sources(store, data):
+    sources = sorted({data["job"]["event_id"], *[x["event_id"] for x in data["sources"]]})
+    return store.rows(
+        "WITH RECURSIVE roots(event_id) AS (SELECT value FROM json_each(?) "
+        "UNION SELECT d.source_event_id FROM event_dependencies d "
+        "JOIN roots r ON d.event_id=r.event_id) "
+        "SELECT e.event_id,e.ingested_at FROM events e JOIN roots USING(event_id)",
+        (encode(sources),),
+    )
+
+
+def life_record(store, settings, clock, row, snapshot):
+    """Read-only native source proof for a Life-origin record, shared with cognition."""
+    if set(snapshot) != {"life"}:
+        raise CoreError("LIFE_DRAFT_CHANGED", 409)
+    data = _life_draft(store, settings, clock, snapshot["life"])
+    job = store.one("SELECT idempotency_key,authority_json FROM jobs WHERE job_id=? AND kind='rem'",
+                    (row["job_id"],))
+    expected = {"kind": "FICTION", "decision": "DREAM", "title": "私人创作",
+                "text": data["result"]["text"], "questions": []}
+    if (not job or job["idempotency_key"] != "life:rem:" + data["job"]["job_id"]
+        or json.loads(job["authority_json"]) != json.loads(data["job"]["authority_json"])
+        or json.loads(row["source_memory_ids_json"]) != [] or row["model_request_id"] is not None
+        or sorted(json.loads(row["source_event_ids_json"])) != sorted(
+            x["event_id"] for x in _life_sources(store, data))
+        or json.loads(row["output_json"]) not in ({}, expected)):
+        raise CoreError("LIFE_DRAFT_CHANGED", 409)
+    return data
+
+
+def consume_life_draft(store, settings, clock, life_job_id, body):
+    """Save exact paid Life prose through REM custody; no new generation or grant."""
+    from companion.life_topics import _paused, _uncertain
+
+    if not store.db.in_transaction:
+        raise RuntimeError("REM_ADMISSION_TRANSACTION_REQUIRED")
+    view = _authority(store, settings, clock, authority=body.authority)
+    reference = {"job_id": life_job_id, "expected_content_sha256": body.expected_content_sha256}
+    data = _life_draft(store, settings, clock, reference)
+    if settings.life_loop.mode != "SHADOW" or _paused(store, settings, clock()):
+        raise CoreError("LIFE_CONSUMPTION_PAUSED", 409)
+    if _uncertain(store):
+        raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
+    if budget.chat_pending(store, clock()) or owner_authority.owner_waiting(
+        store, settings, clock(), authority=view.authority.as_dict(),
+    ):
+        raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
+    key = "life:rem:" + life_job_id
+    existing = store.one("SELECT j.job_id,r.rem_id,j.state FROM jobs j "
+                         "JOIN rem_records r USING(job_id) WHERE j.kind='rem' "
+                         "AND j.idempotency_key=?", (key,))
+    if existing:
+        return {"action": "rem.save", **existing}
+    local = datetime.fromisoformat(clock()).astimezone(ZoneInfo(settings.timezone))
+    if local.hour < settings.rem.local_hour:
+        raise CoreError("REM_NOT_DUE", 409)
+    day = local.date().isoformat()
+    if store.one("SELECT 1 FROM rem_records WHERE local_date=? AND timezone=?",
+                 (day, settings.timezone)):
+        raise CoreError("REM_DAILY_LIMIT", 429)
+    retention = min(settings.rem.source_retention_days, view.policy.source_retention_days,
+                    settings.raw_event_retention_days)
+    roots = _life_sources(store, data)
+    expires = min(after(clock(), settings.rem.record_retention_days * 86400),
+                  data["topic"]["expires_at"],
+                  *(after(row["ingested_at"], retention * 86400) for row in roots))
+    if expires <= clock():
+        raise CoreError("LIFE_DRAFT_EXPIRED", 409)
+    job_id = _enqueue(store, settings, clock, day, data["job"]["conversation_id"], expires,
+                       {"life": reference}, [row["event_id"] for row in roots],
+                       idempotency_key=key)
+    store.audit("life.draft_consumed", life_job_id, life_job_id, clock(),
+                channel_action="rem.save", rem_job_id=job_id)
+    return {"action": "rem.save", "job_id": job_id, "state": "QUEUED",
+            "rem_id": store.one("SELECT rem_id FROM rem_records WHERE job_id=?",
+                                (job_id,))["rem_id"]}
 
 
 def check_job(store, settings, clock, job_id, *, lease_token=None):
@@ -123,7 +227,20 @@ def check_job(store, settings, clock, job_id, *, lease_token=None):
         raise CoreError("REM_POLICY_CHANGED", 409)
     reply_revision.check_sources(store, job_id)
     snapshot = json.loads(row["source_snapshot_json"])
-    _context(store, settings).revalidate(snapshot["proof"], clock())
+    if "life" in snapshot:
+        from companion.life_topics import _paused, _uncertain
+
+        life_record(store, settings, clock, row, snapshot)
+        if settings.life_loop.mode != "SHADOW" or _paused(store, settings, clock()):
+            raise CoreError("LIFE_CONSUMPTION_PAUSED", 409)
+        if _uncertain(store):
+            raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
+        if budget.chat_pending(store, clock()) or owner_authority.owner_waiting(
+            store, settings, clock(), authority=view.authority.as_dict(),
+        ):
+            raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
+    else:
+        _context(store, settings).revalidate(snapshot["proof"], clock())
     return row, snapshot
 
 
@@ -131,7 +248,9 @@ def admit(store, settings, clock, job_id, estimated_input, estimate):
     """Called inside original budget.reserve; original usage is the only counter."""
     if not store.db.in_transaction:
         raise RuntimeError("REM_ADMISSION_TRANSACTION_REQUIRED")
-    check_job(store, settings, clock, job_id)
+    _, snapshot = check_job(store, settings, clock, job_id)
+    if "life" in snapshot:
+        raise CoreError("REM_ALREADY_ATTEMPTED", 409)
     cfg = settings.rem
     if estimated_input > cfg.max_input_tokens:
         raise CoreError("REM_INPUT_LIMIT", 429)
@@ -160,6 +279,20 @@ async def run(core, job):
         return check_job(store, settings, clock, job["job_id"], lease_token=job["lease_token"])
     try:
         row, snapshot = source_check()
+        if "life" in snapshot:
+            with store.transaction():
+                source_check()
+                data = _life_draft(store, settings, clock, snapshot["life"])
+                output = {"kind": "FICTION", "decision": "DREAM", "title": "私人创作",
+                          "text": data["result"]["text"], "questions": []}
+                store.execute("UPDATE rem_records SET output_json=? WHERE rem_id=?",
+                               (encode(output), row["rem_id"]))
+                store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
+                               "WHERE job_id=? AND lease_token=?",
+                               (clock(), job["job_id"], job["lease_token"]))
+                store.audit("rem.completed", row["rem_id"], job["trace_id"], clock(),
+                            kind="FICTION", decision="DREAM", life_job_id=data["job"]["job_id"])
+            return True
         messages = [{"role": "system", "content": RULES},
                     {"role": "user", "content": encode({"memories": snapshot["inputs"]})}]
         request_id = budget.reserve(store, settings, job["job_id"], "rem", messages, clock(),
@@ -258,8 +391,11 @@ def records(core, *, limit=20):
         available = not row["redacted"] and row["expires_at"] > core.clock()
         if available:
             try:
-                core.memory_context.revalidate(json.loads(row["source_snapshot_json"])["proof"],
-                                                core.clock())
+                snapshot = json.loads(row["source_snapshot_json"])
+                if "life" in snapshot:
+                    life_record(core.store, core.settings, core.clock, row, snapshot)
+                else:
+                    core.memory_context.revalidate(snapshot["proof"], core.clock())
             except (CoreError, ValueError, KeyError):
                 available = False
         output = json.loads(row["output_json"]) if available else {}

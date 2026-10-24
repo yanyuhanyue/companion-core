@@ -36,8 +36,9 @@ DREAM/SKIP、FICTION/UNVERIFIED、次数/token/费用/保留期约束有原生�
 
 需要保留以下限制：
 
-- 当前素材仅来自已确认 Memory，不会直接选择 Interest、原始 Episode 或观察正文。
-  已有证据可通过 Memory 入选，但不能宣称已实现多种素材联合选择。
+- 夜间生成素材来自已确认 Memory。Life 的 `PRIVATE_CREATION` 可通过显式
+  `rem.save` 授权把已结算原文交给同一 REM worker 保存，保留原 Life 来源。
+  这不包含 Interest、Episode 等素材的任意联合规划。
 - 问题保存在私人虚构记录中，尚无送入真实探索候选的消费者；任务书允许成为候选，
   并未授权把虚构问题或正文直接作为 Goal 完成证据。
 - cognition 只读接口提供元数据和原费用引用，刻意不返回作品正文。

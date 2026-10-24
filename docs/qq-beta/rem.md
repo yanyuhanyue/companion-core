@@ -1,6 +1,7 @@
 # 私人 REM 创作
 
 REM 使用已有 Memory 事实生成明确标为虚构的私人创作，默认关闭。
+Life 也可把已结算的私人创作原文保存到同一 REM 记录中。
 本模块已经接入原生 Core job、预算、擦除、Life selector 与主人 cognition 读取接口。
 合成入口验收通过不表示已启用后台运行，也不表示真实模型或 QQ 已验收。
 
@@ -17,6 +18,29 @@ REM 使用已有 Memory 事实生成明确标为虚构的私人创作，默认�
 并固定事实内容与完整来源证明。素材不足时安静跳过。
 输入上限默认 2400 token，输出上限默认 600 token；来源与记录保留期默认均为 30 天。
 有效来源保留期取 REM、主人授权、原始事件保留策略中最短值。
+
+## Life 表达选择与保存
+
+`LifeDecision.destination=PRIVATE_CREATION` 表示私人虚构创作或梦境。
+主人 Life 源授权必须明确包含 `purposes=["PRIVATE_CREATION"]`，同时具备独立
+`rem`、`memory` 用途、有效 REM 配置指纹以及已启用的 REM/Memory 配置，模型才会获得该目的地。
+普通私人日记或聊天用途不能推导出创作权限。
+
+原有主人控制接口 `POST /internal/v2/life/results/{job_id}/consume` 接受
+`action=rem.save`、原 authority 和 `expected_content_sha256`。
+该摘要仍是保留原文的 `sha({"text": text})`。自动消费需要 Life 源授权的
+`automatic_actions` 显式包含 `rem.save`；默认列表为空。
+
+消费只把原 Life 结果引用与来源闭包登记为原生 REM job，独立 REM worker
+再次核验原 Life 结算、当前授权、内容摘要、来源、租约和主人输入优先级后原样保存。
+此路径已在 Life 选择时结算费用，因此保存阶段不发起第二次模型调用，REM 记录的
+`model_request_id` 为空；原 Life job 的账目继续保留。
+作品标为 `FICTION/DREAM`，标题为“私人创作”，问题列表为空。
+
+Life 保存与夜间生成共用本地日期/时区的唯一 REM 记录和开始时刻，不能另开每日配额。
+重复消费返回原 REM job；终态失败、撤回与重启均不会创建替代付费任务。
+记录保留期还受原 Life topic 的到期时间限制。来源通过原 Life 证明及原生
+`job_sources`、`event_dependencies` 关联，擦除和旧备份重放继续使用原 ErasureLedger。
 
 ## 执行与记账
 
@@ -58,6 +82,13 @@ DSH 的执行前容量检查与终态结算约束用于对照检查；其进程�
 后台记忆整理的分离方式用于对照边界；本项目的 REM 产物始终是虚构作品。
 持久化、恢复、权限、费用与擦除均复用 Companion Core 的既有机制。
 
+Life 接入前另检查了 DSH
+[schedule runtime](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/schedule/schedule/src/runtime.ts)
+的持久化交付后提交、管理操作串行化与拒绝后不自动重试，以及 SQLite 官方
+[事务语义](https://www.sqlite.org/lang_transaction.html)与
+[唯一约束冲突处理](https://www.sqlite.org/conflict.html)。
+对应复用本项目既有事务、REM 每日唯一约束、原 job 幂等键和终态责任；不复制 DSH 定时器。
+
 `tests/test_rem_native.py` 使用真实签名输入审批和 TCP ingest、原生 Core worker、
 原生 SDK/预算/擦除流程，仅模拟 provider HTTP。
 `tests/rem_process.py` 在独立进程验证正常完成、调用后退出及恢复不重付。
@@ -65,3 +96,6 @@ DSH 的执行前容量检查与终态结算约束用于对照检查；其进程�
 原 selector 创建及执行 REM 的连续证据。
 成功生成测试还验证 DREAM/SKIP 原生记录经真实 owner-control HTTP 按精确 ID 读取，
 费用引用相同且没有正文泄漏。测试回执由集成交接文件统一记录；真实环境验收仍未执行。
+
+`tests/test_life_rem_consumption.py` 验证签名 HTTP 输入、独立 Life/REM worker、
+精确内容消费、独立用途拒绝、来源撤回和备份恢复不重付。
