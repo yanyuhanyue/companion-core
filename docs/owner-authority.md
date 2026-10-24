@@ -147,3 +147,24 @@ STOP 取消尚可撤销的原生任务和待发项，保留 `SENDING`、`DELIVER
 HTTP 钩子等待期间的 STOP；所有外部 provider 使用强制 synthetic `MockTransport`。
 `tests/test_owner_wire.py` 验证共享编解码与无 guard 宿主拒绝，
 `tests/test_owner_input.py` 和 `tests/test_owner_runtime.py` 验证来源、用途、租约与退休边界。
+
+
+### 原生撤回的读取与发送边界
+
+2026-10-25 检查 DSH QQ 插件固定版本
+[c8b9158 出站缓冲](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/outbound-buffer.ts)
+的串行发送与取消，以及同版本
+[入站处理](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/inbound.ts)
+的传输层引用装配。复用其职责划分；撤回真实性与持久取消仍由本项目原
+`owner_notices` 签名队列、Core recall、`cancel-before-send` 回执负责。
+
+[HTTPX request hook](https://www.python-httpx.org/advanced/event-hooks/) 在请求准备后、
+网络发送前运行，且允许修改请求。本项目沿用 `checked_http_client` 的最终传输检查：
+引用读取前和每次异步授权后重新检查原消息的已签名撤回；撤回后的读取结果不进入捕获。
+原生发送门禁复用旧 `WindowOneBot.before_dispatch` 的撤回同步步骤；最终检查发现本地撤回时，
+先将原通知送交 Core，再请求既有未委托取消回执。没有 Core 证明不能记录 NOT_SENT。
+已委托后的超时继续保留 UNKNOWN、原始费用与停止状态。
+
+`tests/test_owner_recall_bridge.py` 使用真实认证 WebSocket、Core HTTP 与独立 Core API/worker
+实例，覆盖通知先到、引用请求前及响应后到达、发送请求前和 Core send-check 响应后到达，
+以及外部委托后超时；仅外部供应商 HTTP 使用合成响应。

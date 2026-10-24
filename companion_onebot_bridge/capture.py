@@ -17,7 +17,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from . import cumulative
+from . import cumulative, owner_notices
 from .event_normalizer import decode, identifier, normalize, redact
 from .network import checked_http_client, private_request_matches, websocket
 from .onebot_client import OneBotClient
@@ -80,13 +80,16 @@ class CaptureDiagnostic:
 class _OwnerReferences:
     """Reuse the checked HTTP boundary for each exact captured-reference read."""
 
-    def __init__(self, runtime, client, onebot):
+    def __init__(self, runtime, client, onebot, event_id):
         self.runtime, self.client, self.onebot = runtime, client, onebot
+        self.event_id = event_id
 
     async def read(self, name, body):
         config = self.runtime.config
 
         def check(request):
+            if owner_notices.recalled(self.runtime, self.event_id):
+                raise ValueError("OWNER_INPUT_RECALLED")
             if (request.method != "POST"
                 or request.headers.get("Authorization") != "Bearer " + config.onebot_token
                 or not private_request_matches(request, config.onebot_http_url, "/" + name)
@@ -132,7 +135,7 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
     rich = config.rich_input_scope == "references_v1"
     raw = decode(frame, config.max_frame_bytes, max_depth=20 if rich else 8)
     event = normalize(frame, config, now=received_at.timestamp())
-    if event is None:
+    if event is None or owner_notices.recalled(runtime, event["event_id"]):
         return None
     occurred_at = datetime.fromisoformat(event["occurred_at"])
     if (not 0 <= (received_at - occurred_at).total_seconds() <= MAX_AGE_SECONDS
@@ -152,9 +155,15 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
                       image_scope="owner_image_v1" if images else "none",
                       file_scope="owner_file_v1" if files else "none")
     references = []
-    await enrich(event, raw["message"], _OwnerReferences(runtime, core_client, onebot),
-                 lambda text: redact(text, config), image_scope=rich, file_scope=rich,
-                 originals=references)
+    try:
+        await enrich(event, raw["message"],
+                     _OwnerReferences(runtime, core_client, onebot, event["event_id"]),
+                     lambda text: redact(text, config), image_scope=rich, file_scope=rich,
+                     originals=references)
+    except ValueError as error:
+        if error.args == ("OWNER_INPUT_RECALLED",):
+            return None
+        raise
     images, files = captured_media(event, raw["message"], references)
     purposes = [kind for kind, items in (("image", images), ("file", files),
                                         ("voice", records)) if items]
@@ -163,6 +172,8 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
     for purpose in ("chat", *purposes):
         await runtime.check(core_client, purpose=purpose)
     runtime.verify()
+    if owner_notices.recalled(runtime, event["event_id"]):
+        return None
     original = frame.encode() if isinstance(frame, str) else frame
     return {"event": event, "frame_sha256": hashlib.sha256(original).hexdigest(),
             "media": {"images": [asdict(image) for image in images],

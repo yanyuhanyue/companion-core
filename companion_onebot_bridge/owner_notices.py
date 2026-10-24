@@ -87,6 +87,16 @@ def put(runtime, frame, received_at, peer):
     return True
 
 
+def recalled(runtime, event_id):
+    """Read only authenticated, journal-verified recall custody."""
+    runtime.verify(active=False)
+    if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'"
+                              ).fetchone():
+        return False
+    return runtime.db.execute("SELECT 1 FROM automatic_recalls WHERE target_event_id=? "
+        "AND authority_json IS NOT NULL LIMIT 1", (event_id,)).fetchone() is not None
+
+
 async def flush_one(runtime, client):
     runtime.verify(active=False)
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'"

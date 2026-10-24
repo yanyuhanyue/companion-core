@@ -8,7 +8,7 @@ import httpx
 
 from companion_delivery_protocol.authority import validate_authority_ref
 
-from . import account_actions, journal, reply_segments
+from . import account_actions, journal, owner_notices, reply_segments
 from .event_normalizer import decode
 from .network import checked_http_client, private_request_matches
 from .onebot_client import OneBotClient, bounded_post
@@ -111,6 +111,10 @@ class OwnerSendGuard:
             or self.dispatched or self.runtime.clock() >= self.lease_until
             or journal.digest(self.prepared_message) != self.message_hash):
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
+        if not account_actions.is_account(self.current_item) and owner_notices.recalled(
+            self.runtime, reply_segments.event_id(self.current_item)
+        ):
+            raise ValueError("OWNER_INPUT_RECALLED")
         if self.pending_input():
             raise ValueError("OWNER_INPUT_PENDING")
         if self.segment_not_before is not None and self.runtime.clock() < self.segment_not_before:
@@ -181,6 +185,8 @@ class OwnerSendGuard:
             self._local()
             seal_protocol_content(request, request.content)
             return
+        while await owner_notices.flush_one(self.runtime, self.client):
+            pass
         item = self.current_item
         account = account_actions.is_account(item)
         check = (account_actions.send_check_owner(self.authority, item) if account else {
@@ -230,6 +236,11 @@ class OwnerSendGuard:
         attempt = self.db.execute("SELECT state FROM window_attempts WHERE message_id=?",
                                    (item["message_id"],)).fetchone()
         if not attempt or attempt[0] not in {"RESERVED", "IO_STARTED"}:
+            return False
+        try:
+            while await owner_notices.flush_one(self.runtime, self.client):
+                pass
+        except httpx.HTTPError:
             return False
         body = {"authority": self.authority, "message_id": item["message_id"],
                 "lease_token": item["lease_token"],
