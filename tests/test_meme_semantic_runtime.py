@@ -404,21 +404,14 @@ def test_unknown_caption_never_repeats_submission_or_enters_index(make_runtime):
         async with core.client() as client:
             await runtime.run_once(client)
             assert (await runtime.run_once(client))["status"] == "CAPTION_PENDING"
-            result = await runtime.run_once(client)
-            if result["status"] != "CAPTION_QUARANTINED":
-                job_id = core.core.store.one("SELECT job_id FROM meme_captions")["job_id"]
-                original = await client.post(BASE + "/captions/" + job_id, json={})
-                check = await client.post("/internal/v1/owner-authority/check", json={
-                    "authority": runtime.authority, "purpose": "meme"})
-                assert original.status_code == 200
-                assert original.json()["state"] == original.json()["usage"]["state"] == "UNKNOWN"
-                pytest.fail(json.dumps({
-                    "expected_bridge_status": "CAPTION_QUARANTINED", "bridge": result,
-                    "original_receipt": original.json(),
-                    "current_check": [check.status_code, check.json()]}, ensure_ascii=False))
-
+            assert (await runtime.run_once(client))["status"] == "DEFERRED"
+            binding = runtime.db.execute(
+                "SELECT state,usage_json FROM meme_caption_bindings").fetchone()
+            assert binding[0] == "UNKNOWN" and json.loads(binding[1])["state"] == "UNKNOWN"
+            assert runtime.db.execute("SELECT state FROM meme_semantic_assets").fetchone()[0] == (
+                "QUARANTINED")
             await runtime.run_once(client)
-            assert (await runtime.run_once(client))["status"] == "IDLE"
+            assert (await runtime.run_once(client))["status"] == "DEFERRED"
 
     run(scenario())
     assert len(core.caption.submissions) == len(core.caption.polls) == 1
@@ -626,10 +619,13 @@ def test_profile_refresh_after_restart_keeps_unknown_caption_receipt_without_res
         async with core.client() as client:
             await runtime.run_once(client)
             await runtime.run_once(client)
-            assert (await runtime.run_once(client))["status"] == "CAPTION_QUARANTINED"
+            assert (await runtime.run_once(client))["status"] == "DEFERRED"
+            assert json.loads(runtime.db.execute(
+                "SELECT usage_json FROM meme_caption_bindings").fetchone()[0])["state"] == "UNKNOWN"
             original = tuple(runtime.db.execute("SELECT * FROM meme_caption_bindings").fetchone())
             core.identity = core.original_identity.model_copy(update={
                 "model_version": "approved-model-v2"})
+            original_embedding = core.embedding
             core.embedding = core.embedding.model_copy(update={
                 "model_version": "local-embedding-v2"})
             cfg, fixture = runtime.config, case(runtime)
@@ -639,14 +635,14 @@ def test_profile_refresh_after_restart_keeps_unknown_caption_receipt_without_res
                 owner = OwnerRuntime(spool, clock=lambda: fixture.core.clock.now)
                 CASES[owner] = fixture
                 restarted = MemeRuntime(owner)
-                assert (await restarted.run_once(client))["status"] == "SEMANTIC_QUARANTINED"
-                assert (await restarted.run_once(client))["status"] == "IDLE"
-                assert restarted.semantics.identity == core.identity
-                assert restarted.semantics.embedding_spec == core.embedding
+                assert (await restarted.run_once(client))["status"] == "DEFERRED"
+                assert (await restarted.run_once(client))["status"] == "DEFERRED"
+                assert restarted.semantics.identity == core.original_identity
+                assert restarted.semantics.embedding_spec == original_embedding
                 assert tuple(spool.db.execute(
                     "SELECT * FROM meme_caption_bindings").fetchone()) == original
 
     run(scenario())
     assert len(core.caption.submissions) == len(core.caption.polls) == 1
     assert not any(path.endswith("/embeddings") for path, _ in core.semantic_calls)
-    assert len([path for path, _ in core.semantic_calls if path.endswith("/profile")]) == 2
+    assert len([path for path, _ in core.semantic_calls if path.endswith("/profile")]) == 1

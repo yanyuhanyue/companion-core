@@ -121,11 +121,17 @@ def test_caption_adapter_uses_real_http_and_independent_native_selector(core, tm
             request = library._request(sha, {"event_id": event["event_id"], "reply_revision": 1,
                 "discovery_job_id": submitted["job_id"], "attempt_key": attempt})
             adapter = CaptionHTTP(http, runtime.catalog)
-            created = await adapter.submit(request)
-            assert created["state"] == "QUEUED", created
+            async def check():
+                runtime._owner_check()
+
+            pending = await library.advance(sha, adapter, request.context,
+                check=check, commit_check=runtime._owner_check)
+            assert pending["state"] == "PENDING", pending
+            original = runtime.db.execute(
+                "SELECT job_id FROM meme_caption_bindings").fetchone()[0]
             report = await child(core, tmp_path, "meme_caption", 1)
             assert len(report["calls"]) == 1, report
-            outcome = await adapter.get(created["job_id"])
+            outcome = await adapter.get(original)
             assert outcome["state"] == "SUCCEEDED", outcome
             assert outcome["usage"]["state"] == "SETTLED"
             assert await adapter.submit(request) == outcome

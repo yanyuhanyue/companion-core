@@ -18,12 +18,12 @@ import httpx
 
 from . import journal
 from .images import resolve_public
-from .meme_caption import CaptionContext
+from .meme_caption import CaptionContext, CaptionOutcome, parse
 from .meme_catalog import INTENTS, MOCKERY, MemeCatalog, Metadata, key_hash
 from .meme_discovery import BraveImages, DiscoveryLimits, ReviewApproval, Usage, run_discovery
 from .meme_library import CATEGORY, MemeLibrary
 from .meme_packs import CommunityPacks, relative_path
-from .meme_semantic import SemanticLibrary, installed, profile
+from .meme_semantic import SemanticLibrary, installed, profile, retain_usage
 from .meme_semantic_http import CaptionEmbeddingHTTP, CaptionHTTP, SemanticHTTP, core_request
 from .onebot_client import bounded_post
 from .reply_segments import event_id as delivery_event_id
@@ -513,6 +513,35 @@ class MemeRuntime:
                 )
             raise
 
+    async def _caption_receipt(self, client):
+        """Close original accounting only; no profile, asset fetch or semantic commit."""
+        self.window.verify(active=False)
+        if not installed(self.db):
+            return None
+        row = self.db.execute(
+            "SELECT request_sha,job_id FROM meme_caption_bindings WHERE job_id IS NOT NULL "
+            "AND (usage_json IS NULL OR json_extract(usage_json,'$.state')='RESERVED') "
+            "AND json_extract(outcome_json,'$.state') IN ('QUEUED','RUNNING') "
+            "AND state IN ('QUEUED','RUNNING','UNKNOWN','FAILED') ORDER BY rowid LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        http = SemanticHTTP(self.window, client, check=self._owner_check)
+        value = await CaptionHTTP(http, self.catalog).get(row[1])
+        retain_usage(self.catalog, row[0], value)
+        outcome = parse(CaptionOutcome, value)
+        if outcome.state in {"QUEUED", "RUNNING"}:
+            return None
+        with self.catalog.atomic():
+            self.db.execute(
+                "UPDATE meme_caption_bindings SET state=?,outcome_json=CASE WHEN ? "
+                "THEN ? ELSE outcome_json END WHERE request_sha=?",
+                (outcome.state if outcome.state != "SUCCEEDED" else "FAILED",
+                 outcome.state != "SUCCEEDED", outcome.model_dump_json(), row[0]))
+            self.db.execute("UPDATE meme_semantic_assets SET state='QUARANTINED' "
+                            "WHERE binding_request=?", (row[0],))
+        return {"status": "CAPTION_QUARANTINED"}
+
     async def _semantic_once(self, client):
         semantics = await self._ensure_semantics(client, self._owner_check)
         rows = self.db.execute(
@@ -549,6 +578,8 @@ class MemeRuntime:
                     raise ValueError("MEME_DISCOVERY_UNSETTLED")
 
             async def check():
+                fence()
+                await self.window.check(client, purpose="meme")
                 fence()
 
             http = SemanticHTTP(self.window, client, check=fence)
@@ -885,6 +916,20 @@ class MemeRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            code = error.args[0] if isinstance(error, ValueError) and len(error.args) == 1 else None
+            refused = (
+                isinstance(error, httpx.HTTPStatusError)
+                and error.response.status_code in {403, 409, 429, 503}
+            ) or (isinstance(code, str) and code in {
+                "OWNER_RUNTIME_STOPPED", "OWNER_AUTHORITY_EXPIRED",
+                "OWNER_AUTHORITY_BINDING_CHANGED", "MEME_INPUT_CANCELLED"})
+            if self.semantics_enabled and refused:
+                try:
+                    receipt = await self._caption_receipt(client)
+                except (ValueError, httpx.HTTPError):
+                    receipt = None
+                if receipt is not None:
+                    return receipt
             pending = self.db.execute(
                 "SELECT 1 FROM meme_runtime_results WHERE state='PENDING' LIMIT 1"
             ).fetchone()
@@ -899,7 +944,6 @@ class MemeRuntime:
                 503,
             }:
                 return {"status": "DEFERRED", "code": "MEME_DISCOVERY_NOT_ADMITTED"}
-            code = error.args[0] if isinstance(error, ValueError) and len(error.args) == 1 else None
             if isinstance(code, str) and code in {
                 "MEME_INPUT_CANCELLED",
                 "MEME_LEASE_EXPIRED",

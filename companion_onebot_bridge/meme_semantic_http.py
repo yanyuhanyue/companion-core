@@ -2,12 +2,14 @@
 
 import base64
 import hashlib
+import json
 import re
 from datetime import datetime
 
 from .images import owner_media_request
 from .meme_caption import (
     CaptionIdentity,
+    CaptionOutcome,
     EmbeddingBatch,
     EmbeddingSpec,
     caption_text,
@@ -16,6 +18,9 @@ from .meme_caption import (
     source_evidence,
 )
 from .meme_semantic_search import SemanticQuery
+from .network import checked_http_client, private_request_matches
+from .onebot_client import bounded_post
+from .window import seal_protocol_content
 
 BASE = "/internal/v1/memes"
 JOB = re.compile(r"job_[a-f0-9]{32}")
@@ -130,7 +135,57 @@ class CaptionHTTP:
     async def get(self, job_id):
         if not isinstance(job_id, str) or not JOB.fullmatch(job_id):
             raise ValueError("MEME_CAPTION_JOB_INVALID")
-        return await self.http.post("/captions/" + job_id, {}, after=False)
+        runtime = self.http.window
+        config, authority = runtime.config, dict(runtime.authority)
+
+        def original():
+            if runtime.config != config or runtime.authority != authority:
+                raise ValueError("MEME_CAPTION_RECEIPT_REQUEST_CHANGED")
+            runtime.verify(active=False)
+            if not self.catalog.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='meme_caption_bindings'"
+            ).fetchone():
+                raise ValueError("MEME_CAPTION_JOB_UNBOUND")
+            rows = self.catalog.db.execute(
+                "SELECT request_sha,sha,source_sha,context_json,outcome_json "
+                "FROM meme_caption_bindings WHERE job_id=?", (job_id,)).fetchall()
+            if len(rows) != 1 or not rows[0][4]:
+                raise ValueError("MEME_CAPTION_JOB_UNBOUND")
+            row = tuple(rows[0])
+            outcome = parse(CaptionOutcome, row[4])
+            context = json.loads(row[3])
+            source = self.catalog.db.execute(
+                "SELECT capture_json,plan_hash FROM window_inputs WHERE event_id=?",
+                (context["event_id"],)).fetchone()
+            if (not source or not source[0]
+                or digest(json.loads(source[0])["authority"]) != source[1]
+                or (outcome.job_id, outcome.request_sha256, outcome.asset_sha256,
+                    outcome.source_evidence_sha256) != (job_id, *row[:3])):
+                raise ValueError("MEME_CAPTION_JOB_UNBOUND")
+            return row, tuple(source), {key: outcome.model_dump(mode="json")[key] for key in (
+                "job_id", "asset_sha256", "source_evidence_sha256", "request_sha256",
+                "caption_model_version", "prompt_version")}
+
+        frozen = original()
+        path = BASE + "/captions/" + job_id
+
+        async def boundary(request):
+            if (original() != frozen or request.method != "POST"
+                or not private_request_matches(request, config.core_url, path)
+                or request.headers.get("Authorization") != "Bearer " + config.bridge_token
+                or "Cookie" in request.headers or request.content != b"{}"
+                or request.headers.get("Content-Type") != "application/json"):
+                raise ValueError("MEME_CAPTION_RECEIPT_REQUEST_CHANGED")
+            seal_protocol_content(request, b"{}")
+
+        # Only an already retained job's empty-body result endpoint is read here.
+        # Submission, profiles and all other operations keep core_request's gates.
+        async with checked_http_client(self.http.client, boundary) as client:
+            value = await bounded_post(client, path, {})
+        if (original() != frozen or not isinstance(value, dict)
+            or any(value.get(key) != expected for key, expected in frozen[2].items())):
+            raise ValueError("MEME_CAPTION_IDENTITY_MISMATCH")
+        return value
 
 
 class CaptionEmbeddingHTTP:
