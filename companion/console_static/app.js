@@ -132,7 +132,7 @@ const CAP_GROUPS = [
 ];
 /* 能力对应的配置项。只显示服务端实际返回的字段；executive 等部署保管的项不在其中。 */
 const CAP_FIELDS = {
-  "memory.manage": ["memory_enabled"], "memory.recall": ["semantic_min_score", "extraction_min_events", "extraction_idle_seconds", "memory_daily_micro_usd", "raw_event_retention_days"],
+  "memory.manage": ["memory_enabled"], "memory.recall": ["semantic_min_score", "extraction_min_events", "extraction_idle_seconds", "emerging_min_sessions", "stable_min_days", "memory_daily_micro_usd", "raw_event_retention_days"],
   diary: ["diary_enabled", "diary_generate_hour", "diary_min_source_events", "diary_max_source_events", "diary_max_body_chars", "diary_max_output_tokens", "diary_catchup_days", "diary_max_attempts", "diary_daily_micro_usd"],
   consolidation: ["consolidation_enabled", "consolidation_local_hour", "consolidation_catchup_days"],
   reflection: ["reflection_enabled", "reflection_daily_max_suggestions", "reflection_min_sources", "reflection_max_daily_calls", "reflection_max_output_tokens", "reflection_daily_micro_usd", "reflection_monthly_micro_usd"],
@@ -201,7 +201,7 @@ const LIMIT_NAMES = {
   max_daily_images: "每日图片", max_daily_files: "每日文件", daily_requests: "每日请求", monthly_requests: "每月请求", daily_bytes: "每日流量",
   max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
 };
-const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器",
+const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子", semantic: "按语义", unlimited: "不限",
   happy: "开心", like: "喜欢", surprised: "惊讶", morning: "早安", sleep: "晚安", sad: "难过", angry: "生气", shy: "害羞", tired: "困了", thinking: "思考", love: "爱心", cry: "哭哭" };
 function limitValue(k, v) {
   if (v === null || v === undefined) return "未设置";
@@ -249,7 +249,7 @@ const SUB = {
 const TOKENS = { max: "最多", min: "最少", daily: "每日", monthly: "每月", total: "总", seconds: "时长", bytes: "大小", chars: "字数", enabled: "开启", limit: "上限" };
 const subLabel = k => SUB[k] || String(k).split("_").map(t => TOKENS[t] || "").join("") || "其他设置";
 /* 与 poke_protocol / voice_config / social_autonomy_protocol 中的 Literal 保持一致 */
-const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
+const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"], segmented_reply: ["sentence", "semantic"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
 const isSensitiveSub = k => /(_sha256|private_key|_socket|parser_image|token|secret)$/.test(k) || k === "key";
 
 /* ================= 状态与接口 ================= */
@@ -466,7 +466,7 @@ const DETAIL_LABELS = {
   entity_id: "关联对象", trace_id: "追踪编号", subject: "主体", memory_kind: "类型", needs_review: "需要核对", evidence_ids: "来源消息",
   local_date: "日期", version: "版本", commitment_state: "承诺状态", updated_at: "更新时间", owner_event_id: "你的消息", output_event_id: "输出记录",
   read_request_id: "读取请求", usage_request_id: "用量记录", reserved_bytes: "预留空间", asset_sha256: "素材摘要", source_sha256: "来源摘要",
-  state: "状态", completed_at: "完成时间", count: "次数", billed_micro_usd: "已计费用（微美元）", action_type: "投递类型",
+  state: "状态", completed_at: "完成时间", count: "次数", billed_micro_usd: "已计费用", action_type: "投递类型",
   last_seen_at: "最近联系", resource_state: "上次资源状态", active_job_id: "关联任务", node_id: "处理节点", capabilities: "已配置能力",
   operation: "处理类型", task_state: "处理状态", partial: "音频不完整", input_bytes: "输入大小", input_duration_seconds: "输入时长",
   result_bytes: "结果大小", delivery_state: "投递状态", message_id: "消息编号", deadline_at: "处理截止", result_expires_at: "结果有效期",
@@ -762,10 +762,11 @@ PAGES.activity = data => {
 /* ================= 记忆 ================= */
 const MEM_KIND = { preference: "偏好", fact: "事实", plan: "计划", habit: "习惯", relation: "关系", profile: "资料", event: "事件", communication: "沟通", goal: "目标" };
 const MEM_SUBJECT = { user: "关于你", owner: "关于你", self: "关于她", companion: "关于她" };
+function memSearch(v) { state.memQ = v; clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRoute({ reset: true }), 300); }
 PAGES.memories = data => {
   const items = data.items || [];
   const searchInput = el("input", { class: "input", id: "mem-q", type: "search", maxlength: "100", placeholder: "搜索记忆内容", value: state.memQ,
-    oninput: e => { state.memQ = e.target.value; clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRoute({ reset: true }), 300); } });
+    oninput: e => { if (e.isComposing) return; memSearch(e.target.value); }, oncompositionend: e => memSearch(e.target.value) });
   return el("div", {}, head("记忆", "每条记忆都有原话作为来源。确认后她会在以后的对话里用到；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
       [["review", "待确认"], ["all", "全部"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
@@ -1126,7 +1127,19 @@ function reconcileBox(item) {
 }
 
 /* ================= 配置字段（能力页与配置页共用一份草稿） ================= */
-const cfgFields = () => (state.data?.configuration?.fields || []).filter(f => typeof f.key === "string" && typeof f.label === "string");
+/* 服务端标签里的计价单位由输入框旁的单位显示，这里去掉，避免选人民币时仍写着美元 */
+const cleanLabel = label => label.replace(/（微美元[^）]*）/g, "").replace(/（毫秒）/g, "");
+const cfgFields = () => (state.data?.configuration?.fields || []).filter(f => typeof f.key === "string" && typeof f.label === "string").map(f => ({ ...f, label: cleanLabel(f.label) }));
+const CAP_KEYS = new Set(Object.values(CAP_FIELDS).flat());
+const capOfKey = key => Object.keys(CAP_FIELDS).find(id => CAP_FIELDS[id].includes(key));
+/* 未配置的对象型设置开启时使用的默认值，与 reply_segments.SegmentedReplyConfig 的默认值一致 */
+const NULL_DEFAULTS = { segmented_reply: { max_segments: 3, min_chars: 12, interval_ms: 1500 } };
+function searchBox(id, value, placeholder, onValue) {
+  // 输入法组字期间不重绘页面，否则中文无法输入。
+  const input = el("input", { class: "input", id, type: "search", placeholder, value,
+    oninput: e => { if (e.isComposing) return; onValue(e.target.value); }, oncompositionend: e => onValue(e.target.value) });
+  return el("label", { class: "search" }, icon("search"), input);
+}
 const fieldOf = key => cfgFields().find(f => f.key === key);
 const draftVal = f => state.draft.has(f.key) ? state.draft.get(f.key) : f.value;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -1198,7 +1211,10 @@ function control(f) {
   if (f.type === "secret") return el("input", { class: "input", type: "password", id, "data-k": id, autocomplete: "new-password",
     placeholder: f.configured ? "已设置，留空保持不变" : "未设置", onchange: e => setDraft(f, e.target.value) });
   if (f.type === "array" && (Array.isArray(v) ? v.every(x => typeof x === "string") : true)) return listControl(id, v || [], list => setDraft(f, list));
-  if (["object", "array"].includes(f.type)) return state.jsonEdit?.has(f.key) || v === null || Array.isArray(v) ? jsonControl(f, id, v) : objectEditor(f, v, []);
+  if (f.type === "object" && v === null && NULL_DEFAULTS[f.key]) return el("div", { class: "row-gap" }, el("span", { class: "note" }, "没有开启"),
+    btn("开启", () => setDraft(f, { ...NULL_DEFAULTS[f.key] }), { cls: "sm" }));
+  if (f.type === "object" && v === null) return el("span", { class: "note" }, "未配置，在部署配置里设置");
+  if (["object", "array"].includes(f.type)) return state.jsonEdit?.has(f.key) || Array.isArray(v) ? jsonControl(f, id, v) : objectEditor(f, v, []);
   return el("input", { class: "input", id, "data-k": id, value: v ?? "", onchange: e => setDraft(f, e.target.value) });
 }
 function jsonControl(f, id, v) {
@@ -1337,7 +1353,7 @@ PAGES.caps = data => {
   return el("div", {}, head("能力与开关", "左边找能力，右边看它的状态和参数。总开关和参数保存为新版本后重启生效；暂停立即生效。", currencySwitch()),
     el("div", { class: "caps2" + (state.capMobile ? " show-detail" : "") },
       el("aside", { class: "cap-index", "aria-label": "能力列表" },
-        el("label", { class: "search" }, icon("search"), el("input", { class: "input", id: "cap-q", type: "search", placeholder: "搜索能力或参数", value: state.capQ, oninput: e => { state.capQ = e.target.value; rerender(); } })),
+        searchBox("cap-q", state.capQ, "搜索能力或参数", v => { state.capQ = v; rerender(); }),
         el("div", { class: "ci-filter", role: "group", "aria-label": "筛选" }, [["all", "全部"], ["on", "已开启"], ["off", "未开启"], ["warn", "需留意"]].map(([k, n]) =>
           el("button", { type: "button", "aria-pressed": String(state.capF === k), onclick: () => { state.capF = k; rerender(); } }, n + " ", el("span", { class: "num" }, String(filterCount(k)))))),
         el("div", { class: "ci-list" }, index.some(Boolean) ? index : el("div", { class: "empty" }, el("h3", {}, "没有符合条件的能力"), el("p", {}, "换个关键词，或选择“全部”。")))),
@@ -1361,6 +1377,7 @@ function capDetail(c) {
         el("small", {}, rt ? "立即生效，不需要重启" : "没有单独的暂停")),
       el("div", {}, el("span", {}, "由谁使用"), el("b", {}, (c.invocation || []).map(x => ({ automatic: "她自动使用", owner_command: "你的指令", tool: "工具调用", owner: "你发起" })[x] || "其他方式").join("、") || "未记录"),
         el("small", {}, c.runtime_observation && c.runtime_observation !== "UNOBSERVED" ? "运行观测：" + statusOf(c.runtime_observation)[0] : "还没有运行观测"))),
+    ["proactive", "diary", "consolidation"].includes(c.id) ? el("section", { class: "cd-sec" }, el("h3", {}, "作息时间"), scheduleStrip()) : null,
     el("section", { class: "cd-sec" }, el("h3", {}, "参数", el("span", {}, fields.length ? "保存为新版本后生效" : "")),
       fields.length ? el("div", { class: "pf-list" }, fields.map(f => fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
 }
@@ -1378,31 +1395,37 @@ function runtimeToggle(target, paused) {
 /* ================= 配置 ================= */
 const GROUPS = [["model", "模型与计价"], ["memory", "记忆与日记"], ["autonomy", "主动与自主"], ["content", "阅读与文件"], ["expression", "表达与表情"], ["system", "运行与控制台"]];
 const RATE_KEYS = ["input_rate", "cached_input_rate", "output_rate"];
+const MODEL_TAIL = ["timeout_seconds", "max_output_tokens", "context_soft_tokens", "max_recent_messages"];
 const SCHEDULE_KEYS = ["quiet_start", "quiet_end", "diary_generate_hour", "consolidation_local_hour"];
 const isMoneyKey = k => /_(daily|monthly)_micro_usd$|^monthly_limit_micro_usd$/.test(k);
 PAGES.configuration = data => {
   const c = data.configuration;
   if (!c || !Array.isArray(c.fields) || !Number.isInteger(c.version) || !Number.isInteger(c.active_version)) return empty("配置数据不完整", "请刷新核对，现在无法安全编辑配置。", true);
   const q = state.cfgQ.trim(), fields = cfgFields();
-  const search = el("label", { class: "search wide-search" }, icon("search"), el("input", { class: "input", id: "cfg-q", type: "search", placeholder: "搜索设置，例如 冷却、上限、时间", value: state.cfgQ, oninput: e => { state.cfgQ = e.target.value; rerender(); } }));
+  const search = searchBox("cfg-q", state.cfgQ, "搜索设置，例如 冷却、上限、时间", v => { state.cfgQ = v; rerender(); });
+  search.classList.add("wide-search");
   const top = [head("配置", "修改会先攒在一起，核对后保存为加密的新版本；运行中的请求继续使用旧配置，重启后生效。", currencySwitch()), el("div", { class: "toolbar" }, search)];
   if (q) {
     const hits = fields.filter(f => (f.label + (f.description || "") + f.key).includes(q));
-    return el("div", {}, top, sheet(`“${q}”的搜索结果`, hits.length ? el("div", { class: "pf-list" }, hits.map(f => fieldRow(f))) : el("div", { class: "empty" }, el("h3", {}, "没有找到这个设置"), el("p", {}, "试试“冷却”“上限”“时间”这类词。")), el("span", { class: "note" }, hits.length + " 项")));
+    return el("div", {}, top, sheet(`“${q}”的搜索结果`, hits.length ? el("div", { class: "pf-list" }, hits.map(f => CAP_KEYS.has(f.key)
+      ? el("div", { class: "pf" }, el("div", { class: "pf-l" }, el("b", {}, f.label), el("span", {}, "属于“" + (CAP_NAMES[capOfKey(f.key)] || "能力") + "”")),
+          el("div", { class: "pf-c" }, el("a", { class: "btn sm", href: "#caps/" + encodeURIComponent(capOfKey(f.key)) }, "去能力与开关修改")))
+      : fieldRow(f))) : el("div", { class: "empty" }, el("h3", {}, "没有找到这个设置"), el("p", {}, "试试“冷却”“上限”“时间”这类词。")), el("span", { class: "note" }, hits.length + " 项")));
   }
-  const special = new Set([...RATE_KEYS, ...SCHEDULE_KEYS, ...fields.filter(f => isMoneyKey(f.key) || f.type === "secret").map(f => f.key)]);
-  const rest = fields.filter(f => !special.has(f.key));
+  const special = new Set([...RATE_KEYS, ...MODEL_TAIL, ...fields.filter(f => isMoneyKey(f.key) || f.type === "secret").map(f => f.key)]);
+  // 属于某项能力的开关和参数只在“能力与开关”里出现，配置页只放系统级设置。
+  const rest = fields.filter(f => !special.has(f.key) && !CAP_KEYS.has(f.key));
   const groups = GROUPS.filter(([g]) => rest.some(f => (f.group || "system") === g));
   const extra = [...new Set(rest.map(f => f.group || "system"))].filter(g => !GROUPS.some(([k]) => k === g)).map(g => [g, "其他设置"]);
-  const sections = [["version", "版本"], ["model", "模型与计价"], ["schedule", "作息时间"], ["money", "费用与预算"], ["secrets", "密钥"],
+  const sections = [["version", "版本"], ["model", "模型与计价"], ["money", "费用与预算"], ["secrets", "密钥"],
     ...[...groups, ...extra].filter(([g]) => g !== "model")];
-  const dirtyIn = id => ({ model: [...RATE_KEYS, ...rest.filter(f => f.group === "model").map(f => f.key)], schedule: SCHEDULE_KEYS,
-    money: fields.filter(f => isMoneyKey(f.key)).map(f => f.key), secrets: fields.filter(f => f.type === "secret").map(f => f.key) }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
+  const dirtyIn = id => ({ model: [...RATE_KEYS, ...MODEL_TAIL, ...rest.filter(f => f.group === "model").map(f => f.key)],
+    money: fields.filter(f => isMoneyKey(f.key) && !CAP_KEYS.has(f.key)).map(f => f.key), secrets: fields.filter(f => f.type === "secret").map(f => f.key) }[id] || rest.filter(f => (f.group || "system") === id).map(f => f.key)).some(k => state.draft.has(k));
   return el("div", {}, top, el("div", { class: "cfg2" },
     el("nav", { class: "cfg-toc", "aria-label": "配置目录" }, sections.map(([id, n]) => el("a", { href: "#configuration/" + id, "data-toc": "cfg-" + id,
       onclick: e => { e.preventDefault(); history.replaceState(null, "", "#configuration/" + id); document.getElementById("cfg-" + id)?.scrollIntoView({ block: "start" }); } }, n,
       dirtyIn(id) || (id === "money" && state.budgetDraft.size) ? el("span", { class: "dirty", "aria-label": "有修改" }) : null))),
-    el("div", { class: "cfg-main" }, versionSection(c), modelSection(rest.filter(f => f.group === "model")), scheduleSection(), moneySection(c), secretsSection(fields.filter(f => f.type === "secret")),
+    el("div", { class: "cfg-main" }, versionSection(c), modelSection(rest.filter(f => f.group === "model")), moneySection(c), secretsSection(fields.filter(f => f.type === "secret")),
       [...groups, ...extra].filter(([g]) => g !== "model").map(([g, n]) => el("section", { class: "sheet cfg-sec", id: "cfg-" + g }, el("div", { class: "sheet-head" }, el("h2", {}, n)),
         el("div", { class: "sheet-body pf-list" }, rest.filter(f => (f.group || "system") === g).map(f => fieldRow(f))))))));
 };
@@ -1428,35 +1451,33 @@ function modelSection(other) {
   const ctx = fieldOf("context_soft_tokens"), out = fieldOf("max_output_tokens"), inR = rate("input_rate"), outR = rate("output_rate");
   const est = ctx && out && inR && outR ? (draftVal(ctx) * draftVal(inR) + draftVal(out) * draftVal(outR)) / 1e6 : null;
   return el("section", { class: "sheet cfg-sec", id: "cfg-model" }, el("div", { class: "sheet-head" }, el("h2", {}, "模型与计价"), el("span", { class: "note" }, "主回复只使用这一个模型")),
-    el("div", { class: "sheet-body" }, el("div", { class: "pf-list" }, other.filter(f => !["max_output_tokens", "context_soft_tokens", "max_recent_messages"].includes(f.key)).map(f => fieldRow(f))),
+    el("div", { class: "sheet-body" }, el("div", { class: "pf-list" }, other.map(f => fieldRow(f))),
       rates.length ? [el("h3", { class: "sub" }, "费率", el("span", {}, "按服务商公布的峰值价格填写，价格未知时会停止自主活动。")),
         el("div", { class: "prices" }, rates.map(f => el("div", { class: "price" + (state.draft.has(f.key) ? " changed" : "") }, el("span", {}, ({ input_rate: "输入", cached_input_rate: "缓存命中输入", output_rate: "输出" })[f.key]), control(f))))] : null,
-      el("div", { class: "pf-list" }, ["max_output_tokens", "context_soft_tokens", "max_recent_messages"].map(fieldOf).filter(Boolean).map(f => fieldRow(f))),
+      el("div", { class: "pf-list" }, MODEL_TAIL.map(fieldOf).filter(Boolean).map(f => fieldRow(f))),
       est !== null ? el("p", { class: "estimate" }, icon("coin"), el("span", {}, "按现在的设置，一轮上下文用满的对话最多约 ", el("b", { class: "num" }, money(est)),
         state.currency === "CNY" ? "（按 1 美元 = ¥" + (state.fx / 1e6).toFixed(2) + " 换算）" : "")) : null));
 }
-function scheduleSection() {
+function scheduleStrip() {
   const fs = SCHEDULE_KEYS.map(fieldOf).filter(Boolean); if (!fs.length) return null;
   const v = k => { const f = fieldOf(k); return f ? draftVal(f) : null; };
   const qs = v("quiet_start"), qe = v("quiet_end"), x = h => (h / 24 * 100) + "%";
   const bands = Number.isInteger(qs) && Number.isInteger(qe) ? (qs > qe ? [[qs, 24], [0, qe]] : qs < qe ? [[qs, qe]] : []) : [];
   const pin = (k, name, cls, on) => Number.isInteger(v(k)) ? el("div", { class: "pin " + cls + (on === false ? " off" : ""), style: { left: x(v(k) + .5) } }, el("i"), el("span", {}, name + " " + String(v(k)).padStart(2, "0") + ":00")) : null;
   const now = localMinutes(new Date().toISOString());
-  return el("section", { class: "sheet cfg-sec", id: "cfg-schedule" }, el("div", { class: "sheet-head" }, el("h2", {}, "作息时间"), el("span", { class: "note" }, "时间按记账时区计算")),
-    el("div", { class: "sheet-body" }, el("div", { class: "clock", role: "img", "aria-label": "免打扰与整理时间" },
+  return el("div", { class: "cd-clock" }, el("div", { class: "clock", role: "img", "aria-label": "免打扰与整理时间" },
       bands.map(([a, z]) => el("div", { class: "cband", style: { left: x(a), width: x(z - a) } })), el("div", { class: "cnow", style: { left: (now / 1440 * 100) + "%" } }),
       pin("diary_generate_hour", "日记", "diary", fieldOf("diary_enabled") ? draftVal(fieldOf("diary_enabled")) : undefined),
       pin("consolidation_local_hour", "夜间整理", "cons", fieldOf("consolidation_enabled") ? draftVal(fieldOf("consolidation_enabled")) : undefined),
       el("div", { class: "cticks" }, [0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => el("span", { style: { left: x(h) } }, String(h).padStart(2, "0"))))),
-      el("p", { class: "note clock-note" }, "斜纹是免打扰时段：不发主动消息，回复照常。灰色标记表示这项整理没有开启。"),
-      el("div", { class: "pf-list" }, fs.map(f => fieldRow(f)))));
+      el("p", { class: "note clock-note" }, "斜纹是免打扰时段：不发主动消息，回复照常。灰色标记表示这项整理没有开启。"));
 }
 function moneySection(c) {
-  const monthly = fieldOf("monthly_limit_micro_usd"), scen = cfgFields().filter(f => isMoneyKey(f.key) && f.key !== "monthly_limit_micro_usd");
+  const monthly = fieldOf("monthly_limit_micro_usd"), scen = cfgFields().filter(f => isMoneyKey(f.key) && f.key !== "monthly_limit_micro_usd" && !CAP_KEYS.has(f.key));
   return el("section", { class: "sheet cfg-sec", id: "cfg-money" }, el("div", { class: "sheet-head" }, el("h2", {}, "费用与预算")),
     el("div", { class: "sheet-body" }, c.cloud_budget?.config ? cloudBudget(c.cloud_budget) : null,
       el("div", { class: "budget-block" }, el("div", { class: "bb-head" }, el("div", {}, el("h3", {}, "模型账本"),
-        el("p", { class: "note" }, "按场景分配额度，0 表示这个场景不能花钱。记账用美元" + (state.currency === "CNY" ? "，这里按 1 美元 = ¥" + (state.fx / 1e6).toFixed(2) + " 换算显示。" : "。") + "属于配置，保存为新版本后生效。")), el("span", { class: "chip" }, "新版本生效")),
+        el("p", { class: "note" }, "所有模型调用每月的总额度。各能力自己的每日额度在“能力与开关”里调整。" + (state.currency === "CNY" ? "金额按 1 美元 = ¥" + (state.fx / 1e6).toFixed(2) + " 换算。" : ""))), el("span", { class: "chip" }, "新版本生效")),
         monthly ? fieldRow(monthly) : null,
         scen.length ? el("table", { class: "t scen" }, el("thead", {}, el("tr", {}, el("th", {}, "场景"), el("th", { class: "r" }, "额度"))),
           el("tbody", {}, scen.map(f => el("tr", { class: "static" + (state.draft.has(f.key) ? " changed" : "") }, el("td", {}, el("b", {}, f.label)), el("td", { class: "r" }, control(f), el("p", { class: "pf-err", role: "alert", hidden: true })))))) : null)));
