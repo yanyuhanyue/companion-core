@@ -6,6 +6,7 @@ through the authenticated evidence interfaces on SocialAutonomy.
 """
 
 import hashlib
+import json
 
 from companion import budget
 from companion.contracts import CoreError
@@ -129,7 +130,26 @@ def _expire(store, now):
                           "ORDER BY p.expires_at,p.plan_id LIMIT ?", (now, _SCAN_LIMIT))
         for row in rows:
             _cancel(store, row["plan_id"], "SOCIAL_PLAN_EXPIRED", now)
-    return bool(rows)
+        abandoned = store.rows(
+            "SELECT p.plan_id,m.state AS usage_state FROM social_autonomy_plans p "
+            "LEFT JOIN model_usage m ON m.request_id=p.model_request_id "
+            "LEFT JOIN model_admissions a ON a.request_id=p.model_request_id "
+            "WHERE p.state='PLANNING' AND p.expires_at<=? "
+            "AND (m.request_id IS NULL OR (m.state='SETTLED' AND m.scenario='social_autonomy')) "
+            "AND (a.request_id IS NULL OR a.lease_until<=?) "
+            "AND NOT EXISTS (SELECT 1 FROM social_autonomy_reservations r "
+            "WHERE r.plan_id=p.plan_id) ORDER BY p.expires_at,p.plan_id LIMIT ?",
+            (now, now, _SCAN_LIMIT),
+        )
+        for row in abandoned:
+            code = ("SOCIAL_PLAN_RESULT_LOST" if row["usage_state"] == "SETTLED"
+                    else "SOCIAL_PLAN_EXPIRED_UNADMITTED")
+            store.execute("UPDATE social_autonomy_plans SET state='CANCELLED',last_error_code=?,"
+                          "updated_at=? WHERE plan_id=? AND state='PLANNING'",
+                          (code, now, row["plan_id"]))
+            store.audit("social.runtime_cancelled", row["plan_id"], row["plan_id"], now,
+                        error_code=code)
+    return bool(rows or abandoned)
 
 
 def _enqueue(module, plan_id, conversation):
@@ -150,7 +170,8 @@ async def run_once(store, settings, model, clock=utcnow) -> bool:
 
     No caller transaction may span this call's model await. Invalid or expired
     READY plans are cancelled; transient quota/authority fences preserve them.
-    A skipped, rejected, interrupted or delivered candidate is never retried.
+    Only proven pre-admission budget refusals can reuse their original request.
+    Paid, uncertain, skipped, interrupted and delivered candidates are never retried.
     """
     module = SocialAutonomy(store, settings, model, clock)
     if not module.config.enabled:
@@ -182,11 +203,25 @@ async def run_once(store, settings, model, clock=utcnow) -> bool:
     if not candidate:
         return changed
     key, inputs = candidate
-    if store.one("SELECT 1 FROM social_autonomy_plans WHERE idempotency_key=?", (key,)):
+    previous = store.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
+    if previous and not module.retryable_unadmitted(previous):
         return changed
+    if previous:
+        # The semantic key survives an equivalent Reader refetch. Retry the exact
+        # original input, never rebind its authority to the newer observation ID.
+        snapshot = json.loads(previous["input_snapshot_json"])
+        inputs = {
+            "source_ids": sorted(source["ref"] for source in snapshot["sources"]),
+            "asset_ids": sorted(asset["asset_id"] for asset in snapshot["assets"]),
+            "profile_fields": sorted(profile["field"] for profile in snapshot["profiles"]),
+        }
     try:
         plan = await module.plan(key, **inputs)
     except CoreError:
+        if previous:
+            # A refused native retry is rolled back; let the normal worker idle
+            # wait run instead of spinning or creating another plan/usage record.
+            return changed
         return bool(store.one("SELECT 1 FROM social_autonomy_plans WHERE idempotency_key=?",
                               (key,))) or changed
     except Exception:

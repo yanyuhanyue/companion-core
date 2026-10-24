@@ -162,6 +162,14 @@ def reserve(
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
+        if scenario == "social_autonomy":
+            from companion.social_autonomy import SocialAutonomy
+
+            if job_id is not None:
+                raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
+            SocialAutonomy(store, settings, clock=clock or (lambda: now)).admit_model(
+                request_id, logical_request_id, messages,
+            )
         if scenario in {"content_vision", *VIDEO_SCENARIOS}:
             if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
                 raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)

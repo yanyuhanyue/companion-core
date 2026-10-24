@@ -2,7 +2,7 @@
 
 import json
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidSignature
@@ -256,14 +256,18 @@ def claim_ready(store, settings, clock, worker_id):
                 or private_life.owner_waiting(store, settings, now)
                 or _boundary_busy(store, job["conversation_id"])):
                 continue
-            stamps = store.rows("SELECT claimed_at FROM poke_batches WHERE conversation_id=? "
-                                "AND claimed_at IS NOT NULL", (job["conversation_id"],))
-            day = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone)).date()
-            today = [row for row in stamps if datetime.fromisoformat(row["claimed_at"])
-                     .astimezone(ZoneInfo(settings.timezone)).date() == day]
-            if (len(today) >= configured.daily_limit or configured.mode == "none"
-                or any(after(row["claimed_at"], configured.cooldown_seconds) > now
-                       for row in stamps)):
+            day = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone)).replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+            start = day.astimezone(UTC).isoformat(timespec="microseconds")
+            end = (day + timedelta(days=1)).astimezone(UTC).isoformat(timespec="microseconds")
+            today = store.one("SELECT COUNT(*) n FROM poke_batches WHERE conversation_id=? "
+                              "AND claimed_at>=? AND claimed_at<?",
+                              (job["conversation_id"], start, end))["n"]
+            latest = store.one("SELECT MAX(claimed_at) at FROM poke_batches "
+                               "WHERE conversation_id=?", (job["conversation_id"],))["at"]
+            if (today >= configured.daily_limit or configured.mode == "none"
+                or latest and after(latest, configured.cooldown_seconds) > now):
                 _cancel(store, job["job_id"], "POKE_RATE_LIMIT", now)
                 continue
             cutoff = store.one("SELECT COALESCE(MAX(rowid),0) AS n FROM events "

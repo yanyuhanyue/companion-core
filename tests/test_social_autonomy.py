@@ -542,6 +542,34 @@ def test_unknown_publish_cannot_be_repaid_as_a_new_plan_after_midnight_or_policy
     assert len(core.store.rows("SELECT * FROM social_autonomy_reservations")) == 1
 
 
+def test_quota_scan_omits_old_known_results_but_retains_old_uncertainty(core, monkeypatch):
+    module, ref, conversation = background(core)
+    first = queue(module, planned(module, ref), conversation)
+    outcome(module, first, dispatch(module, first), "SUCCEEDED")
+    core.clock.advance(86400)
+    seen = []
+    original_rows = core.store.rows
+
+    def observed_rows(sql, *args):
+        rows = original_rows(sql, *args)
+        if sql.startswith("SELECT r.*,o.state,o.attempt_count"):
+            seen.append([row["message_id"] for row in rows])
+        return rows
+
+    monkeypatch.setattr(core.store, "rows", observed_rows)
+    module._capacity("qzone.publish", core.settings.timezone, core.clock())
+    assert seen[-1] == []
+    second_ref = extra_public(core)
+    module.model.text = "另一次公开阅读后的想法。"
+    second = queue(module, planned(module, second_ref, "new-social-candidate"), conversation)
+    outcome(module, second, dispatch(module, second), "UNKNOWN")
+    core.clock.advance(86400)
+    with pytest.raises(CoreError, match="SOCIAL_ACTION_RECONCILIATION_REQUIRED"):
+        module._capacity("qzone.publish", core.settings.timezone, core.clock())
+    assert seen[-1] == [second.message_id]
+    assert len(original_rows("SELECT * FROM social_autonomy_reservations")) == 2
+
+
 def test_unstarted_erasure_releases_only_action_slot_and_never_refunds_model_cost(core):
     core.clock.now = datetime.fromisoformat("2026-10-19T15:59:50+00:00")
     module, ref, conversation = background(core)

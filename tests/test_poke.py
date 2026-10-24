@@ -86,6 +86,36 @@ def claim(env):
     return poke.claim_ready(env.store, env.settings, env.clock, "poke-worker")
 
 
+def test_claim_aggregates_day_range_and_keeps_midnight_boundary(environment, monkeypatch):
+    env = environment
+    env.clock.now = datetime.fromisoformat("2026-10-19T15:59:57+00:00")
+    env.settings.timezone = "Asia/Shanghai"
+    env.settings.poke_policy = PokePolicy(enabled=True, cooldown_seconds=0, daily_limit=1)
+    env.approval.poke_policy_sha256 = paid_budget.sha(env.settings.poke_policy.model_dump())
+    original_rows = env.store.rows
+
+    def no_history_materialization(sql, *args):
+        assert "SELECT claimed_at FROM poke_batches" not in sql
+        return original_rows(sql, *args)
+
+    monkeypatch.setattr(env.store, "rows", no_history_materialization)
+    receive(env)
+    first = claim(env)
+    assert first is not None  # 23:59:59 local.
+    poke.finish(env.store, env.settings, env.approval, first, {"kind": "none"}, env.clock())
+    env.clock.advance(1)
+    receive(env)
+    second = claim(env)
+    assert second is not None  # New local day, same UTC date.
+    poke.finish(env.store, env.settings, env.approval, second, {"kind": "none"}, env.clock())
+    env.clock.advance(20)
+    third = receive(env)
+    assert claim(env) is None
+    assert env.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (third["job_id"],)) == {
+        "last_error_code": "POKE_RATE_LIMIT",
+    }
+
+
 def owner_turn(env, number, text, *, delivered=True):
     result = ingest(env.core, number, text, origin="onebot-direct:FriendMessage:10001")
     with env.store.transaction():
