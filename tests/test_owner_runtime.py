@@ -75,9 +75,12 @@ def test_native_chat_admission_rechecks_authority_after_http_hooks(core, tmp_pat
     else:
         assert asyncio.run(execute()).text == "SYNTHETIC observed reply"
         assert len(calls) == 1
-    state = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
-    # Preserve native liability for an admitted attempt interrupted at the I/O boundary.
-    assert state["state"] == ("SETTLED" if fence is None else "UNKNOWN")
+    state = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+                           (request_id,))
+    assert state["state"] == "SETTLED"
+    if fence:
+        # The controlled transport proves that the provider delegate was never reached.
+        assert state["billed_micro_usd"] == 0
 
 
 def test_native_chat_outbox_requires_same_reference_and_live_send_lease(core, tmp_path):
