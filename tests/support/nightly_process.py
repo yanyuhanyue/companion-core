@@ -55,11 +55,12 @@ def run_worker(settings_path, now, stop_after_extract):
             "usage": {"prompt_tokens": 100, "completion_tokens": 30},
         })
 
-    original_client = httpx.AsyncClient
-
-    def offline_client(**kwargs):
-        kwargs["transport"] = httpx.MockTransport(provider)
-        return original_client(**kwargs)
+    class OfflineClient(httpx.AsyncClient):
+        def __init__(self, *args, **kwargs):
+            # Keep the SDK's client type intact and preserve ModelClient's
+            # explicit admission transport around this mock provider.
+            kwargs.setdefault("transport", httpx.MockTransport(provider))
+            super().__init__(*args, **kwargs)
 
     original_selector = life_worker.native_selector
 
@@ -87,7 +88,7 @@ def run_worker(settings_path, now, stop_after_extract):
 
     life_worker.native_selector = observed_selector
     life_worker.Core = partial(Core, clock=lambda: now)
-    life_worker.httpx.AsyncClient = offline_client
+    life_worker.httpx.AsyncClient = OfflineClient
     life_worker.Wakeup.wait = stop
     try:
         asyncio.run(life_worker.life_worker(settings))
