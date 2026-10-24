@@ -71,7 +71,7 @@ API alive、schema 可读、空队列及按时采样都不能证明 worker 正�
 
 ## 本地 SQLite worker 唤醒
 
-chat、content、executive、diary、life 五个本地 worker 使用 watchfiles 1.3.0 监听数据库父目录，
+chat、content、executive、life 四个本地 worker 使用 watchfiles 1.3.0 监听数据库父目录，
 以覆盖 WAL 的创建、删除与替换。通知仅作为检查提示；SQLite 中的状态、预算、租约仍是唯一权威。
 每次启动先订阅，再在同一 Store 连接取得 `PRAGMA data_version`，执行扫描，等待前再次检查版本。
 自己的提交不会改变该连接的 data_version，因此自身完成记录不会触发业务自旋；不得比较不同连接
@@ -99,12 +99,12 @@ WATCHFILES_FORCE_POLLING 时可能退化为库的文件轮询，不能宣称所�
 
 ### 原生调度边界
 
-五个入口共用 `worker_schedule.ScanContext` 和 `UnitResult`。每轮先取得不可变的扫描起点、
+四个入口共用 `worker_schedule.ScanContext` 和 `UnitResult`。每轮先取得不可变的扫描起点、
 同连接 data_version 和单调时钟值，再调用一次原生业务操作。`run_native_unit` 只把现有的
 工作布尔值／完成数量转换成结果；不领取第二次、不重试异常，也不把取消转换成成功。
 等待必须使用本轮的 ScanContext，旧轮次的上下文会被拒绝。
 
-`worker_deadlines` 按 chat、content、executive、diary、life 提供只读期限投影，保留原有
+`worker_deadlines` 按 chat、content、executive、life 提供只读期限投影，保留原有
 查询、日界、日记／巩固时点和 admission 租约。投影使用扫描开始时刻作下界，保留扫描期间
 刚到期的事项；下一轮移动下界，避免已到期但受限的事项自旋。领域可以返回 UnitResult 的
 `next_deadline` 提示；它只能提前重新检查，不能覆盖数据库期限或授予执行权限，扫描前已经
@@ -115,10 +115,30 @@ WATCHFILES_FORCE_POLLING 时可能退化为库的文件轮询，不能宣称所�
 | chat | `Core.run_once` / `claim_job` / `recover`；包括原有 voice 清理和投递恢复 |
 | content | `ContentService.run_batch` / `run_once`；保留原有批量上限 |
 | executive | `Executive.run_one` / `claim` / `recover`；开始执行后的超时仍为 UNKNOWN |
-| diary | `DiaryService.generate_once` / `DiaryRepository.claim`；保留日记启动恢复 |
-| life | 原有 Consolidator、Memory 和维护调用；检查点与来源仍由领域管理 |
+| life | 有界轮转选择原生 Life activity、Diary、Social、Memory、Consolidator 与维护单步；领域继续管理检查点与来源，Diary 启动恢复由该入口接管 |
 
 共享层不根据过期租约统一重排队，也不以数据库写入数量推断业务进展。领域若以后通过
 UnitResult 报告需要继续清理的有界恢复进展，必须确有原生状态变化；受限的过期记录本身不算
-进展。本片保留各入口的选择顺序、前台让路和维护节奏，不迁移自主任务生产者，也未实施
-每轮一次模型调用的后台公平轮转。后续迁移须在原有 admission、来源与投递边界内进行。
+进展。定期维护本身完成后推进单调时钟，并重新检查本连接可能安排的工作。
+
+### Life 自主选择与完整切换条件
+
+`autonomous_selector` 使用进程内有限轮转，每个 turn 最多调用一个原生操作。
+即使该操作返回空闲或遇到限制，也会消耗本轮机会；不能因为它返回 False 就在同一 turn
+继续调用第二个可能使用模型的操作。只有实际进展或已完成的定期维护会重新开始检查，
+一轮全部空闲后回到文件事件／原生期限等待。游标不落盘，不创建队列、预算或权限状态。
+
+每个操作前重新检查当前聊天和已接收但尚未入队的主人输入。等待中的聊天所需 Content、
+Reader、Executive、Voice 仍由各自原生入口执行；不会因为“后台让路”而把这些前台依赖停掉。
+原生 claim 和最终 dispatch 继续检查最新来源、权限和预算；selector 的前置检查不是许可。
+已开始的模型、发送和不确定结果保留原责任，不为让路而退款或自动重试。
+
+Life、Diary、Social 的默认关闭／SHADOW、DND、每日次数、冷却、SKIP/DEFER 都由原生模块处理。
+静默的一次检查不调用模型；SKIP 消费原候选，不新增消息。公平性只保证进程持续运行且存在
+空闲资源时，持续可用的后台 lane 获得有限轮转机会；不保证持续前台流量下后台按时完成。
+
+完整切换须同时接入 Core 的前台／指定 activity 领取隔离、移除 Core 的 Social fallthrough
+和 timer 问候生产、停用独立 Diary 入口，并提供 `NightlyConsolidator.run_step(worker_id)` 与
+`Core.extract_step(local_day=None)`。两种原生单步均返回 UnitResult，最多一次模型 admission
+或一次有界非模型推进。缺少接口时 Life 启动失败，不能回退调用多模型 `run_once/extract_once`。
+对应 Core 与部署补丁由集成负责人统一接入；这些条件未全部验证前，不宣称统一调度已完成。

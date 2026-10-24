@@ -19,7 +19,6 @@ from companion.diary import DIARY_RULES
 from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
 from companion.reflection import REFLECTION_RULES
 from companion.reply_segments import SegmentedReplyConfig
-from companion.runtime import Runtime
 from companion_onebot_bridge import capture, continuous
 from tests.conftest import run
 from tests.test_continuous_private_replies import worker
@@ -71,10 +70,10 @@ def companion_options(core):
     }
 
 
-def test_independent_background_workers_finish_nightly_memory_diary_reflection_goals(
+def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
     core, tmp_path, monkeypatch
 ):
-    from companion import diary_worker, life_worker
+    from companion import life_worker
 
     calls, number = [], 0
 
@@ -173,14 +172,11 @@ def test_independent_background_workers_finish_nightly_memory_diary_reflection_g
                 day = local.date()
                 core.clock.now = (local + timedelta(days=1)).replace(hour=4).astimezone(UTC)
                 monkeypatch.setattr(life_worker, "Core", partial(Core, clock=core.clock))
-                monkeypatch.setattr(diary_worker, "Runtime", partial(Runtime, clock=core.clock))
-                for module in (life_worker, diary_worker):
-                    monkeypatch.setattr(
-                        module, "ModelClient", lambda settings, _: ModelClient(settings, model)
-                    )
+                monkeypatch.setattr(
+                    life_worker, "ModelClient", lambda settings, _: ModelClient(settings, model)
+                )
                 tasks = [
                     asyncio.create_task(life_worker.life_worker(core.settings)),
-                    asyncio.create_task(diary_worker.diary_worker(core.settings)),
                 ]
                 try:
                     async with asyncio.timeout(12):

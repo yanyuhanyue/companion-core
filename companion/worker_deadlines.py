@@ -22,13 +22,16 @@ LIFE = (
     ("consolidation_runs", "next_attempt_at", "state='PARTIAL'"),
     ("consolidation_runs", "lease_until", "state='LEASED'"),
     ("reflection_runs", "lease_until", "state='RUNNING'"),
+    ("reflection_runs", "next_attempt_at", "state='RETRY_WAIT'"),
     ("goal_steps", "lease_until", "state='RUNNING'"),
     ("goals", "next_due_at", "state IN ('ACCEPTED','QUEUED','RETRY_WAIT')"),
     ("commitments", "deadline", "state IN ('ACKNOWLEDGED','IN_PROGRESS')"),
+    ("life_topics", "due_at", "state IN ('WAITING','DUE')"),
+    ("life_topics", "expires_at", "state IN ('WAITING','DUE')"),
 )
 
 
-def _next(store, settings, scan_started_at, boundaries, *, local_hour=None):
+def _next(store, settings, scan_started_at, boundaries, *, local_hours=()):
     # Use the scan horizon, not wait entry: deadlines crossed during native work
     # need one rescan. Older fenced rows must not produce an immediate busy loop.
     parts = [f"SELECT julianday({field}) AS at FROM {table} WHERE {condition}"
@@ -42,7 +45,7 @@ def _next(store, settings, scan_started_at, boundaries, *, local_hour=None):
     local = scan_started_at.astimezone(ZoneInfo(settings.timezone))
     dates.append((local + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0).astimezone(UTC))
-    if local_hour is not None:
+    for local_hour in local_hours:
         due = local.replace(hour=local_hour, minute=0, second=0, microsecond=0)
         if due <= local:
             due += timedelta(days=1)
@@ -55,7 +58,7 @@ def _next(store, settings, scan_started_at, boundaries, *, local_hour=None):
 
 
 def chat(store, settings, scan_started_at):
-    return _next(store, settings, scan_started_at, JOBS + DELIVERIES + SOCIAL)
+    return _next(store, settings, scan_started_at, JOBS + DELIVERIES)
 
 
 def content(store, settings, scan_started_at):
@@ -66,20 +69,17 @@ def executive(store, settings, scan_started_at):
     return _next(store, settings, scan_started_at, TOOLS)
 
 
-def diary(store, settings, scan_started_at):
-    return _next(store, settings, scan_started_at, DIARY,
-                 local_hour=settings.diary_generate_hour)
-
-
 def life(store, settings, scan_started_at):
-    return _next(store, settings, scan_started_at, LIFE,
-                 local_hour=settings.consolidation_local_hour)
+    hours = {settings.diary_generate_hour, settings.consolidation_local_hour}
+    if settings.quiet_start != settings.quiet_end:
+        hours.add(settings.quiet_end)
+    return _next(store, settings, scan_started_at, LIFE + DIARY + JOBS + SOCIAL,
+                 local_hours=hours)
 
 
 PROVIDERS = {
     "worker": chat,
     "content-worker": content,
     "executive-worker": executive,
-    "diary-worker": diary,
     "life-worker": life,
 }

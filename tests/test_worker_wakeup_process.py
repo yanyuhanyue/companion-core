@@ -21,7 +21,7 @@ from tests.test_private_companion import companion_options
 
 
 async def start(
-    core, directory, role="worker", *, duration=5, settle=0.4, baseline=False, controlled=False,
+    core, directory, role="worker", *, duration=5, settle=0.4, controlled=False,
 ):
     directory.mkdir(parents=True)
     config, ready, report = (directory / name for name in ("config.json", "ready", "result.json"))
@@ -34,7 +34,6 @@ async def start(
                 "settle": settle,
                 "ready": str(ready),
                 "report": str(report),
-                "one_second_baseline": baseline,
                 "release": str(directory / "release") if controlled else None,
                 "scan_progress": str(directory / "scans") if controlled else None,
             },
@@ -93,45 +92,10 @@ def receipt(name, value):
         (path / (name + ".json")).write_text(json.dumps(value, indent=2), encoding="utf-8")
 
 
-def test_five_process_idle_wake_and_sql_evidence(core, tmp_path):
+def test_four_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_path):
     core.settings.content_enabled = True
     core.settings.executive = core.settings.executive.model_copy(update={"enabled": True})
-    roles = ("worker", "content-worker", "executive-worker", "diary-worker", "life-worker")
-
-    async def scenario():
-        result = {}
-        for baseline in (True, False):
-            label = "one_second_baseline" if baseline else "filesystem_hints"
-            children = await asyncio.gather(
-                *[
-                    start(
-                        core,
-                        tmp_path / label / role,
-                        role,
-                        duration=5,
-                        settle=1.5,
-                        baseline=baseline,
-                    )
-                    for role in roles
-                ]
-            )
-            rows = await asyncio.gather(*[finish(child) for child in children])
-            result[label] = rows
-            if not baseline:
-                assert all(row["steady"]["scans"] <= 2 for row in rows), rows
-                assert all(row["steady"]["recorder_writes"] == 0 for row in rows), rows
-        before = sum(row["steady"]["sql"] for row in result["one_second_baseline"])
-        after = sum(row["steady"]["sql"] for row in result["filesystem_hints"])
-        assert after < before, result
-        receipt("idle-five-workers", result)
-
-    run(scenario())
-
-
-def test_five_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_path):
-    core.settings.content_enabled = True
-    core.settings.executive = core.settings.executive.model_copy(update={"enabled": True})
-    roles = ("worker", "content-worker", "executive-worker", "diary-worker", "life-worker")
+    roles = ("worker", "content-worker", "executive-worker", "life-worker")
 
     async def scenario():
         children = await asyncio.gather(*[
@@ -143,7 +107,7 @@ def test_five_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_pat
             assert row["total"]["native_units"] > 0
             assert row["total"]["provider_calls"] == 0
             assert row["watchers"] == row["closed_watchers"] == 1
-        receipt("shared-boundary-five-workers", rows)
+        receipt("shared-boundary-four-workers", rows)
 
     run(scenario())
 

@@ -1,16 +1,16 @@
-"""Independent low-frequency worker for v0.5 background coordination."""
+"""The sole autonomous selector; native domains still own work and permission."""
 
-from functools import partial
+import asyncio
 
 import httpx
 
-from companion import budget, live_text, private_life
-from companion.contracts import CoreError
+from companion import private_life
+from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import uid
-from companion.worker_schedule import UnitResult, run_native_unit
-from companion.worker_wakeup import Maintenance, Wakeup
+from companion.worker_schedule import UnitResult
+from companion.worker_wakeup import Wakeup
 
 
 async def life_worker(settings):
@@ -18,55 +18,34 @@ async def life_worker(settings):
         core = Core(settings, ModelClient(settings, client))
         worker_id = uid("life_worker")
         try:
-            maintenance = Maintenance()
-            force_maintenance = False
+            selector = native_selector(core, worker_id)
+            # Preserve the former Diary worker's startup custody recovery under
+            # the single Life worker lock, including orphaned reservations.
+            core.store.execute(
+                "UPDATE model_usage SET state='UNKNOWN' WHERE scenario='diary' AND state='RESERVED'"
+                + (" AND request_id IN (SELECT request_id FROM model_admissions "
+                   "WHERE lease_until<=?)"
+                   if private_life.enabled(settings) else ""),
+                (core.clock(),) if private_life.enabled(settings) else (),
+            )
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
+                scan, deadline = wake.before_scan(), None
                 while True:
-                    scan = wake.before_scan()
-                    if private_life.enabled(settings):
-                        try:
-                            live_text.guard(core.store, settings, core.clock)
-                        except CoreError:
-                            await wake.wait(scan, UnitResult(False))
-                            continue
-                        if private_life.busy(core.store, core.clock()):
-                            await wake.wait(scan, UnitResult(False))
-                            continue
-                    due = maintenance.due() or force_maintenance
-                    if due:
-                        core.expire_raw_events()
-                        core.consolidation.schedule_due()
-                        core.exploration.schedule_wake(core.wake.evaluate())
-                        with core.store.transaction():
-                            core.goals.expire_commitments()
-                        core.exploration.schedule_goal()
-                        core.social.flush()
-                        core.life_topics.schedule()
-                        maintenance.completed()
-                    force_maintenance = False
-                    result = UnitResult(False)
-                    if not budget.chat_pending(core.store, core.clock()):
-                        pending = core.store.one(
-                            "SELECT j.job_id FROM jobs j "
-                            "JOIN life_activity_results r USING(job_id) "
-                            "WHERE j.state IN ('QUEUED','RETRY_WAIT','RUNNING') "
-                            "AND r.state='PENDING' "
-                            "ORDER BY j.created_at LIMIT 1",
+                    selected = await selector.step()
+                    hint = selected.result.next_deadline
+                    if hint is not None and hint >= scan.started_at:
+                        deadline = min(deadline, hint) if deadline else hint
+                    if selected.result.progressed:
+                        scan, deadline = wake.before_scan(), None
+                    elif not selected.more:
+                        await wake.wait(
+                            scan, UnitResult(False, deadline),
+                            None if selected.blocked else selector.next_maintenance,
                         )
-                        if pending:
-                            result = await run_native_unit(
-                                partial(core.run_once, worker_id, job_id=pending["job_id"]),
-                            )
-                            if result.progressed and settings.life_loop.read_goals_enabled:
-                                core.exploration.schedule_goal()
-                        if not result.progressed:
-                            result = await run_native_unit(core.consolidation.run_once, worker_id)
-                        if (not result.progressed and due
-                                and not budget.chat_pending(core.store, core.clock())):
-                            result = await run_native_unit(core.extract_once)
-                    if not result.progressed:
-                        force_maintenance = (
-                            await wake.wait(scan, result, maintenance.next_at) == "deadline"
-                        )
+                        selector.resume()
+                        scan, deadline = wake.before_scan(), None
+                    # A native step can complete synchronously. Give cancellation
+                    # and newly arrived input a boundary before the next selection.
+                    await asyncio.sleep(0)
         finally:
             core.store.close()

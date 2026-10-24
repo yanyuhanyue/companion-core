@@ -1,4 +1,4 @@
-"""Actual owner HTTP routes and the native independent diary worker, with mock model I/O."""
+"""Actual owner HTTP routes and the native independent Life worker, with mock model I/O."""
 
 import asyncio
 import json
@@ -11,11 +11,11 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from companion import diary_worker, live_text
+from companion import life_worker, live_text
 from companion.api import create_app
+from companion.core import Core
 from companion.diary import DIARY_RULES, DiaryService
 from companion.model import ModelClient
-from companion.runtime import Runtime
 from companion_onebot_bridge import continuous, network
 from tests.conftest import run
 from tests.test_diary import DAY
@@ -109,10 +109,10 @@ async def run_native_diary(core, model_http, monkeypatch, day, expected, during=
         return worked
 
     with monkeypatch.context() as patch:
-        patch.setattr(diary_worker, "Runtime", partial(Runtime, clock=core.clock))
-        patch.setattr(diary_worker, "ModelClient", lambda cfg, _: ModelClient(cfg, model_http))
+        patch.setattr(life_worker, "Core", partial(Core, clock=core.clock))
+        patch.setattr(life_worker, "ModelClient", lambda cfg, _: ModelClient(cfg, model_http))
         patch.setattr(DiaryService, "generate_once", observe)
-        task = asyncio.create_task(diary_worker.diary_worker(core.settings))
+        task = asyncio.create_task(life_worker.life_worker(core.settings))
         waiting = asyncio.create_task(completed.wait())
         try:
             if during:

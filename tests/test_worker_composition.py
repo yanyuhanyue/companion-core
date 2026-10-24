@@ -64,7 +64,6 @@ def opened_stores(monkeypatch):
     [
         ("companion.content_worker", "content_worker", "ContentService", "run_batch"),
         ("companion.executive_worker", "executive_worker", "Executive", "run_one"),
-        ("companion.diary_worker", "diary_worker", "DiaryService", "generate_once"),
     ],
 )
 def test_nonsemantic_worker_enters_own_loop_and_closes_store(
@@ -75,7 +74,6 @@ def test_nonsemantic_worker_enters_own_loop_and_closes_store(
     service_class = getattr(importlib.import_module({
         "ContentService": "companion.content",
         "Executive": "companion.executive",
-        "DiaryService": "companion.diary",
     }[service]), service)
     worked = []
 

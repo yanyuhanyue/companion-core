@@ -41,7 +41,6 @@ async def worker(settings):
                     maintenance = not result.progressed and maintenance_clock.due()
                     if maintenance:
                         core.expire_raw_events()
-                        core.schedule_proactive()
                         maintenance_clock.completed()
                     loop.completed(maintenance=maintenance,
                                    waiting=not result.progressed and not maintenance)
@@ -64,7 +63,6 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("worker")
-    sub.add_parser("diary-worker")
     sub.add_parser("life-worker")
     sub.add_parser("executive-worker")
     sub.add_parser("content-worker")
@@ -126,12 +124,6 @@ def main():
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database):
                 asyncio.run(worker(settings))
-        elif args.command == "diary-worker":
-            from companion.diary_worker import diary_worker
-
-            logging.getLogger("httpx").setLevel(logging.WARNING)
-            with single_worker(settings.database, "diary-worker"):
-                asyncio.run(diary_worker(settings))
         elif args.command == "status":
             from companion.ops_status import snapshot
 

@@ -37,17 +37,11 @@ def main():
             "companion.executive.Executive",
             "run_one",
         ),
-        "diary-worker": (
-            "companion.diary_worker",
-            "diary_worker",
-            "companion.diary.DiaryService",
-            "generate_once",
-        ),
         "life-worker": (
             "companion.life_worker",
             "life_worker",
-            "companion.consolidation.NightlyConsolidator",
-            "run_once",
+            "companion.autonomous_selector.RoundRobin",
+            "step",
         ),
     }[role]
     module = importlib.import_module(module_name)
@@ -88,20 +82,24 @@ def main():
     async def scan(self, *a, **kw):
         stats["scans"] += 1
         result = await native_scan(self, *a, **kw)
+        if role == "life-worker":
+            assert isinstance(result.result, UnitResult)
+            stats["native_units"] += int(result.lane is not None)
         if args.get("scan_progress"):
             await asyncio.to_thread(report_scan)
         return result
 
     setattr(service, method, scan)
-    native_unit = module.run_native_unit
+    if role != "life-worker":
+        native_unit = module.run_native_unit
 
-    async def unit(operation, *a):
-        result = await native_unit(operation, *a)
-        assert isinstance(result, UnitResult)
-        stats["native_units"] += 1
-        return result
+        async def unit(operation, *a):
+            result = await native_unit(operation, *a)
+            assert isinstance(result, UnitResult)
+            stats["native_units"] += 1
+            return result
 
-    module.run_native_unit = unit
+        module.run_native_unit = unit
     native_before_scan = worker_wakeup.Wakeup.before_scan
 
     def before_scan(self):
@@ -145,35 +143,6 @@ def main():
         return native_client(**kw)
 
     httpx.AsyncClient = client
-    if args.get("one_second_baseline"):
-        # Fixed reproduction of the old idle waiting/Recorder policy, using the same
-        # native services. This is not a loader for arbitrary source or a product mode.
-        class OneSecondWait:
-            def __init__(self, *_):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_):
-                pass
-
-            def before_scan(self):
-                pass
-
-            async def wait(self, *_):
-                stats["wait_entries"] += 1
-                await asyncio.sleep(1)
-                return "commit"
-
-        module.Wakeup = OneSecondWait
-        if role == "worker":
-            completed = module.Recorder.completed
-
-            def old_record(self, *, maintenance=False, waiting=False):
-                return completed(self, maintenance=maintenance)
-
-            module.Recorder.completed = old_record
     native_worker = getattr(module, entry)
 
     async def bounded(config):

@@ -171,10 +171,7 @@ def test_actual_worker_blocked_poll_never_advances(core, monkeypatch):
     run(scenario())
 
 
-@pytest.mark.parametrize("operation", ["expire_raw_events", "schedule_proactive"])
-def test_actual_worker_failed_maintenance_preserves_previous_loop_record(
-    core, monkeypatch, operation,
-):
+def test_actual_worker_failed_maintenance_preserves_previous_loop_record(core, monkeypatch):
     worker_fixture(core, monkeypatch)
     previous = encode(record(987))
     core.store.execute("INSERT INTO runtime_meta VALUES (?,?)", (worker_loop.KEY, previous))
@@ -182,7 +179,7 @@ def test_actual_worker_failed_maintenance_preserves_previous_loop_record(
     def fail():
         raise RuntimeError("synthetic maintenance failure")
 
-    monkeypatch.setattr(core, operation, fail)
+    monkeypatch.setattr(core, "expire_raw_events", fail)
     with pytest.raises(RuntimeError, match="synthetic maintenance failure"):
         run(__main__.worker(core.settings))
     # The worker closes its connection even when maintenance fails.

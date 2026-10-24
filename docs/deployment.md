@@ -106,10 +106,10 @@ docker compose -f privacy/readers/compose.json up -d
 先在真实 QQ 上测试正常消息、重复消息和故障恢复，确认仅一条主回复，再将 `memory_enabled=true`。停止 API/Worker 后运行迁移初始化，再启动服务：
 
 ```bash
-docker compose --profile life stop companion-worker companion-life-worker companion-diary-worker companion-api
+docker compose --profile life stop companion-worker companion-life-worker companion-api
 docker compose build
 docker compose run --rm migrate
-docker compose --profile life up -d companion-api companion-worker companion-life-worker companion-diary-worker
+docker compose --profile life up -d companion-api companion-worker companion-life-worker
 ```
 
 聊天 Worker 只处理即时回复；自动记忆提取由 `companion-life-worker` 执行，因此开启记忆时需一并启动 `life` profile。常规提取不依赖夜间整理开关；有排队、执行中或到期重试的聊天时，后台记忆会让位。
@@ -164,6 +164,10 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 在线 `/纠正这一条` 将原始命令事件与新事实一起提交。Worker 在事实提交后、成功回执登记前退出时，可恢复同一个新记忆 ID；租约、STOP、截止和遗忘仍在恢复与提交时复核。
 
+
+自主调度切换时，须先使用旧版本 compose 配置停止独立的 `companion-diary-worker`，
+再应用统一 Life Worker 的 Core／领域／部署改动。新版本只启动 `companion-life-worker` 消费
+自主任务；不得保留旧日记进程并行生成。此步骤需要独立部署授权，代码验收不会自动执行。
 
 ### Bridge 分层依据与验证
 
