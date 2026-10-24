@@ -17,15 +17,17 @@ from tests.test_social_owner_authority import authorize
 from tests.test_social_owner_authority import close_provider_clients as close_provider_clients
 
 
-def prepared(core, tmp_path, *, affect=True):
+def prepared(core, tmp_path, *, affect=True, text="明天可以看看这篇天文介绍"):
     configure(core)
     core.settings.affect_enabled = True
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW", read_goals_enabled=True)
     core.settings.wake_enabled = True
     core.settings.quiet_start = core.settings.quiet_end = 0
-    ingest(core, 1, "明天可以看看这篇天文介绍")
+    core.settings.content_enabled = False
+    ingest(core, 1, text)
     ingest(core, 2, "简短一点")
     core.store.execute("UPDATE jobs SET state='CANCELLED',lease_token=NULL")
+    core.settings.content_enabled = True
     core.life_topics.synchronize()
     topic = core.store.one("SELECT * FROM life_topics")
     scope = LifeShadowApproval(
@@ -35,7 +37,8 @@ def prepared(core, tmp_path, *, affect=True):
         expires_at=after(core.clock(), 3 * 86400),
     )
     authorize(core, tmp_path, life=scope,
-              additional_purposes=["goals", "content", "memory", *(["affect"] if affect else [])])
+              additional_purposes=["goals", "content", "exploration", "memory",
+                                   *(["affect"] if affect else [])])
     core.clock.advance(86400)
     return topic["topic_id"]
 

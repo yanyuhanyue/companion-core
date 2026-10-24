@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
 from companion.contracts import StrictModel
-from companion.goals import GoalProposal
+from companion.goals import GoalContinuationDecision, GoalProposal
 from companion_delivery_protocol.authority import validate_authority_ref
 
 LifeChannelAction = Literal["qq.private.proactive", "diary.save", "qzone.publish"]
@@ -81,6 +81,9 @@ class LifeDecision(StrictModel):
     text: str = Field(default="", max_length=500)
     goal_id: str | None = Field(default=None, max_length=128)
     goal: GoalProposal | None = None
+    continuation: GoalContinuationDecision | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     defer_seconds: int | None = Field(default=None, ge=60, le=86400)
 
     @model_validator(mode="after")
@@ -96,6 +99,8 @@ class LifeDecision(StrictModel):
             raise ValueError("only DEFER supplies a bounded delay")
         if self.action == "CONTINUE" and self.goal_id is None:
             raise ValueError("continuation requires an existing goal")
+        if self.continuation is not None and (self.action != "CONTINUE" or self.goal_id is None):
+            raise ValueError("plan continuation requires the original goal reference")
         if self.action not in {"CONTINUE", "EXPLORE"} and self.goal_id is not None:
             raise ValueError("unrelated goal reference")
         if self.goal is not None and (

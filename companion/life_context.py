@@ -9,6 +9,22 @@ from companion.privacy import redact, sensitive
 from companion.store import encode
 
 
+def read_targets(settings, sources):
+    from companion.content import shared_links
+    from companion.sources import web_hosts
+
+    hosts = web_hosts(settings)
+    targets = []
+    for source in sources:
+        for token in [source.get("url", ""), *source["text"].split()]:
+            for target in shared_links(token, hosts):
+                if target not in targets:
+                    targets.append(target)
+                if len(targets) == 24:
+                    return targets
+    return targets
+
+
 def permitted(store, settings, now, purpose):
     if not owner_authority.required(store, settings):
         return True

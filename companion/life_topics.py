@@ -28,7 +28,14 @@ destination只能选给定allowed_destinations；不表达时为NONE。
 输出source_event_ids、reason(160字内)、text(500字内)。
 CONTINUE必须提供给定的goal_id；DEFER提供60到86400秒的defer_seconds；其他可选字段省略。
 EXPLORE可提供goal，使用原生目标结构：topic、source_event_ids、scope和priority。
-scope只能是{operation:read_content,url:HTTPS地址}或{operation:investigate,url:""}。
+scope只能是{operation:read_content,url:HTTPS地址}、{operation:investigate,url:""}，
+或{operation:read_plan,urls:[1到3个不同且具体的HTTPS地址]}。
+read_plan只使用给定read_targets中的目标，串行读取；模型不能把步骤标成完成，必须等待真实Reader结果。
+现有read_plan的CONTINUE必须提供continuation:{expected_version:当前plan.version,
+action:CONTINUE|WAIT|ABANDON,step_order:[剩余WAITING_DECISION的全部step_id]}。
+只有CONTINUE提供step_order，可调整尚未开始步骤的顺序。WAIT改为提供wait_until带时区时间，
+必须在当前时间之后且不超过来源/话题有效期；ABANDON不提供这两个参数。
+只选plan.allowed_actions中的动作，不添加目标，不续行UNKNOWN，也不修改已执行步骤。
 不能同时提供goal和goal_id。只有read_goals_enabled为true才会提交原Goal/Reader门禁。
 没有值得处理的内容选SKIP。FOLLOW_UP仅供未结束话题的私人草稿，不要求回复。
 SHARE可选择私人日记、私人草稿或明确获准的空间草稿；目的地不代表发送许可。
@@ -187,6 +194,7 @@ def _source(store, settings, event_id, now):
         "text": text[:500],
         "occurred_at": row["occurred_at"],
         "source": row["source"],
+        **({"url": preview["url"]} if kind == "observed_content" else {}),
         "result_status": status,
         "expires_at": after(row["ingested_at"], retention * 86400),
         "source_sha256": sha(
@@ -216,8 +224,8 @@ def _completed_goal_source(store, settings, event_id, scope, now, authority_sha2
         "JOIN jobs j USING(job_id) JOIN goal_steps step ON step.goal_id=g.goal_id "
         "WHERE r.state='SHADOW' AND r.action IN ('CONTINUE','EXPLORE') "
         "AND r.authority_sha256=? AND j.state='SUCCEEDED' AND g.kind='self' "
-        "AND g.state='DONE' AND g.redacted=0 AND g.result_event_id=? "
-        "AND step.state='DONE' AND step.outcome_event_id=g.result_event_id",
+        "AND g.state IN ('DONE','WAITING_INPUT') AND g.redacted=0 "
+        "AND step.state='DONE' AND step.outcome_event_id=?",
         (authority_sha256, event_id),
     )
     for row in rows:
@@ -336,12 +344,16 @@ class LifeTopics:
         # This also makes every private root visible to destination/erasure checks.
         for goal in self.store.rows(
             "SELECT DISTINCT g.goal_id FROM goals g JOIN life_activity_results r USING(goal_id) "
-            "WHERE g.state='DONE' AND g.redacted=0 AND r.state='SHADOW' "
-            "AND g.result_event_id IN (SELECT value FROM json_each(?))",
+            "JOIN goal_steps st ON st.goal_id=g.goal_id "
+            "WHERE g.state IN ('DONE','WAITING_INPUT') AND g.redacted=0 AND r.state='SHADOW' "
+            "AND st.state='DONE' AND st.outcome_event_id IN (SELECT value FROM json_each(?))",
             (encode(sorted(ids)),),
         ):
             ids.update(row["event_id"] for row in self.store.rows(
                 "SELECT event_id FROM goal_evidence WHERE goal_id=?", (goal["goal_id"],)))
+            ids.update(row["outcome_event_id"] for row in self.store.rows(
+                "SELECT outcome_event_id FROM goal_steps WHERE goal_id=? AND state='DONE'",
+                (goal["goal_id"],)))
         if len(ids) > self.settings.life_loop.source_limit:
             raise CoreError("LIFE_SOURCE_LIMIT", 409)
         return [
@@ -702,12 +714,15 @@ class LifeTopics:
                 "AND r.topic_revision=t.revision JOIN goals g USING(goal_id) "
                 "WHERE t.state='CLOSED' AND t.reason_code='CONSUMED' "
                 "AND t.closed_event_id IS NULL AND t.decision_count<2 "
-                "AND t.expires_at>? AND r.state='SHADOW' AND g.state='FAILED' "
+                "AND t.expires_at>? AND r.state='SHADOW' AND (g.state='FAILED' OR "
+                "(g.state='WAITING_INPUT' AND g.next_due_at<=? "
+                "AND json_extract(r.proposal_json,'$.continuation.action')='WAIT' "
+                "AND g.version=json_extract(r.proposal_json,'$.continuation.expected_version')+1)) "
                 "AND g.redacted=0 AND NOT EXISTS (SELECT 1 FROM goal_steps st "
                 "WHERE st.goal_id=g.goal_id AND st.state='EXECUTION_UNCERTAIN') "
                 "AND NOT EXISTS (SELECT 1 FROM exploration_requests er WHERE er.state='UNKNOWN' "
                 "AND json_extract(er.goal_step_json,'$.goal_id')=g.goal_id) "
-                "LIMIT 20", (now,),
+                "LIMIT 20", (now, now),
             ):
                 try:
                     approved = authority(s, self.settings, topic["conversation_id"],
@@ -928,16 +943,16 @@ class LifeTopics:
             # Do not ask the model about an old bug while a bounded-out newer input
             # may have closed it. The owner can close the topic or supply a fresh one.
             raise CoreError(reply_revision.SUPERSEDED, 409)
+        available = {source["event_id"] for source in sources}
         goals = s.rows(
-            "SELECT DISTINCT g.goal_id,g.state,g.topic,g.scope_json FROM goals g "
+            "SELECT DISTINCT g.goal_id,g.state,g.topic,g.scope_json,g.authority_json FROM goals g "
             "JOIN goal_evidence e "
-            "USING(goal_id) WHERE e.event_id IN (SELECT event_id FROM life_topic_sources "
-            "WHERE topic_id=?) AND g.kind='self' AND g.redacted=0 "
+            "USING(goal_id) WHERE e.event_id IN (SELECT value FROM json_each(?)) "
+            "AND g.kind='self' AND g.redacted=0 "
             "AND g.state NOT IN ('DONE','FAILED','CANCELLED') "
             "LIMIT 3",
-            (topic_id,),
+            (encode(sorted(available)),),
         )
-        available = {source["event_id"] for source in sources}
         goals = [
             {
                 "goal_id": g["goal_id"],
@@ -953,8 +968,25 @@ class LifeTopics:
                 )
             }
             <= available
+            and (not owner_authority.required(s, self.settings)
+                 or g["authority_json"]
+                 and sha(json.loads(g["authority_json"])) == approved["sha256"])
         ]
-        from companion.life_context import decision_context
+        from companion.goals import GoalEngine
+
+        # plan() is a validated read-only view; no ledger mutation or separate planner.
+        engine = GoalEngine(s, self.settings, None, self.clock)
+        for goal in goals:
+            if goal["scope"]["operation"] == "read_plan":
+                goal["plan"] = engine.plan(goal["goal_id"])
+                if goal["plan"]["unknown"]:
+                    raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
+        goals = [goal for goal in goals if all(
+            set(step["source_event_ids"]) <= available
+            and (not step["outcome_event_id"] or step["outcome_event_id"] in available)
+            for step in goal.get("plan", {}).get("steps", [])
+        )]
+        from companion.life_context import decision_context, read_targets
 
         context = decision_context(s, self.settings, sources, approved["sha256"], now)
         if any(item["requires_reconciliation"] for item in context["execution_outcomes"]):
@@ -964,6 +996,7 @@ class LifeTopics:
             "topic_id": topic_id,
             "revision": topic["revision"],
             "topic_kind": topic["kind"],
+            "topic_expires_at": topic["expires_at"],
             "conversation_revision": conversation["reply_revision"],
             "latest_owner_event_id": latest_owner["event_id"] if latest_owner else None,
             "source_events": {x["event_id"]: x["source_sha256"] for x in sources},
@@ -971,6 +1004,7 @@ class LifeTopics:
             "text": "",
             "goals": goals,
             "read_goals_enabled": self.settings.life_loop.read_goals_enabled,
+            "read_targets": read_targets(self.settings, sources),
             "allowed_destinations": approved["destinations"],
             "authority_sha256": approved["sha256"],
             "qzone_grants": approved["qzone"],
@@ -1007,6 +1041,32 @@ class LifeTopics:
             raise CoreError("LIFE_PROPOSAL_SCOPE_REQUIRED", 403)
         if decision.action == "FOLLOW_UP" and data["topic_kind"] != "conversation":
             raise CoreError("LIFE_FOLLOW_UP_SOURCE_REQUIRED", 403)
+        if (decision.goal is not None and decision.goal.scope.operation == "read_plan"
+            and not set(decision.goal.scope.urls) <= set(data["read_targets"])):
+            raise CoreError("LIFE_PLAN_TARGET_SCOPE_REQUIRED", 403)
+        if decision.goal_id is not None:
+            selected = next(g for g in data["goals"] if g["goal_id"] == decision.goal_id)
+            plan = selected.get("plan")
+            continuation = decision.continuation
+            if plan is not None:
+                required_sources = {event_id for step in plan["steps"]
+                                    for event_id in step["source_event_ids"]}
+                required_sources.update(step["outcome_event_id"] for step in plan["steps"]
+                                        if step["outcome_event_id"])
+                if (continuation is None or continuation.expected_version != plan["version"]
+                    or continuation.action not in plan["allowed_actions"]
+                    or not required_sources <= set(decision.source_event_ids)
+                    or continuation.action == "CONTINUE" and set(continuation.step_order) != {
+                        step["step_id"] for step in plan["steps"]
+                        if step["state"] == "WAITING_DECISION"
+                    }
+                    or continuation.action == "WAIT" and not (
+                        datetime.fromisoformat(now) < continuation.wait_until
+                        <= datetime.fromisoformat(data["topic_expires_at"])
+                    )):
+                    raise CoreError("LIFE_PLAN_CONTINUATION_SCOPE_REQUIRED", 403)
+            elif continuation is not None:
+                raise CoreError("LIFE_PLAN_CONTINUATION_SCOPE_REQUIRED", 403)
         # Reject direct pressure; prompt + synthetic expression evaluation cover paraphrases.
         if any(
             term in decision.text
@@ -1102,6 +1162,11 @@ class LifeTopics:
             return
         if decision.goal_id:
             goal_id = decision.goal_id
+            if decision.continuation is not None:
+                goals.continue_plan(goal_id, decision.continuation, autonomous=True)
+                s.execute("UPDATE life_activity_results SET goal_id=? WHERE job_id=?",
+                          (goal_id, job["job_id"]))
+                return
         else:
             try:
                 goal_id = goals.propose(decision.goal)

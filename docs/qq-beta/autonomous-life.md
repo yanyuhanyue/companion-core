@@ -54,12 +54,33 @@ Readback exposes the current native goal state, result event and error code. No 
 queue or retry policy is introduced. Wake's automatic new-goal selection yields while Life
 read-goal submission is enabled; accepted goals and commitments retain their original paths.
 
-Only a completed native goal result linked to a successful, settled Life choice under the same
+Only a completed native step result linked to a successful, settled Life choice under the same
 private approval can supply the next private Life decision. Its original goal evidence must
 remain in that approval's exact source set, with unchanged fingerprints and current validity.
 Unrelated reads and arbitrary descendant events cannot inherit this purpose. QZone draft
 permission still requires exact per-result grants. A failed or uncertain read supplies no SHARE
 evidence; native recovery and accounting remain authoritative.
+
+`read_plan` proposals choose one to three distinct HTTPS targets from `read_targets`, derived
+from the already admitted sources with the existing link parser. Migration `0045_goal_read_plan`
+and GoalEngine own the ordered steps, source evidence and parent completion. One step becomes
+active at a time; later steps wait for a separate decision after an actual Reader result.
+Completing one step does not complete the parent or add an independent interest vote.
+
+For an existing plan, Life's `CONTINUE` carries `goal_id` and the native `continuation` object:
+`expected_version`, `action = CONTINUE | WAIT | ABANDON`, and either the complete remaining
+`step_order` for CONTINUE or an aware `wait_until` for WAIT. It may reorder only never-started
+steps in the original target set. It cannot change executed IDs/targets or omit the preceding
+result from its evidence. GoalEngine applies the original authority, source checks and version
+comparison in the same activity transaction. WAIT is finite and bounded by topic validity;
+its due topic can receive one further decision within the existing per-topic/daily limits.
+ABANDON cancels the tail while preserving completed results. UNKNOWN, source withdrawal and
+stale proposals never create a replacement step or request.
+
+The source comparison reuses DSH's [bounded todo list](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/todo/tool-todo/src/index.ts)
+and [planning/permission separation](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/plan/plan-mode/src/index.ts),
+with [persisted execution state](https://docs.langchain.com/oss/python/langgraph/persistence)
+held in Core's existing Goal/Reader records. Model-written completion flags are never evidence.
 
 FOLLOW_UP targets only a conversational topic and PRIVATE_MESSAGE_DRAFT. SHARE can choose
 PRIVATE_MESSAGE_DRAFT or PRIVATE_DIARY; QZONE_DRAFT additionally needs explicit per-source purpose
@@ -217,3 +238,8 @@ The execution follow-up additionally verifies owner HTTP input → independent L
 native Goal → independent Reader v3 with mocked source transport → actual receipt → independent
 Life SHARE, including same-approval private-purpose checks and zero outbox items. Model output
 is synthetic; this does not establish live model decision quality.
+
+`test_life_read_plan.py` exercises independent native Core and Reader processes for ordered
+three-step completion, reordering, finite wait, abandonment and restart. The companion fence
+tests verify unknown outcomes, source erasure, invented targets, stale versions, missing result
+evidence and invalid step lists through the original model admission and commit paths.
