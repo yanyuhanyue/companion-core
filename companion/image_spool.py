@@ -219,11 +219,16 @@ def cleanup(store, now, max_bytes=4_000_000, *, retain_completed=False):
             captured = bool(retain_completed and row and store.one(
                 "SELECT 1 FROM captured_images WHERE item_id=? AND expires_at>?", (item_id, now),
             ))
+            pending_file = bool(row and row["kind"] == "qq_file"
+                and row["state"] in {"QUEUED", "RUNNING"} and row["deadline"] > now
+                and store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                              ("owner_input:" + row["owner_event_id"],)))
             expired = (
                 not row or row["redacted"] or row["source_redacted"]
                 or (row["captured_privacy_epoch"] != epoch(store) and not captured)
                 or row["state"] not in {"QUEUED", "RUNNING", "SUCCEEDED"}
-                or (row["job_state"] not in {"QUEUED", "RUNNING", "RETRY_WAIT"} and not captured)
+                or (row["job_state"] not in {"QUEUED", "RUNNING", "RETRY_WAIT"}
+                    and not captured and not pending_file)
             )
             if not expired:
                 try:

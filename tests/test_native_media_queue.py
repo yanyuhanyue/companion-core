@@ -172,18 +172,26 @@ def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
     run(scenario())
 
 
-def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path):
+@pytest.mark.parametrize("kind", ["image", "file"])
+def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path, kind):
     from websockets.asyncio.server import serve
 
     from companion_onebot_bridge.app import receive, transfer_media, upload
     from companion_onebot_bridge.metrics import Metrics
+    from companion_onebot_bridge.onebot_client import OneBotClient
     from tests.sdk_reader_fixture import answer
+    from tests.test_native_file_pipeline import configure
 
     async def scenario():
+        if kind == "file":
+            configure(core)
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             stop, wake, uploaded = asyncio.Event(), asyncio.Event(), asyncio.Event()
-            frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[
-                {"type": "image", "data": {"url": "https://gchat.qpic.cn/daemon-original"}}]))
+            data = pixels() if kind == "image" else b"first\n\nsecond"
+            segment = ({"type": "image", "data": {"url": "https://gchat.qpic.cn/daemon-original"}}
+                if kind == "image" else {"type": "file", "data": {"file_id": "daemon-file",
+                    "file": "notes.txt", "file_size": len(data)}})
+            frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[segment]))
 
             async def server(socket):
                 assert socket.request.headers["Authorization"] == "Bearer " + config.onebot_token
@@ -195,10 +203,16 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path):
                 return ["8.8.8.8"]
 
             async def downloaded(request):
-                return httpx.Response(200, content=pixels(), headers={"content-type": "image/png"})
+                return httpx.Response(200, content=data, headers={
+                    "content-type": "image/png" if kind == "image" else "text/plain"})
+
+            async def lookup(request):
+                assert kind == "file" and request.url.path == "/get_private_file_url"
+                return httpx.Response(200, json={"status": "ok", "retcode": 0,
+                    "data": {"url": "https://files.example.test/daemon-file"}})
 
             async def response_hook(response):
-                if response.request.url.path.endswith("/image"):
+                if response.request.url.path.endswith("/" + kind):
                     assert response.status_code == 200
                     uploaded.set()
 
@@ -209,13 +223,16 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path):
                 try:
                     async with private_http_client(
                         config.core_url, config.bridge_token,
-                    ) as transfer:
+                    ) as transfer, private_http_client(config.onebot_http_url,
+                        config.onebot_token, transport=httpx.MockTransport(lookup)) as native:
                         transfer.event_hooks["response"].append(response_hook)
                         metrics = Metrics()
-                        pump = pending_media.MediaPump(runtime, transfer,
-                            image_transport=httpx.MockTransport(downloaded), image_resolver=resolve)
+                        protocol = OneBotClient(config, native)
+                        pump = pending_media.MediaPump(runtime, transfer, protocol=protocol,
+                            image_transport=httpx.MockTransport(downloaded), image_resolver=resolve,
+                            file_transport=httpx.MockTransport(downloaded), file_resolver=resolve)
                         tasks = [asyncio.create_task(receive(runtime.config, spool, wake, stop,
-                            metrics, runtime=runtime, core=transfer)),
+                            metrics, protocol, runtime=runtime, core=transfer)),
                             asyncio.create_task(upload(transfer, spool, wake, stop, metrics,
                                                        runtime=runtime)),
                             asyncio.create_task(transfer_media(pump, stop))]
@@ -241,10 +258,13 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path):
                     spool.close()
             job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
             config_path, output = tmp_path / "queue-worker.pickle", tmp_path / "queue-wire.json"
-            config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
-                [answer("原图已经收到。")], "SUCCEEDED", str(output))))
+            arguments = ((core.settings, core.clock.now, job["job_id"],
+                [answer("原图已经收到。")], "SUCCEEDED", str(output)) if kind == "image" else
+                (core.settings, core.clock.now, job["job_id"], data, str(output)))
+            config_path.write_bytes(pickle.dumps(arguments))
+            worker_script = "reader_sdk_worker.py" if kind == "image" else "file_sdk_worker.py"
             process = await asyncio.create_subprocess_exec(sys.executable,
-                str(Path(__file__).with_name("reader_sdk_worker.py")), str(config_path),
+                str(Path(__file__).with_name(worker_script)), str(config_path),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
             try:
                 logs, _ = await asyncio.wait_for(process.communicate(), 45)
@@ -255,7 +275,12 @@ def test_websocket_daemon_queue_reaches_independent_sdk_worker(core, tmp_path):
             assert process.returncode == 0, logs.decode(errors="replace")
             requests = json.loads(output.read_text(encoding="utf-8"))
             assert len(requests) == 1
-            assert any(part["type"] == "image_url" for message in requests[0]["messages"]
-                       if isinstance(message["content"], list) for part in message["content"])
+            if kind == "image":
+                assert any(part["type"] == "image_url" for message in requests[0]["messages"]
+                           if isinstance(message["content"], list) for part in message["content"])
+            else:
+                wire = encode(requests[0]["messages"])
+                assert "first" in wire and "second" in wire and "notes.txt" in wire
+                assert "external_untrusted" in wire
             assert len(core.store.rows("SELECT * FROM outbox")) == 1
     run(scenario())

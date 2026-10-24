@@ -333,7 +333,19 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
                 transport=image_transport, **options)
             await progress("DONE" if image.slot + 1 == len(images) + len(files) + len(records)
                            else "PENDING", image.slot + 1, result)
-        if files or records:
+        for original in files[max(0, start_slot - len(images)):]:
+            from .files import upload_original as upload_file
+
+            position = len(images) + original.slot
+            await guard()
+            options = {"resolver": file_resolver} if file_resolver is not None else {}
+            result = await upload_file(window, client, event_id, original, onebot=protocol,
+                resume_claim=resume_claim if position == start_slot else None,
+                progress=lambda state, receipt, slot=position: progress(state, slot, receipt),
+                transport=file_transport, **options)
+            await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
+                           else "PENDING", position + 1, result)
+        if records:
             raise ValueError("OWNER_MEDIA_TRANSFER_REQUIRED")
         return
 

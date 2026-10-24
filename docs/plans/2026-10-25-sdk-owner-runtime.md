@@ -119,8 +119,7 @@ the retained bytes. Copying evidence therefore does not upgrade its permission.
 
 The Core/API/shared-codec and budget changes are delivered as narrow patches to R1. The image
 HTTP and independent SDK-process tests use only synthetic images and mocked provider transport.
-Native Bridge queue integration, nested attachment capture, file processing and both video
-capabilities have separate remaining acceptance work.
+Nested attachment capture and both video capabilities have separate remaining acceptance work.
 
 `images.upload_original` now transfers originals using the native purpose check, original
 Content claim/check lease, and the shared v2 image signature. It reuses the bounded public-CDN
@@ -145,4 +144,39 @@ patches add the existing pump after admission and pass prepared descriptors into
 persistence. A real authenticated loopback WebSocket, actual HTTP Core, queued transfer and
 independent SDK process exercise this entry; provider/CDN transport remains synthetic.
 The queue/daemon slice adds six native checks and preserves three frozen queue regression
-checks. Files, nested attachments, video and voice integration remain separate work.
+checks. Nested attachments, video and voice integration remain separate work.
+
+
+### Native private files
+
+Private files use the existing Content rows, bounded traffic reservation, source manifest,
+original upload lease, short-lived spool, parser image digest and DocumentEvidence. The native
+branch checks the current `file` purpose and original OwnerCapture without tying file processing
+to the latest reply revision. A new owner turn cancels the previous reply but does not delete a
+queued native file before its existing deadline. Recall, erasure, expiry and STOP still fence
+execution. Frozen v1 upload proofs keep their original verifier and are never relabelled v2.
+
+The dependency-free v2 file codec binds authority, event, slot, source hash, original lease,
+file ID, filename, actual byte count, media hash and MIME. Bridge reuses `fetch_file` for the
+native private-file URL lookup and one bounded GET. Images and files share the existing exact
+checked Core HTTP boundary; the file queue retains DOWNLOADING recovery and read-only
+UPLOADING reconciliation. A lost upload response does not trigger a second upload.
+
+The pinned [DSH attachment implementation](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/attachment.ts)
+was inspected for attachment custody, path metadata, bounds and DNS checks. The project's
+existing stronger pinned-transport and streaming bounds are retained. Parser processes reuse
+[Python subprocess](https://docs.python.org/3/library/subprocess.html#subprocess.Popen) and
+its existing offline container controls. Final callbacks check the original source, current
+permission, exact staged bytes and proof, frozen parser configuration and RUNNING lease before
+process creation and stdin writes, or before socket connect, metadata and file-byte writes.
+[run_coroutine_threadsafe](https://docs.python.org/3/library/asyncio-task.html#asyncio.run_coroutine_threadsafe)
+returns those checks to the owning event loop; parser threads do not access SQLite directly.
+Cancellation closes this check path, and failed input dispatch uses the existing cleanup path.
+
+Acceptance uses authenticated loopback WebSocket receive, actual Core HTTP, the persistent
+Bridge queue, and an independent parser/SDK worker. Only external OneBot, CDN, Docker and model
+transports are synthetic. Native file content reaches SDK context with filename, bounded
+excerpts, source locations and the existing external-untrusted label, then one Outbox reply.
+The shared Core patch describes an empty-text capture as a received non-text message; it does
+not supply a request on the owner's behalf. Shared app and codec edits remain narrow patches
+for the integration owner alongside the prior native queue patches.

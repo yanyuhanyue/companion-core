@@ -268,6 +268,43 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
             _private_download.reset(quiet)
 
 
+async def owner_media_post(runtime, client, path, body, headers=None, *, purpose, before=None):
+    from .event_normalizer import decode
+    from .network import checked_http_client, private_request_matches
+    from .window import seal_protocol_content
+
+    expected = body if isinstance(body, bytes) else encode(body).encode()
+    headers = headers or {"Content-Type": "application/json"}
+
+    def validate(request):
+        if (request.method != "POST"
+            or not private_request_matches(request, runtime.config.core_url, path)
+            or request.headers.get("Authorization") != "Bearer " + runtime.config.bridge_token
+            or request.content != expected
+            or any(request.headers.get(key) != value for key, value in headers.items())):
+            raise ValueError(purpose.upper() + "_CORE_REQUEST_CHANGED")
+
+    async def boundary(request):
+        validate(request)
+        await runtime.check(client, purpose=purpose)
+        if before is not None:
+            await before()
+        validate(request)
+        runtime.verify()
+        seal_protocol_content(request, expected)
+
+    async with checked_http_client(client, boundary) as scoped:
+        async with scoped.stream("POST", path, content=expected, headers=headers,
+                                 timeout=30) as response:
+            response.raise_for_status()
+            result = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=8192):
+                result.extend(chunk)
+                if len(result) > 65536:
+                    raise ValueError("INVALID_CORE_RECEIPT")
+    return decode(bytes(result), 65536)
+
+
 async def upload_original(runtime, client, event_id, image, *, resume_claim=None,
                           progress=None, transport=None, resolver=resolve_public):
     """Transfer a captured original under its native authority and finite Content lease.
@@ -279,10 +316,7 @@ async def upload_original(runtime, client, event_id, image, *, resume_claim=None
 
     from companion_delivery_protocol.authority import image_upload_signing_payload
 
-    from .event_normalizer import decode
-    from .network import checked_http_client, private_request_matches
     from .pending_media import _download_claim
-    from .window import seal_protocol_content
 
     prefix = "/internal/v2/content/" + event_id + "/image"
 
@@ -291,36 +325,8 @@ async def upload_original(runtime, client, event_id, image, *, resume_claim=None
             await progress(state, receipt)
 
     async def post(path, body, headers=None, *, before=None):
-        expected = body if isinstance(body, bytes) else encode(body).encode()
-        headers = headers or {"Content-Type": "application/json"}
-
-        def validate(request):
-            if (request.method != "POST"
-                or not private_request_matches(request, runtime.config.core_url, path)
-                or request.headers.get("Authorization") != "Bearer " + runtime.config.bridge_token
-                or request.content != expected
-                or any(request.headers.get(key) != value for key, value in headers.items())):
-                raise ValueError("IMAGE_CORE_REQUEST_CHANGED")
-
-        async def boundary(request):
-            validate(request)
-            await runtime.check(client, purpose="image")
-            if before is not None:
-                await before()
-            validate(request)
-            runtime.verify()
-            seal_protocol_content(request, expected)
-
-        async with checked_http_client(client, boundary) as scoped:
-            async with scoped.stream("POST", path, content=expected, headers=headers,
-                                     timeout=30) as response:
-                response.raise_for_status()
-                result = bytearray()
-                async for chunk in response.aiter_bytes(chunk_size=8192):
-                    result.extend(chunk)
-                    if len(result) > 65536:
-                        raise ValueError("INVALID_CORE_RECEIPT")
-        return decode(bytes(result), 65536)
+        return await owner_media_post(runtime, client, path, body, headers,
+                                      purpose="image", before=before)
 
     await runtime.check(client, purpose="image")
     source_url(image)
