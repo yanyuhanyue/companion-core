@@ -91,6 +91,21 @@ FileLock 互斥，忙时退出非零；同一次运行的 workers 使用 testmon
 缓存；模型文件共享不等于跨进程共享推理实例。
 
 
+## Outbox 属性测试
+
+`tests/test_outbox_stateful.py` 使用 [Hypothesis 原生状态机](https://hypothesis.readthedocs.io/en/latest/stateful.html)
+的 RuleBasedStateMachine、Bundle、rule 和 invariant，生成 owner/private 的重复输入、租约、
+过期、旧令牌、发送结果和数据库重开序列。复用 Core、传输函数、FakeModel 与 SQLite backup；
+每个示例由 `core_factory` 获得独立数据库及隐私账本路径，已有 `core` 的 tmp_path 接口保留。
+测试检查无重复计费、旧令牌不能改变投递、发送开始后不自动重发，以及原令牌迟到确认可以
+结算 DELIVERY_UNCERTAIN。范围仅限本地普通私聊 Outbox，不执行外部提供方或 QQ 操作。
+
+每次运行最多 25 个示例、每例 20 步，关闭墙钟 deadline，使用
+[Hypothesis 示例数据库](https://hypothesis.readthedocs.io/en/latest/reference/api.html#hypothesis.settings.database)
+`.local/hypothesis/outbox` 保存并重放收缩后的失败序列。该缓存属于测试反馈数据，
+不应提交；失败时保留 Hypothesis 输出的最小调用序列。运行入口仍为
+`./scripts/check.ps1 -TestFiles tests/test_outbox_stateful.py -SkipModelPreparation`。
+
 ## 分片与交接成本
 
 CI 以四个完整文件分片覆盖每个选中平台；完整运行包含 Ubuntu 和 Windows。

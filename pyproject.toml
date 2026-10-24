@@ -36,6 +36,7 @@ dev = [
     { include-group = "file-parser" },
     "pytest>=8,<10", "ruff>=0.11,<1", "jsonschema>=4.23,<5", "pyyaml>=6,<7",
     "pytest-xdist==3.8.0", "pytest-testmon==2.2.0", "filelock>=4,<5",
+    "hypothesis==6.170.9",
     "trafilatura==2.3.1",
     "silk-python==0.2.8",
 ]
