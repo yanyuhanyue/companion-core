@@ -101,7 +101,11 @@ def test_stop_during_core_check_blocks_continuation(config):
                                                    "purpose": "chat"}
             runtime.stop()
             return httpx.Response(200, json={"approved": True, "authority": runtime.authority,
-                                            "purpose": "chat", "expires_at": None})
+                "purpose": "chat", "expires_at": None,
+                "budget_journal_id": "budget_" + "e" * 32,
+                "capture": {"public_key": config.capture_public_key,
+                    "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),
+                    "protocol_epoch": config.protocol_epoch}})
 
         async def run():
             async with httpx.AsyncClient(base_url="http://127.0.0.1:8765",
@@ -188,7 +192,7 @@ def test_checked_dispatch_rechecks_stop_and_retains_uncertainty(config, interrup
         expiry = (runtime.clock() + timedelta(minutes=1)).isoformat()
         item = {"authority": runtime.authority, "message_id": "msg_" + "a" * 32,
             "lease_token": "lease_" + "b" * 32, "lease_until": expiry,
-            "window_origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.reply",
+            "origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.reply",
             "content": {"text": "hello"}, "reply_revision": 1}
         calls = []
 

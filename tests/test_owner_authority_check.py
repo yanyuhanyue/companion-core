@@ -32,7 +32,10 @@ def test_bridge_current_check_is_exact_and_does_not_mint_an_execution_lease(
         "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()})
     if boundary == "active":
         assert response.status_code == 200, response.text
-        assert response.json() == {"approved": True, **body, "expires_at": None}
+        view = owner_authority.current(core.store, core.settings, core.clock)
+        assert response.json() == {"approved": True, **body, "expires_at": None,
+            "budget_journal_id": view.journal_id,
+            "capture": view.policy.capture.model_dump(mode="json")}
         assert response.headers["Cache-Control"] == "no-store"
     else:
         assert response.status_code in {403, 409}, response.text

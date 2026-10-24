@@ -149,7 +149,7 @@ def reserve_uncertain(config):
     now = datetime.now(UTC)
     item = {"authority": config.owner_authority, "message_id": "msg_" + "a" * 32,
         "lease_token": "lease_" + "b" * 32, "lease_until": (now + timedelta(minutes=2)).isoformat(),
-        "window_origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.reply",
+        "origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.reply",
         "content": {"text": "synthetic unknown"}, "reply_revision": 1}
     with Spool(config) as spool:
         runtime = OwnerRuntime(spool)

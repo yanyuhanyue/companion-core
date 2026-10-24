@@ -41,6 +41,8 @@ def stopped(store, proof, stop, *, current=False):
 
 
 def binding(store, proof, row, authority, recorded):
+    from companion.private_life import event_digest
+
     original, policy = frozen(store, proof)
     if (not authority or authority.get("authority") != proof["authority"]
         or json.loads(row["authority_json"]) != proof["authority"]
@@ -49,6 +51,10 @@ def binding(store, proof, row, authority, recorded):
         or row["action_type"] != proof["action_type"] or row["attempt_count"] < 1
         or authority.get("delivery_key") != row["delivery_key"]):
         raise ValueError("original native delivery changed")
+    event = store.one("SELECT * FROM events WHERE event_id=?", (proof["event_id"],))
+    if (not event or not event["redacted"]
+        and event_digest(event) != authority.get("event_sha256")):
+        raise ValueError("original native source changed")
     content_hash = authority.get("content_sha256")
     if (not wire.hash_value(content_hash)
         or proof["content_sha256"] is not None and proof["content_sha256"] != content_hash):
@@ -59,9 +65,10 @@ def binding(store, proof, row, authority, recorded):
             or wire.digest(content if proof["payload_kind"] == "content_sha256"
                            else content["text"]) != proof["payload_sha256"]):
             raise ValueError("original native content changed")
-    elif not store.one("SELECT 1 FROM events e JOIN runtime_meta r "
-                       "ON r.key='erased_event:'||e.event_id WHERE e.event_id=? AND e.redacted=1",
-                       (row["origin_event_id"],)):
+    elif not store.one("SELECT 1 FROM job_sources s JOIN events e USING(event_id) "
+                       "WHERE s.job_id=? AND e.redacted=1 AND EXISTS "
+                       "(SELECT 1 FROM runtime_meta WHERE key='erased_event:'||e.event_id)",
+                       (authority.get("job_id"),)):
         raise ValueError("unproved erased native delivery")
     from companion.voice_original_proof import validate_original_voice_binding
 

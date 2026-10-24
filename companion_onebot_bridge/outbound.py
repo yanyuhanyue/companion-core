@@ -48,7 +48,7 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
     if item["action_type"] == "qq.private.poke":
         if ("reply_revision" in item or "reply_segment" in item or "window_notice" in item
             or not re.fullmatch(r"poke-response:job_[a-f0-9]{32}", item.get("delivery_key", ""))
-            or not re.fullmatch(r"evt_[a-f0-9]{64}", item.get("window_origin_event_id", ""))):
+            or not re.fullmatch(r"evt_[a-f0-9]{64}", reply_segments.event_id(item))):
             raise ValueError("PRIVATE_POKE_DELIVERY_REQUIRED")
         prepare(content, config.owner_qq_id)
         return

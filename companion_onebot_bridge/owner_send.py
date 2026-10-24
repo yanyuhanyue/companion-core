@@ -3,6 +3,8 @@
 from dataclasses import replace
 from datetime import datetime
 
+import httpx
+
 from companion_delivery_protocol.authority import validate_authority_ref
 
 from . import journal, reply_segments
@@ -20,6 +22,7 @@ class OwnerSendGuard:
         self.current_item = None
         self.dispatched = False
         self.prepared_message = self.prepared_voice = self.prepared_account = None
+        self.prepared_native = None
         self.item_hash = None
         self.delivery_binding = None
         self.lease_until = None
@@ -56,6 +59,21 @@ class OwnerSendGuard:
         if (self.current_item is None or self.item_hash != journal.digest(self.current_item)
             or self.dispatched or self.runtime.clock() >= self.lease_until):
             raise ValueError("OWNER_DELIVERY_SEND_FENCED")
+        if self.pending_input():
+            raise ValueError("OWNER_INPUT_PENDING")
+
+    def pending_input(self):
+        item = self.current_item
+        if not item or not ("reply_revision" in item
+            or item.get("delivery_key", "").startswith("poke-response:")
+            or item.get("action_type") == "qq.private.proactive"):
+            return None
+        row = self.db.execute("SELECT i.key FROM inbox i JOIN window_inputs w ON w.event_id=i.key "
+            "WHERE i.state='pending' AND w.plan_hash=? AND i.key!=? "
+            "AND json_extract(w.capture_json,'$.kind')='authenticated_onebot_ws' "
+            "ORDER BY i.rowid LIMIT 1", (journal.digest(self.authority),
+                                        reply_segments.event_id(item))).fetchone()
+        return row[0] if row else None
 
     def _request(self, request):
         item = self.current_item
@@ -68,6 +86,14 @@ class OwnerSendGuard:
             if decode(request.content, 64) != {}:
                 raise ValueError("OWNER_PROTOCOL_REQUEST_CHANGED")
             return False
+        if item["action_type"] == "qq.private.poke":
+            from .native_actions import prepare
+
+            expected = prepare(item["content"], self.config.owner_qq_id)
+            if (self.prepared_native != expected or request.url.path != expected.path
+                or request.content != expected.body):
+                raise ValueError("OWNER_PROTOCOL_REQUEST_CHANGED")
+            return True
         if item["action_type"] not in {"qq.private.reply", "qq.private.proactive"}:
             raise ValueError("OWNER_NATIVE_PREPARATION_REQUIRED")
         message = (self.prepared_voice.message if self.prepared_voice is not None
@@ -120,9 +146,39 @@ class OwnerSendGuard:
         self.dispatched = True
 
     async def cancel_before_send(self, item):
-        # Only a matching authenticated Core cancellation receipt can prove NOT_SENT.
-        # Until that receipt exists, retain native uncertainty and never retry.
-        return False
+        if (self.dispatched or item is not self.current_item
+            or self.item_hash != journal.digest(item)):
+            return False
+        self.runtime.verify(active=False)
+        attempt = self.db.execute("SELECT state FROM window_attempts WHERE message_id=?",
+                                   (item["message_id"],)).fetchone()
+        if not attempt or attempt[0] not in {"RESERVED", "IO_STARTED"}:
+            return False
+        body = {"authority": self.authority, "message_id": item["message_id"],
+                "lease_token": item["lease_token"],
+                "content_sha256": journal.digest(item["content"])}
+        if "reply_revision" in item:
+            body["reply_revision"] = item["reply_revision"]
+        if pending := self.pending_input():
+            body.update(cause="OWNER_INPUT_PENDING", pending_event_id=pending)
+        try:
+            receipt = await bounded_post(self.client,
+                "/internal/v1/owner-authority/cancel-before-send", body)
+        except httpx.HTTPError:
+            return False
+        expected = {"cancelled": True, "message_id": item["message_id"],
+                    "state": "CANCELLED", "send_attempt_retained": True}
+        if receipt != expected or self.dispatched or self.item_hash != journal.digest(item):
+            raise ValueError("OWNER_CANCEL_RECEIPT_INVALID")
+        self.runtime.verify(active=False)
+        with self.db:
+            self.runtime.append("NOT_SENT", {"message_id": item["message_id"],
+                "provider_ack_hash": None, "core_receipt": receipt})
+            self.db.execute("UPDATE window_attempts SET state='NOT_SENT' WHERE message_id=?",
+                            (item["message_id"],))
+            self.runtime.spool.cancel_delivery(item, receipt)
+        self.runtime.verify(active=False)
+        return True
 
     def complete(self, item, provider_id):
         from .native_actions import AccountAck, NativeAck
@@ -161,10 +217,19 @@ class OwnerOneBot:
     async def probe(self):
         return await self.delegate.probe()
 
+    async def prepare_delivery(self, item):
+        if item["action_type"] == "qq.private.poke":
+            from .native_actions import prepare
+
+            self.guard.runtime.verify()
+            self.guard.prepared_native = prepare(item["content"], self.config.owner_qq_id)
+
     async def send_content(self, content):
         item = self.guard.current_item
         if content != item["content"]:
             raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
+        if item["action_type"] == "qq.private.poke":
+            return await self.delegate.send_native(self.guard.prepared_native)
         if "image" in content or "voice" in item:
             raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
         return await self.delegate.send_text(reply_segments.wire_text(item))

@@ -289,6 +289,16 @@ def _input_hash(store, event, proof, account):
     if event["actor_id"] != "owner" or event["privacy_scope"] != "private":
         return None
     if proof["version"] == 2:
+        if event["event_type"] == "notice.poke":
+            original = _meta(store, "poke_input:" + event["event_id"])
+            if (not original or original.get("authority") != proof["authority"]
+                or original.get("source_sha256") != event["fingerprint"]):
+                return None
+            admitted = account["operations"].get("input:" + wire.digest(event["event_id"]))
+            if account["policy"] and (not admitted or admitted["state"] != "ADMITTED"
+                or admitted.get("source_sha256") != event["fingerprint"]):
+                return None
+            return event["fingerprint"]
         original = _meta(store, "owner_input:" + event["event_id"])
         if (not original or original.get("authority") != proof["authority"]
             or original.get("event_id") != event["event_id"]
@@ -384,13 +394,17 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
         "request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id=?) "
         "ORDER BY request_id LIMIT ?", (event_id, maximum + 1)))
     for table, identity, owner, states in (
-        ("voice_jobs", "job_id", "event_id", {"QUEUED", "LEASED", "RUNNING"}),
-        ("bili_video_items", "item_id", "owner_event_id", {"DECLARED", "PREPARED", "ANALYZED"}),
+        ("voice_jobs", "job_id", "event_id", {"QUEUED", "LEASED", "RUNNING", "UNKNOWN"}),
+        ("bili_video_items", "item_id", "owner_event_id",
+         {"DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}),
     ):
         if store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)):
-            extra = store.rows(f"SELECT {identity} AS id,state FROM {table} WHERE {owner}=? "
-                               f"ORDER BY {identity} LIMIT ?", (event_id, maximum + 1))
-            reads.extend({**item, "active": item["state"] in states} for item in extra)
+            cleanup = ",cleanup_state" if table == "voice_jobs" else ""
+            extra = store.rows(f"SELECT {identity} AS id,state{cleanup} FROM {table} "
+                               f"WHERE {owner}=? ORDER BY {identity} LIMIT ?",
+                               (event_id, maximum + 1))
+            reads.extend({**item, "active": item["state"] in states
+                          or item.get("cleanup_state") == "PENDING"} for item in extra)
     complete &= all(len(items) <= maximum for items in (models, global_unsettled, reads))
     primary = [job for job in jobs if job["kind"] == "chat" and job["event_id"] == event_id]
     if not primary:
@@ -400,7 +414,7 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
         "jobs": any(item["state"] not in wire.JOB_TERMINAL for item in jobs),
         "models": bool(global_unsettled) or any(item["state"] != "SETTLED" for item in models),
         "reads": any(item.get("active", item["state"] in {
-            "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED"}) for item in reads),
+            "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED", "UNKNOWN"}) for item in reads),
         "deliveries": any(item["state"] not in wire.DELIVERY_TERMINAL for item in deliveries),
     }
     input_hash = _input_hash(store, event, proof, account)

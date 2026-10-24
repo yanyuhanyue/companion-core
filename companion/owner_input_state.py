@@ -3,20 +3,28 @@
 import json
 
 import companion_delivery_protocol as wire
-from companion import owner_authority, owner_input
+from companion import owner_authority, owner_input, poke
 from companion.contracts import CoreError
+from companion.poke_protocol import OwnerPokeCapture
 
 
 def read(store, settings, capture):
     with store.transaction():
-        original, _ = owner_input.verify(store, settings, capture.model_dump(mode="json"))
+        native_poke = isinstance(capture, OwnerPokeCapture)
+        if native_poke:
+            original, _, source = poke.verify_original(
+                store, settings, capture.model_dump(mode="json"))
+            input_hash = source["notice_sha256"]
+        else:
+            original, _ = owner_input.verify(store, settings, capture.model_dump(mode="json"))
+            input_hash = original.input_sha256
         event_id = original.event_id
         erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                                  ("erased_event:" + event_id,)))
         event = store.one("SELECT event_id,redacted,fingerprint FROM events WHERE event_id=?",
                           (event_id,))
         saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
-                          (owner_input.INPUT + event_id,))
+                          ((poke.INPUT if native_poke else owner_input.INPUT) + event_id,))
         head = owner_authority._latest(store)
         ref = original.authority
         stopped = bool(head and head["state"] == "STOPPED"
@@ -24,8 +32,13 @@ def read(store, settings, capture):
             and head["restore_generation"] == owner_authority._meta(
                 store, owner_authority.GENERATION))
         unadmitted = bool(stopped and event is None)
-        if not erased and (saved and json.loads(saved["value"]).get("capture")
-                           != original.model_dump(mode="json") or not saved and not unadmitted):
+        if native_poke and event and not erased:
+            poke.original_source(store, settings, event_id)
+        saved_capture = json.loads(saved["value"]) if saved else {}
+        original_value = original.model_dump(mode="json")
+        matches = (saved_capture.get("capture_sha256") == wire.digest(original_value)
+                   if native_poke else saved_capture.get("capture") == original_value)
+        if not erased and (saved and not matches or not saved and not unadmitted):
             raise CoreError("OWNER_APPROVED_INPUT_REQUIRED", 404)
         maximum = wire.MAX_INPUT_DELIVERIES
         jobs = store.rows("SELECT j.job_id,j.kind,j.state,j.authority_json FROM jobs j "
@@ -47,29 +60,34 @@ def read(store, settings, capture):
             "USING(task_id) WHERE e.event_id=? ORDER BY t.task_id LIMIT ?",
             (event_id, maximum + 1))
         for table, identity, states in (
-            ("voice_jobs", "job_id", {"QUEUED", "LEASED", "RUNNING"}),
-            ("bili_video_items", "item_id", {"DECLARED", "PREPARED", "ANALYZED"}),
+            ("voice_jobs", "job_id", {"QUEUED", "LEASED", "RUNNING", "UNKNOWN"}),
+            ("bili_video_items", "item_id", {"DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}),
         ):
             field = "event_id" if table == "voice_jobs" else "owner_event_id"
-            extra = store.rows(f"SELECT {identity} AS id,state FROM {table} "
+            cleanup = ",cleanup_state" if table == "voice_jobs" else ""
+            extra = store.rows(f"SELECT {identity} AS id,state{cleanup} FROM {table} "
                                f"WHERE {field}=? ORDER BY {identity} LIMIT ?",
                                (event_id, maximum + 1))
-            reads.extend({**item, "active": item["state"] in states} for item in extra)
+            reads.extend({**item, "active": item["state"] in states
+                          or item.get("cleanup_state") == "PENDING"} for item in extra)
         complete = all(len(items) <= maximum for items in (jobs, models, deliveries, reads, tools))
         unsettled_work = any(item["state"] not in wire.JOB_TERMINAL
                              for item in jobs + tools) or any(
             item.get("active", item["state"] in {
-                "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED"}) for item in reads)
+                "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED", "UNKNOWN"})
+                for item in reads)
         unsettled_model = any(item["state"] != "SETTLED" for item in models)
         unsettled_delivery = any(item["state"] not in wire.DELIVERY_TERMINAL for item in deliveries)
-        primary = [job for job in jobs if job["kind"] == "chat"]
+        primary = [job for job in jobs if job["kind"] == ("poke" if native_poke else "chat")]
         bound = bool(len(primary) == 1
                      and json.loads(primary[0]["authority_json"]) == original.authority)
-        terminal = bool(complete and (bound or erased or unadmitted and not jobs and not deliveries)
+        suppressed = bool(native_poke and event and saved and not jobs and not deliveries)
+        terminal = bool(complete and (bound or erased or suppressed
+            or unadmitted and not jobs and not deliveries)
             and not (
             unsettled_work or unsettled_model or unsettled_delivery))
         return {"authority": original.authority, "event_id": event_id,
-            "input_sha256": original.input_sha256, "terminal": terminal,
+            "input_sha256": input_hash, "terminal": terminal,
             "state": "RECALLED" if erased or event and event["redacted"] else (
                 "CANCELLED" if unadmitted and terminal else "COMPLETE" if terminal else "PENDING"),
             "unsettled_work": unsettled_work, "unsettled_model": unsettled_model,

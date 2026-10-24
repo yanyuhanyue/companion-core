@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 
 from companion_delivery_protocol.authority import validate_authority_ref
@@ -9,6 +10,24 @@ from companion_delivery_protocol.authority import validate_authority_ref
 from . import journal
 from .onebot_client import bounded_post
 from .spool import encode
+
+
+def check_receipt(config, authority, purpose, result, now):
+    expected_capture = {"public_key": config.capture_public_key,
+        "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),
+        "protocol_epoch": config.protocol_epoch}
+    if (set(result) != {"approved", "authority", "purpose", "expires_at",
+                        "budget_journal_id", "capture"}
+        or result["approved"] is not True or result["authority"] != authority
+        or result["purpose"] != purpose or result["capture"] != expected_capture
+        or not isinstance(result["budget_journal_id"], str)
+        or not re.fullmatch(r"budget_[a-f0-9]{32}", result["budget_journal_id"])):
+        raise ValueError("OWNER_AUTHORITY_CHECK_REJECTED")
+    if result["expires_at"] is not None:
+        expiry = datetime.fromisoformat(result["expires_at"])
+        if expiry.utcoffset() is None or now >= expiry:
+            raise ValueError("OWNER_AUTHORITY_EXPIRED")
+    return result
 
 
 def command(config, args):
@@ -49,15 +68,23 @@ def command(config, args):
 
 
 class OwnerRuntime:
-    def __init__(self, spool, *, clock=None):
+    def __init__(self, spool, *, clock=None, legacy=None):
         self.spool, self.db, self.config = spool, spool.db, spool.config
         self.clock = clock or (lambda: datetime.now(UTC))
         self.authority = validate_authority_ref(self.config.owner_authority)
         self.path = spool.directory / "owner-journal.jsonl"
         self.stop_path = spool.directory / ("owner-" + journal.digest(self.authority) + ".stop")
+        self.legacy = legacy
         # Old evidence must be inspected by explicit cutover before any v2 writer starts.
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
-            raise ValueError("OWNER_CUSTODY_CUTOVER_REQUIRED")
+            if legacy is not None:
+                from . import owner_cutover
+
+                if owner_cutover.inspect(spool) != legacy:
+                    raise ValueError("OWNER_LEGACY_CUSTODY_CHANGED")
+            elif not self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='owner_runtime'").fetchone():
+                raise ValueError("OWNER_CUSTODY_CUTOVER_REQUIRED")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS owner_runtime("
             "id INTEGER PRIMARY KEY CHECK(id=1),authority_json TEXT NOT NULL,"
@@ -76,18 +103,21 @@ class OwnerRuntime:
         )
         row = self.row()
         if row is None:
-            if self.db.execute("SELECT 1 FROM inbox UNION ALL SELECT 1 FROM results LIMIT 1"
-                               ).fetchone():
+            if legacy is None and self.db.execute(
+                "SELECT 1 FROM inbox UNION ALL SELECT 1 FROM results LIMIT 1").fetchone():
                 raise ValueError("OWNER_CUSTODY_CUTOVER_REQUIRED")
             head = journal.append(self.path, "OWNER_BOUND", {"version": 2,
-                "authority": self.authority}, at=self.clock().isoformat(),
+                "authority": self.authority, "capture_public_key": self.config.capture_public_key,
+                **({"legacy_custody": legacy} if legacy is not None else {})},
+                at=self.clock().isoformat(),
                 expected_head="0" * 64, create=True)
             with self.db:
                 self.db.execute("INSERT INTO owner_runtime VALUES(1,?,'ACTIVE',?)",
                                 (encode(self.authority), head))
         self.verify(active=False)
-        if self.db.execute("SELECT 1 FROM window_attempts WHERE state IN "
-                           "('RESERVED','IO_STARTED','UNKNOWN') LIMIT 1").fetchone():
+        if self.db.execute("SELECT 1 FROM window_attempts WHERE plan_hash=? AND state IN "
+                           "('RESERVED','IO_STARTED','UNKNOWN') LIMIT 1",
+                           (journal.digest(self.authority),)).fetchone():
             self.stop()
 
     def row(self):
@@ -104,20 +134,41 @@ class OwnerRuntime:
         records, head = journal.read(self.path)
         if (not records or head != row["journal_head"]
             or records[0]["kind"] != "OWNER_BOUND"
-            or records[0]["data"] != {"version": 2, "authority": self.authority}):
+            or set(records[0]["data"]) not in (
+                {"version", "authority", "capture_public_key"},
+                {"version", "authority", "capture_public_key", "legacy_custody"})
+            or records[0]["data"]["version"] != 2
+            or records[0]["data"]["capture_public_key"] != self.config.capture_public_key):
             raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+        current = validate_authority_ref(records[0]["data"]["authority"])
+        self.legacy = records[0]["data"].get("legacy_custody")
+        if (self.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone()
+            and self.legacy is None):
+            raise ValueError("OWNER_CUSTODY_CUTOVER_REQUIRED")
+        references = [current]
         state = "ACTIVE"
         attempts = {}
         inputs = {}
         for record in records[1:]:
             if record["kind"] == "OWNER_STOPPED":
-                if record["data"] != {"authority": self.authority}:
+                if record["data"] != {"authority": current}:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 state = "STOPPED"
+            elif record["kind"] == "OWNER_REBOUND":
+                value = record["data"]
+                successor = validate_authority_ref(value["authority"])
+                if (state != "STOPPED" or value["previous_authority"] != current
+                    or successor["grant_id"] != current["grant_id"]
+                    or successor["revision"] != current["revision"] + 2
+                    or successor["restore_generation"] != current["restore_generation"]):
+                    raise ValueError("OWNER_HANDOFF_BINDING_CHANGED")
+                current = successor
+                references.append(current)
+                state = "ACTIVE"
             elif record["kind"] == "RESERVED":
                 value = record["data"]
                 if (state != "ACTIVE" or value["message_id"] in attempts
-                    or value["plan_hash"] != journal.digest(self.authority)):
+                    or value["plan_hash"] != journal.digest(current)):
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 attempts[value["message_id"]] = {
                     key: item for key, item in value.items() if key != "delivery_binding"}
@@ -127,9 +178,10 @@ class OwnerRuntime:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 inputs[value["event_id"]] = value["capture_sha256"]
             elif record["kind"] in {"RECALL_RECEIVED", "RECALL_ACCEPTED",
-                                    "CORE_STOP_CONFIRMED", "DELIVERY_QUIESCED", "OWNER_RECONCILED"}:
+                                    "CORE_STOP_CONFIRMED", "DELIVERY_QUIESCED", "OWNER_RECONCILED",
+                                    "OWNER_INPUT_TERMINAL", "OWNER_HANDOFF_PREPARED"}:
                 pass  # The original durable notice projection is checked below.
-            elif record["kind"] in {"IO_STARTED", "ACK", "UNKNOWN"}:
+            elif record["kind"] in {"IO_STARTED", "ACK", "UNKNOWN", "NOT_SENT"}:
                 value = record["data"]
                 attempt = attempts.get(value["message_id"])
                 if attempt is None or attempt["state"] not in {"RESERVED", "IO_STARTED"}:
@@ -139,46 +191,74 @@ class OwnerRuntime:
                         and (attempt["state"] != "RESERVED" or state != "ACTIVE"))):
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 attempt.update(state=record["kind"], provider_ack_hash=value["provider_ack_hash"])
+                if record["kind"] == "NOT_SENT":
+                    receipt = {"cancelled": True, "message_id": value["message_id"],
+                               "state": "CANCELLED", "send_attempt_retained": True}
+                    result = self.db.execute("SELECT body,state FROM results WHERE message_id=?",
+                                              (value["message_id"],)).fetchone()
+                    body = json.loads(result[0]) if result else {}
+                    if (value.get("core_receipt") != receipt
+                        or not result or result[1] != "accepted"
+                        or body.get("core_receipt") != receipt or body.get("result") != "NOT_SENT"
+                        or value["provider_ack_hash"] is not None):
+                        raise ValueError("OWNER_NOT_SENT_PROOF_REQUIRED")
             else:
                 raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
-        cursor = self.db.execute("SELECT * FROM window_attempts ORDER BY fence")
+        hashes = [journal.digest(ref) for ref in references]
+        condition = " WHERE plan_hash IN (" + ",".join("?" for _ in hashes) + ")"
+        cursor = self.db.execute("SELECT * FROM window_attempts"
+            + (condition if self.legacy else "") + " ORDER BY fence", hashes if self.legacy else ())
         names = [column[0] for column in cursor.description]
         actual = [dict(zip(names, row, strict=True)) for row in cursor]
         if actual != list(attempts.values()):
             raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
-        actual_inputs = self._inputs()
+        actual_inputs = self._inputs(references)
         if actual_inputs != inputs:
             raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
         from . import owner_notices
 
-        owner_notices.verify(self, records)
+        owner_notices.verify(self, records, references=references)
         from . import owner_native_resolution
 
         owner_native_resolution.verify(self, records)
-        if row["state"] != state:
+        from . import owner_handoff
+
+        owner_handoff.verify(self, records)
+        if self.legacy is not None:
+            from . import owner_cutover
+
+            owner_cutover.verify(self, self.legacy, references)
+        if row["state"] != state or current != self.authority:
             raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
         if active and (state != "ACTIVE" or self.spool.reconciliation_only
                        or self.stop_path.exists() or self.stop_path.is_symlink()):
             raise ValueError("OWNER_RUNTIME_STOPPED")
         return records
 
-    def _inputs(self):
+    def _inputs(self, references):
+        from . import owner_pokes
         from .rich_input import input_digest
 
         inputs = {}
+        hashes = [journal.digest(ref) for ref in references]
+        condition = " WHERE w.plan_hash IN (" + ",".join("?" for _ in hashes) + ")"
         for row in self.db.execute(
             "SELECT w.event_id,w.input_hash,w.approval_hash,w.state,w.capture_json,w.plan_hash,"
             "i.body,i.state FROM window_inputs w LEFT JOIN inbox i ON i.key=w.event_id"
+            + (condition if self.legacy else ""), hashes if self.legacy else (),
         ):
             event_id, input_hash, approval, state, capture, authority, body, inbox_state = row
             receipt = json.loads(capture)
             digest = journal.digest(receipt)
-            if (receipt["event_id"] != event_id or receipt["authority"] != self.authority
-                or receipt["input_sha256"] != input_hash or approval != digest
-                or authority != journal.digest(self.authority) or state != "CAPTURED"
+            source_hash = (journal.digest(receipt["notice"])
+                           if receipt["kind"] == "authenticated_onebot_poke"
+                           else receipt["input_sha256"])
+            if (receipt["event_id"] != event_id or receipt["authority"] not in references
+                or source_hash != input_hash or approval != digest
+                or authority != journal.digest(receipt["authority"]) or state != "CAPTURED"
                 or inbox_state is None or inbox_state == "pending" and body is None):
                 raise ValueError("OWNER_CAPTURE_PROJECTION_CHANGED")
-            if body is not None:
+            if body is not None and not owner_pokes.check_body(receipt, body):
                 event = json.loads(body)
                 if (event["event_id"] != event_id
                     or event["source_event_id"] != receipt["source_event_id"]
@@ -207,14 +287,9 @@ class OwnerRuntime:
         self.verify()
         result = await bounded_post(core_client, "/internal/v1/owner-authority/check",
                                     {"authority": self.authority, "purpose": purpose})
-        if (set(result) != {"approved", "authority", "purpose", "expires_at"}
-            or result["approved"] is not True or result["authority"] != self.authority
-            or result["purpose"] != purpose):
-            raise ValueError("OWNER_AUTHORITY_CHECK_REJECTED")
-        if result["expires_at"] is not None:
-            expiry = datetime.fromisoformat(result["expires_at"])
-            if expiry.utcoffset() is None or self.clock() >= expiry:
-                raise ValueError("OWNER_AUTHORITY_EXPIRED")
+        check_receipt(self.config, self.authority, purpose, result, self.clock())
+        if self.legacy and result["budget_journal_id"] != self.legacy["budget_journal_id"]:
+            raise ValueError("OWNER_LEGACY_BUDGET_CUSTODY_CHANGED")
         self.verify()
         return result
 
@@ -311,10 +386,15 @@ class OwnerRuntime:
             pass
         self.verify()
         row = self.db.execute("SELECT i.key,w.capture_json FROM inbox i JOIN window_inputs w "
-            "ON w.event_id=i.key WHERE i.state='pending' ORDER BY i.rowid LIMIT 1").fetchone()
+            "ON w.event_id=i.key WHERE i.state='pending' AND w.plan_hash=? "
+            "ORDER BY i.rowid LIMIT 1", (journal.digest(self.authority),)).fetchone()
         if row is None:
             return False
         receipt = json.loads(row[1])
+        if receipt["kind"] == "authenticated_onebot_poke":
+            from . import owner_pokes
+
+            return await owner_pokes.flush(self, client, receipt)
         response = await bounded_post(
             client, "/internal/v1/owner-authority/inputs/approve", receipt)
         if (set(response) != {"approved", "duplicate"} or response["approved"] is not True

@@ -5,6 +5,8 @@ import pytest
 from companion import owner_authority, owner_input, owner_input_state
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
+from companion.store import encode
+from companion_onebot_bridge.owner_handoff import terminal
 from tests.test_owner_input import captured, inbound
 
 
@@ -38,3 +40,53 @@ def test_native_input_state_never_treats_unknown_delivery_as_complete(core, tmp_
     capture = OwnerCapture.model_validate(json.loads(saved["value"])["capture"])
     result = owner_input_state.read(core.store, core.settings, capture)
     assert not result["terminal"] and result["unsettled_delivery"]
+
+
+@pytest.mark.parametrize("kind", ["content", "reader", "video", "voice", "cleanup"])
+def test_unknown_or_unconfirmed_source_work_cannot_authorize_handoff(core, tmp_path, kind):
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    accepted = core.ingest(inbound(core, capture), "unknown-source-work")
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (accepted["job_id"],))
+    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    now = core.clock()
+    if kind in {"content", "reader", "video"}:
+        core.store.insert("exploration_requests",
+            request_id="read-original", request_key="read-key",
+            adapter_id="bili", operation="read", url="https://example.com/source",
+            state="UNKNOWN" if kind == "reader" else "DONE", captured_privacy_epoch=0,
+            created_at=now, updated_at=now, reserved_bytes=100, used_bytes=40)
+        core.store.insert("content_items", item_id="content-original",
+            owner_event_id=capture.event_id,
+            kind="link", slot=0, read_request_id="read-original", target_url="https://example.com/source",
+            state="UNKNOWN" if kind == "content" else "SUCCEEDED", captured_privacy_epoch=0,
+            deadline=now, created_at=now, updated_at=now, reserved_bytes=100)
+        if kind == "video":
+            core.store.insert("bili_video_items",
+                item_id="content-original", request_id="read-original",
+                source_event_id=capture.event_id, owner_event_id=capture.event_id,
+                job_id=accepted["job_id"], adapter_id="bili", source_sha256="a" * 64,
+                source_snapshot_sha256="b" * 64, metadata_json="{}", source_grant_sha256="c" * 64,
+                policy_sha256="d" * 64, window_sha256="", binding_sha256="e" * 64,
+                captured_privacy_epoch=0, deadline=now, state="UNKNOWN",
+                created_at=now, updated_at=now)
+    else:
+        core.store.insert("voice_jobs", job_id="voice-original", operation="asr",
+            event_id=capture.event_id, native_source_event_id=event["source_event_id"],
+            conversation_id=event["conversation_id"], source_segment_index=0,
+            captured_privacy_epoch=0, captured_reply_revision=event["reply_revision"],
+            node_id="local", config_json="{}", state="UNKNOWN" if kind == "voice" else "CANCELLED",
+            input_mime="audio/wav", source_partial=0,
+            created_at=now, updated_at=now, deadline_at=now,
+            content_retired=1, cleanup_state="CONFIRMED" if kind == "voice" else "PENDING",
+            authority_json=encode(capture.authority))
+    before = {table: core.store.rows(f"SELECT * FROM {table}") for table in (
+        "content_items", "exploration_requests", "bili_video_items", "voice_jobs", "model_usage")}
+    result = owner_input_state.read(core.store, core.settings, capture)
+    assert result["unsettled_work"] and not result["terminal"]
+    with pytest.raises(ValueError, match="OWNER_INPUT_TERMINAL_REQUIRED"):
+        terminal(result, capture.model_dump(mode="json"))
+    assert before == {table: core.store.rows(f"SELECT * FROM {table}") for table in before}
+    if kind == "cleanup":
+        core.store.execute("UPDATE voice_jobs SET cleanup_state='CONFIRMED'")
+        assert owner_input_state.read(core.store, core.settings, capture)["terminal"]

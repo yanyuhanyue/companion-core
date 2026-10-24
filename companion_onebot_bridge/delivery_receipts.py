@@ -83,13 +83,13 @@ class DeliveryReceipts:
                 payload_sha256=item["content"]["payload_sha256"])
         elif receipt != expected:
             raise ValueError("NOT_SENT_CORE_PROOF_REQUIRED")
-        prior = self.db.execute("SELECT * FROM results WHERE message_id=?",
+        prior = self.db.execute("SELECT body,state FROM results WHERE message_id=?",
                                 (item["message_id"],)).fetchone()
         if prior:
-            value = json.loads(prior["body"])
+            value = json.loads(prior[0])
             if (value.get("lease_token") != item["lease_token"]
                 or value.get("result") not in {"DELIVERY_UNCERTAIN", "NOT_SENT"}
-                or (prior["state"] != "pending" and value.get("result") != "NOT_SENT")):
+                or (prior[1] != "pending" and value.get("result") != "NOT_SENT")):
                 raise ValueError("DELIVERY_ALREADY_ATTEMPTED")
         value = encode({"lease_token": item["lease_token"], "result": "NOT_SENT",
                         "core_receipt": receipt})

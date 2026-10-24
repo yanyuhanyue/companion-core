@@ -28,7 +28,8 @@ async def pause(stop, seconds):
 
 
 async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=None, core=None):
-    if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
+    if runtime is None and spool.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
         raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
     delay = 0.25
     while not stop.is_set():
@@ -40,9 +41,13 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
                     received_at = datetime.now(UTC)
                     try:
                         if runtime is not None:
-                            from . import owner_notices
+                            from . import owner_notices, owner_pokes
 
                             if owner_notices.put(runtime, frame, received_at, ws.remote_address):
+                                wake.set()
+                                continue
+                            if await owner_pokes.put(runtime, core, frame,
+                                                     received_at, ws.remote_address):
                                 wake.set()
                                 continue
                         payload = normalize(frame, config)
@@ -228,6 +233,9 @@ def main():
             "owner-stop",
             "owner-delivery-prepare",
             "owner-delivery-reconcile",
+            "owner-handoff-prepare",
+            "owner-handoff",
+            "owner-cutover",
             "window-open",
             "window-handoff",
             "window-abort-handoff",
@@ -262,6 +270,14 @@ def main():
             print(json.dumps(command(config, args)), flush=True)
         elif args.command in {"owner-delivery-prepare", "owner-delivery-reconcile"}:
             from .owner_native_resolution import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
+        elif args.command in {"owner-handoff-prepare", "owner-handoff"}:
+            from .owner_handoff import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
+        elif args.command == "owner-cutover":
+            from .owner_cutover import command
 
             print(json.dumps(asyncio.run(command(config, args))), flush=True)
         elif args.command == "memory-control-once":

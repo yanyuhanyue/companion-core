@@ -14,7 +14,8 @@ from .onebot_client import bounded_post
 from .spool import encode
 
 
-def verify(runtime, records):
+def verify(runtime, records, *, references=None):
+    references = references or [runtime.authority]
     received, accepted = {}, {}
     for record in records:
         data = record["data"]
@@ -29,7 +30,8 @@ def verify(runtime, records):
     actual, done = {}, {}
     if runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_recalls'").fetchone():
         for key, authority, event_id, receipt_json, state, response_json in runtime.db.execute(
-            "SELECT * FROM automatic_recalls"
+            "SELECT recall_id,authority_json,target_event_id,record_json,state,response_json "
+            "FROM automatic_recalls WHERE authority_json IS NOT NULL"
         ):
             receipt = json.loads(receipt_json)
             payload = {k: v for k, v in receipt.items() if k != "signature"}
@@ -38,7 +40,7 @@ def verify(runtime, records):
             public.verify(bytes.fromhex(receipt["signature"]), recall_signing_payload(payload))
             if (receipt["recall_id"] != key or receipt["target_event_id"] != event_id
                 or json.loads(authority) != receipt["authority"]
-                or receipt["authority"] != runtime.authority
+                or receipt["authority"] not in references
                 or state not in {"PENDING", "ACCEPTED"}
                 or (response_json is not None) != (state == "ACCEPTED")):
                 raise ValueError("OWNER_RECALL_PROJECTION_CHANGED")
@@ -78,7 +80,8 @@ def put(runtime, frame, received_at, peer):
     with runtime.db:
         runtime.append("RECALL_RECEIVED", {"recall_id": value["recall_id"],
                                            "receipt_sha256": journal.digest(receipt)})
-        runtime.db.execute("INSERT INTO automatic_recalls VALUES(?,?,?,?,'PENDING',NULL)",
+        runtime.db.execute("INSERT INTO automatic_recalls(recall_id,authority_json,target_event_id,"
+            "record_json,state,response_json) VALUES(?,?,?,?,'PENDING',NULL)",
             (value["recall_id"], encode(runtime.authority), value["target_event_id"],
              encode(receipt)))
     return True
@@ -90,7 +93,8 @@ async def flush_one(runtime, client):
                               ).fetchone():
         return False
     row = runtime.db.execute("SELECT recall_id,record_json FROM automatic_recalls "
-        "WHERE state='PENDING' ORDER BY rowid LIMIT 1").fetchone()
+                             "WHERE state='PENDING' AND authority_json IS NOT NULL "
+                             "ORDER BY rowid LIMIT 1").fetchone()
     if row is None:
         return False
     receipt = json.loads(row[1])

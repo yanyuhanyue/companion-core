@@ -1,6 +1,7 @@
 """Native proofs using the existing exclusive Spool and owner-resolution projection."""
 
 import json
+from types import SimpleNamespace
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -37,7 +38,8 @@ def binding(guard, item):
 def rows(runtime):
     if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (TABLE,)).fetchone():
         return []
-    cursor = runtime.db.execute(f"SELECT * FROM {TABLE}")
+    cursor = runtime.db.execute(
+        f"SELECT * FROM {TABLE} WHERE json_extract(proof_json,'$.version')=2")
     names = [column[0] for column in cursor.description]
     return [dict(zip(names, row, strict=True)) for row in cursor]
 
@@ -113,17 +115,28 @@ def _check_proof(runtime, records, proof):
 
 def verify(runtime, records):
     prepared, accepted = {}, {}
+    if runtime.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name=?", (TABLE,),
+    ).fetchone() and not runtime.legacy and runtime.db.execute(
+        f"SELECT 1 FROM {TABLE} WHERE json_extract(proof_json,'$.version')!=2 LIMIT 1",
+    ).fetchone():
+        raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
     stopped = False
+    context = runtime
     for index, record in enumerate(records):
         kind, value = record["kind"], record["data"]
-        if kind == "OWNER_STOPPED":
+        if kind in {"OWNER_BOUND", "OWNER_REBOUND"}:
+            context = SimpleNamespace(authority=value["authority"], db=runtime.db,
+                                      config=runtime.config)
+            stopped = False
+        elif kind == "OWNER_STOPPED":
             stopped = True
         elif kind == "CORE_STOP_CONFIRMED":
             if not stopped:
                 raise ValueError("DELIVERY_QUIESCENT_PROCESS_REQUIRED")
-            _confirmation(runtime, value)
+            _confirmation(context, value)
         elif kind == "DELIVERY_QUIESCED":
-            _check_proof(runtime, records[:index], value)
+            _check_proof(context, records[:index], value)
             if value["message_id"] in prepared:
                 raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
             prepared[value["message_id"]] = value
@@ -140,7 +153,7 @@ def verify(runtime, records):
     for message_id, proof in prepared.items():
         row = projected[message_id]
         receipt = json.loads(row["receipt_json"]) if row["receipt_json"] else None
-        if (row["plan_hash"] != wire.digest(runtime.authority)
+        if (row["plan_hash"] != wire.digest(proof["authority"])
             or json.loads(row["proof_json"]) != proof
             or (receipt, row["receipt_record_sha256"]) != accepted.get(message_id, (None, None))):
             raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
