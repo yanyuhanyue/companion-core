@@ -37,6 +37,12 @@ Core 与 Bridge 通过 HTTP 交换原生回执；`companion_delivery_protocol` �
 `get_private_file_url`，按当前文件租约下载、校验字节和 SHA256，再提交签名原件。
 Core 先持久化暂存；独立 `content-worker` 执行解析。不能把聊天里的 URL、路径或模型参数
 当作文件下载授权。混合图片/文件使用原持久队列；已提交项目重启时先核对原状态。
+队列仍在 `DOWNLOADING` 时，可在原图片／文件租约和签名来源仍有效的条件下重新读取，
+不重新 claim 或延长期限；语音重新读取前须确认原 ASR 上传仍被允许且没有已存在任务。
+持久化 `UPLOADING` 后仅核对原接收结果，不能重复上传或启动第二次 ASR。
+完成任务的引用在读取其结果前释放，异常仍向调用者报告。读取恢复依据
+[HTTP 幂等语义](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2)，
+保留原队列阶段、来源检查、费用和不确定效果责任。
 
 支持 `.txt`、`.md`、`.docx`、有文字层的 `.pdf` 和经 LibreOffice 转换的 `.doc`。
 无文字层页面不做 OCR；转换、截断和局部结果保留 `PARTIAL` 及原因。

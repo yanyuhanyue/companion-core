@@ -245,6 +245,38 @@ def test_lost_voice_upload_ack_recovers_only_matching_core_job_without_refetch(c
     run(scenario())
 
 
+def test_crash_after_voice_download_before_upload_can_resume_without_duplicate_asr(
+    core, tmp_path, monkeypatch,
+):
+    from companion_onebot_bridge import voice_media
+
+    gets = []
+    prepare = voice_media.prepare_asr
+
+    async def crash(*args, **kwargs):
+        raise RuntimeError("synthetic crash before upload")
+
+    async def scenario():
+        async with fixture(core, tmp_path) as (window, client, protocol, _, _):
+            await capture(window, client, protocol)
+            media = pump(window, client, protocol, download=lambda request: (
+                gets.append(request.url) or httpx.Response(200, content=wav(),
+                                                          headers={"Content-Type": "audio/wav"})))
+            monkeypatch.setattr(voice_media, "prepare_asr", crash)
+            with pytest.raises(RuntimeError, match="synthetic crash"):
+                await media.execute(window.db.execute("SELECT * FROM automatic_media").fetchone())
+            row = window.db.execute("SELECT * FROM automatic_media").fetchone()
+            assert row["state"] == "DOWNLOADING" and len(gets) == 1
+            assert not core.store.one("SELECT 1 FROM voice_jobs")
+            monkeypatch.setattr(voice_media, "prepare_asr", prepare)
+            await media.execute(row)
+            assert len(gets) == 2
+            assert window.db.execute("SELECT state FROM automatic_media").fetchone()[0] == "DONE"
+            assert core.store.one("SELECT COUNT(*) AS n FROM voice_jobs")["n"] == 1
+            window.verify()
+    run(scenario())
+
+
 def test_record_alias_drift_is_unavailable_and_never_fetches_different_audio(core, tmp_path):
     def native(request):
         if request.url.path == "/get_record":

@@ -619,7 +619,7 @@ class MemePump:
         self.query_event = None
         self.query_tasks = set()
         self.enabled = window.plan.config.meme_enabled
-        self.submitted = set()
+        self.submitted_event = None
         self.next_run = 0
         self.runtime = window.memes if self.enabled else None
 
@@ -672,16 +672,16 @@ class MemePump:
     async def execute(self, row):
         try:
             runtime = self.runtime
-            if row is not None and row["event_id"] not in self.submitted:
+            if row is not None and row["event_id"] != self.submitted_event:
                 offer = runtime.missing_offer(row["event_id"])
                 if offer:
                     state = await self.window.input_state(self.client, row)
                     result = await runtime.submit_missing(self.client, row["event_id"], offer,
                                                          reply_revision=state["reply_revision"])
                     if result.get("status") != "DEFERRED":
-                        self.submitted.add(row["event_id"])
+                        self.submitted_event = row["event_id"]
                 else:
-                    self.submitted.add(row["event_id"])
+                    self.submitted_event = row["event_id"]
             result = await runtime.run_once(self.client)
             if result.get("status") not in {"IDLE", "DISABLED", "BUSY"}:
                 emit("meme_discovery", status=result["status"])
