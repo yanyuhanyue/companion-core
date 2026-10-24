@@ -350,6 +350,7 @@ class SocialAutonomy:
                 native_state = {"SUCCEEDED": "SENT", "REJECTED": "FAILED",
                                 "UNKNOWN": "DELIVERY_UNCERTAIN"}[receipt.result]
                 if (row["state"] != native_state or receipt.message_id != row["message_id"]
+                    or receipt.lease_token != row["lease_token"]
                     or receipt.payload_sha256 != row["payload_sha256"]
                     or receipt.action_type != "qzone.publish"
                     or _sha(receipt.model_dump(mode="json")) != row["receipt_sha256"]):
