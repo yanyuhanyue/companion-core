@@ -12,13 +12,22 @@ from companion.life_protocol import LifeShadowApproval
 from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy, OwnerRuntimeConfig
 from companion.store import after, uid
 from tests.conftest import run
+from tests.social_model_transport import NativeTestModel
 from tests.test_life_topics import bug, due, proposal
 from tests.test_owner_authority import activate
 from tests.test_paid_model_gate import approved_live
 from tests.test_social_autonomy import background, planned, queue
 
 
-def authorize(core, tmp_path, *, life=None, account=True):
+@pytest.fixture(autouse=True)
+def close_provider_clients(core):
+    core.authority_test_clients = []
+    yield
+    for client in core.authority_test_clients:
+        run(client.aclose())
+
+
+def authorize(core, tmp_path, *, life=None, account=True, module=None):
     approved_live(core, tmp_path, max_output_tokens=4096, per_attempt_micro_usd=100000,
                   per_request_micro_usd=200000)
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
@@ -34,6 +43,11 @@ def authorize(core, tmp_path, *, life=None, account=True):
         capability_policies=capability, life_shadow=life,
     )
     result, _ = activate(core, policy)
+    target = module if module is not None else core
+    if not isinstance(target.model, NativeTestModel):
+        target.model = NativeTestModel(core.settings, target.model,
+                                       "social_autonomy" if module else "activity")
+        core.authority_test_clients.append(target.model.client)
     return policy, result["authority"]
 
 
@@ -111,7 +125,7 @@ def test_owner_custody_cannot_fall_back_to_mock_life_scope(core, tmp_path, chang
 
 def test_social_purpose_can_plan_but_cannot_execute_account_action(core, tmp_path):
     module, source, conversation = background(core, max_output_tokens=512)
-    _, ref = authorize(core, tmp_path, account=False)
+    _, ref = authorize(core, tmp_path, account=False, module=module)
     result = planned(module, source)
     snapshot = core.store.one("SELECT input_snapshot_json FROM social_autonomy_plans")
     assert json.loads(snapshot["input_snapshot_json"])["authority"] == ref
@@ -123,7 +137,7 @@ def test_social_purpose_can_plan_but_cannot_execute_account_action(core, tmp_pat
 
 def test_social_stop_during_paid_request_discards_result_without_repayment(core, tmp_path):
     module, source, _ = background(core, max_output_tokens=512)
-    policy, ref = authorize(core, tmp_path)
+    policy, ref = authorize(core, tmp_path, module=module)
     module.model.callback = lambda: stop(core, ref)
     with pytest.raises(CoreError, match="OWNER_AUTHORITY"):
         planned(module, source)
@@ -139,7 +153,7 @@ def test_social_stop_during_paid_request_discards_result_without_repayment(core,
 def test_social_native_retry_keeps_authority_and_is_cancelled_after_revision(core, tmp_path):
     module, source, _ = background(core, max_output_tokens=512)
     core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=0)
-    policy, ref = authorize(core, tmp_path)
+    policy, ref = authorize(core, tmp_path, module=module)
     with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
         planned(module, source)
     job = core.store.one("SELECT * FROM jobs WHERE kind='social_plan'")
@@ -156,7 +170,7 @@ def test_social_native_retry_keeps_authority_and_is_cancelled_after_revision(cor
 
 def test_native_outbox_pins_authority_and_stop_preserves_no_io_receipt(core, tmp_path):
     module, source, conversation = background(core, max_output_tokens=512)
-    _, ref = authorize(core, tmp_path)
+    _, ref = authorize(core, tmp_path, module=module)
     frozen = queue(module, planned(module, source), conversation)
     token = uid("lease")
     # Native hook test. Shared transport/API migration has its own integration receipt.
@@ -194,7 +208,7 @@ def test_account_dtos_reject_legacy_window_and_malformed_authority():
 
 def test_owner_bound_unknown_plan_stays_charged_and_is_not_replayed(core, tmp_path):
     module, source, _ = background(core, max_output_tokens=512)
-    authorize(core, tmp_path)
+    authorize(core, tmp_path, module=module)
     module.model.error = TimeoutError("synthetic provider outcome unknown")
     with pytest.raises(TimeoutError):
         planned(module, source)
@@ -207,7 +221,7 @@ def test_owner_bound_unknown_plan_stays_charged_and_is_not_replayed(core, tmp_pa
 
 def test_owner_bound_source_erasure_during_model_keeps_cost_and_removes_draft(core, tmp_path):
     module, source, _ = background(core, max_output_tokens=512)
-    authorize(core, tmp_path)
+    authorize(core, tmp_path, module=module)
 
     def erase():
         with core.store.transaction():
