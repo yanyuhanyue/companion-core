@@ -15,6 +15,7 @@ KINDS = {
     "reflection": ("reflection_runs", "run_id"),
     "nightly": ("consolidation_runs", "run_id"),
     "model": ("model_usage", "request_id"),
+    "rem": ("rem_records", "rem_id"),
 }
 STATES = frozenset("PENDING SHADOW SKIPPED DEFERRED INVALIDATED CANDIDATE ACCEPTED QUEUED "
                    "RUNNING DONE WAITING WAITING_INPUT WAITING_RESOURCE RETRY_WAIT FAILED "
@@ -139,6 +140,10 @@ class CognitionRead:
         )]
 
     def _record(self, kind, row, sources):
+        if kind == "rem":
+            from companion.cognition_rem import record
+
+            return record(self.core, row, sources.now)
         roots = self._roots(kind, row)
         if (row.get("redacted") or len(roots) > 100 or any(
             not key or not self.projections._goal_source(key, sources) for key in roots

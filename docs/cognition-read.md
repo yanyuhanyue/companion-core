@@ -6,7 +6,7 @@ control dependencies. STOP and disabled runtime features do not prevent an
 authenticated owner from inspecting metadata. Responses use `Cache-Control: no-store`.
 
 Request: `{"kind":"goal","limit":30,"before":null}`. Supported kinds are wake,
-life, goal, diary, reflection, nightly and model. Limits are 1–50. Pagination uses
+life, goal, diary, reflection, nightly, model and rem. Limits are 1–50. Pagination uses
 the native primary-key cursor with SQLite append order, not lexical UUID order.
 Optional `record_id` selects an exact native record; a missing or unavailable record
 is `NOT_RECORDED`. It cannot be combined with `before`. A missing cursor returns `COGNITION_CURSOR_UNAVAILABLE`; it does not silently
@@ -94,3 +94,32 @@ observable after an unrelated real Memory addition; source erasure retracts them
 Saved credential-like and sensitive reasons do not appear in responses. Pending
 records do not acquire an inferred reason. These are module-level checks; real
 entry registration remains the integration owner's responsibility.
+
+
+## REM metadata
+
+`kind=rem` uses the same bounded pagination and exact `record_id` selection. The
+projection reads frozen `rem_records`, the original job and its `scenario=rem`
+usage. It reuses `MemoryContext.revalidate` from the native REM reader, checks that
+stored memory/event references agree with that proof, and retains the outer
+request-wide custody/version fence. Missing records are `NOT_RECORDED`.
+
+Every row is labelled `kind=FICTION`, `audience=owner_only`, and
+`content_kind=private_fiction`; question metadata is `UNVERIFIED`. No title,
+fictional text, question text, source snapshot, or memory body is returned. The
+saved decision and question count are metadata, not factual observations or tool
+execution receipts. `usage` is read from original accounting, including UNKNOWN;
+no count or cost is inferred from the fictional artifact.
+
+Expired, erased or unavailable sources set `source_available=false` and withhold
+source IDs and private result metadata while retaining native job/accounting
+status. REM disabling is not an execution permission for this owner-control read.
+The native `rem.records` reader only supports the newest N rows; this adapter
+adds the cognition native-ID cursor without rebuilding a second history store.
+
+The read-side tests use real Memory evidence and pinned proofs with synthetic
+retained rows in the frozen REM schema. They verify the actual registered owner
+API, paging, missing IDs, expiry, ledger erasure, native scrub, reference mismatch,
+version races and unchanged accounting. They do not execute REM. Root integration `a10ec3c` includes the frozen shared
+Core/config/authority/erasure hooks; these reader checks use that integration.
+Independent-worker generation acceptance remains with R1/Life.
