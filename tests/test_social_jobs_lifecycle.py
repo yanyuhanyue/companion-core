@@ -1,5 +1,6 @@
 """Native social jobs preserve cancellation, fencing, display and schema evidence."""
 
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -12,8 +13,9 @@ from companion.console_media_views import _plans
 from companion.contracts import CoreError
 from companion.social_autonomy import restore_social_autonomy
 from companion.social_autonomy_runtime import _expire, run_once
-from companion.store import migrate
+from companion.store import Store, migrate
 from tests.conftest import run
+from tests.test_release_migration import TIMES, seed_legacy
 from tests.test_social_autonomy import background, planned
 
 
@@ -72,19 +74,40 @@ def test_console_exposes_native_retry_due_time(core):
     assert item["detail"]["next_attempt_at"] == job["next_attempt_at"]
 
 
-def test_mapping_migration_preserves_native_rows_and_blocks_populated_downgrade(core):
+def test_mapping_migration_preserves_native_rows_and_blocks_populated_downgrade(tmp_path):
+    # Exercise this migration on its actual predecessor. Later custody migrations
+    # may intentionally prohibit downgrading a current production schema.
+    database, _, _ = seed_legacy(tmp_path, "0004_diary")
+    migrate(str(database), "0033_model_usage_job_index")
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
-    before = core.store.rows("SELECT rowid,* FROM jobs")
-    command.downgrade(config, "0033_model_usage_job_index")
-    migrate(core.settings.database)
-    assert core.store.rows("SELECT rowid,* FROM jobs") == before
-    _, _, job = deferred(core)
-    with pytest.raises(RuntimeError, match="SOCIAL_JOB_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(database).as_posix())
+    with closing(Store(str(database))) as store:
+        before = store.rows("SELECT rowid,* FROM jobs")
+        migrate(str(database), "0034_social_plan_jobs")
         command.downgrade(config, "0033_model_usage_job_index")
-    assert core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],)) == job
-    assert core.store.one("SELECT version_num FROM alembic_version") == {
-        "version_num": "0034_social_plan_jobs"}
-    assert core.store.rows("PRAGMA foreign_key_check") == []
+        migrate(str(database), "0034_social_plan_jobs")
+        assert store.rows("SELECT rowid,* FROM jobs") == before
+        now = TIMES["keep"]
+        store.insert("jobs", job_id="job_social_migration", event_id="evt_keep",
+                     kind="activity", state="QUEUED", idempotency_key="social-migration",
+                     created_at=now, updated_at=now)
+        store.insert("social_autonomy_plans", plan_id="plan_migration",
+                     idempotency_key="plan-migration", request_sha256="a" * 64,
+                     candidate_sha256="b" * 64, state="PLANNING", policy_version=1,
+                     policy_sha256="c" * 64, authorization_sha256="d" * 64,
+                     binding_sha256="e" * 64, timezone="UTC", policy_json="{}",
+                     input_snapshot_json="{}", source_snapshot_sha256="f" * 64,
+                     created_at=now, expires_at=now, updated_at=now)
+        store.insert("social_autonomy_jobs", plan_id="plan_migration",
+                     job_id="job_social_migration")
+        job = store.one("SELECT * FROM jobs WHERE job_id='job_social_migration'")
+        with pytest.raises(
+            RuntimeError, match="SOCIAL_JOB_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW",
+        ):
+            command.downgrade(config, "0033_model_usage_job_index")
+        assert store.one("SELECT * FROM jobs WHERE job_id='job_social_migration'") == job
+        assert store.one("SELECT version_num FROM alembic_version") == {
+            "version_num": "0034_social_plan_jobs"}
+        assert store.rows("PRAGMA foreign_key_check") == []
