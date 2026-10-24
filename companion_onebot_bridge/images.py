@@ -268,16 +268,19 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
             _private_download.reset(quiet)
 
 
-async def owner_media_post(runtime, client, path, body, headers=None, *, purpose, before=None):
+async def owner_media_request(runtime, client, path, body=b"", headers=None, *, purpose,
+                              before=None, method="POST"):
     from .event_normalizer import decode
     from .network import checked_http_client, private_request_matches
     from .window import seal_protocol_content
 
     expected = body if isinstance(body, bytes) else encode(body).encode()
-    headers = headers or {"Content-Type": "application/json"}
+    if method not in {"GET", "POST"} or method == "GET" and expected:
+        raise ValueError("OWNER_MEDIA_REQUEST_INVALID")
+    headers = headers or ({"Content-Type": "application/json"} if method == "POST" else {})
 
     def validate(request):
-        if (request.method != "POST"
+        if (request.method != method or "Cookie" in request.headers
             or not private_request_matches(request, runtime.config.core_url, path)
             or request.headers.get("Authorization") != "Bearer " + runtime.config.bridge_token
             or request.content != expected
@@ -294,7 +297,7 @@ async def owner_media_post(runtime, client, path, body, headers=None, *, purpose
         seal_protocol_content(request, expected)
 
     async with checked_http_client(client, boundary) as scoped:
-        async with scoped.stream("POST", path, content=expected, headers=headers,
+        async with scoped.stream(method, path, content=expected, headers=headers,
                                  timeout=30) as response:
             response.raise_for_status()
             result = bytearray()
@@ -325,7 +328,7 @@ async def upload_original(runtime, client, event_id, image, *, resume_claim=None
             await progress(state, receipt)
 
     async def post(path, body, headers=None, *, before=None):
-        return await owner_media_post(runtime, client, path, body, headers,
+        return await owner_media_request(runtime, client, path, body, headers,
                                       purpose="image", before=before)
 
     await runtime.check(client, purpose="image")

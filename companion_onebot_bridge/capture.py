@@ -123,6 +123,7 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
     """
     from .files import original_files
     from .images import original_images
+    from .voice_media import original_records
 
     runtime.verify()
     config = runtime.config
@@ -138,10 +139,13 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
         or (received_at - runtime.clock()).total_seconds() > MAX_CLOCK_DRIFT_SECONDS
         or raw["message_id"] in (0, "0")):
         raise ValueError("OWNER_CAPTURE_TIME_CHANGED")
-    await runtime.check(core_client, purpose="chat")
+    permission = await runtime.check(core_client, purpose="chat")
     images = original_images(raw["message"]) if rich else []
     files = original_files(raw["message"]) if rich else []
-    purposes = [kind for kind, items in (("image", images), ("file", files)) if items]
+    records = (original_records(raw["message"]) if rich
+               and "voice" in permission["capability_policies"] else [])
+    purposes = [kind for kind, items in (("image", images), ("file", files),
+                                        ("voice", records)) if items]
     for purpose in purposes:
         await runtime.check(core_client, purpose=purpose)
     event = normalize(frame, config, now=received_at.timestamp(),
@@ -157,7 +161,8 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
     original = frame.encode() if isinstance(frame, str) else frame
     return {"event": event, "frame_sha256": hashlib.sha256(original).hexdigest(),
             "media": {"images": [asdict(image) for image in images],
-                      "files": [asdict(file) for file in files]}}
+                      "files": [asdict(file) for file in files],
+                      **({"records": [asdict(record) for record in records]} if records else {})}}
 
 
 def diagnostic_fields(error):

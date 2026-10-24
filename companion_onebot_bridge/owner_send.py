@@ -204,7 +204,7 @@ class OwnerOneBot:
 
     companion = True
     account_scope = False
-    voice_scope = False
+    voice_scope = True
 
     def __init__(self, guard, protocol):
         self.guard, self.config = guard, guard.config
@@ -223,6 +223,12 @@ class OwnerOneBot:
 
             self.guard.runtime.verify()
             self.guard.prepared_native = prepare(item["content"], self.config.owner_qq_id)
+        elif "voice" in item:
+            from .voice_runtime import prepare_delivery
+
+            permission = await self.guard.runtime.check(self.guard.client, purpose="voice")
+            self.guard.prepared_voice = prepare_delivery(self.guard.runtime, item,
+                voice_policy_sha256=permission["capability_policies"]["voice"])
 
     async def send_content(self, content):
         item = self.guard.current_item
@@ -230,6 +236,10 @@ class OwnerOneBot:
             raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
         if item["action_type"] == "qq.private.poke":
             return await self.delegate.send_native(self.guard.prepared_native)
-        if "image" in content or "voice" in item:
+        if "voice" in item:
+            if self.guard.prepared_voice is None:
+                raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
+            return await self.delegate.send_message(self.guard.prepared_voice.message)
+        if "image" in content:
             raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
         return await self.delegate.send_text(reply_segments.wire_text(item))

@@ -62,20 +62,25 @@ def queue_owner(runtime, event, media, capture, raw):
     """Persist private originals in the existing queue, inside CAPTURED's transaction."""
     images = [OriginalImage(**value) for value in media.get("images", [])]
     files = [OriginalFile(**value) for value in media.get("files", [])]
-    if set(media) - {"images", "files"}:
+    records = [OriginalRecord(**value) for value in media.get("records", [])]
+    if set(media) - {"images", "files", "records"}:
         raise ValueError("AUTOMATIC_MEDIA_CHANGED")
-    if not images and not files:
+    if not images and not files and not records:
         return
     projected = event["payload"].get("rich", {}).get("segments", [])
     originals = [*images, *files]
-    if (not 1 <= len(originals) <= 64
+    if (not 1 <= len(originals) + len(records) <= 64
         or images != original_images(raw["message"])
         or files != original_files(raw["message"])
         or sorted((item.projection() for item in originals), key=lambda item: item["index"])
         != [item for item in projected if item.get("type") in {"image", "file", "face"}]
         or any(image.slot != slot or image.url != source_url(image)
                for slot, image in enumerate(images))
-        or any(file.slot != slot for slot, file in enumerate(files))):
+        or any(file.slot != slot for slot, file in enumerate(files))
+        or records and records != list(original_records(raw["message"]))
+        or records and [{"index": record.index, "type": "record", "actor": "UNVERIFIED",
+             "coverage": "UNSUPPORTED"} for record in records]
+        != [item for item in projected if item.get("type") == "record"]):
         raise ValueError("AUTOMATIC_MEDIA_CHANGED")
     prepare(runtime)
     value = {"authority": runtime.authority, "event_id": event["event_id"],
@@ -83,6 +88,9 @@ def queue_owner(runtime, event, media, capture, raw):
              "images": [asdict(image) for image in images]}
     if files:
         value["files"] = [asdict(file) for file in files]
+    if records:
+        value.update(records=[asdict(record) for record in records],
+                     source_event_id=event["source_event_id"])
     value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
         runtime.config.capture_signing_key)).sign(OWNER_DOMAIN + encode(value).encode()).hex()
     prior = _execute(runtime, "SELECT * FROM automatic_media WHERE event_id=?",
@@ -95,7 +103,8 @@ def queue_owner(runtime, event, media, capture, raw):
     runtime.spool.capacity(len(encode(value).encode()) * 3)
     head = runtime.append("MEDIA_QUEUED", {"event_hash": digest(event["event_id"]),
         "manifest_sha256": manifest_hash, "capture_sha256": digest(capture),
-        "image_count": len(images), **({"file_count": len(files)} if files else {})})
+        "image_count": len(images), **({"file_count": len(files)} if files else {}),
+        **({"record_count": len(records)} if records else {})})
     _execute(runtime, "INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
         (event["event_id"], _binding(runtime), digest(capture), manifest_hash,
          encode(value), len(images)))
@@ -185,7 +194,7 @@ def manifest(window, row):
             or ("files" in value and (not files or not native and window.plan.value.get(
                 "live_text", {}).get("file_scope") != "owner_file_v1"))
             or any(file.slot != slot for slot, file in enumerate(files))
-            or ("records" in value and (native or not records or window.plan.value.get(
+            or ("records" in value and (not records or not native and window.plan.value.get(
                 "live_text", {}).get("voice_scope") != "owner_voice_v1"
                 or value["source_event_id"] != json.loads(source["capture_json"])[
                     "source_event_id"]))
@@ -348,8 +357,16 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
                 transport=file_transport, **options)
             await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
                            else "PENDING", position + 1, result)
-        if records:
-            raise ValueError("OWNER_MEDIA_TRANSFER_REQUIRED")
+        for original in records[max(0, start_slot - len(images) - len(files)):]:
+            from .voice_runtime import upload as upload_voice
+
+            position = len(images) + len(files) + original.slot
+            result = await upload_voice(window, client, event_id, original, check=guard,
+                progress=lambda state, receipt, pos=position: progress(state, pos, receipt),
+                protocol=protocol, voice_transport=voice_transport, voice_resolver=voice_resolver,
+                set_phase=set_phase)
+            await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
+                           else "PENDING", position + 1, result)
         return
 
     if (start_slot < len(images)
@@ -529,6 +546,14 @@ class MediaPump:
 
     async def check_source(self, row):
         if hasattr(self.window, "authority"):
+            current = _execute(self.window, "SELECT * FROM automatic_media WHERE event_id=?",
+                                (row["event_id"],)).fetchone()
+            if not current or current["state"] in TERMINAL:
+                raise SourceCancelled()
+            media = manifest(self.window, current)
+            if (0 <= current["next_slot"] < len(media)
+                and isinstance(media[current["next_slot"]], OriginalRecord)):
+                return await self.window.check(self.client, purpose="voice")
             return await self.status(row["event_id"])
         from .continuous import require_scope
 

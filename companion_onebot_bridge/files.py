@@ -321,7 +321,7 @@ async def upload_original(runtime, client, event_id, original, *, onebot,
 
     from companion_delivery_protocol.authority import file_upload_signing_payload
 
-    from .images import owner_media_post
+    from .images import owner_media_request
     from .pending_media import _download_claim
 
     prefix = "/internal/v2/content/" + event_id + "/file"
@@ -331,7 +331,7 @@ async def upload_original(runtime, client, event_id, original, *, onebot,
             await progress(state, receipt)
 
     async def post(path, body, headers=None, *, before=None):
-        return await owner_media_post(runtime, client, path, body, headers,
+        return await owner_media_request(runtime, client, path, body, headers,
                                       purpose="file", before=before)
 
     await runtime.check(client, purpose="file")

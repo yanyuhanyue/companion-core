@@ -47,9 +47,18 @@ Dropping nonempty authority custody must require explicit reconciliation.
 The current Core APIs import the Voice ASR proof DTO directly. Their external
 Bridge caller must submit the new proof, compare the exact authority in input
 state, and validate schema-v3 voice delivery bindings against its original owner
-reference. The native Bridge host interface is being migrated by its owner;
-these leaf consumers must be integrated with that frozen host, not a fabricated
-WindowPlan. Shared Core/API/config/storage/migration files are not edited here.
+reference. The native Bridge uses OwnerRuntime directly. Capture selects voice
+only when its current policy includes the capability, and checks the voice
+purpose before queuing original record descriptors in the existing media journal.
+ASR state queries and uploads use the checked private HTTP boundary; decoding
+reuses the bounded child process and removes private temporary files before the
+final source check. A lost upload ACK recovers only the matching original job.
+
+TTS preparation checks the current voice-policy hash from authenticated authority
+metadata, original authority, schema, result expiry, canonical text hash and WAV
+bytes. It runs before the delivery journal records the original voice send-check.
+The existing sender transmits only the prepared record through its final Core
+send-check; an uncertain result cannot become a replacement text attempt.
 
 ## Verification so far
 
@@ -73,7 +82,8 @@ authority or payload. Neither path reconstructs a new grant.
 Twenty pure evidence tests cover both schema versions, full and retired custody,
 expired records, original scope/policy/job/token substitution, missing voice
 proof, content/byte/result/expiry changes and historical signature retirement.
-These tests do not claim that the shared reconciliation entry point is integrated.
+The native Bridge reconciliation entry retains this original voice check through
+STOP and owner resolution, including the existing explicit successor handoff.
 
 Four native-source checks pass through real signed owner capture and Core ingest:
 window-free ASR waiting, original-expiry bound, STOP rejection and chat-only
@@ -95,8 +105,13 @@ lease, node, Outbox and accounting rows and adds an empty authority reference.
 Native UNKNOWN reconciliation reuses the original proof validator via R1's
 `e9df94b`, including erasure-retired voice bindings and unchanged usage.
 
-Bridge consumers and final service activation remain the integration owner's
-scope. No real provider, QQ sender or device was activated by these checks.
+Bridge acceptance additionally covers authenticated WebSocket capture, an
+independent SDK worker, two independent voice-node processes over real TLS Core
+HTTP, large TTS envelopes and actual checked mock-OneBot acknowledgements.
+The failure cases include source replacement, pending owner input, changed
+request bodies/paths/streams, lost replies, STOP and original UNKNOWN custody.
+Final service activation remains a separate integration step. No real provider,
+QQ sender or device was activated by these checks.
 
 ## Reuse
 
