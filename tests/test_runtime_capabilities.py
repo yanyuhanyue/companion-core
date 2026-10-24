@@ -13,6 +13,18 @@ from tests.test_paid_model_gate import approved_live
 from tests.test_source_grants import GRANT_ID, authorization, prepare
 
 
+@pytest.fixture
+def budget_projection(monkeypatch):
+    """Isolate aggregation over deliberately unjournaled synthetic usage rows.
+
+    Real authority admission and read-only custody are tested in
+    test_native_capabilities; these tests exercise quota arithmetic only.
+    """
+    from companion import capabilities
+
+    monkeypatch.setattr(capabilities, "_owner_blocks", lambda *args, **kwargs: [])
+
+
 def rows(core, **kwargs):
     return {row["id"]: row for row in snapshot(core.store, core.settings, core.clock, **kwargs)
             ["capabilities"]}
@@ -23,6 +35,27 @@ def observed(core, **facts):
             "expires_at": (core.clock.now + timedelta(minutes=2)).isoformat(), **facts}
 
 
+def grant_native(core, purposes, *, capabilities=()):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from companion import owner_authority, paid_budget
+    from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
+    from tests.test_owner_authority import activate
+
+    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    hashes = owner_authority.capability_hashes(core.settings)
+    policy = OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id,
+        purposes=purposes, memory_scope="owner_private" if "memory" in purposes else "none",
+        authorization_sha256="d" * 64,
+        capture={"public_key": Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex(),
+                 "identity_sha256": paid_budget.sha(
+                     [core.settings.owner_qq_id, core.settings.bot_qq_id]),
+                 "protocol_epoch": "native-capability-test"},
+        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
+        capability_policies={name: hashes[name] for name in capabilities})
+    activate(core, policy)
+
+
 def private_images(core, tmp_path):
     from tests.test_onebot_capture import pinned_plan
     from tests.test_video_understanding import scope_options
@@ -30,6 +63,8 @@ def private_images(core, tmp_path):
     pinned_plan(core, tmp_path, 3001, live=True, approved=True,
                 rich_input_scope="references_v1",
                 scope_options=scope_options(core, model="synthetic-video"))
+    core.settings.meme_discovery_enabled = True
+    grant_native(core, ["image", "meme"], capabilities=("image", "meme"))
 
 
 def test_default_snapshot_is_closed_and_does_not_invent_chat_tools(core):
@@ -121,6 +156,7 @@ def test_life_pause_does_not_disable_explicit_source_reads(core, tmp_path):
     core.settings.diary_enabled = True
     core.settings.memory_enabled = True
     core.settings.consolidation_enabled = True
+    grant_native(core, ["memory", "diary", "consolidation", "content", "exploration"])
     core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused','1')")
     core.store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused','1')")
     current = rows(core)
@@ -138,13 +174,15 @@ def test_life_pause_does_not_disable_explicit_source_reads(core, tmp_path):
 def test_existing_budget_block_is_reported_without_reconciliation(core, tmp_path, key):
     approved_live(core, tmp_path)
     core.settings.memory_enabled = True
+    grant_native(core, ["memory"])
+    before_journal = (tmp_path / "budget.jsonl").read_bytes()
     core.store.execute("INSERT INTO runtime_meta VALUES (?, '1')", (key,))
     before = list(core.store.db.iterdump())
     current = rows(core)
     assert current["memory.recall"]["state"] == "PAUSED"
     assert "BUDGET_RECONCILIATION_REQUIRED" in current["memory.recall"]["reason_codes"]
     assert list(core.store.db.iterdump()) == before
-    assert not (tmp_path / "budget.jsonl").exists()
+    assert (tmp_path / "budget.jsonl").read_bytes() == before_journal
 
 
 def test_search_provider_none_keeps_local_catalog_and_community_admission(core, tmp_path):
@@ -210,7 +248,7 @@ def test_tools_argument_never_bypasses_native_video_approval(core):
     assert rows(core, model_tools=("arbitrary_tool",)).keys() == rows(core).keys()
 
 
-def test_native_video_available_but_only_content_vision_exposes_actual_tool(core, tmp_path):
+def test_native_video_requires_actual_tool_exposure(core, tmp_path):
     private_images(core, tmp_path)
     chat = rows(core)
     assert chat["qq.animation"]["state"] == "READY"
@@ -221,7 +259,17 @@ def test_native_video_available_but_only_content_vision_exposes_actual_tool(core
     assert vision["model.understand_video"]["invocation"] == ["model_callable"]
 
 
-def test_approved_fact_window_does_not_claim_owner_memory_write_commands(core, tmp_path):
+def test_native_bili_tool_requires_current_permission_and_actual_exposure(core, tmp_path):
+    native_capabilities(core, tmp_path)
+    assert "tool.analyze_shared_video" not in rows(core)
+    current = rows(core, model_tools=("analyze_shared_video",))
+    assert current["tool.analyze_shared_video"]["state"] == "READY"
+    core.settings.bili_video = core.settings.bili_video.model_copy(update={"enabled": False})
+    current = rows(core, model_tools=("analyze_shared_video",))
+    assert current["tool.analyze_shared_video"]["state"] == "UNAVAILABLE"
+
+
+def test_retired_fact_window_does_not_claim_native_memory_admission(core, tmp_path):
     from tests.test_live_memory_recall import scope_facts
     from tests.test_onebot_capture import pinned_plan
 
@@ -232,9 +280,9 @@ def test_approved_fact_window_does_not_claim_owner_memory_write_commands(core, t
         "paid_options": {"per_request_calls": 2},
     })
     current = rows(core)
-    assert current["memory.recall"]["state"] == "READY"
+    assert current["memory.recall"]["state"] == "UNAVAILABLE"
     assert current["memory.manage"]["state"] == "UNAVAILABLE"
-    assert "OWNER_COMMAND_SCOPE_REQUIRED" in current["memory.manage"]["reason_codes"]
+    assert "OWNER_AUTHORITY_DISABLED" in current["memory.manage"]["reason_codes"]
 
 
 def test_discovery_does_not_consume_deep_read_capacity_but_keeps_native_resource_limits(core):
@@ -299,6 +347,7 @@ def usage(core, *, state="SETTLED", amount=1, at=None, scenario="reflection"):
 
 @pytest.mark.parametrize("state", ["SETTLED", "RESERVED", "UNKNOWN"])
 @pytest.mark.parametrize("unlimited", [False, True])
+@pytest.mark.usefixtures("budget_projection")
 def test_reflection_capability_counts_every_attempt_even_with_unlimited_spend(
     core, tmp_path, state, unlimited,
 ):
@@ -319,6 +368,7 @@ def test_reflection_capability_counts_every_attempt_even_with_unlimited_spend(
     ("daily", "DAILY_BUDGET_EXHAUSTED"),
     ("monthly", "SCENARIO_MONTHLY_BUDGET_EXHAUSTED"),
 ])
+@pytest.mark.usefixtures("budget_projection")
 def test_reflection_capability_includes_all_accounted_amounts(
     core, tmp_path, state, period, reason,
 ):
@@ -335,6 +385,7 @@ def test_reflection_capability_includes_all_accounted_amounts(
         assert "DAILY_BUDGET_EXHAUSTED" not in current["reason_codes"]
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_reflection_capability_unlimited_spend_does_not_remove_call_limit(core, tmp_path):
     reflection_settings(core, tmp_path, unlimited=True)
     core.settings.reflection_max_daily_calls = 2
@@ -349,6 +400,7 @@ def test_reflection_capability_unlimited_spend_does_not_remove_call_limit(core, 
 
 
 @pytest.mark.parametrize("period", ["daily", "monthly"])
+@pytest.mark.usefixtures("budget_projection")
 def test_reflection_capability_zero_amount_stays_disabled_with_unlimited_spend(
     core, tmp_path, period,
 ):
@@ -366,6 +418,7 @@ def test_reflection_capability_zero_amount_stays_disabled_with_unlimited_spend(
     ("2026-10-19T00:00:00+08:00", "2026-10-18T15:59:59.999999+00:00",
      ["SCENARIO_MONTHLY_BUDGET_EXHAUSTED"]),
 ])
+@pytest.mark.usefixtures("budget_projection")
 def test_reflection_capability_uses_local_day_and_month_boundaries(
     core, tmp_path, now, at, reasons,
 ):
@@ -377,6 +430,7 @@ def test_reflection_capability_uses_local_day_and_month_boundaries(
     assert current["state"] == ("PAUSED" if reasons else "READY")
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_reflection_capability_does_not_charge_other_scenarios(core, tmp_path):
     reflection_settings(core, tmp_path)
     for scenario in ("chat", "diary", "memory_review"):
@@ -423,6 +477,7 @@ def tool_charge(core, amount, *, at=None):
 
 
 @pytest.mark.parametrize("state", ["SETTLED", "RESERVED", "UNKNOWN"])
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_daily_amount_counts_preexisting_other_window_usage(core, tmp_path, state):
     approval = paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
     request = usage(core, state=state, amount=100, scenario="chat")
@@ -439,6 +494,7 @@ def test_paid_capacity_daily_amount_counts_preexisting_other_window_usage(core, 
 
 
 @pytest.mark.parametrize("state", ["RESERVED", "UNKNOWN"])
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_requires_reconciliation_for_legacy_unadmitted_usage(core, tmp_path, state):
     paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
     usage(core, state=state, amount=100, scenario="content_video")
@@ -449,6 +505,7 @@ def test_paid_capacity_requires_reconciliation_for_legacy_unadmitted_usage(core,
     assert "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED" not in current["reason_codes"]
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_unlimited_daily_calls_still_count_all_model_scenarios(core, tmp_path):
     paid_capacity_settings(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
                            monthly_micro_usd=None, window_micro_usd=None, daily_calls=2)
@@ -464,6 +521,7 @@ def test_paid_capacity_unlimited_daily_calls_still_count_all_model_scenarios(cor
     ("paid", "MODEL_MONTHLY_BUDGET_EXHAUSTED"),
     ("local", "MONTHLY_BUDGET_EXHAUSTED"),
 ])
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_monthly_totals_include_tool_responsibility(core, tmp_path, ceiling, reason):
     paid_capacity_settings(core, tmp_path, monthly_micro_usd=500 if ceiling == "paid" else 1000)
     core.settings.monthly_limit_micro_usd = 500 if ceiling == "local" else 1000
@@ -476,6 +534,7 @@ def test_paid_capacity_monthly_totals_include_tool_responsibility(core, tmp_path
 
 
 @pytest.mark.parametrize("ceiling", ["amount", "calls"])
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_window_totals_use_only_current_window(core, tmp_path, ceiling):
     paid_capacity_settings(core, tmp_path, window_micro_usd=100 if ceiling == "amount" else 1000,
                            window_calls=2 if ceiling == "calls" else 10)
@@ -494,6 +553,7 @@ def test_paid_capacity_window_totals_use_only_current_window(core, tmp_path, cei
 
 @pytest.mark.parametrize("state", ["RESERVED", "UNKNOWN"])
 @pytest.mark.parametrize("unlimited", [False, True])
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_concurrency_does_not_expire_with_lease_or_window(
     core, tmp_path, state, unlimited,
 ):
@@ -510,6 +570,7 @@ def test_paid_capacity_concurrency_does_not_expire_with_lease_or_window(
     assert "MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED" not in current["reason_codes"]
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_unlimited_amounts_leave_window_call_limit_intact(core, tmp_path):
     paid_capacity_settings(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
                            monthly_micro_usd=None, window_micro_usd=None, window_calls=2)
@@ -526,6 +587,7 @@ def test_paid_capacity_unlimited_amounts_leave_window_call_limit_intact(core, tm
     assert current["reason_codes"] == ["MODEL_WINDOW_BUDGET_EXHAUSTED"]
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_daily_limit_resets_at_local_midnight(core, tmp_path):
     paid_capacity_settings(core, tmp_path, daily_micro_usd=100)
     core.clock.now = datetime.fromisoformat("2026-10-19T23:59:59.999999+08:00")
@@ -535,6 +597,7 @@ def test_paid_capacity_daily_limit_resets_at_local_midnight(core, tmp_path):
     assert rows(core)["memory.recall"]["state"] == "READY"
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_paid_capacity_does_not_guess_the_next_request_estimate(core, tmp_path):
     paid_capacity_settings(core, tmp_path, daily_micro_usd=100, monthly_micro_usd=100,
                            window_micro_usd=100)
@@ -575,6 +638,9 @@ def native_capabilities(core, tmp_path):
         source="qq_file", token="synthetic-file-adapter-token-123456")
     pinned_plan(core, tmp_path, 3001, live=True, approved=True,
                 rich_input_scope="references_v1", scope_options=options)
+    grant_native(core, ["content", "exploration", "image", "file", "voice", "poke",
+                        "account_actions", "social", "bili_video"],
+        capabilities=("image", "file", "voice", "poke", "account_actions", "bili_video"))
     module = SocialAutonomy(core.store, core.settings, clock=core.clock)
     for field in ("nickname", "signature", "avatar"):
         module.record_profile(ProfileBaseline(bot_qq_id=core.settings.bot_qq_id,
@@ -633,15 +699,24 @@ def test_native_capabilities_are_local_facts_without_guard_or_external_io(
     ("qq.poke", "poke_scope"), ("qq.account.nickname", "account_actions_scope"),
 ])
 def test_feature_toggle_without_original_scope_never_claims_ready(core, tmp_path, feature, scope):
+    from companion import owner_authority
+    from tests.test_owner_authority import activate
+
     native_capabilities(core, tmp_path)
-    core.settings.live_text_window = core.settings.live_text_window.model_copy(
-        update={scope: "none"})
+    purpose = {"file_scope": "file", "bili_video_scope": "bili_video", "voice_scope": "voice",
+               "poke_scope": "poke", "account_actions_scope": "account_actions"}[scope]
+    view = owner_authority.current(core.store, core.settings, core.clock)
+    policy = view.policy.model_copy(update={
+        "purposes": [name for name in view.policy.purposes if name != purpose],
+        "capability_policies": {name: value for name, value in
+            view.policy.capability_policies.items() if name != purpose}})
+    activate(core, policy, revision=view.authority.revision, operation="capability-withdrawal")
     assert rows(core)[feature]["state"] == "UNAVAILABLE"
 
 
 @pytest.mark.parametrize("change,reason", [
     ("image", "PRIVATE_FILE_CONFIG_INVALID"), ("socket", "PRIVATE_FILE_CONFIG_INVALID"),
-    ("adapter", "PRIVATE_FILE_ADAPTER_UNAVAILABLE"), ("bytes", "PRIVATE_FILE_TRAFFIC_EXHAUSTED"),
+    ("bytes", "PRIVATE_FILE_TRAFFIC_EXHAUSTED"),
 ])
 def test_files_require_pinned_parser_transport_adapter_and_original_traffic_budget(
     core, tmp_path, change, reason,
@@ -652,8 +727,6 @@ def test_files_require_pinned_parser_transport_adapter_and_original_traffic_budg
         core.settings.private_files = cfg.model_copy(update={"parser_image": "floating:latest"})
     elif change == "socket":
         core.settings.private_files = cfg.model_copy(update={"parser_socket": "../unsafe.sock"})
-    elif change == "adapter":
-        core.settings.observation_adapters.pop(cfg.adapter_id)
     else:
         core.settings.private_files = cfg.model_copy(
             update={"max_daily_bytes": cfg.max_file_bytes - 1})
@@ -665,7 +738,7 @@ def test_files_require_pinned_parser_transport_adapter_and_original_traffic_budg
 
 @pytest.mark.parametrize("change,reason", [
     ("reader", "BILI_VIDEO_READER_UNAVAILABLE"), ("image", "PAID_IMAGE_APPROVAL_REQUIRED"),
-    ("provider", "PAID_VIDEO_APPROVAL_REQUIRED"), ("policy", "BILI_VIDEO_SCOPE_REQUIRED"),
+    ("provider", "PAID_VIDEO_APPROVAL_REQUIRED"), ("policy", "OWNER_AUTHORITY_CAPABILITY_CHANGED"),
     ("bytes", "READ_BUDGET_UNAVAILABLE"), ("requests", "READ_BUDGET_UNAVAILABLE"),
     ("restore", "BILI_VIDEO_RECONCILIATION_REQUIRED"),
 ])
@@ -683,8 +756,7 @@ def test_bili_sampling_follows_media_scope_provider_reader_and_full_reservation(
     elif change == "provider":
         cfg.video_model_key = SecretStr("")
     elif change == "policy":
-        cfg.live_text_window = cfg.live_text_window.model_copy(
-            update={"bili_video_policy_sha256": "f" * 64})
+        cfg.bili_video = cfg.bili_video.model_copy(update={"max_concurrent": 2})
     elif change == "bytes":
         cfg.exploration_daily_bytes = cfg.bili_video.media.max_input_bytes
     elif change == "requests":
@@ -744,6 +816,7 @@ def test_unknown_model_liability_pauses_native_capabilities_without_settling_it(
     assert list(core.store.db.iterdump()) == before
 
 
+@pytest.mark.usefixtures("budget_projection")
 def test_cumulative_pause_is_read_from_original_journal_without_repair(core, tmp_path):
     from tests.test_delivery_reconciliation import native
 
@@ -776,12 +849,22 @@ def test_voice_disabled_configuration_does_not_require_or_expose_signing_materia
     assert "x" * 32 not in json.dumps(result)
 
 
-def test_unknown_voice_resource_is_not_released_by_capability_projection(core, monkeypatch):
-    from tests.test_voice_flow import flow_fixture
+def test_unknown_voice_resource_is_not_released_by_capability_projection(core, tmp_path):
+    from companion.voice_jobs import VoiceJobs
+    from tests.conftest import run
+    from tests.sdk_reader_fixture import Provider, answer, worker_for
     from tests.test_voice_jobs import TEXT
+    from tests.voice_owner_fixtures import native_voice
 
-    _, jobs, message_id, _, _ = flow_fixture(core, monkeypatch)
-    core.settings.mode = "live"
+    native_voice(core, tmp_path, record=False)
+
+    async def reply():
+        async with worker_for(core, Provider(answer(TEXT))) as worker:
+            assert await worker.run_once("capability-voice-reply")
+
+    run(reply())
+    message_id = core.store.one("SELECT message_id FROM outbox")["message_id"]
+    jobs = VoiceJobs(core.store, core.settings, core.clock)
     with core.store.transaction():
         created = jobs.create_tts(message_id, TEXT)
         core.store.execute("UPDATE voice_jobs SET state='UNKNOWN',started_at=? WHERE job_id=?",

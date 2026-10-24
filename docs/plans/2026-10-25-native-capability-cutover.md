@@ -79,3 +79,20 @@ the daemon's real WebSocket receive, HTTP ingress and media loop, followed by a
 separate SDK worker process. Only external provider/download transport is mocked.
 The cases cover PNG/GIF/APNG, file parsing, source withdrawal, STOP, one-shot
 leases, lost receipts, later-turn image reuse and unknown model outcomes.
+
+## Capability status
+
+The read-only capability projection uses the same current OwnerAuthority purposes
+and policy fingerprints as execution. Memory, diary, background work and callable
+tools retain their separate purposes. Images, files, voice, account actions, memes
+and Bili media no longer require a legacy window to describe native readiness.
+The public-reader projection distinguishes content reading from exploration.
+`analyze_shared_video` and `understand_video` are listed as callable only when
+actually present in that turn's toolset.
+
+READY remains local admission readiness, not provider reachability or evidence of
+an executed operation. Original model, delivery, resource and cumulative-budget
+liabilities still pause readiness. Real native grants verify STOP, mode changes,
+policy drift and absence of permission; database and journal snapshots prove the
+queries leave custody unchanged. Quota-arithmetic unit fixtures separately isolate
+their deliberately unjournaled historical usage rows from authority admission.
