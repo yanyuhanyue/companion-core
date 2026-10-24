@@ -7,6 +7,7 @@ import logging
 import socket
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -265,3 +266,99 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
                 await delegate.aclose()
         finally:
             _private_download.reset(quiet)
+
+
+async def upload_original(runtime, client, event_id, image, *, resume_claim=None,
+                          progress=None, transport=None, resolver=resolve_public):
+    """Transfer a captured original under its native authority and finite Content lease.
+
+    The caller journals each phase before the corresponding I/O. An uncertain claim
+    or upload is reconciled by that caller; this function never retries either.
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from companion_delivery_protocol.authority import image_upload_signing_payload
+
+    from .event_normalizer import decode
+    from .network import checked_http_client, private_request_matches
+    from .pending_media import _download_claim
+    from .window import seal_protocol_content
+
+    prefix = "/internal/v2/content/" + event_id + "/image"
+
+    async def phase(state, receipt=None):
+        if progress is not None:
+            await progress(state, receipt)
+
+    async def post(path, body, headers=None, *, before=None):
+        expected = body if isinstance(body, bytes) else encode(body).encode()
+        headers = headers or {"Content-Type": "application/json"}
+
+        def validate(request):
+            if (request.method != "POST"
+                or not private_request_matches(request, runtime.config.core_url, path)
+                or request.headers.get("Authorization") != "Bearer " + runtime.config.bridge_token
+                or request.content != expected
+                or any(request.headers.get(key) != value for key, value in headers.items())):
+                raise ValueError("IMAGE_CORE_REQUEST_CHANGED")
+
+        async def boundary(request):
+            validate(request)
+            await runtime.check(client, purpose="image")
+            if before is not None:
+                await before()
+            validate(request)
+            runtime.verify()
+            seal_protocol_content(request, expected)
+
+        async with checked_http_client(client, boundary) as scoped:
+            async with scoped.stream("POST", path, content=expected, headers=headers,
+                                     timeout=30) as response:
+                response.raise_for_status()
+                result = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    result.extend(chunk)
+                    if len(result) > 65536:
+                        raise ValueError("INVALID_CORE_RECEIPT")
+        return decode(bytes(result), 65536)
+
+    await runtime.check(client, purpose="image")
+    source_url(image)
+    claim = resume_claim
+    if claim is None:
+        await phase("CLAIMING")
+        claim = await post(prefix + "/claim", {"request_key": f"image:{image.slot}",
+                                               "source_sha256": image.source_sha256})
+    _download_claim(claim, runtime, kind="IMAGE")
+    await phase("DOWNLOADING", claim)
+
+    async def check():
+        receipt = await post(prefix + "/check", {
+            "lease_token": claim["lease_token"], "source_sha256": image.source_sha256})
+        if receipt != {"approved": True, "lease_until": claim["lease_until"]}:
+            raise ValueError("IMAGE_DOWNLOAD_CHECK_REJECTED")
+        if receipt["approved"] is not True:
+            raise ValueError("IMAGE_DOWNLOAD_CHECK_REJECTED")
+        if datetime.fromisoformat(claim["lease_until"]) <= runtime.clock():
+            raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
+        runtime.verify()
+
+    data, mime = await fetch_image(image, claim["max_bytes"], check=check,
+                                   transport=transport, resolver=resolver)
+    await check()
+    proof = {"authority": runtime.authority, "event_id": event_id, "slot": image.slot,
+             "source_sha256": image.source_sha256, "lease_token": claim["lease_token"],
+             "media_sha256": hashlib.sha256(data).hexdigest(), "mime": mime}
+    proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+        runtime.config.capture_signing_key)).sign(image_upload_signing_payload(proof)).hex()
+    await phase("UPLOADING")
+    result = await post(prefix, data, {"Content-Type": mime,
+        "X-Content-Key": f"image:{image.slot}", "X-Content-Lease": claim["lease_token"],
+        "X-Content-Proof": encode(proof)}, before=check)
+    if (set(result) != {"state", "slot", "duplicate", "input_ready"}
+        or result["state"] not in {"STAGED", "SUCCEEDED"}
+        or type(result["slot"]) is not int or result["slot"] != image.slot
+        or type(result["duplicate"]) is not bool or result["input_ready"] is not True):
+        raise ValueError("IMAGE_UPLOAD_RECEIPT_REJECTED")
+    runtime.verify()
+    return result

@@ -66,7 +66,7 @@ async def window(core, tmp_path, *, media=False, content=False, history=False):
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
             headers={"Authorization": "Bearer " + config.bridge_token},
         ) as client:
-            yield client, config, plan
+            yield client, replace(config, core_url=f"http://127.0.0.1:{port}"), plan
 
 
 def native_spool(core, tmp_path, config, plan):

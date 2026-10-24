@@ -121,3 +121,15 @@ The Core/API/shared-codec and budget changes are delivered as narrow patches to 
 HTTP and independent SDK-process tests use only synthetic images and mocked provider transport.
 Native Bridge queue integration, nested attachment capture, file processing and both video
 capabilities have separate remaining acceptance work.
+
+`images.upload_original` now transfers originals using the native purpose check, original
+Content claim/check lease, and the shared v2 image signature. It reuses the bounded public-CDN
+fetcher and the existing final checked HTTP transport. Request hooks run before exact Core
+destination, header and byte checks; source and lease checks run again before upload dispatch.
+The [HTTPX transport API](https://www.python-httpx.org/advanced/transports/) supplies the
+existing transport composition and external MockTransport test seam. The caller retains
+CLAIMING/DOWNLOADING/UPLOADING transitions and must reconcile uncertain effects without replay.
+Three real HTTP plus independent SDK-worker cases cover PNG/GIF/APNG through this transfer;
+three additional cases cover STOP after DNS, changed upload proof, and lost upload receipt.
+The lost-receipt case retains the accepted original and reports failure to the queue owner.
+Durable queue wiring remains separate from this verified byte-transfer helper.

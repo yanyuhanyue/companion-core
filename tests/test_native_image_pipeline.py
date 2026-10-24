@@ -16,6 +16,8 @@ from companion import image_spool, owner_authority
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
 from companion_onebot_bridge.capture import prepare_owner_input
+from companion_onebot_bridge.images import OriginalImage, upload_original
+from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
 from tests.sdk_reader_fixture import Provider, answer, worker_for
 from tests.test_onebot_direct import raw_event
@@ -74,15 +76,36 @@ def test_native_upload_is_one_shot_and_sdk_consumes_original_bytes(core, tmp_pat
     async def scenario():
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             event, image = await admit_image(core, client, config, plan, tmp_path)
-            lease = await claim(client, event, image)
             job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (event["event_id"],))
             assert core.claim_job("wait-for-original", job_id=job["job_id"]) is None
             body = pixels(mime)
             url = "/internal/v2/content/" + event["event_id"] + "/image"
+            downloads, phases = [], []
+
+            async def download(request):
+                downloads.append(request)
+                return httpx.Response(200, content=body, headers={"content-type": mime})
+
+            async def resolve(host, port):
+                return ["8.8.8.8"]
+
+            async def progress(state, receipt):
+                phases.append(state)
+
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    result = await upload_original(runtime, transfer, event["event_id"],
+                        OriginalImage(**image), progress=progress,
+                        transport=httpx.MockTransport(download), resolver=resolve)
+                assert result["input_ready"]
+            finally:
+                spool.close()
+            assert len(downloads) == 1
+            assert phases == ["CLAIMING", "DOWNLOADING", "UPLOADING"]
+            row = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
+            lease = {"lease_token": row["lease_token"]}
             headers = upload_headers(plan, event, image, lease, body, mime)
-            response = await client.post(url, content=body, headers=headers)
-            assert response.status_code == 200, response.text
-            assert response.json()["input_ready"]
             captured = core.store.one("SELECT * FROM captured_images")
             duplicate = await client.post(url, content=body, headers=headers)
             assert duplicate.status_code == 200 and duplicate.json()["duplicate"]
@@ -122,6 +145,57 @@ def test_native_upload_is_one_shot_and_sdk_consumes_original_bytes(core, tmp_pat
             image_spool.cleanup(core.store, core.clock(), retain_completed=True)
             row = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
             assert image_spool.get(core.store, row, core.clock(), 100000)[0] == body
+    run(scenario())
+
+
+@pytest.mark.parametrize("boundary", ["dns_stop", "upload_header", "lost_receipt"])
+def test_native_bridge_transfer_fences_final_io(core, tmp_path, boundary):
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+            event, image = await admit_image(core, client, config, plan, tmp_path)
+            downloads, uploads, phases = [], [], []
+
+            async def resolve(host, port):
+                if boundary == "dns_stop":
+                    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                        operation_id="stop-during-image-dns", authority=plan.authority))
+                return ["8.8.8.8"]
+
+            async def download(request):
+                downloads.append(request)
+                return httpx.Response(200, content=pixels(), headers={"content-type": "image/png"})
+
+            async def request_hook(request):
+                if request.url.path.endswith("/image"):
+                    uploads.append(request.url.path)
+                    if boundary == "upload_header":
+                        request.headers["X-Content-Proof"] = "{}"
+
+            async def response_hook(response):
+                if response.request.url.path.endswith("/image") and boundary == "lost_receipt":
+                    raise httpx.ReadTimeout("synthetic lost receipt", request=response.request)
+
+            async def progress(state, receipt):
+                phases.append(state)
+
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    transfer.event_hooks["request"].append(request_hook)
+                    transfer.event_hooks["response"].append(response_hook)
+                    with pytest.raises((httpx.HTTPError, ValueError)):
+                        await upload_original(runtime, transfer, event["event_id"],
+                            OriginalImage(**image), progress=progress,
+                            transport=httpx.MockTransport(download), resolver=resolve)
+            finally:
+                spool.close()
+            assert len(downloads) == (0 if boundary == "dns_stop" else 1)
+            assert len(uploads) == (0 if boundary == "dns_stop" else 1)
+            assert phases == (["CLAIMING", "DOWNLOADING"] if boundary == "dns_stop" else
+                              ["CLAIMING", "DOWNLOADING", "UPLOADING"])
+            assert len(core.store.rows("SELECT * FROM captured_images")) == (
+                1 if boundary == "lost_receipt" else 0)
+            assert not core.store.rows("SELECT * FROM model_usage")
     run(scenario())
 
 
