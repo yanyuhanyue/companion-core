@@ -1,0 +1,66 @@
+# Cognition metadata projection
+
+`companion.cognition_api.register_cognition_routes(app, control_auth)` provides
+`POST /internal/v2/cognition`. The composition root must pass its existing owner
+control dependencies. STOP and disabled runtime features do not prevent an
+authenticated owner from inspecting metadata. Responses use `Cache-Control: no-store`.
+
+Request: `{"kind":"goal","limit":30,"before":null}`. Supported kinds are wake,
+life, goal, diary, reflection, nightly and model. Limits are 1–50. Pagination uses
+the native primary-key cursor with SQLite append order, not lexical UUID order.
+A missing cursor returns `COGNITION_CURSOR_UNAVAILABLE`; it does not silently
+restart. Pages bound scanned records, so privacy filtering can produce an empty
+page with a continuation. `truncated` means more native rows exist.
+
+The projection reads existing records and never creates a history ledger, runs a
+model, or recalculates a historical measurement. Source checks reuse
+`MemorySources` and `MemoryProjections`; custody and privacy versions are checked
+before and after reads. Invalid, expired or erased source chains are suppressed.
+Goal execution metadata reuses the existing source-backed completion and delivery
+projection. Native UNKNOWN and execution uncertainty remain visible.
+
+Free-form reasons, prompt bodies, topics, diary text, reflection suggestions,
+credentials, model endpoints and raw reasoning are excluded. Reason codes and
+states use explicit allowlists. Measurement exposes the recorded count kind and
+numeric input, reservation margin and output allowance. Missing measurements are
+`NOT_RECORDED`. This view does not attest that an unbound usage row has source
+evidence; it labels such evidence `NOT_RECORDED`.
+
+## Reused sources
+
+- DSH schedule `delivery-history.ts`, revision
+  `22ddee3792402c3e70ec5f86a63c3e3e895a2f60`: inspected the retained delivery-history
+  implementation supplied in the Social lane's pinned source snapshot. Reused
+  native identity pagination, append order, explicit unavailable history, and
+  reading saved receipts without reconstructing Session history.
+- [OpenClaw automation management](https://docs.openclaw.ai/automation/cron-jobs/managing-jobs):
+  reused the separation of automation state and persisted run-history inspection.
+- Existing repository `memory_projection_api.py`, `memory_context.py` and
+  `memory_projections.py`: reused owner route registration, source custody,
+  erasure/retention checks and actual execution-result semantics.
+
+## Integration handoff and limits
+
+The shared `companion/api.py` is owned by the integration lane. Add alongside the
+existing memory projection registration inside `create_app`:
+
+```python
+from companion.cognition_api import register_cognition_routes
+register_cognition_routes(app, control_auth)
+```
+
+The module test registers this route explicitly; it does **not** claim that the
+real application entry point already exposes it. Before acceptance, integration
+must test the registered `create_app` with its real control token, STOP state and
+an independent worker using mocked provider transport. No live acceptance was run.
+
+This is the initial native-record projection. Historical candidate alternatives
+are `NOT_RECORDED`; Life's free-form reason is `NOT_EXPOSED`. N1/N2/N3 and REM
+semantics require the final Life/Nightly schema rather than inventing mappings
+from the older coordinator's memory/diary/reflection/goals step names. Model usage
+is separately paginated; a full cross-kind execution graph and UI remain pending.
+
+Verification: `scripts/check.ps1 -TestFiles tests/test_cognition_read.py` passed
+12 cases, covering empty kinds without execution, native wake decisions and
+pagination, native goal provenance with an independent Core instance, erasure,
+privacy races, measurement filtering and the explicit module HTTP contract.
