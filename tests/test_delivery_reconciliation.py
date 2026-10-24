@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import companion_delivery_protocol as wire
-from companion import budget, cumulative, live_text, paid_budget
+from companion import budget, cumulative, live_text, owner_authority, paid_budget
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError, DeliveryResult
 from companion.model import ModelResponse
@@ -76,6 +76,9 @@ def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
     # admission, amount, model journal, settlement and cumulative implementation.
     with pytest.MonkeyPatch.context() as authority:
         authority.setattr(live_text, "reserve_model", lambda *args, **kwargs: None)
+        # Historical v1 fixture only: create its already-admitted liability without
+        # opening a new native grant or making any provider request.
+        authority.setattr(owner_authority, "admit_model", lambda *args, **kwargs: None)
         request_id = budget.reserve(core.store, core.settings, None, "chat",
             [{"role": "user", "content": "synthetic model input"}], core.clock())
     message_id, token = uid("msg"), uid("lease")
@@ -857,7 +860,15 @@ def test_shared_protocol_is_standard_library_only_and_rejects_extra_private_fiel
                if isinstance(node, ast.ImportFrom)}
     imports |= {alias.name.split(".")[0] for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.Import) for alias in node.names}
-    assert imports <= {"hashlib", "json", "re", "datetime"}
+    assert imports <= {"hashlib", "json", "re", "datetime", "companion_delivery_protocol"}
+    import companion_delivery_protocol.authority as authority_wire
+
+    authority_tree = ast.parse(Path(authority_wire.__file__).read_text("utf-8"))
+    authority_imports = {node.module.split(".")[0] for node in ast.walk(authority_tree)
+                        if isinstance(node, ast.ImportFrom)}
+    authority_imports |= {alias.name.split(".")[0] for node in ast.walk(authority_tree)
+                          if isinstance(node, ast.Import) for alias in node.names}
+    assert authority_imports <= {"re", "dataclasses", "datetime", "companion_delivery_protocol"}
     with pytest.raises(ValueError):
         wire.validate_quiescence({"private_body": "not a valid proof"})
 

@@ -277,7 +277,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     continue
                 if row.get("kind") == delivery_reconciliation.KIND:
                     delivery_reconciliation.validate_journal_record(
-                        store, row, digest, lifecycle, identity["value"],
+                        store, row, digest, lifecycle, identity["value"], authorities,
                     )
                     message_id = row["delivery"]["message_id"]
                     if message_id in resolutions:
@@ -409,7 +409,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             if record["kind"] == delivery_reconciliation.KIND:
                 delivery_reconciliation.validate_journal_record(
                     store, {k: v for k, v in row.items() if k != "sha256"}, row["sha256"],
-                    lifecycle, identity["value"],
+                    lifecycle, identity["value"], authorities,
                 )
             if not authority_record:
                 cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})

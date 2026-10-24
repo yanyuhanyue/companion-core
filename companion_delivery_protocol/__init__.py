@@ -96,16 +96,22 @@ def owner_operation(operation_id, operation_sha256):
 
 def validate_quiescence(value, *, signed=True):
     """Validate shape only; the Core verifies the frozen Bridge Ed25519 key."""
+    native = isinstance(value, dict) and value.get("version") == 2
     account = isinstance(value, dict) and value.get("action_type") in ACCOUNT_ACTIONS
     fields = ACCOUNT_PROOF_FIELDS if account else PROOF_FIELDS
+    if native:
+        from companion_delivery_protocol.authority import validate_authority_ref
+
+        fields = (fields - {"window_id", "plan_sha256"}) | {"authority"}
     voice = isinstance(value, dict) and "voice_check" in value
     if voice and not account:
         fields = fields | {"voice_check"}
     fields = fields if signed else fields - {"signature"}
     if (not isinstance(value, dict) or set(value) != fields
-        or value["kind"] != QUIESCENCE_KIND or type(value["version"]) is not int
-        or value["version"] != 1 or value["action_type"] not in ACTIONS
-        or not identifier(value["window_id"], r"win_[a-f0-9]{32}")
+        or value["kind"] != ("owner_delivery_quiescence_v2" if native else QUIESCENCE_KIND)
+        or type(value["version"]) is not int
+        or value["version"] != (2 if native else 1) or value["action_type"] not in ACTIONS
+        or not native and not identifier(value["window_id"], r"win_[a-f0-9]{32}")
         or not identifier(value["budget_journal_id"], r"budget_[a-f0-9]{32}")
         or not identifier(value["message_id"], r"msg_[a-f0-9]{32}")
         or not identifier(value["account_plan_id"] if account else value["event_id"],
@@ -121,6 +127,8 @@ def validate_quiescence(value, *, signed=True):
                for name in ("original_result_sha256", "content_sha256"))
         or (signed and not identifier(value["signature"], r"[a-f0-9]{128}"))):
         raise ValueError("DELIVERY_QUIESCENCE_INVALID")
+    if native:
+        validate_authority_ref(value["authority"])
     if (account != (value["payload_kind"] == "account_payload_sha256")
         or account and value["content_sha256"] is None
         or (value["action_type"] == "qq.private.poke")
@@ -157,6 +165,10 @@ def validate_voice_check(value, *, allow_legacy=False):
 def signing_payload(value):
     payload = {k: v for k, v in value.items() if k != "signature"}
     validate_quiescence(payload, signed=False)
+    if value.get("version") == 2:
+        from companion_delivery_protocol.authority import QUIESCENCE_DOMAIN as owner_domain
+
+        return owner_domain + canonical(payload)
     return QUIESCENCE_DOMAIN + canonical(payload)
 
 

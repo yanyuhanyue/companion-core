@@ -55,7 +55,7 @@ def _row(store, message_id):
 
 def _authority(store, message_id):
     values = [_meta(store, prefix + message_id) for prefix in (
-        "private_life_delivery:", "live_text_reply:", "account_action_delivery:",
+        "private_life_delivery:", "live_text_reply:", "account_action_delivery:", "owner_delivery:",
     )]
     present = [value for value in values if value is not None]
     if len(present) > 1:
@@ -109,6 +109,12 @@ def _frozen(store, proof):
 def _binding(store, proof, *, recorded=None):
     """Use retained authority hashes; erasure never requires reconstructing text."""
     wire.validate_quiescence(proof)
+    if proof["version"] == 2:
+        from companion import owner_delivery_reconciliation
+
+        row = _row(store, proof["message_id"])
+        return owner_delivery_reconciliation.binding(
+            store, proof, row, _authority(store, row["message_id"]), recorded)
     history = _frozen(store, proof)
     row = _row(store, proof["message_id"])
     authority = _authority(store, row["message_id"])
@@ -349,6 +355,17 @@ def _provider_receipt(row):
 def _input_hash(store, event, proof, account):
     if event["actor_id"] != "owner" or event["privacy_scope"] != "private":
         return None
+    if proof["version"] == 2:
+        original = _meta(store, "owner_input:" + event["event_id"])
+        if (not original or original.get("authority") != proof["authority"]
+            or original.get("event_id") != event["event_id"]
+            or not wire.hash_value(original.get("input_sha256"))):
+            return None
+        admitted = account["operations"].get("input:" + wire.digest(event["event_id"]))
+        if account["policy"] and (not admitted or admitted["state"] != "ADMITTED"
+            or admitted.get("source_sha256") != wire.digest(original.get("capture"))):
+            return None
+        return original["input_sha256"]
     original = _meta(store, "live_text_input:" + event["event_id"])
     poke = _meta(store, "poke_input:" + event["event_id"])
     if (original and original.get("window_sha256") == proof["plan_sha256"]
@@ -517,7 +534,8 @@ def fold_record(state, row):
             or row["prior_quota_state"] != prior["state"]
             or row["prior_liability_sha256"] != wire.digest(prior)
             or prior["source_sha256"] != row["source_sha256"]
-            or prior["window_id"] != row["quiescence"]["window_id"]
+            or row["quiescence"]["version"] == 1
+            and prior["window_id"] != row["quiescence"]["window_id"]
             or prior["logical_request_id"] != _logical_request(row["quiescence"])
             or cumulative.instant(row["at"]) != row["at"]
             or state["clock"] and row["at"] < state["clock"]):
@@ -532,10 +550,18 @@ def fold_record(state, row):
     state["send_resolutions"][message_id] = dict(row)
 
 
-def validate_journal_record(store, row, record_sha256, lifecycle, journal_id):
+def validate_journal_record(store, row, record_sha256, lifecycle, journal_id, authorities=()):
     _shape(row)
     proof = row["quiescence"]
-    if (row["journal_id"] != journal_id or not lifecycle or lifecycle["state"] != "STOPPED"
+    if proof["version"] == 2:
+        from companion import owner_delivery_reconciliation
+
+        if (row["journal_id"] != journal_id
+            or row["core_stop_sha256"] != proof["core_stop_record_sha256"]):
+            raise ValueError("original native journal required")
+        owner_delivery_reconciliation.stopped(
+            store, proof, authorities[-1] if authorities else None)
+    elif (row["journal_id"] != journal_id or not lifecycle or lifecycle["state"] != "STOPPED"
         or lifecycle["plan_sha256"] != proof["plan_sha256"]
         or lifecycle["window_id"] != proof["window_id"]
         or lifecycle["head_sha256"] != row["core_stop_sha256"]):
@@ -588,11 +614,16 @@ def _ready(store, custody, proof, now):
     view = paid_budget.journal(store, custody, allow_settlement=True, initialize=False)
     row, history, delivery = _binding(store, proof)
     lifecycle, account = view["lifecycle"], view["cumulative"]
-    if (not lifecycle or lifecycle["state"] != "STOPPED"
+    native = proof["version"] == 2
+    if native:
+        from companion import owner_delivery_reconciliation
+
+        owner_delivery_reconciliation.stopped(store, proof, view["owner_authority"], current=True)
+    if (not native and (not lifecycle or lifecycle["state"] != "STOPPED"
         or lifecycle["plan_sha256"] != proof["plan_sha256"]
         or lifecycle["window_id"] != proof["window_id"] or history["state"] != "STOPPED"
         or not store.one("SELECT 1 FROM runtime_meta WHERE key=? AND value='OWNER_STOP'",
-                         ("live_text_stopped:" + proof["plan_sha256"],))
+                         ("live_text_stopped:" + proof["plan_sha256"],)))
         or wire.timestamp(proof["quiesced_at"]) > wire.timestamp(now)
         or row["state"] not in {"SENDING", "DELIVERY_UNCERTAIN"}
         or row["state"] == "SENDING" and (
@@ -600,12 +631,13 @@ def _ready(store, custody, proof, now):
             or wire.timestamp(row["lease_until"]) > wire.timestamp(now))):
         raise CoreError("DELIVERY_RECONCILIATION_STOP_REQUIRED", 409)
     prior = account["operations"].get("send:" + wire.digest(proof["message_id"]))
-    frozen_policy = history["approval"].get("cumulative")
+    frozen_policy = None if native else history["approval"].get("cumulative")
     if account["policy"]:
-        if (not frozen_policy or wire.digest(frozen_policy) != account["policy_sha256"]
+        if (not native and (not frozen_policy
+                            or wire.digest(frozen_policy) != account["policy_sha256"])
             or not prior or prior["state"] not in {"RESERVED", "UNKNOWN", "DELIVERY_UNCERTAIN"}
             or prior["source_sha256"] != proof["send_check_sha256"]
-            or prior["window_id"] != proof["window_id"]
+            or not native and prior["window_id"] != proof["window_id"]
             or prior["logical_request_id"] != _logical_request(proof)):
             raise CoreError("DELIVERY_RECONCILIATION_ACCOUNT_CONFLICT", 409)
     elif frozen_policy or prior:
@@ -746,7 +778,8 @@ def resolve(store, settings, message_id, outcome, now, *, operation_id, operatio
                 "owner_operation_id": operation_id, "owner_operation_sha256": operation_sha256,
                 "outcome": outcome, "prior_liability_sha256": wire.digest(prior) if prior else None,
                 "prior_quota_state": prior["state"] if prior else None,
-                "core_stop_sha256": view["lifecycle"]["head_sha256"],
+                "core_stop_sha256": (view["owner_authority"]["record_sha256"]
+                    if proof["version"] == 2 else view["lifecycle"]["head_sha256"]),
                 "delivery": delivery, "quiescence": proof,
                 "input_closure": _input_closure(store, proof, delivery, outcome, account)}
             view = paid_budget.journal(store, custody, row, allow_settlement=True, initialize=False)
