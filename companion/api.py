@@ -637,6 +637,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
                 "expires_at": (view.policy.expires_at.isoformat()
                                if view.policy.expires_at else None)}
 
+    @app.post(prefix + "/owner-authority/inputs/state", dependencies=auth)
+    async def owner_input_state(body: OwnerCapture, response: Response):
+        from companion import owner_input_state
+
+        response.headers["Cache-Control"] = "no-store"
+        return owner_input_state.read(app.state.core.store, settings, body)
+
     @app.post(prefix + "/owner-authority/stop-receipt", dependencies=auth)
     async def owner_stop_receipt(body: AuthorityReference, response: Response):
         from companion import owner_stop_receipt
