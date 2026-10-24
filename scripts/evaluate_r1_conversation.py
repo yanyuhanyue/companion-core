@@ -5,7 +5,6 @@ are not model outputs. Real generation needs a separately authorized executor.
 """
 
 import argparse
-import copy
 import hashlib
 import itertools
 import json
@@ -25,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from companion import budget, paid_budget  # noqa: E402
 from companion.config import Settings  # noqa: E402
 from companion.contracts import Candidate, InboundEvent  # noqa: E402
+from companion.conversation_policy import PARTICIPATION_V1, apply_strategy  # noqa: E402
 from companion.core import Core  # noqa: E402
 from companion.model import model_payload  # noqa: E402
 from companion.reply_segments import SegmentedReplyConfig  # noqa: E402
@@ -33,14 +33,7 @@ from companion.transport import enqueue  # noqa: E402
 
 DATASET = ROOT / "tests/fixtures/r1_conversation_cases.json"
 NOW = "2026-10-24T06:30:00.000000+00:00"
-STRATEGY = """
-交流指导：先从上下文理解这句话是在分享、吐槽、讨论、求助还是收尾，再决定怎样参与；不必解释自己的判断。
-可以接住一个具体细节，表达有依据的观察、看法、联想或不同意见。普通分享不默认需要分析、建议、安慰总结或行动计划；明确求助时仍认真帮助。
-不必把对方每句话的含义全部展开。长短随内容，一句简短回应也可以完整；不为显得体贴而补写一段道理。
-问题只有在确实有助于当前交流时才问，不用末尾问句维持对话，也不把对方已说清的立场重新交还给对方定义。
-允许玩笑、转话题和自然收尾；尊重不想解释、不想被追问和希望安静的表达。不要把表达选择说成已执行的设置变更。
-观点来自当前材料与可靠记忆，不把观察写成亲历，不从称呼推导固定性格、关系职责、依恋或人类情感。没有证据时保留不确定。
-""".strip()
+STRATEGY = PARTICIPATION_V1
 
 
 def sha(value):
@@ -86,20 +79,6 @@ def private_case(path):
         "rubric": "Observe explanation, redundant questions, grounded views and truthfulness.",
     }}
 
-
-def apply_strategy(messages, strategy):
-    result = copy.deepcopy(messages)
-    if strategy == "baseline":
-        return result
-    if strategy != "participation_v1" or result[0]["role"] != "system":
-        raise ValueError("Unknown strategy or missing system instruction")
-    # A controlled change to instruction only, after native context selection.
-    # These existing Expression clauses otherwise conflict with brief responses.
-    text = result[0]["content"]
-    for clause in ("每次必须有完整文字回复。", "必须有完整文字回复。"):
-        text = text.replace(clause, "需要回应时，简短的文字回应也可以完整。")
-    result[0]["content"] = text + "\n" + STRATEGY
-    return result
 
 
 def _ingest(core, name, text, *, old_session=False):
@@ -242,7 +221,25 @@ def blind_export(plan, observations, output, seed=20261024):
     content = {key: value for key, value in plan.items() if key != "plan_sha256"}
     if sha(content) != plan["plan_sha256"]:
         raise ValueError("Plan changed after preparation")
+    if plan.get("schema_version") != 1:
+        raise ValueError("Unsupported experiment plan version")
     expected = {(r["case"], r["repetition"], r["strategy"]): r for r in plan["requests"]}
+    if not expected or len(expected) != len(plan["requests"]):
+        raise ValueError("Empty or duplicate planned requests")
+    pairs = {}
+    for (case, repeat, strategy), request in expected.items():
+        payload = request["payload"]
+        messages = payload.get("messages", [])
+        if (strategy not in {"baseline", "participation_v1"} or len(messages) < 2
+            or messages[0].get("role") != "system"
+            or sha(payload) != request["payload_sha256"]
+            or sha(messages[1:]) != request["shared_context_sha256"]):
+            raise ValueError("Planned payload or shared input mismatch")
+        pair = pairs.setdefault((case, repeat), {})
+        pair[strategy] = {**payload, "messages": messages[1:]}
+    if any(set(pair) != {"baseline", "participation_v1"}
+           or pair["baseline"] != pair["participation_v1"] for pair in pairs.values()):
+        raise ValueError("Comparison requires the same input and model parameters")
     results = {}
     for row in observations:
         key = (row["case"], row["repetition"], row["strategy"])

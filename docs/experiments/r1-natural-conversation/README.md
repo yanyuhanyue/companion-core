@@ -74,7 +74,7 @@ python scripts/evaluate_r1_conversation.py blind --plan .local/r1-private/pilot/
 不得将 3 次重复当作 3 个不同真人样本，或将模型自评当作主人反馈。
 
 在看到全部评分前不决定上线。新增事实/权限错误须先解决；自然度与交流意愿改善且刻意感
-不恶化才有理由讨论最小可独立关闭策略。结果混合则报告具体失败类别并重新登记实验，
+不恶化才有理由推荐启用候选策略。结果混合则报告具体失败类别并重新登记实验，
 不能只挑成功回复。生产策略、部署、主动交流与真实 QQ 验收仍分别待后续决定。
 
 ## 六次真实 pilot 的拟授权与执行方式
@@ -103,3 +103,49 @@ UNKNOWN、异常 usage、来源撤回、到期、预算拒绝或停止要求均�
 
 这段是可审阅的复用方案，不是已实现或已验证的真实执行器。mock 验证与授权材料齐备后
 才能安排真实调用；当前离线 PR 不引入新的预算、任务或发送机制。
+
+## P1 离线策略组件与反馈重置
+
+`companion/conversation_policy.py` 复用上述 `participation_v1` 原文及变换。
+`ConversationPolicyConfig` 默认 `OFF`，`SHADOW` 只产生可检查的选择，二者不改变模型输入。
+显式 `ENABLED` 才增加交流指导。稳定指导和本轮表达参考分别返回，由 Core 原有 prompt
+组装器处理；角色、事实、历史、当前输入、输出限额和原生分段规则保持原有职责。
+短确认和收尾倾向简短；明确求助认真处理；仍有效的 owner 反馈控制详细程度、分步和
+话题继续方式。它不推断隐藏意图、隐私或真实 AI 心理，不设固定人格、称呼和亲密话术，
+也不产生主动任务、工具授权或发送决定。
+
+运行集成需由 Core 在组装前调用 `prompt_parts`，并在原有来源校验中调用 `revalidate`。
+进入实际上下文的 Affect 快照也须独立重验，以拦截生成期间发生的重置或失效，不依赖策略启用。
+配置未提供时序列化保持原形；建议的 Settings 字段为可空 `conversation_policy`，默认
+省略。本组件没有模型客户端、数据库、计费或投递入口。当前模式与真实授权、实机可用性
+和主观自然度是不同维度。
+
+Affect 仍只有原来的四维明确反馈与 TTL。`AffectEngine.reset` 仅接受 owner，并要求稳定
+操作编号和原生 Ledger hook。重置以 `affect_reset` 记录持久化，使用空的事件/记忆删除
+集合；`owner_feedback_reset_at` 是可重建的单调截止时间。截止时间及之前的明确反馈
+不再进入 Affect 或派生的表达偏好，新反馈可重新生效。同一时刻的反馈保守地视为旧反馈。
+聊天原文、事实记忆、兴趣、目标、已接受承诺和费用不被删除；重置也不启用或暂停自主能力。
+重复请求和旧记录重放不能推进或倒退截止时间，旧备份通过相同 Ledger 恢复该屏障。
+原生 Ledger 的读入、重放与 apply 必须识别此目标并在通用删除分支之前处理；未接入时
+reset 返回 `AFFECT_RESET_NOT_INTEGRATED`，不会伪报成功。Core 的显式控制入口应使用
+`/重置互动`，沿用 owner/private 认证与既有命令范围，引用、近似文本或带参数文本不执行。
+
+36 个合成 case、v1 策略字节和 v1 计划格式保持原样。导出会重新校验计划 hash、每项
+payload hash、共同输入 hash，并检查同一对的历史、当前输入和模型参数完全一致。
+已有 JSON 计划不重写；v1 的估算仍按原合同解释，不补写成精确计量。若后续新计划要保存
+native `Measurement.receipt()`，须单独登记新版本及其来源字段，保留历史 v1 验证。
+
+实现核对：
+
+- [DSH system-prompt](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/system-prompt/src/index.ts)
+  的 blob `45442e3a234e7fe71c482f74196013f06fe51559` 将稳定 section、动态 context 与工具声明分开。
+  此处复用该职责划分，并继续使用本仓库原有组装器。
+- [KI-CO sessionStateService](https://github.com/Kisera001/KI-CO/blob/main/src/services/sessionStateService.ts)
+  的 blob `09cff0b7ff924703a45e44e39de77687777ededc` 提供可清除的有界短期状态卡；
+  本项目复用明确的短期边界，持久性由现有 Ledger 提供，不移植其人格配置或 localStorage。
+- [OhWhale AstrBot setup](https://github.com/chauko0423/ohwhale-deploy/blob/main/ohwhale/astrbot_setup.py)
+  的 blob `ad689fd6af3b521bd40239c215f994c38314daaf` 是部署配置与 persona 注入，未提供可复用的
+  对话反馈状态机。本项目继续复用自己的 Affect、Expression 和原生消息分段，没有引入固定人设。
+
+这些离线检查只能证明输入、状态与边界行为，不能证明自然度、幽默或陪伴体验已经改善。
+付费模型评价与真实 QQ 体验仍等待单独授权和真人验收。

@@ -67,17 +67,21 @@ def test_private_baseline_uses_sent_prefix_and_excludes_target_answer(tmp_path):
 
 def _plan():
     requests = [{"case": "case", "repetition": 0, "strategy": strategy,
-                 "payload_sha256": strategy, "payload": {"messages": [
+                 "payload": {"messages": [
                      {"role": "system", "content": "rule"}, {"role": "user", "content": "input"}]}}
                 for strategy in ("baseline", "participation_v1")]
-    plan = {"requests": requests}
+    for row in requests:
+        row["payload_sha256"] = experiment.sha(row["payload"])
+        row["shared_context_sha256"] = experiment.sha(row["payload"]["messages"][1:])
+    plan = {"schema_version": 1, "requests": requests}
     plan["plan_sha256"] = experiment.sha(plan)
     return plan
 
 
 def _observations():
     return [{"case": "case", "repetition": 0, "strategy": strategy,
-             "payload_sha256": strategy, "evidence_type": "MODEL_RESPONSE",
+             "payload_sha256": _plan()["requests"][0]["payload_sha256"],
+             "evidence_type": "MODEL_RESPONSE",
              "text": "Injected export-test text", "state": "SETTLED"}
             for strategy in ("baseline", "participation_v1")]
 
@@ -107,3 +111,26 @@ def test_blind_export_keeps_unknown_outcome_and_hides_strategy(tmp_path, monkeyp
     assert "UNKNOWN" in {ballot[0]["A_state"], ballot[0]["B_state"]}
     assert "strategy" not in json.dumps(ballot)
     assert (tmp_path / ".local/ballot/mapping.private.json").exists()
+
+
+@pytest.mark.parametrize("change", ["payload_hash", "input", "model", "duplicate", "version"])
+def test_rehashed_plan_requires_same_inputs_and_model(tmp_path, monkeypatch, change):
+    monkeypatch.setattr(experiment, "ROOT", tmp_path)
+    plan = _plan()
+    candidate = plan["requests"][1]
+    if change == "payload_hash":
+        candidate["payload_sha256"] = "incorrect"
+    elif change == "duplicate":
+        plan["requests"].append(copy.deepcopy(candidate))
+    elif change == "version":
+        plan["schema_version"] = 2
+    else:
+        if change == "input":
+            candidate["payload"]["messages"][-1]["content"] = "different input"
+        else:
+            candidate["payload"]["model"] = "different-model"
+        candidate["payload_sha256"] = experiment.sha(candidate["payload"])
+        candidate["shared_context_sha256"] = experiment.sha(candidate["payload"]["messages"][1:])
+    plan["plan_sha256"] = experiment.sha({k: v for k, v in plan.items() if k != "plan_sha256"})
+    with pytest.raises(ValueError):
+        experiment.blind_export(plan, _observations(), tmp_path / ".local/ballot")
