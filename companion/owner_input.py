@@ -140,6 +140,13 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
     event = store.one("SELECT e.*,c.scope,c.owner_actor_id FROM events e "
                       "JOIN conversations c USING(conversation_id) WHERE event_id=?", (event_id,))
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event_id,))
+    if history and receipt is None and store.one(
+        "SELECT 1 FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,)
+    ):
+        from companion import legacy_owner_input
+
+        return legacy_owner_input.source(store, settings, view, event_id, now,
+                                          allow_commands=allow_commands)
     try:
         value = json.loads(receipt["value"]) if receipt else {}
         body = json.loads(event["body_json"]) if event else {}
@@ -195,6 +202,10 @@ def history_sources(store, settings, clock, job):
                                        scope.max_turns):
         try:
             source(store, settings, view, item["event_id"], clock(), history=True)
+            if not store.one("SELECT 1 FROM runtime_meta WHERE key=?", (INPUT + item["event_id"],)):
+                from companion import legacy_owner_input
+
+                legacy_owner_input.validate_turn(store, settings, view, item, clock())
         except CoreError:
             continue
         result.append(item)
