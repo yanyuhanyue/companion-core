@@ -110,11 +110,11 @@ def test_http_acceptance_independent_worker_and_restart(core, tmp_path, monkeypa
         assert all(row["state"] == "SUCCEEDED" for row in core.store.rows("SELECT state FROM jobs"))
         assert not core.store.rows("SELECT * FROM episodes")
         chat_usage = core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid")
-        chat_count = {"only_media": 0, "mixed_media_caption": 2}.get(batch, 1)
+        # Each ordinary input has one settled model reply before extraction.
         assert chat_usage == [
             {"scenario": "chat", "state": "SETTLED"}
-            for _ in range(chat_count)
-        ]  # Empty image messages use the existing local reply without a model request.
+            for _ in payloads
+        ]
         # Secrets here are public synthetic fixtures, supplied to the local mock transport only.
         config = core.settings.model_dump(mode="json")
         config["model_key"] = core.settings.model_key.get_secret_value()
