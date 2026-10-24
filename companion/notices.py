@@ -183,7 +183,7 @@ def check_request(store, settings, request_id, now):
 
 
 def messages(store, settings, job, now, principles):
-    from companion.budget import token_upper_bound
+    from companion.token_measurement import measure_request
 
     data = validate(store, settings, job, now)
     if data is None:
@@ -192,7 +192,8 @@ def messages(store, settings, job, now, principles):
     result = [{"role": "system", "content": principles + "\n" + RULES},
               {"role": "user", "content": encode(payload)}]
     while (payload["text"]
-           and (excess := token_upper_bound(result) - settings.context_soft_tokens) > 0):
+           and (excess := measure_request(settings, result, "activity").reserved_input_tokens
+                - settings.context_soft_tokens) > 0):
         payload["text"] = payload["text"].encode("utf-8")[:-excess].decode("utf-8", errors="ignore")
         payload["excerpt_truncated"] = True
         result[-1]["content"] = encode(payload)

@@ -21,12 +21,16 @@ def sha(value):
 
 
 def snapshot(settings):
+    from companion.token_measurement import count_contract
+
     approval = settings.paid_model
     value = approval.model_dump(mode="json", exclude={"journal_path"})
     # Existing text-only journals bind the original bytes, not a new null field.
     if approval.image_input is None:
         value.pop("image_input")
     value["estimator"] = "utf8-third-v1"
+    if counting := count_contract(settings):
+        value["token_measurement"] = counting
     value["local_monthly_micro_usd"] = settings.monthly_limit_micro_usd
     value["scenario_daily_micro_usd"] = {
         "memory_extract": settings.memory_daily_micro_usd,
@@ -240,6 +244,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, {}
         corrections = {}
+        measurements = {}
         resolutions = {}
         heads = set()
         lifecycle, seen, managed = None, set(), False
@@ -286,6 +291,13 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     corrections[row["idempotency_key"]] = row
                 elif row["kind"] == "blocked":
                     blocked[row["request_id"]] = digest
+                if row["kind"] == "reserve" and "measurement" in row:
+                    proof = row["measurement"]
+                    if (set(proof) != {"version", "sha256"} or proof["version"] != 1
+                        or not re.fullmatch(r"[a-f0-9]{64}", proof["sha256"])
+                        or row["request_id"] in measurements):
+                        raise ValueError("measurement journal evidence")
+                    measurements[row["request_id"]] = proof["sha256"]
                 latest[row["request_id"]] = row
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
@@ -318,9 +330,26 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         ):
             raise ValueError("live window stopped or replaced")
         admissions = {row["request_id"]: row for row in store.rows(
-            "SELECT a.request_id,a.contract_sha256,a.io_started_at,m.billed_micro_usd,m.state "
+            "SELECT a.*,m.billed_micro_usd,m.state "
             "FROM model_admissions a LEFT JOIN model_usage m USING(request_id)"
         )}
+        for request_id, admission in admissions.items():
+            receipt = json.loads(admission.get("measurement_json", "{}"))
+            if not isinstance(receipt, dict):
+                raise ValueError("invalid measurement receipt")
+            expected = measurements.get(request_id)
+            if (record and record.get("kind") == "reserve"
+                and record.get("request_id") == request_id):
+                proof = record.get("measurement", {})
+                if proof and (set(proof) != {"version", "sha256"} or proof["version"] != 1):
+                    raise ValueError("invalid new measurement version")
+                expected = proof.get("sha256")
+            if receipt:
+                if (expected != sha(receipt) or receipt.get("version") != 1
+                    or receipt.get("payload_sha256") != admission["payload_sha256"]):
+                    raise ValueError("measurement custody mismatch")
+            elif expected is not None:
+                raise ValueError("measurement evidence removed")
         for request_id, row in latest.items():
             if record and request_id == record.get("request_id"):
                 continue

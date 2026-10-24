@@ -85,12 +85,21 @@ class _AdmissionTransport(httpx.AsyncBaseTransport):
         pass  # The caller owns the borrowed transport and its connection pool.
 
 
+def model_route(settings, scenario):
+    """The effective generation route shared by payload measurement and transport."""
+    video = (settings.paid_model.video_input
+             if scenario in {"content_video", "content_video_preview"}
+             and settings.paid_model else None)
+    return (video.provider, video.model, video.endpoint.rstrip("/")) if video else (
+        settings.provider, settings.model_name, settings.model_url.rstrip("/"))
+
+
 def model_payload(settings, messages, scenario):
     video = (settings.paid_model.video_input
              if scenario in {"content_video", "content_video_preview"}
              and settings.paid_model else None)
     payload = {
-        "model": video.model if video else settings.model_name,
+        "model": model_route(settings, scenario)[1],
         "messages": messages,
         "max_tokens": settings.output_tokens(scenario),
         "stream": False,
@@ -143,7 +152,7 @@ class ModelClient:
         video = (self.settings.paid_model.video_input
                  if scenario in {"content_video", "content_video_preview"}
                  and self.settings.paid_model else None)
-        endpoint = (video.endpoint if video else self.settings.model_url).rstrip("/")
+        endpoint = model_route(self.settings, scenario)[2]
         endpoint += "/chat/completions"
         key = self.settings.video_model_key if video else self.settings.model_key
         authorization = "Bearer " + key.get_secret_value()

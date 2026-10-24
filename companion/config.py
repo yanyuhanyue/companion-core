@@ -29,6 +29,7 @@ from companion.poke_protocol import PokePolicy
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.sources import ObservationSource
+from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
 from companion.video_input import VideoInputPolicy
 from companion.voice_config import VoiceConfig
@@ -371,6 +372,9 @@ class Settings(BaseModel):
     model_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-flash"
     provider: str = "deepseek"
+    token_measurement: TokenMeasurementConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     model_key: SecretStr = SecretStr("")
     video_model_key: SecretStr = Field(default=SecretStr(""), exclude_if=lambda value: not value)
     timeout_seconds: int = Field(default=45, ge=5, le=180)

@@ -10,12 +10,13 @@ import httpx
 from companion import cloud_budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
+from companion.token_measurement import byte_estimate, measure_request
 from companion.video_input import SCENARIOS as VIDEO_SCENARIOS
 
 
 def token_upper_bound(messages):
     # Conservative byte bound, not a tokenizer measurement; actual usage replaces it.
-    return sum(len(m["content"].encode("utf-8")) + 24 for m in messages) + 32
+    return byte_estimate(messages)
 
 
 def cost(settings, input_tokens, output_tokens, cached=0, *, scenario=None):
@@ -118,10 +119,8 @@ def reserve(
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-    estimated_input = (
-        paid_budget.estimate_input_tokens(approval, messages, scenario) if approval
-        else token_upper_bound(messages)
-    )
+    measurement = measure_request(settings, messages, scenario)
+    estimated_input = measurement.reserved_input_tokens
     output_tokens = settings.output_tokens(scenario)
     if approval:
         if estimated_input > approval.max_input_tokens:
@@ -311,6 +310,7 @@ def reserve(
                 contract_sha256=contract_hash,
                 payload_sha256=paid_budget.sha(model_payload(settings, messages, scenario)),
                 snapshot_json=encode(snapshot),
+                measurement_json=encode(measurement.receipt()),
                 reserved_micro_usd=estimate,
                 input_bound=estimated_input,  # Historical SQL column; this is a local estimate.
                 output_bound=output_tokens,
@@ -330,6 +330,8 @@ def reserve(
                     "request_id": request_id,
                     "minimum_micro_usd": estimate,
                     "contract_sha256": contract_hash,
+                    "measurement": {"version": 1, "sha256": paid_budget.sha(
+                        measurement.receipt())},
                     **({"quota": quota} if quota else {}),
                 },
             )
@@ -746,6 +748,19 @@ def _persist_accounting(
     cloud_budget.sync_reference(store, "model", admission["request_id"])
 
 
+def _check_measurement(settings, admission, messages, scenario):
+    measured = measure_request(settings, messages, scenario)
+    if measured.reserved_input_tokens != admission["input_bound"]:
+        raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
+    saved = json.loads(admission["measurement_json"])
+    if saved:
+        if saved != measured.receipt() or saved["payload_sha256"] != admission["payload_sha256"]:
+            raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
+    elif settings.token_measurement is not None:
+        # Empty migrated rows mean historical estimates; never upgrade their evidence.
+        raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
+
+
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
                    source_check=None):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
@@ -848,10 +863,9 @@ async def _dispatch(
         snapshot = paid_budget.snapshot(settings)
         if row["contract_sha256"] != paid_budget.sha(snapshot):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-        if paid_budget.estimate_input_tokens(approval, messages, scenario) != row["input_bound"]:
-            raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
         if row["payload_sha256"] != paid_budget.sha(model_payload(settings, messages, scenario)):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+        _check_measurement(settings, row, messages, scenario)
         if store.one(
             "SELECT 1 FROM runtime_meta WHERE key IN "
             "('model_budget_blocked','model_budget_restore_required')"
@@ -910,6 +924,7 @@ async def _dispatch(
                     or current["io_started_at"] != now
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
+                    or current["measurement_json"] != row["measurement_json"]
                     or (scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"} and (
                         current["scenario"] != scenario
                         or current["usage_job_id"] != row["usage_job_id"]
@@ -940,6 +955,7 @@ async def _dispatch(
                 model_payload(settings, messages, scenario),
             ):
                 raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+            _check_measurement(settings, current, messages, scenario)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
