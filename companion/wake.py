@@ -20,6 +20,8 @@ class WakePlanner:
         cfg, s, now = self.settings, self.store, self.clock()
         if not cfg.wake_enabled or not cfg.goals_enabled:
             return []
+        if cfg.life_loop.mode != "OFF" and cfg.life_loop.read_goals_enabled:
+            return []  # Life decisions select new self goals; accepted native steps still run.
         self.goals.expire_sources()
         local = datetime.fromisoformat(now).astimezone(ZoneInfo(cfg.timezone))
         slot = int(local.timestamp()) // (cfg.wake_min_interval_minutes * 60)

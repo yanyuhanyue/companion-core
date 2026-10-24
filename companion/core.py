@@ -1337,6 +1337,8 @@ class Core(Runtime):
                     self.store, self.settings, now
                 )
                 notice_parts = notices.parts(self.store, self.settings, job, reply, now)
+                if notices.shadow(job):
+                    self.life_topics.submit_goal(job, self.goals)
                 if notice_parts == []:
                     notices.record(self.store, self.settings, job, [], now)
                 if reply_is_current and (

@@ -45,6 +45,8 @@ async def life_worker(settings):
                     )
                     if pending:
                         worked = await core.run_once(worker_id, job_id=pending["job_id"])
+                        if worked and settings.life_loop.read_goals_enabled:
+                            core.exploration.schedule_goal()
                     if not worked:
                         worked = await core.consolidation.run_once(worker_id)
                     if (
