@@ -1292,7 +1292,7 @@ function numberInput({ id, key, type, value, nullable, lo, hi, onValue }) {
     } });
   return el("span", { class: "unit" + (u.pre ? " has-pre" : "") }, u.pre ? el("i", {}, u.pre) : null, input, u.unit ? el("em", {}, u.unit) : null);
 }
-function control(f) {
+function control(f, only) {
   const v = draftVal(f), id = "cf-" + f.key.replace(/[^a-z0-9_]/gi, "-");
   if (f.key === "expression_meme_categories") return categoryPicker(f, v || []);
   if (f.key === "web_reading_hosts") return hostPicker(f, v || []);
@@ -1313,7 +1313,7 @@ function control(f) {
     return on ? el("div", { class: "obj" }, sw, objectEditor(f, { ...SHOW_DEFAULTS[f.key], ...v }, [], true)) : sw;
   }
   if (f.type === "object" && v === null) return el("span", { class: "note" }, "未配置，在部署配置里设置");
-  if (["object", "array"].includes(f.type)) return state.jsonEdit?.has(f.key) || Array.isArray(v) ? jsonControl(f, id, v) : objectEditor(f, v, []);
+  if (["object", "array"].includes(f.type)) return state.jsonEdit?.has(f.key) || Array.isArray(v) ? jsonControl(f, id, v) : objectEditor(f, v, [], false, only);
   return el("input", { class: "input", id, "data-k": id, value: v ?? "", onchange: e => setDraft(f, e.target.value) });
 }
 function jsonControl(f, id, v) {
@@ -1325,9 +1325,9 @@ function jsonControl(f, id, v) {
   } });
 }
 /* 对象配置按子项显示：开关、数字、文字、名单，嵌套的设置组缩进显示 */
-function objectEditor(f, value, path, bare = false) {
+function objectEditor(f, value, path, bare = false, only = null) {
   const parent = path.length ? path.at(-1) : f.key;
-  const rows = Object.entries(value || {}).map(([k, v]) => {
+  const rows = Object.entries(value || {}).filter(([k]) => !only || path.length || only.includes(k)).map(([k, v]) => {
     const p = [...path, k], id = "cf-" + [f.key, ...p].join("-").replace(/[^a-z0-9_-]/gi, "-"), label = subLabel(k);
     const put = x => setDraft(f, setIn(draftVal(f), p, x));
     let ctl;
@@ -1395,13 +1395,13 @@ function listControl(id, list, onList) {
     el("button", { type: "button", class: "icon-btn", "aria-label": "移除 " + x, onclick: () => onList(list.filter((_, j) => j !== i)) }, icon("close")))) : el("li", { class: "none" }, "还是空的")),
     el("div", { class: "list-add" }, input, btn("添加", add, { cls: "sm" })), err);
 }
-function fieldRow(f, label) {
+function fieldRow(f, label, only) {
   const changed = state.draft.has(f.key), wide = ["object", "array"].includes(f.type);
   const active = f.active_value !== undefined && !same(f.value, f.active_value) && f.type !== "secret";
   return el("div", { class: "pf" + (wide ? " wide" : "") + (changed ? " changed" : ""), id: "pf-" + f.key },
     el("div", { class: "pf-l" }, el("b", {}, label || f.label), f.description ? el("span", {}, f.description) : null,
       active ? el("span", { class: "pf-active" }, "当前生效：" + fmtField(f, f.active_value)) : null),
-    el("div", { class: "pf-c" }, control(f), f.nullable && f.type !== "secret" && !NULL_DEFAULTS[f.key] && draftVal(f) !== null ? btn("设为未配置", () => setDraft(f, null), { cls: "sm quiet" }) : null),
+    el("div", { class: "pf-c" }, control(f, only), f.nullable && f.type !== "secret" && !NULL_DEFAULTS[f.key] && draftVal(f) !== null ? btn("设为未配置", () => setDraft(f, null), { cls: "sm quiet" }) : null),
     el("p", { class: "pf-err", role: "alert", hidden: true }));
 }
 function currencySwitch() {
@@ -1464,6 +1464,24 @@ function capMarks(id) {
     proposals ? el("span", { class: "pdot", title: proposals + " 条提议等你批准" }) : null,
     capFieldsOf(id).some(f => state.draft.has(f.key)) || state.autoDraft?.[id] ? el("span", { class: "ddot", title: "有没保存的修改" }) : null];
 }
+/* 多项能力共用一组设置时，每项只显示和自己相关的子项 */
+const PROFILE_LIMITS = ["profile_daily_limit", "profile_cooldown_seconds"];
+const CAP_SUB = {
+  "qq.profile.observe": { social_autonomy: ["enabled", "scope", "profile_baseline_seconds", "decision_interval_seconds", "model_daily_calls", "model_daily_micro_usd", "max_pending_plans", "plan_ttl_seconds"] },
+  "qq.account.signature": { social_autonomy: ["signature_enabled", "max_signature_chars", ...PROFILE_LIMITS] },
+  "qq.account.nickname": { social_autonomy: ["nickname_enabled", "max_nickname_chars", ...PROFILE_LIMITS] },
+  "qq.account.avatar": { social_autonomy: ["avatar_enabled", "max_asset_bytes", "max_asset_dimension", ...PROFILE_LIMITS] },
+  "qq.account.qzone_publish": { social_autonomy: ["qzone_enabled", "qzone_daily_limit", "qzone_cooldown_seconds", "max_publish_chars", "max_source_refs", "max_source_chars"] },
+  "qq.poke": { poke_policy: ["enabled", "mode", "coalesce_seconds", "cooldown_seconds", "daily_limit", "max_coalesced", "max_text_chars", "max_pending_seconds"] },
+  "qq.poke.native": { poke_policy: ["allow_native", "cooldown_seconds", "daily_limit"] },
+  "qq.voice.asr": { voice: ["asr", "job_ttl_seconds", "max_pending_jobs", "max_private_blob_bytes"] },
+  "qq.voice.tts": { voice: ["reply", "result_ttl_seconds", "max_pending_jobs"] },
+  "bilibili.video": { bili_video: ["enabled", "deadline_seconds", "max_concurrent", "max_context_chars", "sampling"] },
+  "model.understand_video": { bili_video: ["media"] },
+  "qq.images": { content: ["use_chat_model_for_vision", "max_images_per_event", "max_image_bytes", "max_daily_images", "max_daily_image_bytes", "image_daily_micro_usd", "vision"] },
+  "qq.animation": { content: ["use_chat_model_for_vision", "max_image_bytes", "max_daily_images", "max_daily_image_bytes"] },
+};
+const CAP_SUB_LABEL = { social_autonomy: "相关设置", poke_policy: "相关设置", voice: "相关设置", bili_video: "相关设置", content: "相关设置" };
 /* 每项能力的总开关：配置键，或对象配置里的子项路径。共用一个开关的能力会同时变化 */
 const CAP_SWITCH = {
   "memory.manage": "memory_enabled", "memory.recall": "memory_enabled", diary: "diary_enabled", consolidation: "consolidation_enabled",
@@ -1556,7 +1574,7 @@ function capDetail(c) {
     ["proactive", "diary", "consolidation"].includes(c.id) ? el("section", { class: "cd-sec" }, el("h3", {}, "作息时间"), scheduleStrip()) : null,
     autonomySection(c.id),
     el("section", { class: "cd-sec" }, el("h3", {}, "参数", el("span", {}, fields.length ? "保存为新版本后生效" : "")),
-      fields.length ? el("div", { class: "pf-list" }, fields.map(f => fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
+      fields.length ? el("div", { class: "pf-list" }, fields.map(f => CAP_SUB[c.id]?.[f.key] ? fieldRow(f, CAP_SUB_LABEL[f.key], CAP_SUB[c.id][f.key]) : fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
 }
 /* ================= 交给她决定 ================= */
 const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，你批准后才生效。"],
