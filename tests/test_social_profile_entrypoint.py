@@ -9,9 +9,11 @@ import sys
 import httpx
 from pydantic import SecretStr
 
+from companion.console_api import COOKIE
 from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
 from tests.test_onebot_capture import pinned_plan, real_core_http
+from tests.test_owner_console import ORIGIN, PASSWORD
 from tests.test_private_companion import companion_options
 from tests.test_social_autonomy import background
 
@@ -19,7 +21,10 @@ from tests.test_social_autonomy import background
 def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget(core, tmp_path):
     module, ref, _ = background(core, nickname_enabled=True, qzone_enabled=False,
                                 max_output_tokens=128)
-    memory_id = confirmed_profile_material(core)
+    memory_id = confirmed_profile_material(core, confirm=False)
+    core.settings.console.enabled = True
+    core.settings.console.public_origin = ORIGIN
+    core.settings.control_token = SecretStr(PASSWORD)
 
     async def scenario():
         options = companion_options(core)
@@ -37,6 +42,17 @@ def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget
                 opened = await api.post("/internal/v1/live-text/open",
                                         json={"window_sha256": window.sha256})
                 assert opened.status_code == 200, opened.text
+                session = await api.post("/v1/console/session", json={"password": PASSWORD},
+                                         headers={"Origin": ORIGIN})
+                assert session.status_code == 200, session.text
+                # The loopback server stands behind the configured HTTPS Console origin.
+                # Forward its Secure cookie explicitly, as a TLS terminator would.
+                owner_headers = {"Origin": ORIGIN, "X-CSRF-Token": session.json()["csrf_token"],
+                                 "Cookie": COOKIE + "=" + session.cookies[COOKIE],
+                                 "Idempotency-Key": "real-console-profile-confirm"}
+                confirmed = await api.post("/v1/console/memories/" + memory_id + "/decision",
+                                           json={"decision": "confirm"}, headers=owner_headers)
+                assert confirmed.status_code == 200, confirmed.text
                 baseline = await api.post("/internal/v1/account-actions/profile-baselines", json={
                     "window_sha256": window.sha256,
                     "authorization_sha256": module.config.authorization_sha256,
@@ -77,8 +93,12 @@ def test_real_api_independent_profile_worker_excludes_public_and_rechecks_forget
                 assert leased.status_code == 200, leased.text
                 item = leased.json()["items"][0]
                 assert item["action_type"] == "qq.profile.nickname"
-                with core.store.transaction():
-                    core.memory.decide(memory_id, "forget", core.clock())
+                forgotten = await api.post("/v1/console/memories/" + memory_id + "/decision",
+                                           json={"decision": "forget"}, headers={
+                                               **owner_headers,
+                                               "Idempotency-Key": "real-console-forget",
+                                           })
+                assert forgotten.status_code == 200, forgotten.text
                 denied = await api.post(
                     "/internal/v1/deliveries/" + item["message_id"] + "/begin-send",
                     json={"lease_token": item["lease_token"]},

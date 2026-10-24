@@ -388,6 +388,71 @@ class Memory:
             ),
         )
 
+    def decide_from_console(self, memory_id, decision, now, corrected=None, *, operation_id,
+                            origin, owner_check):
+        """Called only by the owner Console; receipt and native decision commit together."""
+        s = self.store
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            # Reuse the same session/control credential/CSRF/origin check inside the write
+            # transaction. The bridge-token memory API never calls this entry point.
+            owner_check()
+            if not self.settings.console.enabled or origin != self.settings.console.public_origin:
+                raise CoreError("CONSOLE_ORIGIN_REQUIRED", 403)
+            if decision != "correct" and corrected is not None:
+                raise CoreError("CORRECTION_NOT_APPLICABLE", 400)
+            request_hash = hashlib.sha256(encode([
+                "POST", "/v1/console/memories/" + memory_id + "/decision",
+                {"decision": decision, "corrected_content": corrected},
+            ]).encode()).hexdigest()
+            operation = s.one("SELECT * FROM console_operations WHERE request_id=?",
+                              (operation_id,))
+            if (not operation or operation["state"] != "STARTED"
+                or operation["request_sha256"] != request_hash):
+                raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
+            before = s.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+            if not before:
+                raise CoreError("MEMORY_NOT_FOUND", 404)
+            roots = {e["event_id"] for e in s.rows(
+                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (memory_id,),
+            )}
+            result = self.decide(memory_id, decision, now, corrected)
+            if decision == "forget":
+                return result
+            current = s.one("SELECT * FROM memories WHERE memory_id=?", (result["memory_id"],))
+            roots.update(e["event_id"] for e in s.rows(
+                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (result["memory_id"],),
+            ))
+            evidence = s.one("SELECT * FROM events WHERE event_id IN "
+                             "(SELECT value FROM json_each(?)) ORDER BY event_id LIMIT 1",
+                             (encode(sorted(roots)),))
+            if not evidence:
+                raise CoreError("MISSING_MEMORY_EVIDENCE", 409)
+            event_id = uid("evt")
+            body = {
+                "text": current["content"], "channel": "owner_console", "origin": origin,
+                "operation_id": operation_id, "request_sha256": request_hash,
+                "memory_id": memory_id, "result_memory_id": current["memory_id"],
+                "decision": decision,
+                "before_sha256": hashlib.sha256(encode(before).encode()).hexdigest(),
+                "after_sha256": hashlib.sha256(encode(current).encode()).hexdigest(),
+                "content_sha256": hashlib.sha256(current["content"].encode()).hexdigest(),
+                "source_event_ids": sorted(roots),
+            }
+            s.insert("events", event_id=event_id, schema_version=1, source="owner.decision",
+                     source_event_id="console-memory:" + operation_id,
+                     conversation_id=evidence["conversation_id"], actor_id="owner",
+                     event_type="memory.console_decided", occurred_at=now, ingested_at=now,
+                     privacy_scope="private", body_json=encode(body), trace_id=event_id,
+                     memory_processed=1)
+            s.insert("memory_evidence", memory_id=current["memory_id"], event_id=event_id,
+                     polarity=1, created_at=now)
+            for source_id in sorted(roots):
+                s.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
+            s.audit("memory.owner_decision", memory_id, event_id, now, decision=decision,
+                    source_event_id=event_id, channel="owner_console",
+                    receipt_sha256=hashlib.sha256(encode(body).encode()).hexdigest())
+            return result
+
     def decide(self, memory_id, decision, now, corrected=None, *, evidence_event_id=None):
         self.require_owner("owner")
         s = self.store

@@ -19,10 +19,11 @@ from companion.store import after, encode
 from companion.transport import cancel_proactive_work, reconcile_delivery
 
 COOKIE = "companion_owner_session"
-# These Memory.decide failures precede writes (and its transaction has rolled back).
+# These native Memory failures leave no committed change after its transaction rolls back.
 # Keep allowlists at each caller: a generic CoreError is not proof of no effect.
 MEMORY_REJECTIONS = frozenset({
     "MEMORY_NOT_FOUND", "MEMORY_NOT_ACTIVE", "CORRECTION_REQUIRED", "CREDENTIAL_MEMORY_DENIED",
+    "CORRECTION_NOT_APPLICABLE",
 })
 
 
@@ -120,7 +121,7 @@ def register_console_routes(app, settings):
         if not settings.control_token.get_secret_value():
             raise CoreError("CONSOLE_OWNER_CREDENTIAL_REQUIRED", 503)
 
-    async def owner(request: Request):
+    def check_owner(request: Request):
         enabled()
         core = app.state.core
         token = request.cookies.get(COOKIE, "")
@@ -134,6 +135,9 @@ def register_console_routes(app, settings):
             if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), row["csrf_token"]):
                 raise CoreError("CONSOLE_CSRF_REQUIRED", 403)
         return row
+
+    async def owner(request: Request):
+        return check_owner(request)
 
     @app.middleware("http")
     async def private_headers(request, call_next):
@@ -235,8 +239,11 @@ def register_console_routes(app, settings):
                               idempotency_key: str = Header(default="")):
         core = app.state.core
         return _operation(core, request, idempotency_key, body.model_dump(), lambda:
-            core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content),
-            rejected_errors=MEMORY_REJECTIONS)
+            core.memory.decide_from_console(
+                memory_id, body.decision, core.clock(), body.corrected_content,
+                operation_id=idempotency_key, origin=request.headers.get("origin", ""),
+                owner_check=lambda: check_owner(request),
+            ), rejected_errors=MEMORY_REJECTIONS)
 
     @app.get(prefix + "/life", dependencies=auth)
     async def life():

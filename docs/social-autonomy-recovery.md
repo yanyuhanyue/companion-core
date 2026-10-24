@@ -90,10 +90,15 @@ rejected instead of silently changing their meaning.
 
 `social_profile_sources` reuses native Memory source closure, pinned evidence and ledger custody.
 Eligible material is a current, conflict-free self fact/preference or owner preference, with a
-native `memory.owner_decision` audit matching the actual direct-owner QQ confirmation/correction
-command. A model-produced CONFIRMED flag or `user_confirmed` origin is insufficient. Older
-API/console decisions without an attributable command receipt are not admitted by this stricter
-consumer; the existing owner confirmation command supplies that evidence. Public/Reader or
+native `memory.owner_decision` audit matching either the actual direct-owner QQ command or a
+typed `memory.console_decided` event from the authenticated owner Console. Console confirms and
+corrections recheck the control credential, session, CSRF and Origin inside the native Memory
+transaction. The event binds the request, exact before/after memory hashes, content, decision,
+origin and original evidence roots; the matching audit and source dependencies commit with the
+memory change. It contains no session cookie, CSRF token or control credential. Idempotency uses
+the existing Console operation receipt. A model-produced CONFIRMED flag, `user_confirmed` origin
+or generic `console.operation` audit is insufficient. Historical Console decisions without this
+native receipt and ordinary bridge-token memory API decisions remain excluded. Public/Reader or
 granted-source ancestors, missing/erased evidence, invalid conversations and expired material
 fail closed, including when other valid evidence remains. No new approval queue or authority
 store is created.
@@ -118,4 +123,7 @@ and sensitive-memory restrictions.
 Synthetic checks cover automatically confirmed memories, real owner confirmation/correction,
 Reader-derived ancestry, missing and withdrawn evidence, forget during generation and before
 send, old public-profile plans, unchanged uncertain accounting, and a real HTTP profile-baseline
-API with an independent Core worker process and mocked provider transport.
+API with an independent Core worker process and mocked provider transport. The same real HTTP
+check confirms and forgets material through the owner Console. Dedicated checks cover Console
+authentication, credential rotation before the native transaction, receipt/version tampering,
+transaction rollback, idempotency, correction ancestry and ledger cancellation.
