@@ -60,6 +60,7 @@ REVISION_CHAIN = (
     "0036_social_plan_jobs",
     "0037_life_topics",
     "0038_life_goal_binding",
+    "0039_evaluation",
 )
 LEGACY_TABLES = (
     "principals",
@@ -331,9 +332,9 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0038_life_goal_binding"]
+    assert scripts.get_heads() == ["0039_evaluation"]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0038_life_goal_binding")
+    revisions, current = [], scripts.get_revision("0039_evaluation")
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
@@ -416,7 +417,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0038_life_goal_binding"}
+            {"version_num": "0039_evaluation"}
         ]
         voice_incarnation = restored.one(
             "SELECT * FROM runtime_meta WHERE key='voice_incarnation'"
