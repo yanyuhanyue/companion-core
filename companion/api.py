@@ -55,6 +55,7 @@ from companion.memory_control import (
 )
 from companion.model import ModelClient
 from companion.owner_authority_protocol import (
+    AuthorityReference,
     OwnerAuthorityCheck,
     OwnerCapture,
     OwnerRecall,
@@ -635,6 +636,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
                 "purpose": body.purpose,
                 "expires_at": (view.policy.expires_at.isoformat()
                                if view.policy.expires_at else None)}
+
+    @app.post(prefix + "/owner-authority/stop-receipt", dependencies=auth)
+    async def owner_stop_receipt(body: AuthorityReference, response: Response):
+        from companion import owner_stop_receipt
+
+        response.headers["Cache-Control"] = "no-store"
+        return owner_stop_receipt.read(app.state.core.store, settings, body.authority)
 
     @app.post(prefix + "/owner-authority/send-check", dependencies=auth)
     async def owner_send_check(body: OwnerSendCheck, response: Response):
