@@ -132,6 +132,10 @@ class OwnerCapture(AuthorityReference):
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
 
 
+class OwnerAuthorityCheck(AuthorityReference):
+    purpose: Purpose
+
+
 class OwnerSendCheck(AuthorityReference):
     event_id: str = Field(pattern=r"^[A-Za-z0-9_:-]{8,128}$")
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")

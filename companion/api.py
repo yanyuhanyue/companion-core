@@ -54,7 +54,12 @@ from companion.memory_control import (
     stopped_workers,
 )
 from companion.model import ModelClient
-from companion.owner_authority_protocol import OwnerCapture, OwnerRecall, OwnerSendCheck
+from companion.owner_authority_protocol import (
+    OwnerAuthorityCheck,
+    OwnerCapture,
+    OwnerRecall,
+    OwnerSendCheck,
+)
 from companion.poke_protocol import PokeCapture
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
@@ -613,6 +618,17 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         response.headers["Cache-Control"] = "no-store"
         return owner_input.approve(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/owner-authority/check", dependencies=auth)
+    async def owner_authority_check(body: OwnerAuthorityCheck, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        view = owner_authority.current(core.store, settings, core.clock,
+                                       authority=body.authority, purpose=body.purpose)
+        return {"approved": True, "authority": view.authority.as_dict(),
+                "purpose": body.purpose,
+                "expires_at": (view.policy.expires_at.isoformat()
+                               if view.policy.expires_at else None)}
 
     @app.post(prefix + "/owner-authority/send-check", dependencies=auth)
     async def owner_send_check(body: OwnerSendCheck, response: Response):

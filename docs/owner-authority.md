@@ -30,6 +30,11 @@ OwnerAuthority 保存主人的持久用途授权。付费策略继续使用原 B
 所有路径均位于 `/internal/v1`。授权 preview、activate/revisions、stop、status
 使用 owner control 凭据。Bridge 凭据不能创建或扩大授权。
 
+Bridge 可通过 `POST /owner-authority/check` 提交精确的 `authority` 和 `purpose`，
+查询该用途当前是否允许执行。成功响应包含 `approved=true`、原引用、原用途及可空的
+`expires_at`，并设置 `Cache-Control: no-store`。它不创建执行租约，也不消耗预算；
+STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送仍必须通过下面的有限租约检查。
+
 1. `POST /owner-authority/inputs/approve` 接收 `OwnerCapture`。
    字段为 `authority`、`kind=authenticated_onebot_ws`、`event_id`、`source_event_id`、
    `input_sha256`、`frame_sha256`、`evidence_sha256`、`identity_sha256`、`protocol_epoch`、

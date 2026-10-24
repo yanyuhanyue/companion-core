@@ -43,6 +43,8 @@ def event_cleanup(name, erase):
 def cleanup_contracts():
     # Lazy imports preserve the existing modules' privacy helper dependencies.
     from companion.affect import erase_affect
+    from companion.agent_images import erase_images
+    from companion.agent_persistence import erase_conversations
     from companion.bili_video import erase_bili_video
     from companion.consolidation import erase_consolidation
     from companion.content import erase_content
@@ -64,6 +66,8 @@ def cleanup_contracts():
     from companion.voice_jobs import erase_voice_jobs
 
     return (
+        event_cleanup("agent-conversations", erase_conversations),
+        event_cleanup("captured-images", erase_images),
         event_cleanup("owner_authority", erase_owner_authority),
         event_cleanup("owner_input", erase_owner_inputs),
         event_cleanup("observations", erase_observations),

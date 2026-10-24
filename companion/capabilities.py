@@ -646,6 +646,21 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
     names = {value for value in model_tools if isinstance(value, str)}
     names.update(value.get("function", {}).get("name") for value in model_tools
                  if isinstance(value, dict) and isinstance(value.get("function"), dict))
+    native_queries = {
+        "capability_status": True, "current_time": True, "diary_status": True,
+        "diary_list": cfg.diary_enabled, "diary_read": cfg.diary_enabled,
+        "memory_recall": cfg.memory_enabled, "memory_history": cfg.memory_enabled,
+        "goal_list": cfg.goals_enabled,
+        "reading_catalog": cfg.content_enabled and cfg.observation_enabled,
+        "read_content": cfg.content_enabled and cfg.observation_enabled,
+        "discover_content": cfg.exploration_enabled and cfg.observation_enabled,
+        "reading_status": cfg.content_enabled and cfg.observation_enabled,
+        "cancel_reading": cfg.content_enabled and cfg.observation_enabled,
+    }
+    for name in sorted(names & native_queries.keys()):
+        add("tool." + name, "已绑定本轮工具；具体结果以调用回执为准。", ("model_callable",),
+            enabled=native_queries[name], paused=model_blocks,
+            unavailable=[])
     add("qq.animation", "本次主人动图的完整动作分析由 content_vision 中的 understand_video 处理。",
         unavailable=video_errors + image_errors, paused=model_blocks)
     add("model.understand_video", "仅分析当前已捕获的主人动图；只在本轮实际提供工具时可调用。",

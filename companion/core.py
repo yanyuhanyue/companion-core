@@ -16,7 +16,6 @@ from companion import (
     notices,
     owner_authority,
     owner_delivery,
-    owner_exploration,
     owner_input,
     poke,
     private_life,
@@ -255,8 +254,6 @@ class Core(Runtime):
                     if not authority or "content" in authority.policy.purposes:
                         self.content.schedule(event.event_id)
                         self.content.followup(event.event_id)
-                    if not authority or "exploration" in authority.policy.purposes:
-                        owner_exploration.schedule(self, event.event_id)
                 if native_controls and command == "重置互动" and not arguments:
                     self.affect.reset(cfg.owner_qq_id, event.event_id, self.ledger)
                 if not authority or "affect" in authority.policy.purposes:
@@ -317,6 +314,10 @@ class Core(Runtime):
                 (job["job_id"],),
             )
             state = "QUEUED" if job["attempts"] < job["max_attempts"] else "FAILED"
+            from companion.agent_persistence import recoverable
+
+            if not recoverable(s, job["job_id"]):
+                state = "FAILED"
             s.execute(
                 "UPDATE jobs SET state=?,lease_token=NULL,last_error_code='WORKER_LEASE_EXPIRED',"
                 "updated_at=? WHERE job_id=?",
@@ -396,8 +397,6 @@ class Core(Runtime):
                         return None
                 if self.content.status(row["event_id"])["pending"]:
                     return None
-                if owner_exploration.pending(self, row["event_id"]):
-                    return None
             token = uid("lease")
             s.execute(
                 "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
@@ -470,7 +469,8 @@ class Core(Runtime):
         for snapshot in snapshots:
             try:
                 purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
-                           "voice": "voice"}.get(snapshot["kind"])
+                           "voice": "voice", "diary": "diary", "images": "image"}.get(
+                               snapshot["kind"], snapshot.get("purpose"))
                 if authority and purpose and purpose not in authority.policy.purposes:
                     raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
                 if snapshot["kind"] == "memory":
@@ -489,6 +489,16 @@ class Core(Runtime):
                         affect=self._affect_context(authority))
                 elif snapshot["kind"] == "voice":
                     self.voice.check_context(job, snapshot["proof"])
+                elif snapshot["kind"] == "diary":
+                    self.diary.revalidate_context(snapshot["proof"])
+                elif snapshot["kind"] == "sources":
+                    self.goals.validate_sources(snapshot["event_ids"])
+                elif snapshot["kind"] == "images":
+                    from companion import agent_images
+
+                    rows = agent_images.inputs(self.store, self.settings, self.clock, job)
+                    if [row["item_id"] for row, _, _ in rows] != snapshot["item_ids"]:
+                        raise CoreError("PRIVACY_CHANGED", 409)
             except CoreError as error:
                 if error.code == "PRIVACY_CHANGED":
                     # A now-invalid source cancels this response, not the companion window.
@@ -579,7 +589,7 @@ class Core(Runtime):
             items = items[:-1]
         return None
 
-    def context(self, job, memories=None, memory_paused=False, *, snapshots=None):
+    def context(self, job, memories=None, memory_paused=False, *, snapshots=None, model_tools=()):
         s, cfg = self.store, self.settings
         reply_revision.check_job(s, job)
         authority = self._owner_job_view(job)
@@ -608,7 +618,8 @@ class Core(Runtime):
             from companion.capabilities import snapshot as capability_snapshot
 
             capability_rules, capability_data = capability_prompt(
-                capability_snapshot(s, cfg, self.clock), compact=cfg.context_soft_tokens < 8000,
+                capability_snapshot(s, cfg, self.clock, model_tools=model_tools),
+                compact=cfg.context_soft_tokens < 8000,
             )
             rules += capability_rules
             dynamic_rules.append(capability_data)
@@ -633,10 +644,6 @@ class Core(Runtime):
         references = []
         reference_sources = []
         reference_proofs = []
-        browsing = owner_exploration.context(self, job["event_id"]) if (
-            permitted("exploration")) else None
-        if browsing:
-            reference_sources.append((browsing["message"], browsing["source_event_ids"]))
         bounded_text = private_life.strict(s, cfg)
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
         combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
@@ -781,8 +788,6 @@ class Core(Runtime):
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             add_rules(qq_rich.RULES)
         current_input = []
-        if browsing:
-            current_input.append(browsing["message"])
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         if cfg.voice.enabled and permitted("voice") and job["kind"] == "chat":
@@ -1283,6 +1288,7 @@ class Core(Runtime):
         )
         request_id = None
         context_snapshots = []
+        conversation_store = None
         try:
             reply_revision.check_job(self.store, job)
             authority = self._owner_job_view(job)
@@ -1315,7 +1321,15 @@ class Core(Runtime):
                 and before_command != captured_epoch
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)
-            if reply is None:
+            if reply is None and job["kind"] == "chat" and authority is not None:
+                from companion.agent_chat import reply as agent_reply
+
+                reply, conversation_store = await agent_reply(self, job, context_snapshots)
+                if reply is None:
+                    return True
+                reply = redact(reply, self.settings)
+                generated_reply = True
+            elif reply is None:
                 if self.settings.memory_enabled and notices.reference(job) is None:
                     hits, paused_memory = await self.recall_for_reply(job)
                     self._check_reply_epoch(job, captured_epoch)
@@ -1452,6 +1466,8 @@ class Core(Runtime):
                         live_text.record_replies(
                             self.store, self.settings, self.clock, job, message_ids,
                         )
+                if conversation_store is not None:
+                    conversation_store.complete()
                 self.store.execute(
                     "UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
                     "WHERE job_id=?",
