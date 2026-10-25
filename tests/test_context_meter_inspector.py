@@ -18,7 +18,6 @@ from companion.dialogue_history import fit_context
 from companion.model import ModelClient
 from companion.store import encode
 from tests.owner_model_fixtures import authorized_job
-from tests.support.native_consumer_entry import environment
 from tests.test_token_measurement import configure
 
 
@@ -247,6 +246,8 @@ def test_offline_long_dialogue_pressure_replays_full_tool_payloads_and_hard_refu
 
 
 def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_path):
+    from tests.support.native_consumer_entry import environment
+
     configure(core, tmp_path)
 
     async def exercise():
