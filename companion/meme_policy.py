@@ -89,12 +89,20 @@ def trusted_source(metadata, rules):
                 or acquired["source_files"]["license"]["body_sha256"] != rule.license_sha256
             ):
                 continue
-        elif (
-            metadata["asset_url"] != f"https://codeload.github.com/{rule.repo}/zip/{rule.revision}"
-            or acquired["archive_member"]
-            != rule.repo.split("/")[-1] + "-" + rule.revision + "/" + path
-        ):
-            continue
+        else:
+            archive = f"https://codeload.github.com/{rule.repo}/zip/{rule.revision}"
+            fetch = acquired["fetch"]
+            if (
+                metadata["asset_url"] != archive
+                or acquired["archive_member"]
+                != rule.repo.split("/")[-1] + "-" + rule.revision + "/" + path
+                or fetch["requested_url"] != archive
+                or fetch["final_url"] != archive
+                or len(fetch["hops"]) != 1
+                or fetch["hops"][0]["url"] != archive
+                or fetch["hops"][0]["status"] != 200
+            ):
+                continue
         return True
     return False
 
