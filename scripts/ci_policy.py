@@ -12,8 +12,8 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL_JOBS = ("test", "container", "browser-reader", "plugin-native")
-# Only these existing UI assets can omit Windows Python/package checks. New assets
-# and every Python file fail open to Windows; this is not an inferred import graph.
+# Only these existing UI assets can use console checks instead of backend suites.
+# New assets and every Python file fail open to full CI; no inferred import graph.
 STATIC_UI = {"companion/console_static/" + name for name in ("app.css", "app.js", "index.html")}
 # These existing backend-only files still run complete Ubuntu AND Windows suites,
 # but do not change the browser reader. Shared code, new tests and unknown paths
@@ -148,6 +148,8 @@ def windows_selection(profile, event_name, ref, files):
 
 
 def test_matrix(selection):
+    if not selection["product"] and selection["browser"]:
+        return {"include": [{"os": "ubuntu-latest", "shard": 0, "verify_shard": 0}]}
     platforms = ["ubuntu-latest"] + (["windows-latest"] if selection["product"] else [])
     return {"include": [{"os": platform, "shard": shard,
                          "verify_shard": int(platform == "windows-latest")}
@@ -166,6 +168,8 @@ def expected_results(profile, selection):
                **dict.fromkeys(FULL_JOBS, expected)}
     if profile == "selected" and not selection["browser"]:
         results["browser-reader"] = "skipped"
+    if profile == "selected" and not selection["product"]:
+        results.update(container="skipped", **{"plugin-native": "skipped"})
     return results
 
 

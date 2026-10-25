@@ -288,7 +288,10 @@ def test_workflow_preserves_complete_platform_coverage_and_fails_closed():
                     "uv build", "uv run python scripts/verify_package.py"):
         matches = [step for step in steps if step.get("run") == command]
         assert len(matches) == 1
-        assert matches[0]["if"] == "${{ matrix.shard == matrix.verify_shard }}"
+        condition = "${{ matrix.shard == matrix.verify_shard"
+        if command.endswith(("scripts/replay.py", "scripts/smoke.py")):
+            condition += " && fromJSON(needs.preflight.outputs.windows).product"
+        assert matches[0]["if"] == condition + " }}"
     assert not any("ruff" in step.get("run", "")
                    for step in jobs["browser-reader"]["steps"])
     assert set(workflow["on"]) == {"push", "pull_request", "merge_group", "workflow_dispatch"}

@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from scripts import ci_policy, ci_reuse
-from tests.test_ci_policy import ROOT, needs
+from tests.test_ci_policy import ROOT, commit, git, needs
 
 
 def selection(files, event="pull_request", ref="refs/pull/1/merge", profile="full"):
@@ -23,6 +23,7 @@ def selection(files, event="pull_request", ref="refs/pull/1/merge", profile="ful
     "companion_voice_node/state.py", "companion_onebot_bridge/voice_media.py",
     "source_reader/browser.py", "tests/test_source_browser.py", "tests/test_new_feature.py",
     "companion/new_backend.py", "unknown/new.txt", "docs/unknown.json", "companion/NEW.py",
+    "companion/console_api.py", "companion/console_cognition.py", "tsconfig.console.json",
 ])
 def test_shared_platform_browser_and_unknown_paths_keep_both_windows_checks(path):
     value = selection(["companion/console_static/app.css", path])
@@ -69,8 +70,26 @@ def test_allowlists_are_existing_files_and_do_not_hide_new_tests():
     assert not any(name.startswith("companion_voice_node/") for name in ci_policy.NON_BROWSER)
 
 
+def test_last_ui_commit_cannot_hide_backend_changes_earlier_in_the_pr(tmp_path):
+    git(tmp_path, "init", "-q")
+    static = tmp_path / "companion/console_static"
+    static.mkdir(parents=True)
+    (static / "app.js").write_text("initial\n")
+    backend = tmp_path / "companion/console_api.py"
+    backend.write_text("initial\n")
+    base = commit(tmp_path)
+    backend.write_text("changed\n")
+    commit(tmp_path)
+    (static / "app.js").write_text("changed\n")
+    head = commit(tmp_path)
+    event = {"pull_request": {"base": {"sha": base}, "head": {"sha": head}}}
+    files = ci_policy.changed_files("pull_request", event, tmp_path)
+    assert set(files) == {"companion/console_api.py", "companion/console_static/app.js"}
+    assert selection(files)["product"] and selection(files)["browser"]
+
+
 @pytest.mark.parametrize("event,files,profile,count,browser", [
-    ("pull_request", ["companion/console_static/app.css"], "selected", 4, True),
+    ("pull_request", ["companion/console_static/app.css"], "selected", 1, True),
     ("pull_request", ["companion/expression.py"], "selected", 8, False),
     ("pull_request", ["companion/new.py"], "full", 8, True),
     ("pull_request", ["uv.lock"], "full", 8, True),
@@ -110,11 +129,14 @@ def test_matrix_and_gate_cover_every_selected_shard_and_required_job(product, br
     matrix = ci_policy.test_matrix(value)["include"]
     expected_platforms = ["ubuntu-latest"] + (["windows-latest"] if product else [])
     assert {(row["os"], row["shard"]) for row in matrix} == {
-        (platform, shard) for platform in expected_platforms for shard in range(4)}
+        (platform, shard) for platform in expected_platforms
+        for shard in range(4 if product else 1)}
     assert sum(row["shard"] == row["verify_shard"] for row in matrix) == len(expected_platforms)
     profile = "full" if product and browser else "selected"
     results = needs("full")
     results["browser-reader"]["result"] = "success" if browser else "skipped"
+    if not product:
+        results["container"]["result"] = results["plugin-native"]["result"] = "skipped"
     assert ci_policy.check_results(profile, results, value)
     for job in ("preflight", "quality", *ci_policy.FULL_JOBS):
         original = results[job]["result"]
@@ -126,6 +148,45 @@ def test_matrix_and_gate_cover_every_selected_shard_and_required_job(product, br
         results["browser-reader"]["result"] = "success"
         assert not ci_policy.check_results(profile, results, value)
     assert not ci_policy.check_results("full", results, {**value, "product": False})
+
+
+def test_static_ui_workflow_requires_console_types_browser_contracts_and_packaging():
+    jobs = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(),
+                     Loader=yaml.BaseLoader)["jobs"]
+    product = "${{ fromJSON(needs.preflight.outputs.windows).product }}"
+    console = "${{ !fromJSON(needs.preflight.outputs.windows).product }}"
+    types = next(step for step in jobs["quality"]["steps"]
+                 if "tsc -p tsconfig.console.json" in step.get("run", ""))
+    assert "needs.preflight.outputs.profile == 'selected'" in types["if"]
+    tests = jobs["test"]["steps"]
+    full = next(step for step in tests if "-p scripts.ci_shards" in step.get("run", ""))
+    assert full["if"] == product
+    ui = next(step for step in tests if step.get("if") == console)
+    assert "-p scripts.ci_shards" not in ui["run"]
+    for name in ("test_console_static.py", "test_owner_console.py", "test_console_cognition.py"):
+        assert "tests/" + name in ui["run"] and (ROOT / "tests" / name).is_file()
+    for command in ("uv build", "uv run python scripts/verify_package.py"):
+        step = next(step for step in tests if step.get("run") == command)
+        assert step["if"] == "${{ matrix.shard == matrix.verify_shard }}"
+    browsers = [step for step in jobs["browser-reader"]["steps"]
+                if "pytest" in step.get("run", "")]
+    assert len(browsers) == 2
+    scoped = next(step for step in browsers if step["if"] == console)
+    assert "tests/test_console_browser.py" in scoped["run"]
+    assert "test_source_browser.py" not in scoped["run"]
+    assert next(step for step in browsers if step is not scoped)["if"] == product
+    for name in ("container", "plugin-native"):
+        assert "&& fromJSON(needs.preflight.outputs.windows).product" in jobs[name]["if"]
+
+
+@pytest.mark.parametrize("job", ["preflight", "quality", "test", "browser-reader"])
+def test_ui_selection_cannot_pass_if_any_console_validation_is_skipped(job):
+    value = selection(["companion/console_static/app.js"])
+    results = needs("full")
+    results["container"]["result"] = results["plugin-native"]["result"] = "skipped"
+    assert ci_policy.check_results("selected", results, value)
+    results[job]["result"] = "skipped"
+    assert not ci_policy.check_results("selected", results, value)
 
 
 @pytest.mark.parametrize("profile,raw", [("full", ""), ("full", "null"), ("", "")])
@@ -142,10 +203,17 @@ def test_failed_preflight_still_writes_machine_result(tmp_path, monkeypatch, pro
     assert record["passed"] is False and record["checks"]["quality"] == "missing"
 
 
-def test_selected_receipt_records_skips_and_cannot_mint_full_reuse(tmp_path, monkeypatch):
-    value = selection(["companion/expression.py"])
+@pytest.mark.parametrize("path,reason,skips", [
+    ("companion/expression.py", "known-backend-only", ["browser-reader"]),
+    ("companion/console_static/app.js", "known-static-ui-only", ["container", "plugin-native"]),
+])
+def test_selected_receipt_records_skips_and_cannot_mint_full_reuse(
+    tmp_path, monkeypatch, path, reason, skips,
+):
+    value = selection([path])
     results = needs("full")
-    results["browser-reader"]["result"] = "skipped"
+    for job in skips:
+        results[job]["result"] = "skipped"
     monkeypatch.setattr(ci_policy, "ROOT", tmp_path)
     monkeypatch.setattr(ci_policy.subprocess, "check_output", lambda *a, **k: "a\nb\n")
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
@@ -155,8 +223,9 @@ def test_selected_receipt_records_skips_and_cannot_mint_full_reuse(tmp_path, mon
     monkeypatch.setattr(sys, "argv", ["ci_policy.py", "gate", "--profile", "selected"])
     ci_policy.main()
     record = json.loads((tmp_path / ".local/ci/validation.json").read_text())
-    assert record["passed"] and record["windows"]["reason"] == "known-backend-only"
-    assert record["checks"]["browser-reader"] == record["expected"]["browser-reader"] == "skipped"
+    assert record["passed"] and record["windows"]["reason"] == reason
+    for job in skips:
+        assert record["checks"][job] == record["expected"][job] == "skipped"
     monkeypatch.setattr(ci_reuse, "checkout", lambda: {"commit": "a", "tree": "b"})
     monkeypatch.setenv("GITHUB_SHA", "a")
     for profile in ("selected", "full"):
