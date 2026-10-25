@@ -17,6 +17,7 @@
     "tests/test_bili_video_entrypoint.py": 16.453,
     "tests/test_bilibili_discussion.py": 1.378,
     "tests/test_bilibili_short_cards.py": 1.609,
+    "tests/test_bridge_owner_no_io.py": 13.53,
     "tests/test_bridge_stop_recovery.py": 3.873,
     "tests/test_budget_completion.py": 0.289,
     "tests/test_cancelled_input_reconciliation.py": 3.32,
@@ -55,6 +56,7 @@
     "tests/test_file_evidence.py": 0.022,
     "tests/test_file_parser.py": 4.011,
     "tests/test_file_parser_host.py": 2.613,
+    "tests/test_file_voice_download_recovery.py": 24.202,
     "tests/test_goals.py": 0.697,
     "tests/test_growth_foundations.py": 1.228,
     "tests/test_handoff_recall_recovery.py": 6.158,
@@ -105,6 +107,9 @@
     "tests/test_memory_workflows.py": 3.71,
     "tests/test_model_request_boundary.py": 0.401,
     "tests/test_model_response_accounting.py": 0.341,
+    "tests/test_native_image_bursts.py": 95.46,
+    "tests/test_native_image_download_expiry.py": 9.624,
+    "tests/test_native_mixed_message_bursts.py": 44.753,
     "tests/test_natural_chat.py": 3.39,
     "tests/test_next_life_api.py": 4.901,
     "tests/test_next_life_diary.py": 0.52,
@@ -168,6 +173,7 @@
     "tests/test_ops_observe.py": 6.459,
     "tests/test_ops_status.py": 0.598,
     "tests/test_owner_console.py": 5.716,
+    "tests/test_owner_delivery_no_io.py": 3.17,
     "tests/test_owner_exploration.py": 5.801,
     "tests/test_owner_recall_bridge.py": 3.387,
     "tests/test_owner_recall_bridge_media.py": 28.228,
@@ -271,5 +277,8 @@
     "tests/test_window_schema_preparation.py": 0.307,
     "tests/test_worker_composition.py": 4.134,
     "tests/test_worker_loop_observation.py": 1.139
-  }
+  },
+  "additional_source_runs": [
+    "https://github.com/yanyuhanyue/companion-core/actions/runs/40190857053"
+  ]
 }

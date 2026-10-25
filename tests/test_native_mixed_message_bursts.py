@@ -6,6 +6,8 @@ import json
 import httpx
 import pytest
 
+from companion import api
+from companion.core import Core
 from companion_onebot_bridge import pending_media
 from tests.conftest import run
 from tests.native_continuous_support import frame, host
@@ -21,8 +23,12 @@ from tests.test_qq_rich_input import card
 
 @pytest.mark.parametrize("layout", ["same_message", "card_image_text", "image_card_text"])
 def test_card_image_and_question_keep_all_sources_through_independent_workers(
-    core, tmp_path, layout,
+    core, tmp_path, monkeypatch, layout,
 ):
+    # The HTTP reader result and child SDK worker must use the same fixture clock;
+    # wall-clock completion can otherwise schedule the resume ahead of the child.
+    monkeypatch.setattr(api, "Core", lambda *args, **kwargs: Core(
+        *args, clock=core.clock, **kwargs))
     text = {"type": "text", "data": {"text": "结合文章和这张图回答我的问题"}}
     attachment = image_segment("https://gchat.qpic.cn/mixed-original")
     shared = card(url=URL)
