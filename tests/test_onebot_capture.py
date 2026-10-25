@@ -176,7 +176,10 @@ async def real_core_http(core):
     api.state.core = core
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
-    server = Server(uvicorn.Config(api, lifespan="off", log_config=None, access_log=False))
+    # Native children have a 30s deadline. Keep server idle expiry beyond the
+    # client's 5s pool expiry to avoid Windows timer/connection-close races.
+    server = Server(uvicorn.Config(api, lifespan="off", log_config=None, access_log=False,
+                                   timeout_keep_alive=60))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         await asyncio.wait_for(ready.wait(), 5)
