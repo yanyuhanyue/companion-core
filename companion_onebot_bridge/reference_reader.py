@@ -394,7 +394,19 @@ def captured_media(event, message, references=()):
     from .images import original_images
 
     shared = event["payload"].get("shared_content", [])
-    images = original_images(message) if any(item["kind"] == "image" for item in shared) else []
+    images = []
+    for projection in (event["payload"].get("rich") or {}).get("segments", []):
+        if projection["type"] not in {"image", "face"} or projection["coverage"] != "UNREAD":
+            continue
+        index = projection["index"]
+        if (not isinstance(message, list) or type(index) is not int
+            or not 0 <= index < len(message)):
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        original = replace(original_images([message[index]])[0], index=index,
+                           slot=projection["slot"])
+        if original.projection() != projection:
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        images.append(original)
     files = original_files(message) if any(item["kind"] == "file" for item in shared) else []
     projections = {tuple(item["path"]): item
                    for item in media_segments(event["payload"].get("rich"))
@@ -425,6 +437,10 @@ def captured_media(event, message, references=()):
         target.append(original)
         seen.add(path)
     if seen != set(projections):
+        raise ValueError("CAPTURE_MEDIA_CHANGED")
+    if [{"kind": "image", "slot": image.slot} for image in images] != [
+        item for item in shared if item["kind"] == "image"
+    ]:
         raise ValueError("CAPTURE_MEDIA_CHANGED")
     return images, files
 
