@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "0034_capability_delegation"
-down_revision = "0033_model_usage_job_index"
+revision = "0046_capability_delegation"
+down_revision = "0045_goal_read_plan"
 branch_labels = None
 depends_on = None
 
