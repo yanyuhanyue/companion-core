@@ -6,47 +6,33 @@ import os
 import sys
 from pathlib import Path
 
-import httpx
 import pytest
 
+from companion.contracts import Candidate
 from companion.store import encode
-from tests.conftest import event, run
-from tests.test_memory_commands import fact
-from tests.test_onebot_capture import real_core_http
-from tests.test_paid_model_gate import approved_live
+from tests.conftest import run
+from tests.support.native_consumer_entry import environment
 
 
 @pytest.mark.parametrize("withdraw", [False, True])
 def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, withdraw):
-    mid = fact(core, 1, "青禾项目使用蓝色配色")
-    approved_live(core, tmp_path)
-    config = core.settings.model_dump(mode="json")
-    # Public synthetic fixture credentials, never production settings.
-    config.update(
-        model_key=core.settings.model_key.get_secret_value(),
-        bridge_token=core.settings.bridge_token.get_secret_value(),
-    )
     settings_path = tmp_path / "worker-settings.json"
-    settings_path.write_text(encode(config), encoding="utf-8")
     workspace = Path(__file__).resolve().parents[1]
 
     async def scenario():
-        async with (
-            real_core_http(core) as port,
-            httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}",
-                trust_env=False,
-                headers={
-                    "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()
-                },
-            ) as client,
-        ):
-            accepted = await client.post(
-                "/internal/v1/inbox/events",
-                json=event(core, 2, "青禾项目使用什么配色").model_dump(mode="json"),
-                headers={"X-Idempotency-Key": "separate-process-memory-input"},
-            )
-            assert accepted.status_code == 202, accepted.text
+        async with environment(core, tmp_path, purposes=("chat", "memory")) as (entry, _):
+            client = entry.client
+            source = await entry.admit(1, "青禾项目使用蓝色配色")
+            with core.store.transaction():
+                mid = core.memory.add(Candidate(subject="project", kind="fact", fact_key="color",
+                    content=source["payload"]["text"], evidence_event_id=source["event_id"],
+                    evidence_quote=source["payload"]["text"]), core.clock(), confirmed=True)
+            question = await entry.admit(2, "青禾项目使用什么配色")
+            config = core.settings.model_dump(mode="json")
+            # Public synthetic fixture credentials, never production settings.
+            for name in ("model_key", "bridge_token", "control_token"):
+                config[name] = getattr(core.settings, name).get_secret_value()
+            await asyncio.to_thread(settings_path.write_text, encode(config), encoding="utf-8")
             script = (
                 "import sys; from tests.support.memory_process import run_worker; "
                 "run_worker(sys.argv[1], sys.argv[2])"
@@ -66,12 +52,15 @@ def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, w
             )
             try:
                 while True:
-                    line = await asyncio.wait_for(child.stdout.readline(), 20)
+                    # Allow cold SDK/model initialization; HTTP liveness is checked after readiness.
+                    line = await asyncio.wait_for(child.stdout.readline(), 60)
                     assert line, (await child.stderr.read()).decode("utf-8", errors="replace")
                     message = json.loads(line)
+                    assert message.get("phase") != "worker_result", message
                     if message.get("phase") == "inference_wait":
                         break
                 worker_pid = message["pid"]
+                assert message["inference_thread"] != message["owner_thread"], message
                 assert worker_pid != os.getpid() and child.pid != os.getpid()
                 # Windows venv python.exe redirects to a second native Python process.
                 assert child.pid in {worker_pid, message["parent_pid"]}
@@ -96,23 +85,26 @@ def test_tcp_input_independent_worker_process_and_source_fence(core, tmp_path, w
                     child.kill()
                     await child.communicate()
             job = core.store.one(
-                "SELECT state,last_error_code FROM jobs WHERE event_id='evt_test_2'"
+                "SELECT state,last_error_code FROM jobs WHERE event_id=?", (question["event_id"],),
             )
             if withdraw:
-                assert result["calls"] == []
+                assert result["calls"] == ["chat"]
                 assert job == {"state": "CANCELLED", "last_error_code": "REPLY_CANCELLED"}
-                assert not core.store.rows("SELECT * FROM model_usage")
+                assert core.store.one("SELECT scenario,state FROM model_usage") == {
+                    "scenario": "chat", "state": "SETTLED"}
+                assert core.store.one("SELECT billed_micro_usd FROM model_usage")[
+                    "billed_micro_usd"] > 0
                 assert not core.store.rows("SELECT * FROM memory_vectors")
                 assert not core.store.rows("SELECT * FROM outbox")
             else:
-                assert result["calls"] == ["memory_review", "chat"]
+                assert result["calls"] == ["chat", "chat"]
                 assert job["state"] == "SUCCEEDED"
                 usage = core.store.rows("SELECT scenario,state,billed_micro_usd FROM model_usage")
-                assert [row["scenario"] for row in usage] == ["memory_review", "chat"]
+                assert [row["scenario"] for row in usage] == ["chat", "chat"]
                 assert all(
                     row["state"] == "SETTLED" and row["billed_micro_usd"] > 0 for row in usage
                 )
                 queued = core.store.rows("SELECT origin_event_id,state FROM outbox")
-                assert queued == [{"origin_event_id": "evt_test_2", "state": "PENDING"}]
+                assert queued == [{"origin_event_id": question["event_id"], "state": "PENDING"}]
 
     run(scenario())

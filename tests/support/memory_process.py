@@ -7,6 +7,7 @@ import sys
 import threading
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 
@@ -14,9 +15,9 @@ from companion import __main__ as entrypoint
 from companion import core as core_module
 from companion.config import Settings
 from companion.core import Core
-from companion.model import RECALL_RULES
 from companion.retrieval import SemanticIndex
 from companion.store import Store
+from tests.sdk_reader_fixture import answer, call
 
 
 def run_worker(settings_path, now):
@@ -29,7 +30,7 @@ def run_worker(settings_path, now):
         SemanticIndex._infer,
     )
 
-    class Finished(Exception):
+    class Finished(BaseException):
         pass
 
     def guard(method):
@@ -46,11 +47,12 @@ def run_worker(settings_path, now):
 
     def infer(self, query, contents):
         inference_threads.append(threading.get_ident())
-        assert threading.get_ident() != owner_thread
         assert isinstance(query, str) and isinstance(contents, tuple)
         assert all(isinstance(text, str) for text in contents)
         print(json.dumps({"phase": "inference_wait", "pid": os.getpid(),
-                          "parent_pid": os.getppid()}), flush=True)
+                          "parent_pid": os.getppid(), "inference_thread": threading.get_ident(),
+                          "owner_thread": owner_thread}), flush=True)
+        assert threading.get_ident() != owner_thread
         assert sys.stdin.readline().strip() == "continue"
         # Run the actual cached local encoder. Only the timing gate is synthetic.
         return original_infer(self, query, contents)
@@ -58,25 +60,14 @@ def run_worker(settings_path, now):
     def provider(request):
         assert request.url.host == "synthetic.invalid"
         messages = json.loads(request.content)["messages"]
-        reviewing = messages[0]["content"] == RECALL_RULES
-        calls.append("memory_review" if reviewing else "chat")
-        if not reviewing:
+        calls.append("chat")
+        if any(message["role"] == "tool" for message in messages):
             assert "青禾项目使用蓝色配色" in json.dumps(messages, ensure_ascii=False)
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": '{"relevant":["m0"]}'
-                            if reviewing
-                            else "青禾项目使用蓝色配色。"
-                        }
-                    }
-                ],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
-        )
+            body = answer("青禾项目使用蓝色配色。")
+        else:
+            body = answer(calls=[call("recall-project-color", "memory_recall",
+                                     {"query": "青禾项目使用什么配色"})])
+        return httpx.Response(200, json=body)
 
     def offline_client(**kwargs):
         kwargs.setdefault("transport", httpx.MockTransport(provider))
@@ -84,12 +75,14 @@ def run_worker(settings_path, now):
 
     async def once(self, *args, **kwargs):
         await original_run(self, *args, **kwargs)
+        print(json.dumps({"phase": "worker_result", "jobs": self.store.rows(
+            "SELECT state,last_error_code FROM jobs")}), flush=True)
         raise Finished
 
     SemanticIndex._infer = infer
     Core.run_once = once
     core_module.Core = partial(Core, clock=lambda: now)
-    entrypoint.httpx.AsyncClient = offline_client
+    entrypoint.httpx = SimpleNamespace(AsyncClient=offline_client)
     try:
         asyncio.run(entrypoint.worker(settings))
     except Finished:
