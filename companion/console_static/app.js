@@ -2017,7 +2017,8 @@ PAGES.thinking = data => {
     el("p", { class: "note" }, "这条记录引用的消息编号，都经过权限和来源校验；来源被清除后这条记录不再显示。"),
     el("ul", { class: "dk-ctx" },
       (sel.source_event_ids || []).length > 0
-        ? (sel.source_event_ids || []).map(eid => el("li", {}, el("code", {}, eid)))
+        ? (sel.source_event_ids || []).map((eid, n) => el("li", {}, el("span", { class: "dk-n" }, "第 " + (n + 1) + " 条来源"),
+            el("span", { class: "tag ok" }, "已核验"), el("span", { class: "note" }, "编号尾号 " + shortId(eid))))
         : [el("li", { class: "note" }, "没有来源消息")]
     )
   ] : state.cogTab === "reasoning" ? reasoningView(sel, data[sel._kind]) : [
@@ -2577,3 +2578,4 @@ function reasoningView(sel, page) {
     el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。"),
     sel.model_request_id ? el("div", { class: "row-gap mt" }, linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看这次模型调用的用量")) : null];
 }
+
