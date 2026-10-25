@@ -87,7 +87,7 @@ def _capture(store, settings, event_id, custody, authority):
         raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
 
 
-def provenance(store, settings, custody, item, data):
+def provenance(store, settings, custody, item, data, *, caption_job_id=None):
     """Resolve originals independently of manifest hints, including reuse ancestors.
 
     A known erased original yields only a tombstone. Unverifiable legacy material
@@ -95,8 +95,10 @@ def provenance(store, settings, custody, item, data):
     """
     candidates = store.rows(
         "SELECT c.*,j.event_id,j.authority_json FROM meme_captions c JOIN jobs j USING(job_id) "
-        "WHERE c.asset_sha256=? AND c.source_sha256=? AND j.kind='meme_caption' ORDER BY c.rowid",
-        (item["asset_sha256"], item["source_sha256"]),
+        "WHERE c.asset_sha256=? AND c.source_sha256=? AND j.kind='meme_caption' "
+        + ("AND c.job_id=? " if caption_job_id else "") + "ORDER BY c.rowid",
+        (item["asset_sha256"], item["source_sha256"],
+         *((caption_job_id,) if caption_job_id else ())),
     )
     proof = source_evidence(SimpleNamespace(**item["metadata"]))
     for candidate in candidates:

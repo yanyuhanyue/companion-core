@@ -79,6 +79,17 @@ class ExpressionEngine:
         return tuple(dict.fromkeys(c for c in configured if CATEGORY.fullmatch(c)))[:12]
 
     def _offer(self, event_id):
+        from companion.meme_retrieval import MemeRetrieval, core_owned
+
+        if core_owned(self.settings):
+            from companion.meme_core import MemeCaptionService
+
+            job = self.store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
+            if not job or reply_revision.control_job(self.store, job):
+                return True, None
+            value = MemeRetrieval(MemeCaptionService(self.store, self.settings, None,
+                self.clock)).check(job, executing=job["state"] == "RUNNING")
+            return True, MemeOffer.model_validate(value["offer"]) if value["offer"] else None
         if getattr(self.settings, "meme_semantics_enabled", False):
             row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
                                  ("meme_offer:" + event_id,)) if event_id else None
@@ -243,6 +254,12 @@ class ExpressionEngine:
             if image.get("category") == category:
                 return intent
         if selected:
+            from companion.meme_retrieval import blocked, core_owned
+
+            if core_owned(self.settings) and blocked(
+                self.store, self.settings, selected.candidate_id, now,
+            ):
+                return intent
             return intent.model_copy(update={"image": ImageIntent(
                 source="companion.meme_catalog", category=category,
                 candidate_id=selected.candidate_id, offer_key=offer.offer_key,

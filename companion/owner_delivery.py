@@ -123,7 +123,7 @@ def _usage(store, job, view):
     return [row["request_id"] for row in rows]
 
 
-def _material(store, row, job, view, requests):
+def _material(store, row, job, view, requests, *, meme_binding=None):
     event = store.one("SELECT * FROM events WHERE event_id=?", (row["origin_event_id"],))
     if (not event or row["origin_event_id"] != job["event_id"]
         or row["conversation_id"] != job["conversation_id"]
@@ -138,7 +138,20 @@ def _material(store, row, job, view, requests):
             "delivery_key": row["delivery_key"], "action_type": row["action_type"],
             "history_sha256": paid_budget.sha(_history_proof(store, job)),
             "context_sha256": paid_budget.sha(_snapshots(store, job)),
-            "request_ids": requests}
+            "request_ids": requests,
+            **({"meme_binding_version": 1, "meme_binding_sha256": paid_budget.sha(meme_binding)}
+               if meme_binding is not None else {})}
+
+
+def _meme_binding(store, settings, clock, job, row):
+    from companion.meme_core import MemeCaptionService
+    from companion.meme_retrieval import MemeRetrieval, core_owned
+
+    image = json.loads(row["content_json"]).get("image")
+    if not core_owned(settings) or image is None:
+        return None
+    return MemeRetrieval(MemeCaptionService(store, settings, None, clock)).selected(
+        job, image, executing=job["state"] == "RUNNING")
 
 
 def record_replies(store, settings, clock, job, message_ids):
@@ -192,7 +205,8 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
         row = store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
         if row is None or row["state"] != "PENDING" or json.loads(row["authority_json"]):
             raise CoreError("OWNER_DELIVERY_ADMISSION_REQUIRED", 403)
-        material = _material(store, row, job, view, requests)
+        material = _material(store, row, job, view, requests,
+                              meme_binding=_meme_binding(store, settings, clock, job, row))
         if job["kind"] == "poke":
             from companion import poke
 
@@ -216,7 +230,8 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     view = _sources(store, settings, clock, job)
     if (job["state"] != "SUCCEEDED"
         or json.loads(row["authority_json"]) != view.authority.as_dict()
-        or material != _material(store, row, job, view, _usage(store, job, view))):
+        or material != _material(store, row, job, view, _usage(store, job, view),
+            meme_binding=_meme_binding(store, settings, clock, job, row))):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403)
     reply_revision.check_delivery(store, message_id)
     if job["kind"] == "poke":

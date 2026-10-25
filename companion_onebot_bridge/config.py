@@ -1,7 +1,7 @@
 import re
 import stat
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from ipaddress import ip_address, ip_network
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
@@ -60,6 +60,7 @@ class BridgeConfig:
     rich_input_scope: str = "none"
     meme_directory: str | None = None
     meme_enabled: bool = False
+    meme_catalog_owner: str = "bridge"
     meme_semantics_enabled: bool = False
     meme_discovery_enabled: bool = False
     meme_search_provider: str = "none"
@@ -75,6 +76,8 @@ class BridgeConfig:
     account_asset_max_dimension: int = 2048
 
     def __post_init__(self):
+        if self.meme_catalog_owner not in {"bridge", "core"}:
+            raise ValueError("INVALID_MEME_CATALOG_OWNER")
         if self.owner_authority is not None:
             from companion_delivery_protocol.authority import validate_authority_ref
 
@@ -204,6 +207,12 @@ class BridgeConfig:
         if __import__("os").name != "nt" and info.st_mode & 0o077:
             raise ValueError("PRIVATE_CONFIG_REQUIRED")
         return cls(**tomllib.loads(target.read_text("utf-8")))
+
+    def snapshot(self):
+        value = asdict(self)
+        if self.meme_catalog_owner == "bridge":
+            value.pop("meme_catalog_owner")
+        return value
 
     @property
     def origin(self):

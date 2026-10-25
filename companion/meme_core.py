@@ -376,6 +376,7 @@ class MemeCaptionService:
         }
 
     def submit(self, body):
+        self._bridge_catalog()
         s, now = self.store, self.clock()
         approval = scope(s, self.settings, self.clock)
         if body.identity != identity(self.settings):
@@ -720,6 +721,7 @@ class MemeCaptionService:
         )
 
     async def embed(self, body):
+        self._bridge_catalog()
         approval = scope(self.store, self.settings, self.clock)
         current_source(self.store, self.settings, approval, body.event_id, body.reply_revision,
                        self.clock)
@@ -753,6 +755,7 @@ class MemeCaptionService:
         return row
 
     async def query(self, body):
+        self._bridge_catalog()
         s = self.store
         approval = scope(s, self.settings, self.clock)
         event, value, job = current_source(
@@ -813,6 +816,7 @@ class MemeCaptionService:
         return result
 
     def offer(self, body):
+        self._bridge_catalog()
         s = self.store
         with s.transaction():
             approval = scope(s, self.settings, self.clock)
@@ -868,6 +872,8 @@ class MemeCaptionService:
 
     def waiting_offer(self, job, now):
         if (
+            getattr(self.settings, "meme_catalog_owner", "bridge") == "core"
+            or
             not self.settings.meme_semantics_enabled
             or job["kind"] != "chat"
         ):
@@ -882,3 +888,21 @@ class MemeCaptionService:
         return now < after(job["created_at"], 2) and not self.store.one(
             "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)
         )
+
+    def _bridge_catalog(self):
+        if getattr(self.settings, "meme_catalog_owner", "bridge") == "core":
+            raise CoreError("MEME_CORE_CATALOG_OWNED", 403)
+
+    async def prepare_offer(self, job):
+        from companion.meme_retrieval import MemeRetrieval, core_owned
+
+        if (core_owned(self.settings) and job["kind"] == "chat"
+            and not reply_revision.control_job(self.store, job)):
+            MemeRetrieval(self).prepare(job)
+
+    def check_offer(self, job):
+        from companion.meme_retrieval import MemeRetrieval, core_owned
+
+        if (core_owned(self.settings) and job["kind"] == "chat"
+            and not reply_revision.control_job(self.store, job)):
+            MemeRetrieval(self).check(job)

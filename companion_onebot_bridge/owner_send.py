@@ -233,6 +233,8 @@ class OwnerSendGuard:
         self.dispatched = True
 
     async def cancel_before_send(self, item):
+        if self.config.meme_catalog_owner == "core" and item["content"].get("image") is not None:
+            self.prepared_message = None
         if (self.dispatched or item is not self.current_item
             or self.item_hash != journal.digest(item)):
             return False
@@ -349,7 +351,10 @@ class OwnerOneBot:
                 if journal.digest(item) != original:
                     raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
 
-            image = self.guard.runtime.memes.prepare(item, check=fence)
+            if self.config.meme_catalog_owner == "core":
+                image = await self.guard.runtime.memes.prepare(self.guard.client, item, check=fence)
+            else:
+                image = self.guard.runtime.memes.prepare(item, check=fence)
             self.guard.meme_prepared = image is not None
             message = [{"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
             if image is None:
@@ -375,12 +380,16 @@ class OwnerOneBot:
             if self.guard.prepared_message is None:
                 raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
             try:
-                provider_id = await self.delegate.send_message(self.guard.prepared_message)
-            except BaseException:
-                if self.guard.meme_sending and self.guard.dispatched:
-                    self.guard.runtime.memes.receipt(item, "UNKNOWN")
-                raise
-            if self.guard.meme_sending:
-                self.guard.runtime.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
-            return provider_id
+                try:
+                    provider_id = await self.delegate.send_message(self.guard.prepared_message)
+                except BaseException:
+                    if self.guard.meme_sending and self.guard.dispatched:
+                        self.guard.runtime.memes.receipt(item, "UNKNOWN")
+                    raise
+                if self.guard.meme_sending:
+                    self.guard.runtime.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
+                return provider_id
+            finally:
+                if self.config.meme_catalog_owner == "core":
+                    self.guard.prepared_message = None
         return await self.delegate.send_text(reply_segments.wire_text(item))
