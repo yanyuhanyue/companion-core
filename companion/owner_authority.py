@@ -121,6 +121,7 @@ def custody(store, settings, *, settlement=False):
 def current(store, settings, clock, *, purpose=None, authority=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
     from companion import paid_budget
+    from companion.live_text import _ledger_custody
 
     if settings.owner_runtime.mode != "ENABLED" or _meta(store, MODE) != "ENABLED":
         raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
@@ -144,11 +145,12 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         raise CoreError("OWNER_AUTHORITY_PAID_POLICY_CHANGED", 409)
     if policy.owner_qq_id != settings.owner_qq_id:
         raise CoreError("OWNER_AUTHORITY_IDENTITY_CHANGED", 403)
-    if policy.expires_at is not None and datetime.fromisoformat(clock()) >= policy.expires_at:
-        raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
     if purpose is not None and purpose not in policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
     custody(store, settings)
+    _ledger_custody(store, settings)
+    if policy.expires_at is not None and datetime.fromisoformat(clock()) >= policy.expires_at:
+        raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
     return OwnerAuthorityView(ref, policy, row["journal_id"], row["journal_path"])
 
 

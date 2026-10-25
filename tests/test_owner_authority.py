@@ -160,8 +160,8 @@ def test_source_erasure_scrubs_policy_but_preserves_journal_evidence(core, tmp_p
     from companion.store import after
     from tests.conftest import ingest
 
-    policy = prepare(core, tmp_path)
     ingest(core)
+    policy = prepare(core, tmp_path)
     core.store.execute("UPDATE jobs SET state='CANCELLED'")
     event = core.store.one("SELECT event_id,conversation_id FROM events")
     scope = LifeShadowApproval(
@@ -239,10 +239,12 @@ def test_job_authority_requires_native_unexpired_lease(core, tmp_path):
     from companion.store import after
     from tests.conftest import ingest
 
+    source = ingest(core)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
     policy = prepare(core, tmp_path)
     activate(core, policy)
-    ingest(core)
-    job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
+    job_id = core.new_job(source["event_id"], "evaluation", "native-evaluation-test", core.clock())
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
     with core.store.transaction():
         authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
                            purpose="evaluation")
@@ -264,13 +266,16 @@ def test_job_authority_requires_native_unexpired_lease(core, tmp_path):
 def test_revision_cannot_reauthorize_a_bound_job(core, tmp_path):
     from tests.conftest import ingest
 
+    source = ingest(core)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
     policy = prepare(core, tmp_path)
     activate(core, policy)
-    ingest(core)
-    job = core.store.one("SELECT * FROM jobs WHERE kind='chat'")
+    job_id = core.new_job(source["event_id"], "evaluation", "native-evaluation-test", core.clock())
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
     with core.store.transaction():
         authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
                            purpose="evaluation")
+
     core.store.execute("UPDATE jobs SET state='CANCELLED'")
     activate(core, policy, revision=1, operation="operation-revision-2")
     with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
@@ -280,3 +285,39 @@ def test_revision_cannot_reauthorize_a_bound_job(core, tmp_path):
                                                 match="OWNER_AUTHORITY_REVISION_CHANGED"):
         authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
                            purpose="evaluation")
+
+
+def test_pending_external_erasure_fences_current_use_without_repairing_original_evidence(
+    core, tmp_path, monkeypatch,
+):
+    from pathlib import Path
+
+    from tests.conftest import ingest
+
+    source = ingest(core)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    policy = prepare(core, tmp_path)
+    activated, _ = activate(core, policy)
+    usage = core.store.rows("SELECT * FROM model_usage")
+
+    def interrupted(*args):
+        raise RuntimeError("synthetic erasure apply crash")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(core.ledger, "apply", interrupted)
+        with pytest.raises(RuntimeError, match="synthetic erasure apply crash"):
+            with core.store.transaction():
+                core.ledger.expire_events(core.store, [source["event_id"]], core.clock())
+    original = Path(core.settings.erasure_ledger).read_bytes()
+    with pytest.raises(CoreError, match="ERASURE_REPLAY_REQUIRED"):
+        authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+    assert Path(core.settings.erasure_ledger).read_bytes() == original
+    assert core.store.one("SELECT redacted FROM events")["redacted"] == 0
+    assert authority.evidence(core.store, core.settings, activated["authority"]).policy == policy
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+    stopped = authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="stop-with-pending-erasure", authority=activated["authority"]))
+    assert stopped["state"] == "STOPPED"
+    core.ledger.replay(core.store)
+    assert core.store.one("SELECT redacted FROM events")["redacted"] == 1
+    assert Path(core.settings.erasure_ledger).read_bytes() == original
