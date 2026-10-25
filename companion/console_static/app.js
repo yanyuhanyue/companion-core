@@ -1936,7 +1936,7 @@ function cognitionSummary(item, kind) {
   }
   if (kind === "model") {
     const u = item.usage || {};
-    return `${u.input_tokens || 0} 输入，${u.output_tokens || 0} 输出`;
+    return u.observed ? `${u.input_tokens} 输入，${u.output_tokens} 输出` : "实际用量未记录";
   }
   return "";
 }
@@ -2530,7 +2530,24 @@ function lifeDecisionView(sel) {
     sel.job ? kv("处理任务", sel.job.state === "NOT_RECORDED" ? "未记录" : statusOf(sel.job.state)[0]) : null);
 }
 function cognitionExtra(sel) {
-  return [sel._kind === "goal" ? goalStepsView(sel) : sel._kind === "life" ? lifeDecisionView(sel) : null, cognitionLinks(sel)];
+  return [sel._kind === "goal" ? goalStepsView(sel) : sel._kind === "life" ? lifeDecisionView(sel)
+    : sel._kind === "model" ? modelMeasurementView(sel) : null, cognitionLinks(sel)];
+}
+
+function modelMeasurementView(sel) {
+  const m = sel.measurement || {}, u = sel.usage || {};
+  const kinds = { exact_local_render: "固定渲染器本地计数", provider_count: "服务商计数", estimate: "本地估算", unsupported: "计数格式不支持" };
+  const number = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未记录";
+  return el("section", { class: "steps-view" }, el("h4", {}, "本次请求计量"),
+    kv("计量方式", m.state === "RECORDED" ? kinds[m.count_kind] || "未知"
+      : m.state === "INCONSISTENT" ? "记录损坏或超限" : "未记录"),
+    kv("输入计数", number(m.input_tokens)), kv("预留裕量", number(m.reservation_margin)),
+    kv("输出预留", number(m.output_allowance)),
+    kv("实际输入 / 输出", u.observed ? number(u.input_tokens) + " / " + number(u.output_tokens) : "未记录"),
+    kv("实际缓存输入", u.observed ? number(u.cached_input_tokens) : "未记录"),
+    kv("已计或预留费用", money(u.billed_micro_usd)),
+    el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；费用按配置费率核算。"),
+    el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
 }
 
 /* 原始推理：只说明有没有、为什么没有，不展示内部字段，也不根据最终结果补写推理 */

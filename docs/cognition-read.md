@@ -49,6 +49,14 @@ numeric input, reservation margin and output allowance. Missing measurements are
 `NOT_RECORDED`. This view does not attest that an unbound usage row has source
 evidence; it labels such evidence `NOT_RECORDED`.
 
+Model items also label `usage.observed`: true only for a SETTLED row with a recorded
+paid dispatch. Local measurement remains separate from observed usage, including
+UNKNOWN and RESERVED attempts. Malformed or oversized measurement JSON is
+`INCONSISTENT`; diagnostics never rerun tokenization or expose arbitrary receipt
+fields. `context_regions` and `trimming_reason` are `NOT_RECORDED`: these details
+were not persisted and cannot be reconstructed from totals. The owner console
+shows the same per-attempt figures, with no new storage or execution permission.
+
 Each item includes `occurred_at` from its original native `created_at`, or the
 model-usage row's existing `occurred_at`. It is independent of the response's
 `as_of` read time and opaque record ID. Pagination still follows native append
