@@ -27,7 +27,10 @@ def test_signed_v1_image_copy_preserves_bytes_and_never_upgrades_permission(core
     settings = core.settings.model_copy(update={"database": str(tmp_path / "fixture-current.db")})
     migrate(settings.database)
     with Core(settings, clock=core.clock) as legacy, ExitStack() as cleanup:
-        config, _ = pinned_plan(legacy, tmp_path / "legacy-plan", 3001,
+        plan_directory = tmp_path / "legacy-plan"
+        plan_directory.mkdir(mode=0o700)
+        plan_directory.chmod(0o700)
+        config, _ = pinned_plan(legacy, plan_directory, 3001,
                                  live=True, approved=True, rich_input_scope="references_v1",
                                  scope_options=legacy_image_options())
         approval = legacy.settings.live_text_window

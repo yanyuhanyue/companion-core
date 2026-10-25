@@ -534,6 +534,7 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
         ):
             assert new.pop("reserved_requests") == 1 and new.pop("used_requests") is None
             assert new.pop("source_grant_id") is None and new.pop("source_grant_epoch") is None
+            assert new.pop("authority_json") == "{}"
             assert new == old
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
     finally:
@@ -552,10 +553,11 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
     before = core.store.one(
         "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
     )
+    assert before["authority_json"] == "{}"
     before_0014 = {
         key: value
         for key, value in before.items()
-        if key not in {"source_grant_id", "source_grant_epoch"}
+        if key not in {"source_grant_id", "source_grant_epoch", "authority_json"}
     }
     database = historical_database(core.store, tmp_path / "reader.db", "0014_reader_budget")
     cfg = Config()
@@ -585,7 +587,7 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
                 for key, value in before.items()
                 if key
                 not in {"reserved_requests", "used_requests",
-                        "source_grant_id", "source_grant_epoch"}
+                        "source_grant_id", "source_grant_epoch", "authority_json"}
             }
             migrate(database)
             assert (

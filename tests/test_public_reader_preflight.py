@@ -6,11 +6,11 @@ import httpcore
 import httpx
 import pytest
 
-from companion import live_text
-from companion.api import create_app
+from companion import owner_authority
+from companion.owner_authority_protocol import AuthorityStop
 from source_reader.heybox import HeyboxReader
 from source_reader.network import PublicHTTP, PublicNetwork
-from source_reader.worker import tick
+from source_reader.worker_v1 import tick
 from tests.conftest import run
 from tests.test_live_card_content import TOKEN, captured
 from tests.test_source_reader import RecordingStream, Responses, response
@@ -19,11 +19,11 @@ from tests.test_source_reader import RecordingStream, Responses, response
 @pytest.mark.parametrize("stop_at", [None, "after_lease", "dns", "tls"])
 def test_public_card_worker_rechecks_core_after_network_wait_before_get(core, tmp_path, stop_at):
     async def scenario():
-        async with captured(core, tmp_path) as (window, _, _, _):
+        async with captured(core, tmp_path) as (window, core_client, _, _):
+            usage = core.store.rows("SELECT * FROM model_usage")
             def stop():
-                live_text.stop_window(core.store, live_text.WindowReference(
-                    window_sha256=window.plan.sha256,
-                ), core.clock)
+                owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                    operation_id="stop-public-preflight", authority=window.runtime.authority))
 
             class Stream(RecordingStream):
                 async def start_tls(self, *args, **kwargs):
@@ -59,26 +59,27 @@ def test_public_card_worker_rechecks_core_after_network_wait_before_get(core, tm
                 ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
                 network_backend=PublicNetwork(resolver, backend), max_keepalive_connections=0,
             )
-            api = create_app(core.settings)
-            api.state.core = core
             async with PublicHTTP(pool) as public, httpx.AsyncClient(
-                base_url="http://core", transport=httpx.ASGITransport(api),
+                base_url=core_client.base_url,
                 headers={"Authorization": "Bearer " + TOKEN},
                 event_hooks={"response": [after_core]},
             ) as client:
                 if stop_at:
-                    with pytest.raises(httpx.HTTPStatusError):
-                        await tick(client, HeyboxReader(public, clock=core.clock), "reader")
-                    assert len(validations) == 1 and validations[0] != 200
+                    assert await tick(client, HeyboxReader(public, clock=core.clock), "reader",
+                                      source="heybox", clock=lambda: core.clock.now)
+                    assert validations and validations[-1] != 200
+                    assert all(status == 200 for status in validations[:-1])
                     assert backend.requests == []
                     assert not core.store.one("SELECT 1 FROM observations")
                 else:
-                    assert await tick(client, HeyboxReader(public, clock=core.clock), "reader")
-                    assert validations == [200] and len(backend.requests) == 1
+                    assert await tick(client, HeyboxReader(public, clock=core.clock), "reader",
+                                   source="heybox", clock=lambda: core.clock.now)
+                    assert validations and all(status == 200 for status in validations)
+                    assert len(backend.requests) == 1
                     saved = core.store.one("SELECT state FROM exploration_requests")
                     assert saved["state"] == "DONE"
                 # Connections go through the existing public DNS pinning backend.
-                assert backend.hosts == ["1.1.1.1"]
-                assert not core.store.one("SELECT 1 FROM model_usage")
+                assert backend.hosts == ([] if stop_at == "after_lease" else ["1.1.1.1"])
+                assert core.store.rows("SELECT * FROM model_usage") == usage
 
     run(scenario())
