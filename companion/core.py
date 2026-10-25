@@ -472,6 +472,7 @@ class Core(Runtime):
     def _check_context_snapshots(self, job, snapshots, *, current_request=None):
         reply_revision.check_job(self.store, job)
         authority = self._owner_job_view(job)
+        self.memes.check_offer(job)
         if private_life.strict(self.store, self.settings):
             live_text.check_job(self.store, self.settings, self.clock, job,
                                 current_request=current_request)
@@ -1388,6 +1389,8 @@ class Core(Runtime):
                 and before_command != captured_epoch
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)
+            if reply is None and job["kind"] == "chat":
+                await self.memes.prepare_offer(job)
             if reply is None and job["kind"] == "chat" and authority is not None:
                 from companion.agent_chat import reply as agent_reply
 
