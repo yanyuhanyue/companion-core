@@ -84,3 +84,29 @@ loader，并在真实 ModelClient 的模拟 transport 边界核对声明被篡�
 该限制约束本地计量。未知 tokenizer、图片和视频仍保持原 estimate 身份与已授权路径，
 不能把估算加裕量称为供应商 tokenizer 的严格上界。它不改变全局计量策略，不产生远程计数请求，
 也不配置任何生产限额。验证使用合成配置、签名 HTTP 入站及独立 worker，外部模型 transport 为 Mock。
+
+## 原生请求前的可选上下文选择
+
+Core 组装有界候选，在原图附加后记录连续区域；SDK 每次 `before_model_request` 使用实际
+`instruction_parts` 和完整函数声明重新计量。软目标、原输入限制及联合窗口共用压力判定，
+先删除可选引用，再删除较早的完整历史回合。规则、当前输入、已绑定媒体、复核事实、承诺和
+接续依据保留；本 job 已产生的模型响应、工具调用与结果不参与裁剪。必需内容超过软目标
+保持完整，能否发送由原硬准入决定；不增加摘要模型调用或自动降低输出预留。
+
+布局位于原 `agent_conversations.snapshots_json` 的 `context_plan.metadata.core_context` v1，
+只存本 job 区域索引、SHA-256 和裁剪原因。最多 96 个区域、64 KiB，无法精确映射或初始越界
+时保留完整输入。缺项和未知版本不允许新裁剪；已识别 v1 结构、来源摘要或请求绑定损坏，
+在付费 I/O 前拒绝。来源快照及 `job_sources` 保守保留，裁剪不会解除来源责任。
+
+请求与持久消息同步更新，沿原 MODEL_PENDING 检查点写入 pending 选择；最终 ControlledModel
+wire 必须匹配，再由原 admitted 事务关联原 request_id、payload 和 measurement 摘要。
+拒绝、READY/WAITING 恢复、已结算 usage、UNKNOWN 与 STARTED 的停止规则沿原 ConversationStore。
+工具新增来源按快照前缀绑定。原擦除 handler 同时删除该 JSON；独立擦除账本重放会清理旧备份，
+费用责任仍保留。非 SDK 上下文使用同一压力判定，继续执行原完整计量和准入。
+
+实现复用已锁定的 Pydantic AI 2.60.0 公开 Hooks、消息类型和 `dataclasses.replace`。
+连续 ModelRequest 的普通 metadata 会在 SDK 合并时丢失，因此使用原 Core snapshot；
+不写 SDK 保留命名空间。SDK 的 ProcessHistory 同时更新请求和持久消息，规划亦遵循此语义。
+参照 [SDK 消息历史](https://pydantic.dev/docs/ai/message-history/)及
+[持久化](https://pydantic.dev/docs/ai/core-concepts/persistence/)，具体行为由安装版本的
+公开 API 探针和实际 ControlledModel 最终 wire 对照验证。
