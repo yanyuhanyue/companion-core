@@ -23,17 +23,26 @@ repeat product tests before the parallel jobs. Documentation validation owns a
 fresh `ci-docs-*` directory under `.local/test-temp`, removed on success or failure.
 Unrelated retained diagnostics are preserved.
 
-## Windows path selection
+## Console and Windows path selection
 
-Only pull requests can use the `selected` profile. Ubuntu's complete four-file-shard suite,
-container checks and native-plugin checks remain required. Windows is selected independently
-for the product suite and the browser-reader job:
+Only pull requests can use the `selected` profile. The complete PR diff selects the checks;
+a final UI-only commit cannot hide backend changes from earlier commits in that PR.
 
-| Complete non-document diff | Windows product suite/package checks | Windows browser |
-|---|---|---|
-| Only the three existing Console static assets in `STATIC_UI` | Omitted | Required |
-| Only existing backend files/tests explicitly listed in `NON_BROWSER` | Required | Omitted |
-| Mixed surfaces, shared dependencies, packaging/deployment, PowerShell, process/path/lock, voice/bridge, new tests/files or any unknown path | Required | Required |
+| Complete non-document diff | Product tests and packaging | Browser | Containers / native plugins |
+|---|---|---|---|
+| Only the three existing Console static assets in `STATIC_UI` | One Ubuntu job: Console CSP/assets, owner API contracts, wheel/source package checks | Console interactions on Windows | Omitted |
+| Only existing backend files/tests explicitly listed in `NON_BROWSER` | Complete Ubuntu and Windows suites, replay, smoke and packages | Omitted | Required |
+| Mixed surfaces, shared dependencies, packaging/deployment, PowerShell, process/path/lock, voice/bridge, new tests/files or any unknown path | Complete Ubuntu and Windows suites, replay, smoke and packages | Readers and Console on Windows | Required |
+
+Console-only validation always type-checks the owner Console and runs
+`test_console_static.py`, `test_owner_console.py`, `test_console_cognition.py` and the real
+TLS/browser interactions in `test_console_browser.py` and `test_console_supplement_browser.py`.
+It builds and verifies the release
+archives, including the three Console resources. It does not schedule full backend shards,
+backend replay/smoke, reader browser tests or unchanged container/native-plugin checks.
+The existing backend-only selection and all full validation keep their previous coverage.
+Documentation privacy and registered evidence checks also run, so Markdown or evidence
+JSON accompanying a Console-only change retains its validators.
 
 The exact small allowlists live in `scripts/ci_policy.py`. Generic Python changes are **not**
 assumed portable or browser-independent; they keep Windows unless explicitly listed. Even
@@ -51,9 +60,10 @@ full coverage. The full reuse artifact is version 2 and explicitly records Windo
 and browser coverage in addition to checking all actual job names/results. Older receipts
 and selected receipts are rejected.
 
-Preflight emits the native GitHub Actions JSON matrix. Each selected platform still gets all
-four shards, plus its replay/smoke/package checks once. The gate validates the browser skip
-against the selection and rejects failed, cancelled or unexpected job results. Every final
+Preflight emits the native GitHub Actions JSON matrix. Full product validation gets all
+four shards on each platform, plus its replay/smoke/package checks once. Console-only PRs
+get one Ubuntu Console/package job. The gate validates every selected skip, requires the
+Console test and browser jobs, and rejects failed, cancelled or unexpected job results. Every final
 gate writes `.local/ci/validation.json` with selection reasons, the actual scheduled matrix,
 expected and observed job results, checkout identity and reuse reference. The always-uploaded
 `ci-validation-*` artifact preserves failures as well as successes. It is a scoped report,
@@ -187,3 +197,10 @@ was inspected: it exercises real host/client entry functions with synthetic host
 services. That supports retaining our existing native-plugin and entrypoint
 checks; it supplies no Python sharding facility to replace. There is no new test
 executor, validation service or business protocol.
+
+The Console-only refinement reuses the same selector, matrix, job conditions and final gate.
+The pinned [DSH selfcheck](https://github.com/c1overzz/dsh-bili-scroll/blob/9a3e0e67d82feedf755c763807c806c4d125a245/selfcheck.mjs)
+was rechecked: its synthetic host/client entrypoint validation supports retaining real Console
+HTTP/browser checks. GitHub's [matrix outputs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations#using-an-output-to-define-two-matrices)
+provide the existing mechanism for scheduling the one Console job. No dependency analysis
+or new evidence/reuse format is introduced; selected results still cannot mint full-tree proof.
