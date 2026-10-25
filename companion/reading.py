@@ -110,7 +110,11 @@ class ReadingService:
         for source_id in context.source_event_ids:
             if not reply_revision.source_active(self.store, source_id):
                 raise CoreError("REPLY_SOURCE_RECALLED", 409)
-            if row["goal_step_json"] == "{}" and reply_revision.owner_input(self.store, source_id):
+            captured_owner = self.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                                            (owner_input.INPUT + source_id,))
+            if row["goal_step_json"] == "{}" and (
+                captured_owner or reply_revision.owner_input(self.store, source_id)
+            ):
                 if self.settings.owner_runtime.mode == "ENABLED":
                     view = owner_authority.current(self.store, self.settings, self.clock,
                                                    purpose="content")
@@ -188,6 +192,8 @@ class ReadingService:
         )
         row = s.one("SELECT * FROM exploration_requests WHERE request_id=?",
                     (attempt["request_id"],))
+        if hashlib.sha256(row["url"].encode()).hexdigest() != attempt["original_url_sha256"]:
+            raise CoreError("READER_TARGET_MISMATCH", 409)
         self._sources(row, context)
         paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
         if paused and paused["value"] == "1" and self.exploration.autonomous(
