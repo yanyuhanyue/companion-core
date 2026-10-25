@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir --require-hashes -r requirements.lock && \
     chown bridge:bridge /bridge-data
 COPY companion_onebot_bridge ./companion_onebot_bridge
 COPY companion_meme_protocol ./companion_meme_protocol
+COPY companion_meme_sources ./companion_meme_sources
 COPY companion_delivery_protocol ./companion_delivery_protocol
 COPY scripts/probe_snowluma_direct.py ./scripts/probe_snowluma_direct.py
 USER bridge
