@@ -9,6 +9,7 @@ from companion.config import PaidModelApproval
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
 from tests.conftest import run
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 MESSAGES = [{"role": "user", "content": "synthetic owner request"}]
@@ -25,6 +26,8 @@ def unlimited(core, tmp_path, **changes):
 @pytest.mark.parametrize("scenario", ["chat", "memory_review"])
 def test_explicit_unlimited_periods_still_record_and_settle_real_dispatch(core, tmp_path, scenario):
     approval = unlimited(core, tmp_path)
+    job_id = authorized_job(core, purposes=("chat", "memory") if scenario == "memory_review"
+                            else ("chat",))
     calls = []
 
     async def exercise():
@@ -35,7 +38,7 @@ def test_explicit_unlimited_periods_still_record_and_settle_real_dispatch(core, 
             })
         ))) as client:
             for _ in range(2):
-                request_id = budget.reserve(core.store, core.settings, None, scenario,
+                request_id = budget.reserve(core.store, core.settings, job_id, scenario,
                                             MESSAGES, core.clock())
                 await budget.complete(ModelClient(core.settings, client), core.store,
                                       core.settings, request_id, MESSAGES, scenario, core.clock)
@@ -52,10 +55,11 @@ def test_explicit_unlimited_periods_still_record_and_settle_real_dispatch(core, 
 
 def test_old_authority_keeps_its_serialized_shape_and_limits(core, tmp_path):
     approval = approved_live(core, tmp_path, daily_micro_usd=1)
+    job_id = authorized_job(core)
     assert "unlimited_period_spend" not in approval.model_dump(mode="json")
     assert "unlimited_period_spend" not in paid_budget.snapshot(core.settings)
     with pytest.raises(CoreError, match="MODEL_DAILY_BUDGET_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     with pytest.raises(ValidationError):
         PaidModelApproval.model_validate({**approval.model_dump(), "unlimited_period_spend": "yes"})
     with pytest.raises(ValidationError):
@@ -71,23 +75,26 @@ def test_old_authority_keeps_its_serialized_shape_and_limits(core, tmp_path):
 ])
 def test_period_opt_in_never_lifts_per_request_bounds(core, tmp_path, changes, code):
     unlimited(core, tmp_path, **changes)
+    job_id = authorized_job(core)
     with pytest.raises(CoreError, match=code):
-        budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     assert core.store.rows("SELECT * FROM model_usage") == []
 
 
 def test_unknown_usage_blocks_further_dispatch_under_unlimited_money(core, tmp_path):
     unlimited(core, tmp_path, concurrency=1)
-    request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    job_id = authorized_job(core)
+    request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     budget.settle(core.store, core.settings, request_id)
     with pytest.raises(CoreError, match="MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
 
 
 def test_settlement_uses_frozen_unlimited_authority_after_configuration_changes(core, tmp_path):
     approval = unlimited(core, tmp_path)
-    request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    job_id = authorized_job(core)
+    request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     core.settings.paid_model = approval.model_copy(update={
         "unlimited_period_spend": False, "daily_micro_usd": 1,
         "monthly_micro_usd": 1, "window_micro_usd": 1,
