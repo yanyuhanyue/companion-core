@@ -30,6 +30,7 @@ async def reply(core, job, snapshots):
     messages = [] if conversation is not None else core.context(
         job, memories=[], snapshots=snapshots,
         model_tools=tuple(name for toolset in tools for name in toolset.tools),
+        planning=True,
     )
     emit("t_context_ready", job["trace_id"])
     result = await run_conversation(

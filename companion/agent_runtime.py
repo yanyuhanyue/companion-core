@@ -13,11 +13,11 @@ from pydantic_ai.capabilities import Hooks
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
-from companion import budget, owner_authority, owner_input
+from companion import budget, context_planner, owner_authority, owner_input
 from companion.agent_messages import (
     from_wire_messages,
+    request_wire,
     to_runtime_response,
-    to_wire_messages,
 )
 from companion.contracts import CoreError
 from companion.model import ModelResponse
@@ -56,8 +56,7 @@ class ControlledModel(Model):
         # Pydantic AI prepares histories before invoking Model.request, including
         # retry feedback and ordered tool results. Request instructions are also
         # provided by its resolved parameters, not rebuilt from our own state.
-        wire = [*({"role": "system", "content": part.content}
-                  for part in parameters.instruction_parts or []), *to_wire_messages(messages)]
+        wire = request_wire(messages, parameters)
         response = await self._complete(wire, tools=parameters.function_tools)
         return to_runtime_response(response, model_name=self.model_name, provider_name=self.system)
 
@@ -104,6 +103,7 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
     async def complete(wire, *, tools):
         check()
         try:
+            context_planner.check_request(core, job, snapshots, wire, tools)
             request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat", wire,
                                         core.clock(), clock=core.clock, tools=tools)
         except Exception:
@@ -118,8 +118,11 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
             from companion.agent_images import check_payload
 
             check_payload(core.store, core.settings, core.clock, job, wire)
-            if persistence is not None and not registered:
-                persistence.admitted(request_id)
+            if not registered:
+                if persistence is not None:
+                    persistence.admitted(request_id)
+                else:
+                    context_planner.admitted(core, job, snapshots, request_id)
                 registered = True
 
         response = await budget.complete(
@@ -139,10 +142,19 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         check()
         return args
 
-    hooks = {"before_tool_execute": before_tool_execute}
+    async def before_model_request(ctx, request_context):
+        check()
+        messages = context_planner.plan_request(core, job, snapshots, request_context)
+        request_context.messages = messages
+        ctx.messages[:] = messages
+        if persistence is not None:
+            return await persistence.before_model_request(ctx, request_context)
+        return request_context
+
+    hooks = {"before_tool_execute": before_tool_execute,
+             "before_model_request": before_model_request}
     if persistence is not None:
-        hooks.update(before_model_request=persistence.before_model_request,
-                     after_model_request=persistence.after_model_request,
+        hooks.update(after_model_request=persistence.after_model_request,
                      tool_execute=persistence.wrap_tool_execute)
     agent = Agent(
         ControlledModel(core.settings.model_name, complete,
