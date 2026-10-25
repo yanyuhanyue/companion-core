@@ -2,26 +2,31 @@
 
 import asyncio
 import copy
+import hashlib
 import json
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from companion import budget, cloud_budget, evaluation, paid_budget
+from companion import budget, cloud_budget, evaluation, owner_authority, owner_input, paid_budget
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse, model_payload
 from companion.policy import ConsentRequest, ConsentService
+from companion.qq_rich import input_digest
 from companion.runtime import Runtime
 from companion.store import Store
-from tests.conftest import ingest
+from companion_delivery_protocol.authority import capture_signing_payload
+from tests.conftest import event, ingest
 from tests.test_paid_model_gate import approved_live
 
 
-def prepare(core, tmp_path):
-    source = ingest(core, text="SYNTHETIC private source")
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
+def prepare(core, tmp_path, *, chat=False):
+    source = None if chat else ingest(core, text="SYNTHETIC private source")
+    if source:
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
     core.settings.evaluation_enabled = True
     core.settings.max_output_tokens = 2048
     approved_live(core, tmp_path, provider="deepseek", model="deepseek-flash",
@@ -31,11 +36,21 @@ def prepare(core, tmp_path):
     from tests.test_owner_authority import activate
 
     core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    key = Ed25519PrivateKey.generate() if chat else None
+    core.evaluation_test_key = key
     activate(core, OwnerGrantPolicy(
-        owner_qq_id=core.settings.owner_qq_id, purposes=["evaluation"],
+        owner_qq_id=core.settings.owner_qq_id,
+        purposes=["evaluation", "chat"] if chat else ["evaluation"],
         authorization_sha256="d" * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
+        capture={"public_key": key.public_key().public_bytes_raw().hex(),
+                 "identity_sha256": paid_budget.sha(
+                     [core.settings.owner_qq_id, core.settings.bot_qq_id]),
+                 "protocol_epoch": "evaluation-chat-test"} if key else None,
     ))
+    if chat:
+        source = admitted_chat(core, 1, text="SYNTHETIC private source")
+        core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
     rows = []
     for repetition in range(3):
         for strategy in (("baseline", "participation_v1") if repetition % 2 == 0 else (
@@ -55,6 +70,27 @@ def prepare(core, tmp_path):
     plan["plan_sha256"] = paid_budget.sha(plan)
     return evaluation.Manifest(plan=plan, source_event_ids=[source["event_id"]],
                                baseline_sha256="a" * 64, source_document_sha256="b" * 64)
+
+
+def admitted_chat(core, number=2, *, text="synthetic independent chat"):
+    from companion.owner_authority_protocol import OwnerCapture
+
+    view = owner_authority.current(core.store, core.settings, core.clock, purpose="chat")
+    source = (f"{core.settings.bot_qq_id}:onebot-direct:FriendMessage:"
+              f"{core.settings.owner_qq_id}:epoch:evaluation-chat-test:{number}")
+    event_id = "evt_" + hashlib.sha256(source.encode()).hexdigest()
+    value = dict(authority=view.authority.as_dict(), kind="authenticated_onebot_ws",
+                 source_event_id=source, event_id=event_id,
+                 input_sha256=input_digest({"text": text}), frame_sha256="b" * 64,
+                 evidence_sha256="c" * 64, identity_sha256=view.policy.capture.identity_sha256,
+                 protocol_epoch=view.policy.capture.protocol_epoch,
+                 occurred_at=core.clock(), received_at=core.clock())
+    value["signature"] = core.evaluation_test_key.sign(capture_signing_payload(value)).hex()
+    capture = OwnerCapture.model_validate(value)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    incoming = event(core, number, text, origin="onebot-direct:FriendMessage:10001").model_copy(
+        update={"event_id": event_id, "source_event_id": source})
+    return core.ingest(incoming, "evaluation-chat-" + str(number))
 
 
 def authorize(core, manifest):
@@ -144,17 +180,20 @@ def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
     from tests.test_cumulative_budget import policy
     from tests.test_owner_authority import activate
 
-    manifest = prepare(core, tmp_path)
+    manifest = prepare(core, tmp_path, chat=True)
     policy(core, account={"model_attempts": 1})
     prior_policy = OwnerGrantPolicy.model_validate_json(
         owner_authority._latest(core.store)["policy_json"])
     activate(core, prior_policy.model_copy(update={
         "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
     }), revision=1, operation="operation-cumulative-revision")
-    prior = budget.reserve(core.store, core.settings, None, "chat",
+    normal = admitted_chat(core)
+    assert core.claim_job("prior-cumulative-chat", job_id=normal["job_id"])
+    prior = budget.reserve(core.store, core.settings, normal["job_id"], "chat",
                            [{"role": "user", "content": "prior responsibility"}], core.clock(),
                            clock=core.clock)
     budget.settle(core.store, core.settings, prior, ModelResponse("old", 30, 2))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (normal["job_id"],))
     submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
@@ -165,7 +204,7 @@ def test_preexisting_cumulative_liability_blocks_evaluation(core, tmp_path):
 @pytest.mark.parametrize("condition", ["revoked", "expired", "source", "window", "disabled",
                                        "new_owner"])
 def test_changes_block_execution_without_io(core, tmp_path, condition):
-    manifest = prepare(core, tmp_path)
+    manifest = prepare(core, tmp_path, chat=condition == "new_owner")
     request = authorize(core, manifest)
     submitted = evaluation.submit(core, request)
     if condition == "revoked":
@@ -181,7 +220,7 @@ def test_changes_block_execution_without_io(core, tmp_path, condition):
     elif condition == "disabled":
         core.settings.evaluation_enabled = False
     else:
-        newer = ingest(core, 2, text="new private input")
+        newer = admitted_chat(core)
         core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (newer["job_id"],))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
@@ -214,14 +253,17 @@ def test_unknown_stops_remaining_calls_and_never_retries(core, tmp_path, failure
 
 
 def test_normal_task_spend_competes_for_same_cloud_ceiling(core, tmp_path):
-    manifest = prepare(core, tmp_path)
-    submitted = evaluation.submit(core, authorize(core, manifest))
+    manifest = prepare(core, tmp_path, chat=True)
     cap = core.settings.cloud_budget.model_copy(update={"daily_micro_cny": 30000})
     core.settings.cloud_budget = cap
     # Native preceding charge; no evaluation-local balance can discard this liability.
-    prior = budget.reserve(core.store, core.settings, None, "chat",
+    normal = admitted_chat(core)
+    assert core.claim_job("prior-cloud-chat", job_id=normal["job_id"])
+    prior = budget.reserve(core.store, core.settings, normal["job_id"], "chat",
                            [{"role": "user", "content": "prior"}], core.clock(), clock=core.clock)
     budget.settle(core.store, core.settings, prior, ModelResponse("old", 30, 2048))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (normal["job_id"],))
+    submitted = evaluation.submit(core, authorize(core, manifest))
     calls = []
     work(core, lambda req: (calls.append(1) or response(req)))
     assert calls == []
@@ -238,7 +280,9 @@ def test_source_revoke_during_transport_hook_fences_request(core, tmp_path):
         ConsentService(core.store, core.settings, core.clock).revoke(request.consent_id)
     work(core, lambda req: (calls.append(1) or response(req)), hooks={"request": [revoke]})
     assert calls == []
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "SETTLED", "billed_micro_usd": 0}
+    assert core.store.one("SELECT 1 FROM audit_log WHERE action='model.not_dispatched'")
 
 
 def test_crash_after_settlement_before_result_never_repays(core, tmp_path):

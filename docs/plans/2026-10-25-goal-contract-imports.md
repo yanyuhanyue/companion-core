@@ -20,3 +20,10 @@ imports while parsing and round-tripping Settings.
 Voice's isolated contract import fixture includes the existing dependency-free
 authority wire package. It continues to reject Core, storage, Bridge and Voice
 runtime imports rather than treating the shared wire types as an execution host.
+
+The same independent-worker check exposed cold imports while erasure replay held
+`BEGIN IMMEDIATE`. Cleanup contract discovery now precedes that transaction;
+all ledger projection reads, repairs and publication remain inside it. This
+respects SQLite's [single-writer transaction model](https://www.sqlite.org/lang_transaction.html).
+The exact regression permits a second connection to write during code-only
+discovery while preserving the original ledger bytes and replay marker.

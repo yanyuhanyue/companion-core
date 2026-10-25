@@ -135,15 +135,15 @@ def test_m0_04_uncertain_provider_usage_blocks_paid_retry(core, failure, tmp_pat
             core.ingest(inbound(core, capture), "m0-unknown-input")
             assert await core.run_once()
             core.clock.advance(30)
-            # A queued retry reaches admission, where the first call's unresolved
-            # charge blocks a second paid request for this same task.
+            # Native Conversation custody refuses recovery of the first unknown
+            # response before a second paid request can be admitted.
             assert await core.run_once()
             core.clock.advance(30)
             assert not await core.run_once()
 
     run(exercise())
     assert core.store.one("SELECT state,attempts,last_error_code FROM jobs") == {
-        "state": "FAILED", "attempts": 2, "last_error_code": "CLOUD_TASK_USAGE_UNCERTAIN",
+        "state": "FAILED", "attempts": 2, "last_error_code": "CONVERSATION_OUTCOME_UNAVAILABLE",
     }
     assert len(calls) == 1
     assert core.store.one("SELECT COUNT(*) AS n FROM model_usage WHERE state='UNKNOWN'")["n"] == 1

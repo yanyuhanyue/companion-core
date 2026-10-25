@@ -101,7 +101,8 @@ def test_observation_scoped_auth_and_owner_inspection(core):
     assert core.store.rows("SELECT * FROM outbox") == []
     assert core.store.rows("SELECT * FROM model_usage") == []
     core.settings.proactive_enabled = True
-    assert not core.schedule_proactive()  # An internal observation cannot become a QQ destination.
+    core.settings.social_enabled = True
+    assert not core.social.flush()  # An internal observation cannot become a QQ destination.
 
 
 @pytest.mark.parametrize(

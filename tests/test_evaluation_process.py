@@ -11,8 +11,7 @@ from pydantic import SecretStr
 
 from companion import evaluation, owner_authority
 from companion.store import after
-from tests.conftest import ingest
-from tests.test_evaluation import authorize, prepare, result, work
+from tests.test_evaluation import admitted_chat, authorize, prepare, result, work
 from tests.test_onebot_capture import real_core_http
 
 
@@ -24,7 +23,7 @@ def process_config(core, path):
     path.write_text(json.dumps(values), encoding="utf-8")
 
 
-async def processes(core, directory, *, count=2, mode="normal"):
+async def processes(core, directory, *, count=2, mode="normal", drain=False):
     directory.mkdir()
     config = directory / "synthetic-config.json"
     process_config(core, config)
@@ -37,12 +36,17 @@ async def processes(core, directory, *, count=2, mode="normal"):
                 sys.executable, "-B", "-m", "tests.evaluation_process", "--config", str(config),
                 "--now", core.clock(), "--ready", str(ready), "--gate", str(gate),
                 "--log", str(log), "--mode", mode,
+                *(["--drain"] if drain else []),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             children.append(child)
             logs.append(log)
         async with asyncio.timeout(30):
             while not all((directory / f"ready-{i}").exists() for i in range(count)):
-                assert all(child.returncode is None for child in children), "worker setup failed"
+                stopped = [child for child in children if child.returncode is not None]
+                if stopped:
+                    errors = [err.decode(errors="replace") for _, err in
+                              await asyncio.gather(*(child.communicate() for child in stopped))]
+                    raise AssertionError("worker setup failed: " + "\n".join(errors))
                 await asyncio.sleep(0.02)
             gate.write_text("go", encoding="utf-8")
             outputs = await asyncio.gather(*(child.communicate() for child in children))
@@ -103,12 +107,12 @@ def test_process_death_after_dispatch_preserves_unknown_and_no_repayment(core, t
 
 
 def test_two_workers_normal_chat_and_experiment_compete_for_original_cloud_budget(core, tmp_path):
-    manifest = prepare(core, tmp_path)
+    manifest = prepare(core, tmp_path, chat=True)
     core.settings.cloud_budget = core.settings.cloud_budget.model_copy(
         update={"daily_micro_cny": 30000})
-    normal = ingest(core, 2, text="Other SYNTHETIC chat", origin="other:FriendMessage:10001")
+    normal = admitted_chat(core)
     submitted = evaluation.submit(core, authorize(core, manifest))
-    hashes = asyncio.run(processes(core, tmp_path / "competing"))
+    hashes = asyncio.run(processes(core, tmp_path / "competing", drain=True))
     assert len(hashes) == 1
     usage = core.store.rows("SELECT job_id,state,billed_micro_usd FROM model_usage")
     assert len(usage) == 1 and usage[0]["state"] == "SETTLED"

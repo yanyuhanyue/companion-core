@@ -411,8 +411,10 @@ class ErasureLedger:
         )
         if (applied["n"] or 0) > len(lines) - 1:
             raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
+        # Loading cleanup owners may import the SDK on a cold worker. Discover
+        # the code-only contract before taking SQLite's single writer lock.
+        signature = contract_signature()
         with store.transaction():
-            signature = contract_signature()
             previous = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTRACT_KEY,))
             repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:

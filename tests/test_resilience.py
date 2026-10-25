@@ -16,7 +16,7 @@ from tests.test_m0 import lease
 from tests.test_m1 import remember
 
 
-def test_astrbot_handler_stops_before_spooling(core, tmp_path, monkeypatch):
+def test_retired_astrbot_handler_stops_without_new_spooling(core, tmp_path, monkeypatch):
     modules = {
         name: types.ModuleType(name)
         for name in ("astrbot", "astrbot.api", "astrbot.api.event", "astrbot.api.star")
@@ -57,7 +57,7 @@ def test_astrbot_handler_stops_before_spooling(core, tmp_path, monkeypatch):
         message_obj=types.SimpleNamespace(self_id="10002", message_id="42", timestamp=1792382400),
     )
     run(bridge.on_private_message(ev))
-    assert order == ["stop", "spool"]
+    assert order == ["stop"]
     order.clear()
     ev.get_sender_id = lambda: "99999"
     run(bridge.on_private_message(ev))
@@ -83,10 +83,11 @@ def test_uncertainty_does_not_block_next_reply_or_resend(core):
 def test_unknown_price_blocks_autonomy_only(core):
     core.settings.input_rate = None
     core.settings.proactive_enabled = True
+    core.settings.social_enabled = True
     ingest(core)
     run(core.run_once())
     assert core.store.one("SELECT state FROM jobs")["state"] == "SUCCEEDED"
-    assert not core.schedule_proactive()
+    assert not core.social.flush()
     assert core.status()["usage"][0]["unknown_price_requests"] == 1
 
 

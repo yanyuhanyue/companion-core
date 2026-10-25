@@ -6,35 +6,25 @@ import os
 import sys
 from pathlib import Path
 
-import httpx
 import pytest
 
 from companion import paid_budget
-from tests.conftest import event
-from tests.test_onebot_capture import real_core_http
+from tests.support.native_consumer_entry import environment
 from tests.test_token_measurement import configure
 
 WORKER = r'''
 import asyncio, json, sys
+from contextlib import closing
 from pathlib import Path
 import httpx
 from companion import __main__
 from companion.config import Settings
-from companion.core import Core
+from companion.store import Store
 
 value = json.loads(Path(sys.argv[1]).read_text("utf-8"))
 settings = Settings.model_validate(value["settings"])
 assert settings.model_key.get_secret_value() == "synthetic-key"
 assert settings.token_measurement.policy == "prefer_exact"
-original_init, original_run = Core.__init__, Core.run_once
-def init(self, cfg, model=None, clock=None):
-    original_init(self, cfg, model, clock=lambda: value["now"])
-Core.__init__ = init
-class Finished(Exception): pass
-async def run_once(self, worker_id):
-    assert await original_run(self, worker_id)
-    raise Finished()
-Core.run_once = run_once
 calls = []
 def provider(request):
     calls.append(json.loads(request.content))
@@ -50,10 +40,23 @@ class OfflineClient(native_client):
         kwargs["transport"] = httpx.MockTransport(provider)
         super().__init__(*args, **kwargs)
 __main__.httpx.AsyncClient = OfflineClient
-try:
-    asyncio.run(__main__.worker(settings))
-except Finished:
-    pass
+async def exercise():
+    task = asyncio.create_task(__main__.worker(settings))
+    try:
+        with closing(Store(settings.database)) as observer:
+            async with asyncio.timeout(20):
+                while True:
+                    if task.done():
+                        await task
+                        raise AssertionError("worker exited before the native job completed")
+                    job = observer.one("SELECT state FROM jobs WHERE job_id=?", (value["job_id"],))
+                    if calls and job["state"] in {"SUCCEEDED", "FAILED", "RETRY_WAIT"}:
+                        break
+                    await asyncio.sleep(0.02)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+asyncio.run(exercise())
 assert len(calls) == 1
 print(json.dumps({"model_requests": len(calls)}))
 '''
@@ -62,23 +65,20 @@ print(json.dumps({"model_requests": len(calls)}))
 @pytest.mark.parametrize("outcome", ["success", "invalid_reply", "missing_usage"])
 def test_http_to_independent_worker_count_and_accounting(core, tmp_path, outcome):
     configure(core, tmp_path)
-    settings = core.settings.model_dump(mode="json")
-    settings["model_key"] = "synthetic-key"
-    settings["bridge_token"] = core.settings.bridge_token.get_secret_value()
     config_path = tmp_path / "worker.json"
-    config_path.write_text(json.dumps({"settings": settings, "now": core.clock(),
-                                      "outcome": outcome}), "utf-8")
 
     async def exercise():
-        async with real_core_http(core) as port:
-            async with httpx.AsyncClient(trust_env=False) as client:
-                response = await client.post(
-                    f"http://127.0.0.1:{port}/internal/v1/inbox/events",
-                    headers={"Authorization": "Bearer " + settings["bridge_token"],
-                             "X-Idempotency-Key": "token-worker-1"},
-                    json=event(core).model_dump(mode="json"),
-                )
-                assert response.status_code == 202, response.text
+        async with environment(core, tmp_path, purposes=("chat",), paid_options={
+            "provider": "deepseek", "model": "deepseek-flash",
+            "endpoint": "https://api.deepseek.com",
+        }) as (entry, _):
+            source = await entry.admit(1, "synthetic token measurement request")
+            settings = core.settings.model_dump(mode="json")
+            settings["model_key"] = "synthetic-key"
+            settings["bridge_token"] = core.settings.bridge_token.get_secret_value()
+            settings["control_token"] = core.settings.control_token.get_secret_value()
+            config_path.write_text(json.dumps({"settings": settings, "outcome": outcome,
+                "job_id": entry.accepted[source["event_id"]]["job_id"]}), "utf-8")
             child = await asyncio.create_subprocess_exec(
                 sys.executable, "-B", "-c", WORKER, str(config_path),
                 cwd=Path(__file__).parents[1], env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},

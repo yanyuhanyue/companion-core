@@ -21,6 +21,7 @@ async def main():
     for name in ("config", "now", "log", "ready", "gate"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--mode", choices=("normal", "crash"), default="normal")
+    parser.add_argument("--drain", action="store_true")
     args = parser.parse_args()
     raw = await asyncio.to_thread(Path(args.config).read_text, "utf-8")
     settings = Settings.model_validate(json.loads(raw))
@@ -56,6 +57,14 @@ async def main():
             await asyncio.to_thread(Path(args.ready).write_text, "ready", encoding="utf-8")
             await asyncio.to_thread(wait_gate)
             worked = await core.run_once("synthetic-process-" + str(os.getpid()))
+            while args.drain and core.store.one(
+                "SELECT 1 FROM jobs WHERE kind IN ('chat','evaluation') "
+                "AND state IN ('QUEUED','RUNNING')"
+            ):
+                # Another worker can own the preceding chat; retain the real
+                # selector and wait until the queued experiment becomes eligible.
+                await asyncio.sleep(0.02)
+                worked = await core.run_once("synthetic-process-" + str(os.getpid())) or worked
             print(json.dumps({"worked": worked}), flush=True)
 
 
