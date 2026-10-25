@@ -15,10 +15,12 @@ from tests.test_diary import DAY
 from tests.test_growth_foundations import complete_read, view
 from tests.test_heybox_reader import URL
 from tests.test_observations import enable_observations, observation
+from tests.test_owner_authority import activate as activate_owner
+from tests.test_owner_authority import prepare as prepare_owner
 from tests.test_source_grants import prepare, receipt
 
 
-def test_live_daily_sources_exclude_retained_simulation_before_any_model_request(core):
+def test_live_daily_sources_exclude_retained_simulation_before_any_model_request(core, tmp_path):
     enable_observations(core)
     core.observations.append(
         "reader", observation(core, occurred_at="2026-10-18T04:00:00Z")
@@ -27,6 +29,8 @@ def test_live_daily_sources_exclude_retained_simulation_before_any_model_request
     core.settings.mode = "live"
     assert core.diary.repo.sources(DAY) == []
     enable_nightly(core, seed=False)
+    policy = prepare_owner(core, tmp_path).model_copy(update={"purposes": ["reflection"]})
+    activate_owner(core, policy)
     assert run(core.reflections.run_day(DAY))["state"] == "SKIPPED"
     assert core.model.calls == []
     assert core.store.rows("SELECT * FROM model_usage") == []
