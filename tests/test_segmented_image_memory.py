@@ -103,8 +103,10 @@ def test_joint_evidence_loss_or_unknown_send_stops_remaining_fragments(core, tmp
                     "WHERE state='UNKNOWN'").fetchone()[0] == 1
                 with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
                     value.entry.runtime.verify()
-                assert not (await value.entry.send(value.entry.client,
-                                                   value.entry.protocol))["worked"]
+                deliveries = core.store.rows("SELECT * FROM outbox")
+                with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                    await value.entry.send(value.entry.client, value.entry.protocol)
+                assert core.store.rows("SELECT * FROM outbox") == deliveries
             else:
                 assert not (await value.entry.send(value.entry.client,
                                                    value.entry.protocol))["worked"]

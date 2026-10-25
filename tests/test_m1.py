@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-import httpx
 import pytest
 from cryptography.fernet import Fernet
 
@@ -9,7 +8,6 @@ from companion import budget
 from companion.backup import backup, restore
 from companion.contracts import Candidate, CoreError
 from companion.core import Core
-from companion.model import ModelClient
 from companion.privacy import epoch
 from companion.store import after, encode, migrate
 from tests.conftest import event, ingest, run
@@ -260,40 +258,32 @@ def test_inflight_reply_is_discarded_after_forgetting(core):
 def test_forget_in_recall_request_hook_keeps_retry_contract_before_provider_dispatch(
     core, tmp_path,
 ):
-    from tests.test_paid_model_gate import approved_live
-
-    memory_id = remember(core, 1, "我喜欢茉莉绿茶", confirmed=True)
-    core.store.execute("UPDATE jobs SET state='SUCCEEDED'")
-    approved_live(core, tmp_path)
-    accepted = ingest(core, 2, "茉莉绿茶")
-    calls = []
+    from tests.support.native_recall_entry import native_recall, returned
 
     async def forget(request):
-        assert json.loads(request.content)["messages"][-1]["role"] == "user"
-        core.memory.decide(memory_id, "forget", core.clock())
-
-    def provider(request):
-        calls.append(request)
-        return httpx.Response(200, json={})
+        if returned(json.loads(request.content)):
+            core.memory.decide(value.memory_id, "forget", core.clock())
 
     async def scenario():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider),
-                                     event_hooks={"request": [forget]}) as client:
-            with Core(core.settings, ModelClient(core.settings, client), core.clock) as worker:
-                assert await worker.run_once()
-                assert worker.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
-                                        (accepted["job_id"],)) == {
-                    "state": "RETRY_WAIT", "last_error_code": "PRIVACY_CHANGED",
-                }
+        nonlocal value
+        async with native_recall(core, tmp_path, fact_text="我喜欢茉莉绿茶",
+            query="茉莉绿茶", tool_query="*", request_hook=forget) as value:
+            source = await value.capture()
+            assert await value.worker.run_once("forget-before-native-answer-dispatch")
+            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+                (source["event_id"],)) == {"state": "CANCELLED",
+                                         "last_error_code": "REPLY_SOURCE_RECALLED"}
+            assert len(value.calls) == 1 and not value.sends
+            assert not core.store.rows("SELECT * FROM outbox")
+            usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid")
+            assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
+            assert usage[0]["billed_micro_usd"] > 0
+            assert usage[1]["billed_micro_usd"] == 0
+            assert not await value.worker.run_once("no-stale-recall-retry")
+            assert core.store.rows(
+                "SELECT state,billed_micro_usd FROM model_usage ORDER BY rowid") == usage
+    value = None
     run(scenario())
-    assert not calls
-    assert not core.store.rows("SELECT * FROM outbox")
-    usage = core.store.one(
-        "SELECT u.state,u.billed_micro_usd,a.reserved_micro_usd FROM model_usage u "
-        "JOIN model_admissions a USING(request_id)",
-    )
-    assert usage["state"] == "UNKNOWN"
-    assert usage["billed_micro_usd"] == usage["reserved_micro_usd"] > 0
 
 
 @pytest.mark.parametrize("source", ["empty", "whitespace", "missing", "redacted", "expired"])
