@@ -29,8 +29,10 @@ The delivery integration seam is
 the existing service constructors hold references and open no Core, model, search
 or HTTP session. Active conversation checks use the same function with
 `executing=True`. Delivery callers retain their existing snapshot hash binding and
-pass those saved `reader` snapshots unchanged. Owner delivery integration is owned
-by the integration lane and is deliberately separate from this commit.
+pass those saved `reader` snapshots unchanged. `owner_delivery._sources` invokes
+this same validator when recording the generated reply and when checking its
+lease, begin-send and final send-check. A changed result body, evidence or original
+source binding refuses delivery while preserving already settled model costs.
 
 Inspected references:
 

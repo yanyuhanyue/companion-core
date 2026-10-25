@@ -75,6 +75,16 @@ def _memories(store, settings, clock, job, view):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
+def _readings(store, settings, clock, job, *, executing):
+    from companion.agent_reading import revalidate_results
+
+    try:
+        revalidate_results(store, settings, clock, job, _snapshots(store, job),
+                           executing=executing)
+    except (ValueError, KeyError, TypeError, CoreError) as error:
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
+
+
 def _sources(store, settings, clock, job, *, executing=False):
     if job is None:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
@@ -88,6 +98,7 @@ def _sources(store, settings, clock, job, *, executing=False):
         owner_input.check_history(store, settings, clock, job, _history_proof(store, job))
         _images(store, settings, clock, job, executing=executing)
         _memories(store, settings, clock, job, view)
+        _readings(store, settings, clock, job, executing=executing)
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
     elif job["kind"] == "poke":

@@ -96,3 +96,13 @@ liabilities still pause readiness. Real native grants verify STOP, mode changes,
 policy drift and absence of permission; database and journal snapshots prove the
 queries leave custody unchanged. Quota-arithmetic unit fixtures separately isolate
 their deliberately unjournaled historical usage rows from authority admission.
+
+Native segmented delivery also retains the existing first-fragment whole-group
+allowance check. `owner_delivery.check_delivery` uses the original
+`cumulative.check/liability/violations` functions to project the remaining,
+unaccounted segments within the existing delivery transaction. Confirmed prefixes
+and already recorded send operations are counted once. `admit_operation` still
+records each actual attempt; the preview creates no future debit or reservation.
+This reuses the former `WindowOneBot` whole-group policy and SQLite transaction
+boundary rather than adding another quota ledger. Window, day, month and account
+caps are checked before any OneBot I/O.
