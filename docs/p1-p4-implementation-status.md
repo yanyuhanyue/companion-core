@@ -8,7 +8,7 @@ PR #109、#111 仍未合并；部署与真实体验分别验收。
 Reader 原始结果入 SDK、生成后投递来源检查、最终原图/记忆、整组额度及未结 RPC 领取边界的增量已进入该工作树。
 
 **唯一集成 CI：[完整 workflow_dispatch](https://github.com/yanyuhanyue/companion-core/actions/runs/40151901077) — attempt 2 / COMPLETED / SUCCESS。**
-最终证据统一见[集成 CI 回执](../../reliability-integration/.local/verification/final-ci-summary.json)：上述冻结候选的 14 个 job（含最终 `ci`）全部成功。
+最终证据统一见上述集成 CI：冻结候选的 14 个 job（含最终 `ci`）全部成功。
 每平台收集 7160 个唯一用例：Linux 为 7145 passed / 15 skipped，Windows 为 7151 passed / 9 skipped；
 另有 8 项浏览器用例在独立 `browser-reader` job 通过。平台跳过项及复用的分片证据均记录在同一回执中。
 第一轮 `f44a8fa` 的 132 个失败用例已由纠正 XML 逐项闭合，原始失败与修复证据保留。
