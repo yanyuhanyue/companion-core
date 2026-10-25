@@ -16,14 +16,13 @@ from companion.contracts import InboundEvent
 from companion.core import Core
 from companion.model import ModelClient
 from companion_onebot_bridge import face_graphics as graphics
-from companion_onebot_bridge import images, pending_media
+from companion_onebot_bridge import images
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
+from tests.support.native_images import image_host, upload
 from tests.test_live_image_input import options
-from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import config, raw_event
 from tests.test_onebot_images import image_segment
-from tests.test_onebot_window import reply_approval
 
 
 def face(identifier="277"):
@@ -164,6 +163,7 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
     raw = raw_event(message=[face()])
 
     async def source(ws):
+        raw["time"] = int(core.clock.now.timestamp())
         await ws.send(json.dumps(raw))
         await ws.wait_closed()
 
@@ -177,43 +177,33 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
         scope = options()
         scope["paid_options"]["image_input"] = scope["paid_options"]["image_input"].model_copy(
             update={"max_pixels_per_image": 256_000})
-        async with (source_window(core, tmp_path, source, live=True, approved=True,
-                rich_input_scope="references_v1", scope_options=scope)as(
-                    window, client, protocol, _, sends),
-                httpx.AsyncClient(transport=httpx.MockTransport(provider))as model_http):
-            async def read_response(response):
-                await response.aread()
-            client.event_hooks["response"].append(read_response)
-            core.model = ModelClient(core.settings, model_http)
-            core.content.options = core.settings.content
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window),
-                                         defer_media=mode == "deferred")
+        async with image_host(core, tmp_path, source, options=scope) as (active, _, sends, _):
+            await active.capture()
+            await active.flush()
+            queued = active.db.execute("SELECT state FROM automatic_media").fetchone()
+            assert queued[0] == "PENDING"
             if mode == "deferred":
-                queued = window.db.execute("SELECT * FROM automatic_media").fetchone()
-                assert queued["state"] == "PENDING"
-                originals = pending_media.manifest(window, queued)
-                assert originals[0].face_id == "277"
-                await pending_media.upload(window, client, queued["event_id"], originals)
-            assert len(calls) == 1
-            prompt = calls[0]["messages"][0]["content"][0]["text"]
-            assert "QQ内置表情277" in prompt and "官方静态图" in prompt
+                active.restart()
+            async def forbidden(*args):
+                raise AssertionError("Bundled official face must not use network")
+            await upload(active, transport=httpx.MockTransport(forbidden), resolver=forbidden)
+            assert calls == []
             owner = core.store.one("SELECT * FROM events WHERE source='qq.onebot'")
             body = json.loads(owner["body_json"])
             assert body["text"] == "" and qq_images.manifest(body)[0]["face_id"] == "277"
             content = core.store.one("SELECT * FROM content_items")
             assert content["state"] == "SUCCEEDED"
             assert content["media_sha256"] == hashlib.sha256(graphics.read("277")).hexdigest()
-            with Core(core.settings, ModelClient(core.settings, model_http), core.clock)as worker:
-                assert worker.store is not core.store
-                assert await worker.run_once()
-            assert len(calls) == 2
-            assert [r["scenario"]for r in core.store.rows(
-                "SELECT scenario FROM model_usage ORDER BY rowid")] == ["content_vision", "chat"]
-            assert all(r["state"] == "SETTLED" for r in core.store.rows(
-                "SELECT state FROM model_usage"))
-            assert "官方静态图" in json.dumps(calls[1]["messages"], ensure_ascii=False)
-            approval = reply_approval(window.plan, core)
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as model_http:
+                with Core(core.settings, ModelClient(core.settings, model_http),
+                          core.clock) as worker:
+                    assert worker.store is not core.store
+                    assert await worker.run_once()
+            assert len(calls) == 1
+            assert core.store.rows("SELECT scenario,state FROM model_usage") == [
+                {"scenario": "chat", "state": "SETTLED"}]
+            assert "官方静态图" in json.dumps(calls[0]["messages"], ensure_ascii=False)
+            usage = core.store.rows("SELECT * FROM model_usage")
             if mode == "source_change":
                 body["rich"]["segments"][0]["face_id"] = "14"
                 core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
@@ -221,15 +211,11 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
             elif mode == "erasure":
                 with core.store.transaction():
                     core.ledger.expire_events(core.store, [owner["event_id"]], core.clock())
-            if mode in {"source_change", "erasure"}:
-                with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                    await window.send_once(client, protocol, approval)
-                assert sends == []
-                assert len(calls) == 2
-                assert all(r["state"] == "SETTLED" for r in core.store.rows(
-                    "SELECT state FROM model_usage"))
-                return
-            delivered = await window.send_once(client, protocol, approval)
-            assert delivered["attempt_states"] == {"ACK": 1} and len(sends) == 1
+            await active.pump()
+            assert len(sends) == int(mode in {"inline", "deferred"})
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            assert len(calls) == 1
+            if sends:
+                assert active.attempts() == {"ACK": 1}
 
     run(scenario())
