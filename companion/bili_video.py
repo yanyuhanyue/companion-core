@@ -74,6 +74,18 @@ def _tx(store):
     return nullcontext() if store.db.in_transaction else store.transaction()
 
 
+def _analysis_text(phases):
+    return "视频局部视觉样本分析（未分析音轨，未完整观看）：\n" + "\n".join(
+        json.loads(phase["analysis_json"])["analysis"] for phase in phases
+    )
+
+
+def _phase_evidence(phases):
+    return [{"phase": phase["phase"], "model_request_id": phase["model_request_id"],
+             "payload_sha256": phase["payload_sha256"],
+             "materialized": json.loads(phase["evidence_json"])} for phase in phases]
+
+
 def _policy(store, settings, clock, current_request=None):
     config = settings.bili_video
     if not config.enabled or not settings.content_enabled:
@@ -1036,9 +1048,7 @@ class BiliVideoService:
         )
         if not phases or any(not phase["analysis_json"] for phase in phases):
             raise CoreError("BILI_VIDEO_ANALYSIS_REQUIRED", 409)
-        text = "视频局部视觉样本分析（未分析音轨，未完整观看）：\n" + "\n".join(
-            json.loads(phase["analysis_json"])["analysis"] for phase in phases
-        )
+        text = _analysis_text(phases)
         _, observed = _source(self.store, self.settings, row["source_event_id"], self.clock())
         current = self.store.one(
             "SELECT * FROM bili_video_items WHERE request_id=?", (row["request_id"],)
@@ -1082,15 +1092,7 @@ class BiliVideoService:
             "visual_observed": True,
             "audio_analyzed": False,
             "complete_video": False,
-            "phases": [
-                {
-                    "phase": phase["phase"],
-                    "model_request_id": phase["model_request_id"],
-                    "payload_sha256": phase["payload_sha256"],
-                    "materialized": json.loads(phase["evidence_json"]),
-                }
-                for phase in phases
-            ],
+            "phases": _phase_evidence(phases),
         }
         stored = self.store.one(
             "SELECT evidence_json FROM observations WHERE event_id=?", (result["event_id"],)
@@ -1293,6 +1295,60 @@ class BiliVideoService:
                       "AND a.state='DEFERRED' AND c.phase='WAITING')",
                       (self.clock(), self.clock(), request_id))
             return {"accepted": True}
+
+    def check_result(self, request_id, event_ids):
+        """Validate the original completed visual evidence without creating media work."""
+        s = self.store
+        row = s.one("SELECT * FROM bili_video_items WHERE request_id=?", (request_id,))
+        if row is None:
+            return
+        _policy(s, self.settings, self.clock)
+        source, _ = _source(s, self.settings, row["source_event_id"], self.clock())
+        context = self.context(row["item_id"])
+        output = s.one("SELECT e.source,e.event_type,e.body_json,o.* FROM events e "
+                       "JOIN observations o USING(event_id) WHERE e.event_id=?",
+                       (row["output_event_id"],))
+        phases = s.rows("SELECT * FROM bili_video_phases WHERE request_id=? "
+                        "AND phase<>'prepare' AND state='SETTLED' ORDER BY created_at,phase DESC",
+                        (request_id,))
+        try:
+            if (row["redacted"] or row["state"] != "COMPLETE" or not context
+                or context.get("event_id") != row["output_event_id"]
+                or event_ids != [row["output_event_id"]]
+                or json_sha256(source) != row["source_snapshot_sha256"]
+                or source["source_sha256"] != row["source_sha256"]
+                or not output or output["source"] != "observation.bilibili"
+                or output["event_type"] != "content.observed"
+                or output["adapter_id"] != row["adapter_id"]
+                or output["result_status"] != "FETCHED" or not 1 <= len(phases) <= 2
+                or s.one("SELECT 1 FROM bili_video_phases WHERE request_id=? "
+                         "AND state IN ('PENDING','UNKNOWN')", (request_id,))):
+                raise ValueError("visual result identity changed")
+            proof = json.loads(output["evidence_json"])["bili_video"]
+            text = json.loads(output["body_json"])["text"]
+            if (text != _analysis_text(phases)
+                or hashlib.sha256(text.encode()).hexdigest() != output["source_sha256"]
+                or proof["source_event_id"] != row["source_event_id"]
+                or proof["source_sha256"] != row["source_sha256"]
+                or proof["partial"] is not True or proof["visual_observed"] is not True
+                or proof["audio_analyzed"] is not False or proof["complete_video"] is not False
+                or proof["phases"] != _phase_evidence(phases)):
+                raise ValueError("visual result evidence changed")
+            for phase in phases:
+                paid = s.one("SELECT m.state,m.job_id,m.scenario,a.payload_sha256,"
+                             "a.logical_request_id FROM model_usage m "
+                             "JOIN model_admissions a USING(request_id) WHERE m.request_id=?",
+                             (phase["model_request_id"],))
+                if (phase["state"] != "SETTLED" or not paid or paid["state"] != "SETTLED"
+                    or paid["job_id"] != phase["model_job_id"]
+                    or paid["logical_request_id"] != phase["model_job_id"]
+                    or paid["scenario"] != SCENARIOS[phase["phase"]]
+                    or paid["payload_sha256"] != phase["payload_sha256"]
+                    or json.loads(phase["response_json"])["receipt_sha256"]
+                    != phase["request_sha256"]):
+                    raise ValueError("visual paid receipt changed")
+        except (KeyError, ValueError, TypeError):
+            raise CoreError("BILI_VIDEO_RESULT_CHANGED", 409) from None
 
     def context(self, item_id):
         row = self.store.one("SELECT * FROM bili_video_items WHERE item_id=?", (item_id,))

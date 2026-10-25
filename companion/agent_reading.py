@@ -1,5 +1,6 @@
 """SDK tools reuse authenticated owner sources and the original Reader queue."""
 
+import hashlib
 import json
 from typing import Annotated, Literal
 
@@ -13,7 +14,8 @@ from companion.agent_runtime import check_conversation
 from companion.capabilities import public_source_readiness
 from companion.contracts import CoreError
 from companion.sources import content_target, web_hosts
-from companion.store import after
+from companion.store import after, encode
+from companion.transport import digest
 
 
 def _remember(core, job, snapshots, sources):
@@ -25,17 +27,23 @@ def _remember(core, job, snapshots, sources):
     check_conversation(core, job, snapshots)
 
 
-def _owner_source(core, job, event_id):
-    view = owner_authority.check_job(core.store, core.settings, core.clock, job,
-                                     purpose="content", executing=True)
-    source, _, _ = owner_input.source(core.store, core.settings, view, event_id,
-                                      core.clock(), history=event_id != job["event_id"])
+def _read_owner_source(store, settings, clock, job, event_id, *, executing):
+    from companion.goals import GoalEngine
+
+    view = owner_authority.check_job(store, settings, clock, job,
+                                     purpose="content", executing=executing)
+    source, _, _ = owner_input.source(store, settings, view, event_id,
+                                     clock(), history=event_id != job["event_id"])
     if source["conversation_id"] != job["conversation_id"]:
         raise CoreError("CONVERSATION_READER_SOURCE_REQUIRED", 403)
-    core.goals.validate_sources([event_id])
-    if not reply_revision.source_active(core.store, event_id):
+    GoalEngine(store, settings, None, clock).validate_sources([event_id])
+    if not reply_revision.source_active(store, event_id):
         raise CoreError("REPLY_SOURCE_RECALLED", 409)
     return source
+
+
+def _owner_source(core, job, event_id):
+    return _read_owner_source(core.store, core.settings, core.clock, job, event_id, executing=True)
 
 
 def catalog(core, job, snapshots):
@@ -68,43 +76,108 @@ def catalog(core, job, snapshots):
     return valid
 
 
-def reading_result(core, job, snapshots, request_id, *, include_pending=False):
-    row = core.store.one("SELECT * FROM exploration_requests WHERE request_id=? AND redacted=0",
+def _reading_result(store, settings, clock, job, request_id, *, executing):
+    from companion.bili_video import BiliVideoService
+    from companion.exploration import ExplorationService
+    from companion.goals import GoalEngine
+    from companion.observation import ObservationService
+
+    # These existing services only hold references; no Core lifecycle or model is opened.
+    goals = GoalEngine(store, settings, None, clock)
+    observations = ObservationService(store, settings, clock)
+    exploration = ExplorationService(store, settings, observations, goals, None, None, clock)
+    row = store.one("SELECT * FROM exploration_requests WHERE request_id=? AND redacted=0",
                          (request_id,))
     if not row or row["goal_step_json"] != "{}":
         raise CoreError("CONVERSATION_READER_SOURCE_REQUIRED", 403)
-    sources = [item["event_id"] for item in core.store.rows(
+    sources = [item["event_id"] for item in store.rows(
         "SELECT event_id FROM exploration_evidence WHERE request_id=?", (request_id,),
     )]
-    owners = [event_id for event_id in sources if reply_revision.owner_input(core.store, event_id)]
+    owners = [event_id for event_id in sources if reply_revision.owner_input(store, event_id)]
     if not owners:
         raise CoreError("CONVERSATION_READER_SOURCE_REQUIRED", 403)
     for event_id in owners:
-        _owner_source(core, job, event_id)
-    policy = core.exploration.adapter(row["adapter_id"])
-    captured = core.observations.grants.captured(row)
+        _read_owner_source(store, settings, clock, job, event_id, executing=executing)
+    policy = exploration.adapter(row["adapter_id"])
+    captured = observations.grants.captured(row)
     if captured or policy.source_grant_required:
-        core.observations.grants.require(row["adapter_id"], captured)
-    _remember(core, job, snapshots, sources)
-    pending = row["state"] in {"QUEUED", "RUNNING"}
-    if pending and not include_pending:
-        return None
+        observations.grants.require(row["adapter_id"], captured)
     items = []
     if row["state"] == "DONE":
-        for item in core.store.rows(
-            "SELECT e.event_id,e.body_json,e.occurred_at,o.result_status,o.evidence_json "
-            "FROM exploration_evidence x JOIN events e USING(event_id) "
-            "JOIN observations o USING(event_id) WHERE x.request_id=? "
-            "AND e.redacted=0 AND o.redacted=0 ORDER BY e.rowid LIMIT 40", (request_id,),
+        attempt = store.one("SELECT * FROM reading_attempts WHERE request_id=?",
+                                 (request_id,))
+        if (not attempt or attempt["state"] != "DONE" or not attempt["result_sha256"]
+            or attempt["result_sha256"] != row["result_sha256"]
+            or attempt["adapter_id"] != row["adapter_id"]
+            or attempt["original_url_sha256"] != hashlib.sha256(row["url"].encode()).hexdigest()):
+            raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+        try:
+            result_ids = json.loads(attempt["result_event_ids_json"])
+        except (ValueError, TypeError) as error:
+            raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409) from error
+        if (not isinstance(result_ids, list) or len(result_ids) > 40
+            or any(not isinstance(value, str) for value in result_ids)
+            or len(result_ids) != len(set(result_ids))):
+            raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+        BiliVideoService(store, settings, None, clock=clock).check_result(request_id, result_ids)
+        sources = sorted(set(sources) | set(result_ids))
+        for item in store.rows(
+            "SELECT e.event_id,e.body_json,e.occurred_at,o.result_status,o.evidence_json,"
+            "o.canonical_url FROM events e JOIN observations o USING(event_id) "
+            "WHERE e.event_id IN (SELECT value FROM json_each(?)) "
+            "AND e.redacted=0 AND o.redacted=0 ORDER BY e.rowid", (encode(result_ids),),
         ):
             body = json.loads(item["body_json"])
             items.append({"event_id": item["event_id"], "observed_at": item["occurred_at"],
                           "coverage": item["result_status"], "title": body.get("title", ""),
-                          "text": body.get("text", ""), "url": body.get("url", ""),
+                          "text": body.get("text", ""), "url": item["canonical_url"],
                           "evidence": json.loads(item["evidence_json"])})
+        if len(items) != len(result_ids):
+            raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+    goals.validate_sources(sources)
     return {"request_id": request_id, "state": row["state"], "operation": row["operation"],
-            "as_of": core.clock(), "error_code": row["last_error_code"],
+            "as_of": clock(), "error_code": row["last_error_code"],
             "source_event_ids": sorted(sources), "items": items}
+
+
+def _result_digest(store, result):
+    receipt = store.one("SELECT adapter_id,lease_token,context_json,source_grant_json,"
+                        "original_url_sha256,result_sha256,result_event_ids_json "
+                        "FROM reading_attempts WHERE request_id=?", (result["request_id"],))
+    bindings = store.rows("SELECT event_id FROM exploration_evidence WHERE request_id=? "
+                          "ORDER BY event_id", (result["request_id"],))
+    return digest({"result": {key: value for key, value in result.items() if key != "as_of"},
+                   "receipt": receipt, "source_bindings": bindings})
+
+
+def reading_result(core, job, snapshots, request_id, *, include_pending=False):
+    result = _reading_result(core.store, core.settings, core.clock, job, request_id, executing=True)
+    _remember(core, job, snapshots, result["source_event_ids"])
+    if result["state"] in {"QUEUED", "RUNNING"} and not include_pending:
+        return None
+    if result["state"] == "DONE":
+        proof = {"kind": "reader", "purpose": "content", "request_id": request_id,
+                 "sha256": _result_digest(core.store, result)}
+        if proof not in snapshots:
+            snapshots.append(proof)
+    return result
+
+
+def revalidate_results(store, settings, clock, job, snapshots, *, executing=False):
+    """Read-only context check for active or completed jobs, including delivery guards."""
+    proofs = [proof for proof in snapshots if proof["kind"] == "reader"]
+    if not proofs:
+        return
+    reply_revision.check_job(store, job)
+    for proof in proofs:
+        if (proof.get("purpose") != "content" or _result_digest(store, _reading_result(
+            store, settings, clock, job, proof["request_id"], executing=executing,
+        )) != proof["sha256"]):
+            raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+
+
+def check_results(core, job, snapshots):
+    revalidate_results(core.store, core.settings, core.clock, job, snapshots, executing=True)
 
 
 def deferred_results(core, job, snapshots, conversation):
