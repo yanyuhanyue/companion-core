@@ -536,9 +536,12 @@ def test_unknown_publish_cannot_be_repaid_as_a_new_plan_after_midnight_or_policy
     object.__setattr__(core.settings, "social_autonomy", config)
     second_ref = extra_public(core)
     module.model.text = "这是新内容，仍不能绕过未核对的发布。"
-    second = planned(module, second_ref, "social-plan-two")
-    with pytest.raises(CoreError, match="SOCIAL_ACTION_RECONCILIATION_REQUIRED"):
-        queue(module, second, conversation)
+    usage = core.store.rows("SELECT * FROM model_usage")
+    plans = core.store.rows("SELECT * FROM social_autonomy_plans")
+    with pytest.raises(CoreError, match="SOCIAL_DELIVERY_RECONCILIATION_REQUIRED"):
+        planned(module, second_ref, "social-plan-two")
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+    assert core.store.rows("SELECT * FROM social_autonomy_plans") == plans
     assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
     assert len(core.store.rows("SELECT * FROM social_autonomy_reservations")) == 1
 

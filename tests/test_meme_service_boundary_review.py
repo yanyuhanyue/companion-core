@@ -101,7 +101,13 @@ def test_discovery_jobs_do_not_duplicate_or_enable_memory_extraction(
                 with Core(core.settings, model, core.clock) as worker:
                     assert worker.store is not core.store
                     completed = await worker.extract_once()
-            expected = [{"event_id": event["event_id"], "text": event["payload"]["text"]}]
+            source = core.store.one(
+                "SELECT conversation_id,occurred_at FROM events WHERE event_id=?",
+                (event["event_id"],))
+            expected = [{"event_id": event["event_id"], "text": event["payload"]["text"],
+                         "conversation_id": source["conversation_id"],
+                         "occurred_at": source["occurred_at"],
+                         "episode_source_event_ids": [event["event_id"]]}]
             assert completed is (chat_state == "SUCCEEDED"), json.dumps({
                 "clock": core.clock(),
                 "events": core.store.rows(

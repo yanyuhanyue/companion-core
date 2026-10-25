@@ -97,8 +97,14 @@ def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
                 assert sends == [] and pin[1] is None
                 with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
                     window.runtime.verify()
-                assert not await window.pump()
+                before = core.store.rows("SELECT * FROM model_usage")
+                deliveries = core.store.rows("SELECT * FROM outbox")
+                with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                    await window.pump()
                 assert len(invoked) == 1
+                assert core.store.rows("SELECT * FROM model_usage") == before
+                assert core.store.rows("SELECT * FROM outbox") == deliveries
+                assert deliveries[0]["state"] == "DELIVERY_UNCERTAIN"
             else:
                 assert window.runtime.row()["state"] == "ACTIVE" and len(sends) == 1
                 parts = sends[0]["message"]
