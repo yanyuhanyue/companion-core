@@ -3,6 +3,7 @@
 import asyncio
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -118,7 +119,7 @@ def test_once_capture_routes_recall_and_skips_withdrawn_reference_io(core, tmp_p
         await ws.wait_closed()
 
     def recall():
-        owner_notices.put(runtime, native_recall_frame(), core.clock.now, ("127.0.0.1", 12345))
+        owner_notices.put(runtime, native_recall_frame(), datetime.now(UTC), ("127.0.0.1", 12345))
 
     def protocol_reply(request):
         if request.url.path in {"/get_msg", "/get_forward_msg"}:
@@ -166,7 +167,7 @@ def test_recall_dispatch_boundary_distinguishes_not_sent_from_unknown(core, tmp_
         await ws.wait_closed()
 
     def recall():
-        owner_notices.put(runtime, native_recall_frame(), core.clock.now, ("127.0.0.1", 12345))
+        owner_notices.put(runtime, native_recall_frame(), datetime.now(UTC), ("127.0.0.1", 12345))
 
     def remote(request):
         if request.url.path == "/send_private_msg":
