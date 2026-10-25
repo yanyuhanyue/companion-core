@@ -74,3 +74,9 @@ Console 的“思考与决策 → 模型调用”显示同一回执，并将有�
 缺项或未知版本为 `NOT_RECORDED`，损坏或请求绑定不一致为 `INCONSISTENT`；旧 epoch 与擦除后
 隐藏规划详情。`source_validity=NOT_REVALIDATED` 保留，不替代执行时的权限和来源检查。
 规划 JSON 沿原 Conversation 擦除闭包删除，历史费用和 UNKNOWN 责任不变。
+
+原 assembler 仍先执行既有初始软容量选择，再登记实际选中的来源；未选入的候选不被 pin。
+初始 fit 的淘汰原因仍为未记录；逐请求原因只覆盖其后新 planner 实际执行的裁剪。
+请求时 planner 可继续裁剪已选入的可选区域，但不撤销既有来源责任；未完成的主人输入、
+原图及其完整 turn 保持必需。记录中的 epoch 是布局捕获代次；无关 epoch 前进时，执行仍由
+原授权、实际来源和最终输出核验决定，诊断继续把旧代次标为 `STALE_EPOCH`。

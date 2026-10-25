@@ -886,7 +886,7 @@ class Core(Runtime):
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )
-        if planning or protected:
+        if protected:
             # History is capped before review. Do not silently discard reviewed
             # conflict evidence or selected facts here; full paid admission still applies.
             messages = [rules, *references, *(m for turn in turns for m in turn), *current_input]
@@ -943,7 +943,8 @@ class Core(Runtime):
                     committed and reference is references[0]) or (
                     reference is memory_reference and bool(hits))) for reference in references
                     if any(message is reference for message in messages))
-                blocks.extend(("history", turn, preserve) for turn in turns
+                blocks.extend(("history", turn, preserve or source.get("reply_complete") is False)
+                              for source, turn in zip(sources, turns, strict=True)
                               if any(message is turn[0] for message in messages))
                 blocks.append(("current", current_input, True))
                 initialize(self, job, messages, blocks, snapshots)

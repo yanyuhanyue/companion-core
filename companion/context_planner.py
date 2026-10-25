@@ -147,7 +147,9 @@ def validate(snapshots, job, current_epoch):
         if (
             plan["job_id"] != job["job_id"]
             or type(plan["privacy_epoch"]) is not int
-            or plan["privacy_epoch"] != current_epoch
+            # This is the layout's capture generation, not a replacement for
+            # original source revalidation. Unrelated erasure may advance it.
+            or not 0 <= plan["privacy_epoch"] <= current_epoch
             or plan["authority_sha256"] != sha(json.loads(job["authority_json"]))
             or not _integer(count, len(proofs))
             or plan["initial_source_proofs_sha256"] != sha(proofs[:count])

@@ -267,7 +267,7 @@ def test_recognized_damaged_plan_never_reaches_paid_io(core, tmp_path, damage):
     if damage == "job":
         plan["job_id"] = "other"
     elif damage == "epoch":
-        advance_epoch(core.store)
+        plan["privacy_epoch"] = epoch(core.store) + 1
     elif damage == "group":
         plan["groups"][1]["wire_count"] = True
     elif damage == "proof":
@@ -303,6 +303,21 @@ def test_unknown_absent_and_oversized_layouts_preserve_all_input(core, tmp_path)
     assert snapshots == []
     context = request_context(messages)
     assert planner.plan_request(core, job, snapshots, context) is context.messages
+
+
+def test_unrelated_epoch_preserves_capture_binding_without_rewriting_proofs(core, tmp_path):
+    _, job = chat(core, tmp_path)
+    _, snapshots = initial(core, job, snapshots=[{"kind": "history", "proof": []}])
+    original = deepcopy(snapshots)
+    captured = epoch(core.store)
+    advance_epoch(core.store)
+    plan = planner.check(core, job, snapshots)
+    assert plan["privacy_epoch"] == captured and snapshots == original
+    # Source/admission bindings remain strict even when the capture is older.
+    snapshots[0]["proof"].append({"event_id": "foreign-source"})
+    with pytest.raises(CoreError, match="CONTEXT_PLAN_INVALID"):
+        planner.check(core, job, snapshots)
+    assert not core.store.rows("SELECT * FROM model_usage")
 
 
 def test_attached_media_pins_entire_history_group_and_retains_honest_estimate(core, tmp_path):
