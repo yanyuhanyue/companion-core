@@ -35,6 +35,30 @@ redacted 状态都不补猜历史批准，仍不验证外部授权原件。
 输出不含明文、旧签名、URL、账户或路径；散列仍是可关联标识，对外分享前需再匿名化。
 遗忘后当前输出抑制旧引用；已有私人导出不会自动删除，应按既有保留/删除合同处置。
 
+## 原生 SDK 请求计量投影
+
+每个 `model_calls` 项复用 Console cognition 的 `measurement` 投影，读取该次
+`model_admissions.measurement_json`，仅导出计数身份、输入计数、预留裕量和输出预留。
+工具循环的每次模型请求分别显示。Inspector 不重算历史 Token、不读取 prompt 正文，
+不根据当前 tokenizer 配置升级旧回执；旧行 `{}` 为 `NOT_RECORDED`，损坏或超长 JSON
+为 `INCONSISTENT`。计量记录不证明供应商实际用量或独立账本已经重新核验。
+
+`exact_local_render` 是固定渲染器的本地计数，`estimate` 是本地估算；媒体和未知路由
+继续保留其原计量身份。UNKNOWN/RESERVED 仍可展示本地计量和费用责任，但实际 Token
+为空。没有保存的 `context_regions`、`trimming_reason` 均为 `NOT_RECORDED`，不能从最终
+payload 大小反推裁剪原因。原生 SDK 尚未保存旧窗口的 context 记录时，顶层 context
+同样保持 `NOT_RECORDED`，不把调用计量误称为完整 Context Planner。
+
+Console 的“思考与决策 → 模型调用”显示同一回执，并将有效已结算、已记录发送的用量
+与本地计量分开。demo、未发送、UNKNOWN 的实际用量显示为未记录。原有主人会话、来源
+过滤、隐私版本校验及 no-store 规则继续生效；不增加表、迁移或持久元数据。
+
+补充验证使用 100/1000 轮公开合成候选请求，复用原裁剪和固定 tokenizer，包含完整工具
+声明、两项工具调用/结果及过大的必需结果。它逐项测量并对超限候选执行原 reserve
+拒绝，每组仅发送一项 Mock provider 样本，不能称为千次模型调用或真实模型质量评估。
+真实 HTTP 入站后的独立 Core worker 另验证两次 SDK 请求和原回执，外部 transport
+保持 Mock；原生撤回后保留原模型费用并隐藏来源。真实 QQ 和长期体验仍待独立验收。
+
 回归覆盖空/待定/选中/最终差异、被遗忘/epoch变化、错误摘要/事件/重复候选/外来选择、
 未结算或错误 payload、损坏/超长记录及数据库不变；另在原本地认证记忆召回链中验证
 实际冻结记录的投影，仍使用 Mock provider，不是付费或 QQ 真人证据。
