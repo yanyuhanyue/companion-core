@@ -15,10 +15,9 @@ from companion.core import Core
 from companion.privacy import advance_epoch
 from companion.store import encode, uid
 from tests.conftest import run
-from tests.native_continuous_support import host
+from tests.native_continuous_support import frame, host
 from tests.test_dialogue_context import sent_history
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_direct import raw_event
 
 
 @asynccontextmanager
@@ -32,8 +31,9 @@ async def native_continuity(core, tmp_path, *, turns=4, byte_limit=16000, texts=
     async def source(ws):
         nonlocal number
         number += 1
-        await ws.send(json.dumps(raw_event(number, text=texts[number - 1],
-                                          time=int(core.clock.now.timestamp()))))
+        # Wire event time and app.receive use the wall clock; the independently
+        # advancing Core clock belongs to business deadlines and history tests.
+        await ws.send(frame(number, text=texts[number - 1]))
         await ws.wait_closed()
 
     def provider_reply(request):
@@ -73,6 +73,40 @@ def history_snapshot(core):
         "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1")
     return next(item["proof"] for item in json.loads(row["snapshots_json"])
                 if item["kind"] == "history")
+
+
+@pytest.mark.parametrize("microsecond", [995999, 999792])
+def test_source_timestamp_uses_receive_wall_clock_across_second_boundary(
+    core, tmp_path, monkeypatch, microsecond,
+):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from companion_onebot_bridge import app
+    from tests import native_continuous_support
+
+    received = datetime.now(UTC).replace(microsecond=microsecond)
+    wall_clock = SimpleNamespace(now=lambda _: received)
+    monkeypatch.setattr(native_continuous_support, "datetime", wall_clock)
+    monkeypatch.setattr(app, "datetime", wall_clock)
+
+    async def scenario():
+        async with native_continuity(core, tmp_path) as (
+            active, _, calls, sends, capture_input, finish,
+        ):
+            # Reproduce the CI boundary: the independently advanced business clock
+            # has crossed the next second while the receiver wall clock has not.
+            core.clock.now = received.replace(microsecond=0) + timedelta(seconds=1)
+            await capture_input()
+            receipt = json.loads(active.db.execute(
+                "SELECT capture_json FROM window_inputs").fetchone()[0])
+            assert receipt["occurred_at"] == received.replace(microsecond=0).isoformat()
+            assert receipt["received_at"] == received.isoformat()
+            assert await finish()
+            assert active.attempts() == {"ACK": 1}
+            assert len(calls) == len(sends) == 1
+
+    run(scenario())
 
 
 def test_five_authenticated_turns_use_only_approved_window_and_keep_one_attempt(core, tmp_path):

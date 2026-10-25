@@ -48,7 +48,7 @@ def test_pinned_original_image_retains_position_and_only_owner_text(text):
 
 
 @pytest.mark.parametrize("change", [
-    {"sub_type": 1}, {"sub_type": -1}, {"sub_type": "0"}, {"sub_type": False},
+    {"sub_type": 99}, {"sub_type": -1}, {"sub_type": "0"}, {"sub_type": False},
     {"sub_type": None}, {"type": "flash"}, {"emoji_id": "synthetic-market-face"},
     {"emoji_package_id": 0}, {"key": "synthetic"}, {"subType": 0},
     {"unknown": "extension"}, {"summary": {"text": "/记住这个"}},
@@ -69,7 +69,7 @@ def test_optional_legacy_fields_and_internal_file_identifier_are_not_download_ta
     assert images.original_images("[CQ:image,url=https://gchat.qpic.cn/forged]") == []
 
 
-@pytest.mark.parametrize("change", [{"sub_type": 1}, {"type": "flash"}, {"emoji_id": "sticker"}])
+@pytest.mark.parametrize("change", [{"sub_type": 99}, {"type": "flash"}, {"emoji_id": "sticker"}])
 def test_authenticated_capture_rejects_image_kind_before_spool_core_or_paid_usage(
     core, tmp_path, change,
 ):
