@@ -1875,7 +1875,7 @@ class TestWindow:
             sender = WindowOneBot(operation, protocol)
             async with self.core_http(client) as scoped, sender.delegate.client:
                 if not await deliver_tick(scoped, sender, self.spool, guard=operation):
-                    if operation.waiting_for_segment(deliveries):
+                    if operation.has_pending_segment(deliveries):
                         return self.status() | {"delivery_wait": "SEGMENT_NOT_READY"}
                     raise ValueError("NO_APPROVED_DELIVERY_READY")
             if self.row()["state"] == "STOPPED":
@@ -2042,7 +2042,8 @@ class SendOperation:
             raise ValueError("REPLY_SEGMENT_TOTAL_CHANGED")
         return segment, not_before
 
-    def waiting_for_segment(self, deliveries):
+    def has_pending_segment(self, deliveries):
+        # Classify an empty Core lease; this is not the native pre-lease pacing hook.
         if not self.segmented_scope or not deliveries.get("PENDING", 0):
             return False
         approval = self.approval
