@@ -105,6 +105,7 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                 assert core.store.one("SELECT state FROM model_usage") == {"state": "RESERVED"}
                 with Core(core.settings) as second_worker:
                     assert second_worker.store is not core.store
+                    assert second_worker.claim_job("concurrent-worker") is None
                     assert second_worker.store.rows("SELECT state FROM model_usage") == [
                         {"state": "RESERVED"}]
                     assert second_worker.store.one("SELECT state FROM jobs WHERE job_id=?",

@@ -191,3 +191,12 @@ HTTP 钩子等待期间的 STOP；所有外部 provider 使用强制 synthetic `
 投递终态保留原 `owner_delivery` 身份与内容摘要。真实撤回或擦除沿既有 tombstone 和清空内容分支读回，
 不要求旧输入 epoch 等于当前 epoch，也不获取当前执行许可。回执仍分别报告 work/model/delivery
 未决状态；CHAT 停止不等于全部责任关闭。校验只读，不重开任务、不重发、不退还或改写历史费用。
+
+
+原生 claim 继续复用现有 `private_life.busy` 与 `SENDING` 等待检查：原 CHAT 已被新输入取消时，
+尚在派发中的模型责任仍占用执行位置；API 继续接受新输入，但独立 worker 等原回执结算后再领取。
+此检查位于现有 SQLite 领取事务内。2026-10-25 核对
+[DSH jobs-local 的 activeJobCount](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts)
+仍将 running/stopping 计入所属 owner 的活动责任；复用本项目已有等待策略，不引入第二个调度器。
+[SQLite 事务](https://www.sqlite.org/lang_transaction.html)提供领取时的串行写入边界，
+真实 HTTP burst 和独立 Store 的 claim 负例验证取消业务任务不会提前释放未结 I/O。

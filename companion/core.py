@@ -336,7 +336,8 @@ class Core(Runtime):
         s, now = self.store, self.clock()
         with s.transaction():
             self.recover(now)
-            if private_life.enabled(self.settings):
+            if (owner_authority.required(s, self.settings)
+                or private_life.enabled(self.settings)):
                 if private_life.busy(s, now) or s.one(
                     "SELECT 1 FROM outbox WHERE state='SENDING' LIMIT 1",
                 ):
