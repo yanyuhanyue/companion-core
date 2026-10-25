@@ -229,7 +229,8 @@ def test_successful_history_can_share_after_future_read_permission_ends(
     assert core.social.consider(event.event_id)
     assert core.social.flush()
     assert not core.store.rows("SELECT * FROM outbox")
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     bodies = [json.loads(row["content_json"])["text"] for row in
               core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
     assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]
@@ -269,7 +270,8 @@ def test_accepted_text_history_without_url_needs_no_new_fetch_or_receipt(core, s
     core.observations.append("reader", event)
     assert core.social.consider(event.event_id)
     assert core.social.flush()
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     body = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])["text"]
     assert body == core.model.activity
     assert core.store.rows("SELECT * FROM exploration_requests") == []
@@ -297,7 +299,8 @@ def test_legacy_queued_alias_url_keeps_same_accepted_content(core, source, legac
     )
     assert core.social.consider(event.event_id) == candidate
     assert core.social.flush()
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     bodies = [json.loads(row["content_json"])["text"] for row in
               core.store.rows("SELECT content_json FROM outbox ORDER BY rowid")]
     assert bodies == [core.model.activity, BILI if source == "bilibili" else HEYBOX]

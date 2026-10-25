@@ -32,6 +32,7 @@ from companion.social_autonomy_protocol import (
 )
 from companion.store import Store, after, encode, migrate, uid
 from tests.conftest import ingest, run
+from tests.social_profile_support import confirmed_profile_material
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import queued
 
@@ -127,7 +128,7 @@ def test_no_suitable_candidate_is_a_durable_skip_without_model_cost_or_profile_d
 def test_live_planning_requires_separate_qq_authority_before_any_native_provider_gate(core):
     module = service(core)
     core.settings.mode = "live"
-    with pytest.raises(CoreError, match="SOCIAL_LIVE_SCOPE_REQUIRED"):
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
         run(module.plan("unapproved-live"))
     assert core.model.calls == []
     assert not core.store.rows("SELECT * FROM social_autonomy_plans")
@@ -535,11 +536,42 @@ def test_unknown_publish_cannot_be_repaid_as_a_new_plan_after_midnight_or_policy
     object.__setattr__(core.settings, "social_autonomy", config)
     second_ref = extra_public(core)
     module.model.text = "这是新内容，仍不能绕过未核对的发布。"
-    second = planned(module, second_ref, "social-plan-two")
-    with pytest.raises(CoreError, match="SOCIAL_ACTION_RECONCILIATION_REQUIRED"):
-        queue(module, second, conversation)
+    usage = core.store.rows("SELECT * FROM model_usage")
+    plans = core.store.rows("SELECT * FROM social_autonomy_plans")
+    with pytest.raises(CoreError, match="SOCIAL_DELIVERY_RECONCILIATION_REQUIRED"):
+        planned(module, second_ref, "social-plan-two")
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+    assert core.store.rows("SELECT * FROM social_autonomy_plans") == plans
     assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
     assert len(core.store.rows("SELECT * FROM social_autonomy_reservations")) == 1
+
+
+def test_quota_scan_omits_old_known_results_but_retains_old_uncertainty(core, monkeypatch):
+    module, ref, conversation = background(core)
+    first = queue(module, planned(module, ref), conversation)
+    outcome(module, first, dispatch(module, first), "SUCCEEDED")
+    core.clock.advance(86400)
+    seen = []
+    original_rows = core.store.rows
+
+    def observed_rows(sql, *args):
+        rows = original_rows(sql, *args)
+        if sql.startswith("SELECT r.*,o.state,o.attempt_count"):
+            seen.append([row["message_id"] for row in rows])
+        return rows
+
+    monkeypatch.setattr(core.store, "rows", observed_rows)
+    module._capacity("qzone.publish", core.settings.timezone, core.clock())
+    assert seen[-1] == []
+    second_ref = extra_public(core)
+    module.model.text = "另一次公开阅读后的想法。"
+    second = queue(module, planned(module, second_ref, "new-social-candidate"), conversation)
+    outcome(module, second, dispatch(module, second), "UNKNOWN")
+    core.clock.advance(86400)
+    with pytest.raises(CoreError, match="SOCIAL_ACTION_RECONCILIATION_REQUIRED"):
+        module._capacity("qzone.publish", core.settings.timezone, core.clock())
+    assert seen[-1] == [second.message_id]
+    assert len(original_rows("SELECT * FROM social_autonomy_reservations")) == 2
 
 
 def test_unstarted_erasure_releases_only_action_slot_and_never_refunds_model_cost(core):
@@ -568,7 +600,9 @@ def test_profile_result_uses_protocol_receipt_without_inventing_a_message_id(cor
     module.record_profile(ProfileBaseline(bot_qq_id="10002", field=field, value="当前资料",
                                           observed_at=core.clock(), receipt_sha256="c" * 64))
     module.model.proposal = {"kind": field, "value": value}
-    result = planned(module, ref, profile_fields=[field])
+    memory_id = confirmed_profile_material(core)
+    result = run(module.plan("profile-test-plan", profile_fields=[field],
+                             profile_memory_ids=[memory_id]))
     frozen = queue(module, result, conversation)
     assert frozen.audience is None and frozen.profile_baseline_sha256
     token = dispatch(module, frozen)
@@ -585,7 +619,10 @@ def test_changed_profile_baseline_cannot_pass_final_dispatch(core):
     module.record_profile(ProfileBaseline(bot_qq_id="10002", field="nickname", value="原昵称",
                                           observed_at=core.clock(), receipt_sha256="c" * 64))
     module.model.proposal = {"kind": "nickname", "value": "自主新昵称"}
-    frozen = queue(module, planned(module, ref, profile_fields=["nickname"]), conversation)
+    memory_id = confirmed_profile_material(core)
+    result = run(module.plan("profile-test-plan", profile_fields=["nickname"],
+                             profile_memory_ids=[memory_id]))
+    frozen = queue(module, result, conversation)
     core.clock.advance(1)
     module.record_profile(ProfileBaseline(bot_qq_id="10002", field="nickname", value="刚手动改过",
                                           observed_at=core.clock(), receipt_sha256="d" * 64))

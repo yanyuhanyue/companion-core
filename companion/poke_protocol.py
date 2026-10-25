@@ -6,7 +6,10 @@ import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from companion_delivery_protocol.authority import validate_authority_ref
+from companion_delivery_protocol.poke import owner_poke_signing_payload
 
 POKE_DOMAIN = b"companion-core/onebot-owner-poke/v1\x00"
 ACTION = "qq.private.poke"
@@ -44,9 +47,8 @@ class PokeNotice(_Strict):
         return self
 
 
-class PokeCapture(_Strict):
+class _PokeCaptureFields(_Strict):
     kind: Literal["authenticated_onebot_poke"]
-    window_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
     source_event_id: str = Field(min_length=1, max_length=512)
     notice: PokeNotice
@@ -58,6 +60,20 @@ class PokeCapture(_Strict):
     occurred_at: AwareDatetime
     received_at: AwareDatetime
     signature: str = Field(pattern=r"^[a-f0-9]{128}$")
+
+
+class PokeCapture(_PokeCaptureFields):
+    """Historical v1 proof for immutable receipts and reconciliation."""
+    window_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class OwnerPokeCapture(_PokeCaptureFields):
+    authority: dict
+
+    @field_validator("authority")
+    @classmethod
+    def valid_authority(cls, value):
+        return validate_authority_ref(value)
 
 
 class PokeDecision(_Strict):
@@ -123,9 +139,11 @@ def canonical_source(notice):
 
 
 def signed_payload(capture):
-    value = (capture.model_dump(mode="json") if isinstance(capture, PokeCapture)
+    value = (capture.model_dump(mode="json") if isinstance(capture, _PokeCaptureFields)
              else dict(capture))
     value.pop("signature", None)
+    if "authority" in value:
+        return owner_poke_signing_payload(value)
     for key in ("occurred_at", "received_at"):
         value[key] = datetime.fromisoformat(value[key]).isoformat()
     return POKE_DOMAIN + _encode(value).encode()

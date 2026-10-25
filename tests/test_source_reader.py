@@ -1,8 +1,10 @@
+import asyncio
 import copy
 import hashlib
 import json
 import socket
 import ssl
+from contextlib import closing
 from pathlib import Path
 
 import httpcore
@@ -21,11 +23,19 @@ from companion.observation import ReadingEvidence
 from companion.store import Store, migrate
 from companion.transport import digest
 from source_reader.bilibili import BilibiliReader, VideoPage, subtitle_excerpt
-from source_reader.network import PublicHTTP, PublicNetwork, ReadBudget, ReadFailure, permitted_url
+from source_reader.network import (
+    PublicHTTP,
+    PublicNetwork,
+    ReadBudget,
+    ReadFailure,
+    permitted_url,
+    public_addresses,
+)
 from source_reader.worker import read_result, tick
 from tests.conftest import ingest, run
 from tests.test_exploration import URL, configure, discover
 from tests.test_observations import enable_observations, observation
+from tests.test_test_fixtures import historical_database
 
 NOW = "2026-10-19T04:00:00+00:00"
 CAPTION = "https://aisubtitle.hdslb.com/bfs/subtitle/example.json?auth_key=transient-reference"
@@ -229,6 +239,44 @@ def test_any_private_dns_answer_blocks_the_connection(addresses):
         with pytest.raises(ReadFailure, match="NONPUBLIC"):
             await PublicNetwork(resolver, backend).connect_tcp("api.bilibili.com", 443)
         assert not backend.hosts
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("address", [
+    "224.0.0.1", "239.255.255.250", "ff02::1", "ff0e::1", "ff02::1%12",
+    "::ffff:8.8.8.8", "2002:0808:0808::1", "2002:7f00:0001::1",
+    "2001:0000:4136:e378:8000:63bf:3fff:fdd2", "malformed-address",
+])
+@pytest.mark.parametrize("system_resolver", [False, True])
+def test_special_dns_answer_never_reaches_socket(address, system_resolver, monkeypatch):
+    async def scenario():
+        async def resolver(host, port):
+            return ["1.1.1.1", address]
+
+        async def getaddrinfo(host, port, **kwargs):
+            return [(None, socket.SOCK_STREAM, None, "", (value, port))
+                    for value in await resolver(host, port)]
+
+        monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", getaddrinfo)
+        backend = Responses(response(b"synthetic"))
+        network = PublicNetwork(public_addresses if system_resolver else resolver, backend)
+        with pytest.raises(ReadFailure, match="READER_NONPUBLIC_ADDRESS"):
+            await network.connect_tcp("api.bilibili.com", 443)
+        assert not backend.hosts and not backend.requests
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("address", ["8.8.8.8", "2606:4700:4700::1111"])
+def test_native_public_address_remains_usable(address):
+    async def scenario():
+        async def resolver(host, port):
+            return [address]
+
+        backend = Responses(response(b"synthetic"))
+        await PublicNetwork(resolver, backend).connect_tcp("api.bilibili.com", 443)
+        assert backend.hosts == [address]
 
     run(scenario())
 
@@ -486,6 +534,7 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
         ):
             assert new.pop("reserved_requests") == 1 and new.pop("used_requests") is None
             assert new.pop("source_grant_id") is None and new.pop("source_grant_epoch") is None
+            assert new.pop("authority_json") == "{}"
             assert new == old
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
     finally:
@@ -493,7 +542,9 @@ def test_populated_0013_upgrade_keeps_historical_single_request_accounting(tmp_p
 
 
 @pytest.mark.parametrize("reservation", [1, 4])
-def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, reservation):
+def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(
+    core, reservation, tmp_path,
+):
     configure(core)
     core.settings.content_enabled = True
     core.settings.observation_adapters["bili"].reader_max_requests = reservation
@@ -502,42 +553,46 @@ def test_0014_downgrade_preserves_data_or_refuses_multi_request_history(core, re
     before = core.store.one(
         "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
     )
+    assert before["authority_json"] == "{}"
     before_0014 = {
         key: value
         for key, value in before.items()
-        if key not in {"source_grant_id", "source_grant_epoch"}
+        if key not in {"source_grant_id", "source_grant_epoch", "authority_json"}
     }
+    database = historical_database(core.store, tmp_path / "reader.db", "0014_reader_budget")
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
-    if reservation == 4:
-        with pytest.raises(RuntimeError, match="READER_BUDGET_DOWNGRADE"):
+    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
+    with closing(Store(database)) as store:
+        if reservation == 4:
+            with pytest.raises(RuntimeError, match="READER_BUDGET_DOWNGRADE"):
+                command.downgrade(cfg, "0013_content")
+            assert (
+                store.one(
+                    "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+                )
+                == before_0014
+            )
+            assert (
+                store.one("SELECT version_num FROM alembic_version")["version_num"]
+                == "0014_reader_budget"
+            )
+        else:
             command.downgrade(cfg, "0013_content")
-        assert (
-            core.store.one(
+            after = store.one(
                 "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
             )
-            == before_0014
-        )
-        assert (
-            core.store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0014_reader_budget"
-        )
-    else:
-        command.downgrade(cfg, "0013_content")
-        after = core.store.one(
-            "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
-        )
-        assert after == {
-            key: value
-            for key, value in before.items()
-            if key
-            not in {"reserved_requests", "used_requests", "source_grant_id", "source_grant_epoch"}
-        }
-        migrate(core.settings.database)
-        assert (
-            core.store.one(
-                "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+            assert after == {
+                key: value
+                for key, value in before.items()
+                if key
+                not in {"reserved_requests", "used_requests",
+                        "source_grant_id", "source_grant_epoch", "authority_json"}
+            }
+            migrate(database)
+            assert (
+                store.one(
+                    "SELECT * FROM exploration_requests WHERE request_id=?", (lease["request_id"],)
+                )
+                == before
             )
-            == before
-        )

@@ -1,6 +1,6 @@
 """Native services with synthetic sources/clocks; no real-day or phone evidence."""
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from cryptography.fernet import Fernet
@@ -90,7 +90,11 @@ def test_goal_shadow_pause_failure_and_restart_keep_intention_separate_from_exec
     try:
         assert restarted.goals.claim() is None
         restarted.goals.pause_autonomy(False)
+        # Pausing a running step retains the native resource retry deadline.
+        assert restarted.goals.claim() is None
+        core.clock.now = datetime.fromisoformat(restarted.goals.get(goal_id)["next_due_at"])
         second = restarted.goals.claim()
+        assert second is not None
         restarted.goals.fail(second, "FETCH_UNKNOWN", retryable=False)
         result = restarted.goals.recent()[0]
         assert result["state"] == "FAILED" and result["result"] is None
@@ -110,7 +114,8 @@ def test_completed_commitment_is_not_delivered_until_outbox_ack_and_never_claims
     assert completed["result"]["source"] == "observation.simulation"
     assert completed["delivery"] is None
     assert completed["commitment_state"] == "IN_PROGRESS"
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     for _ in range(2):
         assert core.goals.recent()[0]["commitment_state"] == "IN_PROGRESS"
         item = lease_deliveries(
@@ -147,7 +152,8 @@ def queued_share(core):
     source = source_with_older_parent(core)
     core.social.consider(source)
     assert core.social.flush()
-    assert run(core.run_once("share-wording"))
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once("share-wording", job_id=job["job_id"]))
     return core.store.one("SELECT * FROM outbox")
 
 
@@ -183,7 +189,8 @@ def test_share_rechecks_transitive_expiry_at_every_boundary_without_background_w
         core.social.consider(source)
     if stage in {"lease", "begin"}:
         assert core.social.flush()
-        assert run(core.run_once("share-wording"))
+        job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+        assert job and run(core.run_once("share-wording", job_id=job["job_id"]))
     if stage == "begin":
         item = lease_deliveries(
             core.store, core.settings, LeaseRequest(worker_id="fixture"), core.clock()

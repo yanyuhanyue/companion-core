@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -26,17 +27,29 @@ async def pause(stop, seconds):
         pass
 
 
-async def receive(config, spool, wake, stop, metrics, onebot=None):
-    if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
+async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=None, core=None):
+    if runtime is None and spool.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
         raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
     delay = 0.25
     while not stop.is_set():
         try:
-            async with await websocket(config) as ws:
+            async with await websocket(config, check=runtime.verify if runtime else None) as ws:
                 metrics.emit("ws_connected")
                 async for frame in ws:
                     received_ns = time.perf_counter_ns()
+                    received_at = datetime.now(UTC)
                     try:
+                        if runtime is not None:
+                            from . import owner_notices, owner_pokes
+
+                            if owner_notices.put(runtime, frame, received_at, ws.remote_address):
+                                wake.set()
+                                continue
+                            if await owner_pokes.put(runtime, core, frame,
+                                                     received_at, ws.remote_address):
+                                wake.set()
+                                continue
                         payload = normalize(frame, config)
                         raw = (decode(frame, config.max_frame_bytes, max_depth=(
                             20 if config.rich_input_scope == "references_v1" else 8
@@ -45,6 +58,23 @@ async def receive(config, spool, wake, stop, metrics, onebot=None):
                         metrics.emit("event_rejected")
                         continue
                     if payload:
+                        if runtime is not None:
+                            from .capture import prepare_owner_input
+
+                            prepared = await prepare_owner_input(
+                                runtime, core, onebot, frame, received_at, ws.remote_address)
+                            if prepared is None:
+                                continue
+                            payload = prepared["event"]
+                            added = runtime.persist_capture(payload, frame,
+                                received_at=received_at, peer=ws.remote_address,
+                                media=prepared["media"])
+                            if added:
+                                metrics.start(payload, received_ns)
+                                wake.set()
+                            else:
+                                metrics.emit("duplicate_suppressed")
+                            continue
                         fingerprint = hashlib.sha256(
                             encode(
                                 {
@@ -95,12 +125,15 @@ async def receive(config, spool, wake, stop, metrics, onebot=None):
         delay = min(delay * 2, 30)
 
 
-async def upload(client, spool, wake, stop, metrics):
+async def upload(client, spool, wake, stop, metrics, *, runtime=None, memes=None):
     while not stop.is_set():
         wake.clear()
         try:
-            while payload := await spool.flush_one(client):
+            flush = runtime.flush_one if runtime is not None else spool.flush_one
+            while payload := await flush(client):
                 metrics.accepted(payload)
+                if memes is not None:
+                    memes.admitted(payload["event_id"])
         except httpx.TransportError:
             metrics.emit("core_unavailable")
             await pause(stop, 1)
@@ -117,10 +150,25 @@ async def upload(client, spool, wake, stop, metrics):
             pass
 
 
-async def deliver(client, onebot, spool, stop, metrics):
+async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protocol=None):
     while not stop.is_set():
         try:
-            worked = await deliver_tick(client, onebot, spool, metrics=metrics)
+            guard = None
+            if runtime is not None:
+                from .owner_send import OwnerOneBot, OwnerSendGuard
+
+                # Reports remain replayable after STOP; sends never are.
+                if await spool.flush_result(client):
+                    continue
+                runtime.verify()
+                guard = OwnerSendGuard(runtime, client)
+                onebot = OwnerOneBot(guard, protocol)
+            worked = await deliver_tick(client, onebot, spool, metrics=metrics, guard=guard)
+            if not worked and runtime is not None:
+                permission = await runtime.check(client)
+                if "account_actions" in permission["capability_policies"]:
+                    worked = await deliver_tick(client, onebot, spool, metrics=metrics,
+                                                guard=guard, delivery_lane="qq_account")
         except httpx.HTTPError:
             metrics.emit("send_unavailable")
             await pause(stop, 1)
@@ -129,7 +177,43 @@ async def deliver(client, onebot, spool, stop, metrics):
             await pause(stop, onebot.config.poll_seconds)
 
 
+async def transfer_media(pump, stop):
+    try:
+        while not stop.is_set():
+            pump.window.verify()
+            pump.tick()
+            if pump.task is not None:
+                await pump.task
+            else:
+                await pause(stop, pump.window.config.poll_seconds)
+    finally:
+        await pump.close()
+
+
+async def observe_profile(pump, stop):
+    try:
+        while not stop.is_set():
+            pump.window.verify()
+            pending = pump.window.db.execute(
+                "SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
+            pump.tick(idle=pending is None)
+            await pause(stop, pump.window.config.poll_seconds)
+    finally:
+        await pump.close()
+
+
+async def discover_memes(pump, stop, profile):
+    try:
+        while not stop.is_set():
+            pump.tick(idle=profile.task is None or profile.task.done())
+            await pause(stop, pump.owner.config.poll_seconds)
+    finally:
+        await pump.close()
+
+
 async def run(config):
+    if config.owner_authority is None:
+        raise ValueError("OWNER_AUTHORITY_REQUIRED")
     stop, wake = asyncio.Event(), asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -138,20 +222,38 @@ async def run(config):
             signal.signal(sig, lambda *_: stop.set())
     metrics = Metrics()
     with Spool(config) as spool:
-        if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
-            raise ValueError("CONTROLLED_WINDOW_REQUIRES_ONCE_COMMANDS")
+        runtime = None
+        if config.owner_authority is not None:
+            from .owner_runtime import OwnerRuntime
+
+            runtime = OwnerRuntime(spool)
+            runtime.verify()
         async with (
             private_http_client(config.core_url, config.bridge_token) as core,
             private_http_client(config.onebot_http_url, config.onebot_token) as protocol,
         ):
             onebot = OneBotClient(config, protocol)
-            if not (await onebot.probe())["connection_ready"]:
+            from .owner_memes import MemePump
+            from .pending_media import MediaPump
+            from .profile_probe import ProfilePump
+
+            media = MediaPump(runtime, core, protocol=onebot)
+            profile = ProfilePump(runtime, core, protocol)
+            memes = MemePump(runtime, core)
+            status = await runtime.probe(core, protocol)
+            if not status["connection_ready"]:
                 raise ValueError("ONEBOT_NOT_READY")
             async with asyncio.TaskGroup() as group:
                 tasks = [
-                    group.create_task(receive(config, spool, wake, stop, metrics, onebot)),
-                    group.create_task(upload(core, spool, wake, stop, metrics)),
-                    group.create_task(deliver(core, onebot, spool, stop, metrics)),
+                    group.create_task(receive(config, spool, wake, stop, metrics, onebot,
+                                              runtime=runtime, core=core)),
+                    group.create_task(upload(core, spool, wake, stop, metrics,
+                                             runtime=runtime, memes=memes)),
+                    group.create_task(deliver(core, onebot, spool, stop, metrics,
+                                              runtime=runtime, protocol=protocol)),
+                    group.create_task(transfer_media(media, stop)),
+                    group.create_task(observe_profile(profile, stop)),
+                    group.create_task(discover_memes(memes, stop, profile)),
                 ]
                 await stop.wait()
                 for task in tasks:
@@ -176,6 +278,13 @@ def main():
         default="daemon",
         choices=(
             "daemon",
+            "owner-status",
+            "owner-stop",
+            "owner-delivery-prepare",
+            "owner-delivery-reconcile",
+            "owner-handoff-prepare",
+            "owner-handoff",
+            "owner-cutover",
             "window-open",
             "window-handoff",
             "window-abort-handoff",
@@ -204,6 +313,22 @@ def main():
         config = BridgeConfig.load(args.config)
         if args.command == "daemon":
             asyncio.run(run(config))
+        elif args.command in {"owner-status", "owner-stop"}:
+            from .owner_runtime import command
+
+            print(json.dumps(command(config, args)), flush=True)
+        elif args.command in {"owner-delivery-prepare", "owner-delivery-reconcile"}:
+            from .owner_native_resolution import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
+        elif args.command in {"owner-handoff-prepare", "owner-handoff"}:
+            from .owner_handoff import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
+        elif args.command == "owner-cutover":
+            from .owner_cutover import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
         elif args.command == "memory-control-once":
             from .memory_control import command
 

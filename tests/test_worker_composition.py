@@ -14,6 +14,7 @@ from companion.memory import Memory
 from companion.retrieval import SemanticIndex
 from companion.runtime import Runtime
 from companion.store import Store, migrate
+from companion.worker_wakeup import Wakeup
 
 
 @pytest.fixture
@@ -63,7 +64,6 @@ def opened_stores(monkeypatch):
     [
         ("companion.content_worker", "content_worker", "ContentService", "run_batch"),
         ("companion.executive_worker", "executive_worker", "Executive", "run_one"),
-        ("companion.diary_worker", "diary_worker", "DiaryService", "generate_once"),
     ],
 )
 def test_nonsemantic_worker_enters_own_loop_and_closes_store(
@@ -74,7 +74,6 @@ def test_nonsemantic_worker_enters_own_loop_and_closes_store(
     service_class = getattr(importlib.import_module({
         "ContentService": "companion.content",
         "Executive": "companion.executive",
-        "DiaryService": "companion.diary",
     }[service]), service)
     worked = []
 
@@ -85,11 +84,11 @@ def test_nonsemantic_worker_enters_own_loop_and_closes_store(
         worked.append(instance)
         return False
 
-    async def stop(_seconds):
+    async def stop(*_args):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(service_class, operation, tick)
-    monkeypatch.setattr(asyncio, "sleep", stop)
+    monkeypatch.setattr(Wakeup, "wait", stop)
 
     def forbidden_memory(*args, **kwargs):
         pytest.fail("A nonsemantic worker constructed Memory")
@@ -159,7 +158,7 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     async def fetch(*args, **kwargs):
         return png(), "image/png"
 
-    async def stop(_seconds):
+    async def stop(*_args):
         raise asyncio.CancelledError()
 
     calls = []
@@ -176,7 +175,7 @@ def test_content_worker_finishes_queued_article_images_without_semantic_startup(
     monkeypatch.setattr(content.HTTPMediaProvider, "__init__", offline_provider_init)
     monkeypatch.setattr(content, "fetch_public_image", fetch)
     monkeypatch.setattr(content_worker, "Runtime", partial(Runtime, clock=clock))
-    monkeypatch.setattr(asyncio, "sleep", stop)
+    monkeypatch.setattr(Wakeup, "wait", stop)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(content_worker.content_worker(settings))
     assert unavailable_semantics == []
@@ -238,12 +237,12 @@ def test_content_worker_restart_keeps_expired_inflight_image_unknown_without_ret
         provider_calls.append(args)
         raise AssertionError("An interrupted image must not be dispatched again")
 
-    async def stop(_seconds):
+    async def stop(*_args):
         raise asyncio.CancelledError()
 
     monkeypatch.setattr(content.HTTPMediaProvider, "process", forbidden_provider)
     monkeypatch.setattr(content_worker, "Runtime", partial(Runtime, clock=clock))
-    monkeypatch.setattr(asyncio, "sleep", stop)
+    monkeypatch.setattr(Wakeup, "wait", stop)
     for _ in range(2):
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(content_worker.content_worker(settings))

@@ -5,11 +5,10 @@ import json
 import httpx
 import pytest
 
-from companion_onebot_bridge import capture, images
+from companion_onebot_bridge import images
 from tests.conftest import run
-from tests.test_capture_diagnostics import cli_failure
+from tests.support.native_images import image_host, upload
 from tests.test_live_image_input import options
-from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import URL, image_segment
 
@@ -111,11 +110,12 @@ def test_actual_httpcore_connect_failure_trace_recovers_without_repeating_get():
     assert addresses == ["1.1.1.1", "8.8.8.8"] and len(checks) == 3
 
 
-def test_image_download_cli_failure_preserves_safe_stage_without_the_signed_url(
-    core, tmp_path, monkeypatch, capsys,
+def test_native_image_failure_preserves_queue_stage_without_the_signed_url(
+    core, tmp_path, caplog,
 ):
     async def source(ws):
-        await ws.send(json.dumps(raw_event(message=[image_segment()])))
+        await ws.send(json.dumps(raw_event(time=int(core.clock.now.timestamp()),
+                                          message=[image_segment()])))
         await ws.wait_closed()
 
     async def resolve(*_):
@@ -125,21 +125,18 @@ def test_image_download_cli_failure_preserves_safe_stage_without_the_signed_url(
         raise httpx.ConnectError(URL, request=request)
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 rich_input_scope="references_v1", scope_options=options()) as (
-            window, client, protocol, _, sends,
+        async with image_host(core, tmp_path, source, options=options()) as (
+            active, _, sends, calls,
         ):
-            await window.capture_once(client, protocol)
+            await active.capture()
+            await active.flush()
             with pytest.raises(ValueError) as caught:
-                await window.approve_captured(client, capture_approval(window),
-                    image_transport=httpx.MockTransport(refused), image_resolver=resolve)
-            assert capture.diagnostic_fields(caught.value) == {
-                "capture_phase": "image_download", "capture_reason": "CAPTURE_CONNECTION_FAILED",
-            }
-            assert core.model.calls == sends == []
-            return caught.value
+                await upload(active, transport=httpx.MockTransport(refused), resolver=resolve)
+            assert str(caught.value) == "IMAGE_CONNECTION_FAILED"
+            assert active.db.execute("SELECT state FROM automatic_media").fetchone()[0] == (
+                "DOWNLOADING")
+            assert calls == sends == []
+            assert not core.store.rows("SELECT * FROM model_usage")
 
-    output, value = cli_failure(monkeypatch, capsys, run(scenario()))
-    assert value["capture_phase"] == "image_download"
-    assert value["capture_reason"] == "CAPTURE_CONNECTION_FAILED"
-    assert URL not in output and "rkey" not in output
+    run(scenario())
+    assert URL not in caplog.text and "rkey" not in caplog.text

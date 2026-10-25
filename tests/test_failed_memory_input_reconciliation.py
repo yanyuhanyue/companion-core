@@ -1,21 +1,16 @@
 """Retire a historical settled recall failure without replay, refund or invented ACK."""
 import asyncio
-import json
 from pathlib import Path
 
 import httpx
 import pytest
 
-from companion import budget, live_text
-from companion.core import Core
-from companion.model import RECALL_RULES, ModelClient
+from companion import live_text
 from companion.privacy import advance_epoch, epoch
 from companion.runtime import Runtime
 from companion.store import after, uid
 from tests.conftest import ingest, run
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
+from tests.historical_input_retirement import historical_input
 
 
 @pytest.mark.parametrize("mutation", [
@@ -24,10 +19,9 @@ from tests.test_private_companion import companion_options
     "active_job", "lease", "foreign_event", "superseded", "missing_failure", "wrong_failure",
     "wrong_scenario", "erased_source", "not_stopped", "forged_revision", "forged_resolution",
 ])
-def test_native_failed_recall_retirement_preserves_original_accounting(
+def test_historical_failed_recall_retirement_preserves_original_accounting(
     core, tmp_path, mutation,
 ):
-    calls = []
     if mutation == "contract_replay":
         seed = ingest(core, 900, "expired unrelated source",
                       origin=f"seed:FriendMessage:{core.settings.owner_qq_id}")
@@ -37,40 +31,8 @@ def test_native_failed_recall_retirement_preserves_original_accounting(
             core.ledger.expire_events(core.store, [seed["event_id"]], core.clock())
         assert core.store.one("SELECT state FROM privacy_erasure_ledger")["state"] == "COMPLETE"
 
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="🤔"), ensure_ascii=False))
-        await ws.wait_closed()
-
-    def provider(request):
-        calls.append(json.loads(request.content))
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": "synthetic invalid recall selection"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
-
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                scope_options=companion_options(core)) as (window, client, protocol, _, sends):
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
-            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport),
-                          core.clock) as worker:
-                    assert worker.store is not core.store
-                    job = worker.claim_job("historical-recall-worker")
-                    messages = [{"role": "system", "content": RECALL_RULES},
-                                {"role": "user", "content": '{"query":"🤔","memories":[]}'}]
-                    # Reproduce the pre-upgrade outcome with native admission,
-                    # settlement, audit and fail_job. Future safe-recall handling
-                    # need not keep producing this already-persisted old failure.
-                    request_id = budget.reserve(worker.store, worker.settings, job["job_id"],
-                        "memory_review", messages, worker.clock(), clock=worker.clock)
-                    await budget.complete(worker.model, worker.store, worker.settings,
-                        request_id, messages, "memory_review", worker.clock)
-                    worker.store.audit("memory.recall_invalid", job["job_id"], job["trace_id"],
-                                       worker.clock())
-                    worker.fail_job(job, "MEMORY_REVIEW_INVALID")
-            await window.stop_live(client)
+        async with historical_input(core, tmp_path, failure="memory") as (window, client, job):
             core.clock.advance(core.settings.lease_seconds + 1)
             original_job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
             assert original_job["state"] == "FAILED"
@@ -172,6 +134,6 @@ def test_native_failed_recall_retirement_preserves_original_accounting(
             assert core.store.rows("SELECT * FROM model_admissions") == admissions
             assert core.store.rows("SELECT * FROM jobs") == jobs
             assert await asyncio.to_thread(journal.read_bytes) == budget_before
-            assert len(calls) == 1 and sends == []
+            assert core.model.calls == []
 
     run(scenario())

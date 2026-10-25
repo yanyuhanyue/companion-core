@@ -11,21 +11,22 @@ import pytest
 from cryptography.fernet import Fernet
 from PIL import Image
 
-from companion import budget, live_text, private_life
+from companion import budget, owner_authority, private_life
+from companion.autonomous_selector import native_selector
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.diary import DIARY_RULES
 from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
+from companion.owner_authority_protocol import AuthorityStop
 from companion.reflection import REFLECTION_RULES
 from companion.reply_segments import SegmentedReplyConfig
-from companion.runtime import Runtime
-from companion_onebot_bridge import continuous
+from companion_onebot_bridge import capture
 from tests.conftest import run
-from tests.test_continuous_private_replies import worker
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
+from tests.native_continuous_support import until
+from tests.sdk_reader_fixture import answer as tool_answer
+from tests.sdk_reader_fixture import call as tool_call
+from tests.support.native_companion import companion_host, ingress, raw_event
 
 
 def companion_options(core):
@@ -71,10 +72,10 @@ def companion_options(core):
     }
 
 
-def test_independent_background_workers_finish_nightly_memory_diary_reflection_goals(
+def test_independent_life_worker_finishes_nightly_memory_diary_reflection_goals(
     core, tmp_path, monkeypatch
 ):
-    from companion import diary_worker, life_worker
+    from companion import life_worker
 
     calls, number = [], 0
 
@@ -158,29 +159,25 @@ def test_independent_background_workers_finish_nightly_memory_diary_reflection_g
         )
 
     async def scenario():
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, scope_options=companion_options(core)
+        async with companion_host(
+            core, tmp_path, source, options=companion_options(core)
         ) as (window, client, protocol, _, _):
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
                 core.model = ModelClient(core.settings, model)
                 for _ in range(2):
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(client, capture_approval(window))
+                    await ingress(window)
                     assert await core.run_once()
-                    await continuous.pump_private(window, client, protocol)
+                    await window.pump()
                 assert core.affect.snapshot()["state"]["interaction_tone"] == "detailed"
                 local = core.clock.now.astimezone(ZoneInfo("Asia/Shanghai"))
                 day = local.date()
                 core.clock.now = (local + timedelta(days=1)).replace(hour=4).astimezone(UTC)
                 monkeypatch.setattr(life_worker, "Core", partial(Core, clock=core.clock))
-                monkeypatch.setattr(diary_worker, "Runtime", partial(Runtime, clock=core.clock))
-                for module in (life_worker, diary_worker):
-                    monkeypatch.setattr(
-                        module, "ModelClient", lambda settings, _: ModelClient(settings, model)
-                    )
+                monkeypatch.setattr(
+                    life_worker, "ModelClient", lambda settings, _: ModelClient(settings, model)
+                )
                 tasks = [
                     asyncio.create_task(life_worker.life_worker(core.settings)),
-                    asyncio.create_task(diary_worker.diary_worker(core.settings)),
                 ]
                 try:
                     async with asyncio.timeout(12):
@@ -216,23 +213,30 @@ def test_independent_background_workers_finish_nightly_memory_diary_reflection_g
                     row["state"] == "SETTLED"
                     for row in core.store.rows("SELECT state FROM model_usage")
                 )
-                assert live_text.status(core.store, core.settings, core.clock)["approved"]
+                assert owner_authority.current(core.store, core.settings, core.clock)
 
     run(scenario())
 
 
-def test_continuous_history_memory_restart_and_proactive_share(core, tmp_path, monkeypatch):
+def test_continuous_history_memory_restart_and_followup(core, tmp_path, monkeypatch):
     calls = []
     send_checks = []
+    number = 0
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="我喜欢龙井茶")))
+        nonlocal number
+        number += 1
+        await ws.send(json.dumps(raw_event(number,
+            text="我喜欢龙井茶" if number == 1 else "接着刚才的话题聊")))
         await ws.wait_closed()
 
     def model_response(request):
         payload = json.loads(request.content)
         messages = payload["messages"]
         calls.append(messages)
+        if number == 2 and not any(m["role"] == "tool" for m in messages):
+            return httpx.Response(200, json=tool_answer(calls=[
+                tool_call("recall-tea", "memory_recall", {"query": "龙井茶"})]))
         if messages[0]["content"] == EXTRACT_RULES:
             event_id = json.loads(messages[-1]["content"])[0]["event_id"]
             text = json.dumps(
@@ -263,8 +267,8 @@ def test_continuous_history_memory_restart_and_proactive_share(core, tmp_path, m
         )
 
     async def scenario():
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, scope_options=companion_options(core)
+        async with companion_host(
+            core, tmp_path, source, options=companion_options(core)
         ) as (
             window,
             client,
@@ -272,49 +276,34 @@ def test_continuous_history_memory_restart_and_proactive_share(core, tmp_path, m
             _,
             sends,
         ):
-            pause, stop_worker = asyncio.Event(), asyncio.Event()
 
             async def checked(response):
-                if response.request.url.path == "/internal/v1/live-text/send-check":
+                if response.request.url.path == "/internal/v1/owner-authority/send-check":
                     await response.aread()
                     send_checks.append((response.status_code, response.json()))
 
             client.event_hooks["response"].append(checked)
-
-            def emitted(kind, **values):
-                if kind == "automatic_input_delivered":
-                    pause.set()
-
-            monkeypatch.setattr(continuous, "emit", emitted)
             async with httpx.AsyncClient(transport=httpx.MockTransport(model_response)) as model:
                 core.model = ModelClient(core.settings, model)
-                task = asyncio.create_task(worker(core, stop_worker))
-                try:
-                    result = await asyncio.wait_for(
-                        continuous.run(window, client, protocol, pause=pause), 15
-                    )
-                finally:
-                    stop_worker.set()
-                    await task
-                assert result["attempt_states"] == {"ACK": 1}
+                window.start()
+                await until(lambda: window.attempts() == {"ACK": 1}, tasks=window.tasks)
+                assert not await window.pause()
                 assert await core.extract_once()
                 assert core.store.one("SELECT content FROM memories")["content"] == "用户喜欢龙井茶"
                 assert core.store.one("SELECT COUNT(*) n FROM memory_evidence")["n"] == 1
                 with Core(core.settings, core.model, core.clock) as restarted:
                     assert restarted.memory.search("龙井茶")
-                    restarted.clock.advance(3601)
-                    assert restarted.schedule_proactive()
-                    assert await restarted.run_once()
-                assert (
-                    core.store.one(
-                        "SELECT state FROM outbox WHERE action_type='qq.private.proactive'"
-                    )["state"]
-                    == "PENDING"
-                )
-                await continuous.pump_private(window, client, protocol)
+                window.restart()
+                await ingress(window)
+                assert await core.run_once()
+                await window.pump()
                 assert send_checks[-1][0] == 200, send_checks[-1]
-                assert len(sends) == 2 and window.status()["attempt_states"] == {"ACK": 2}
-                assert live_text.status(core.store, core.settings, core.clock)["approved"]
+                assert len(sends) == 2 and window.attempts() == {"ACK": 2}
+                assert {"role": "user", "content": "我喜欢龙井茶"} in calls[-1]
+                assert {"role": "assistant", "content": "记下了，聊聊龙井茶吧。"} in calls[-1]
+                assert any(item["role"] == "tool" and "用户喜欢龙井茶" in json.dumps(
+                    json.loads(item["content"]), ensure_ascii=False) for item in calls[-1])
+                assert owner_authority.current(core.store, core.settings, core.clock)
                 assert all(
                     row["state"] == "SETTLED"
                     for row in core.store.rows("SELECT state FROM model_usage")
@@ -348,6 +337,10 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
         payload = json.loads(request.content)
         messages = payload["messages"]
         calls.append(messages)
+        if (number == 2 and payload.get("tools")
+            and not any(m["role"] == "tool" for m in messages)):
+            return httpx.Response(200, json=tool_answer(calls=[
+                tool_call("recall-image-tea", "memory_recall", {"query": "龙井茶"})]))
         if messages[0]["content"] == EXTRACT_RULES:
             event = json.loads(messages[-1]["content"])[0]
             text = json.dumps(
@@ -400,13 +393,11 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
         options["paid_options"]["image_input"] = images["paid_options"]["image_input"].model_copy(
             update={"max_images_per_request": "unlimited"}
         )
-        async with source_window(
+        async with companion_host(
             core,
             tmp_path,
             source,
-            live=True,
-            approved=True,
-            scope_options=options,
+            options=options,
             rich_input_scope="references_v1",
         ) as (window, client, protocol, _, sends):
 
@@ -433,10 +424,8 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
 
                 client.event_hooks["response"].append(accepted)
                 for _ in range(2):
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(
-                        client,
-                        capture_approval(window),
+                    await ingress(
+                        window,
                         image_transport=httpx.MockTransport(cdn),
                         image_resolver=resolve,
                     )
@@ -446,7 +435,7 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
                     rows = core.store.rows("SELECT state,last_error_code FROM jobs")
                     assert all(row["state"] == "SUCCEEDED" for row in rows), rows
                     for _ in range(5 if number == 2 else 1):
-                        await continuous.pump_private(window, client, protocol)
+                        await window.pump()
                     if number == 1:
                         assert await core.extract_once()
                         if background_inflight:
@@ -472,22 +461,26 @@ def test_five_images_with_memory_and_history_deliver_five_fragments(
                                 )
                             )
                             await started.wait()
-                assert len(downloads) == 5 and len(calls) == 5 + int(background_inflight)
+                assert len(downloads) == 5 and len(calls) == 4 + int(background_inflight)
                 assert len(sends) == 6
                 assert [item["message"][0]["data"]["text"] for item in sends[1:]] == pieces
                 chat = calls[-1]
-                assert len(chat[-1]["content"]) == 6
+                image_turn = next(m for m in chat if m["role"] == "user"
+                                  and isinstance(m["content"], list))
+                assert len(image_turn["content"]) == 6
                 assert {"role": "user", "content": "我喜欢龙井茶"} in chat
                 assert {"role": "assistant", "content": "我们一起聊聊龙井茶。"} in chat
-                assert any("用户喜欢龙井茶" in item["content"] for item in chat[:-1])
-                assert window.status()["attempt_states"] == {"ACK": 6}
+                assert any(item["role"] == "tool" and "用户喜欢龙井茶" in json.dumps(
+                    json.loads(item["content"]), ensure_ascii=False) for item in chat)
+                assert window.attempts() == {"ACK": 6}
                 assert core.store.rows("PRAGMA foreign_key_check") == []
 
     run(scenario())
 
 
+@pytest.mark.parametrize("first_response_delay", [0.0, capture.MAX_CLOCK_DRIFT_SECONDS + 0.1])
 def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
-    core, tmp_path, monkeypatch
+    core, tmp_path, monkeypatch, first_response_delay,
 ):
     from companion import __main__, api
     from companion import core as core_module
@@ -506,8 +499,10 @@ def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
         instances.append(instance)
         return instance
 
-    def respond(request):
+    async def respond(request):
         calls.append(json.loads(request.content)["messages"])
+        if len(calls) == 1:
+            await asyncio.sleep(first_response_delay)
         return httpx.Response(
             200,
             json={
@@ -523,32 +518,23 @@ def test_real_api_lifespan_and_independent_chat_worker_keep_two_turn_history(
             monkeypatch.setattr(
                 __main__, "ModelClient", lambda settings, _: ModelClient(settings, model)
             )
-            async with source_window(
+            async with companion_host(
                 core,
                 tmp_path,
                 source,
-                live=True,
-                approved=True,
-                scope_options=companion_options(core),
+                options=companion_options(core),
                 independent_api=True,
             ) as (window, client, protocol, _, sends):
-                pause = asyncio.Event()
-
-                def emitted(kind, **values):
-                    if kind == "automatic_input_delivered":
-                        if len(sends) == 1:
-                            next_input.set()
-                        else:
-                            pause.set()
-
-                monkeypatch.setattr(continuous, "emit", emitted)
                 task = asyncio.create_task(__main__.worker(core.settings))
+                window.start(worker=False)
                 try:
-                    result = await asyncio.wait_for(
-                        continuous.run(window, client, protocol, pause=pause), 15
-                    )
-                    assert result["attempt_states"] == {"ACK": 2}
+                    await until(lambda: window.attempts() == {"ACK": 1},
+                                tasks=[*window.tasks, task], deadline_seconds=15)
+                    next_input.set()
+                    await until(lambda: window.attempts() == {"ACK": 2},
+                                tasks=[*window.tasks, task], deadline_seconds=15)
                 finally:
+                    await window.pause()
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
         assert len(instances) == 2 and all(instance is not core for instance in instances)
@@ -572,15 +558,12 @@ def test_background_memory_cannot_commit_after_window_boundary(core, tmp_path, b
         if messages[0]["content"] == EXTRACT_RULES:
             event = json.loads(messages[-1]["content"])[0]
             if boundary == "stop":
-                live_text.stop_window(
-                    core.store,
-                    live_text.WindowReference(
-                        window_sha256=core.settings.live_text_window.plan_sha256
-                    ),
-                    core.clock,
-                )
+                view = owner_authority.current(core.store, core.settings, core.clock)
+                owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                    operation_id="stop-private-memory", authority=view.authority.as_dict()))
             else:
-                core.clock.now = core.settings.live_text_window.ends_at
+                view = owner_authority.current(core.store, core.settings, core.clock)
+                core.clock.now = view.policy.expires_at
             text = json.dumps(
                 {
                     "memories": [
@@ -607,15 +590,14 @@ def test_background_memory_cannot_commit_after_window_boundary(core, tmp_path, b
         )
 
     async def scenario():
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, scope_options=companion_options(core)
+        async with companion_host(
+            core, tmp_path, source, options=companion_options(core)
         ) as (window, client, protocol, _, _):
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
                 core.model = ModelClient(core.settings, model)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                await ingress(window)
                 assert await core.run_once()
-                await window.send_once(client, protocol, reply_approval(window.plan, core))
+                await window.pump()
                 assert not await core.extract_once()
                 assert not core.store.one("SELECT 1 FROM memories")
                 assert (
@@ -623,8 +605,8 @@ def test_background_memory_cannot_commit_after_window_boundary(core, tmp_path, b
                     == 2
                 )
                 with pytest.raises(CoreError):
-                    private_life.ensure_active(core.store, core.settings, core.clock)
-                assert not core.schedule_proactive()
+                    owner_authority.current(core.store, core.settings, core.clock, purpose="memory")
+                assert core.wake.evaluate() == []
                 assert core.diary.schedule_due() == []
                 assert core.consolidation.schedule_due() == []
 
@@ -642,13 +624,11 @@ def test_current_companion_without_offer_uses_text_fallback(core, tmp_path, monk
 
     async def scenario():
         options = companion_options(core)
-        async with source_window(
+        async with companion_host(
             core,
             tmp_path,
             source,
-            live=True,
-            approved=True,
-            scope_options=options,
+            options=options,
             bridge_options={"meme_directory": str(library.parent)},
         ) as (
             window,
@@ -657,13 +637,6 @@ def test_current_companion_without_offer_uses_text_fallback(core, tmp_path, monk
             _,
             sends,
         ):
-            pause, stop_worker = asyncio.Event(), asyncio.Event()
-
-            def emitted(kind, **values):
-                if kind == "automatic_input_delivered":
-                    pause.set()
-
-            monkeypatch.setattr(continuous, "emit", emitted)
             async with httpx.AsyncClient(
                 transport=httpx.MockTransport(
                     lambda request: httpx.Response(
@@ -676,14 +649,9 @@ def test_current_companion_without_offer_uses_text_fallback(core, tmp_path, monk
                 )
             ) as model:
                 core.model = ModelClient(core.settings, model)
-                task = asyncio.create_task(worker(core, stop_worker))
-                try:
-                    await asyncio.wait_for(
-                        continuous.run(window, client, protocol, pause=pause), 15
-                    )
-                finally:
-                    stop_worker.set()
-                    await task
+                window.start()
+                await until(lambda: window.attempts() == {"ACK": 1}, tasks=window.tasks)
+                assert not await window.pause()
             assert len(sends) == 1
             assert sends[0]["message"] == [{"type": "text", "data": {"text": "完成啦！"}}]
 
@@ -723,38 +691,29 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                 "exploration_daily_bytes": 4_194_304,
             }
         )
-        async with source_window(
+        async with companion_host(
             core,
             tmp_path,
             source,
-            live=True,
-            approved=True,
-            scope_options=options,
+            options=options,
             rich_input_scope="references_v1",
         ) as (window, client, protocol, _, sends):
-            async def hook(request):
+            def provider(request):
                 messages = json.loads(request.content)["messages"]
                 if change_during_dispatch and '"kind":"share"' in messages[-1]["content"]:
                     core.store.execute("UPDATE observations SET source_sha256=? WHERE "
                                        "result_status='FETCHED'", ("0" * 64,))
+                return httpx.Response(200, json={
+                    "choices": [{"message": {"content": "一起看看吧。"}}],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
             async with httpx.AsyncClient(
-                event_hooks={"request": [hook]},
-                transport=httpx.MockTransport(
-                    lambda request: httpx.Response(
-                        200,
-                        json={
-                            "choices": [{"message": {"content": "一起看看吧。"}}],
-                            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-                        },
-                    )
-                )
+                transport=httpx.MockTransport(provider)
             ) as model:
                 core.model = ModelClient(core.settings, model)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                await ingress(window)
                 assert await core.run_once()
-                await continuous.pump_private(window, client, protocol)
+                await window.pump()
                 discover(core)
                 goal, item = read_goal(core)
                 result = core.exploration.complete(
@@ -777,7 +736,9 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                 core.clock.advance(3601)
                 assert core.social.flush()
                 with Core(core.settings, core.model, core.clock) as independent_worker:
-                    assert await independent_worker.run_once("share-wording")
+                    activity = next(lane for lane in native_selector(
+                        independent_worker, "share-wording").lanes if lane.name == "activity")
+                    assert (await activity.run()).progressed
                 if change_during_dispatch:
                     assert core.store.one("SELECT last_error_code FROM jobs "
                                           "WHERE kind='activity'")["last_error_code"] == (
@@ -788,14 +749,14 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                                                "WHERE action_type='qq.private.proactive'")
                     usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage "
                                            "WHERE scenario='activity'")
-                    assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
+                    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
                     return
                 assert core.store.one("SELECT state,last_error_code FROM jobs "
                                       "WHERE kind='activity'") == {
                     "state": "SUCCEEDED", "last_error_code": None,
                 }
-                await continuous.pump_private(window, client, protocol)
-                await continuous.pump_private(window, client, protocol)
+                await window.pump()
+                await window.pump()
                 assert len(sends) == 3
                 assert sends[-2]["message"] == [{"type": "text", "data": {"text": "一起看看吧。"}}]
                 assert sends[-1]["message"] == [{"type": "text", "data": {"text": URL}}]
@@ -813,10 +774,10 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                     running = core.exploration.create("bili", "discover", "stop-running")
                     queued = core.exploration.create("bili", "discover", "stop-queued")
                 assert core.exploration.lease("bili")["request_id"] == running
-                response = await client.post(
-                    "/internal/v1/live-text/stop", json={"window_sha256": window.plan.sha256}
-                )
-                assert response.status_code == 200
+                stopped = owner_authority.stop(core.store, core.settings, core.clock,
+                    AuthorityStop(authority=window.runtime.authority,
+                                  operation_id="stop-private-exploration"))
+                assert stopped["state"] == "STOPPED"
                 assert (
                     core.store.one(
                         "SELECT state FROM exploration_requests WHERE request_id=?", (running,)
@@ -829,7 +790,9 @@ def test_native_discovery_goal_read_and_proactive_delivery_keep_source_checks(
                     )["state"]
                     == "CANCELLED"
                 )
-                assert not private_life.ready(core.store, core.settings, core.clock)
+                with pytest.raises(CoreError):
+                    owner_authority.current(core.store, core.settings, core.clock,
+                                            purpose="proactive")
 
     run(scenario())
 
@@ -845,8 +808,8 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
         await ws.wait_closed()
 
     async def scenario():
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, scope_options=companion_options(core)
+        async with companion_host(
+            core, tmp_path, source, options=companion_options(core)
         ) as (window, client, protocol, _, sends):
             async with httpx.AsyncClient(
                 transport=httpx.MockTransport(
@@ -860,8 +823,7 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                 )
             ) as model:
                 core.model = ModelClient(core.settings, model)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                await ingress(window)
                 assert await core.run_once()
                 if drift == "content":
                     value = {"text": "替换的合成正文。"}
@@ -881,10 +843,16 @@ def test_private_companion_refuses_changed_or_uncertain_delivery(core, tmp_path,
                 else:
                     with core.store.transaction():
                         advance_epoch(core.store)
-                with pytest.raises((CoreError, ValueError, httpx.HTTPStatusError)):
-                    await continuous.pump_private(window, client, protocol)
+                original_usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                if drift in {"content", "source", "privacy"}:
+                    await window.pump()
+                    assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
+                else:
+                    with pytest.raises((CoreError, ValueError, httpx.HTTPStatusError)):
+                        await window.pump()
                 assert not sends
                 assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
+                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == original_usage
 
     run(scenario())
 
@@ -900,8 +868,8 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
 
     async def scenario():
         nonlocal text
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, scope_options=companion_options(core)
+        async with companion_host(
+            core, tmp_path, source, options=companion_options(core)
         ) as (window, client, protocol, _, sends):
             async with httpx.AsyncClient(
                 transport=httpx.MockTransport(
@@ -917,14 +885,13 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                 core.model = ModelClient(core.settings, model)
 
                 async def turn():
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(client, capture_approval(window))
+                    await ingress(window)
                     assert await core.run_once()
                     row = core.store.one(
                         "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC"
                     )
                     assert row["state"] == "SUCCEEDED", row
-                    await continuous.pump_private(window, client, protocol)
+                    await window.pump()
 
                 await turn()
                 memory = core.store.one("SELECT * FROM memories")
@@ -938,7 +905,7 @@ def test_signed_memory_commands_continue_chat_and_erasure_survives_old_backup(co
                 text = "现在继续聊天"
                 await turn()
                 assert len(sends) == 3
-                assert live_text.status(core.store, core.settings, core.clock)["approved"]
+                assert owner_authority.current(core.store, core.settings, core.clock)
                 restore(str(archive), str(restored), key, core.settings.erasure_ledger)
                 settings = core.settings.model_copy(update={"database": str(restored)})
                 with Core(settings, core.model, core.clock) as recovered:

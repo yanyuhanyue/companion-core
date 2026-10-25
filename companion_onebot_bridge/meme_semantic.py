@@ -61,6 +61,33 @@ def managed(db, sha):
     )
 
 
+def retain_usage(catalog, request_sha, raw):
+    """Retain original liability before any current content/source authorization."""
+    receipt = parse(UsageReceipt, raw["usage"]) if raw.get("usage") is not None else None
+    with catalog.atomic():
+        binding = catalog.db.execute(
+            "SELECT job_id,usage_json,state FROM meme_caption_bindings WHERE request_sha=?",
+            (request_sha,),
+        ).fetchone()
+        if not binding or binding[0] is not None and raw.get("job_id") != binding[0]:
+            raise ValueError("MEME_CAPTION_JOB_MISMATCH")
+        if binding[2] == "SUCCEEDED" and raw.get("state") != "SUCCEEDED":
+            raise ValueError("MEME_CAPTION_TERMINAL_STATE")
+        if receipt is None and (
+            binding[1] or raw.get("state") not in {"QUEUED", "FAILED", "CANCELLED"}
+        ):
+            raise ValueError("MEME_CAPTION_USAGE_REQUIRED")
+        if binding[1] and not receipt_follows(parse(UsageReceipt, binding[1]), receipt):
+            raise ValueError("MEME_CAPTION_USAGE_CONFLICT")
+        # Accounting survives malformed semantics, deletion and a late cancelled result.
+        if receipt is not None:
+            catalog.db.execute(
+                "UPDATE meme_caption_bindings SET usage_json=? WHERE request_sha=?",
+                (receipt.model_dump_json(), request_sha),
+            )
+    return binding
+
+
 def terminal_without_usage(binding):
     if not binding or binding[0] not in {"FAILED", "CANCELLED"} or binding[2] is not None:
         return False
@@ -419,28 +446,7 @@ class SemanticLibrary:
             )
         ):
             raise ValueError("MEME_CAPTION_IDENTITY_MISMATCH")
-        receipt = parse(UsageReceipt, raw["usage"]) if raw.get("usage") is not None else None
-        with self.catalog.atomic():
-            binding = self.db.execute(
-                "SELECT job_id,usage_json,state FROM meme_caption_bindings WHERE request_sha=?",
-                (request.sha256,),
-            ).fetchone()
-            if not binding or binding[0] is not None and raw.get("job_id") != binding[0]:
-                raise ValueError("MEME_CAPTION_JOB_MISMATCH")
-            if binding[2] == "SUCCEEDED" and raw.get("state") != "SUCCEEDED":
-                raise ValueError("MEME_CAPTION_TERMINAL_STATE")
-            if receipt is None and (
-                binding[1] or raw.get("state") not in {"QUEUED", "FAILED", "CANCELLED"}
-            ):
-                raise ValueError("MEME_CAPTION_USAGE_REQUIRED")
-            if binding[1] and not receipt_follows(parse(UsageReceipt, binding[1]), receipt):
-                raise ValueError("MEME_CAPTION_USAGE_CONFLICT")
-            # Accounting survives malformed semantics, deletion and a late cancelled result.
-            if receipt is not None:
-                self.db.execute(
-                    "UPDATE meme_caption_bindings SET usage_json=? WHERE request_sha=?",
-                    (receipt.model_dump_json(), request.sha256),
-                )
+        binding = retain_usage(self.catalog, request.sha256, raw)
         outcome = parse(CaptionOutcome, raw)
         await check()
         with self.catalog.atomic(commit_check):

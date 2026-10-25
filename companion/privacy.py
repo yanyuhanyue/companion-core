@@ -161,9 +161,13 @@ class ErasureLedger:
                     raise ValueError("invalid sequence")
                 if record.get("target_type", "memory") not in {
                     "memory", "event_batch", "raw_retention", "diary", "source_grant",
-                    "input_recall",
+                    "input_recall", "affect_reset",
                 }:
                     raise ValueError("unknown erasure target")
+                if record.get("target_type") == "affect_reset":
+                    from companion.affect import validate_reset_record
+
+                    validate_reset_record(record)
                 if record.get("target_type") == "input_recall":
                     from companion.input_recall import marker_key, validate_source
 
@@ -234,6 +238,26 @@ class ErasureLedger:
             stream.flush()
             os.fsync(stream.fileno())
         self.apply(store, record)
+
+    def reset_affect(self, store, request_id, now):
+        from companion.affect import apply_feedback_reset, reset_record, reset_target
+
+        if not store.db.in_transaction:
+            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        target = reset_target(request_id)
+        lines = self.read()
+        record = next((item for item in lines[1:] if
+            item.get("target_type") == "affect_reset" and item["memory_id"] == target), None)
+        if record is None:
+            record = reset_record(len(lines), request_id, now)
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(encode(record) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            store.audit("affect.reset", record["erasure_id"], "owner", now)
+        result = apply_feedback_reset(store, record)
+        self.record_complete(store, record)
+        return result
 
     def expire_events(self, store, event_ids, now, *, retention_cutoff=None):
         record = {
@@ -387,11 +411,17 @@ class ErasureLedger:
         )
         if (applied["n"] or 0) > len(lines) - 1:
             raise CoreError("ERASURE_LEDGER_TRUNCATED", 503)
+        # Loading cleanup owners may import the SDK on a cold worker. Discover
+        # the code-only contract before taking SQLite's single writer lock.
+        signature = contract_signature()
         with store.transaction():
-            signature = contract_signature()
             previous = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTRACT_KEY,))
             repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:
+                if record.get("target_type") == "affect_reset":
+                    # Rebuild the durable reset barrier even from an older backup.
+                    self.apply(store, record)
+                    continue
                 # Rebuild this projection even for pre-upgrade COMPLETE records.
                 # A backup may predate the event itself, so UPDATE events is insufficient.
                 for event_id in record["event_ids"]:
@@ -459,6 +489,10 @@ class ErasureLedger:
             self.apply_input_recall(store, record, repair=True)
             return
 
+        if record.get("target_type") == "affect_reset":
+            self.apply(store, record)
+            return
+
         # Older apply() expanded dependencies only in memory, then deleted those
         # links. Its per-event tombstone still names this exact erasure, so use
         # that explicit attribution rather than guessing from content or dates.
@@ -496,6 +530,13 @@ class ErasureLedger:
 
         if record.get("target_type") == "input_recall":
             self.apply_input_recall(store, record)
+            return
+
+        if record.get("target_type") == "affect_reset":
+            from companion.affect import apply_feedback_reset
+
+            apply_feedback_reset(store, record)
+            self.record_complete(store, record)
             return
 
         if record.get("target_type") == "source_grant":

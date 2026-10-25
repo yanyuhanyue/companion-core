@@ -22,6 +22,7 @@ from companion.voice_protocol import (
     VoiceLease,
     VoiceProtocolError,
     VoiceResult,
+    VoiceStopRequest,
     canonical_bytes,
     digest,
     sign_voice_lease,
@@ -185,12 +186,23 @@ class FakeCore:
         self.wrong_receipt = False
         self.claim_manifest = None
         self.generation = 1
+        self.incarnation = "b" * 32
+        self.last_sequence = 0
+        self.replay = None
+        self.last_claim = None
+        self.stops = []
+        self.stopped = False
+        self.cleanup_epoch = 0
 
     def lease(self, manifest):
         now = datetime.now(UTC)
         if self.invalid_lease == "expired":
             now = now - timedelta(seconds=60)
         values = {
+            "incarnation": self.incarnation,
+            "claim_sequence": max(1, self.last_sequence),
+            "stop_token": "s" * 48,
+            "privacy_epoch": 0,
             "job_id": self.job_id,
             "generation": self.generation,
             "node_id": self.config.node_id,
@@ -223,17 +235,47 @@ class FakeCore:
             return httpx.Response(403, json={"private": "wrong auth"})
         assert request.headers["accept-encoding"] == "identity"
         suffix = request.url.path.removeprefix(ROUTE_PREFIX)
+        if suffix == "/session":
+            return httpx.Response(200, json={"incarnation": self.incarnation,
+                "last_sequence": self.last_sequence, "replay_available": self.replay is not None,
+                "recovery_required": False})
         if suffix == "/claim":
             claim = VoiceClaimRequest.model_validate_json(request.content)
             self.claim_bodies.append(request.content)
             assert request.headers["idempotency-key"] == claim.request_id
             self.claim_manifest = claim.manifest_sha256
-            if claim.resource_state == "QUARANTINED":
-                return httpx.Response(200, json={"lease": None})
+            if claim.incarnation != self.incarnation:
+                return httpx.Response(410, json={"error": "VOICE_CLAIM_EPOCH_RETIRED"})
+            if claim.sequence < self.last_sequence:
+                return httpx.Response(410, json={"error": "VOICE_CLAIM_RETIRED"})
+            if claim.sequence > self.last_sequence + 1:
+                return httpx.Response(409, json={"error": "VOICE_CLAIM_SEQUENCE_GAP"})
+            if claim.sequence == self.last_sequence:
+                if self.last_claim != request.content:
+                    return httpx.Response(409, json={"error": "VOICE_CLAIM_REPLAY_MISMATCH"})
+                if self.replay is None:
+                    return httpx.Response(410, json={"error": "VOICE_CLAIM_RETIRED"})
+            else:
+                self.last_sequence = claim.sequence
+                self.last_claim = request.content
+                unavailable = self.stopped or claim.resource_state == "QUARANTINED"
+                self.replay = {"lease": None if unavailable
+                               else self.lease(claim.manifest_sha256)}
             if self.claim_loss:
                 self.claim_loss = False
                 raise httpx.ReadError("claim response lost", request=request)
-            return httpx.Response(200, json={"lease": self.lease(claim.manifest_sha256)})
+            return httpx.Response(200, json=self.replay)
+        if suffix.endswith("/stop"):
+            body = VoiceStopRequest.model_validate_json(request.content)
+            self.stops.append(body)
+            assert body.ref.job_id == self.job_id and body.ref.stop_token == "s" * 48
+            closed = body.resource_state == "READY"
+            confirmed = body.cleanup.complete() and body.cleanup_epoch == self.cleanup_epoch
+            if closed:
+                self.stopped = True
+                self.replay = None
+            return httpx.Response(200, json={"custody_closed": closed,
+                "cleanup_confirmed": confirmed, "cleanup_epoch": self.cleanup_epoch})
         if suffix.endswith("/control"):
             body = VoiceControlRequest.model_validate_json(request.content)
             self.controls.append(body)
@@ -341,7 +383,7 @@ def test_invalid_signed_scope_never_launches_provider(node, invalid):
     core.invalid_lease = invalid
     with pytest.raises(VoiceProtocolError):
         run_once(config, core, counter)
-    assert child_receipts(counter) == [] and len(core.requests) == 1
+    assert child_receipts(counter) == [] and len(core.requests) == 2
 
 
 def test_expired_claim_replay_is_closed_without_dispatch_or_permanent_claim_retry(node):
@@ -351,12 +393,13 @@ def test_expired_claim_replay_is_closed_without_dispatch_or_permanent_claim_retr
     with pytest.raises(VoiceProtocolError, match="VOICE_CORE_UNAVAILABLE"):
         run_once(config, core, counter)
     core.invalid_lease = "expired"
+    core.replay = {"lease": core.lease(core.claim_manifest)}
     assert run_once(config, core, counter) == "DISCARDED"
     assert core.claim_bodies[0] == core.claim_bodies[1]
     assert child_receipts(counter) == []
     with NodeState(config.state_directory) as state:
         assert state.pending_claim() is None and state.active_job() is None
-        assert state.job(core.job_id, 1)["phase"] == "TERMINAL"
+        assert state.job(core.job_id, 1) is None
 
 
 def test_input_digest_mismatch_is_rejected_before_dispatch(node):
@@ -405,7 +448,7 @@ def test_duplicate_completed_generation_does_not_run_again(node):
     config, key, counter = node
     core = FakeCore(config, key)
     assert run_once(config, core, counter) == "COMPLETED"
-    assert run_once(config, core, counter) == "DISCARDED"
+    assert run_once(config, core, counter) == "IDLE"
     assert len(child_receipts(counter)) == 1 and len(core.result_bodies) == 1
 
 
@@ -423,15 +466,18 @@ def test_cancel_stops_owned_child_and_preserves_tts_quarantine(node, operation):
         if operation == "tts":
             assert process_has_exited(receipt["pid"], resource["process_identity"])
             quarantine_id = resource["quarantine_id"]
-    assert run_once(config, core, counter) == "DISCARDED"
+    assert run_once(config, core, counter) == ("RETRY" if operation == "tts" else "DISCARDED")
     if operation == "tts":
-        assert run_once(config, core, counter) == "IDLE"
+        assert run_once(config, core, counter) == "RETRY"
         with NodeState(config.state_directory) as state:
             assert state.resource()["quarantine_id"] == quarantine_id
-        assert (
-            VoiceClaimRequest.model_validate_json(core.claim_bodies[-1]).resource_state
-            == "QUARANTINED"
-        )
+            assert state.active_job()["phase"] == "UNKNOWN"
+            state.recover_manually(quarantine_id=quarantine_id,
+                operator="synthetic-operator", service_instance="synthetic-stopped-instance",
+                confirmation="inflight-execution-stopped")
+        assert run_once(config, core, counter) == "DISCARDED"
+        assert len(core.claim_bodies) == 1
+        assert core.stops[-1].resource_state == "READY"
     assert len(child_receipts(counter)) == 1 and core.result_bodies == []
 
 
@@ -496,7 +542,7 @@ def test_expired_result_cache_is_removed_without_regenerating_audio(node):
             state.db.execute("UPDATE jobs SET cache_expires=?", (time.time() - 1,))
     assert run_once(config, core, counter) == "DISCARDED"
     assert len(child_receipts(counter)) == 1
-    assert core.controls[-1].phase == "RESULT_LOST"
+    assert core.stops[-1].outcome == "RESULT_LOST"
     assert [p.name for p in (config.state_directory / "result-cache").iterdir()] == ["CACHEDIR.TAG"]
 
 
@@ -682,11 +728,12 @@ async def parent_fixture(spec_path):
         state.accept_claim(lease)
         supervisor = FixtureSupervisor(
             config.workspace,
-            config.state_directory / "child-temp" / "parent-crash",
+            state.prepare_temp(lease),
             counter=counter,
             scenario="block",
         )
         await supervisor.start(5)
+        state.bind_process(lease, supervisor.process.pid, supervisor.identity)
         state.dispatch(lease, pid=supervisor.process.pid, process_identity=supervisor.identity)
         await supervisor.dispatch(
             {
@@ -760,9 +807,21 @@ def test_parent_crash_contains_child_and_recovers_resource_conservatively(
         ):
             time.sleep(0.02)
         assert process_has_exited(child["pid"], child["identity"])
-        assert run_once(config, core, counter) == "DISCARDED"
+        assert run_once(config, core, counter) == ("DISCARDED" if operation == "asr" else "RETRY")
         with NodeState(config.state_directory) as state:
-            assert state.resource()["state"] == ("READY" if operation == "asr" else "QUARANTINED")
+            resource = state.resource()
+            assert resource["state"] == ("READY" if operation == "asr" else "QUARANTINED")
+            if operation == "tts":
+                assert state.active_job()["phase"] == "UNKNOWN"
+                state.recover_manually(quarantine_id=resource["quarantine_id"],
+                    operator="synthetic-operator", service_instance="synthetic-stopped-instance",
+                    confirmation="inflight-execution-stopped")
+            else:
+                assert state.active_job() is None
+        if operation == "tts":
+            assert run_once(config, core, counter) == "DISCARDED"
+            with NodeState(config.state_directory) as state:
+                assert state.active_job() is None
         assert len(child_receipts(counter)) == 1 and core.result_bodies == []
     finally:
         if process.poll() is None:

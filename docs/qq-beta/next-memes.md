@@ -1,6 +1,22 @@
 # QQ 表情候选与后台找图
 
 本集成已接入 Core HTTP v1、回复规划、Outbox、Bridge `MemeRuntime` 和空闲调度。
+
+原生静态目录的输入审批沿用 `OwnerCapture`，通过独立 `meme_offer` 旁车冻结候选，
+不改变原签名或增加授权协议。审批与选择均要求当前 meme/expression 用途，图片最终
+发送复核 meme 用途。该接入复用已检查的 DSH QQ
+[gateway bootstrap](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/gateway/bootstrap.ts)
+中 transport/media 与入口组装的职责分离；当前权限与能力元数据分离参考
+[RFC 7662 §2.2](https://datatracker.ietf.org/doc/html/rfc7662#section-2.2)。
+候选、预算和不可重放发送继续使用项目既有目录、Core job、Outbox 与 Bridge journal。
+
+原生宿主由 `app.run` 组装 `owner_memes.MemePump`。输入 ACK 后立即启动最多 1.5 秒的
+语义检索，使用原签名 input-state 的实际回复版本；输入上传不等待检索。
+静态目录在输入审批前冻结候选。后台发现等待原回复完成，并让位于待提交主人输入、
+媒体和资料观测；已有发现任务的恢复由原 Core 租约及预算控制。
+`OwnerOneBot` 在准备阶段固定候选图片字节与消息摘要，最终 transport 边界复核授权、
+来源与消息后再记录素材 `SENDING`。实际发送成功／不确定分别保存原 `SENT`／`UNKNOWN`；
+只有 Core 确认取消且原发送 journal 已提交 `NOT_SENT` 后才释放未发送素材。
 当前状态为 **implemented / mock-verified**；本轮未完成真实搜索、生产素材审核、
 QQ 实机选发或线上启用，不能标记为 **configured / live-verified**。
 输入中断、撤回和重放合同见[输入生命周期](input-lifecycle.md)。
@@ -62,6 +78,9 @@ Core 字段位于 `companion.config.Settings`，可从 Core TOML 或对应
 Core 对话频率与 Bridge 图片冷却分别执行，不自动相互换算。实际回复还要求
 `automatic_reply=true`、`companion_scope="owner_private_v1"`、有效签名窗口与原发送权限。
 启用开关不会补齐窗口批准、搜索订阅或素材许可。
+历史候选容量已满时，新输入使用文字路径；已冻结的候选仍按原身份重放。
+发现结果或语义来源容量已满时，先补交原待确认结果，再推迟新任务领取，避免取得费用责任后无处保存回执。
+容量降级不会删除历史记录、重置冷却或释放 UNKNOWN。
 
 ## HTTP v1 与持久预算
 

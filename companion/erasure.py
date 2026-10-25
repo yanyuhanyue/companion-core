@@ -43,22 +43,35 @@ def event_cleanup(name, erase):
 def cleanup_contracts():
     # Lazy imports preserve the existing modules' privacy helper dependencies.
     from companion.affect import erase_affect
+    from companion.agent_images import erase_images
+    from companion.agent_persistence import erase_conversations
     from companion.bili_video import erase_bili_video
     from companion.consolidation import erase_consolidation
     from companion.content import erase_content
+    from companion.evaluation import erase as erase_evaluation
     from companion.executive import erase_executive
     from companion.exploration import erase_exploration
     from companion.goals import erase_goals
+    from companion.life_topics import erase_topics
     from companion.media import erase_media_links
     from companion.meme_core import erase_captions
+    from companion.memory_enrichment import erase as erase_memory_enrichment
+    from companion.memory_work import erase_memory_work
     from companion.observation import erase_observations
+    from companion.owner_authority import erase_sources as erase_owner_authority
+    from companion.owner_input import erase as erase_owner_inputs
     from companion.poke import erase as erase_poke
     from companion.reading import erase_reading
     from companion.reflection import erase_reflections
+    from companion.rem import erase as erase_rem
     from companion.social_autonomy import erase_social_autonomy
     from companion.voice_jobs import erase_voice_jobs
 
     return (
+        event_cleanup("agent-conversations", erase_conversations),
+        event_cleanup("captured-images", erase_images),
+        event_cleanup("owner_authority", erase_owner_authority),
+        event_cleanup("owner_input", erase_owner_inputs),
         event_cleanup("observations", erase_observations),
         event_cleanup("affect", erase_affect),
         DerivedCleanup(
@@ -68,7 +81,11 @@ def cleanup_contracts():
             ),
         ),
         event_cleanup("consolidation", erase_consolidation),
+        event_cleanup("rem", erase_rem),
+        event_cleanup("memory-work", erase_memory_work),
+        event_cleanup("memory-enrichment", erase_memory_enrichment),
         event_cleanup("goals", erase_goals),
+        event_cleanup("life-topics", erase_topics),
         event_cleanup("reading", erase_reading),
         event_cleanup("exploration", erase_exploration),
         event_cleanup("executive", erase_executive),
@@ -79,6 +96,7 @@ def cleanup_contracts():
         event_cleanup("social-autonomy", erase_social_autonomy),
         event_cleanup("voice", erase_voice_jobs),
         event_cleanup("bili-video", erase_bili_video),
+        event_cleanup("evaluation", erase_evaluation),
     )
 
 

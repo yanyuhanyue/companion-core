@@ -1,29 +1,31 @@
 """Shared CNY reservations retain native accounting, FX snapshots and task identity."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from threading import Barrier
 
-import httpx
 import pytest
 
-from companion import api, budget, cloud_budget, cumulative, paid_budget
+from companion import budget, cloud_budget, cumulative, paid_budget
 from companion.cloud_budget import CloudBudgetConfig
 from companion.contracts import CoreError
-from companion.core import Core
 from companion.executive import erase_executive
 from companion.executor_gateway import receipt
-from companion.model import ModelClient, ModelResponse
+from companion.model import ModelResponse
 from companion.store import Store, after, uid
-from tests.conftest import event, run
+from tests.conftest import run
+from tests.owner_model_fixtures import authorized_job
+from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.native_consumer_entry import environment
 from tests.test_cumulative_budget import policy as cumulative_policy
 from tests.test_executive import FakeExecutor, configured, proposal
 from tests.test_media import chunk, process, service, start
 from tests.test_paid_model_gate import approved_live
+from tests.test_video_accounting import core as historical_video_core
 from tests.test_video_accounting import correct, failed_video
 
-__all__ = ["failed_video"]  # Reuse the real stopped-native-correction fixture.
+__all__ = ["failed_video", "historical_video_core"]
 
 MESSAGES = [{"role": "user", "content": "synthetic budget request"}]
 
@@ -171,7 +173,8 @@ def test_legacy_models_and_dispatched_tools_are_included_before_fx_changes(core)
 def test_legacy_native_reservation_is_not_lost_when_billed_projection_lags(core, tmp_path, kind):
     if kind == "model":
         approved_live(core, tmp_path)
-        reference = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        reference = budget.reserve(core.store, core.settings, authorized_job(core),
+                                   "chat", MESSAGES, core.clock())
         reservation = core.store.one("SELECT reserved_micro_usd FROM model_admissions")
         held = reservation["reserved_micro_usd"]
         core.store.execute("DELETE FROM cloud_cost_snapshots")
@@ -222,28 +225,36 @@ def test_old_unlimited_paid_approval_cannot_bypass_cloud_daily_limit(core, tmp_p
     approved_live(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
                   monthly_micro_usd=None, window_micro_usd=None)
     options(core, daily_micro_cny=1)
-    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
-    assert not core.store.rows("SELECT * FROM model_usage")
-    assert not core.store.rows("SELECT * FROM model_admissions")
-    assert not Path(core.settings.paid_model.journal_path).exists()
-    change(core, daily_micro_cny=20_000_000)
-    request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
-    assert core.store.one("SELECT request_id FROM model_usage")["request_id"] == request_id
-
-
-def test_cloud_rejection_does_not_partially_activate_a_cumulative_policy(core, tmp_path):
-    approved_live(core, tmp_path)
-    options(core, daily_micro_cny=1)
-    cumulative_policy(core)
+    job_id = authorized_job(core)
     path = Path(core.settings.paid_model.journal_path)
     before = path.read_bytes()
     with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
-        budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
+    assert not core.store.rows("SELECT * FROM model_usage")
+    assert not core.store.rows("SELECT * FROM model_admissions")
     assert path.read_bytes() == before
-    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (cumulative.PROJECTION,))
     change(core, daily_micro_cny=20_000_000)
-    request_id = budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock())
+    request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
+    assert core.store.one("SELECT request_id FROM model_usage")["request_id"] == request_id
+
+
+def test_cloud_rejection_does_not_partially_reserve_cumulative_model_budget(core, tmp_path):
+    approved_live(core, tmp_path)
+    options(core, daily_micro_cny=1)
+    cumulative_policy(core)
+    job_id = authorized_job(core)
+    path = Path(core.settings.paid_model.journal_path)
+    before = path.read_bytes()
+    projection = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                (cumulative.PROJECTION,))
+    with pytest.raises(CoreError, match="CLOUD_DAILY_BUDGET_EXHAUSTED"):
+        budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
+    assert path.read_bytes() == before
+    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                          (cumulative.PROJECTION,)) == projection
+    assert not core.store.rows("SELECT * FROM model_usage")
+    change(core, daily_micro_cny=20_000_000)
+    request_id = budget.reserve(core.store, core.settings, job_id, "chat", MESSAGES, core.clock())
     with core.store.transaction():
         custody = paid_budget.journal(core.store, core.settings.paid_model)
     assert request_id in custody["cumulative"]["models"]
@@ -352,67 +363,55 @@ def test_observed_cost_overrun_is_retained_and_reported_instead_of_rolled_back(c
         charge(core, "next-estimate", 1)
 
 
-def test_verified_native_correction_releases_unknown_classification_without_repricing(
-    core, failed_video,
-):
-    request, _, _ = failed_video
-    cloud_budget.summary(core.store, core.settings, core.clock())
-    before = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?",
-                            (request["request_id"],))
-    assert before["state"] == "UNKNOWN"
-    receipt = correct(core, request)
-    cloud_budget.summary(core.store, core.settings, core.clock())
-    after_row = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?",
-                               (request["request_id"],))
-    assert after_row["state"] == "SETTLED"
-    assert after_row["amount_micro_cny"] == before["amount_micro_cny"]
-    assert after_row["reconciliation_sha256"] == receipt["receipt_sha256"]
+class TestHistoricalCorrection:
+    @pytest.fixture
+    def core(self, historical_video_core):
+        # Relocate the fixture's journal file without changing its signed accounting bytes.
+        historical_video_core.store.execute("UPDATE model_admissions SET journal_path=?",
+            (historical_video_core.settings.paid_model.journal_path,))
+        return historical_video_core
+
+    def test_verified_native_correction_releases_unknown_classification_without_repricing(
+        self, core, failed_video,
+    ):
+        request, _, _ = failed_video
+        cloud_budget.summary(core.store, core.settings, core.clock())
+        before = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?",
+                                (request["request_id"],))
+        assert before["state"] == "UNKNOWN"
+        receipt = correct(core, request)
+        cloud_budget.summary(core.store, core.settings, core.clock())
+        after_row = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE reference_id=?",
+                                   (request["request_id"],))
+        assert after_row["state"] == "SETTLED"
+        assert after_row["amount_micro_cny"] == before["amount_micro_cny"]
+        assert after_row["reconciliation_sha256"] == receipt["receipt_sha256"]
 
 
 def test_authenticated_http_and_independent_model_worker_share_the_live_cloud_cap(core, tmp_path):
-    core.clock.now = datetime.now(UTC)
-    approved_live(core, tmp_path, unlimited_period_spend=True, daily_micro_usd=None,
-                  monthly_micro_usd=None, window_micro_usd=None)
     options(core, daily_micro_cny=100_000)
-    calls = []
-
-    def provider(request):
-        calls.append(request)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "合成预算回复"}}],
-                                        "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+    provider = Provider(answer("合成预算回复"))
 
     async def scenario():
-        app = api.create_app(core.settings)
-        async with app.router.lifespan_context(app), httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1",
-            headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
-        ) as client, httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-            with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                assert worker.store is not app.state.core.store and worker.store is not core.store
-                first = event(core, 1, "第一条预算测试").model_dump(mode="json")
-                accepted = await client.post("/internal/v1/inbox/events", json=first,
-                                             headers={"X-Idempotency-Key": "http-budget-first"})
-                assert accepted.status_code == 202, accepted.text
-                assert await worker.run_once("independent-cloud-worker")
-                first_usage = core.store.one("SELECT * FROM model_usage")
-                assert len(calls) == 1 and first_usage["state"] == "SETTLED"
-                core.clock.now = datetime.now(UTC)
-                current = cloud_budget.summary(core.store, core.settings, core.clock())
-                used = current["used_micro_cny"]
-                change(core, daily_micro_cny=used)
-                core.clock.now = datetime.now(UTC)
-                second = event(core, 2, "第二条不得越过云总额").model_dump(mode="json")
-                accepted = await client.post("/internal/v1/inbox/events", json=second,
-                                             headers={"X-Idempotency-Key": "http-budget-second"})
-                assert accepted.status_code == 202, accepted.text
-                assert await worker.run_once("independent-cloud-worker")
-                assert core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?",
-                                      (accepted.json()["job_id"],))["last_error_code"] == (
-                    "CLOUD_DAILY_BUDGET_EXHAUSTED"
-                )
-                assert len(calls) == 1
-                assert core.store.rows("SELECT * FROM model_usage") == [first_usage]
-                assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
+        async with environment(core, tmp_path, purposes=("chat",), paid_options={
+            "unlimited_period_spend": True, "daily_micro_usd": None,
+            "monthly_micro_usd": None, "window_micro_usd": None,
+        }) as (entry, _), worker_for(core, provider) as worker:
+            first = await entry.admit(1, "第一条预算测试")
+            assert await worker.run_once("independent-cloud-worker")
+            first_usage = core.store.one("SELECT * FROM model_usage")
+            assert len(provider.requests) == 1 and first_usage["state"] == "SETTLED"
+            assert first_usage["job_id"] == entry.accepted[first["event_id"]]["job_id"]
+            current = cloud_budget.summary(core.store, core.settings, core.clock())
+            change(core, daily_micro_cny=current["used_micro_cny"])
+            second = await entry.admit(2, "第二条不得越过云总额")
+            assert await worker.run_once("independent-cloud-worker")
+            job_id = entry.accepted[second["event_id"]]["job_id"]
+            assert core.store.one("SELECT last_error_code FROM jobs WHERE job_id=?",
+                                  (job_id,))["last_error_code"] == "CLOUD_DAILY_BUDGET_EXHAUSTED"
+            assert len(provider.requests) == 1
+            assert core.store.rows("SELECT * FROM model_usage") == [first_usage]
+            assert len(core.store.rows("SELECT * FROM cloud_cost_snapshots")) == 1
     run(scenario())
 
 

@@ -6,6 +6,10 @@ param(
     [Parameter(ParameterSetName = 'Tests')]
     [ValidateRange(0, 2147483647)][int]$Durations = 0,
     [Parameter(ParameterSetName = 'Tests')][string]$JunitXml = '',
+    [Parameter(ParameterSetName = 'Tests')][ValidateRange(0, 32)][int]$Workers = 2,
+    [Parameter(ParameterSetName = 'Tests')][switch]$Impact,
+    [Parameter(ParameterSetName = 'Tests')][switch]$Full,
+    [Parameter(ParameterSetName = 'Tests')][switch]$SkipModelPreparation,
     [string]$Python = '.venv/Scripts/python.exe'
 )
 
@@ -13,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $taskRoot
 $pytestArguments = @()
+if ($Full -and $TestFiles.Count) { throw '-Full cannot be combined with -TestFiles' }
 if ($Durations -gt 0) { $pytestArguments += "--durations=$Durations" }
 if ($JunitXml) {
     $report = if ([IO.Path]::IsPathRooted($JunitXml)) {
@@ -25,12 +30,15 @@ if ($JunitXml) {
 }
 $roundTemp = '.local/test-temp/check-' + [guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Force -Path "$roundTemp/tmp" | Out-Null
+# Workers share this disposable cache; create it before their first concurrent writes.
+New-Item -ItemType Directory -Force -Path "$roundTemp/pytest-cache" | Out-Null
 $previousEnvironment = @{}
-foreach ($name in @('TEMP', 'TMP', 'UV_CACHE_DIR', 'PYTHONDONTWRITEBYTECODE', 'PYTHONIOENCODING', 'PYTHONPATH')) {
+foreach ($name in @('TEMP', 'TMP', 'TMPDIR', 'UV_CACHE_DIR', 'PYTHONDONTWRITEBYTECODE', 'PYTHONIOENCODING', 'PYTHONPATH')) {
     $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 $env:TEMP = (Resolve-Path "$roundTemp/tmp").Path
 $env:TMP = $env:TEMP
+$env:TMPDIR = $env:TEMP
 $env:UV_CACHE_DIR = Join-Path $taskRoot '.local/uv-cache'
 $env:PYTHONDONTWRITEBYTECODE = '1'
 $env:PYTHONIOENCODING = 'utf-8'
@@ -45,7 +53,11 @@ try {
     } else {
         & $Python -m ruff check companion companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts "--cache-dir=$roundTemp/ruff-cache"
         if ($LASTEXITCODE -ne 0) { throw 'Lint failed' }
-        & $Python -m pytest -q @TestFiles @pytestArguments "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
+        $feedbackArguments = @('--workers', $Workers)
+        if ($Impact) { $feedbackArguments += '--impact' }
+        if ($Full) { $feedbackArguments += '--full' }
+        if ($SkipModelPreparation) { $feedbackArguments += '--skip-model-preparation' }
+        & $Python -B -m scripts.test_feedback @feedbackArguments -- @TestFiles @pytestArguments "--basetemp=$roundTemp/pytest" -o "cache_dir=$roundTemp/pytest-cache"
         if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
     }
 } finally {

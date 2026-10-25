@@ -1,152 +1,53 @@
-"""Synthetic recall outputs over authenticated HTTP and independently opened Core workers.
-
-Production evidence establishes recall_invalid and settled usage, not the original
-response shape. Every invalid response below is an explicitly synthetic test case.
-"""
+"""Native SDK memory tools retain source proofs and original paid responsibilities."""
 
 import json
-from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from companion import budget, live_text
+from companion import budget, owner_authority
+from companion.contracts import CoreError
 from companion.core import Core
-from companion.model import RECALL_RULES, REVIEW_RULES, ModelClient
+from companion.model import REVIEW_RULES, ModelClient
 from companion.store import encode
 from tests.conftest import run
-from tests.test_input_protocol import environment, notice
-from tests.test_reply_revision_api import admit
+from tests.sdk_reader_fixture import answer, call
+from tests.support.owner_memory import environment
 
 FACT = "我用🤔表示在考虑青禾项目的蓝色配色"
 
 
-def response(text, *, review=False, usage=True):
-    body = {"choices": [{"message": {"content": text}}]}
-    if usage:
-        body["usage"] = {"prompt_tokens": 2540 if review else 100,
-                         "completion_tokens": 58 if review else 20}
+def tool_response(arguments='{"query":"*"}', *, usage=True):
+    value = call("recall-owner-fact", "memory_recall", {})
+    value["function"]["arguments"] = arguments
+    body = answer(calls=[value])
+    if not usage:
+        body.pop("usage")
     return httpx.Response(200, json=body)
 
 
-@pytest.mark.parametrize(("output", "reason"), [
-    ("synthetic non-JSON output", "schema"),
-    ('{}', "schema"),
-    ('{"relevant":null}', "schema"),
-    ('{"relevant":"m0"}', "schema"),
-    ('{"relevant":[{}]}', "schema"),
-    ('{"relevant":[],"reason":"synthetic extra field"}', "schema"),
-    ('```json\n{"relevant":[]}\n```', "schema"),
-    ('{"relevant":["m0","m0"]}', "duplicate_reference"),
-    ('{"relevant":["m999"]}', "unknown_reference"),
-])
-def test_paid_invalid_recall_continues_owner_emoji_chat_without_candidates_or_retry(
-    core, tmp_path, monkeypatch, output, reason,
-):
-    async def scenario():
-        calls = []
-
-        def provider(request):
-            messages = json.loads(request.content)["messages"]
-            review = messages[0]["content"] == RECALL_RULES
-            calls.append(("review" if review else "chat", messages))
-            return response(output if review else "在想什么呢？", review=review)
-
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    assert worker.store is not core.store
-                    await admit(client, config, plan, 1, "/记住这个 " + FACT)
-                    assert await worker.run_once("seed-owner-fact")
-                    assert calls == []
-                    before = core.store.rows("SELECT * FROM memories")
-                    original, accepted = await admit(client, config, plan, 2, "🤔")
-                    assert await worker.run_once("actual-emoji-chat")
-                    stored = core.store.one("SELECT body_json FROM events WHERE event_id=?",
-                                            (original["event_id"],))
-                    assert json.loads(stored["body_json"])["text"] == "\U0001f914"
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
-                                          (accepted["job_id"],)) == {"state": "SUCCEEDED"}
-                    assert [kind for kind, _ in calls] == ["review", "chat"]
-                    assert FACT not in encode(calls[-1][1])
-                    assert "核对暂不可用，不能断言没有历史记录" in encode(calls[-1][1])
-                    assert core.store.rows("SELECT * FROM memories") == before
-                    review = core.store.one(
-                        "SELECT * FROM model_usage WHERE scenario='memory_review'",
-                    )
-                    assert (review["state"], review["input_tokens"], review["output_tokens"]) == (
-                        "SETTLED", 2540, 58,
-                    )
-                    assert review["billed_micro_usd"] == budget.cost(
-                        core.settings, 2540, 58, scenario="memory_review",
-                    ) > 0
-                    invalid = core.store.one(
-                        "SELECT safe_detail_json FROM audit_log "
-                        "WHERE action='memory.recall_invalid'",
-                    )
-                    assert json.loads(invalid["safe_detail_json"]) == {
-                        "reason": reason, "request_id": review["request_id"],
-                    }
-                    paused = core.store.one(
-                        "SELECT safe_detail_json FROM audit_log "
-                        "WHERE action='memory.recall_paused'",
-                    )
-                    assert json.loads(paused["safe_detail_json"])["code"] == "MEMORY_REVIEW_INVALID"
-                    assert not live_text.stopped(core.store, plan.sha256)
-                    assert core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
-                                          (original["event_id"],))
-                    assert not await worker.run_once("no-automatic-review-retry")
-                with Core(core.settings, ModelClient(core.settings, transport)) as restarted:
-                    assert not await restarted.run_once("restart-does-not-repeat-paid-review")
-                    assert restarted.store.one(
-                        "SELECT * FROM model_usage WHERE scenario='memory_review'",
-                    ) == review
-                assert [kind for kind, _ in calls] == ["review", "chat"]
-    run(scenario())
+def tool_result(messages):
+    return next(message["content"] for message in messages if message["role"] == "tool")
 
 
-@pytest.mark.parametrize("selection", [None, [], ["m0"]])
-def test_emoji_with_no_memory_or_valid_selection_keeps_native_success_path(
-    core, tmp_path, monkeypatch, selection,
-):
-    async def scenario():
-        calls = []
-
-        def provider(request):
-            messages = json.loads(request.content)["messages"]
-            review = messages[0]["content"] == RECALL_RULES
-            calls.append(("review" if review else "chat", messages))
-            return response(encode({"relevant": selection}) if review else "在想什么呢？",
-                            review=review)
-
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    if selection is not None:
-                        await admit(client, config, plan, 1, "/记住这个 " + FACT)
-                        assert await worker.run_once("seed-owner-fact")
-                    source, accepted = await admit(client, config, plan, 2, "🤔")
-                    assert await worker.run_once("emoji-with-available-context")
-                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
-                                          (accepted["job_id"],))["state"] == "SUCCEEDED"
-                    assert [kind for kind, _ in calls] == (
-                        ["chat"] if selection is None else ["review", "chat"]
-                    )
-                    assert (FACT in encode(calls[-1][1])) is bool(selection)
-                    assert "核对暂不可用" not in encode(calls[-1][1])
-                    assert calls[-1][1][-1]["content"] == "🤔"
-                    assert not core.store.rows(
-                        "SELECT 1 FROM audit_log WHERE action IN "
-                        "('memory.recall_invalid','memory.recall_paused')",
-                    )
-                    assert core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
-                                          (source["event_id"],))
-                    assert not live_text.stopped(core.store, plan.sha256)
-    run(scenario())
+def assert_settled_calls(core, count, *, scenario="chat"):
+    charged = budget.cost(core.settings, 100, 20, scenario=scenario)
+    assert charged > 0
+    assert core.store.rows(
+        "SELECT scenario,state,input_tokens,output_tokens,billed_micro_usd FROM model_usage"
+    ) == [{"scenario": scenario, "state": "SETTLED", "input_tokens": 100,
+           "output_tokens": 20, "billed_micro_usd": charged}] * count
 
 
-def test_invalid_recall_with_unknown_usage_does_not_start_chat_or_refund(
-    core, tmp_path, monkeypatch,
+@pytest.mark.parametrize("arguments", [
+    "synthetic non-JSON output", '{}', '{"query":null}', '{"query":42}', '{"query":[]}',
+    '{"query":"*","reason":"synthetic extra field"}',
+    '```json\n{"query":"*"}\n```', '{"query":""}', encode({"query": "x" * 2001}),
+    '{"query":"*","selected":["m0","m0"]}', '{"query":"*","selected":["m999"]}',
+], ids=["non-json", "missing", "null", "number", "array", "extra", "fenced", "empty", "long",
+        "duplicate-selector", "unknown-selector"])
+def test_invalid_memory_tool_arguments_recover_within_sdk_budget_without_candidates(
+    core, tmp_path, arguments,
 ):
     async def scenario():
         calls = []
@@ -154,77 +55,193 @@ def test_invalid_recall_with_unknown_usage_does_not_start_chat_or_refund(
         def provider(request):
             messages = json.loads(request.content)["messages"]
             calls.append(messages)
-            assert messages[0]["content"] == RECALL_RULES
-            return response("synthetic non-JSON output", review=True, usage=False)
+            if len(calls) == 1:
+                return tool_response(arguments)
+            assert len(calls) == 2
+            assert tool_result(messages)
+            assert FACT not in encode(messages)
+            return httpx.Response(200, json=answer("在想什么呢？"))
 
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
+        async with environment(core, tmp_path) as (admit, _, reference):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    await admit(client, config, plan, 1, "/记住这个 " + FACT)
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    seed, _ = await admit(1, "/记住这个 " + FACT)
                     assert await worker.run_once("seed-owner-fact")
-                    source, accepted = await admit(client, config, plan, 2, "🤔")
-                    assert await worker.run_once("unknown-review-accounting")
+                    assert calls == []
+                    before = core.store.rows("SELECT * FROM memories")
+                    source, accepted = await admit(2, "🤔")
+                    assert await worker.run_once("invalid-memory-arguments")
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        (accepted["job_id"],)) == {"state": "SUCCEEDED"}
+                    assert len(calls) == 2 <= core.settings.paid_model.per_request_calls
+                    assert core.store.rows("SELECT * FROM memories") == before
+                    assert not core.store.rows("SELECT * FROM agent_tool_calls WHERE job_id=?",
+                                               (accepted["job_id"],))
+                    assert seed.event_id not in {row["event_id"] for row in core.store.rows(
+                        "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                    assert_settled_calls(core, 2)
+                    assert json.loads(core.store.one(
+                        "SELECT content_json FROM outbox WHERE origin_event_id=?",
+                        (source.event_id,))["content_json"])["text"] == "在想什么呢？"
+                    assert not await worker.run_once("no-extra-paid-review")
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as restarted:
+                    assert not await restarted.run_once("no-restart-replay")
+                assert owner_authority.current(core.store, core.settings, core.clock
+                    ).authority.as_dict() == reference
+                assert len(calls) == 2
+    run(scenario())
+
+
+def test_repeated_invalid_memory_tool_arguments_stop_at_sdk_retry_limit(core, tmp_path):
+    calls = []
+
+    def provider(request):
+        calls.append(json.loads(request.content)["messages"])
+        assert len(calls) <= 2
+        return tool_response('{}')
+
+    async def scenario():
+        async with environment(core, tmp_path) as (admit, _, _):
+            source, accepted = await admit(1, "🤔")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    assert await worker.run_once("bounded-sdk-retry")
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        (accepted["job_id"],)) == {"state": "FAILED"}
+                    assert not await worker.run_once("no-job-retry-after-sdk-exhaustion")
+            assert len(calls) == 2 <= core.settings.paid_model.per_request_calls
+            assert_settled_calls(core, 2)
+            assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                                       (source.event_id,))
+            assert not core.store.rows("SELECT * FROM memories")
+    run(scenario())
+
+
+@pytest.mark.parametrize("selection", [None, [], ["m0"]])
+def test_emoji_memory_candidates_are_evaluated_in_the_same_sdk_conversation(
+    core, tmp_path, selection,
+):
+    async def scenario():
+        calls = []
+        reply = "在想什么呢？" if not selection else "你正在考虑青禾项目的蓝色配色。"
+
+        def provider(request):
+            messages = json.loads(request.content)["messages"]
+            calls.append(messages)
+            if len(calls) == 1:
+                assert messages[-1]["content"] == "🤔"
+                return tool_response()
+            result = json.loads(tool_result(messages))
+            assert result["state"] == ("NO_RECORD" if selection is None else "FOUND")
+            assert [fact["content"] for fact in result["facts"]] == (
+                [] if selection is None else [FACT])
+            return httpx.Response(200, json=answer(reply))
+
+        async with environment(core, tmp_path) as (admit, _, reference):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    if selection is not None:
+                        await admit(1, "/记住这个 " + FACT)
+                        assert await worker.run_once("seed-owner-fact")
+                    before = core.store.rows("SELECT * FROM memories")
+                    source, accepted = await admit(2, "🤔")
+                    assert await worker.run_once("native-memory-relevance")
+                    assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        (accepted["job_id"],)) == {"state": "SUCCEEDED"}
+                    assert len(calls) == 2
+                    assert_settled_calls(core, 2)
+                    assert core.store.rows("SELECT * FROM memories") == before
+                    assert json.loads(core.store.one(
+                        "SELECT content_json FROM outbox WHERE origin_event_id=?",
+                        (source.event_id,))["content_json"])["text"] == reply
+                    assert owner_authority.current(core.store, core.settings, core.clock
+                        ).authority.as_dict() == reference
+    run(scenario())
+
+
+def test_unknown_tool_request_usage_does_not_execute_tool_refund_or_replay(core, tmp_path):
+    async def scenario():
+        calls = []
+
+        def provider(request):
+            calls.append(json.loads(request.content)["messages"])
+            assert len(calls) == 1
+            return tool_response(usage=False)
+
+        async with environment(core, tmp_path) as (admit, _, _):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    seed, _ = await admit(1, "/记住这个 " + FACT)
+                    assert await worker.run_once("seed-owner-fact")
+                    before = core.store.rows("SELECT * FROM memories")
+                    source, accepted = await admit(2, "🤔")
+                    assert await worker.run_once("unknown-tool-accounting")
                     assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
-                                          (accepted["job_id"],)) == {
-                        "state": "FAILED", "last_error_code": "MEMORY_REVIEW_INVALID",
-                    }
-                    assert len(calls) == 1
-                    usage = core.store.one(
-                        "SELECT u.state,u.billed_micro_usd,a.reserved_micro_usd FROM model_usage u "
-                        "JOIN model_admissions a USING(request_id)",
-                    )
+                        (accepted["job_id"],)) == {
+                            "state": "FAILED", "last_error_code": "MODEL_OUTCOME_UNKNOWN"}
+                    usage = core.store.one("SELECT u.state,u.billed_micro_usd,a.reserved_micro_usd "
+                        "FROM model_usage u JOIN model_admissions a USING(request_id)")
                     assert usage["state"] == "UNKNOWN"
                     assert usage["billed_micro_usd"] == usage["reserved_micro_usd"] > 0
-                    assert not core.store.rows(
-                        "SELECT 1 FROM audit_log WHERE action='memory.recall_paused'",
-                    )
-                    assert not core.store.rows("SELECT 1 FROM outbox WHERE origin_event_id=?",
-                                               (source["event_id"],))
-                    assert live_text.stopped(core.store, plan.sha256)
+                    assert seed.event_id not in {row["event_id"] for row in core.store.rows(
+                        "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
+                    assert core.store.rows("SELECT * FROM memories") == before
+                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                                               (source.event_id,))
+                    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+                        owner_authority.current(core.store, core.settings, core.clock)
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as restarted:
+                    assert not await restarted.run_once("no-unknown-replay")
+                assert len(calls) == 1
     run(scenario())
 
 
 @pytest.mark.parametrize("interruption", ["recall", "supersede"])
-def test_invalid_review_cannot_override_recall_or_supersession(
-    core, tmp_path, monkeypatch, interruption,
-):
+def test_memory_tool_result_cannot_override_recall_or_supersession(core, tmp_path, interruption):
     async def scenario():
         calls = []
 
         async def provider(request):
             messages = json.loads(request.content)["messages"]
             calls.append(messages)
-            assert messages[0]["content"] == RECALL_RULES
+            if len(calls) == 1:
+                return tool_response()
+            assert FACT in tool_result(messages)
+            assert seed.event_id in {row["event_id"] for row in core.store.rows(
+                "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],))}
             if interruption == "recall":
-                recalled = await client.post("/internal/v1/live-text/inputs/recall", json=
-                    notice(config, plan, datetime.now(UTC), number=1))
+                recalled = await recall(seed)
                 assert recalled.status_code == 200, recalled.text
             else:
-                await admit(client, config, plan, 3, "现在换个话题")
-            return response("synthetic non-JSON output", review=True)
+                await admit(3, "现在换个话题")
+            return httpx.Response(200, json=answer("这个旧答案不得发送。"))
 
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
+        async with environment(core, tmp_path) as (admit, recall, reference):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    await admit(client, config, plan, 1, "/记住这个 " + FACT)
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    seed, _ = await admit(1, "/记住这个 " + FACT)
                     assert await worker.run_once("seed-owner-fact")
-                    source, accepted = await admit(client, config, plan, 2, "🤔")
-                    assert await worker.run_once("interrupted-invalid-review")
+                    source, accepted = await admit(2, "🤔")
+                    assert await worker.run_once("interrupted-memory-answer")
                     assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
-                                          (accepted["job_id"],))["state"] == "CANCELLED"
-                    assert len(calls) == 1
-                    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
-                    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
-                    assert not core.store.rows("SELECT 1 FROM outbox WHERE origin_event_id=?",
-                                               (source["event_id"],))
-                    assert not core.store.rows(
-                        "SELECT 1 FROM audit_log WHERE action='memory.recall_paused'",
-                    )
-                    assert not live_text.stopped(core.store, plan.sha256)
+                        (accepted["job_id"],)) == {"state": "CANCELLED"}
+                    assert len(calls) == 2
+                    assert_settled_calls(core, 2)
+                    assert not core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
+                                               (source.event_id,))
+                    assert owner_authority.current(core.store, core.settings, core.clock
+                        ).authority.as_dict() == reference
     run(scenario())
 
 
-def test_invalid_memory_write_review_still_rejects_new_fact(core, tmp_path, monkeypatch):
+def test_invalid_memory_write_review_rejects_new_fact_with_bounded_paid_retries(core, tmp_path):
     async def scenario():
         calls = []
 
@@ -232,29 +249,29 @@ def test_invalid_memory_write_review_still_rejects_new_fact(core, tmp_path, monk
             messages = json.loads(request.content)["messages"]
             calls.append(messages)
             assert messages[0]["content"] == REVIEW_RULES
-            return response("synthetic non-JSON output", review=True)
+            return httpx.Response(200, json=answer("synthetic non-JSON output"))
 
-        async with environment(core, tmp_path, monkeypatch) as (client, config, plan, _):
+        async with environment(core, tmp_path) as (admit, _, _):
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport)) as worker:
-                    await admit(client, config, plan, 1, "/记住这个 " + FACT)
+                with Core(core.settings, ModelClient(core.settings, transport),
+                          core.clock) as worker:
+                    await admit(1, "/记住这个 " + FACT)
                     assert await worker.run_once("seed-owner-fact")
                     before = core.store.rows("SELECT * FROM memories")
-                    source, accepted = await admit(client, config, plan, 2,
-                                                  "/记住这个 " + FACT.replace("蓝色", "红色"))
-                    assert await worker.run_once("invalid-write-review")
-                    assert core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
-                                          (accepted["job_id"],)) == {
-                        "state": "FAILED", "last_error_code": "MEMORY_REVIEW_INVALID",
-                    }
-                    assert len(calls) == 1
-                    assert core.store.rows("SELECT * FROM memories") == before
-                    assert not core.store.rows("SELECT 1 FROM memory_evidence WHERE event_id=?",
-                                               (source["event_id"],))
-                    assert core.store.rows("SELECT state FROM model_usage") == [
-                        {"state": "SETTLED"},
-                    ]
-                    assert not core.store.rows(
-                        "SELECT 1 FROM audit_log WHERE action='memory.recall_paused'",
-                    )
+                    source, accepted = await admit(2, "/记住这个 " + FACT.replace("蓝色", "红色"))
+                    for attempt in range(core.settings.max_attempts):
+                        assert await worker.run_once("invalid-write-review")
+                        final = attempt + 1 == core.settings.max_attempts
+                        assert core.store.one(
+                            "SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                            (accepted["job_id"],)) == {
+                                "state": "FAILED" if final else "RETRY_WAIT",
+                                "last_error_code": "MEMORY_REVIEW_INVALID"}
+                        assert core.store.rows("SELECT * FROM memories") == before
+                        assert not core.store.rows("SELECT 1 FROM memory_evidence WHERE event_id=?",
+                                                   (source.event_id,))
+                        core.clock.advance(60)
+                    assert len(calls) == core.settings.max_attempts
+                    assert_settled_calls(core, len(calls), scenario="memory_review")
+                    assert not await worker.run_once("no-extra-write-retry")
     run(scenario())

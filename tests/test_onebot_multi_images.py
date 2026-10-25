@@ -7,13 +7,12 @@ import httpx
 import pytest
 from PIL import Image
 
-from companion.model import ModelClient
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.window import digest
 from tests.conftest import run
+from tests.support.native_images import image_host, raw_event, upload
 from tests.test_live_image_input import options
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import config, raw_event
+from tests.test_onebot_direct import config
 from tests.test_onebot_images import image_segment
 
 
@@ -60,6 +59,7 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
         data.append(out.getvalue())
 
     async def source(ws):
+        raw["time"] = int(core.clock.now.timestamp())
         await ws.send(json.dumps(raw))
         await ws.wait_closed()
 
@@ -93,15 +93,16 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
     )
 
     async def scenario():
-        async with (
-            source_window(core, tmp_path, source, live=True, approved=True,
-                          rich_input_scope="references_v1", scope_options=opts)
-            as (window, client, protocol, _, sends),
-            httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http,
+        async with image_host(core, tmp_path, source, options=opts, model_reply=model) as (
+            active, _, sends, _,
         ):
-            core.model = ModelClient(core.settings, model_http)
-            core.content.options = core.settings.content
+            async def checked(response):
+                if response.is_error:
+                    await response.aread()
+                    raise AssertionError(response.text)
 
+            if failure is None:
+                active.client.event_hooks["response"].append(checked)
             async def observe_upload(request):
                 if request.url.path.endswith("/image"):
                     index = len(uploads)
@@ -111,36 +112,35 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
                     assert proof["source_sha256"] == digest(raw["message"][index + 1])
                     uploads.append(request)
 
-            client.event_hooks["request"].append(observe_upload)
-            await window.capture_once(client, protocol)
-            operation = window.approve_captured(
-                client, capture_approval(window), image_resolver=resolve,
-                image_transport=httpx.MockTransport(cdn),
-            )
+            active.client.event_hooks["request"].append(observe_upload)
+            await active.capture()
             if failure == "policy":
                 with pytest.raises(httpx.HTTPStatusError):
-                    await operation
+                    await active.flush()
                 assert downloads == uploads == calls == []
                 assert not core.store.one("SELECT 1 FROM model_usage")
-            elif failure:
-                with pytest.raises(ValueError, match="IMAGE_FETCH_REJECTED"):
-                    await operation
-                assert len(downloads) == 2 and len(uploads) == 1
-                assert not calls and not core.store.one("SELECT 1 FROM model_usage")
-                assert window.status()["state"] in {"STOPPED", "CORE_STOP_UNCONFIRMED"}
             else:
-                try:
+                await active.flush()
+                operation = upload(active, resolver=resolve, transport=httpx.MockTransport(cdn))
+                if failure:
+                    with pytest.raises(ValueError, match="IMAGE_FETCH_REJECTED"):
+                        await operation
+                    assert len(downloads) == 2 and len(uploads) == 1
+                    assert not calls and not core.store.one("SELECT 1 FROM model_usage")
+                    assert not core.store.one("SELECT 1 FROM outbox")
+                else:
                     await operation
-                except httpx.HTTPStatusError as error:
-                    raise AssertionError(error.response.text) from error
-                assert len(downloads) == len(uploads) == count
-                assert len(calls) == 1
-                parts = calls[0]["messages"][0]["content"]
-                assert len([part for part in parts if part["type"] == "image_url"]) == count
-                assert [row["state"] for row in core.store.rows(
-                    "SELECT state FROM content_items ORDER BY slot",
-                )] == ["SUCCEEDED"] * count
-                assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
-            assert not sends and not core.store.one("SELECT 1 FROM outbox")
+                    assert len(downloads) == len(uploads) == count and calls == []
+                    assert not core.store.one("SELECT 1 FROM model_usage")
+                    assert await core.run_once()
+                    assert len(calls) == 1
+                    parts = [part for message in calls[0]["messages"]
+                             if isinstance(message["content"], list) for part in message["content"]]
+                    assert len([part for part in parts if part["type"] == "image_url"]) == count
+                    assert [row["state"] for row in core.store.rows(
+                        "SELECT state FROM content_items ORDER BY slot")] == ["SUCCEEDED"] * count
+                    assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
+                    assert core.store.one("SELECT state FROM outbox")["state"] == "PENDING"
+            assert not sends
 
     run(scenario())

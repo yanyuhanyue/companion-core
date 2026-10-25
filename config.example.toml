@@ -20,6 +20,7 @@ autonomous_daily_micro_usd = 200000
 memory_daily_micro_usd = 50000
 # Enable after completing M0 checks; run life-worker for background memory extraction.
 memory_enabled = false
+evaluation_enabled = false # Owner-consented, six-call no-delivery experiments on the same budget.
 embedding_cache_dir = "data/embedding-cache"
 semantic_min_score = 0.5
 extraction_min_events = 5

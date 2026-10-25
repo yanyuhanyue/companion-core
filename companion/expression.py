@@ -96,6 +96,27 @@ class ExpressionEngine:
                 return True, offer
             except (CoreError, ValidationError, ValueError, TypeError, KeyError):
                 return True, None
+        native = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                ("owner_input:" + event_id,)) if event_id else None
+        if native:
+            from companion import owner_authority, owner_input
+
+            try:
+                view = owner_authority.current(self.store, self.settings, self.clock,
+                                                purpose="meme")
+                owner_authority.current(self.store, self.settings, self.clock,
+                                         purpose="expression", authority=view.authority)
+                _, _, job = owner_input.source(self.store, self.settings, view, event_id,
+                                               self.clock(), purpose="meme")
+                reply_revision.check_job(self.store, job)
+                value = json.loads(native["value"])
+                offer = MemeOffer.model_validate(value["meme_offer"]) \
+                    if value.get("meme_offer") else None
+                if offer and offer.offer_key != "meme:" + event_id:
+                    return True, None
+                return True, offer
+            except (CoreError, ValidationError, ValueError, TypeError, KeyError):
+                return True, None
         row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
                              ("live_text_input:" + event_id,)) if event_id else None
         value = json.loads(row["value"]) if row else {}
@@ -119,8 +140,12 @@ class ExpressionEngine:
         return sample < probability
 
     def instruction(self, event_id=None):
+        return "".join(self.instruction_parts(event_id))
+
+    def instruction_parts(self, event_id=None):
+        """Static rules and current offer data, with the same expression authority."""
         if not self.settings.expression_enabled:
-            return ""
+            return "", ""
         offered, offer = self._offer(event_id)
         if offered:
             rules = (
@@ -131,21 +156,18 @@ class ExpressionEngine:
             )
             if (offer is None or not offer.candidates
                 or not self._selection_allowed(event_id, offer.offer_key)):
-                return rules + "本轮只回复文字，不添加表情标记。"
+                return rules, "本轮只回复文字，不添加表情标记。"
             return rules + (
                 "如有合适候选，只在回复末尾附一个⬡候选ID⬡；也可选择none并省略标记。"
-                "只能使用本轮列表的candidate_id，不能用类别名或自造ID。候选数据：\n"
-                + encode(offer.model_dump())
-            )
+                "只能使用本轮列表的candidate_id，不能用类别名或自造ID。"
+            ), "\n候选数据：\n" + encode(offer.model_dump())
         return (
             "表达自然，按当下内容选择长短，不必固定开场、重复总结或刻意卖萌。"
             "表达风格不改变事实、权限和承诺；不要把表达选择当成真实情绪。"
             "每次必须有完整文字回复。仅在轻松且合适时，可在末尾附一个表情标记"
-            "⬡类别⬡，也可以完全不用。可用类别："
-            + ", ".join(self.categories())
-            + "。严肃、痛苦、医疗、法律或用户拒绝表情的语境只回复文字。"
+            "⬡类别⬡，也可以完全不用。严肃、痛苦、医疗、法律或用户拒绝表情的语境只回复文字。"
             "不要输出图片网址、文件路径或声称图片已发送。"
-        )
+        ), "可用类别：" + ", ".join(self.categories()) + "。"
 
     def intent(self, event_id, reply, now=None):
         now = now or self.clock()

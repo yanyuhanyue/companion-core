@@ -263,11 +263,9 @@ def test_populated_0014_upgrade_keeps_rows_constraints_and_refuses_lossy_downgra
             updated_at="2026-10-18T04:00:00+00:00",
         )
         before = store.rows("SELECT * FROM content_items ORDER BY item_id")
-    migrate(str(database))
+    migrate(str(database), "0015_article_images")
     with closing(Store(str(database))) as store:
-        assert store.rows("SELECT * FROM content_items ORDER BY item_id") == [
-            {**row, "attachment_json": "{}"} for row in before
-        ]
+        assert store.rows("SELECT * FROM content_items ORDER BY item_id") == before
         row = {**before[0], "item_id": "fifth-image", "slot": 4}
         store.insert("content_items", **row)
         for changes in ({"state": "INVALID"}, {"kind": "INVALID"}, {"slot": 64}):

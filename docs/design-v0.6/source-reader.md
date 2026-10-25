@@ -38,6 +38,12 @@ ErasureLedger 会清除正文及读取证据。
 外部响应只接受未压缩数据，拒绝跳转、压缩炸弹和超额内容。
 DNS 每次解析后检查所有地址，只连接已校验的公网数字 IP，保留原始 Host、TLS SNI 和证书验证。
 只允许固定 B站页面／API 路径及两种字幕 CDN，拒绝内网、元数据、混合公网／私网 DNS 响应。
+公网检查还拒绝组播、IPv4-mapped IPv6、6to4 和 Teredo 地址；系统解析与最终连接入口使用同一规则。
+它复用 Bridge 已有的地址分类策略，通过标准库
+[`ipaddress`](https://docs.python.org/3.12/library/ipaddress.html) 独立实现，保持读取器的部署边界。
+已对照 DSH `22ddee3792402c3e70ec5f86a63c3e3e895a2f60` 的
+[HTTP fetch provider](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/web/web-fetch-http/src/provider.ts)：
+其 URL／重定向限制与传输分层可参考，实际请求交给进程 dispatcher，不能代替本读取器的 DNS 地址检查与连接固定。
 不继承 HTTP 代理、Cookie 或 Core 请求头。
 
 ## 隔离环境启用
@@ -64,7 +70,7 @@ exploration_daily_bytes = 2621440
 
 Reader 环境单独配置 `COMPANION_READER_TOKEN` 为该适配器密钥。
 不得复用 Bridge／owner token。Core 中同一来源只配置一个实际领取该队列的 Reader；
-使用此进程时关闭 Bridge 的 `bilibili_reader_enabled`，避免旧 Reader 竞争租约。
+旧 AstrBot 内置 Reader 已移除；使用 `source_reader.migrate_astrbot` 导出原配置后启动独立进程，避免旧插件继续竞争租约。
 按需保留其他来源适配器的现有配置。所有功能在默认配置中仍关闭。
 
 ```powershell
@@ -75,7 +81,7 @@ uv sync --frozen --group reader
 .venv/Scripts/python.exe -m source_reader --probe https://www.bilibili.com/video/BV1GJ411x7h7
 ```
 
-Core 的 HTTP origin 仅接受 localhost／私网 IP；HTTPS 可使用受信任的服务域名。
+Core 的 HTTP origin 接受 localhost／私网 IP，另允许私有 Compose 网络中的固定 `companion-api` 服务名；HTTPS 可使用受信任的服务域名。
 Reader 只需要 httpx/httpcore；Playwright 是可选 reader 依赖组，不在 Core 默认安装路径。
 
 ## 可选 Chromium 与容器

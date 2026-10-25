@@ -14,6 +14,8 @@ from companion_onebot_bridge.app import receive
 from companion_onebot_bridge.metrics import Metrics
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import ingest, run
+from tests.owner_model_fixtures import authorized_job
+from tests.support.native_consumer_entry import environment
 from tests.test_onebot_direct import config, normalized, raw_event
 
 
@@ -163,7 +165,8 @@ def test_model_adapter_payload_and_missing_usage_are_checked_with_stub_http(
         core.settings.mode = "live"
         core.settings.model_url = "https://synthetic.invalid/v1"
         messages = [{"role": "user", "content": "synthetic request"}]
-        request_id = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+        request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+                                    "chat", messages, core.clock())
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
             result = await budget.complete(
                 ModelClient(core.settings, http),
@@ -210,11 +213,11 @@ def test_model_adapter_errors_do_not_retry_or_expose_provider_body(core, respons
         return response
 
     async def scenario():
-        core.settings.mode = "live"
-        core.settings.model_url = "https://synthetic.invalid"
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with environment(core, tmp_path, purposes=("chat",), paid_options={
+            "endpoint": "https://synthetic.invalid"}) as (entry, _), httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)) as http:
             core.model = ModelClient(core.settings, http)
-            ingest(core)
+            await entry.admit(1, "检查单次模型失败")
             assert await core.run_once()
             core.clock.advance(30)
             assert not await core.run_once()
@@ -250,8 +253,9 @@ def test_rejected_binary_and_expanding_text_do_not_block_following_frame(tmp_pat
                 yield json.dumps(raw_event(2, "synthetic accepted frame")).encode()
                 stop.set()
 
-        async def connection(config):
+        async def connection(config, *, check=None):
             assert config == cfg
+            assert check is None
             return SyntheticSocket()
 
         monkeypatch.setattr("companion_onebot_bridge.app.websocket", connection)

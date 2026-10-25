@@ -1,0 +1,323 @@
+"""Native journal revision/STOP custody; all approvals and transport are synthetic."""
+
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import SecretStr
+
+from companion import owner_authority as authority
+from companion import paid_budget
+from companion.api import create_app
+from companion.contracts import CoreError
+from companion.owner_authority_protocol import (
+    AuthorityChange,
+    AuthorityPreview,
+    AuthorityStop,
+    OwnerGrantPolicy,
+    OwnerRuntimeConfig,
+)
+from tests.test_paid_model_gate import approved_live
+
+
+def prepare(core, tmp_path, *, enabled=True):
+    approved_live(core, tmp_path)
+    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED" if enabled else "OFF")
+    return OwnerGrantPolicy(owner_qq_id=core.settings.owner_qq_id, purposes=["evaluation"],
+                            authorization_sha256="d" * 64,
+                            paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)))
+
+
+def activate(core, policy, *, revision=0, operation="operation-activate-1"):
+    query = AuthorityPreview(expected_revision=revision, policy=policy)
+    preview = authority.preview(core.store, core.settings, core.clock, query)
+    request = AuthorityChange(operation_id=operation, **query.model_dump(),
+                              preview_sha256=preview["preview_sha256"])
+    return authority.activate(core.store, core.settings, core.clock, request), request
+
+
+def test_default_off_and_no_implicit_grant(core, tmp_path):
+    policy = prepare(core, tmp_path, enabled=False)
+    assert core.store.rows("SELECT * FROM owner_authority_revisions") == []
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
+        activate(core, policy)
+    assert not Path(core.settings.paid_model.journal_path).exists()
+
+
+def test_revision_idempotency_and_current_policy(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    result, request = activate(core, policy)
+    assert authority.activate(core.store, core.settings, core.clock, request) == result
+    view = authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+    assert view.authority.as_dict() == result["authority"]
+    assert view.policy == policy
+    assert len(core.store.rows("SELECT * FROM owner_authority_revisions")) == 1
+    request = request.model_copy(update={"preview_sha256": "f" * 64})
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_OPERATION_CONFLICT"):
+        authority.activate(core.store, core.settings, core.clock, request)
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
+        activate(core, policy, operation="operation-activate-2")
+
+
+def test_stop_survives_removed_settings_and_does_not_claim_quiescence(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    result, _ = activate(core, policy)
+    core.settings.owner_runtime = OwnerRuntimeConfig()
+    core.settings.paid_model = None
+    request = AuthorityStop(operation_id="operation-stop-1", authority=result["authority"])
+    stopped = authority.stop(core.store, core.settings, core.clock, request)
+    assert stopped["state"] == "STOPPED"
+    assert stopped["admission_fenced"] and not stopped["quiescence_proven"]
+    assert authority.stop(core.store, core.settings, core.clock, request) == stopped
+    assert authority.status(core.store, core.settings, core.clock)["state"] == "OFF"
+
+
+def test_journal_fsync_precedes_database_commit(core, tmp_path, monkeypatch):
+    policy = prepare(core, tmp_path)
+    # Establish the original journal header so the injected failure targets the revision.
+    with core.store.transaction():
+        paid_budget.journal(core.store, core.settings.paid_model)
+    def fail_fsync(_):
+        raise OSError("synthetic fsync failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(paid_budget.os, "fsync", fail_fsync)
+        with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+            activate(core, policy)
+    assert core.store.rows("SELECT * FROM owner_authority_revisions") == []
+    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+        activate(core, policy)
+
+
+def test_restore_generation_cannot_restore_authority(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    activate(core, policy)
+    with core.store.transaction():
+        authority.restore(core.store)
+    assert authority.status(core.store, core.settings, core.clock)["state"] == "OFF"
+    # Even changing the local mode pointer cannot bypass the restore generation.
+    core.store.execute("UPDATE runtime_meta SET value='ENABLED' WHERE key=?", (authority.MODE,))
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_REQUIRED"):
+        authority.current(core.store, core.settings, core.clock)
+
+
+def test_stop_record_and_database_projection_cannot_diverge(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    result, _ = activate(core, policy)
+    authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="operation-stop-1", authority=result["authority"],
+    ))
+    core.store.execute("DELETE FROM owner_authority_revisions WHERE state='STOPPED'")
+    with core.store.transaction(), pytest.raises(CoreError,
+                                                match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+        paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
+
+
+def test_control_api_rejects_bridge_credential_and_activates_exact_preview(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    core.settings.control_token = SecretStr("synthetic-owner-control-token")
+    app = create_app(core.settings)
+    app.state.core = core
+    client = TestClient(app)
+    request = AuthorityPreview(expected_revision=0, policy=policy).model_dump(mode="json")
+    bridge = {"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()}
+    owner = {"Authorization": "Bearer synthetic-owner-control-token"}
+    prefix = "/internal/v1/owner-authority"
+    assert client.post(prefix + "/preview", json=request, headers=bridge).status_code == 401
+    response = client.post(prefix + "/preview", json=request, headers=owner)
+    assert response.status_code == 200, response.text
+    request.update(operation_id="operation-api-activate",
+                   preview_sha256=response.json()["preview_sha256"])
+    response = client.post(prefix + "/activate", json=request, headers=owner)
+    assert response.status_code == 200, response.text
+    assert client.post(prefix + "/activate", json=request, headers=owner).json() == response.json()
+    records = [json.loads(line) for line in Path(core.settings.paid_model.journal_path).read_text(
+        "utf-8").splitlines()]
+    assert records[-1]["kind"] == authority.RECORD_KIND
+    assert "policy" not in records[-1]  # Journal pins policy by hash, without source bodies.
+
+
+def test_native_encrypted_restore_never_reactivates_grant(core, tmp_path):
+    from cryptography.fernet import Fernet
+
+    from companion.backup import backup, restore
+    from companion.runtime import Runtime
+
+    policy = prepare(core, tmp_path)
+    activate(core, policy)
+    path, restored, key = tmp_path / "snapshot.enc", tmp_path / "restored.db", Fernet.generate_key()
+    backup(core.settings.database, path, key)
+    restore(path, restored, key, core.settings.erasure_ledger)
+    settings = core.settings.model_copy(update={"database": str(restored)})
+    with Runtime(settings, core.clock) as runtime:
+        assert authority.status(runtime.store, settings, core.clock)["state"] == "OFF"
+        assert runtime.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                 (authority.GENERATION,))["value"] != "initial"
+
+
+def test_source_erasure_scrubs_policy_but_preserves_journal_evidence(core, tmp_path):
+    from companion.life_protocol import LifeShadowApproval
+    from companion.store import after
+    from tests.conftest import ingest
+
+    ingest(core)
+    policy = prepare(core, tmp_path)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    event = core.store.one("SELECT event_id,conversation_id FROM events")
+    scope = LifeShadowApproval(
+        scope="owner_private_life_shadow_v1", authorization_sha256="b" * 64,
+        conversation_id=event["conversation_id"], source_event_ids=[event["event_id"]],
+        purposes=["PRIVATE_DIARY"], expires_at=after(core.clock(), 3600), max_items=2,
+    )
+    policy = policy.model_copy(update={"purposes": ["life"], "life_shadow": scope})
+    activated, _ = activate(core, policy)
+    with core.store.transaction():
+        core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
+    row = core.store.one("SELECT * FROM owner_authority_revisions")
+    assert row["policy_json"] == "{}" and row["policy_redacted"] == 1
+    assert row["record_sha256"] == activated["record_sha256"]
+    assert authority.status(core.store, core.settings, core.clock)["state"] == "OFF"
+    with core.store.transaction():
+        paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
+
+
+@pytest.mark.parametrize("state", ["OPEN", "PREPARED"])
+def test_old_live_window_is_not_converted_to_grant(core, tmp_path, state):
+    from companion.store import encode
+
+    policy = prepare(core, tmp_path)
+    core.store.insert("runtime_meta", key="live_text_window", value=encode({
+        "plan_sha256": "a" * 64, "window_id": "win_" + "b" * 32,
+    }))
+    core.store.insert("runtime_meta", key="live_text_window:" + "a" * 64,
+                      value=encode({"state": state}))
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_LEGACY_STOP_REQUIRED"):
+        activate(core, policy)
+    assert core.store.rows("SELECT * FROM owner_authority_revisions") == []
+
+
+def test_stopped_policy_is_evidence_only(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    result, _ = activate(core, policy)
+    authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="operation-stop-evidence", authority=result["authority"],
+    ))
+    core.settings.paid_model = None
+    assert authority.evidence(core.store, core.settings, result["authority"]).policy == policy
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
+        authority.current(core.store, core.settings, core.clock, authority=result["authority"])
+
+
+def test_reserved_rem_purpose_cannot_be_activated(core, tmp_path):
+    policy = prepare(core, tmp_path)
+    policy = OwnerGrantPolicy.model_validate({**policy.model_dump(), "purposes": ["rem"],
+                                              "capability_policies": {"rem": "a" * 64}})
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_CAPABILITY_CHANGED"):
+        activate(core, policy)
+    assert core.store.rows("SELECT * FROM owner_authority_revisions") == []
+
+
+def test_paid_policy_drift_is_fenced_before_first_model_admission(core, tmp_path):
+    from datetime import timedelta
+
+    policy = prepare(core, tmp_path)
+    result, _ = activate(core, policy)
+    assert core.store.rows("SELECT * FROM model_admissions") == []
+    paid = core.settings.paid_model
+    core.settings.paid_model = paid.model_copy(update={
+        "expires_at": paid.expires_at + timedelta(seconds=30),
+    })
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_PAID_POLICY_CHANGED"):
+        authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+    # Original proof and emergency STOP remain usable with drifted settings.
+    assert authority.evidence(core.store, core.settings, result["authority"]).policy == policy
+    authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="operation-stop-drift", authority=result["authority"]))
+
+
+def test_job_authority_requires_native_unexpired_lease(core, tmp_path):
+    from companion.store import after
+    from tests.conftest import ingest
+
+    source = ingest(core)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    policy = prepare(core, tmp_path)
+    activate(core, policy)
+    job_id = core.new_job(source["event_id"], "evaluation", "native-evaluation-test", core.clock())
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    with core.store.transaction():
+        authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
+                           purpose="evaluation")
+    with pytest.raises(CoreError, match="JOB_LEASE_LOST"):
+        authority.check_job(core.store, core.settings, core.clock, job,
+                            purpose="evaluation", executing=True)
+    core.store.execute("UPDATE jobs SET state='RUNNING',lease_token='lease-owner-test',"
+                       "lease_until=? WHERE job_id=?", (after(core.clock(), 30), job["job_id"]))
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
+    authority.check_job(core.store, core.settings, core.clock, job,
+                        purpose="evaluation", executing=True)
+    core.store.execute("UPDATE jobs SET lease_until=? WHERE job_id=?",
+                       (core.clock(), job["job_id"]))
+    with pytest.raises(CoreError, match="JOB_LEASE_LOST"):
+        authority.check_job(core.store, core.settings, core.clock, job,
+                            purpose="evaluation", executing=True)
+
+
+def test_revision_cannot_reauthorize_a_bound_job(core, tmp_path):
+    from tests.conftest import ingest
+
+    source = ingest(core)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    policy = prepare(core, tmp_path)
+    activate(core, policy)
+    job_id = core.new_job(source["event_id"], "evaluation", "native-evaluation-test", core.clock())
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    with core.store.transaction():
+        authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
+                           purpose="evaluation")
+
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    activate(core, policy, revision=1, operation="operation-revision-2")
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_REVISION_CHANGED"):
+        authority.check_job(core.store, core.settings, core.clock, job, purpose="evaluation")
+    core.store.execute("UPDATE jobs SET state='QUEUED'")
+    with core.store.transaction(), pytest.raises(CoreError,
+                                                match="OWNER_AUTHORITY_REVISION_CHANGED"):
+        authority.bind_job(core.store, core.settings, core.clock, job["job_id"],
+                           purpose="evaluation")
+
+
+def test_pending_external_erasure_fences_current_use_without_repairing_original_evidence(
+    core, tmp_path, monkeypatch,
+):
+    from pathlib import Path
+
+    from tests.conftest import ingest
+
+    source = ingest(core)
+    core.store.execute("UPDATE jobs SET state='CANCELLED'")
+    policy = prepare(core, tmp_path)
+    activated, _ = activate(core, policy)
+    usage = core.store.rows("SELECT * FROM model_usage")
+
+    def interrupted(*args):
+        raise RuntimeError("synthetic erasure apply crash")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(core.ledger, "apply", interrupted)
+        with pytest.raises(RuntimeError, match="synthetic erasure apply crash"):
+            with core.store.transaction():
+                core.ledger.expire_events(core.store, [source["event_id"]], core.clock())
+    original = Path(core.settings.erasure_ledger).read_bytes()
+    with pytest.raises(CoreError, match="ERASURE_REPLAY_REQUIRED"):
+        authority.current(core.store, core.settings, core.clock, purpose="evaluation")
+    assert Path(core.settings.erasure_ledger).read_bytes() == original
+    assert core.store.one("SELECT redacted FROM events")["redacted"] == 0
+    assert authority.evidence(core.store, core.settings, activated["authority"]).policy == policy
+    assert core.store.rows("SELECT * FROM model_usage") == usage
+    stopped = authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="stop-with-pending-erasure", authority=activated["authority"]))
+    assert stopped["state"] == "STOPPED"
+    core.ledger.replay(core.store)
+    assert core.store.one("SELECT redacted FROM events")["redacted"] == 1
+    assert Path(core.settings.erasure_ledger).read_bytes() == original

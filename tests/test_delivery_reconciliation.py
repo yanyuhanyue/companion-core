@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import companion_delivery_protocol as wire
-from companion import budget, cumulative, live_text, paid_budget
+from companion import budget, cumulative, live_text, owner_authority, paid_budget
 from companion import delivery_reconciliation as reconciliation
 from companion.contracts import CoreError, DeliveryResult
 from companion.model import ModelResponse
@@ -39,7 +39,8 @@ def signed(env, **changes):
 
 
 def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
-           action="qq.private.poke", stopped=True, model_unknown=False, legacy=False, voice=False):
+           action="qq.private.poke", stopped=True, model_unknown=False, legacy=False, voice=False,
+           voice_v1=False):
     accepted = ingest(core, 1, "synthetic private source")
     event = core.store.one("SELECT * FROM events WHERE event_id=?", (accepted["event_id"],))
     key = Ed25519PrivateKey.generate()
@@ -75,6 +76,9 @@ def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
     # admission, amount, model journal, settlement and cumulative implementation.
     with pytest.MonkeyPatch.context() as authority:
         authority.setattr(live_text, "reserve_model", lambda *args, **kwargs: None)
+        # Historical v1 fixture only: create its already-admitted liability without
+        # opening a new native grant or making any provider request.
+        authority.setattr(owner_authority, "admit_model", lambda *args, **kwargs: None)
         request_id = budget.reserve(core.store, core.settings, None, "chat",
             [{"role": "user", "content": "synthetic model input"}], core.clock())
     message_id, token = uid("msg"), uid("lease")
@@ -114,7 +118,9 @@ def native(core, tmp_path, *, quota=True, uncertain=True, expired=False,
             "action_type": action, "request_ids": [request_id],
             })
         if voice:
-            send_check["voice"] = voice_authority(core, event, content, message_id, plan.sha256)
+            send_check["voice"] = voice_authority(
+                core, event, content, message_id, plan.sha256, legacy=voice_v1
+            )
             send_check["reply_revision"] = event["reply_revision"]
         if legacy:
             core.store.execute("DELETE FROM runtime_meta WHERE key=?",
@@ -214,19 +220,37 @@ def account_authority(core, content, window_sha256):
     })
 
 
-def voice_authority(core, event, content, message_id, window_sha256):
-    from companion.voice_protocol import VoiceDeliveryBinding
+def voice_authority(core, event, content, message_id, window_sha256, *, legacy=False):
+    from companion.voice_protocol import LegacyVoiceDeliveryBinding
 
     job_id = uid("voice")
     delivery_key = "synthetic-original:" + message_id
-    binding = VoiceDeliveryBinding(job_id=job_id, generation=1, message_id=message_id,
-        delivery_key=delivery_key, event_id=event["event_id"], window_sha256=window_sha256,
-        source_sha256="1" * 64, identity_sha256="2" * 64, privacy_epoch=0,
-        reply_revision=event["reply_revision"], node_id="local", manifest_sha256="3" * 64,
-        node_config_sha256="4" * 64, voice_policy_sha256="b" * 64,
-        content_sha256=wire.digest(content), reply_sha256=wire.digest(content["text"]),
-        result_sha256="5" * 64, audio_sha256="6" * 64, audio_bytes=100,
-        expires_at=after(core.clock(), 60)).model_dump(mode="json")
+    binding = LegacyVoiceDeliveryBinding(
+        retirement_token="random-proof-" + "x" * 32,
+        job_id=job_id,
+        generation=1,
+        message_id=message_id,
+        delivery_key=delivery_key,
+        event_id=event["event_id"],
+        window_sha256=window_sha256,
+        source_sha256="1" * 64,
+        identity_sha256="2" * 64,
+        privacy_epoch=0,
+        reply_revision=event["reply_revision"],
+        node_id="local",
+        manifest_sha256="3" * 64,
+        node_config_sha256="4" * 64,
+        voice_policy_sha256="b" * 64,
+        content_sha256=wire.digest(content),
+        reply_sha256=wire.digest(content["text"]),
+        result_sha256="5" * 64,
+        audio_sha256="6" * 64,
+        audio_bytes=100,
+        expires_at=after(core.clock(), 60),
+    ).model_dump(mode="json")
+    if legacy:
+        binding.pop("retirement_token")
+        binding["schema_version"] = 1
     core.store.insert("voice_jobs", job_id=job_id, operation="tts", event_id=event["event_id"],
         native_source_event_id=event["source_event_id"], conversation_id=event["conversation_id"],
         message_id=message_id, source_sha256=binding["source_sha256"],
@@ -242,7 +266,7 @@ def voice_authority(core, event, content, message_id, window_sha256):
     put(core.store, "voice_reply:" + message_id, {"state": "AUDIO", "job_id": job_id,
         "binding": binding, "binding_sha256": wire.digest(binding)})
     return {"binding_sha256": wire.digest(binding),
-            **{k: binding[k] for k in wire.VOICE_CHECK_FIELDS - {"binding_sha256"}}}
+            **{k: binding[k] for k in wire.VOICE_CHECK_FIELDS - {"binding_sha256"} if k in binding}}
 
 
 @pytest.mark.parametrize("action", sorted(wire.ACCOUNT_ACTIONS))
@@ -421,14 +445,16 @@ def test_voice_resolution_rejects_changed_original_result(core, tmp_path, change
 ])
 def test_voice_wire_rejects_non_exact_check(field, value):
     check = {"binding_sha256": "a" * 64, "job_id": "voice_" + "1" * 32, "generation": 1,
-             "result_sha256": "b" * 64, "audio_sha256": "c" * 64, "audio_bytes": 100}
+             "result_sha256": "b" * 64, "audio_sha256": "c" * 64, "audio_bytes": 100,
+             "retirement_token": "random-proof-" + "x" * 32}
     with pytest.raises(ValueError, match="VOICE_CHECK"):
         wire.validate_voice_check({**check, field: value})
 
 
 def test_voice_check_validation_returns_a_detached_dictionary():
     value = {"binding_sha256": "a" * 64, "job_id": "voice_" + "1" * 32, "generation": 1,
-             "result_sha256": "b" * 64, "audio_sha256": "c" * 64, "audio_bytes": 100}
+             "result_sha256": "b" * 64, "audio_sha256": "c" * 64, "audio_bytes": 100,
+             "retirement_token": "random-proof-" + "x" * 32}
     checked = wire.validate_voice_check(value)
     assert checked == value and checked is not value
     checked["generation"] = 2
@@ -834,7 +860,15 @@ def test_shared_protocol_is_standard_library_only_and_rejects_extra_private_fiel
                if isinstance(node, ast.ImportFrom)}
     imports |= {alias.name.split(".")[0] for node in ast.walk(ast.parse(source))
                 if isinstance(node, ast.Import) for alias in node.names}
-    assert imports <= {"hashlib", "json", "re", "datetime"}
+    assert imports <= {"hashlib", "json", "re", "datetime", "companion_delivery_protocol"}
+    import companion_delivery_protocol.authority as authority_wire
+
+    authority_tree = ast.parse(Path(authority_wire.__file__).read_text("utf-8"))
+    authority_imports = {node.module.split(".")[0] for node in ast.walk(authority_tree)
+                        if isinstance(node, ast.ImportFrom)}
+    authority_imports |= {alias.name.split(".")[0] for node in ast.walk(authority_tree)
+                          if isinstance(node, ast.Import) for alias in node.names}
+    assert authority_imports <= {"re", "dataclasses", "datetime", "companion_delivery_protocol"}
     with pytest.raises(ValueError):
         wire.validate_quiescence({"private_body": "not a valid proof"})
 
@@ -959,3 +993,30 @@ def test_terminal_input_recovery_does_not_close_an_old_database_with_active_work
         assert expected["receipt"]["input_closure"]["terminal"]
     finally:
         restored.db.close()
+
+
+@pytest.mark.parametrize("change", ["token", "job", "message", "signature", "body", "missing"])
+def test_retired_voice_proof_is_bound_to_original_signed_message(core, tmp_path, change):
+    env = native(core, tmp_path, action="qq.private.reply", voice=True)
+    with core.store.transaction():
+        ErasureLedger(core.settings.erasure_ledger).expire_events(
+            core.store, [env.proof["event_id"]], core.clock())
+    if change == "token":
+        env.proof = signed(env, voice_check=env.proof["voice_check"] |
+                           {"retirement_token": "unrelated-random-" + "z" * 32})
+    elif change == "job":
+        env.proof = signed(env, voice_check=env.proof["voice_check"] |
+                           {"job_id": "voice_" + "f" * 32})
+    elif change == "message":
+        env.proof = signed(env, message_id="msg_" + "f" * 32)
+    elif change == "signature":
+        env.proof["signature"] = "0" * 128
+    elif change == "body":
+        env.proof["voice_check"]["audio_sha256"] = "f" * 64
+    else:
+        env.proof.pop("voice_check")
+        env.proof = signed(env)
+    before = rows(env)
+    with pytest.raises(CoreError):
+        prepare(env)
+    assert rows(env) == before

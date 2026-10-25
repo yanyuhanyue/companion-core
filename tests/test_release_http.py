@@ -2,13 +2,13 @@
 
 import gzip
 import json
+from contextlib import asynccontextmanager
 
+import httpcore
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from astrbot_plugin_companion_bridge.content import fetch_qq_image
-from astrbot_plugin_companion_bridge.reader import ReadFailure, bounded_get, read_heybox_api
 from companion.content import fetch_public_image
 from companion.contracts import CoreError
 from companion.executive import HTTPExecutor
@@ -16,6 +16,9 @@ from companion.executive_protocol import ExecutorEndpoint
 from companion.executor_budget_proxy import create_budget_proxy
 from companion.media_config import MediaConfig, MediaEndpoint
 from companion.media_provider import HTTPMediaProvider
+from companion_onebot_bridge.images import fetch_image, original_images
+from source_reader.heybox import HeyboxReader, SourceAPI
+from source_reader.network import PublicHTTP, ReadBudget, ReadFailure
 from tests.conftest import ingest, run
 from tests.test_content import POST, enable
 from tests.test_executive import TOKEN, envelope
@@ -45,21 +48,36 @@ async def read_response(path, stream, limit, encoding=None):
         lambda request: httpx.Response(200, headers=headers, stream=stream)
     )
     if path == "qq_image":
-        return await fetch_qq_image("https://gchat.qpic.cn/image/one", limit, transport)
+        async def check():
+            pass
+
+        async def resolve(*args):
+            return ["1.1.1.1"]
+
+        image = original_images([{"type": "image", "data": {
+            "url": "https://gchat.qpic.cn/image/one"}}])[0]
+        return await fetch_image(image, limit, check=check, resolver=resolve, transport=transport)
     if path == "link_image":
         return await fetch_public_image(
             "https://imgheybox.max-c.com/image/one", "heybox", limit, transport
         )
-    async with httpx.AsyncClient(
-        base_url="https://source.example",
-        transport=transport,
-        headers={"Accept-Encoding": "identity"},
-    ) as client:
-        if path == "source_reader":
-            return await read_heybox_api(
-                client, {"operation": "read", "url": POST, "max_bytes": limit}
-            )
-        return await bounded_get(client, POST, limit)
+    class Pool:
+        @asynccontextmanager
+        async def stream(self, method, url, **kwargs):
+            assert method == "GET"
+            yield httpcore.Response(200, headers=headers, content=stream)
+
+        async def aclose(self):
+            pass
+
+    budget = ReadBudget(limit, 1)
+    if path == "source_reader":
+        async with SourceAPI("https://source.example", "source-token-" * 3, Pool()) as source:
+            items = await HeyboxReader(None, source).read(
+                {"operation": "read", "url": POST}, budget)
+            return items, budget.used_bytes
+    async with PublicHTTP(Pool()) as public:
+        return await public.get(POST, budget, "article")
 
 
 @pytest.mark.parametrize("path", PATHS)

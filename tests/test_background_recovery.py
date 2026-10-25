@@ -155,33 +155,30 @@ def test_discovery_invalid_feed_never_falls_back_to_a_page(payload):
 
 
 def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
-    core, tmp_path, monkeypatch
+    core, tmp_path, monkeypatch,
 ):
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
     from companion import api, life_worker
     from companion.config import ObservationAdapterConfig
+    from companion.diary import DIARY_RULES
     from companion.model import ModelClient
     from companion.reflection import REFLECTION_RULES
-    from companion_onebot_bridge import continuous
-    from tests.test_onebot_capture import capture_approval, source_window
+    from tests.native_continuous_support import host
+    from tests.support.native_context import Capture
+    from tests.test_consolidation import ReflectionModel
     from tests.test_onebot_direct import raw_event
-    from tests.test_private_companion import companion_options
 
-    seed_closed_days(core)
-    first, second = date(2026, 10, 16), date(2026, 10, 17)
-    for day in (first, second):
-        core.consolidation.schedule_day(day)
-        assert run(core.consolidation.run_once())
-    core.store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
-                       "WHERE local_date=?", (second.isoformat(),))
-    core.store.execute("UPDATE consolidation_runs SET state='CANCELLED',"
-                       "last_error_code='LIVE_WINDOW_STOPPED' WHERE local_date=?",
-                       (second.isoformat(),))
-    diaries = core.store.rows("SELECT * FROM diary_runs")
-    existing_usage = core.store.rows("SELECT * FROM model_usage")
+    fixture_model = ReflectionModel()
     calls, instances = [], []
+    number = 0
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="继续聊读书安排")))
+        nonlocal number
+        number += 1
+        await ws.send(json.dumps(raw_event(number, text="这一天我们聊了读书安排。",
+                                          time=int(core.clock.now.timestamp()))))
         await ws.wait_closed()
 
     def construct(*args, **kwargs):
@@ -189,47 +186,73 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
         instances.append(instance)
         return instance
 
-    def respond(request):
+    async def respond(request):
         messages = json.loads(request.content)["messages"]
         rules = messages[0]["content"]
         calls.append(rules)
-        if rules == REFLECTION_RULES:
-            data = json.loads(messages[-1]["content"])
-            assert data["local_date"] == second.isoformat()
-            source = data["sources"][0]
-            text = json.dumps({"suggestions": [{"kind": "next_question",
-                "text": "下次进一步了解这本书", "evidence": [{"source_id": source["source_id"],
-                "exact_quote": source["text"]}]}]}, ensure_ascii=False)
-        else:
-            text = "我们接着聊读书吧。"
-        return httpx.Response(200, json={"choices": [{"message": {"content": text}}],
+        scenario = "diary" if rules == DIARY_RULES else (
+            "reflection" if rules == REFLECTION_RULES else "chat")
+        result = await fixture_model.complete(messages, scenario)
+        return httpx.Response(200, json={"choices": [{"message": {"content": result.text}}],
                                         "usage": {"prompt_tokens": 100, "completion_tokens": 40}})
 
     async def scenario():
-        options = companion_options(core)
-        options["link_scope"] = "owner_links_v1"
-        options["core_options"].update({
-            "extraction_min_events": 40, "wake_max_daily_runs": 0,
-            "reflection_max_daily_calls": 4, "content_enabled": True,
-            "observation_enabled": True, "exploration_daily_requests": 8,
-            "exploration_monthly_requests": 30, "exploration_daily_bytes": 4_194_304,
-            "observation_adapters": {"bili": ObservationAdapterConfig(
-                source="bilibili", token="synthetic-recovery-reader-token")},
-        })
+        options = dict(diary_enabled=True, consolidation_enabled=True, reflection_enabled=True,
+            goals_enabled=True, exploration_enabled=True, reflection_max_daily_calls=1,
+            reflection_min_sources=1, reflection_daily_micro_usd=50000,
+            reflection_monthly_micro_usd=100000, extraction_min_events=40,
+            wake_max_daily_runs=0, content_enabled=True, observation_enabled=True,
+            exploration_daily_requests=8, exploration_monthly_requests=30,
+            exploration_daily_bytes=4_194_304,
+            observation_adapters={"bili": ObservationAdapterConfig(
+                source="bilibili", token="synthetic-recovery-reader-token")})
         monkeypatch.setattr(api, "Core", construct)
         monkeypatch.setattr(life_worker, "Core", construct)
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
-            monkeypatch.setattr(life_worker, "ModelClient",
-                                lambda settings, _: ModelClient(settings, model))
-            core.model = ModelClient(core.settings, model)
-            async with source_window(
-                core, tmp_path, source, live=True, approved=True, scope_options=options,
-                independent_api=True, rich_input_scope="references_v1",
-            ) as (window, client, protocol, _, sends):
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+        async with host(core, tmp_path, source, ticking=False, independent_api=True,
+            model_reply=respond, core_options=options,
+            purposes=("chat", "history", "memory", "diary", "consolidation", "reflection",
+                      "goals", "content", "exploration"),
+        ) as (bridge, _, sends, _):
+            core.diary.model = core.reflections.model = core.model
+            start = core.clock.now.astimezone(ZoneInfo(core.settings.timezone))
+            first, second = start.date(), (start + timedelta(days=1)).date()
+            receiver = Capture(core, bridge.spool, bridge.runtime)
+            for offset in (0, 1):
+                core.clock.now = start + timedelta(days=offset)
+                for _ in range(3):
+                    await receiver.capture_once(bridge.client, bridge.protocol)
+                    await bridge.flush()
                 assert await core.run_once()
-                await continuous.pump_private(window, client, protocol)
+                assert await bridge.pump()
+            core.clock.now = (start + timedelta(days=2)).replace(hour=4)
+            for day in (first, second):
+                core.consolidation.schedule_day(day)
+                assert await core.consolidation.run_once()
+            assert core.consolidation.status(first)["state"] == "COMPLETE"
+            assert core.consolidation.status(second)["state"] == "PARTIAL"
+            pending = core.store.one("SELECT * FROM reflection_runs WHERE local_date=?",
+                                     (second.isoformat(),))
+            assert pending["state"] == "RETRY_WAIT" and pending["model_request_id"] is None
+            core.store.execute("UPDATE reflection_runs SET state='FAILED',next_attempt_at=NULL "
+                               "WHERE local_date=?", (second.isoformat(),))
+            core.store.execute("UPDATE consolidation_runs SET state='CANCELLED',"
+                "last_error_code='LIVE_WINDOW_STOPPED' WHERE local_date=?", (second.isoformat(),))
+            diaries = core.store.rows("SELECT * FROM diary_runs ORDER BY local_date")
+            existing_usage = core.store.rows("SELECT * FROM model_usage")
+            baseline_sends = len(sends)
+            calls.clear()
+            core.settings.reflection_max_daily_calls = 4
+            await receiver.capture_once(bridge.client, bridge.protocol)
+            await bridge.flush()
+            assert await core.run_once()
+            assert await bridge.pump()
+            from companion.autonomous_selector import foreground_clear
+
+            assert foreground_clear(core), core.store.rows(
+                "SELECT kind,state,last_error_code FROM jobs")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
+                monkeypatch.setattr(life_worker, "ModelClient",
+                                    lambda settings, _: ModelClient(settings, model))
                 task = asyncio.create_task(life_worker.life_worker(core.settings))
                 try:
                     async with asyncio.timeout(12):
@@ -237,45 +260,45 @@ def test_real_api_and_independent_worker_recover_backlog_and_public_exploration(
                             if task.done():
                                 task.result()
                             await asyncio.sleep(0.02)
+                except TimeoutError:
+                    raise AssertionError({"nightly": core.consolidation.status(second),
+                        "reflection": core.store.rows("SELECT * FROM reflection_runs"),
+                        "calls": calls}) from None
                 finally:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
-                assert len(instances) == 2 and all(instance is not core for instance in instances)
-                assert calls.count(REFLECTION_RULES) == 1
-                assert core.store.rows("SELECT * FROM diary_runs WHERE local_date IN (?,?)",
-                                       (first.isoformat(), second.isoformat())) == diaries
-                for row in existing_usage:
-                    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
-                                          (row["request_id"],)) == row
-                assert len(sends) == 1
-                with core.store.transaction():
-                    core.exploration.create("bili", "discover", "synthetic-repaired-discovery")
-                backend = Responses(
-                    response({"code": 0, "data": {"list": [{"bvid": "BV1xx411c7mD",
-                                                            "title": "公开探索标题"}]}}),
-                    response(META),
-                )
-                pool = httpcore.AsyncConnectionPool(
-                    ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
-                    network_backend=backend, max_keepalive_connections=0,
-                )
-                client.headers["Authorization"] = "Bearer synthetic-recovery-reader-token"
-                async with PublicHTTP(pool) as public:
-                    reader = BilibiliReader(public, clock=core.clock, subtitles=False)
-                    assert await tick(client, reader, "bili")
-                    goal = core.store.one("SELECT * FROM goals WHERE topic='公开探索标题'")
-                    assert goal
-                    core.goals.accept(goal["goal_id"])
-                    assert core.exploration.schedule_goal()
-                    assert await tick(client, reader, "bili")
-                    assert not await tick(client, reader, "bili")
-                assert core.goals.get(goal["goal_id"])["state"] == "DONE"
-                assert core.store.rows(
-                    "SELECT result_status FROM observations ORDER BY rowid"
-                ) == [{"result_status": "DISCOVERED"}, {"result_status": "FETCHED"}]
-                assert len(backend.requests) == 2
-                assert backend.server_names == ["api.bilibili.com"] * 2
-                assert all(row["state"] == "SETTLED"
-                           for row in core.store.rows("SELECT state FROM model_usage"))
-
+            assert len(instances) == 2 and all(instance is not core for instance in instances)
+            assert calls.count(REFLECTION_RULES) == 1
+            assert core.store.rows("SELECT * FROM diary_runs WHERE local_date IN (?,?) "
+                "ORDER BY local_date", (first.isoformat(), second.isoformat())) == diaries
+            for row in existing_usage:
+                assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                                      (row["request_id"],)) == row
+            assert len(sends) == baseline_sends + 1
+            with core.store.transaction():
+                core.exploration.create("bili", "discover", "synthetic-repaired-discovery")
+            backend = Responses(
+                response({"code": 0, "data": {"list": [{"bvid": "BV1xx411c7mD",
+                                                        "title": "公开探索标题"}]}}),
+                response(META))
+            pool = httpcore.AsyncConnectionPool(
+                ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+                network_backend=backend, max_keepalive_connections=0)
+            bridge.client.headers["Authorization"] = "Bearer synthetic-recovery-reader-token"
+            async with PublicHTTP(pool) as public:
+                reader = BilibiliReader(public, clock=core.clock, subtitles=False)
+                assert await tick(bridge.client, reader, "bili")
+                goal = core.store.one("SELECT * FROM goals WHERE topic='公开探索标题'")
+                assert goal
+                core.goals.accept(goal["goal_id"])
+                assert core.exploration.schedule_goal()
+                assert await tick(bridge.client, reader, "bili")
+                assert not await tick(bridge.client, reader, "bili")
+            assert core.goals.get(goal["goal_id"])["state"] == "DONE"
+            assert core.store.rows("SELECT result_status FROM observations ORDER BY rowid") == [
+                {"result_status": "DISCOVERED"}, {"result_status": "FETCHED"}]
+            assert len(backend.requests) == 2
+            assert backend.server_names == ["api.bilibili.com"] * 2
+            assert all(row["state"] == "SETTLED"
+                       for row in core.store.rows("SELECT state FROM model_usage"))
     run(scenario())

@@ -8,13 +8,9 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
-from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import create_engine
 
 from companion import budget
 from companion.api import create_app
@@ -30,6 +26,7 @@ from companion.transport import enqueue
 from companion.worker_lock import single_worker
 from tests.conftest import FakeModel, ingest, run
 from tests.test_m1 import remember
+from tests.test_test_fixtures import historical_database
 
 DAY = date(2026, 10, 18)
 
@@ -509,6 +506,7 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     assert row["output_tokens"] == 350
     # Finish the no-I/O Demo probe before entering a separately approved mock-live scope.
     budget.settle(core.store, core.settings, request_id, ModelResponse("demo", 0, 0))
+    assert generate(core)["state"] == "COMMITTED"
     captured = []
 
     def respond(request):
@@ -521,9 +519,10 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
         )
 
     async def execute():
-        from tests.test_paid_model_gate import approved_live
+        from tests.test_owner_authority import activate, prepare
 
-        approved_live(core, tmp_path)
+        policy = prepare(core, tmp_path).model_copy(update={"purposes": ["diary"]})
+        activate(core, policy)
         cfg = core.settings
         reserved = budget.reserve(core.store, cfg, None, "diary", [], core.clock())
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
@@ -535,8 +534,6 @@ def test_d19_diary_budget_and_output_limit_are_independent(core, tmp_path):
     assert (
         captured[0]["max_tokens"] == 350 and captured[0]["response_format"]["type"] == "json_object"
     )
-    core.settings.mode = "demo"
-    assert generate(core)["state"] == "COMMITTED"
 
 
 def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core, tmp_path):
@@ -578,7 +575,7 @@ def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core,
     try:
         for table, added in (
             ("conversations", {"reply_revision": 0}), ("events", {"reply_revision": 0}),
-            ("jobs", {"context_tracked": 0}),
+            ("jobs", {"context_tracked": 0, "authority_json": "{}"}),
         ):
             assert old.store.one(f"SELECT * FROM {table}") == {**original[table], **added}
         assert old.store.schema_capabilities()
@@ -587,23 +584,23 @@ def test_d21_migration_preserves_m1_data_and_refuses_destructive_downgrade(core,
         migration = Config()
         migration.set_main_option("script_location", str(Path("migrations").resolve()))
         migration.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
+        cost_database = historical_database(
+            old.store, tmp_path / "cost-guard.db", "0026_cloud_budget")
+        migration.set_main_option("sqlalchemy.url", "sqlite:///" + cost_database.as_posix())
         costs = old.store.rows("SELECT * FROM cloud_cost_snapshots")
         with pytest.raises(RuntimeError, match="CLOUD_BUDGET_DOWNGRADE"):
             command.downgrade(migration, "0003_memory_index")
-        assert old.store.rows("SELECT * FROM cloud_cost_snapshots") == costs
+        with closing(Store(cost_database)) as guarded:
+            assert guarded.rows("SELECT * FROM cloud_cost_snapshots") == costs
         assert old.diary.get_day(DAY, "10001")
-        # The later cost-custody guard is encountered first. The original diary
-        # migration must independently retain its own destructive-downgrade guard.
-        engine = create_engine("sqlite:///" + path.as_posix())
-        try:
-            with engine.connect() as connection:
-                with Operations.context(MigrationContext.configure(connection)):
-                    with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
-                        ScriptDirectory.from_config(migration).get_revision(
-                            "0004_diary",
-                        ).module.downgrade()
-        finally:
-            engine.dispose()
+        # Exercise the original diary guard on its own historical schema as well.
+        diary_database = historical_database(old.store, tmp_path / "diary-guard.db", "0004_diary")
+        migration.set_main_option("sqlalchemy.url", "sqlite:///" + diary_database.as_posix())
+        with pytest.raises(RuntimeError, match="DIARY_DOWNGRADE"):
+            command.downgrade(migration, "0003_memory_index")
+        with closing(Store(diary_database)) as guarded:
+            assert guarded.rows("SELECT entry_id FROM diary_entries") == old.store.rows(
+                "SELECT entry_id FROM diary_entries")
     finally:
         old.store.close()
 

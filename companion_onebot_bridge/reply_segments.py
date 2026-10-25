@@ -50,6 +50,15 @@ def validate_scope(value, outer):
 
 
 def event_id(item):
+    if "authority" in item:
+        from companion_delivery_protocol.authority import validate_authority_ref
+
+        validate_authority_ref(item["authority"])
+        value = item.get("origin_event_id")
+        if ("window_origin_event_id" in item or not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9_:-]{8,128}", value)):
+            raise ValueError("INVALID_OWNER_ORIGIN")
+        return value
     if "window_origin_event_id" in item:
         value = item["window_origin_event_id"]
         if not isinstance(value, str) or not re.fullmatch(

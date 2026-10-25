@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -17,11 +17,11 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from websockets.exceptions import ConnectionClosed, InvalidHandshake
 
-from . import cumulative
+from . import cumulative, owner_notices
 from .event_normalizer import decode, identifier, normalize, redact
-from .network import checked_http_client, websocket
+from .network import checked_http_client, private_request_matches, websocket
 from .onebot_client import OneBotClient
-from .reference_reader import enrich, restore
+from .reference_reader import captured_media, enrich, restore
 from .rich_input import MAX_RICH_BYTES, input_digest
 from .spool import encode
 from .window import SHA, check_protocol_request, digest, private_json, seal_protocol_content
@@ -75,6 +75,111 @@ CAPTURE_REASONS = frozenset(
 class CaptureDiagnostic:
     phase: str
     reason: str
+
+
+class _OwnerReferences:
+    """Reuse the checked HTTP boundary for each exact captured-reference read."""
+
+    def __init__(self, runtime, client, onebot, event_id):
+        self.runtime, self.client, self.onebot = runtime, client, onebot
+        self.event_id = event_id
+
+    async def read(self, name, body):
+        config = self.runtime.config
+
+        def check(request):
+            if owner_notices.recalled(self.runtime, self.event_id):
+                raise ValueError("OWNER_INPUT_RECALLED")
+            if (request.method != "POST"
+                or request.headers.get("Authorization") != "Bearer " + config.onebot_token
+                or not private_request_matches(request, config.onebot_http_url, "/" + name)
+                or decode(request.content, 1024) != body):
+                raise ValueError("CAPTURE_REFERENCE_REQUEST_CHANGED")
+
+        async def boundary(request):
+            check(request)
+            await self.runtime.check(self.client, purpose="chat")
+            check(request)
+            self.runtime.verify()
+            seal_protocol_content(request, request.content)
+
+        async with checked_http_client(self.onebot.client, boundary) as scoped:
+            return await OneBotClient(config, scoped).action(name, body)
+
+    async def get_msg(self, reference):
+        reference = identifier(reference, signed=True)
+        if reference == "0":
+            raise ValueError("INVALID_REFERENCE")
+        return await self.read("get_msg", {"message_id": int(reference)})
+
+    async def get_forward_msg(self, reference):
+        return await self.read("get_forward_msg", {"id": reference})
+
+
+async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, peer):
+    """Prepare an authenticated v2 input; OwnerRuntime owns signatures and persistence.
+
+    The caller owns the authenticated WebSocket and supplies the original OneBotClient.
+    Each reference read reuses checked HTTP dispatch. Returned media descriptors remain
+    private capture evidence; only their normalized projections enter the Core event.
+    No attachment bytes, upload, journal append, or delivery occurs here.
+    """
+    from .files import original_files
+    from .images import original_images
+    from .voice_media import original_records
+
+    runtime.verify()
+    config = runtime.config
+    if not isinstance(received_at, datetime) or received_at.utcoffset() is None:
+        raise ValueError("OWNER_CAPTURE_TIME_CHANGED")
+    rich = config.rich_input_scope == "references_v1"
+    raw = decode(frame, config.max_frame_bytes, max_depth=20 if rich else 8)
+    event = normalize(frame, config, now=received_at.timestamp())
+    if event is None or owner_notices.recalled(runtime, event["event_id"]):
+        return None
+    occurred_at = datetime.fromisoformat(event["occurred_at"])
+    if (not 0 <= (received_at - occurred_at).total_seconds() <= MAX_AGE_SECONDS
+        or (received_at - runtime.clock()).total_seconds() > MAX_CLOCK_DRIFT_SECONDS
+        or raw["message_id"] in (0, "0")):
+        raise ValueError("OWNER_CAPTURE_TIME_CHANGED")
+    permission = await runtime.check(core_client, purpose="chat")
+    images = original_images(raw["message"]) if rich else []
+    files = original_files(raw["message"]) if rich else []
+    records = (original_records(raw["message"]) if rich
+               and "voice" in permission["capability_policies"] else [])
+    purposes = [kind for kind, items in (("image", images), ("file", files),
+                                        ("voice", records)) if items]
+    for purpose in purposes:
+        await runtime.check(core_client, purpose=purpose)
+    event = normalize(frame, config, now=received_at.timestamp(),
+                      image_scope="owner_image_v1" if images else "none",
+                      file_scope="owner_file_v1" if files else "none")
+    references = []
+    try:
+        await enrich(event, raw["message"],
+                     _OwnerReferences(runtime, core_client, onebot, event["event_id"]),
+                     lambda text: redact(text, config), image_scope=rich, file_scope=rich,
+                     originals=references)
+    except ValueError as error:
+        if error.args == ("OWNER_INPUT_RECALLED",):
+            return None
+        raise
+    images, files = captured_media(event, raw["message"], references)
+    purposes = [kind for kind, items in (("image", images), ("file", files),
+                                        ("voice", records)) if items]
+    # Reference reads yield to external I/O. Recheck every selected purpose before
+    # handing the projection to the original runtime's persistence boundary.
+    for purpose in ("chat", *purposes):
+        await runtime.check(core_client, purpose=purpose)
+    runtime.verify()
+    if owner_notices.recalled(runtime, event["event_id"]):
+        return None
+    original = frame.encode() if isinstance(frame, str) else frame
+    return {"event": event, "frame_sha256": hashlib.sha256(original).hexdigest(),
+            "media": {"images": [asdict(image) for image in images],
+                      "files": [asdict(file) for file in files],
+                      **({"records": [asdict(record) for record in records]} if records else {}),
+                      **({"references": references} if references else {})}}
 
 
 def diagnostic_fields(error):

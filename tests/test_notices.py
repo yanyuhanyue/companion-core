@@ -11,6 +11,7 @@ from companion.model import ModelResponse
 from companion.social import proactive_counts
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from tests.conftest import run
+from tests.notice_owner_fixtures import run_notice
 from tests.test_goals import result_for, setup_goal
 from tests.test_source_definitions import BILI, accepted_text, enable_sharing
 
@@ -42,7 +43,7 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
     event = ready_share(core, wording)
     assert not core.store.rows("SELECT * FROM outbox")
     assert not core.social.flush()
-    assert run(core.run_once())
+    assert run(run_notice(core))
     rows = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
     assert [json.loads(row["content_json"])["text"] for row in rows] == [wording, BILI]
     assert rows[0]["reply_group_id"] == rows[1]["reply_group_id"]
@@ -71,7 +72,7 @@ def test_share_uses_generated_wording_then_a_link_only_bubble(core, wording):
 
 def test_share_skip_keeps_the_real_model_charge_without_an_outbox(core):
     ready_share(core, "[SKIP]")
-    assert run(core.run_once())
+    assert run(run_notice(core))
     assert core.store.one("SELECT state FROM social_candidates")["state"] == "SKIPPED"
     assert not core.store.rows("SELECT * FROM outbox")
     assert len(core.model.calls) == 1
@@ -88,13 +89,13 @@ def test_unreserved_slot_refusal_waits_for_the_same_wording_job(core, monkeypatc
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
 
     monkeypatch.setattr(budget, "reserve", occupied)
-    assert run(core.run_once())
+    assert run(run_notice(core))
     row = core.store.one("SELECT * FROM jobs WHERE kind='activity'")
     assert row["state"] == "RETRY_WAIT" and row["attempts"] == 0
     assert not core.model.calls and not core.store.rows("SELECT * FROM outbox")
     core.clock.advance(61)
     monkeypatch.setattr(budget, "reserve", reserve)
-    assert run(core.run_once())
+    assert run(run_notice(core))
     assert len(core.model.calls) == 1
 
 
@@ -106,7 +107,7 @@ def test_accepted_task_feedback_uses_the_model_and_waits_for_both_acks(core):
     wording = "天文资料读到了，里面提到的现象很有意思。"
     core.model = NoticeModel(wording)
     assert not core.store.rows("SELECT * FROM outbox")
-    assert run(core.run_once())
+    assert run(run_notice(core))
     assert proactive_counts(core.store, core.settings, core.clock())[0] == 0
     for index in range(2):
         item = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
@@ -127,7 +128,7 @@ def test_failed_task_wording_receives_the_real_failure_and_cannot_skip(core):
     core.clock.advance(86401)
     assert not core.goals.claim()
     core.model = NoticeModel("[SKIP]")
-    assert run(core.run_once())
+    assert run(run_notice(core))
     assert not core.store.rows("SELECT * FROM outbox")
     assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
     assert core.goals.get(goal)["state"] == "FAILED"
@@ -138,7 +139,7 @@ def test_failed_task_wording_receives_the_real_failure_and_cannot_skip(core):
 
 def test_first_bubble_uncertainty_prevents_the_link_from_being_sent(core):
     ready_share(core, "刚读到这段资料，想与你分享。")
-    assert run(core.run_once())
+    assert run(run_notice(core))
     item = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
                             core.clock())["items"][0]
     begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
@@ -161,7 +162,7 @@ def test_long_share_prompt_marks_excerpt_and_respects_context_capacity(core):
     core.social.consider(event.event_id)
     core.settings.context_soft_tokens = 6000
     core.model = NoticeModel("其中的这个话题很有意思。")
-    assert core.social.flush() and run(core.run_once())
+    assert core.social.flush() and run(run_notice(core))
     messages, _ = core.model.calls[0]
     payload = json.loads(messages[-1]["content"])
     assert payload["excerpt_truncated"] is True and payload["text"]

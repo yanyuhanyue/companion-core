@@ -7,15 +7,15 @@ from contextlib import closing
 import httpx
 import pytest
 
-from companion import qq_rich
+from companion import owner_authority, qq_rich
 from companion.contracts import Candidate, CoreError
 from companion.model import ModelClient
 from companion.store import Store, encode
 from companion_onebot_bridge.rich_input import input_digest
 from tests.conftest import run
-from tests.test_onebot_capture import bootstrap_frames, capture_approval, source_window
+from tests.support.native_context import source_window
+from tests.test_onebot_capture import bootstrap_frames
 from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
 from tests.test_qq_rich_input import card
 
 
@@ -54,7 +54,7 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
     async def scenario():
         async with (
             source_window(
-                core, tmp_path, source, live=True, approved=True, rich_input_scope="references_v1"
+                core, tmp_path, source, rich_input_scope="references_v1"
             ) as (
                 window,
                 client,
@@ -65,25 +65,25 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
             httpx.AsyncClient(transport=httpx.MockTransport(model_reply)) as model_http,
         ):
             core.model = ModelClient(core.settings, model_http)
-            journal_id = core.settings.live_text_window.budget_journal_id
+            journal_id = owner_authority.current(core.store, core.settings, core.clock).journal_id
             result = await window.capture_once(client, protocol)
             assert result["new_inputs"] == 1 and not core.store.one("SELECT 1 FROM events")
-            captured = window.db.execute("SELECT * FROM window_inputs").fetchone()
+            captured = window.db.execute("SELECT capture_json FROM window_inputs").fetchone()
             queued = window.db.execute("SELECT body FROM inbox").fetchone()
             event = json.loads(queued[0])
-            capture = json.loads(captured["capture_json"])
+            capture = json.loads(captured[0])
             assert capture["input_sha256"] == input_digest(event["payload"])
             assert capture["input_sha256"] == qq_rich.input_digest(event["payload"])
-            assert handshakes == ["Bearer " + window.plan.config.onebot_token]
+            assert handshakes == ["Bearer " + window.config.onebot_token]
             if change == "spool":
                 event["payload"] = mutate(event["payload"])
                 window.db.execute("UPDATE inbox SET body=?", (encode(event),))
-                with pytest.raises(ValueError, match="CAPTURE_INPUT_CHANGED"):
-                    await window.approve_captured(client, capture_approval(window))
+                with pytest.raises(ValueError, match="OWNER_CAPTURE_PROJECTION_CHANGED"):
+                    await window.runtime.flush_one(client)
                 assert not core.store.one("SELECT 1 FROM events")
                 assert calls == sends == []
                 return
-            await window.approve_captured(client, capture_approval(window))
+            await window.runtime.flush_one(client)
             stored = core.store.one("SELECT * FROM events")
             original_body = json.loads(stored["body_json"])
             if change == "job":
@@ -102,7 +102,6 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
             assert "MISSING" in messages[-2]["content"]
             assert "非主人话语" in messages[-2]["content"]
             assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
-            reply = reply_approval(window.plan, core)
             if change == "delivery":
                 core.store.execute(
                     "UPDATE events SET body_json=?", (encode(mutate(original_body)),)
@@ -120,11 +119,16 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
                     assert restored.one("SELECT body_json FROM events")["body_json"] == "{}"
                     assert restored.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
             if change in {"delivery", "erase"}:
-                with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                    await window.send_once(client, protocol, reply)
+                rejected = False
+                try:
+                    await window.send(client, protocol)
+                except (ValueError, httpx.HTTPStatusError):
+                    rejected = True
                 assert sends == []
+                assert rejected or core.store.one("SELECT state FROM outbox")[
+                    "state"] == "CANCELLED"
             else:
-                result = await window.send_once(client, protocol, reply)
+                result = await window.send(client, protocol)
                 assert result["attempt_states"] == {"ACK": 1}
                 assert len(sends) == 1
                 if change == "replay":
@@ -132,7 +136,8 @@ def test_signed_rich_source_survives_existing_pipeline_and_drift_is_fenced(core,
                     with pytest.raises(ValueError, match="SOURCE_EVENT_CONFLICT"):
                         await window.capture_once(client, protocol)
                     assert len(calls) == len(sends) == 1
-            assert core.settings.live_text_window.budget_journal_id == journal_id
+            assert owner_authority.current(core.store, core.settings, core.clock).journal_id == (
+                journal_id)
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
 
     run(scenario())
@@ -153,18 +158,21 @@ def test_unapproved_rich_capture_stops_before_core_or_model(core, tmp_path):
         await ws.wait_closed()
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True) as (
+        async with source_window(core, tmp_path, source, rich_input_scope="references_v1") as (
             window,
             client,
             protocol,
             _,
             sends,
         ):
-            with pytest.raises(ValueError, match="WINDOW_OWNER_TEXT_INPUT_REQUIRED"):
-                await window.capture_once(client, protocol)
+            core.settings.rich_input_scope = "none"
+            await window.capture_once(client, protocol)
+            with pytest.raises(httpx.HTTPStatusError) as rejected:
+                await window.runtime.flush_one(client)
+            assert rejected.value.response.status_code == 403
             assert not core.store.one("SELECT 1 FROM events")
             assert core.model.calls == sends == []
-            assert window.status()["state"] == "STOPPED"
+            assert window.spool.pending_count == 1
 
     run(scenario())
 
@@ -205,8 +213,6 @@ def test_references_only_capture_has_no_owner_evidence_and_remains_in_sent_histo
                 core,
                 tmp_path,
                 source,
-                live=True,
-                approved=True,
                 rich_input_scope="references_v1",
                 scope_options={
                     "history_scope": "approved_window",
@@ -219,7 +225,7 @@ def test_references_only_capture_has_no_owner_evidence_and_remains_in_sent_histo
         ):
             core.model = ModelClient(core.settings, model)
             await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+            await window.runtime.flush_one(client)
             original = core.store.one("SELECT * FROM events")
             body = json.loads(original["body_json"])
             assert body["text"] == "" and body["rich"]["owner_text_positions"] == []
@@ -238,10 +244,10 @@ def test_references_only_capture_has_no_owner_evidence_and_remains_in_sent_histo
                 )
             assert await core.run_once()
             assert len(calls) == 1 and "非主人话语" in calls[0]["messages"][-2]["content"]
-            assert calls[0]["messages"][-1]["content"] == "请看看我分享的内容。"
-            assert await window.send_once(client, protocol, reply_approval(window.plan, core))
+            assert calls[0]["messages"][-1]["content"] == "主人发送了一条非文本消息。"
+            assert await window.send(client, protocol)
             await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+            await window.runtime.flush_one(client)
             assert await core.run_once()
             assert len(calls) == 2
             messages = calls[-1]["messages"]
@@ -276,13 +282,27 @@ def test_references_only_requires_approved_scope_and_does_not_enable_empty_or_sl
 
     async def scenario():
         async with source_window(
-            core, tmp_path, source, live=True, approved=True, rich_input_scope=scope
+            core, tmp_path, source, rich_input_scope=scope
         ) as (window, client, protocol, _, sends):
-            with pytest.raises(ValueError):
+            if message and message[0].get("data", {}).get("text", "").startswith("/"):
                 await window.capture_once(client, protocol)
+                await window.runtime.flush_one(client)
+                stored = core.store.one("SELECT * FROM events")
+                body = json.loads(stored["body_json"])
+                assert body["text"] == "/忘记这一条 mem_fake"
+                assert body["control_command"] is True and body["rich"]["segments"]
+                assert "非主人话语" in qq_rich.context(body)["content"]
+                assert await core.run_once()
+                assert core.model.calls == sends == []
+                for table in ("model_usage", "memories", "exploration_requests"):
+                    assert core.store.rows("SELECT * FROM " + table) == []
+                return
+            with pytest.raises((ValueError, httpx.HTTPStatusError)):
+                await window.capture_once(client, protocol)
+                await window.runtime.flush_one(client)
             assert core.store.rows("SELECT * FROM events") == []
             assert core.model.calls == sends == []
-            assert window.status()["new_inputs"] == 0
+            assert not window.db.execute("SELECT 1 FROM inbox WHERE state='accepted'").fetchone()
 
     run(scenario())
 
@@ -316,8 +336,6 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(
                 core,
                 tmp_path,
                 source,
-                live=True,
-                approved=True,
                 rich_input_scope="references_v1",
                 scope_options={
                     "core_options": {
@@ -332,14 +350,14 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(
         ):
             core.model = ModelClient(core.settings, model)
             await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+            await window.runtime.flush_one(client)
             assert await core.run_once()
-            await window.send_once(client, protocol, reply_approval(window.plan, core))
+            await window.send(client, protocol)
             prior = core.store.one("SELECT * FROM events")
             raw["message_id"] += 1
             raw["message"] = [{"type": "text", "data": {"text": "主人第二个问题"}}]
             await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+            await window.runtime.flush_one(client)
             assert await core.run_once()
             refs = [
                 message for message in calls[-1]["messages"] if "QQ引用资料" in message["content"]
@@ -351,11 +369,16 @@ def test_actual_rich_history_is_counted_and_bound_through_delivery(
                 "UPDATE events SET body_json=? WHERE event_id=?", (encode(body), prior["event_id"])
             )
             if include_history:
-                with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                    await window.send_once(client, protocol, reply_approval(window.plan, core))
+                rejected = False
+                try:
+                    await window.send(client, protocol)
+                except (ValueError, httpx.HTTPStatusError):
+                    rejected = True
                 assert len(sends) == 1
+                assert rejected or core.store.one("SELECT state FROM outbox ORDER BY rowid DESC")[
+                    "state"] == "CANCELLED"
             else:
-                await window.send_once(client, protocol, reply_approval(window.plan, core))
+                await window.send(client, protocol)
                 assert len(sends) == 2
             assert len(calls) == 2
 

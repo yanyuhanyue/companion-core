@@ -1,5 +1,6 @@
 """Bounded hypotheses grounded in source events, never self-authorizing personality changes."""
 
+import json
 import re
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -7,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import Field, model_validator
 
-from companion import budget, delegation, private_life
+from companion import budget, delegation, owner_authority, private_life
 from companion.contracts import CoreError, StrictModel
 from companion.diary import UNSUPPORTED_ACTIVITY, DiaryCitation, source_hash
 from companion.observation import expired_sources
@@ -111,7 +112,8 @@ def erase_reflections(store, event_ids, clear_replies):
 class ReflectionService:
     def __init__(self, store, settings, model, diary_repository, ledger, clock):
         self.store, self.settings, self.model = store, settings, model
-        self.sources, self.clock = diary_repository.sources, clock
+        self.sources = lambda day: diary_repository.sources(day, purpose="reflection")
+        self.clock = clock
         self.ledger = ledger
 
     def validate_day(self, day):
@@ -125,9 +127,16 @@ class ReflectionService:
 
     def claim(self, day):
         self.validate_day(day)
-        if not self.settings.reflection_enabled or not private_life.ready(
-            self.store, self.settings, self.clock
-        ):
+        if owner_authority.required(self.store, self.settings):
+            try:
+                owner_authority.current(self.store, self.settings, self.clock, purpose="reflection")
+                ready = not (private_life.busy(self.store, self.clock())
+                             or budget.chat_pending(self.store, self.clock()))
+            except CoreError:
+                ready = False
+        else:
+            ready = private_life.ready(self.store, self.settings, self.clock)
+        if not self.settings.reflection_enabled or not ready:
             return None
         s, now = self.store, self.clock()
         with s.transaction():
@@ -197,7 +206,15 @@ class ReflectionService:
             }
 
     def validate_lease(self, run):
-        private_life.ensure_active(self.store, self.settings, self.clock)
+        if owner_authority.required(self.store, self.settings):
+            admission = self.store.one(
+                "SELECT a.authority_json FROM model_admissions a JOIN reflection_runs r "
+                "ON r.model_request_id=a.request_id WHERE r.run_id=?", (run["run_id"],),
+            )
+            owner_authority.current(self.store, self.settings, self.clock, purpose="reflection",
+                authority=json.loads(admission["authority_json"]) if admission else None)
+        else:
+            private_life.ensure_active(self.store, self.settings, self.clock)
         current = self.store.one("SELECT * FROM reflection_runs WHERE run_id=?", (run["run_id"],))
         if (
             not current
@@ -315,7 +332,12 @@ class ReflectionService:
                 messages,
                 "reflection",
                 self.clock,
+                source_check=lambda: self.validate_lease(run),
             )
+            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                                   (request_id,))
+            if not usage or usage["state"] != "SETTLED":
+                raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = ReflectionDraft.model_validate_json(response.text)
             if len(draft.suggestions) > self.settings.reflection_daily_max_suggestions:
                 raise CoreError("REFLECTION_TOO_MANY_SUGGESTIONS", 400)

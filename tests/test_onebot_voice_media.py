@@ -36,7 +36,8 @@ from tests.test_onebot_direct import config, raw_event
 NOW = datetime(2026, 10, 24, tzinfo=UTC)
 URL = "https://multimedia.nt.qq.com.cn/download/voice?key=private-signed-token"
 KEY = "11" * 32
-PLAN = "a" * 64
+AUTHORITY = {"version": 2, "grant_id": "grant_" + "a" * 32, "revision": 1,
+             "policy_sha256": "a" * 64, "restore_generation": "voice-native-test"}
 POLICY = "b" * 64
 
 
@@ -111,7 +112,7 @@ def downloaded(data=None):
 
 async def prepare(tmp_path, data=None, *, limits=voice.DEFAULT_LIMITS, check=valid, **kwargs):
     return await voice.prepare_asr(
-        downloaded(data), event(), plan_sha256=PLAN, capture_signing_key=KEY,
+        downloaded(data), event(), authority=AUTHORITY, capture_signing_key=KEY,
         check=check, work_dir=tmp_path / "owned-work", limits=limits, **kwargs,
     )
 
@@ -134,7 +135,7 @@ def bound_source(**changes):
 def test_capture_binding_without_plaintext_produces_same_signed_native_upload(tmp_path):
     source = bound_source()
     actual = run(voice.prepare_asr(
-        downloaded(), source, plan_sha256=PLAN, capture_signing_key=KEY,
+        downloaded(), source, authority=AUTHORITY, capture_signing_key=KEY,
         check=valid, work_dir=tmp_path / "owned-work",
     ))
     expected = run(prepare(tmp_path))
@@ -161,7 +162,7 @@ def test_capture_source_binding_rejects_invalid_digests_identity_or_index(change
 def test_capture_source_cannot_rebind_another_record_before_native_work(tmp_path, changes):
     with pytest.raises(ValueError, match="VOICE_RECORD_SOURCE_REQUIRED"):
         run(voice.prepare_asr(
-            downloaded(), bound_source(**changes), plan_sha256=PLAN, capture_signing_key=KEY,
+            downloaded(), bound_source(**changes), authority=AUTHORITY, capture_signing_key=KEY,
             check=valid, work_dir=tmp_path / "owned-work",
         ))
     assert_clean(tmp_path)
@@ -173,7 +174,7 @@ def test_capture_source_binding_does_not_bypass_live_source_authority(tmp_path):
 
     with pytest.raises(ValueError, match="VOICE_SOURCE_RECALLED"):
         run(voice.prepare_asr(
-            downloaded(), bound_source(), plan_sha256=PLAN, capture_signing_key=KEY,
+            downloaded(), bound_source(), authority=AUTHORITY, capture_signing_key=KEY,
             check=recalled, work_dir=tmp_path / "owned-work",
         ))
     assert_clean(tmp_path)
@@ -432,18 +433,31 @@ def delivery():
             "lease_until": (NOW + timedelta(seconds=60)).isoformat(),
             "delivery_key": "reply:" + event_id + ":v1", "action_type": "qq.private.reply",
             "conversation_platform_session_key": config().origin,
-            "content": {"text": "a verified private reply"}, "reply_revision": 3}
+            "content": {"text": "a verified private reply"}, "reply_revision": 3,
+            "authority": AUTHORITY, "origin_event_id": event_id}
     binding = {
-        "schema_version": 1, "job_id": "voice_" + "3" * 32, "generation": 1,
-        "message_id": message_id, "delivery_key": item["delivery_key"], "event_id": event_id,
-        "window_sha256": PLAN, "source_sha256": "4" * 64,
+        "schema_version": 3,
+        "retirement_token": "random-proof-" + "x" * 32,
+        "job_id": "voice_" + "3" * 32,
+        "generation": 1,
+        "message_id": message_id,
+        "delivery_key": item["delivery_key"],
+        "event_id": event_id,
+        "authority": AUTHORITY,
+        "source_sha256": "4" * 64,
         "identity_sha256": voice.digest([config().owner_qq_id, config().bot_qq_id]),
-        "privacy_epoch": 1, "reply_revision": 3, "node_id": "local_voice",
-        "manifest_sha256": "5" * 64, "node_config_sha256": "6" * 64,
-        "voice_policy_sha256": POLICY, "content_sha256": voice.digest(item["content"]),
+        "privacy_epoch": 1,
+        "reply_revision": 3,
+        "node_id": "local_voice",
+        "manifest_sha256": "5" * 64,
+        "node_config_sha256": "6" * 64,
+        "voice_policy_sha256": POLICY,
+        "content_sha256": voice.digest(item["content"]),
         "reply_sha256": voice.digest(item["content"]["text"]),
-        "result_sha256": voice.digest(audio), "audio_sha256": audio["audio_sha256"],
-        "audio_bytes": len(raw), "expires_at": (NOW + timedelta(seconds=30)).isoformat(),
+        "result_sha256": voice.digest(audio),
+        "audio_sha256": audio["audio_sha256"],
+        "audio_bytes": len(raw),
+        "expires_at": (NOW + timedelta(seconds=30)).isoformat(),
     }
     # Independently authored Core DTO produces the actual outbound serialization.
     bound = VoiceDeliveryBinding.model_validate(binding)
@@ -454,7 +468,7 @@ def delivery():
 
 
 def prepared_delivery(item):
-    return voice.prepare_delivery(item, config(), plan_sha256=PLAN,
+    return voice.prepare_delivery(item, config(), authority=AUTHORITY,
                                   voice_policy_sha256=POLICY, now=NOW)
 
 
@@ -471,7 +485,7 @@ def test_outbound_record_uses_verified_inline_pcm_and_exact_final_delivery_check
     assert prepared.check == {"binding_sha256": item["voice"]["binding_sha256"],
         "job_id": binding["job_id"], "generation": binding["generation"],
         "result_sha256": binding["result_sha256"], "audio_sha256": binding["audio_sha256"],
-        "audio_bytes": binding["audio_bytes"]}
+        "audio_bytes": binding["audio_bytes"], "retirement_token": binding["retirement_token"]}
     assert prepared.body_sha256 == voice.digest({
         "user_id": int(config().owner_qq_id), "message": prepared.message, "auto_escape": True,
     })
@@ -479,14 +493,34 @@ def test_outbound_record_uses_verified_inline_pcm_and_exact_final_delivery_check
     assert prepared.message[0]["data"]["file"].startswith("base64://")
 
 
+def test_historical_voice_binding_is_readable_but_not_a_native_send_envelope():
+    from companion.voice_protocol import LegacyVoiceDeliveryBinding
+
+    item = delivery()
+    item.pop("authority")
+    item.pop("origin_event_id")
+    binding = item["voice"]["binding"]
+    binding.pop("authority")
+    binding.update(schema_version=2, window_sha256="c" * 64)
+    original = LegacyVoiceDeliveryBinding.model_validate(binding)
+    item["voice"]["binding_sha256"] = voice.digest(original.model_dump(mode="json"))
+    prepared = voice.prepare_delivery(item, config(), plan_sha256="c" * 64,
+                                      voice_policy_sha256=POLICY, now=NOW)
+    assert prepared.check["binding_sha256"] == item["voice"]["binding_sha256"]
+    with pytest.raises(ValueError):
+        voice.prepare_delivery(item, config(), authority=AUTHORITY,
+                               voice_policy_sha256=POLICY, now=NOW)
+
+
 @pytest.mark.parametrize("field,value", [
-    ("message_id", "msg_" + "9" * 32), ("window_sha256", "9" * 64),
+    ("message_id", "msg_" + "9" * 32), ("authority", AUTHORITY | {"revision": 2}),
+    ("schema_version", 2), ("window_sha256", "9" * 64),
     ("voice_policy_sha256", "9" * 64), ("identity_sha256", "9" * 64),
     ("reply_revision", 4), ("content_sha256", "9" * 64), ("reply_sha256", "9" * 64),
     ("audio_sha256", "9" * 64), ("audio_bytes", 44), ("generation", True),
     ("expires_at", NOW.isoformat()),
 ])
-def test_audio_binding_rejects_source_window_identity_content_or_result_drift(field, value):
+def test_audio_binding_rejects_source_authority_identity_content_or_result_drift(field, value):
     item = delivery()
     item["voice"]["binding"][field] = value
     item["voice"]["binding_sha256"] = voice.digest(item["voice"]["binding"])

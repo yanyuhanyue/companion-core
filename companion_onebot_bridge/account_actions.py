@@ -1,9 +1,11 @@
-"""Finite QQ account actions bound to a server-frozen plan and an explicit window."""
+"""Finite QQ account actions bound to a server-frozen plan and delivery authority."""
 
 import base64
 import re
 from dataclasses import dataclass
 from datetime import datetime
+
+from companion_delivery_protocol.authority import validate_authority_ref
 
 from . import account_assets
 from .native_actions import canonical, content_hash
@@ -43,6 +45,13 @@ def validate(item, config):
     """Core owns source provenance; this side independently binds every transport argument."""
     try:
         plan = item["content"]
+        if "authority" in item:
+            validate_authority_ref(item["authority"])
+            if "window_sha256" in item:
+                raise ValueError()
+        elif (not isinstance(item.get("window_sha256"), str)
+              or not SHA.fullmatch(item["window_sha256"])):
+            raise ValueError()
         if (not is_account(item) or item.get("action_type") not in ACTIONS
             or any(field in item for field in ("reply_segment", "reply_revision", "window_notice"))
             or item.get("conversation_platform_session_key") != config.origin
@@ -59,9 +68,7 @@ def validate(item, config):
                 "payload_sha256"))
             or plan["payload_sha256"] != content_hash({key: value for key, value in plan.items()
                                                        if key != "payload_sha256"})
-            or item.get("content_sha256") != content_hash(plan)
-            or not isinstance(item.get("window_sha256"), str)
-            or not SHA.fullmatch(item["window_sha256"])):
+            or item.get("content_sha256") != content_hash(plan)):
             raise ValueError()
         if datetime.fromisoformat(plan["expires_at"]).utcoffset() is None:
             raise ValueError()
@@ -161,6 +168,41 @@ def lease_request(window):
             "window_sha256": window.plan.sha256,
             "account_actions_authorization_sha256": window.plan.value["live_text"][
                 "account_actions_authorization_sha256"]}
+
+
+def prepare_owner(runtime, item, authorization_sha256):
+    """Host owns custody/send approval; bind its checked capability to frozen bytes."""
+    plan = validate(item, runtime.config)
+    authority = validate_authority_ref(runtime.authority)
+    if (item.get("authority") != authority
+        or not isinstance(authorization_sha256, str)
+        or not SHA.fullmatch(authorization_sha256)
+        or plan["authorization_sha256"] != authorization_sha256
+        or runtime.clock() >= datetime.fromisoformat(plan["expires_at"])):
+        raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
+    asset = (account_assets.prepare(runtime.config, plan, runtime.clock())
+             if plan["action_type"] == "qq.profile.avatar" else None)
+    return PreparedAccount(plan["action_type"], PATHS[plan["action_type"]],
+        canonical(native_body(plan, asset)), content_hash(plan), plan["payload_sha256"],
+        plan["plan_id"], plan["owner_qq_id"], plan["bot_qq_id"], asset)
+
+
+def send_check_owner(authority, item):
+    authority = validate_authority_ref(authority)
+    if item.get("authority") != authority or "window_sha256" in item:
+        raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
+    return {"authority": authority, "message_id": item["message_id"],
+            "lease_token": item["lease_token"], "content_sha256": content_hash(item["content"]),
+            "payload_sha256": item["content"]["payload_sha256"]}
+
+
+def lease_request_owner(authority, authorization_sha256):
+    authority = validate_authority_ref(authority)
+    if not isinstance(authorization_sha256, str) or not SHA.fullmatch(authorization_sha256):
+        raise ValueError("ACCOUNT_ACTION_SCOPE_REQUIRED")
+    return {"worker_id": "onebot-direct", "limit": 1, "delivery_lane": "qq_account",
+            "authority": authority,
+            "account_actions_authorization_sha256": authorization_sha256}
 
 
 def cancelled_proof(receipt, *, message_id, lease_token, content_sha256, payload_sha256=None):

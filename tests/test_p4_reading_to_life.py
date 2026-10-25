@@ -19,6 +19,7 @@ from companion.core import Core
 from companion.exploration import ReadItem, ReadResult
 from companion.model import ModelResponse
 from companion.observation import ArticleEvidence, ReadingEvidence, ReadingSource, SubtitleSpan
+from companion.social import proactive_counts
 from companion.source_grants import SourceGrantRegistration, SourceGrantSnapshot
 from companion.store import encode
 from companion.transport import begin_send, delivery_result, lease_deliveries
@@ -228,9 +229,13 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             assert run(active.run_once("p4-simulated-chat"))
             assert acknowledge_one(active)["action_type"] == "qq.private.reply"
             assert active.social.flush()
-            assert run(active.run_once("p4-share-wording"))
+            job = active.store.one(
+                "SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+            assert job and run(active.run_once("p4-share-wording", job_id=job["job_id"]))
             assert not active.social.flush()
-            assert not active.schedule_proactive()  # One common daily allowance.
+            # Social wording and native Life delivery use this same daily counter.
+            count, _ = proactive_counts(active.store, cfg, active.clock())
+            assert count == cfg.proactive_daily_limit
             message = active.store.one(
                 "SELECT o.* FROM outbox o JOIN social_candidates c "
                 "ON c.message_id=o.message_id WHERE c.event_id=?", (fetched,),

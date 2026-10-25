@@ -1,10 +1,12 @@
 import asyncio
 import json
+import os
 import sqlite3
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta
 
 import pytest
+from filelock import FileLock
 
 from companion.config import Settings
 from companion.contracts import InboundEvent
@@ -97,30 +99,59 @@ def ingest(core, number=1, text="今天想聊聊茶", **kwargs):
 
 
 @pytest.fixture(scope="session")
-def migrated_database(tmp_path_factory):
-    """Run the real migration chain once; each test receives an independent database."""
-    path = tmp_path_factory.mktemp("schema") / "empty.db"
-    migrate(str(path))
+def migrated_database(tmp_path_factory, worker_id):
+    """One real schema per run across xdist workers; independent test backups below."""
+    base = tmp_path_factory.getbasetemp()
+    shared = base if worker_id == "master" else base.parent
+    path = shared / "empty-schema.db"
+    # pytest-xdist's documented shared-session fixture pattern. Publish only after
+    # migration succeeds, so a killed preparer cannot leave a usable partial DB.
+    with FileLock(str(path) + ".lock", timeout=120):
+        if not path.exists():
+            preparing = shared / "empty-schema.preparing.db"
+            migrate(str(preparing))
+            preparing.replace(path)
     return path
 
 
+@pytest.fixture(scope="session", autouse=True)
+def worker_scratch(tmp_path_factory):
+    """Children inherit their worker's scratch; the caller owns the enclosing round."""
+    path = tmp_path_factory.getbasetemp() / "process-tmp"
+    path.mkdir(exist_ok=True)
+    previous = {key: os.environ.get(key) for key in ("TEMP", "TMP", "TMPDIR")}
+    os.environ.update(dict.fromkeys(previous, str(path)))
+    yield
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 @pytest.fixture
-def core(tmp_path, migrated_database):
-    cfg = Settings(
-        owner_qq_id="10001",
-        bot_qq_id="10002",
-        bridge_token="test-token-" * 4,
-        database=str(tmp_path / "core.db"),
-        erasure_ledger=str(tmp_path / "privacy.jsonl"),
-        input_rate=300000,
-        cached_input_rate=6000,
-        output_rate=1200000,
-        proactive_enabled=False,
-    )
-    # SQLite backup includes committed WAL data and never copies another test's state.
-    with closing(sqlite3.connect(migrated_database)) as source:
-        with closing(sqlite3.connect(cfg.database)) as destination:
-            source.backup(destination)
-    instance = Core(cfg, FakeModel(), Clock())
-    yield instance
-    instance.store.close()
+def core_factory(tmp_path_factory, migrated_database):
+    """Each call owns fresh native state; a property example never reuses another's DB."""
+    @contextmanager
+    def create(directory=None):
+        directory = directory if directory is not None else tmp_path_factory.mktemp("scenario")
+        cfg = Settings(
+            owner_qq_id="10001", bot_qq_id="10002", bridge_token="test-token-" * 4,
+            database=str(directory / "core.db"), erasure_ledger=str(directory / "privacy.jsonl"),
+            input_rate=300000, cached_input_rate=6000, output_rate=1200000,
+            proactive_enabled=False,
+        )
+        # SQLite backup includes committed WAL data without copying another test's state.
+        with closing(sqlite3.connect(migrated_database)) as source:
+            with closing(sqlite3.connect(cfg.database)) as destination:
+                source.backup(destination)
+        with Core(cfg, FakeModel(), Clock()) as instance:
+            yield instance
+    return create
+
+
+@pytest.fixture
+def core(tmp_path, core_factory):
+    # Preserve the existing fixture's exact tmp_path/core.db and privacy.jsonl interface.
+    with core_factory(tmp_path) as instance:
+        yield instance

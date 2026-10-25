@@ -14,7 +14,8 @@ from companion import budget, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponseError, model_payload
 from companion.store import Store
-from tests.conftest import ingest, run
+from tests.conftest import run
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 
@@ -62,8 +63,8 @@ def image_approval(core, tmp_path, **changes):
 
 
 def reserve_image(core, messages=None, *, number=1, **kwargs):
-    ingest(core, number)
-    job = core.store.one("SELECT job_id FROM jobs ORDER BY rowid DESC")["job_id"]
+    purposes = ("chat", "image") if core.settings.paid_model.image_input else ("chat",)
+    job = authorized_job(core, purposes=purposes, number=number)
     request = budget.reserve(
         core.store,
         core.settings,
@@ -103,6 +104,19 @@ async def invoke(core, request, messages, *, scenario="content_vision", handler=
         )
         budget.settle(core.store, core.settings, request, response)
         return response
+
+
+def test_native_image_uses_the_explicit_request_call_limit(core, tmp_path):
+    image_approval(core, tmp_path, per_request_calls=3)
+    job, request = reserve_image(core)
+    run(invoke(core, request, image_messages()))
+    text = [{"role": "user", "content": "synthetic follow-up"}]
+    for _ in range(2):
+        request = budget.reserve(core.store, core.settings, job, "chat", text, core.clock())
+        run(invoke(core, request, text, scenario="chat"))
+    with pytest.raises(CoreError, match="MODEL_REQUEST_BUDGET_EXHAUSTED"):
+        budget.reserve(core.store, core.settings, job, "chat", text, core.clock())
+    assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")["n"] == 3
 
 
 def test_text_snapshot_omits_new_policy_and_keeps_original_shape(core, tmp_path):
@@ -259,20 +273,18 @@ def test_image_approval_is_explicit_and_strict(core, tmp_path, field, value):
 @pytest.mark.parametrize(
     "mutation,code",
     [
-        ("separate_provider", "SEPARATE_PROVIDER_UNSUPPORTED"),
+        ("separate_provider", "CONTRACT_MISMATCH"),
         ("no_job", "CHAT_JOB_REQUIRED"),
         ("other_logical", "CHAT_JOB_REQUIRED"),
-        ("missing_job", "CHAT_JOB_REQUIRED"),
-        ("extra_calls", "TWO_CALL_CONTRACT_REQUIRED"),
+        ("missing_job", "OWNER_AUTHORITY_JOB_BINDING_REQUIRED"),
     ],
 )
 def test_image_approval_never_authorizes_another_provider_or_job(core, tmp_path, mutation, code):
-    image_approval(core, tmp_path, per_request_calls=3 if mutation == "extra_calls" else 2)
-    ingest(core)
-    job = core.store.one("SELECT job_id FROM jobs")["job_id"]
+    image_approval(core, tmp_path)
+    job = authorized_job(core, purposes=("chat", "image"))
     logical = job
     if mutation == "separate_provider":
-        core.settings.content.use_chat_model_for_vision = False
+        core.settings.provider = "unapproved-image-provider"
     elif mutation == "no_job":
         job = logical = None
     elif mutation == "other_logical":
@@ -297,8 +309,8 @@ def test_image_approval_never_authorizes_another_provider_or_job(core, tmp_path,
     [
         ("image", "REQUEST_CHANGED"),
         ("payload", "PAYLOAD_CHANGED"),
-        ("policy", "CONTRACT_CHANGED"),
-        ("provider", "SEPARATE_PROVIDER_UNSUPPORTED"),
+        ("policy", "OWNER_AUTHORITY_CAPABILITY_CHANGED"),
+        ("provider", "CONTRACT_MISMATCH"),
     ],
 )
 def test_final_http_hook_drift_blocks_image_dispatch(core, tmp_path, mutation, code):
@@ -318,14 +330,15 @@ def test_final_http_hook_drift_blocks_image_dispatch(core, tmp_path, mutation, c
             policy = original.image_input.model_copy(update={"estimated_tokens_per_image": 2000})
             core.settings.paid_model = original.model_copy(update={"image_input": policy})
         else:
-            core.settings.content.use_chat_model_for_vision = False
+            core.settings.provider = "unapproved-image-provider"
 
     with pytest.raises(CoreError, match=code):
         run(invoke(core, request, messages, hooks=[change], handler=lambda req: calls.append(req)))
     budget.settle(core.store, core.settings, request)
     assert calls == []
     usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
-    assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
+    assert usage == {"state": "SETTLED", "billed_micro_usd": 0}
+    assert core.store.one("SELECT 1 FROM audit_log WHERE action='model.not_dispatched'")
 
 
 def test_multimodal_stream_cannot_disagree_with_frozen_json(core, tmp_path):
@@ -365,7 +378,7 @@ def test_missing_or_invalid_image_usage_retains_amount_and_blocks_retry(core, tm
         "state": "UNKNOWN",
         "billed_micro_usd": reserved,
     }
-    with pytest.raises(CoreError, match="IMAGE_ALREADY_ATTEMPTED"):
+    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
         budget.reserve(core.store, core.settings, job, "content_vision", messages, core.clock())
     with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
         budget.reserve(
@@ -399,7 +412,7 @@ def test_invalid_provider_text_still_settles_received_image_usage(core, tmp_path
         "input_tokens": 1000,
         "output_tokens": 20,
     }
-    with pytest.raises(CoreError, match="ALREADY_STARTED"):
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED"):
         run(invoke(core, request, messages))
 
 
@@ -456,7 +469,9 @@ def test_final_image_stage_identity_is_not_mutable(core, tmp_path, column, value
         table = "model_admissions" if column == "logical_request_id" else "model_usage"
         core.store.execute(f"UPDATE {table} SET {column}=? WHERE request_id=?", (value, request))
 
-    with pytest.raises(CoreError, match="ADMISSION_LEASE_EXPIRED"):
+    code = ("COMPANION_BACKGROUND_SCOPE_REQUIRED" if column == "job_id"
+            else "ADMISSION_LEASE_EXPIRED")
+    with pytest.raises(CoreError, match=code):
         run(invoke(core, request, messages, hooks=[change], handler=lambda req: calls.append(req)))
     assert calls == []
 

@@ -48,10 +48,16 @@ class OriginalFile:
     filename: str
     size: int | None
     file_hash: str = ""
+    path: tuple[int, ...] = ()
+    origin: dict | None = None
 
     def __post_init__(self):
+        from .rich_input import media_location
+
+        media_location(self.index, self.path, self.origin)
+        object.__setattr__(self, "path", tuple(self.path))
         if (type(self.index) is not int or not 0 <= self.index < 64
-            or type(self.slot) is not int or not 0 <= self.slot <= self.index
+            or type(self.slot) is not int or not 0 <= self.slot < 64
             or not isinstance(self.source_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", self.source_sha256) is None
             or not _opaque(self.file_id, 512)
@@ -63,10 +69,13 @@ class OriginalFile:
             raise ValueError("INVALID_FILE_SEGMENT")
 
     def projection(self):
-        return {"index": self.index, "type": "file", "actor": "UNVERIFIED",
+        value = {"index": self.index, "type": "file", "actor": "UNVERIFIED",
                 "coverage": "UNREAD", "slot": self.slot, "file_id": self.file_id,
                 "filename": self.filename, "size": self.size,
                 "source_sha256": self.source_sha256}
+        if self.path:
+            value.update(path=list(self.path), origin=self.origin)
+        return value
 
 
 @dataclass(frozen=True, repr=False)
@@ -308,3 +317,70 @@ async def fetch_file(original, max_bytes, *, onebot, check, transport=None,
                 await delegate.aclose()
         finally:
             _private_download.reset(quiet)
+
+
+async def upload_original(runtime, client, event_id, original, *, onebot,
+                          resume_claim=None, progress=None, transport=None,
+                          resolver=resolve_public):
+    """Reuse native URL resolution and bounded GET under the original Core file lease."""
+    import base64
+    from datetime import datetime
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from companion_delivery_protocol.authority import file_upload_signing_payload
+
+    from .images import owner_media_request
+    from .pending_media import _download_claim
+
+    prefix = "/internal/v2/content/" + event_id + "/file"
+
+    async def phase(state, receipt=None):
+        if progress is not None:
+            await progress(state, receipt)
+
+    async def post(path, body, headers=None, *, before=None):
+        return await owner_media_request(runtime, client, path, body, headers,
+                                      purpose="file", before=before)
+
+    await runtime.check(client, purpose="file")
+    claim = resume_claim
+    if claim is None:
+        await phase("CLAIMING")
+        claim = await post(prefix + "/claim", {"request_key": f"file:{original.slot}",
+            "source_sha256": original.source_sha256})
+    _download_claim(claim, runtime)
+    await phase("DOWNLOADING", claim)
+
+    async def check():
+        receipt = await post(prefix + "/check", {"lease_token": claim["lease_token"],
+            "source_sha256": original.source_sha256})
+        if (receipt != {"approved": True, "lease_until": claim["lease_until"]}
+            or receipt["approved"] is not True):
+            raise ValueError("FILE_DOWNLOAD_CHECK_REJECTED")
+        if datetime.fromisoformat(claim["lease_until"]) <= runtime.clock():
+            raise ValueError("FILE_DOWNLOAD_LEASE_EXPIRED")
+        runtime.verify()
+
+    downloaded = await fetch_file(original, claim["max_bytes"], onebot=onebot, check=check,
+                                  transport=transport, resolver=resolver)
+    await check()
+    proof = {"authority": runtime.authority, "event_id": event_id, "slot": original.slot,
+             "source_sha256": original.source_sha256, "lease_token": claim["lease_token"],
+             "file_id": original.file_id, "filename": original.filename,
+             "media_sha256": downloaded.media_sha256, "mime": downloaded.mime,
+             "bytes": len(downloaded.body)}
+    proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+        runtime.config.capture_signing_key)).sign(file_upload_signing_payload(proof)).hex()
+    await phase("UPLOADING")
+    result = await post(prefix, downloaded.body, {"Content-Type": downloaded.mime,
+        "X-Content-Key": f"file:{original.slot}", "X-Content-Lease": claim["lease_token"],
+        "X-Content-Proof": base64.urlsafe_b64encode(encode(proof).encode()).decode()}, before=check)
+    if (set(result) != {"item_id", "state", "duplicate"}
+        or result["state"] not in {"QUEUED", "RUNNING", "SUCCEEDED"}
+        or not isinstance(result["item_id"], str)
+        or not re.fullmatch(r"content_[a-f0-9]{32}", result["item_id"])
+        or type(result["duplicate"]) is not bool):
+        raise ValueError("FILE_UPLOAD_RECEIPT_REJECTED")
+    runtime.verify()
+    return result

@@ -21,12 +21,16 @@ def sha(value):
 
 
 def snapshot(settings):
+    from companion.token_measurement import count_contract
+
     approval = settings.paid_model
     value = approval.model_dump(mode="json", exclude={"journal_path"})
     # Existing text-only journals bind the original bytes, not a new null field.
     if approval.image_input is None:
         value.pop("image_input")
     value["estimator"] = "utf8-third-v1"
+    if counting := count_contract(settings):
+        value["token_measurement"] = counting
     value["local_monthly_micro_usd"] = settings.monthly_limit_micro_usd
     value["scenario_daily_micro_usd"] = {
         "memory_extract": settings.memory_daily_micro_usd,
@@ -92,7 +96,7 @@ def contract(settings, now):
     return approval
 
 
-def estimate_input_tokens(approval, messages, scenario):
+def estimate_input_tokens(approval, messages, scenario, *, tools=()):
     """Estimate approved input locally, without claiming a provider-side token bound.
 
     UTF-8 bytes / 3 approximates mixed Chinese/Latin text, with per-message and
@@ -102,6 +106,13 @@ def estimate_input_tokens(approval, messages, scenario):
     """
     try:
         estimate = 32
+        if tools and scenario != "chat":
+            raise CoreError("MODEL_TOOLS_SCOPE_REQUIRED", 503)
+        if scenario == "chat":
+            from companion.agent_messages import estimate_messages
+
+            messages, tool_estimate = estimate_messages(messages, tools)
+            estimate += tool_estimate
         if scenario == "content_video_preview":
             from companion.video_input import preview_text_and_estimate
 
@@ -217,7 +228,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
-    from companion import cumulative, delivery_reconciliation
+    from companion import cumulative, delivery_reconciliation, owner_authority
 
     path = Path(approval.journal_path)
     identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
@@ -240,7 +251,9 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         lines = path.read_text("utf-8").splitlines()
         previous, latest, blocked = "0" * 64, {}, {}
         corrections = {}
+        measurements = {}
         resolutions = {}
+        authorities = []
         heads = set()
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
@@ -259,9 +272,12 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 ):
                     raise ValueError("journal identity")
             else:
+                if row.get("kind") == owner_authority.RECORD_KIND:
+                    owner_authority.fold(authorities, row, digest)
+                    continue
                 if row.get("kind") == delivery_reconciliation.KIND:
                     delivery_reconciliation.validate_journal_record(
-                        store, row, digest, lifecycle, identity["value"],
+                        store, row, digest, lifecycle, identity["value"], authorities,
                     )
                     message_id = row["delivery"]["message_id"]
                     if message_id in resolutions:
@@ -286,6 +302,13 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     corrections[row["idempotency_key"]] = row
                 elif row["kind"] == "blocked":
                     blocked[row["request_id"]] = digest
+                if row["kind"] == "reserve" and "measurement" in row:
+                    proof = row["measurement"]
+                    if (set(proof) != {"version", "sha256"} or proof["version"] != 1
+                        or not re.fullmatch(r"[a-f0-9]{64}", proof["sha256"])
+                        or row["request_id"] in measurements):
+                        raise ValueError("measurement journal evidence")
+                    measurements[row["request_id"]] = proof["sha256"]
                 latest[row["request_id"]] = row
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
@@ -303,6 +326,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         if (managed or stored_lifecycle) and stored_lifecycle != lifecycle:
             raise ValueError("live lifecycle behind journal or DB")
         delivery_reconciliation.validate_projection(store, resolutions, resolution_replay)
+        owner_authority.validate_projection(store, authorities, identity["value"], path)
+        authority_record = record and record.get("kind") == owner_authority.RECORD_KIND
         lifecycle_record = record and record.get("kind") in {
             "window_stop", "window_open", "window_handoff"
         }
@@ -312,15 +337,36 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             )
         )):
             raise ValueError("journal reconciliation")
-        if lifecycle and not allow_settlement and (
+        if authorities and authorities[-1]["state"] != "ACTIVE" and not (
+            allow_settlement or authority_record
+        ):
+            raise ValueError("owner authority stopped")
+        if lifecycle and not authorities and not authority_record and not allow_settlement and (
             lifecycle["state"] == "STOPPED"
             or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"]
         ):
             raise ValueError("live window stopped or replaced")
         admissions = {row["request_id"]: row for row in store.rows(
-            "SELECT a.request_id,a.contract_sha256,a.io_started_at,m.billed_micro_usd,m.state "
+            "SELECT a.*,m.billed_micro_usd,m.state "
             "FROM model_admissions a LEFT JOIN model_usage m USING(request_id)"
         )}
+        for request_id, admission in admissions.items():
+            receipt = json.loads(admission.get("measurement_json", "{}"))
+            if not isinstance(receipt, dict):
+                raise ValueError("invalid measurement receipt")
+            expected = measurements.get(request_id)
+            if (record and record.get("kind") == "reserve"
+                and record.get("request_id") == request_id):
+                proof = record.get("measurement", {})
+                if proof and (set(proof) != {"version", "sha256"} or proof["version"] != 1):
+                    raise ValueError("invalid new measurement version")
+                expected = proof.get("sha256")
+            if receipt:
+                if (expected != sha(receipt) or receipt.get("version") != 1
+                    or receipt.get("payload_sha256") != admission["payload_sha256"]):
+                    raise ValueError("measurement custody mismatch")
+            elif expected is not None:
+                raise ValueError("measurement evidence removed")
         for request_id, row in latest.items():
             if record and request_id == record.get("request_id"):
                 continue
@@ -357,12 +403,16 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     raise ValueError("unrelated independent block")
             row = {**record, "previous": previous}
             row["sha256"] = sha(row)
+            if authority_record:
+                owner_authority.fold(authorities, {k: v for k, v in row.items() if k != "sha256"},
+                                     row["sha256"])
             if record["kind"] == delivery_reconciliation.KIND:
                 delivery_reconciliation.validate_journal_record(
                     store, {k: v for k, v in row.items() if k != "sha256"}, row["sha256"],
-                    lifecycle, identity["value"],
+                    lifecycle, identity["value"], authorities,
                 )
-            cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
+            if not authority_record:
+                cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
             next_lifecycle = _live_record(
                 {k: v for k, v in row.items() if k != "sha256"}, row["sha256"], lifecycle, seen
             )
@@ -375,6 +425,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             previous = row["sha256"]
             if record["kind"] in {"quota_pause", delivery_reconciliation.KIND}:
                 store.retain_budget_stop(identity["value"], previous)
+            if authority_record and record["state"] == "STOPPED":
+                store.retain_budget_stop(identity["value"], previous)
             if record["kind"] == delivery_reconciliation.KIND:
                 resolutions[row["delivery"]["message_id"]] = row
             if lifecycle_record:
@@ -386,6 +438,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                               (cumulative.PROJECTION,
                                encode(cumulative.binding(account, path, previous))))
         return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account,
-                "blocked_request_ids": sorted(blocked), "send_resolutions": resolutions}
+                "blocked_request_ids": sorted(blocked), "send_resolutions": resolutions,
+                "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error

@@ -290,6 +290,42 @@ class SourceAPI:
             return await response_body(response, budget)
 
 
+class DiscoveryHTML(HTMLParser):
+    """Public title/URL discovery moved from the retired embedded Reader."""
+
+    def __init__(self, limit):
+        super().__init__(convert_charrefs=True)
+        self.limit, self.items, self.anchor, self.skip = min(40, limit), {}, None, 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag in {"script", "style"}:
+            self.skip += 1
+        if self.skip or len(self.items) >= self.limit:
+            return
+        if tag == "a":
+            self.anchor = [attrs.get("href", ""), attrs.get("title", "")[:300]]
+        elif tag == "img" and self.anchor and not self.anchor[1]:
+            self.anchor[1] = attrs.get("alt", "")[:300]
+
+    def handle_data(self, text):
+        if self.anchor and not self.skip and not self.anchor[1]:
+            self.anchor[1] = text.strip()[:300]
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.skip = max(0, self.skip - 1)
+        if tag == "a" and self.anchor:
+            href, title = self.anchor
+            self.anchor = None
+            try:
+                url = post_url(urljoin("https://www.xiaoheihe.cn/", href))
+            except (ValueError, ReadFailure):
+                return
+            if title.strip() and len(self.items) < self.limit:
+                self.items.setdefault(url, {"url": url, "title": title.strip(), "text": ""})
+
+
 class HeyboxReader:
     parser_version = "heybox/1"
 
@@ -297,8 +333,10 @@ class HeyboxReader:
         snapshot = getattr(self.source, "grant_snapshot", None)
         return snapshot(required=required) if snapshot else None
 
-    def __init__(self, public, source=None, clock=lambda: datetime.now(UTC).isoformat()):
+    def __init__(self, public, source=None, clock=lambda: datetime.now(UTC).isoformat(),
+                 *, public_discovery=False):
         self.public, self.source, self.clock = public, source, clock
+        self.public_discovery = public_discovery
         self.parser_version = "heybox/2"
 
     async def read(self, item, budget):
@@ -306,7 +344,13 @@ class HeyboxReader:
         if item["operation"] not in {"discover", "read"}:
             raise ReadFailure("READER_OPERATION_INVALID")
         if discover and not self.source:
-            raise ReadFailure("DISCOVERY_SOURCE_REQUIRED")
+            if not self.public_discovery:
+                raise ReadFailure("DISCOVERY_SOURCE_REQUIRED")
+            raw = await self.public.get("https://www.xiaoheihe.cn/", budget, "page")
+            page = DiscoveryHTML(item["max_items"])
+            page.feed(raw.decode("utf-8", errors="strict"))
+            page.close()
+            return list(page.items.values())
         url = "https://www.xiaoheihe.cn/" if discover else post_url(item["url"])
         comments = None
         if self.source:

@@ -8,9 +8,9 @@ import pytest
 from companion.model import RECALL_RULES, ModelClient
 from companion.reply_segments import SegmentedReplyConfig, split_text
 from companion.transport import reply_group
-from companion_onebot_bridge import continuous, reply_segments
+from companion_onebot_bridge import reply_segments
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, source_window
+from tests.support.native_context import source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
@@ -51,7 +51,8 @@ def test_private_segments_send_without_blank_lines_and_keep_raw_evidence(core, t
     assert parts == [first + "\n\n", last]
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="我们接着刚才的话题聊吧。")))
+        await ws.send(json.dumps(raw_event(1, text="我们接着刚才的话题聊吧。",
+                                          time=int(core.clock.now.timestamp()))))
         await ws.wait_closed()
 
     def respond(request):
@@ -62,15 +63,14 @@ def test_private_segments_send_without_blank_lines_and_keep_raw_evidence(core, t
 
     async def scenario():
         options = companion_options(core)
-        options.update(segmented_reply=policy, max_send_attempts=20)
         options["core_options"]["segmented_reply"] = policy
-        options["window_options"].update(max_attempts=20, max_visible_replies=20)
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=options) as (window, client, protocol, _, sends):
+        async with source_window(core, tmp_path, source, scope_options=options) as (
+            window, client, protocol, _, sends,
+        ):
             async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
                 core.model = ModelClient(core.settings, model)
                 await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                assert await window.runtime.flush_one(client)
                 assert await core.run_once()
                 rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
                 assert len(rows) == 2 and all(r["segment_count"] == 2 for r in rows)
@@ -83,15 +83,17 @@ def test_private_segments_send_without_blank_lines_and_keep_raw_evidence(core, t
                             request._content = json.dumps(body).encode()
                             request.stream = httpx.ByteStream(request.content)
                     protocol.event_hooks["request"].append(restore_raw_whitespace)
-                await continuous.pump_private(window, client, protocol)
+                await window.send(client, protocol)
                 if tamper:
                     assert sends == []
-                    assert window.status()["attempt_states"] == {"UNKNOWN": 1}
+                    assert dict(window.db.execute(
+                        "SELECT state,count(*) FROM window_attempts GROUP BY 1")) == {"UNKNOWN": 1}
                 else:
                     core.clock.advance(1)
-                    await continuous.pump_private(window, client, protocol)
+                    await window.send(client, protocol)
                     assert [sent["message"][0]["data"]["text"] for sent in sends] == [first, last]
-                    assert window.status()["attempt_states"] == {"ACK": 2}
+                    assert dict(window.db.execute(
+                        "SELECT state,count(*) FROM window_attempts GROUP BY 1")) == {"ACK": 2}
                     group = reply_group(core.store, rows[0]["message_id"], require_sent=True)
                     assert group["text"] == reply
     run(scenario())

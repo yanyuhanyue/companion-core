@@ -1,26 +1,36 @@
-"""A verified owner frame outranks an autonomous share before its actual transport call."""
+"""A verified owner frame outranks an admitted Life draft before transport dispatch."""
 
-import asyncio
 import json
+from dataclasses import replace
+from datetime import timedelta
 
-import httpx
-
+from companion import owner_authority
 from companion.core import Core
-from companion.model import EXTRACT_RULES, RECALL_RULES, ModelClient
-from companion_onebot_bridge import capture, continuous
+from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
+from companion.model import EXTRACT_RULES, RECALL_RULES
+from companion.owner_authority_protocol import AuthorityStop
+from companion_onebot_bridge import owner_handoff
+from companion_onebot_bridge.onebot_client import OneBotClient
+from companion_onebot_bridge.owner_runtime import OwnerRuntime
+from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.native_continuous_support import host
+from tests.support.native_context import Capture
 from tests.test_input_interrupt_bridge import model_response
-from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
+from tests.test_owner_authority import activate
 from tests.test_private_companion import companion_options
 
 
 def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(core, tmp_path):
-    cancel_requests = []
+    cancel_requests, sources = [], []
+    number = 0
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="我喜欢龙井茶")))
+        nonlocal number
+        number += 1
+        await ws.send(json.dumps(raw_event(number, time=int(core.clock.now.timestamp()),
+            text="我喜欢龙井茶" if number == 1 else "等等，先聊我的事情")))
         await ws.wait_closed()
 
     def answer(request):
@@ -34,54 +44,87 @@ def test_queued_owner_input_cancels_proactive_before_dispatch_without_unknown(co
             }]}, ensure_ascii=False)
         elif messages[0]["content"] == RECALL_RULES:
             text = '{"relevant":["m0"]}'
+        elif sources:
+            text = json.dumps({"action": "SHARE", "destination": "PRIVATE_MESSAGE_DRAFT",
+                "source_event_ids": sources, "reason": "聊聊已确认的饮茶偏好",
+                "text": "我们聊聊龙井茶。"}, ensure_ascii=False)
         else:
             text = "我们聊聊龙井茶。"
         return model_response(text)
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=companion_options(core)) as (
-            window, client, protocol, _, sends,
-        ), httpx.AsyncClient(transport=httpx.MockTransport(answer)) as model_http:
-            core.model = ModelClient(core.settings, model_http)
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+        async with host(core, tmp_path, source, model_reply=answer,
+            purposes=("chat", "history", "memory", "proactive"),
+            core_options=companion_options(core)["core_options"],
+            paid_options={"per_request_calls": 3}) as (window, _, sends, _):
+            await window.capture()
+            await window.flush()
             assert await core.run_once()
-            await window.send_once(client, protocol, reply_approval(window.plan, core))
+            assert await window.pump()
             assert len(sends) == 1 and await core.extract_once()
+            event = core.store.one(
+                "SELECT event_id,conversation_id FROM events WHERE actor_id='owner'")
+            sources.append(event["event_id"])
+            scope = LifeShadowApproval(scope="owner_private_life_shadow_v1",
+                authorization_sha256="c" * 64, conversation_id=event["conversation_id"],
+                source_event_ids=sources, purposes=["PRIVATE_MESSAGE_DRAFT"], max_items=1,
+                expires_at=core.clock.now + timedelta(days=2),
+                automatic_actions=["qq.private.proactive"])
+            original = owner_authority.current(core.store, core.settings, core.clock)
+            window.runtime.stop()
+            owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                authority=original.authority.as_dict(), operation_id="life-input-priority-renew"))
+            window.spool.close()
+            window.spool = Spool(window.config, reconciliation_only=True)
+            core.clock.advance(1)
+            window.runtime = OwnerRuntime(window.spool, clock=lambda: core.clock.now)
+            assert (await owner_handoff.prepare(window.runtime, window.client))["state"] == (
+                "HANDOFF_PREPARED")
+            core.settings.life_loop = LifeLoopConfig(mode="SHADOW", follow_up_delay_seconds=3600)
+            policy = original.policy.model_copy(update={
+                "purposes": [*original.policy.purposes, "life"], "life_shadow": scope})
+            successor = activate(core, policy, revision=original.authority.revision + 1,
+                                 operation="life-input-priority-grant")[0]["authority"]
+            assert (await owner_handoff.handoff(window.runtime, window.client, successor))[
+                "state"] == "ACTIVE"
+            window.config = replace(window.config, owner_authority=successor)
+            window.restart()
+            window.onebot = OneBotClient(window.config, window.protocol)
             with Core(core.settings, core.model, core.clock) as restarted:
                 restarted.clock.advance(3601)
-                assert restarted.schedule_proactive() and await restarted.run_once()
+                job_id = restarted.life_topics.schedule()
+                assert job_id
+                assert await restarted.run_once("life-input-priority", job_id=job_id)
+                assert restarted.life_topics.consume_due(diary=restarted.diary)
             assert core.store.one(
                 "SELECT state FROM outbox WHERE action_type='qq.private.proactive'",
             )["state"] == "PENDING"
-            receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
+            usage = core.store.rows("SELECT * FROM model_usage")
 
             async def before(request):
                 if request.url.path == "/send_private_msg":
-                    raw = raw_event(2, text="等等，先聊我的事情")
-                    raw["time"] = int(core.clock.now.timestamp())
-                    frame = json.dumps(raw)
-                    _, event = capture.input_event(window, frame, core.clock.now)
-                    receiver.put(frame, core.clock.now, ("127.0.0.1", 12345), event["event_id"])
+                    captured = Capture(core, window.spool, window.runtime)
+                    assert (await captured.capture_once(window.client, window.protocol))[
+                        "new_inputs"] == 1
 
             async def cancellation(request):
                 if request.url.path.endswith("/cancel-before-send"):
                     cancel_requests.append(json.loads(request.content))
 
-            protocol.event_hooks["request"].append(before)
-            client.event_hooks["request"].append(cancellation)
-            await continuous.pump_private(window, client, protocol)
-            assert len(sends) == 1 and window.status()["state"] == "OPEN"
-            assert window.status()["attempt_states"] == {"ACK": 1, "NOT_SENT": 1}
+            window.protocol.event_hooks["request"].append(before)
+            window.client.event_hooks["request"].append(cancellation)
+            assert await window.pump()
+            assert len(sends) == 1 and window.runtime.row()["state"] == "ACTIVE"
+            assert window.attempts() == {"ACK": 1, "NOT_SENT": 1}
             assert core.store.one(
                 "SELECT state FROM outbox WHERE action_type='qq.private.proactive'",
             )["state"] == "CANCELLED"
             assert core.store.one("SELECT reply_revision FROM conversations")["reply_revision"] == 1
             assert len(cancel_requests) == 1
             assert cancel_requests[0]["cause"] == "OWNER_INPUT_PENDING"
-            assert cancel_requests[0]["pending_event_id"] == receiver.first().event_id
+            pending = window.db.execute("SELECT key FROM inbox WHERE state='pending'").fetchone()[0]
+            assert cancel_requests[0]["pending_event_id"] == pending
             assert "reply_revision" not in cancel_requests[0]
-            window.verify(active=False)
-
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            window.runtime.verify(active=False)
     run(scenario())

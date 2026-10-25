@@ -13,8 +13,8 @@ QQ / NapCat → AstrBot bridge ── HTTP v1 ──→ API
                                    \          |          /
                                         SQLite Store
 
-独立 Worker → Core → 可替换的 ModelClient → 模型 HTTP API
-独立 diary-worker → DiaryService / DiaryRepository → SQLite / 同一 ModelClient
+聊天 Worker → Core → 可替换的 ModelClient → 模型 HTTP API
+Life Worker → 有界自主选择 → 原生 Life / Diary / Social / Memory 队列与服务
 ```
 
 - 插件不导入核心代码、不访问核心数据库、不调用 LLM。它维护仅用于可靠投递的收件箱，成功接收后删除正文。

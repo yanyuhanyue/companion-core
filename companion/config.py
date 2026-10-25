@@ -19,16 +19,21 @@ from pydantic import (
 
 from companion.bili_video_config import BiliVideoConfig
 from companion.cloud_budget import CloudBudgetConfig
+from companion.conversation_policy import ConversationPolicyConfig
 from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
+from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
 from companion.operator_config import ConsoleConfig
+from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.poke_protocol import PokePolicy
+from companion.rem_protocol import RemConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.sources import ObservationSource
+from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
 from companion.video_input import VideoInputPolicy
 from companion.voice_config import VoiceConfig
@@ -195,6 +200,9 @@ class LiveTextWindowApproval(BaseModel):
     companion_approval_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$", exclude_if=lambda value: value is None,
     )
+    life_shadow: LifeShadowApproval | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     window_id: str = Field(pattern=r"^win_[a-f0-9]{32}$")
     starts_at: datetime
@@ -266,6 +274,12 @@ class LiveTextWindowApproval(BaseModel):
     @model_validator(mode="after")
     def valid_interval(self):
         companion = self.companion_scope == "owner_private_v1"
+        if self.life_shadow is not None and not companion:
+            raise ValueError("Life SHADOW requires private companion approval")
+        if self.life_shadow is not None and not (
+            self.starts_at < self.life_shadow.expires_at <= self.ends_at
+        ):
+            raise ValueError("Life SHADOW expiry must stay inside the private window")
         if companion:
             if (not self.automatic_reply or not self.companion_approval_sha256
                 or self.memory_scope != "owner_private" or self.history_scope != "owner_private"
@@ -365,6 +379,8 @@ class LiveTextWindowApproval(BaseModel):
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
+    rem: RemConfig = Field(default_factory=RemConfig)
     _operator_config_version: int = PrivateAttr(default=0)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)
@@ -378,6 +394,12 @@ class Settings(BaseModel):
     model_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-flash"
     provider: str = "deepseek"
+    conversation_policy: ConversationPolicyConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    token_measurement: TokenMeasurementConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     model_key: SecretStr = SecretStr("")
     video_model_key: SecretStr = Field(default=SecretStr(""), exclude_if=lambda value: not value)
     timeout_seconds: int = Field(default=45, ge=5, le=180)
@@ -397,6 +419,7 @@ class Settings(BaseModel):
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
     memory_enabled: bool = False
+    evaluation_enabled: bool = False
     diary_enabled: bool = False
     diary_generate_hour: int = Field(default=2, ge=0, le=23)
     diary_min_source_events: int = Field(default=3, ge=1, le=40)
@@ -443,6 +466,10 @@ class Settings(BaseModel):
     goals_max_active: int = Field(default=10, ge=1, le=50)
     goal_max_attempts: int = Field(default=3, ge=1, le=3)
     wake_enabled: bool = False
+    life_loop: LifeLoopConfig = Field(
+        default_factory=LifeLoopConfig,
+        exclude_if=lambda value: value == LifeLoopConfig(),
+    )
     wake_min_interval_minutes: int = Field(default=180, ge=1, le=1440)
     wake_max_daily_runs: int = Field(default=3, ge=0, le=20)
     exploration_enabled: bool = False
@@ -558,6 +585,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "rem":
+            return self.rem.max_output_tokens
         if scenario == "social_autonomy":
             return self.social_autonomy.max_output_tokens
         if scenario == "meme_caption":

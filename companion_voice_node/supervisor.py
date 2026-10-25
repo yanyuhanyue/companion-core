@@ -242,6 +242,7 @@ class ProcessSupervisor:
         self.process = None
         self._job = None
         self.identity = None
+        self.on_started = None
 
     async def start(self, startup_seconds: float):
         self.temporary.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -270,6 +271,8 @@ class ProcessSupervisor:
             self.identity = process_identity(self.process.pid)
             if self.identity is None:
                 raise VoiceProtocolError("VOICE_PROCESS_IDENTITY_UNAVAILABLE")
+            if self.on_started is not None:
+                self.on_started(self.process.pid, self.identity)
             message = await asyncio.wait_for(self._read(), startup_seconds)
             if message != {"status": "READY"}:
                 raise VoiceProtocolError("VOICE_PROCESS_START_FAILED")

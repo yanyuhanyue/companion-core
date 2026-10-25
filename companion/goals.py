@@ -3,12 +3,24 @@
 import json
 from contextlib import nullcontext
 from datetime import UTC
-from typing import Literal
-from urllib.parse import urlsplit
 
-from pydantic import AwareDatetime, Field, model_validator
-
-from companion.contracts import CoreError, StrictModel
+from companion import goal_plan
+from companion.contracts import CoreError
+from companion.goal_protocol import (
+    CommitmentRequest as CommitmentRequest,
+)
+from companion.goal_protocol import (
+    GoalContinuationDecision as GoalContinuationDecision,
+)
+from companion.goal_protocol import (
+    GoalDecision as GoalDecision,
+)
+from companion.goal_protocol import (
+    GoalProposal as GoalProposal,
+)
+from companion.goal_protocol import (
+    GoalScope,
+)
 from companion.observation import expired_sources
 from companion.privacy import epoch, redact
 from companion.store import after, encode, uid
@@ -24,25 +36,21 @@ def withdraw_reflection_goals(store, suggestion_id, now):
         "AND state NOT IN ('DONE','FAILED','CANCELLED')", (suggestion_id,)
     ):
         goal_id = goal["goal_id"]
-        step = store.one("SELECT state FROM goal_steps WHERE goal_id=?", (goal_id,))
-        reads = store.rows(
-            "SELECT started_at FROM exploration_requests "
-            "WHERE json_extract(goal_step_json,'$.goal_id')=?", (goal_id,)
-        )
-        uncertain = step and (
-            step["state"] == "EXECUTION_UNCERTAIN"
-            or (step["state"] == "RUNNING" and (not reads or any(r["started_at"] for r in reads)))
-        )
         store.execute(
             "UPDATE goals SET state='CANCELLED',last_error_code='REFLECTION_WITHDRAWN',"
             "version=version+1,updated_at=? WHERE goal_id=?", (now, goal_id)
         )
-        store.execute(
-            "UPDATE goal_steps SET state=?,lease_token=NULL,"
-            "last_error_code='REFLECTION_WITHDRAWN',updated_at=? WHERE goal_id=? "
-            "AND state NOT IN ('DONE','FAILED')",
-            ("EXECUTION_UNCERTAIN" if uncertain else "CANCELLED", now, goal_id),
-        )
+        for step in store.rows("SELECT * FROM goal_steps WHERE goal_id=? "
+                               "AND state NOT IN ('DONE','FAILED')", (goal_id,)):
+            uncertain = step["state"] == "EXECUTION_UNCERTAIN" or store.one(
+                "SELECT 1 FROM exploration_requests WHERE "
+                "json_extract(goal_step_json,'$.step_id')=? AND "
+                "(state='UNKNOWN' OR (state='RUNNING' AND started_at IS NOT NULL))",
+                (step["step_id"],))
+            store.execute("UPDATE goal_steps SET state=?,lease_token=NULL,"
+                          "last_error_code='REFLECTION_WITHDRAWN',updated_at=? WHERE step_id=?",
+                          ("EXECUTION_UNCERTAIN" if uncertain else "CANCELLED",
+                           now, step["step_id"]))
         store.execute(
             "UPDATE exploration_requests SET state=CASE WHEN state='RUNNING' THEN 'UNKNOWN' "
             "ELSE 'CANCELLED' END,lease_token=NULL,last_error_code='REFLECTION_WITHDRAWN',"
@@ -50,38 +58,6 @@ def withdraw_reflection_goals(store, suggestion_id, now):
             "AND json_extract(goal_step_json,'$.goal_id')=?", (now, goal_id)
         )
         store.audit("goal.reflection_withdrawn", goal_id, suggestion_id, now)
-
-
-class GoalScope(StrictModel):
-    operation: Literal["read_content", "investigate"] = "investigate"
-    url: str = Field(default="", max_length=2048)
-
-    @model_validator(mode="after")
-    def validate_scope(self):
-        if self.operation == "read_content":
-            url = urlsplit(self.url)
-            if url.scheme != "https" or not url.hostname or url.username or url.fragment:
-                raise ValueError("read_content requires an HTTPS URL without credentials")
-        elif self.url:
-            raise ValueError("investigate has no fixed URL")
-        return self
-
-
-class GoalProposal(StrictModel):
-    topic: str = Field(min_length=2, max_length=300)
-    source_event_ids: list[str] = Field(min_length=1, max_length=256)
-    scope: GoalScope = Field(default_factory=GoalScope)
-    priority: int = Field(default=1, ge=0, le=3)
-
-
-class CommitmentRequest(StrictModel):
-    proposal: GoalProposal
-    accepted_event_id: str = Field(min_length=1, max_length=128)
-    deadline: AwareDatetime
-
-
-class GoalDecision(StrictModel):
-    decision: Literal["ACCEPT", "CANCEL"]
 
 
 def acknowledge_commitment_delivery(store, message_id, state, now):
@@ -107,6 +83,9 @@ def erase_goals(store, event_ids):
             row["goal_id"]
             for row in store.rows("SELECT goal_id FROM goal_evidence WHERE event_id=?", (event_id,))
         )
+        goals.update(row["goal_id"] for row in store.rows(
+            "SELECT s.goal_id FROM goal_step_evidence e JOIN goal_steps s USING(step_id) "
+            "WHERE e.event_id=?", (event_id,)))
         goals.update(
             row["goal_id"]
             for row in store.rows(
@@ -125,7 +104,9 @@ def erase_goals(store, event_ids):
             (goal_id,),
         )
         store.execute(
-            "UPDATE goal_steps SET state='CANCELLED',lease_token=NULL,outcome_event_id=NULL,"
+            "UPDATE goal_steps SET state=CASE WHEN state='EXECUTION_UNCERTAIN' "
+            "THEN state ELSE 'CANCELLED' END,lease_token=NULL,outcome_event_id=NULL,"
+            "scope_json='{}',"
             "last_error_code='PRIVACY_CHANGED' WHERE goal_id=?",
             (goal_id,),
         )
@@ -135,6 +116,8 @@ def erase_goals(store, event_ids):
             (goal_id,),
         )
         store.execute("DELETE FROM goal_evidence WHERE goal_id=?", (goal_id,))
+        store.execute("DELETE FROM goal_step_evidence WHERE step_id IN "
+                      "(SELECT step_id FROM goal_steps WHERE goal_id=?)", (goal_id,))
         store.execute(
             "UPDATE wake_decisions SET goal_id=NULL,budget_snapshot='{}' WHERE goal_id=?",
             (goal_id,),
@@ -152,6 +135,22 @@ class GoalEngine:
                 "SELECT event_id FROM goal_evidence WHERE goal_id=? ORDER BY event_id", (goal_id,)
             )
         ]
+
+    def step_source_ids(self, step_id):
+        ids = [row["event_id"] for row in self.store.rows(
+            "SELECT event_id FROM goal_step_evidence WHERE step_id=? ORDER BY event_id",
+            (step_id,))]
+        step = self.store.one("SELECT goal_id FROM goal_steps WHERE step_id=?", (step_id,))
+        if (not step or not 1 <= len(ids) <= 256
+            or not set(self.source_ids(step["goal_id"])) <= set(ids)):
+            raise CoreError("GOAL_SOURCE_UNAVAILABLE", 409)
+        return ids
+
+    def plan(self, goal_id):
+        return goal_plan.plan(self, goal_id)
+
+    def continue_plan(self, goal_id, decision, *, autonomous=False):
+        return goal_plan.continue_plan(self, goal_id, decision, autonomous=autonomous)
 
     def validate_sources(self, event_ids):
         if expired_sources(
@@ -191,14 +190,23 @@ class GoalEngine:
             raise CoreError("GOAL_REFLECTION_UNAVAILABLE", 409)
         return suggestion
 
+    def validate_authority(self, goal):
+        from companion import owner_authority
+
+        if owner_authority.required(self.store, self.settings):
+            owner_authority.current(self.store, self.settings, self.clock, purpose="goals",
+                                    authority=json.loads(goal["authority_json"]))
+
     def propose(self, proposal, kind="self", *, reflection_suggestion_id=None):
         if not self.settings.goals_enabled:
             raise CoreError("GOALS_DISABLED", 403)
         if kind not in {"self", "commitment"}:
             raise CoreError("INVALID_GOAL_KIND", 400)
+        if kind == "commitment" and proposal.scope.operation == "read_plan":
+            raise CoreError("COMMITMENT_SINGLE_TARGET_REQUIRED", 403)
         if (
             redact(proposal.topic, self.settings) != proposal.topic
-            or redact(proposal.scope.url, self.settings) != proposal.scope.url
+            or any(redact(url, self.settings) != url for url in proposal.scope.targets())
         ):
             raise CoreError("GOAL_CONTAINS_CREDENTIALS", 400)
         s, now = self.store, self.clock()
@@ -225,6 +233,12 @@ class GoalEngine:
             previous = s.one("SELECT * FROM goals WHERE proposal_key=?", (key,))
             if previous:
                 return previous["goal_id"]
+            from companion import owner_authority
+
+            authority = {}
+            if owner_authority.required(s, self.settings):
+                authority = owner_authority.current(s, self.settings, self.clock,
+                                                     purpose="goals").authority.as_dict()
             active = s.one(
                 "SELECT COUNT(*) AS n FROM goals WHERE state NOT IN ('DONE','FAILED','CANCELLED')"
             )["n"]
@@ -244,6 +258,7 @@ class GoalEngine:
                 created_at=now,
                 updated_at=now,
                 reflection_suggestion_id=reflection_suggestion_id,
+                authority_json=encode(authority),
             )
             for event_id in sorted(set(proposal.source_event_ids)):
                 s.insert("goal_evidence", goal_id=goal_id, event_id=event_id)
@@ -256,12 +271,19 @@ class GoalEngine:
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
             goal = self.get(goal_id)
+            self.validate_authority(goal)
             if autonomous and goal["kind"] != "self":
                 raise CoreError("OWNER_REQUIRED", 403)
             if goal["state"] in TERMINAL:
                 return goal
             self.validate_reflection(goal["reflection_suggestion_id"])
             self.validate_sources(self.source_ids(goal_id))
+            if goal_plan.unknown(self, goal_id):
+                raise CoreError("GOAL_EXECUTION_UNCERTAIN", 409)
+            existing = s.rows("SELECT * FROM goal_steps WHERE goal_id=? ORDER BY position",
+                              (goal_id,))
+            if existing and json.loads(goal["scope_json"]).get("operation") == "read_plan":
+                return goal  # Continuation requires its original versioned decision, never ACCEPT.
             if goal["state"] not in {
                 "CANDIDATE",
                 "ACCEPTED",
@@ -283,18 +305,19 @@ class GoalEngine:
                 (state, now, goal_id),
             )
             if state in {"QUEUED", "WAITING_RESOURCE"}:
-                step = s.one("SELECT * FROM goal_steps WHERE goal_id=?", (goal_id,))
-                if not step:
-                    s.insert(
-                        "goal_steps",
-                        step_id=uid("step"),
-                        goal_id=goal_id,
-                        state=state,
-                        max_attempts=self.settings.goal_max_attempts,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                elif step["state"] in {"WAITING_RESOURCE", "RETRY_WAIT"}:
+                if not existing:
+                    evidence = goal_plan.closure(self, self.source_ids(goal_id))
+                    for position, url in enumerate(scope.targets(), 1):
+                        step_id = uid("step")
+                        s.insert("goal_steps", step_id=step_id, goal_id=goal_id,
+                            position=position, scope_json=encode(
+                                GoalScope(operation="read_content", url=url).model_dump()),
+                            state=state if position == 1 else "WAITING_DECISION",
+                            max_attempts=self.settings.goal_max_attempts,
+                            created_at=now, updated_at=now)
+                        for source in evidence:
+                            s.insert("goal_step_evidence", step_id=step_id, event_id=source)
+                elif existing[0]["state"] in {"WAITING_RESOURCE", "RETRY_WAIT"}:
                     s.execute(
                         "UPDATE goal_steps SET state='QUEUED',updated_at=? WHERE goal_id=?",
                         (now, goal_id),
@@ -361,10 +384,12 @@ class GoalEngine:
                 "WHERE ge.goal_id=? ORDER BY e.occurred_at,e.event_id",
                 (goal["goal_id"],),
             )
-            goal["execution"] = self.store.one(
-                "SELECT state,attempts,last_error_code,outcome_event_id,updated_at "
-                "FROM goal_steps WHERE goal_id=?", (goal["goal_id"],)
+            goal["steps"] = self.store.rows(
+                "SELECT step_id,position,state,attempts,last_error_code,"
+                "outcome_event_id,updated_at "
+                "FROM goal_steps WHERE goal_id=? ORDER BY position", (goal["goal_id"],)
             )
+            goal["execution"] = goal["steps"][0] if len(goal["steps"]) == 1 else None
             goal["result"] = self.store.one(
                 "SELECT e.event_id,e.source,e.occurred_at,o.result_status,o.source_sha256 "
                 "FROM observations o JOIN events e USING(event_id) WHERE e.event_id=? "
@@ -383,7 +408,8 @@ class GoalEngine:
         with nullcontext() if self.store.db.in_transaction else self.store.transaction():
             rows = self.store.rows(
                 "SELECT event_id FROM goal_evidence UNION SELECT outcome_event_id AS event_id "
-                "FROM goal_steps WHERE outcome_event_id IS NOT NULL"
+                "FROM goal_steps WHERE outcome_event_id IS NOT NULL "
+                "UNION SELECT event_id FROM goal_step_evidence"
             )
             expired = expired_sources(
                 self.store, [row["event_id"] for row in rows],
@@ -406,6 +432,10 @@ class GoalEngine:
                 from companion.transport import cancel_proactive_work
 
                 cancel_proactive_work(self.store, self.clock())
+                for step in self.store.rows("SELECT s.* FROM goal_steps s JOIN goals g "
+                    "USING(goal_id) WHERE g.kind='self' AND s.state='RUNNING'"):
+                    self.fail(step, "AUTONOMY_PAUSED", resource=True,
+                              execution_uncertain=goal_plan.dispatched(self, step["step_id"]))
                 self.store.execute(
                     "UPDATE goal_steps SET state='WAITING_RESOURCE',lease_token=NULL,"
                     "last_error_code='AUTONOMY_PAUSED' WHERE goal_id IN (SELECT goal_id FROM "
@@ -419,7 +449,7 @@ class GoalEngine:
         return {"paused": paused}
 
     def cancel(self, goal_id):
-        with self.store.transaction():
+        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
             goal = self.get(goal_id)
             if goal["state"] in TERMINAL:
                 return goal
@@ -427,14 +457,19 @@ class GoalEngine:
                 "UPDATE goals SET state='CANCELLED',version=version+1,updated_at=? WHERE goal_id=?",
                 (self.clock(), goal_id),
             )
-            self.store.execute(
-                "UPDATE goal_steps SET state='CANCELLED',lease_token=NULL WHERE goal_id=?",
-                (goal_id,),
-            )
+            for step in self.store.rows("SELECT * FROM goal_steps WHERE goal_id=? "
+                                       "AND state NOT IN ('DONE','FAILED')", (goal_id,)):
+                uncertain = step["state"] == "EXECUTION_UNCERTAIN" or (
+                    step["state"] == "RUNNING" and goal_plan.dispatched(self, step["step_id"]))
+                self.store.execute("UPDATE goal_steps SET state=?,lease_token=NULL WHERE step_id=?",
+                    ("EXECUTION_UNCERTAIN" if uncertain else "CANCELLED", step["step_id"]))
+            self.store.execute("UPDATE exploration_requests SET state=CASE WHEN state='RUNNING' "
+                "THEN 'UNKNOWN' ELSE 'CANCELLED' END,lease_token=NULL WHERE state IN "
+                "('QUEUED','RUNNING') AND json_extract(goal_step_json,'$.goal_id')=?", (goal_id,))
             self.feedback(goal_id, "EXPLAINED_FAILURE", "OWNER_CANCELLED")
         return self.get(goal_id)
 
-    def feedback(self, goal_id, outcome, code=None, result_event_id=None):
+    def feedback(self, goal_id, outcome, code=None, result_event_id=None, *, notify=True):
         row = self.store.one(
             "SELECT c.*,e.conversation_id FROM commitments c JOIN events e ON "
             "e.event_id=c.accepted_event_id WHERE c.goal_id=? AND c.state<>'ERASED'",
@@ -448,6 +483,8 @@ class GoalEngine:
             "goal_id=?",
             (result_event_id, outcome, code, self.clock(), goal_id),
         )
+        if not notify:
+            return
         from companion.notices import schedule
 
         schedule(self.store, self.settings, "commitment", row["commitment_id"],
@@ -482,33 +519,55 @@ class GoalEngine:
             for row in s.rows(
                 "SELECT * FROM goal_steps WHERE state='RUNNING' AND lease_until<=?", (now,)
             ):
-                state = "RETRY_WAIT" if row["attempts"] < row["max_attempts"] else "FAILED"
-                s.execute(
-                    "UPDATE goal_steps SET state=?,lease_token=NULL,"
-                    "last_error_code='GOAL_LEASE_EXPIRED' WHERE step_id=?",
-                    (state, row["step_id"]),
-                )
-                s.execute(
-                    "UPDATE goals SET state=?,next_due_at=?,"
-                    "last_error_code='GOAL_LEASE_EXPIRED',version=version+1 WHERE goal_id=?",
-                    (state, now, row["goal_id"]),
-                )
-                if state == "FAILED":
-                    self.feedback(row["goal_id"], "EXPLAINED_FAILURE", "GOAL_LEASE_EXPIRED")
+                self.fail(row, "GOAL_LEASE_EXPIRED", retryable=True,
+                          execution_uncertain=goal_plan.dispatched(self, row["step_id"]))
+                s.execute("UPDATE goals SET next_due_at=? WHERE goal_id=? AND state='RETRY_WAIT'",
+                          (now, row["goal_id"]))
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
-            row = s.one(
-                "SELECT st.*,g.kind,g.topic,g.scope_json FROM goal_steps st JOIN goals g "
+            candidates = s.rows(
+                "SELECT st.*,g.kind,g.topic FROM goal_steps st JOIN goals g "
                 "USING(goal_id) WHERE st.state IN ('QUEUED','RETRY_WAIT','WAITING_RESOURCE') "
                 "AND g.state IN ('QUEUED','RETRY_WAIT','WAITING_RESOURCE') AND "
                 "g.next_due_at<=? AND g.redacted=0 AND (g.kind='commitment' OR ?=0) ORDER BY "
                 "CASE g.kind WHEN 'commitment' THEN 0 ELSE 1 END,g.priority DESC,g.created_at "
-                "LIMIT 1",
+                "LIMIT 256",
                 (now, int(bool(paused and paused["value"] == "1"))),
             )
-            if not row:
+            row = None
+            for candidate in candidates:
+                if s.one("SELECT 1 FROM goal_steps WHERE goal_id=? AND state='RUNNING' "
+                         "AND step_id<>?", (candidate["goal_id"], candidate["step_id"])):
+                    continue
+                try:
+                    self.validate_authority(self.get(candidate["goal_id"]))
+                except CoreError as error:
+                    if error.code not in {"OWNER_AUTHORITY_REFERENCE_INVALID",
+                                          "OWNER_AUTHORITY_REVISION_CHANGED",
+                                          "OWNER_AUTHORITY_PURPOSE_REQUIRED"}:
+                        raise
+                    # Close rejected future work, keeping prior Reader attempts and liability.
+                    s.execute("UPDATE goal_steps SET state='FAILED',lease_token=NULL,"
+                              "last_error_code=?,updated_at=? WHERE step_id=?",
+                              (error.code, now, candidate["step_id"]))
+                    s.execute("UPDATE goals SET state='FAILED',last_error_code=?,"
+                              "version=version+1,updated_at=? WHERE goal_id=?",
+                              (error.code, now, candidate["goal_id"]))
+                    self.feedback(candidate["goal_id"], "EXPLAINED_FAILURE", error.code,
+                                  notify=False)
+                    s.audit("goal.authority_rejected", candidate["goal_id"],
+                            candidate["step_id"], now, error_code=error.code)
+                    continue
+                if goal_plan.unknown(self, candidate["goal_id"]):
+                    s.execute("UPDATE goals SET state='WAITING_INPUT',version=version+1,"
+                              "last_error_code='GOAL_EXECUTION_UNCERTAIN' WHERE goal_id=?",
+                              (candidate["goal_id"],))
+                    continue
+                row = candidate
+                break
+            if row is None:
                 return None
             self.validate_reflection(self.get(row["goal_id"])["reflection_suggestion_id"])
-            self.validate_sources(self.source_ids(row["goal_id"]))
+            self.validate_sources(self.step_source_ids(row["step_id"]))
             token = uid("goal_lease")
             s.execute(
                 "UPDATE goal_steps SET state='RUNNING',lease_token=?,lease_until=?,"
@@ -532,12 +591,15 @@ class GoalEngine:
             }
 
     def validate_lease(self, step):
+        self.validate_authority(self.get(step["goal_id"]))
         current = self.store.one("SELECT * FROM goal_steps WHERE step_id=?", (step["step_id"],))
         if (
             not current
             or current["state"] != "RUNNING"
             or current["lease_token"] != step["lease_token"]
             or current["lease_until"] <= self.clock()
+            or current["goal_id"] != step["goal_id"]
+            or current["scope_json"] != step["scope_json"]
         ):
             raise CoreError("GOAL_STALE_LEASE", 409)
         if epoch(self.store) != step["captured_privacy_epoch"]:
@@ -545,7 +607,11 @@ class GoalEngine:
         if not self.settings.goals_enabled:
             raise CoreError("GOALS_DISABLED", 403)
         self.validate_reflection(self.get(step["goal_id"])["reflection_suggestion_id"])
-        self.validate_sources(self.source_ids(step["goal_id"]))
+        self.validate_sources(self.step_source_ids(step["step_id"]))
+        target = GoalScope.model_validate_json(step["scope_json"])
+        parent = GoalScope.model_validate_json(self.get(step["goal_id"])["scope_json"])
+        if target.operation != "read_content" or target.url not in parent.targets():
+            raise CoreError("GOAL_STEP_SCOPE_MISMATCH", 409)
 
     def finish(self, step, result_event_id):
         s, now = self.store, self.clock()
@@ -572,8 +638,16 @@ class GoalEngine:
                     if parent["source_event_id"] not in ancestors:
                         ancestors.add(parent["source_event_id"])
                         pending.append(parent["source_event_id"])
-            if not set(self.source_ids(step["goal_id"])) <= ancestors:
+            if not set(self.step_source_ids(step["step_id"])) <= ancestors:
                 raise CoreError("GOAL_RESULT_NOT_RELATED", 409)
+            if json.loads(self.get(step["goal_id"])["scope_json"])["operation"] == "read_plan":
+                matched = s.one("SELECT r.request_id FROM exploration_requests r "
+                    "JOIN exploration_evidence e USING(request_id) WHERE e.event_id=? "
+                    "AND json_extract(r.goal_step_json,'$.step_id')=? "
+                    "AND json_extract(r.goal_step_json,'$.lease_token')=? AND r.state='RUNNING'",
+                    (result_event_id, step["step_id"], step["lease_token"]))
+                if not matched:
+                    raise CoreError("GOAL_RESULT_REQUEST_MISMATCH", 409)
             scope = GoalScope.model_validate_json(step["scope_json"])
             if scope.url.rstrip("/") not in {
                 result["canonical_url"].rstrip("/"),
@@ -585,6 +659,14 @@ class GoalEngine:
                 "updated_at=? WHERE step_id=?",
                 (result_event_id, now, step["step_id"]),
             )
+            remaining = s.one("SELECT 1 FROM goal_steps WHERE goal_id=? AND state<>'DONE'",
+                              (step["goal_id"],))
+            if remaining:
+                s.execute("UPDATE goals SET state='WAITING_INPUT',version=version+1,"
+                          "next_due_at=?,updated_at=? WHERE goal_id=?",
+                          (now, now, step["goal_id"]))
+                s.audit("goal.step_completed", step["goal_id"], step["step_id"], now)
+                return self.get(step["goal_id"])
             s.execute(
                 "UPDATE goals SET state='DONE',result_event_id=?,version=version+1,"
                 "updated_at=? WHERE goal_id=?",
@@ -600,11 +682,11 @@ class GoalEngine:
                 )
         return self.get(step["goal_id"])
 
-    def fail(self, step, code, retryable=False, resource=False):
+    def fail(self, step, code, retryable=False, resource=False, *, execution_uncertain=False):
         if not code.isascii() or not code.replace("_", "").isalnum() or len(code) > 64:
             code = "GOAL_FAILED"
         s, now = self.store, self.clock()
-        with s.transaction():
+        with nullcontext() if s.db.in_transaction else s.transaction():
             current = s.one("SELECT * FROM goal_steps WHERE step_id=?", (step["step_id"],))
             if (
                 not current
@@ -612,23 +694,33 @@ class GoalEngine:
                 or current["lease_token"] != step["lease_token"]
             ):
                 return False
-            state = (
+            reads = goal_plan.requests(self, step_id=step["step_id"])
+            execution_uncertain = execution_uncertain or any(
+                row["state"] == "UNKNOWN" or row["attempt_state"] == "UNKNOWN"
+                or row["state"] == "RUNNING" and row["started_at"] is not None for row in reads)
+            sent = goal_plan.dispatched(self, step["step_id"])
+            state = "EXECUTION_UNCERTAIN" if execution_uncertain else (
                 "WAITING_RESOURCE"
-                if resource
+                if resource and not sent
                 else "RETRY_WAIT"
-                if retryable and current["attempts"] < current["max_attempts"]
+                if retryable and not sent and current["attempts"] < current["max_attempts"]
                 else "FAILED"
             )
+            if not sent:
+                s.execute("UPDATE exploration_requests SET state='CANCELLED',lease_token=NULL "
+                    "WHERE state='QUEUED' AND json_extract(goal_step_json,'$.step_id')=?",
+                    (step["step_id"],))
             delay = 3600 if resource else 60 * 2 ** max(0, current["attempts"] - 1)
             s.execute(
                 "UPDATE goal_steps SET state=?,lease_token=NULL,last_error_code=?,"
                 "attempts=attempts-?,updated_at=? WHERE step_id=?",
-                (state, code, int(resource), now, step["step_id"]),
+                (state, code, int(resource and not sent), now, step["step_id"]),
             )
             s.execute(
                 "UPDATE goals SET state=?,last_error_code=?,next_due_at=?,version=version+1,"
                 "updated_at=? WHERE goal_id=?",
-                (state, code, after(now, delay), now, step["goal_id"]),
+                ("WAITING_INPUT" if execution_uncertain else state,
+                 code, after(now, delay), now, step["goal_id"]),
             )
             if state == "FAILED":
                 self.feedback(step["goal_id"], "EXPLAINED_FAILURE", code)

@@ -1,0 +1,76 @@
+# Responsive memory retrieval and stable prompt prefixes
+
+The reply recall and extraction-review paths previously called synchronous FastEmbed from an
+async task. ONNX's own worker threads do not yield the calling event loop. An offline probe with
+the actual cached BGE model and 32 uncached synthetic memories observed a 504ms heartbeat gap;
+the cached-vector path was much shorter. This is a local observation, not a production percentile.
+
+## Execution boundary
+
+`Memory.search` and `search_async` share eligibility, lexical retrieval, ranking and final source
+checks. `SemanticIndex` shares cache lookup, pure inference and cache commit. Only model loading
+and fully materialized passage/query inference move through `asyncio.to_thread`. SQLite access,
+Ledger checks, proof capture, revalidation and vector writes stay on the original caller.
+The existing two-thread encoder/cache is retained. A standard lock serializes memory inference
+for a cached model path, including CPU work still finishing after its caller was cancelled.
+No new executor pool, index store, task queue, budget or retry policy is introduced.
+
+Before waiting, async retrieval pins the candidate memories and all their source ancestry with
+the existing `MemoryContext.pin` proof. On return it checks the caller's current input/scope,
+privacy version, current-time source proof and full memory rows before any vector write. The
+original conditional cache insertion and final ranking/source fences remain. Cancellation does
+not reach cache commit; a completed CPU task is not authority to publish its result.
+
+| Caller | Route |
+| --- | --- |
+| Reply recall | `recall_async` → `search_async`; current job/history and source proof rechecked |
+| Extraction/explicit memory planning | `search_async`; candidate sources and optional job rechecked |
+| HTTP memory search | `search_async`; existing actor and live-window restriction retained |
+| Console memory listing | Existing synchronous `search("*")`; no embedding |
+| Owner `/你记得什么` | Existing synchronous wildcard recall; no embedding |
+| Direct synchronous context/search consumers | Same synchronous algorithm, suitable outside async I/O; native reply worker supplies precomputed reviewed hits |
+
+Core construction retains its existing startup warmup. Runtime retrieval moves inference off
+the event loop; this change does not move Core construction or its SQLite connection to a thread.
+
+## Prompt assembly
+
+Expression and capability renderers expose static rules separately from current offer/state
+data. Core concatenates all static rules first, including image, rich-history and voice rules
+discovered later in context assembly, then the dynamic material. Both stay in the original
+system role. Offers, capability availability and source-dependent references still refresh for
+each call; revoked offers cannot remain in a cached local prompt.
+
+The controlled two-offer probe increased the common system-text prefix from 1,925 to 4,261 UTF-8
+bytes, retaining the content/rich rules before the differing candidate IDs. These bytes are not
+provider tokens or measured cache hits. DeepSeek persists complete prefix units and cache hits
+are best-effort; no cost or remote cache-hit improvement is asserted.
+
+The soft context estimator, paid upper bound and memory relevance-review policy are unchanged.
+Empty recall still skips review. Tokenizer changes need separately validated full wire counting;
+the presence of official V4.1 material does not establish a counter integrated in this runtime.
+
+## Reused implementations and references
+
+- The local `companion/meme_core.py` pure `_embedding`/`asyncio.to_thread` boundary and its
+  before/after source checks provide the existing project pattern.
+- [DSH system-prompt at 22ddee3](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/system-prompt/src/index.ts)
+  separates ordered static sections from dynamic context. Core reuses that ordering principle
+  while preserving its own role and authority contracts.
+- [Python asyncio.to_thread](https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread)
+  supplies the standard thread boundary. It does not imply cancellation of work already running.
+- [FastEmbed ONNX embedding](https://github.com/qdrant/fastembed/blob/main/fastembed/text/onnx_embedding.py)
+  and the installed 0.9.0 implementation were inspected: embedding is a synchronous iterator.
+- [DeepSeek prefix-cache rules](https://api-docs.deepseek.com/guides/kv_cache/) describe complete
+  persisted prefixes; [token usage](https://api-docs.deepseek.com/quick_start/token_usage/) distinguishes
+  estimates from actual returned usage.
+
+## Verification
+
+Deterministic tests keep inference pending in a worker thread while the event loop runs and
+exercise forget, correction, source deletion/edit, expiry, new input and cancellation. They
+assert no stale cache writes or model calls. A real HTTP check keeps health responsive during
+retrieval, rejects a concurrent search-source withdrawal, and completes an independently opened
+Core worker through mocked provider transport and native memory-review/chat settlement.
+Source-aware image/history, console, extraction and synchronous ranking callers are checked too.
+The exact frozen candidate and checks belong to the single verification receipt.

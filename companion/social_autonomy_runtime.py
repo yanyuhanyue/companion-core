@@ -1,13 +1,14 @@
 """One background decision using retained public evidence and the native Outbox.
 
-Core calls this after foreground, poke and meme work. This module never fetches
+The Life selector calls this between bounded native units. This module never fetches
 account data or sends an action; reviewed assets and real profile probes arrive
 through the authenticated evidence interfaces on SocialAutonomy.
 """
 
 import hashlib
+import json
 
-from companion import budget
+from companion import budget, social_plan_jobs, social_profile_sources
 from companion.contracts import CoreError
 from companion.social_autonomy import SocialAutonomy, public_source
 from companion.store import after, encode, utcnow
@@ -18,7 +19,10 @@ _INVALID_PLAN = {
     "SOCIAL_SOURCE_CHANGED", "SOCIAL_SOURCE_EXPIRED", "SOCIAL_PUBLIC_SOURCE_REQUIRED",
     "SOCIAL_PRIVATE_OR_INVALID_TEXT", "SOCIAL_REVIEWED_AVATAR_REQUIRED",
     "SOCIAL_PROFILE_BASELINE_REQUIRED", "SOCIAL_PROFILE_BASELINE_STALE",
-    "SOCIAL_DUPLICATE_ACTION",
+    "SOCIAL_DUPLICATE_ACTION", "SOCIAL_PROFILE_PURPOSE_REQUIRED",
+    "SOCIAL_PROFILE_SOURCE_REQUIRED", "PRIVACY_CHANGED",
+    "OWNER_AUTHORITY_REVISION_CHANGED", "OWNER_AUTHORITY_REFERENCE_INVALID",
+    "SOCIAL_DELIVERY_AUTHORITY_CHANGED",
 }
 
 
@@ -66,7 +70,7 @@ def _candidates(module):
         if len(sources) >= cfg.max_source_refs:
             break
     profiles, assets = [], []
-    for field in ("nickname", "signature", "avatar"):
+    for field in ("avatar",):
         if not getattr(cfg, field + "_enabled"):
             continue
         try:
@@ -113,6 +117,37 @@ def _candidates(module):
     }
 
 
+def _profile_candidate(module):
+    fields = []
+    for field in ("nickname", "signature"):
+        if not getattr(module.config, field + "_enabled"):
+            continue
+        try:
+            module.context(profile_fields=[field])
+        except CoreError:
+            continue
+        fields.append(field)
+    if not fields:
+        return None
+    ids = social_profile_sources.candidates(module.store, module.settings, module.clock())
+    while ids:
+        context = module.context(profile_fields=fields, profile_memory_ids=ids)
+        try:
+            module._messages(context, module.config)
+        except CoreError as error:
+            if error.code != "SOCIAL_CONTEXT_TOO_LARGE":
+                raise
+            ids.pop()
+            continue
+        semantic = {"purpose": context["purpose"], "profile_material": context["profile_material"],
+                    "profiles": [{"field": p["field"], "value": p["value"]}
+                                 for p in context["profiles"]]}
+        return "social-profile:" + _fingerprint(semantic), {
+            "profile_fields": fields, "profile_memory_ids": ids,
+        }
+    return None
+
+
 def _cancel(store, plan_id, code, now):
     store.execute("UPDATE social_autonomy_plans SET state='CANCELLED',last_error_code=?,"
                   "updated_at=? WHERE plan_id=? AND state='READY' AND NOT EXISTS "
@@ -123,13 +158,34 @@ def _cancel(store, plan_id, code, now):
 
 def _expire(store, now):
     with store.transaction():
+        recovered_jobs = social_plan_jobs.recover(store, now)
         rows = store.rows("SELECT p.plan_id FROM social_autonomy_plans p WHERE p.state='READY' "
                           "AND p.expires_at<=? AND NOT EXISTS (SELECT 1 FROM "
                           "social_autonomy_reservations r WHERE r.plan_id=p.plan_id) "
                           "ORDER BY p.expires_at,p.plan_id LIMIT ?", (now, _SCAN_LIMIT))
         for row in rows:
             _cancel(store, row["plan_id"], "SOCIAL_PLAN_EXPIRED", now)
-    return bool(rows)
+        abandoned = store.rows(
+            "SELECT p.plan_id,m.state AS usage_state FROM social_autonomy_plans p "
+            "LEFT JOIN model_usage m ON m.request_id=p.model_request_id "
+            "LEFT JOIN model_admissions a ON a.request_id=p.model_request_id "
+            "WHERE p.state='PLANNING' AND p.expires_at<=? "
+            "AND (m.request_id IS NULL OR (m.state='SETTLED' AND m.scenario='social_autonomy')) "
+            "AND (a.request_id IS NULL OR a.lease_until<=?) "
+            "AND NOT EXISTS (SELECT 1 FROM social_autonomy_reservations r "
+            "WHERE r.plan_id=p.plan_id) ORDER BY p.expires_at,p.plan_id LIMIT ?",
+            (now, now, _SCAN_LIMIT),
+        )
+        for row in abandoned:
+            code = ("SOCIAL_PLAN_RESULT_LOST" if row["usage_state"] == "SETTLED"
+                    else "SOCIAL_PLAN_EXPIRED_UNADMITTED")
+            store.execute("UPDATE social_autonomy_plans SET state='CANCELLED',last_error_code=?,"
+                          "updated_at=? WHERE plan_id=? AND state='PLANNING'",
+                          (code, now, row["plan_id"]))
+            store.audit("social.runtime_cancelled", row["plan_id"], row["plan_id"], now,
+                        error_code=code)
+            social_plan_jobs.cancel_plans(store, [row["plan_id"]], code, now)
+    return bool(rows or abandoned or recovered_jobs)
 
 
 def _enqueue(module, plan_id, conversation):
@@ -145,12 +201,13 @@ def _enqueue(module, plan_id, conversation):
         return True
 
 
-async def run_once(store, settings, model, clock=utcnow) -> bool:
+async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-worker") -> bool:
     """Return True only after durable work; False means idle, yielded or fenced.
 
     No caller transaction may span this call's model await. Invalid or expired
     READY plans are cancelled; transient quota/authority fences preserve them.
-    A skipped, rejected, interrupted or delivered candidate is never retried.
+    Only proven pre-admission budget refusals can reuse their original request.
+    Paid, uncertain, skipped, interrupted and delivered candidates are never retried.
     """
     module = SocialAutonomy(store, settings, model, clock)
     if not module.config.enabled:
@@ -178,11 +235,45 @@ async def run_once(store, settings, model, clock=utcnow) -> bool:
         return _enqueue(module, ready["plan_id"], conversation) or changed
     if model is None:
         return changed
-    candidate = _candidates(module)
+    retry = social_plan_jobs.claim(module, worker_id)
+    if retry:
+        row = store.one("SELECT p.* FROM social_autonomy_jobs r JOIN social_autonomy_plans p "
+                        "USING(plan_id) WHERE r.job_id=?", (retry["job_id"],))
+        try:
+            messages, _ = module._messages(json.loads(row["input_snapshot_json"]), module.config)
+            plan = await module._run_plan(row["plan_id"], row["model_request_id"], messages,
+                                          job=retry)
+        except Exception as error:
+            code = error.code if isinstance(error, CoreError) else "SOCIAL_RETRY_FAILED"
+            with store.transaction():
+                social_plan_jobs.fail(module, retry, code)
+            return True
+        if plan["state"] == "READY":
+            _enqueue(module, plan["plan_id"], conversation)
+        return True
+    candidate = None
+    builders = (_profile_candidate, _candidates) if settings.life_loop.mode == "OFF" else (
+        _profile_candidate,
+    )
+    for build in builders:
+        try:
+            candidate = build(module)
+        except CoreError:
+            continue
+        if not candidate:
+            continue
+        key, inputs = candidate
+        previous = store.one("SELECT * FROM social_autonomy_plans WHERE idempotency_key=?", (key,))
+        if not previous:
+            break
+        if (module.retryable_unadmitted(previous)
+            and social_plan_jobs.get(store, previous["plan_id"]) is None):
+            try:
+                return bool(social_plan_jobs.queue(module, previous["plan_id"])) or changed
+            except CoreError:
+                pass
+        candidate = None
     if not candidate:
-        return changed
-    key, inputs = candidate
-    if store.one("SELECT 1 FROM social_autonomy_plans WHERE idempotency_key=?", (key,)):
         return changed
     try:
         plan = await module.plan(key, **inputs)

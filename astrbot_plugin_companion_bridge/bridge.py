@@ -3,13 +3,13 @@ import json
 import re
 import sqlite3
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
+import httpx
 
-def _unique_fields(items):
-    fields = dict(items)
-    if len(fields) != len(items):
-        raise ValueError("duplicate receipt field")
-    return fields
+from companion_onebot_bridge.delivery_receipts import DeliveryReceipts
+from companion_onebot_bridge.instance_lock import acquire
+from companion_onebot_bridge.onebot_client import bounded_post
 
 
 def normalize(event, owner_id, bot_id, token="", protocol_epoch=""):
@@ -60,9 +60,17 @@ def normalize(event, owner_id, bot_id, token="", protocol_epoch=""):
     return key, payload
 
 
-class Spool:
+class Spool(DeliveryReceipts):
     def __init__(self, path):
-        self.db = sqlite3.connect(path)
+        self.path = path
+        self.reconciliation_only = False
+        self.config = SimpleNamespace(max_voice_lease_bytes=65536)
+        self.lock = acquire(str(path) + ".lock")
+        try:
+            self.db = sqlite3.connect(path)
+        except BaseException:
+            self.lock.close()
+            raise
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("PRAGMA secure_delete=ON")
@@ -74,7 +82,21 @@ class Spool:
             "CREATE TABLE IF NOT EXISTS protocol_generations "
             "(epoch TEXT PRIMARY KEY,backend TEXT NOT NULL)"
         )
+        self.db.execute("CREATE TABLE IF NOT EXISTS results "
+                        "(message_id TEXT PRIMARY KEY,body TEXT NOT NULL,"
+                        "state TEXT NOT NULL DEFAULT 'pending')")
+        self.db.execute("CREATE TABLE IF NOT EXISTS delivery_identity (value TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS retired_inbox "
+                        "(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         self.db.commit()
+
+    def close(self):
+        self.db.close()
+        self.lock.close()
+
+    def sealed(self):
+        return bool(self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='native_handoff'").fetchone())
 
     def bind_backend(self, backend, epoch):
         if backend not in {"napcat", "snowluma"}:
@@ -98,9 +120,14 @@ class Spool:
                 and self.db.execute("SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
             ):
                 raise ValueError("drain the existing bridge inbox before switching backend")
+            if self.db.execute("SELECT 1 FROM results WHERE state='pending' LIMIT 1").fetchone():
+                raise ValueError("reconcile delivery receipts before switching backend")
             self.db.execute("INSERT INTO protocol_generations VALUES (?,?)", (epoch, backend))
 
     def put(self, key, payload):
+        if self.sealed():
+            raise ValueError("ASTRBOT_INPUT_RETIRED")
+        self.bind_origin(payload)
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         with self.db:
             prior = self.db.execute("SELECT body FROM inbox WHERE key=?", (key,)).fetchone()
@@ -109,49 +136,83 @@ class Spool:
             self.db.execute("INSERT OR IGNORE INTO inbox(key,body) VALUES (?,?)", (key, body))
 
     async def flush_one(self, client):
+        if self.sealed():
+            raise ValueError("ASTRBOT_INPUT_RETIRED")
         row = self.db.execute(
             "SELECT key,body FROM inbox WHERE state='pending' ORDER BY rowid LIMIT 1"
         ).fetchone()
         if not row:
-            return
-        response = await client.post(
-            "/internal/v1/inbox/events",
-            content=row[1].encode(),
-            headers={"X-Idempotency-Key": row[0], "Content-Type": "application/json"},
-        )
-        erased = False
-        if response.status_code == 410 and len(response.content) <= 65536:
-            try:
-                erased = response.json(object_pairs_hook=_unique_fields) == {
-                    "error": "EVENT_ERASED"
-                }
-            except (ValueError, UnicodeError, RecursionError):
-                pass
-        if erased:
-            with self.db:
-                self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
-            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            return
+            return False
+        payload = json.loads(row[1])
+        try:
+            status, result = await bounded_post(
+                client, "/internal/v1/inbox/events", payload,
+                headers={"X-Idempotency-Key": row[0]}, statuses=(202, 410), with_status=True,
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {400, 403, 409, 422}:
+                with self.db:
+                    self.db.execute("UPDATE inbox SET state='rejected' WHERE key=?", (row[0],))
+            raise
+        if status == 410:
+            if result != {"error": "EVENT_ERASED"}:
+                raise ValueError("INVALID_ERASURE_RECEIPT")
+            state = "erased"
+        else:
+            from companion_onebot_bridge.spool import validate_acceptance
+
+            validate_acceptance(result, payload["event_id"])
+            state = "accepted"
+        receipt = {"event_id": payload["event_id"], "state": state,
+                   "body_sha256": hashlib.sha256(row[1].encode()).hexdigest(),
+                   "image_slots": [item["slot"] for item in payload["payload"].get(
+                       "shared_content", []) if item.get("kind") == "image"],
+                   "core_receipt": result}
         with self.db:
-            if response.status_code == 202:
-                self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
-            elif response.status_code in {400, 403, 409, 422}:
-                self.db.execute("UPDATE inbox SET state='rejected' WHERE key=?", (row[0],))
-        response.raise_for_status()
+            self.db.execute("INSERT OR REPLACE INTO retired_inbox VALUES (?,?)",
+                            (row[0], json.dumps(receipt, sort_keys=True)))
+            self.db.execute("DELETE FROM inbox WHERE key=?", (row[0],))
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return True
 
 
-async def deliver_one(client, item, send):
-    message_id = item["message_id"]
-    body = {"lease_token": item["lease_token"]}
-    started = await client.post(f"/internal/v1/deliveries/{message_id}/begin-send", json=body)
-    started.raise_for_status()
-    # If begin-send times out, do not send: the server may already have committed SENDING.
-    try:
-        accepted = await send(item["conversation_platform_session_key"], item["content"]["text"])
-        outcome = "SENT" if accepted is True else "DELIVERY_UNCERTAIN"
-    except Exception:
-        outcome = "DELIVERY_UNCERTAIN"
-    result = await client.post(
-        f"/internal/v1/deliveries/{message_id}/result", json={**body, "result": outcome}
-    )
-    result.raise_for_status()
+    def bind_origin(self, payload):
+        origin = payload["conversation"]["platform_session_key"]
+        owner = payload["actor"]["platform_user_id"]
+        bot = payload["source_event_id"].split(":", 1)[0]
+        value = json.dumps([owner, bot, origin])
+        with self.db:
+            row = self.db.execute("SELECT value FROM delivery_identity").fetchone()
+            if row and row[0] != value:
+                raise ValueError("BRIDGE_IDENTITY_CHANGED")
+            if not row:
+                self.db.execute("INSERT INTO delivery_identity VALUES (?)", (value,))
+
+    def delivery_identity(self, owner, bot):
+        # Upgrade the original inbox in place; preserve each body and idempotency key.
+        for row in self.db.execute("SELECT body FROM inbox"):
+            self.bind_origin(json.loads(row[0]))
+        row = self.db.execute("SELECT value FROM delivery_identity").fetchone()
+        if not row:
+            return None
+        saved_owner, saved_bot, origin = json.loads(row[0])
+        if (owner, bot) != (saved_owner, saved_bot):
+            raise ValueError("BRIDGE_IDENTITY_CHANGED")
+        return origin
+
+    def check_backend(self, backend, epoch):
+        current = self.db.execute(
+            "SELECT epoch,backend FROM protocol_generations ORDER BY rowid DESC LIMIT 1"
+        ).fetchone()
+        if current != (epoch, backend):
+            raise ValueError("BRIDGE_IDENTITY_CHANGED")
+
+    def capacity(self, extra_bytes=0):
+        from pathlib import Path
+
+        if sum(p.stat().st_size for p in Path(self.path).parent.glob(
+            Path(self.path).name + "*")) + extra_bytes >= 64 * 1024 * 1024:
+            raise ValueError("SPOOL_DISK_CAPACITY")
+
+    def trace_for(self, delivery_key):
+        return None

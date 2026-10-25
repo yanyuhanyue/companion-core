@@ -6,11 +6,9 @@ import logging
 import httpx
 import pytest
 
-from companion.model import ModelClient
 from tests.conftest import run
+from tests.support.native_images import image_host, raw_event, upload
 from tests.test_live_image_input import options, png
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import URL, image_segment
 
 
@@ -51,25 +49,17 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
         return ["1.1.1.1"]
 
     async def scenario():
-        async with (
-            source_window(
-                core, tmp_path, source, live=True, approved=True,
-                rich_input_scope="references_v1", scope_options=options(),
-            ) as (window, client, protocol, _, sends),
-            httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http,
+        async with image_host(core, tmp_path, source, options=options(), model_reply=model) as (
+            active, _, sends, _,
         ):
-            core.model = ModelClient(core.settings, model_http)
-            core.content.options = core.settings.content
-            await window.capture_once(client, protocol)
-            approval = capture_approval(window)
+            await active.capture()
+            await active.flush()
             with pytest.raises(ValueError, match=(
                 "IMAGE_FETCH_FAILED" if failure == "read_timeout" else "IMAGE_TOO_LARGE"
             )):
-                await window.approve_captured(
-                    client, approval, image_transport=httpx.MockTransport(cdn),
-                    image_resolver=resolve,
-                )
-            assert window.status()["state"] in {"STOPPED", "CORE_STOP_UNCONFIRMED"}
+                await upload(active, transport=httpx.MockTransport(cdn), resolver=resolve)
+            assert active.db.execute("SELECT state FROM automatic_media").fetchone()[0] == (
+                "DOWNLOADING")
             assert len(downloads) == 1 and closed == [True]
             assert calls == sends == []
             assert not core.store.one("SELECT 1 FROM model_usage")
@@ -77,8 +67,10 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
             assert not core.store.one("SELECT 1 FROM observations")
             assert not core.store.one("SELECT 1 FROM outbox")
             assert core.store.one("SELECT COUNT(*) n FROM content_items")["n"] == 1
+            core.clock.advance(181)
+            active.restart()
             with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                await window.approve_captured(client, approval)
+                await upload(active, transport=httpx.MockTransport(cdn), resolver=resolve)
             assert len(downloads) == 1 and calls == sends == []
 
     run(scenario())

@@ -42,8 +42,9 @@ API instance 改变、失败或已观察阻断都会断开 clear segment。不�
 0，摘要只给最后一段实际观察跨度，不累加缺失间隔或多段时长。
 命令正常退出只表示完成诊断或采样，仍须读取 blockers/failures，不能据退出码签收健康。
 
-Core 聊天 worker 在同一循环完成 poll 及本轮维护后，最多每两秒更新一条
+Core 聊天 worker 在同一循环完成 poll 及本轮维护后，运行阶段最多每两秒更新一条
 `runtime_meta.worker_loop`：匿名 session、递增 sequence、UTC 完成时间和固定完成阶段。
+进入／离开等待阶段时会记录状态转换；连续空闲通知不会刷新完成时间。
 没有独立后台 heartbeat；poll 或维护卡住时不会继续写。该记录不改变业务、租约或预算，
 `run_once=True` 也可能代表失败处理，不能据此计作成功。worker 自身仍会执行原有保留期
 清理等维护，启动它并非只读观察操作。
@@ -66,3 +67,94 @@ API alive、schema 可读、空队列及按时采样都不能证明 worker 正�
 本轮验证使用本地合成 SQLite/HTTP 和秒级实际等待。没有真实 QQ、供应商、付费模型、
 告警联系人或真实小时/天数运行证据。观察文件不是第二份收件、发送或预算账本，
 不会改变任何额度、UNKNOWN、租约、遗忘记录或业务状态。
+
+
+## 本地 SQLite worker 唤醒
+
+chat、content、executive、life 四个本地 worker 使用 watchfiles 1.3.0 监听数据库父目录，
+以覆盖 WAL 的创建、删除与替换。通知仅作为检查提示；SQLite 中的状态、预算、租约仍是唯一权威。
+每次启动先订阅，再在同一 Store 连接取得 `PRAGMA data_version`，执行扫描，等待前再次检查版本。
+自己的提交不会改变该连接的 data_version，因此自身完成记录不会触发业务自旋；不得比较不同连接
+的版本数值。合并或重复通知只导致重新核对，通知本身不会创建任务或扩大执行许可。
+
+等待同时受原生 next_attempt_at、lease_until、业务期限、本地日界与维护截止时间约束。
+原来按 ticks 计数的维护改为单调时间每分钟截止；新通知不会加速维护节奏。无新写入的 retry/租约
+仍按最近期限唤醒。每分钟的轻量版本核对补偿可能遗漏的文件通知；版本未变化且没有到期事项时，
+content/executive 不重复业务扫描。墙钟跳变会重新核对；业务对时间、STOP、擦除和权限的原有判断
+保持不变。取消时先唤醒并等待阻塞的 watch 调用退出，再关闭 native watcher，最后关闭 Store；
+既有单 worker OS 锁仍覆盖其完整生命周期。
+
+`WAITING_AFTER_POLL` / `WAITING_AFTER_MAINTENANCE` 只说明最近一次完成后进入过等待。
+十秒内投影为 WAITING，超过十秒仍为 STALE；不证明当前进程存活，也不算连续健康活动。
+观察器使用 LOOP_WAITING_UNVERIFIED 断开活动区间，Console 保留最近完成时间和未验证说明。
+未知 stage/state、额外字段及非法类型继续拒绝，不能为了长等待放宽公开观测校验。
+
+复用依据：[watchfiles watch](https://watchfiles.helpmanual.io/api/watch/)、
+[可显式关闭并提供订阅边界的 Rust backend](https://watchfiles.helpmanual.io/api/rust_backend/)、
+[SQLite data_version](https://www.sqlite.org/pragma.html#pragma_data_version) 与
+[DSH 有序取消／等待退出](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/agent-loop/src/index.ts)。
+实现使用该固定版本的 watchfiles 默认环境／WSL backend 选择；无法使用原生通知或显式启用
+WATCHFILES_FORCE_POLLING 时可能退化为库的文件轮询，不能宣称所有平台纯事件或零 OS 线程唤醒。
+源 Reader 网络限速、Bridge 发送节流、voice 租约、诊断采样以及协作性 sleep(0) 不属于这项改动。
+
+### 原生调度边界
+
+四个入口共用 `worker_schedule.ScanContext` 和 `UnitResult`。每轮先取得不可变的扫描起点、
+同连接 data_version 和单调时钟值，再调用一次原生业务操作。`run_native_unit` 只把现有的
+工作布尔值／完成数量转换成结果；不领取第二次、不重试异常，也不把取消转换成成功。
+等待必须使用本轮的 ScanContext，旧轮次的上下文会被拒绝。
+
+`worker_deadlines` 按 chat、content、executive、life 提供只读期限投影，保留原有
+查询、日界、日记／巩固时点和 admission 租约。投影使用扫描开始时刻作下界，保留扫描期间
+刚到期的事项；下一轮移动下界，避免已到期但受限的事项自旋。领域可以返回 UnitResult 的
+`next_deadline` 提示；它只能提前重新检查，不能覆盖数据库期限或授予执行权限，扫描前已经
+过期的提示会忽略。已完成的原生工作仍立即进入下一轮。
+
+| 入口 | 恢复、领取与提交的责任方 |
+|---|---|
+| chat | `Core.run_once` / `claim_job` / `recover`；包括原有 voice 清理和投递恢复 |
+| content | `ContentService.run_batch` / `run_once`；保留原有批量上限 |
+| executive | `Executive.run_one` / `claim` / `recover`；开始执行后的超时仍为 UNKNOWN |
+| life | 有界轮转选择原生 Life activity、Diary、Social、Memory、Consolidator 与维护单步；领域继续管理检查点与来源，Diary 启动恢复由该入口接管 |
+
+共享层不根据过期租约统一重排队，也不以数据库写入数量推断业务进展。领域若以后通过
+UnitResult 报告需要继续清理的有界恢复进展，必须确有原生状态变化；受限的过期记录本身不算
+进展。定期维护本身完成后推进单调时钟，并重新检查本连接可能安排的工作。
+
+### Life 自主选择与完整切换条件
+
+`autonomous_selector` 使用进程内有限轮转，每个 turn 最多调用一个原生操作。
+即使该操作返回空闲或遇到限制，也会消耗本轮机会；不能因为它返回 False 就在同一 turn
+继续调用第二个可能使用模型的操作。只有实际进展或已完成的定期维护会重新开始检查，
+一轮全部空闲后回到文件事件／原生期限等待。游标不落盘，不创建队列、预算或权限状态。
+
+每个操作前重新检查当前聊天和已接收但尚未入队的主人输入。等待中的聊天所需 Content、
+Reader、Executive、Voice 仍由各自原生入口执行；不会因为“后台让路”而把这些前台依赖停掉。
+原生 claim 和最终 dispatch 继续检查最新来源、权限和预算；selector 的前置检查不是许可。
+已开始的模型、发送和不确定结果保留原责任，不为让路而退款或自动重试。
+
+OwnerAuthority 的 `required/current` 决定是否需要当前授权；各 lane 仅消费其明确许可的
+purpose。activity 还须匹配原 job 的完整授权引用，并由原生 check_job 复验，不能借最新授权
+重绑旧任务。已批准但未入库的签名输入按当前引用阻止新后台 turn。领域截止时间只读取可为空的
+`policy.expires_at`；没有截止时间不补造窗口。STOP、授权版本变化和恢复仍触发原 wakeup 重算。
+
+Wake 在推进或过期处理目标前同时要求 `wake`、`goals`、`exploration`；Affect 仅在开关开启且
+具备独立 `affect` purpose 时读取。REM 默认关闭，启用后还须具备 `rem` 与 `memory`，每轮只
+创建一个原生 REM job 或执行一次指定 job；原预算准入负责每日调用数和日／月费用上限。
+REM 沿用同一轮转，预算拒绝或空闲不会占用其他 N1–N3 lane 的下一轮机会，输出仅为私人虚构记录。
+
+`poke` 与 `meme_caption` lane 只在 live 模式、对应开关开启且当前独立用途获授权时，调用
+`Core._run_poke_once` 与 `MemeCaptionService.run_once`。它们不依赖空闲聊天入口的 fallback；
+原生 job 负责领取、恢复、原授权复核和计费。Poke 合并期限沿用 `jobs.next_attempt_at` 的原
+deadline 投影，未增加轮询或生产者。M0/M1 不调用这两个外部能力操作。
+
+Life、Diary、Social 的默认关闭／SHADOW、DND、每日次数、冷却、SKIP/DEFER 都由原生模块处理。
+静默的一次检查不调用模型；SKIP 消费原候选，不新增消息。公平性只保证进程持续运行且存在
+空闲资源时，持续可用的后台 lane 获得有限轮转机会；不保证持续前台流量下后台按时完成。
+
+完整切换须同时接入 Core 的前台／指定 activity 领取隔离、移除 Core 的 Social fallthrough
+和 timer 问候生产、停用独立 Diary 入口，并提供 `NightlyConsolidator.run_step(worker_id)` 与
+`Core.extract_step(local_day=None)`。两种原生单步均返回 UnitResult，最多一次模型 admission
+或一次有界非模型推进。获准启用的 lane 缺少接口时，Life 启动或该 lane 首次执行失败，
+不能回退调用多模型 `run_once/extract_once`；没有相应 purpose 的 lane 不调用接口。
+对应 Core 与部署补丁由集成负责人统一接入；这些条件未全部验证前，不宣称统一调度已完成。

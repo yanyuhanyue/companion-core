@@ -19,11 +19,11 @@ from companion import (
     content_files,
     image_spool,
     live_text,
-    private_life,
+    owner_authority,
+    owner_input,
     qq_files,
     qq_images,
-    qq_video,
-    reply_revision,
+    qq_rich,
     video_input,
 )
 from companion.contracts import CoreError
@@ -31,7 +31,7 @@ from companion.media_config import MediaEndpoint
 from companion.media_provider import HTTPMediaProvider
 from companion.observation import ObservationEvent, ObservationPayload
 from companion.privacy import epoch, redact
-from companion.reading import FOLLOWUP, followup_item
+from companion.reading import followup_item
 from companion.sources import content_target, public_image_url, supports, web_hosts
 from companion.store import after, encode, uid, utcnow
 
@@ -188,7 +188,10 @@ class ContentService:
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
         self.model = model
-        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes)
+        from companion import agent_images
+
+        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes,
+                            retain_completed=agent_images.enabled(self.settings))
 
     def discard_images(self, event_id):
         rows = self.store.rows(
@@ -219,6 +222,9 @@ class ContentService:
         ) != ("qq.onebot", "owner", "private", "owner"):
             raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
         body = json.loads(event["body_json"])
+        if owner_authority.required(self.store, self.settings):
+            view = owner_authority.current(self.store, self.settings, self.clock, purpose="content")
+            owner_input.source(self.store, self.settings, view, event_id, self.clock())
         if live_text.active(self.store, self.settings):
             approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
             files, images = qq_files.manifest(body), qq_images.manifest(body)
@@ -258,7 +264,7 @@ class ContentService:
         links = (shared_links(body.get("text", ""), allowed_web)
                  if not bounded or owner_links else [])
         if not bounded or link_scope:
-            for segment in (body.get("rich") or {}).get("segments", []):
+            for segment in qq_rich.media_segments(body.get("rich")):
                 if segment.get("type") != "json":
                     continue
                 for field in segment.get("fields", []):
@@ -276,6 +282,11 @@ class ContentService:
                 if item["slot"] >= 0 and (self.options.max_images_per_event == "unlimited"
                                          or item["slot"] < self.options.max_images_per_event):
                     images.add(item["slot"])
+        native_images = bool(images and owner_authority.required(self.store, self.settings))
+        if native_images:
+            from companion import agent_images
+
+            agent_images.source(self.store, self.settings, self.clock, event_id)
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
             # The preflight body cannot resurrect a share erased while waiting for this write lock.
@@ -295,6 +306,7 @@ class ContentService:
                 state = "WAITING"
                 if kind == "link":
                     source, _ = content_target(url, web_hosts=allowed_web)
+                if kind == "link" and self.settings.owner_runtime.mode != "ENABLED":
                     adapter_id = next(
                         (
                             name
@@ -316,12 +328,12 @@ class ContentService:
                             )
                         except CoreError as exc:
                             error = exc.code
-                elif not bounded and (
+                elif kind != "link" and not bounded and not native_images and (
                     not self.options.vision.url or not self.options.vision.max_request_micro_usd
                 ):
                     error = "CONTENT_VISION_NOT_CONFIGURED"
                 elif (
-                    not bounded
+                    kind != "link" and not bounded and not native_images
                     and self.options.image_daily_micro_usd
                     < self.options.vision.max_request_micro_usd
                 ):
@@ -369,64 +381,9 @@ class ContentService:
                 )
         return self.status(event_id)["items"]
 
-    def followup(self, event_id):
-        """Let an explicit owner follow-up consume one existing read, without reissuing it."""
-        if not self.settings.content_enabled or not private_life.enabled(self.settings):
-            return
-        event, body = self._source(event_id)
-        if self._rows(event_id) or body.get("shared_content"):
-            return
-        text = body.get("text", "").strip()
-        if re.search(r"别|不要|不用|停止|取消|算了|不看|不读|换.{0,2}话题|聊别的", text):
-            return
-        continuation = re.search(
-            r"(?:继续|接着|再试|重新|重试|试试).{0,16}(?:读|看|打开)|再(?:读|看)"
-            r"|(?:现在|这次|应该).{0,8}(?:可以|能).{0,8}(?:读|看|打开)", text,
-        )
-        references = {segment["reference"] for segment in (body.get("rich") or {}).get(
-            "segments", []
-        ) if segment["type"] == "reply"}
-        if not continuation and not references:
-            return
-        s = self.store
-        with nullcontext() if s.db.in_transaction else s.transaction():
-            self._source(event_id)
-            reply_revision.require_current(s, event_id, event["reply_revision"])
-            candidates = s.rows(
-                "SELECT c.*,e.source_event_id AS owner_source_event_id FROM content_items c "
-                "JOIN events e "
-                "ON e.event_id=c.owner_event_id JOIN exploration_requests r "
-                "ON r.request_id=c.read_request_id WHERE e.conversation_id=? "
-                "AND e.redacted=0 AND c.redacted=0 AND c.kind='link' AND r.redacted=0 "
-                "AND r.operation='read' AND r.goal_step_json='{}' "
-                "AND e.rowid<(SELECT rowid FROM events WHERE event_id=?) "
-                "ORDER BY e.rowid DESC,c.slot LIMIT ?",
-                (event["conversation_id"], event_id,
-                 self.settings.live_text_window.max_history_turns),
-            )
-            namespace = event["source_event_id"].rpartition(":")[0]
-            for item in candidates:
-                if references and item["owner_source_event_id"] not in {
-                    namespace + ":" + reference for reference in references
-                }:
-                    continue
-                try:
-                    self._source(item["owner_event_id"])
-                except CoreError:
-                    continue
-                value = {"item_id": item["item_id"], "privacy_epoch": epoch(s),
-                         "window_sha256": self.settings.live_text_window.plan_sha256}
-                s.execute("INSERT OR IGNORE INTO runtime_meta(key,value) VALUES (?,?)",
-                          (FOLLOWUP + event_id, encode(value)))
-                current = followup_item(s, self.settings, event_id)
-                if current:
-                    job = s.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
-                    reply_revision.remember_sources(s, job, {current["owner_event_id"], event_id})
-                return
-
     def _consumer_rows(self, event_id):
         rows = self._rows(event_id)
-        inherited = followup_item(self.store, self.settings, event_id)
+        inherited = followup_item(self.store, self.settings, event_id, clock=self.clock)
         if inherited:
             rows.append(inherited)
         return rows
@@ -442,6 +399,9 @@ class ContentService:
         items, deadlines = [], []
         for row in self._consumer_rows(event_id):
             state, error = row["state"], row["error_code"]
+            if (row["kind"] == "link" and not row["read_request_id"]
+                and self.settings.owner_runtime.mode == "ENABLED"):
+                state = "DISCOVERED"
             if row["kind"] == "link" and row["read_request_id"]:
                 read = self.store.one(
                     "SELECT state,last_error_code,redacted FROM exploration_requests "
@@ -505,9 +465,11 @@ class ContentService:
             "ORDER BY e.rowid DESC LIMIT 3",
             (event["conversation_id"], event_id),
         )
-        if live_text.active(self.store, self.settings):
+        if self.settings.owner_runtime.mode == "ENABLED" or live_text.active(
+            self.store, self.settings
+        ):
             roots = [{"event_id": event_id}]
-            inherited = followup_item(self.store, self.settings, event_id)
+            inherited = followup_item(self.store, self.settings, event_id, clock=self.clock)
             if inherited:
                 roots.append({"event_id": inherited["owner_event_id"],
                               "item_id": inherited["item_id"]})
@@ -1136,9 +1098,7 @@ class ContentService:
                 )
             result_model = cfg.model_name
             if response.tool_calls:
-                response = await qq_video.analyze(model, s, cfg, clock, job, response.tool_calls)
-                result_model = cfg.paid_model.video_input.model
-                sampling = ["[本批动图已按原时间顺序转为无声视频分析，图像预览仅为首帧。]"]
+                raise CoreError("OWNER_AUTHORITY_REQUIRED", 403)
             text = redact(response.text, cfg).replace(
                 cfg.model_key.get_secret_value(), "[REDACTED]",
             )
@@ -1362,12 +1322,15 @@ class ContentService:
             return {"approved": True, "lease_until": row["lease_until"]}
 
     async def run_once(self):
+        from companion import agent_images
+
         if not self.settings.content_enabled:
             return False
         if await content_files.run_file_once(self):
             return True
         s, now = self.store, self.clock()
-        image_spool.cleanup(s, now, self.options.max_image_bytes)
+        image_spool.cleanup(s, now, self.options.max_image_bytes,
+                            retain_completed=agent_images.enabled(self.settings))
         day, _ = self._periods()
         for lost in s.rows(
             "SELECT m.request_id FROM model_usage m JOIN content_items c "

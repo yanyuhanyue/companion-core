@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -20,6 +21,8 @@ from companion.runtime import Runtime
 from companion.store import encode, migrate, uid
 from companion.worker_lock import single_worker
 from companion.worker_loop import Recorder
+from companion.worker_schedule import run_native_unit
+from companion.worker_wakeup import Maintenance, Wakeup
 
 
 async def worker(settings):
@@ -30,20 +33,29 @@ async def worker(settings):
         worker_id = uid("worker")
         loop = Recorder(core.store)
         try:
-            ticks = 0
-            while True:
-                worked = await core.run_once(worker_id)
-                maintenance = not worked and ticks % 60 == 0
-                if not worked:
+            maintenance_clock = Maintenance()
+            with Wakeup(core.store, settings, "worker", core.clock) as wake:
+                while True:
+                    scan = wake.before_scan()
+                    result = await run_native_unit(core.run_once, worker_id)
+                    maintenance = not result.progressed and maintenance_clock.due()
                     if maintenance:
                         core.expire_raw_events()
-                        core.schedule_proactive()
-                    ticks += 1
-                loop.completed(maintenance=maintenance)
-                if not worked:
-                    await asyncio.sleep(1)
+                        maintenance_clock.completed()
+                    loop.completed(maintenance=maintenance,
+                                   waiting=not result.progressed and not maintenance)
+                    if not result.progressed and not maintenance:
+                        await wake.wait(scan, result, maintenance_clock.next_at)
         finally:
             core.store.close()
+
+
+def trusted_proxy_ips(value):
+    """Trust only explicit proxy socket addresses, never ambient forwarding settings."""
+    try:
+        return [str(ipaddress.ip_address(item.strip())) for item in value.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError("Use fixed proxy IP addresses, comma separated") from None
 
 
 def main():
@@ -51,7 +63,6 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("init")
     sub.add_parser("worker")
-    sub.add_parser("diary-worker")
     sub.add_parser("life-worker")
     sub.add_parser("executive-worker")
     sub.add_parser("content-worker")
@@ -72,6 +83,8 @@ def main():
     server = sub.add_parser("serve")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8765)
+    server.add_argument("--forwarded-allow-ips", type=trusted_proxy_ips, default=[],
+                        help="Trust forwarding headers only from these fixed proxy IPs")
     server.add_argument("--memory-control-grant")
     server.add_argument("--memory-control-sha256")
     archive = sub.add_parser("backup")
@@ -104,18 +117,13 @@ def main():
                 host=args.host,
                 port=args.port,
                 access_log=False,
-                proxy_headers=False,
+                proxy_headers=bool(args.forwarded_allow_ips),
+                forwarded_allow_ips=args.forwarded_allow_ips,
             )
         elif args.command == "worker":
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database):
                 asyncio.run(worker(settings))
-        elif args.command == "diary-worker":
-            from companion.diary_worker import diary_worker
-
-            logging.getLogger("httpx").setLevel(logging.WARNING)
-            with single_worker(settings.database, "diary-worker"):
-                asyncio.run(diary_worker(settings))
         elif args.command == "status":
             from companion.ops_status import snapshot
 

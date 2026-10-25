@@ -1,0 +1,785 @@
+{
+  "source_commit": "85c98ec85c1b86929fdb5e8525234f64bb6d43bb",
+  "revision": "0033_model_usage_job_index",
+  "clock": "2026-10-19T04:00:00.000000+00:00",
+  "settings": {
+    "console": {
+      "enabled": false,
+      "public_origin": "https://console.11314520.xyz",
+      "session_seconds": 3600,
+      "max_sessions": 5
+    },
+    "cloud_budget": {
+      "daily_micro_cny": 20000000,
+      "video_per_item_micro_cny": 1000000,
+      "asr_per_item_micro_cny": 500000,
+      "usd_to_cny_micro": 8000000,
+      "fx_source": "operator_planning_estimate",
+      "fx_validity_seconds": 2592000
+    },
+    "owner_qq_id": "10001",
+    "bot_qq_id": "10002",
+    "bridge_token": "**********",
+    "database": "E:\\Companion Core\\.local\\worktrees\\mature-tools-compat\\.local\\verification\\video-accounting-history\\.local\\test-temp\\check-e30e7421c11540b4805bce2f31c5412a\\pytest\\test_export0\\core.db",
+    "erasure_ledger": "E:\\Companion Core\\.local\\worktrees\\mature-tools-compat\\.local\\verification\\video-accounting-history\\.local\\test-temp\\check-e30e7421c11540b4805bce2f31c5412a\\pytest\\test_export0\\privacy.jsonl",
+    "timezone": "Asia/Shanghai",
+    "mode": "live",
+    "model_url": "https://synthetic.invalid/v1",
+    "model_name": "offline-text",
+    "provider": "offline-fixture",
+    "model_key": "**********",
+    "video_model_key": "**********",
+    "timeout_seconds": 45,
+    "max_output_tokens": 768,
+    "context_soft_tokens": 16000,
+    "max_recent_messages": 30,
+    "input_rate": 1000000,
+    "cached_input_rate": 100000,
+    "output_rate": 2000000,
+    "paid_model": {
+      "live_approved": true,
+      "window_id": "win_11111111111111111111111111111111",
+      "approval_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider": "offline-fixture",
+      "model": "offline-text",
+      "endpoint": "https://synthetic.invalid/v1",
+      "currency": "USD",
+      "timezone": "Asia/Shanghai",
+      "starts_at": "2026-10-01T00:00:00+08:00",
+      "expires_at": "2026-10-21T04:00:00Z",
+      "rates_valid_until": "2026-10-21T04:00:00Z",
+      "input_rate": 1000000,
+      "cached_input_rate": 100000,
+      "output_rate": 2000000,
+      "input_estimate_safety_percent": 125,
+      "usage_anomaly_ratio": 4,
+      "usage_anomaly_min_tokens": 256,
+      "max_input_tokens": 20000,
+      "max_output_tokens": 1000,
+      "per_attempt_micro_usd": 30000,
+      "per_request_micro_usd": 60000,
+      "per_request_calls": 4,
+      "daily_micro_usd": null,
+      "daily_calls": 10,
+      "monthly_micro_usd": null,
+      "window_micro_usd": null,
+      "window_calls": 100,
+      "concurrency": 1,
+      "journal_path": "E:\\Companion Core\\.local\\worktrees\\mature-tools-compat\\.local\\verification\\video-accounting-history\\.local\\test-temp\\check-e30e7421c11540b4805bce2f31c5412a\\pytest\\test_export0\\budget.jsonl",
+      "unlimited_period_spend": true,
+      "image_input": {
+        "approval_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "estimated_tokens_per_image": 100,
+        "max_bytes_per_image": 50000,
+        "max_pixels_per_image": 100,
+        "max_images_per_request": 1
+      },
+      "video_input": {
+        "approval_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "provider": "synthetic-video",
+        "model": "configurable-video-one",
+        "endpoint": "https://video.example.test/v1",
+        "input_rate": 8990,
+        "cached_input_rate": 899,
+        "output_rate": 44949,
+        "max_output_tokens": 1000,
+        "timeout_seconds": 45,
+        "estimated_tokens_per_second": 200,
+        "estimated_tokens_per_image": 1024,
+        "max_seconds": 30,
+        "max_bytes": 4000000
+      }
+    },
+    "live_text_window": {
+      "live_approved": true,
+      "execution": "approved_live",
+      "automatic_reply": true,
+      "companion_scope": "owner_private_v1",
+      "companion_approval_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "plan_sha256": "c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874",
+      "window_id": "win_11111111111111111111111111111111",
+      "starts_at": "2026-10-19T11:59:00+08:00",
+      "ends_at": "2026-10-20T12:00:00+08:00",
+      "core_config_sha256": "2e7eade569dd719da9c2b8ecdbc64829a8b1ef0a80080aa8fa00146eb6f02350",
+      "core_code_sha256": "e44056d0312f81c439f7809d34e0e244c536c6f1314bf8f8c6a6a006ed883c31",
+      "bridge_code_sha256": "f5bd5638ad58f0b87bf7bfe95624e0a7f4e354010196d39241a174031bd772e7",
+      "candidate_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "paid_contract_sha256": "99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f",
+      "budget_journal_id": "budget_9a71daf56eeb4aab8d829f33d84aad22",
+      "custodian_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "approval_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "max_inputs": 5,
+      "capture_public_key": "1537069da0481d2a53464fe24a494b33766cdfa24cfeee900ca08be712c04557",
+      "max_model_attempts": 100,
+      "max_input_chars": 500,
+      "max_reply_chars": 500,
+      "rich_input_scope": "references_v1",
+      "image_scope": "owner_image_v1",
+      "image_approval_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "history_scope": "owner_private",
+      "history_approval_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "max_history_turns": 15,
+      "max_history_utf8_bytes": 16000,
+      "memory_scope": "owner_private",
+      "memory_facts": [],
+      "memory_approval_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "handoff": null
+    },
+    "rich_input_scope": "none",
+    "monthly_limit_micro_usd": 20000000,
+    "autonomous_daily_micro_usd": 200000,
+    "memory_daily_micro_usd": 50000,
+    "memory_enabled": true,
+    "diary_enabled": true,
+    "diary_generate_hour": 2,
+    "diary_min_source_events": 1,
+    "diary_max_source_events": 40,
+    "diary_max_output_tokens": 700,
+    "diary_max_body_chars": 2400,
+    "diary_catchup_days": 3,
+    "diary_max_attempts": 2,
+    "diary_daily_micro_usd": 50000,
+    "diary_auto_share": false,
+    "diary_admin_token": "",
+    "control_token": "",
+    "executive": {
+      "enabled": false,
+      "allow_changes": false,
+      "daily_calls": 0,
+      "daily_micro_usd": 0,
+      "monthly_micro_usd": 0,
+      "timeout_seconds": 45,
+      "endpoints": {}
+    },
+    "media": {
+      "enabled": false,
+      "max_session_seconds": 180,
+      "max_session_bytes": 2000000,
+      "max_daily_bytes": 10000000,
+      "max_chunk_bytes": 64000,
+      "max_output_bytes": 256000,
+      "max_active_sessions": 2,
+      "daily_micro_usd": 0,
+      "provider_timeout_seconds": 20,
+      "speech_voice": "alloy",
+      "voice_adapter": "media_voice",
+      "camera_adapter": "media_camera",
+      "android_adapter": "media_android",
+      "stt": {
+        "url": "",
+        "key": "",
+        "model": "",
+        "protocol": "openai",
+        "max_request_micro_usd": 0
+      },
+      "tts": {
+        "url": "",
+        "key": "",
+        "model": "",
+        "protocol": "openai",
+        "max_request_micro_usd": 0
+      },
+      "vision": {
+        "url": "",
+        "key": "",
+        "model": "",
+        "protocol": "openai",
+        "max_request_micro_usd": 0
+      }
+    },
+    "content_enabled": true,
+    "web_reading_enabled": false,
+    "content": {
+      "max_links_per_event": 2,
+      "max_images_per_event": 4,
+      "max_images_per_article": 32,
+      "article_image_micro_usd": 50000,
+      "use_chat_model_for_vision": true,
+      "max_image_bytes": 1000000,
+      "max_daily_image_bytes": 32000000,
+      "max_daily_images": 32,
+      "image_daily_micro_usd": 10000,
+      "wait_seconds": 30,
+      "upload_window_seconds": 300,
+      "provider_timeout_seconds": 20,
+      "max_context_chars": 9000,
+      "image_adapter": "content_image",
+      "vision": {
+        "url": "",
+        "key": "",
+        "model": "",
+        "protocol": "openai",
+        "max_request_micro_usd": 0
+      }
+    },
+    "private_files": {
+      "enabled": false,
+      "parser_image": "",
+      "parser_socket": "",
+      "adapter_id": "content_file",
+      "max_files_per_event": 2,
+      "max_daily_files": 32,
+      "max_daily_bytes": 67108864,
+      "wait_seconds": 75,
+      "upload_window_seconds": 300,
+      "upload_lease_seconds": 20,
+      "worker_lease_seconds": 50,
+      "spool_retention_seconds": 300,
+      "limits": {
+        "max_file_bytes": 8388608,
+        "max_expanded_bytes": 33554432,
+        "max_zip_entries": 512,
+        "max_compression_ratio": 200,
+        "max_pages": 200,
+        "max_records": 2000,
+        "max_text_chars": 12000,
+        "max_table_depth": 8,
+        "max_pdf_stream_bytes": 8388608,
+        "cpu_seconds": 15,
+        "wall_seconds": 30,
+        "memory_bytes": 805306368,
+        "scratch_bytes": 134217728,
+        "max_processes": 96
+      }
+    },
+    "poke_policy": {
+      "enabled": false,
+      "mode": "auto",
+      "allow_native": false,
+      "coalesce_seconds": 2,
+      "cooldown_seconds": 30,
+      "daily_limit": 20,
+      "max_coalesced": 20,
+      "max_text_chars": 160,
+      "max_pending_seconds": 300
+    },
+    "voice": {
+      "enabled": false,
+      "signing_private_key": null,
+      "nodes": {},
+      "job_ttl_seconds": 90,
+      "lease_ttl_seconds": 30,
+      "result_ttl_seconds": 90,
+      "max_pending_jobs": 32,
+      "max_private_blob_bytes": 32000000,
+      "reply": {
+        "enabled": true,
+        "mode": "voice_input",
+        "max_chars": 400,
+        "wait_seconds": 15,
+        "proactive": false
+      },
+      "asr": {
+        "enabled": true,
+        "wait_seconds": 20,
+        "max_records": 2,
+        "max_context_chars": 4000
+      }
+    },
+    "social_autonomy": {
+      "enabled": false,
+      "scope": "none",
+      "authorization_sha256": null,
+      "policy_version": 1,
+      "qzone_enabled": false,
+      "nickname_enabled": false,
+      "signature_enabled": false,
+      "avatar_enabled": false,
+      "qzone_daily_limit": 1,
+      "profile_daily_limit": 1,
+      "qzone_cooldown_seconds": 3600,
+      "profile_cooldown_seconds": 604800,
+      "model_daily_calls": 4,
+      "model_daily_micro_usd": 100000,
+      "decision_interval_seconds": 3600,
+      "max_publish_chars": 500,
+      "max_nickname_chars": 24,
+      "max_signature_chars": 120,
+      "max_source_refs": 3,
+      "max_source_chars": 3000,
+      "max_input_bytes": 16000,
+      "max_output_tokens": 1024,
+      "timeout_seconds": 45,
+      "plan_ttl_seconds": 3600,
+      "profile_baseline_seconds": 300,
+      "max_pending_plans": 4,
+      "asset_policy_sha256": null,
+      "max_asset_bytes": 2097152,
+      "max_asset_dimension": 2048
+    },
+    "bili_video": {
+      "enabled": false,
+      "media": {
+        "max_preview_frames": 4,
+        "max_clips": 3,
+        "max_clip_seconds": 20.0,
+        "max_total_clip_seconds": 30.0,
+        "max_input_bytes": 33554432,
+        "max_asset_bytes": 4000000,
+        "max_total_output_bytes": 8000000,
+        "max_width": 512,
+        "max_height": 512,
+        "max_source_pixels": 8294400,
+        "max_source_seconds": 36000.0,
+        "max_decoded_frames": 3000,
+        "max_output_frames": 1501,
+        "output_fps": 25,
+        "timestamp_tolerance_seconds": 0.04,
+        "max_frame_gap_seconds": 1.0,
+        "timeout_seconds": 30.0,
+        "terminate_grace_seconds": 1.0,
+        "max_process_output_bytes": 262144,
+        "max_memory_bytes": 536870912
+      },
+      "sampling": {
+        "max_duration_seconds": 36000.0,
+        "max_subtitles": 2000,
+        "max_danmaku": 10000,
+        "max_text_chars": 500,
+        "max_evidence_per_selection": 8,
+        "initial_frames": 4,
+        "max_segments": 3,
+        "min_frame_gap_seconds": 12.0,
+        "context_before_seconds": 6.0,
+        "context_after_seconds": 8.0,
+        "max_segment_seconds": 20.0,
+        "max_total_segment_seconds": 30.0,
+        "subtitle_duplicate_seconds": 30.0,
+        "subtitle_similarity": 0.85,
+        "danmaku_duplicate_seconds": 10.0,
+        "danmaku_bin_seconds": 5.0,
+        "local_window_seconds": 60.0,
+        "min_danmaku_support": 3,
+        "min_density_ratio": 2.0,
+        "baseline_floor_per_second": 0.2,
+        "focus_terms": []
+      },
+      "deadline_seconds": 180,
+      "max_concurrent": 1,
+      "max_context_chars": 3000
+    },
+    "observation_enabled": true,
+    "observation_adapters": {
+      "content_image": {
+        "token": "**********",
+        "source": "qq_image",
+        "media_analysis": true,
+        "reader_max_requests": 1,
+        "source_grant_required": false
+      }
+    },
+    "voice_enabled": false,
+    "camera_enabled": false,
+    "android_enabled": false,
+    "affect_enabled": true,
+    "affect_decay_minutes": 180,
+    "affect_max_evidence": 12,
+    "consolidation_enabled": true,
+    "consolidation_local_hour": 3,
+    "consolidation_catchup_days": 3,
+    "reflection_enabled": true,
+    "reflection_daily_max_suggestions": 3,
+    "reflection_min_sources": 1,
+    "reflection_max_output_tokens": 600,
+    "reflection_max_daily_calls": 1,
+    "reflection_daily_micro_usd": 50000,
+    "reflection_monthly_micro_usd": 100000,
+    "goals_enabled": true,
+    "goals_max_active": 10,
+    "goal_max_attempts": 3,
+    "wake_enabled": true,
+    "wake_min_interval_minutes": 180,
+    "wake_max_daily_runs": 3,
+    "exploration_enabled": true,
+    "exploration_daily_candidate_limit": 40,
+    "exploration_daily_deep_reads": 5,
+    "exploration_daily_requests": 0,
+    "exploration_monthly_requests": 0,
+    "exploration_max_response_bytes": 524288,
+    "exploration_daily_bytes": 0,
+    "social_enabled": true,
+    "social_semantic_threshold": 0.9,
+    "expression_enabled": true,
+    "expression_learning_enabled": false,
+    "expression_cooldown_minutes": 30,
+    "expression_selection_probability": 0.35,
+    "meme_discovery_enabled": false,
+    "meme_discovery_daily_queries": 2,
+    "meme_discovery_daily_download_bytes": 16777216,
+    "meme_discovery_daily_storage_bytes": 4194304,
+    "expression_meme_categories": [
+      "happy",
+      "like",
+      "surprised",
+      "morning",
+      "sleep"
+    ],
+    "embedding_cache_dir": "data/embedding-cache",
+    "semantic_min_score": 0.5,
+    "extraction_min_events": 1,
+    "extraction_idle_seconds": 0,
+    "emerging_min_sessions": 3,
+    "stable_min_days": 7,
+    "proactive_enabled": true,
+    "proactive_interval_seconds": 10800,
+    "proactive_idle_seconds": 3600,
+    "proactive_daily_limit": 2,
+    "quiet_start": 0,
+    "quiet_end": 0,
+    "lease_seconds": 120,
+    "max_attempts": 3,
+    "raw_event_retention_days": 365
+  },
+  "tables": {
+    "content_items": [
+      {
+        "item_id": "content_3997480bf31e40febb02a80961512083",
+        "owner_event_id": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "kind": "qq_image",
+        "slot": 0,
+        "source_event_id": null,
+        "target_url": "",
+        "read_request_id": null,
+        "state": "UNKNOWN",
+        "media_sha256": "a9c5677298b642f8bb5d990dfb3590125b15d53b83b119e71c84251b026b032b",
+        "fingerprint": "1a70f09f34535321718632855cbe51a96860f4a8e746c8779d91fafa7a5bed0c",
+        "captured_privacy_epoch": 0,
+        "reserved_bytes": 1000000,
+        "usage_request_id": "model_89260db358234eb5988dfa730cd124ed",
+        "output_event_id": null,
+        "lease_token": "content_lease_5b5528530af44c95b9de608b07223094",
+        "lease_until": "2026-10-19T04:00:30.000000+00:00",
+        "deadline": "2026-10-19T04:00:30.000000+00:00",
+        "error_code": "LIVE_VIDEO_RESULT_REQUIRED",
+        "redacted": 0,
+        "created_at": "2026-10-19T04:00:00.000000+00:00",
+        "started_at": "2026-10-19T04:00:00.000000+00:00",
+        "updated_at": "2026-10-19T04:00:00.000000+00:00",
+        "attachment_json": "{}"
+      }
+    ],
+    "cloud_budget_policies": [
+      {
+        "version": 1,
+        "config_json": "{\"asr_per_item_micro_cny\":500000,\"daily_micro_cny\":20000000,\"fx_source\":\"operator_planning_estimate\",\"fx_validity_seconds\":2592000,\"usd_to_cny_micro\":8000000,\"video_per_item_micro_cny\":1000000}",
+        "config_sha256": "aca61fea6abdc4d85aae73151cd10cc169f411a4971dce6b5d9d4c800779d6c6",
+        "timezone": "Asia/Shanghai",
+        "effective_at": "2026-10-19T04:00:00.000000+00:00",
+        "fx_valid_from": "2026-10-19T04:00:00.000000+00:00",
+        "fx_valid_until": "2026-11-18T04:00:00.000000+00:00"
+      }
+    ],
+    "job_sources": [
+      {
+        "job_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "event_id": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392"
+      }
+    ],
+    "model_budget_windows": [
+      {
+        "window_id": "win_11111111111111111111111111111111",
+        "contract_sha256": "99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f"
+      }
+    ],
+    "audit_log": [
+      {
+        "audit_id": 1,
+        "action": "reply.superseded",
+        "actor_id": "system",
+        "entity_type": "core",
+        "entity_id": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "trace_id": "trace_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "safe_detail_json": "{\"reply_revision\":1}",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "audit_id": 2,
+        "action": "event.accepted",
+        "actor_id": "system",
+        "entity_type": "core",
+        "entity_id": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "trace_id": "trace_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "safe_detail_json": "{}",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "audit_id": 3,
+        "action": "cloud_budget.bound",
+        "actor_id": "system",
+        "entity_type": "core",
+        "entity_id": "1",
+        "trace_id": "cloud-budget",
+        "safe_detail_json": "{\"config_sha256\":\"aca61fea6abdc4d85aae73151cd10cc169f411a4971dce6b5d9d4c800779d6c6\",\"fx_basis\":\"configured_estimate\"}",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "audit_id": 4,
+        "action": "model.usage_diagnostic",
+        "actor_id": "system",
+        "entity_type": "core",
+        "entity_id": "model_89260db358234eb5988dfa730cd124ed",
+        "trace_id": "budget",
+        "safe_detail_json": "{\"actual_usage_known\":true,\"billing_basis\":\"configured_rates_not_invoice\",\"cached_input_tokens\":0,\"code\":\"NORMAL\",\"cost_error_micro_usd\":-1153,\"currency\":\"USD\",\"input_actual_tokens\":100,\"input_error_tokens\":-593,\"input_estimated_tokens\":693,\"limits\":[],\"output_actual_tokens\":20,\"reserved_micro_usd\":1293,\"usage_priced_micro_usd\":140}",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "audit_id": 5,
+        "action": "model.usage_diagnostic",
+        "actor_id": "system",
+        "entity_type": "core",
+        "entity_id": "model_c3d621aa78ab4c45b4f2aecde7864fbd",
+        "trace_id": "budget",
+        "safe_detail_json": "{\"actual_usage_known\":true,\"billing_basis\":\"configured_rates_not_invoice\",\"cached_input_tokens\":0,\"code\":\"NORMAL\",\"cost_error_micro_usd\":-47,\"currency\":\"USD\",\"input_actual_tokens\":100,\"input_error_tokens\":-242,\"input_estimated_tokens\":342,\"limits\":[],\"output_actual_tokens\":20,\"reserved_micro_usd\":49,\"usage_priced_micro_usd\":2}",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      }
+    ],
+    "jobs": [
+      {
+        "job_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "event_id": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "kind": "chat",
+        "state": "CANCELLED",
+        "idempotency_key": "reply:evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "attempts": 0,
+        "max_attempts": 3,
+        "lease_owner": null,
+        "lease_until": null,
+        "next_attempt_at": null,
+        "last_error_code": "LIVE_WINDOW_STOPPED",
+        "created_at": "2026-10-19T04:00:00.000000+00:00",
+        "updated_at": "2026-10-19T04:00:00.000000+00:00",
+        "lease_token": null,
+        "context_tracked": 1
+      }
+    ],
+    "conversations": [
+      {
+        "conversation_id": "conv_c26b07f9091140fcb9c94138a36e072c",
+        "platform": "qq.onebot",
+        "platform_session_key": "onebot-direct:FriendMessage:10001",
+        "scope": "private",
+        "owner_actor_id": "owner",
+        "last_event_at": "2026-10-19T04:00:00.000000+00:00",
+        "created_at": "2026-10-19T04:00:00.000000+00:00",
+        "reply_revision": 1
+      }
+    ],
+    "cloud_cost_snapshots": [
+      {
+        "reference_type": "model",
+        "reference_id": "model_89260db358234eb5988dfa730cd124ed",
+        "policy_version": 1,
+        "task_kind": "model",
+        "task_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "local_day": "2026-10-19",
+        "occurred_at": "2026-10-19T04:00:00.000000+00:00",
+        "dispatched_at": "2026-10-19T04:00:00.000000+00:00",
+        "snapshot_json": "{\"config\":{\"asr_per_item_micro_cny\":500000,\"daily_micro_cny\":20000000,\"fx_source\":\"operator_planning_estimate\",\"fx_validity_seconds\":2592000,\"usd_to_cny_micro\":8000000,\"video_per_item_micro_cny\":1000000},\"config_sha256\":\"aca61fea6abdc4d85aae73151cd10cc169f411a4971dce6b5d9d4c800779d6c6\",\"conversion_provenance\":\"reservation\",\"cost_basis\":\"configured_planning_estimates_not_provider_upper_bounds\",\"effective_at\":\"2026-10-19T04:00:00.000000+00:00\",\"fx_valid_from\":\"2026-10-19T04:00:00.000000+00:00\",\"fx_valid_until\":\"2026-11-18T04:00:00.000000+00:00\",\"pricing\":{\"cached_input_rate\":100000,\"input_rate\":1000000,\"output_rate\":2000000,\"pricing_known\":true},\"timezone\":\"Asia/Shanghai\",\"version\":1}",
+        "reserved_micro_usd": 1293,
+        "accounted_micro_usd": 140,
+        "amount_micro_cny": 1120,
+        "state": "SETTLED",
+        "legacy": 0,
+        "reconciliation_sha256": null,
+        "updated_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "reference_type": "model",
+        "reference_id": "model_c3d621aa78ab4c45b4f2aecde7864fbd",
+        "policy_version": 1,
+        "task_kind": "video",
+        "task_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "local_day": "2026-10-19",
+        "occurred_at": "2026-10-19T04:00:00.000000+00:00",
+        "dispatched_at": "2026-10-19T04:00:00.000000+00:00",
+        "snapshot_json": "{\"config\":{\"asr_per_item_micro_cny\":500000,\"daily_micro_cny\":20000000,\"fx_source\":\"operator_planning_estimate\",\"fx_validity_seconds\":2592000,\"usd_to_cny_micro\":8000000,\"video_per_item_micro_cny\":1000000},\"config_sha256\":\"aca61fea6abdc4d85aae73151cd10cc169f411a4971dce6b5d9d4c800779d6c6\",\"conversion_provenance\":\"reservation\",\"cost_basis\":\"configured_planning_estimates_not_provider_upper_bounds\",\"effective_at\":\"2026-10-19T04:00:00.000000+00:00\",\"fx_valid_from\":\"2026-10-19T04:00:00.000000+00:00\",\"fx_valid_until\":\"2026-11-18T04:00:00.000000+00:00\",\"pricing\":{\"cached_input_rate\":899,\"input_rate\":8990,\"output_rate\":44949,\"pricing_known\":true},\"timezone\":\"Asia/Shanghai\",\"version\":1}",
+        "reserved_micro_usd": 49,
+        "accounted_micro_usd": 49,
+        "amount_micro_cny": 392,
+        "state": "UNKNOWN",
+        "legacy": 0,
+        "reconciliation_sha256": null,
+        "updated_at": "2026-10-19T04:00:00.000000+00:00"
+      }
+    ],
+    "events": [
+      {
+        "event_id": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "schema_version": 1,
+        "source": "qq.onebot",
+        "source_event_id": "10002:onebot-direct:FriendMessage:10001:epoch:offline-first-20261020:1",
+        "conversation_id": "conv_c26b07f9091140fcb9c94138a36e072c",
+        "actor_id": "owner",
+        "event_type": "message.received",
+        "occurred_at": "2026-10-19T04:00:00.000000+00:00",
+        "ingested_at": "2026-10-19T04:00:00.000000+00:00",
+        "privacy_scope": "private",
+        "body_json": "{\"media\":[],\"rich\":{\"coverage\":\"PARTIAL\",\"owner_text_positions\":[],\"segment_count\":1,\"segments\":[{\"actor\":\"UNVERIFIED\",\"coverage\":\"UNREAD\",\"index\":0,\"slot\":0,\"source_sha256\":\"9edeb6d9b68360eabb0db564c5722c7eda2dda98bd27881de7bbd08db97b2347\",\"type\":\"image\"}],\"version\":\"references_v1\"},\"shared_content\":[{\"kind\":\"image\",\"slot\":0}],\"text\":\"\"}",
+        "trace_id": "trace_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "idempotency_key": "evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "fingerprint": "48a1e88a634785e9b1c4f789878072ef7e4abfaccbb2c26fc5a2a2c72c6c5b99",
+        "redacted": 0,
+        "memory_processed": 0,
+        "reply_revision": 1
+      }
+    ],
+    "model_usage": [
+      {
+        "usage_id": "usage_9a7a56d3b8df4508844cce80f67f2939",
+        "request_id": "model_89260db358234eb5988dfa730cd124ed",
+        "job_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "scenario": "content_vision",
+        "provider": "offline-fixture",
+        "model": "offline-text",
+        "input_tokens": 100,
+        "cached_input_tokens": 0,
+        "output_tokens": 20,
+        "billed_micro_usd": 140,
+        "is_estimate": 1,
+        "occurred_at": "2026-10-19T04:00:00.000000+00:00",
+        "state": "SETTLED",
+        "pricing_known": 1
+      },
+      {
+        "usage_id": "usage_d75a18b0ddb94e7cab533ed7d4024094",
+        "request_id": "model_c3d621aa78ab4c45b4f2aecde7864fbd",
+        "job_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "scenario": "content_video",
+        "provider": "synthetic-video",
+        "model": "configurable-video-one",
+        "input_tokens": 100,
+        "cached_input_tokens": 0,
+        "output_tokens": 20,
+        "billed_micro_usd": 49,
+        "is_estimate": 1,
+        "occurred_at": "2026-10-19T04:00:00.000000+00:00",
+        "state": "UNKNOWN",
+        "pricing_known": 1
+      }
+    ],
+    "principals": [
+      {
+        "actor_id": "owner",
+        "kind": "owner",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "actor_id": "companion",
+        "kind": "companion",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      },
+      {
+        "actor_id": "system",
+        "kind": "system",
+        "created_at": "2026-10-19T04:00:00.000000+00:00"
+      }
+    ],
+    "model_admissions": [
+      {
+        "request_id": "model_89260db358234eb5988dfa730cd124ed",
+        "logical_request_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "attempt_id": "attempt_240b61a3e8f14f81b23034f176344ac5",
+        "attempt_number": 1,
+        "window_id": "win_11111111111111111111111111111111",
+        "contract_sha256": "99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f",
+        "payload_sha256": "c420de7980a60c71849acfc342db8dcb116576843ecc498da66dea9d938a9b46",
+        "snapshot_json": "{\"approval_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"cached_input_rate\":100000,\"concurrency\":1,\"credential_tag\":\"775920ad83ef9702c0573c4f9d50a0fbfa052b32a196cb98f4b874d173b7f0fb\",\"currency\":\"USD\",\"daily_calls\":10,\"daily_micro_usd\":null,\"endpoint\":\"https://synthetic.invalid/v1\",\"estimator\":\"utf8-third-v1\",\"expires_at\":\"2026-10-21T04:00:00Z\",\"image_estimator\":\"approved-fixed-image-plus-utf8-third-v1\",\"image_input\":{\"approval_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"estimated_tokens_per_image\":100,\"max_bytes_per_image\":50000,\"max_images_per_request\":1,\"max_pixels_per_image\":100},\"input_estimate_safety_percent\":125,\"input_rate\":1000000,\"live_approved\":true,\"local_monthly_micro_usd\":20000000,\"max_input_tokens\":20000,\"max_output_tokens\":1000,\"model\":\"offline-text\",\"monthly_micro_usd\":null,\"output_rate\":2000000,\"per_attempt_micro_usd\":30000,\"per_request_calls\":4,\"per_request_micro_usd\":60000,\"provider\":\"offline-fixture\",\"rates_valid_until\":\"2026-10-21T04:00:00Z\",\"reflection_monthly_micro_usd\":100000,\"scenario_daily_micro_usd\":{\"activity\":200000,\"content_vision\":10000,\"diary\":50000,\"memory_extract\":50000,\"memory_review\":50000,\"reflection\":50000},\"starts_at\":\"2026-10-01T00:00:00+08:00\",\"timezone\":\"Asia/Shanghai\",\"unlimited_period_spend\":true,\"usage_anomaly_min_tokens\":256,\"usage_anomaly_ratio\":4,\"video_credential_tag\":\"29562a00ce452dc766c32d6621b685619d37842c1fbf85c11c3076c80e408f19\",\"video_input\":{\"approval_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"cached_input_rate\":899,\"endpoint\":\"https://video.example.test/v1\",\"estimated_tokens_per_image\":1024,\"estimated_tokens_per_second\":200,\"input_rate\":8990,\"max_bytes\":4000000,\"max_output_tokens\":1000,\"max_seconds\":30,\"model\":\"configurable-video-one\",\"output_rate\":44949,\"provider\":\"synthetic-video\",\"timeout_seconds\":45},\"window_calls\":100,\"window_id\":\"win_11111111111111111111111111111111\",\"window_micro_usd\":null}",
+        "reserved_micro_usd": 1293,
+        "input_bound": 693,
+        "output_bound": 300,
+        "lease_token": "model_lease_67d1cf6ebd37434ba9735f706098a1da",
+        "lease_until": "2026-10-19T04:00:55.000000+00:00",
+        "io_started_at": "2026-10-19T04:00:00.000000+00:00",
+        "journal_path": "E:\\Companion Core\\.local\\worktrees\\mature-tools-compat\\.local\\verification\\video-accounting-history\\.local\\test-temp\\check-e30e7421c11540b4805bce2f31c5412a\\pytest\\test_export0\\budget.jsonl",
+        "journal_id": "budget_9a71daf56eeb4aab8d829f33d84aad22"
+      },
+      {
+        "request_id": "model_c3d621aa78ab4c45b4f2aecde7864fbd",
+        "logical_request_id": "job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "attempt_id": "attempt_cd0b5d63ee3c4f4faeafcbdbe6c44f8b",
+        "attempt_number": 2,
+        "window_id": "win_11111111111111111111111111111111",
+        "contract_sha256": "99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f",
+        "payload_sha256": "4d48b1961fe7f777b59ff9f1c043e09510eed3e1cf61f59755e80e6561376b66",
+        "snapshot_json": "{\"approval_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"cached_input_rate\":100000,\"concurrency\":1,\"credential_tag\":\"775920ad83ef9702c0573c4f9d50a0fbfa052b32a196cb98f4b874d173b7f0fb\",\"currency\":\"USD\",\"daily_calls\":10,\"daily_micro_usd\":null,\"endpoint\":\"https://synthetic.invalid/v1\",\"estimator\":\"utf8-third-v1\",\"expires_at\":\"2026-10-21T04:00:00Z\",\"image_estimator\":\"approved-fixed-image-plus-utf8-third-v1\",\"image_input\":{\"approval_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"estimated_tokens_per_image\":100,\"max_bytes_per_image\":50000,\"max_images_per_request\":1,\"max_pixels_per_image\":100},\"input_estimate_safety_percent\":125,\"input_rate\":1000000,\"live_approved\":true,\"local_monthly_micro_usd\":20000000,\"max_input_tokens\":20000,\"max_output_tokens\":1000,\"model\":\"offline-text\",\"monthly_micro_usd\":null,\"output_rate\":2000000,\"per_attempt_micro_usd\":30000,\"per_request_calls\":4,\"per_request_micro_usd\":60000,\"provider\":\"offline-fixture\",\"rates_valid_until\":\"2026-10-21T04:00:00Z\",\"reflection_monthly_micro_usd\":100000,\"scenario_daily_micro_usd\":{\"activity\":200000,\"content_vision\":10000,\"diary\":50000,\"memory_extract\":50000,\"memory_review\":50000,\"reflection\":50000},\"starts_at\":\"2026-10-01T00:00:00+08:00\",\"timezone\":\"Asia/Shanghai\",\"unlimited_period_spend\":true,\"usage_anomaly_min_tokens\":256,\"usage_anomaly_ratio\":4,\"video_credential_tag\":\"29562a00ce452dc766c32d6621b685619d37842c1fbf85c11c3076c80e408f19\",\"video_input\":{\"approval_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"cached_input_rate\":899,\"endpoint\":\"https://video.example.test/v1\",\"estimated_tokens_per_image\":1024,\"estimated_tokens_per_second\":200,\"input_rate\":8990,\"max_bytes\":4000000,\"max_output_tokens\":1000,\"max_seconds\":30,\"model\":\"configurable-video-one\",\"output_rate\":44949,\"provider\":\"synthetic-video\",\"timeout_seconds\":45},\"window_calls\":100,\"window_id\":\"win_11111111111111111111111111111111\",\"window_micro_usd\":null}",
+        "reserved_micro_usd": 49,
+        "input_bound": 342,
+        "output_bound": 1000,
+        "lease_token": "model_lease_285ec641fffc49afa8768891c071f6d4",
+        "lease_until": "2026-10-19T04:00:55.000000+00:00",
+        "io_started_at": "2026-10-19T04:00:00.000000+00:00",
+        "journal_path": "E:\\Companion Core\\.local\\worktrees\\mature-tools-compat\\.local\\verification\\video-accounting-history\\.local\\test-temp\\check-e30e7421c11540b4805bce2f31c5412a\\pytest\\test_export0\\budget.jsonl",
+        "journal_id": "budget_9a71daf56eeb4aab8d829f33d84aad22"
+      }
+    ],
+    "runtime_meta": [
+      {
+        "key": "ledger_id",
+        "value": "ledger_503e361861284225b05b4256a702804d"
+      },
+      {
+        "key": "derived_erasure_contract",
+        "value": "2,diary-projections,observations,affect,reflections,consolidation,goals,reading,exploration,executive,media,meme-captions,content,poke,social-autonomy,voice,bili-video"
+      },
+      {
+        "key": "owner_qq_id",
+        "value": "10001"
+      },
+      {
+        "key": "model_budget_journal_id",
+        "value": "budget_9a71daf56eeb4aab8d829f33d84aad22"
+      },
+      {
+        "key": "live_text_window",
+        "value": "{\"approval_sha256\":\"b1b1e8916041d3090004f68257e5f03e6495e12c5f48cb8ca0dcf37fa94ec52e\",\"budget_journal_id\":\"budget_9a71daf56eeb4aab8d829f33d84aad22\",\"budget_journal_path\":\"E:\\\\Companion Core\\\\.local\\\\worktrees\\\\mature-tools-compat\\\\.local\\\\verification\\\\video-accounting-history\\\\.local\\\\test-temp\\\\check-e30e7421c11540b4805bce2f31c5412a\\\\pytest\\\\test_export0\\\\budget.jsonl\",\"erasure_ledger_sha256\":\"6aece0ba41ccffe3a2abf050ddf088e4de4bbd73b2da3f61fd19f5939b729c2a\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"privacy_epoch\":0,\"window_id\":\"win_11111111111111111111111111111111\"}"
+      },
+      {
+        "key": "live_text_input:evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392",
+        "value": "{\"capture\":{\"config_sha256\":\"1d1eea0a3b31e141f7fd4f5eb2559a4a628b0f5693802c8559e4ab45658324ff\",\"event_id\":\"evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392\",\"evidence_sha256\":\"eb84e35cc8ebb0a3bb5f2870ec94ec4d6478ca0e4dcbc4abf53a61b6ac578e37\",\"frame_sha256\":\"acbcaba55493d48edfb878ead9605b449044484a87b46cd2d64fc53b6bb2452d\",\"identity_sha256\":\"97695c176c1d6d65165e80481b33396ab989d79e6468d92136799e1bdbfeada3\",\"input_sha256\":\"08e7f850f881c83525b697e6af0e9b5dc79bb39bb781f77491244515dfc2937f\",\"kind\":\"authenticated_onebot_ws\",\"occurred_at\":\"2026-10-19T04:00:00Z\",\"protocol_epoch\":\"offline-first-20261020\",\"received_at\":\"2026-10-19T04:00:00Z\",\"signature\":\"2c45ebb537b335dcdc554a81aa669663a04193bce8fff7c1407f4130f22aa7cdfea61cc06ec528e0b3d6cc2039d6d1de6c2e44eb7280da755fc990c1c4e9fa0a\",\"source_event_id\":\"10002:onebot-direct:FriendMessage:10001:epoch:offline-first-20261020:1\",\"window_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\"},\"event_id\":\"evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392\",\"evidence_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"input_sha256\":\"08e7f850f881c83525b697e6af0e9b5dc79bb39bb781f77491244515dfc2937f\",\"privacy_epoch\":0,\"window_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\"}"
+      },
+      {
+        "key": "live_text_image:job_383dc25bcbcd4f23a681683fbc0bae5e",
+        "value": "{\"event_id\":\"evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392\",\"image_approval_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"images\":[{\"fingerprint\":\"1a70f09f34535321718632855cbe51a96860f4a8e746c8779d91fafa7a5bed0c\",\"item_id\":\"content_3997480bf31e40febb02a80961512083\",\"media_sha256\":\"a9c5677298b642f8bb5d990dfb3590125b15d53b83b119e71c84251b026b032b\",\"source\":{\"actor\":\"UNVERIFIED\",\"coverage\":\"UNREAD\",\"index\":0,\"slot\":0,\"source_sha256\":\"9edeb6d9b68360eabb0db564c5722c7eda2dda98bd27881de7bbd08db97b2347\",\"type\":\"image\"},\"upload_proof\":{\"event_id\":\"evt_ad1c7f3a4a47dda567f73add4b77029644210b6c940b6a0dd780ae22dd378392\",\"lease_token\":\"content_lease_5b5528530af44c95b9de608b07223094\",\"media_sha256\":\"a9c5677298b642f8bb5d990dfb3590125b15d53b83b119e71c84251b026b032b\",\"mime\":\"image/gif\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"signature\":\"547b2c486e208c74f1c29d1172a75235c114581a91b75d26b05804c42014158ce71894e6c7005cd5476a3a14d3c82fd75a046cb21370bac4617493d4811b6f02\",\"source_sha256\":\"9edeb6d9b68360eabb0db564c5722c7eda2dda98bd27881de7bbd08db97b2347\"}}],\"original_expires_at\":\"2026-10-19T04:05:00.000000+00:00\",\"payload_sha256\":\"c420de7980a60c71849acfc342db8dcb116576843ecc498da66dea9d938a9b46\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"privacy_epoch\":0,\"request_id\":\"model_89260db358234eb5988dfa730cd124ed\",\"video\":{\"media_sha256\":[\"43835a4a44deb0a795b721c5cd5c3c658bc340e9e48f25b503c2273e0b410649\"],\"payload_sha256\":\"4d48b1961fe7f777b59ff9f1c043e09510eed3e1cf61f59755e80e6561376b66\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"privacy_epoch\":0,\"request_id\":\"model_c3d621aa78ab4c45b4f2aecde7864fbd\",\"slots\":[0],\"source_sha256\":\"b0c8678b5169c99c67173b084d03233a8dad78d068fd65f5a0ece1eadc66edfb\",\"tool_call_sha256\":\"725eab462253a78a03dae37f4e6268cc83ca1c3c173b0565d5d3ba0b355ab174\"}}"
+      },
+      {
+        "key": "private_life_model:model_89260db358234eb5988dfa730cd124ed",
+        "value": "{\"event_sha256\":\"4feb7c582341ab54c01178e3731d22c3f4883f9da1da8439172fe8c4a09ea22b\",\"job_id\":\"job_383dc25bcbcd4f23a681683fbc0bae5e\",\"payload_sha256\":\"c420de7980a60c71849acfc342db8dcb116576843ecc498da66dea9d938a9b46\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"privacy_epoch\":0,\"scenario\":\"content_vision\"}"
+      },
+      {
+        "key": "private_life_model:model_c3d621aa78ab4c45b4f2aecde7864fbd",
+        "value": "{\"event_sha256\":\"4feb7c582341ab54c01178e3731d22c3f4883f9da1da8439172fe8c4a09ea22b\",\"job_id\":\"job_383dc25bcbcd4f23a681683fbc0bae5e\",\"payload_sha256\":\"4d48b1961fe7f777b59ff9f1c043e09510eed3e1cf61f59755e80e6561376b66\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"privacy_epoch\":0,\"scenario\":\"content_video\"}"
+      },
+      {
+        "key": "model_budget_blocked",
+        "value": "1"
+      },
+      {
+        "key": "live_text_stopped:c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874",
+        "value": "CONTENT_IMAGE_FAILED_CLOSED"
+      },
+      {
+        "key": "model_budget_live_lifecycle",
+        "value": "{\"handoff_sha256\":null,\"head_sha256\":\"b704f25c7e7a525a07b5ef95a8634db59c093fc1c70fddf0ffb6b0aa0dca4774\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"state\":\"STOPPED\",\"window_id\":\"win_11111111111111111111111111111111\"}"
+      },
+      {
+        "key": "live_text_stopped",
+        "value": "OWNER_STOP"
+      },
+      {
+        "key": "live_text_window:c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874",
+        "value": "{\"approval\":{\"approval_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"automatic_reply\":true,\"bridge_code_sha256\":\"f5bd5638ad58f0b87bf7bfe95624e0a7f4e354010196d39241a174031bd772e7\",\"budget_journal_id\":\"budget_9a71daf56eeb4aab8d829f33d84aad22\",\"candidate_sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"capture_public_key\":\"1537069da0481d2a53464fe24a494b33766cdfa24cfeee900ca08be712c04557\",\"companion_approval_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"companion_scope\":\"owner_private_v1\",\"core_code_sha256\":\"e44056d0312f81c439f7809d34e0e244c536c6f1314bf8f8c6a6a006ed883c31\",\"core_config_sha256\":\"2e7eade569dd719da9c2b8ecdbc64829a8b1ef0a80080aa8fa00146eb6f02350\",\"custodian_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"ends_at\":\"2026-10-20T12:00:00+08:00\",\"execution\":\"approved_live\",\"handoff\":null,\"history_approval_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"history_scope\":\"owner_private\",\"image_approval_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"image_scope\":\"owner_image_v1\",\"live_approved\":true,\"max_history_turns\":15,\"max_history_utf8_bytes\":16000,\"max_input_chars\":500,\"max_inputs\":5,\"max_model_attempts\":100,\"max_reply_chars\":500,\"memory_approval_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"memory_facts\":[],\"memory_scope\":\"owner_private\",\"paid_contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"rich_input_scope\":\"references_v1\",\"starts_at\":\"2026-10-19T11:59:00+08:00\",\"window_id\":\"win_11111111111111111111111111111111\"},\"binding\":{\"approval_sha256\":\"b1b1e8916041d3090004f68257e5f03e6495e12c5f48cb8ca0dcf37fa94ec52e\",\"budget_journal_id\":\"budget_9a71daf56eeb4aab8d829f33d84aad22\",\"budget_journal_path\":\"E:\\\\Companion Core\\\\.local\\\\worktrees\\\\mature-tools-compat\\\\.local\\\\verification\\\\video-accounting-history\\\\.local\\\\test-temp\\\\check-e30e7421c11540b4805bce2f31c5412a\\\\pytest\\\\test_export0\\\\budget.jsonl\",\"erasure_ledger_sha256\":\"6aece0ba41ccffe3a2abf050ddf088e4de4bbd73b2da3f61fd19f5939b729c2a\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"privacy_epoch\":0,\"window_id\":\"win_11111111111111111111111111111111\"},\"state\":\"STOPPED\"}"
+      }
+    ]
+  },
+  "request": {
+    "request_id": "model_c3d621aa78ab4c45b4f2aecde7864fbd",
+    "journal_id": "budget_9a71daf56eeb4aab8d829f33d84aad22",
+    "expected_head_sha256": "b704f25c7e7a525a07b5ef95a8634db59c093fc1c70fddf0ffb6b0aa0dca4774",
+    "authorization_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "deployment_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "idempotency_key": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "video_request_id": "model_c3d621aa78ab4c45b4f2aecde7864fbd",
+  "journal": "{\"journal_id\":\"budget_9a71daf56eeb4aab8d829f33d84aad22\",\"kind\":\"header\",\"previous\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"sha256\":\"2b02bb6df0465051785091c6932ce8fdd60d359a79d0c40ead9ccd0c64e88020\"}\n{\"handoff_sha256\":null,\"kind\":\"window_open\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"previous\":\"2b02bb6df0465051785091c6932ce8fdd60d359a79d0c40ead9ccd0c64e88020\",\"sha256\":\"b13572ea6ca8e649a66ae7de5cbcda1718a611d2c3291a903b1881de1b03d8b5\",\"window_id\":\"win_11111111111111111111111111111111\"}\n{\"contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"kind\":\"reserve\",\"minimum_micro_usd\":1293,\"previous\":\"b13572ea6ca8e649a66ae7de5cbcda1718a611d2c3291a903b1881de1b03d8b5\",\"request_id\":\"model_89260db358234eb5988dfa730cd124ed\",\"sha256\":\"dd281db5e8c9692cd4fd2d4eaf9119de6906db246c09fd7d6745187423ea57d2\",\"state\":\"RESERVED\"}\n{\"contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"io_started_at\":\"2026-10-19T04:00:00.000000+00:00\",\"kind\":\"io_started\",\"minimum_micro_usd\":1293,\"previous\":\"dd281db5e8c9692cd4fd2d4eaf9119de6906db246c09fd7d6745187423ea57d2\",\"request_id\":\"model_89260db358234eb5988dfa730cd124ed\",\"sha256\":\"77e78df74b2dad0b0f8b72e6e00bdafdc4b3ceb6d36ae104511034cfb2a4c8f1\",\"state\":\"RESERVED\"}\n{\"contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"io_started_at\":\"2026-10-19T04:00:00.000000+00:00\",\"kind\":\"settle\",\"minimum_micro_usd\":140,\"previous\":\"77e78df74b2dad0b0f8b72e6e00bdafdc4b3ceb6d36ae104511034cfb2a4c8f1\",\"request_id\":\"model_89260db358234eb5988dfa730cd124ed\",\"sha256\":\"153a3e2306254e4d3e6f22672aa78442951af575321e2e4bf6d0eab2af49d9cb\",\"state\":\"SETTLED\"}\n{\"contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"kind\":\"reserve\",\"minimum_micro_usd\":49,\"previous\":\"153a3e2306254e4d3e6f22672aa78442951af575321e2e4bf6d0eab2af49d9cb\",\"request_id\":\"model_c3d621aa78ab4c45b4f2aecde7864fbd\",\"sha256\":\"d935f50f1eb266b0e6f33a05665afc2cac76c4ff7f17c8c7373a311027389011\",\"state\":\"RESERVED\"}\n{\"contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"io_started_at\":\"2026-10-19T04:00:00.000000+00:00\",\"kind\":\"io_started\",\"minimum_micro_usd\":49,\"previous\":\"d935f50f1eb266b0e6f33a05665afc2cac76c4ff7f17c8c7373a311027389011\",\"request_id\":\"model_c3d621aa78ab4c45b4f2aecde7864fbd\",\"sha256\":\"998a1f299efd1ce230f68806bba5be45b9b120672a1f189d8b57ea03d95b0139\",\"state\":\"RESERVED\"}\n{\"contract_sha256\":\"99412d17a7c1034019a9d30aecbb23d9c7113f14ff897efb42c3ea73f0bb082f\",\"io_started_at\":\"2026-10-19T04:00:00.000000+00:00\",\"kind\":\"blocked\",\"minimum_micro_usd\":49,\"previous\":\"998a1f299efd1ce230f68806bba5be45b9b120672a1f189d8b57ea03d95b0139\",\"request_id\":\"model_c3d621aa78ab4c45b4f2aecde7864fbd\",\"sha256\":\"c07029a881d38d8fc53db12a5ed223bcc27f42a037011bd8a602d2a209ecb4d2\",\"state\":\"UNKNOWN\"}\n{\"kind\":\"window_stop\",\"plan_sha256\":\"c05beb842aecda4f570b8e9ea0f025a7132a0fbb04bfeed15a9eb2ea5790f874\",\"previous\":\"c07029a881d38d8fc53db12a5ed223bcc27f42a037011bd8a602d2a209ecb4d2\",\"sha256\":\"b704f25c7e7a525a07b5ef95a8634db59c093fc1c70fddf0ffb6b0aa0dca4774\",\"window_id\":\"win_11111111111111111111111111111111\"}\n",
+  "erasure_ledger": "{\"ledger_id\":\"ledger_503e361861284225b05b4256a702804d\"}\n"
+}

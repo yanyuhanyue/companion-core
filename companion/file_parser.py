@@ -476,7 +476,7 @@ def _container_argv(docker, image, name, filename, mime_type, limits, *, owner_l
 
 def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: str,
                    workspace: str | Path, limits=DEFAULT_LIMITS, docker="docker",
-                   container_name=None, owner_label=None, docker_env=None):
+                   container_name=None, owner_label=None, docker_env=None, effect_check=None):
     """Run once in a pinned, offline Linux image. Never substitute host-side parsing."""
     result = _result(data, filename, mime_type)
     try:
@@ -493,6 +493,8 @@ def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: st
         raise ValueError("PARSER_SCRATCH_OUTSIDE_WORKSPACE")
     scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="launch-", dir=scratch) as directory:
+        if effect_check:
+            effect_check()
         try:
             process = subprocess.Popen(command, shell=False, cwd=directory, stdin=subprocess.PIPE,
                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -506,10 +508,18 @@ def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: st
 
         def feed():
             try:
+                if effect_check:
+                    effect_check()
                 process.stdin.write(data)
-                process.stdin.close()
             except (OSError, ValueError):
                 pass
+            except Exception:
+                failure.append("PARSER_AUTHORITY_CHANGED")
+            finally:
+                try:
+                    process.stdin.close()
+                except (OSError, ValueError):
+                    pass
 
         def receive():
             try:
@@ -526,6 +536,9 @@ def parse_isolated(data: bytes, filename: str, mime_type: str = "", *, image: st
         sender.start()
         receiver.start()
         receiver.join(limits.wall_seconds)
+        sender.join(10)
+        if sender.is_alive():
+            failure.append("PARSER_INPUT_UNCONFIRMED")
         if receiver.is_alive() or failure:
             code = failure[0] if failure else "PARSER_TIMEOUT"
             try:

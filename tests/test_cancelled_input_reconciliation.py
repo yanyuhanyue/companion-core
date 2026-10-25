@@ -4,81 +4,123 @@ import json
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
+from companion.privacy import advance_epoch
 from companion.store import encode, uid
+from companion_onebot_bridge import owner_handoff
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, source_window
+from tests.native_continuous_support import frame, host
+from tests.native_owner_recovery_support import CONTROL_TOKEN, reopen_host, stop_host
 from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
 
 
-@pytest.mark.parametrize("mutation", [None, "model", "outbox", "source", "active", "proof"])
-def test_stopped_cancelled_input_requires_native_no_attempt_proof(core, tmp_path, mutation):
+@pytest.mark.parametrize("mutation", [None, "model", "outbox", "source", "active", "proof",
+                                     "erased", "privacy_epoch", "settled", "settled_recalled",
+                                     "admission_job", "admission_authority", "delivery_content"])
+def test_stopped_input_requires_original_native_materials(
+    core, tmp_path, monkeypatch, mutation,
+):
+    generated = mutation in {"settled", "settled_recalled", "admission_job",
+                             "admission_authority", "delivery_content"}
+
     async def source(ws):
-        await ws.send(json.dumps(raw_event()))
+        await ws.send(frame())
         await ws.wait_closed()
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=companion_options(core)) as (
-            window, client, protocol, _, sends,
+        async with host(core, tmp_path, source,
+                        core_options={"control_token": SecretStr(CONTROL_TOKEN)}) as (
+            active, _, sends, calls,
         ):
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
-            event_id=core.store.one("SELECT event_id FROM jobs")["event_id"]
+            await active.capture()
+            await active.flush()
+            event_id = core.store.one("SELECT event_id FROM jobs")["event_id"]
+            if generated:
+                assert await core.run_once()
             if mutation != "active":
-                await window.stop_live(client)
+                await stop_host(active)
+            if mutation in {"erased", "settled_recalled"}:
+                with core.store.transaction():
+                    core.ledger.expire_events(core.store, [event_id], core.clock())
+            elif mutation == "privacy_epoch":
+                advance_epoch(core.store)
             if mutation == "source":
                 core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
-                                   (encode({"text":"changed"}),event_id))
+                                   (encode({"text": "changed"}), event_id))
             if mutation in {"model", "outbox"}:
-                job=core.store.one("SELECT * FROM jobs")
+                job = core.store.one("SELECT * FROM jobs")
                 if mutation == "model":
-                    core.store.insert('model_usage',usage_id=uid('usage'),request_id=uid('model'),
-                        job_id=job['job_id'],scenario='chat',provider='mock',model='synthetic',
-                        input_tokens=0,output_tokens=0,billed_micro_usd=1,
-                        state='SETTLED',occurred_at=core.clock())
+                    core.store.insert("model_usage", usage_id=uid("usage"), request_id=uid("model"),
+                        job_id=job["job_id"], scenario="chat", provider="mock", model="synthetic",
+                        input_tokens=0, output_tokens=0, billed_micro_usd=1,
+                        state="SETTLED", occurred_at=core.clock())
                 else:
-                    core.store.insert('outbox',message_id=uid('msg'),origin_event_id=event_id,
-                        conversation_id=core.store.one('SELECT conversation_id FROM events')[
-                            'conversation_id'],action_type='qq.private.reply',
-                        content_json='{}',content_sha256='a'*64,delivery_key='synthetic',
-                        state='FAILED',attempt_count=1,created_at=core.clock(),updated_at=core.clock())
+                    core.store.insert("outbox", message_id=uid("msg"), origin_event_id=event_id,
+                        conversation_id=core.store.one("SELECT conversation_id FROM events")[
+                            "conversation_id"], action_type="qq.private.reply",
+                        content_json="{}", content_sha256="a" * 64, delivery_key="synthetic",
+                        state="FAILED", attempt_count=1, created_at=core.clock(),
+                        updated_at=core.clock())
+            if mutation == "admission_job":
+                core.store.execute("UPDATE model_admissions SET logical_request_id='foreign-job'")
+            elif mutation == "admission_authority":
+                core.store.execute("UPDATE model_admissions SET authority_json='{}'")
+            elif mutation == "delivery_content":
+                core.store.execute("UPDATE outbox SET content_json=?",
+                                   (encode({"text": "changed"}),))
+            accounting = {table: core.store.rows(f"SELECT * FROM {table}") for table in (
+                "model_usage", "model_admissions", "outbox")}
             if mutation == "proof":
-                original=window.core_post
+                original = owner_handoff.bounded_post
 
-                async def changed(*args):
-                    result=await original(*args)
-                    return {**result,'input_sha256':'0'*64}
+                async def changed(client, path, body):
+                    result = await original(client, path, body)
+                    return result | {"input_sha256": "0" * 64} if path.endswith(
+                        "/inputs/state") else result
 
-                window.core_post=changed
-            before=window.row()['journal_head']
-            if mutation:
-                with pytest.raises((ValueError,httpx.HTTPStatusError)):
-                    await window.reconcile_cancelled_inputs(client)
-                assert window.row()['journal_head'] == before
-                assert window.db.execute(
-                    "SELECT state FROM window_inputs").fetchone()[0]=='APPROVED'
-            else:
-                proof=await client.post('/internal/v1/live-text/inputs/cancelled',json={
-                    'window_sha256':window.plan.sha256,'event_id':event_id})
-                assert proof.status_code==200,proof.json()
-                result=await window.reconcile_cancelled_inputs(client)
-                assert result['cancelled_inputs']==1 and result['state']=='STOPPED'
-                assert window.db.execute(
-                    "SELECT state FROM window_inputs").fetchone()[0]=='CANCELLED'
-                assert window.status()['new_inputs']==1
-                assert window.verify(active=False)['state']=='STOPPED'
-                assert (await window.reconcile_cancelled_inputs(client))['cancelled_inputs']==0
-                records,_=window.read_journal()
-                assert any(r['kind']=='INPUT_CANCELLED' for r in records)
-                assert not any(r['kind']=='ACK' for r in records)
-                core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
-                                   (encode({"text":"changed"}),event_id))
-                proof=await client.post('/internal/v1/live-text/inputs/cancelled',json={
-                    'window_sha256':window.plan.sha256,'event_id':event_id})
-                assert proof.status_code==409
-            assert sends==[] and core.model.calls==[]
+                monkeypatch.setattr(owner_handoff, "bounded_post", changed)
+            if mutation == "active":
+                before = active.runtime.row()["journal_head"]
+                with pytest.raises(ValueError, match="DELIVERY_QUIESCENT_PROCESS_REQUIRED"):
+                    await owner_handoff.prepare(active.runtime, active.client)
+                assert active.runtime.row()["journal_head"] == before
+                return
+            runtime = reopen_host(active, monkeypatch)
+            with runtime.spool:
+                before = runtime.row()["journal_head"]
+                if mutation in {"model", "outbox", "source", "proof", "admission_job",
+                                "admission_authority", "delivery_content"}:
+                    with pytest.raises((ValueError, httpx.HTTPStatusError)):
+                        await owner_handoff.prepare(runtime, active.client)
+                    assert runtime.row()["journal_head"] == before
+                else:
+                    result = await owner_handoff.prepare(runtime, active.client)
+                    assert result["state"] == "HANDOFF_PREPARED"
+                    records = runtime.verify(active=False)
+                    terminal = [r for r in records if r["kind"] == "OWNER_INPUT_TERMINAL"]
+                    assert len(terminal) == 1 and terminal[0]["data"]["terminal"]
+                    assert not any(r["kind"] == "ACK" for r in records)
+                    assert (await owner_handoff.prepare(runtime, active.client)) == result
+                    if mutation in {"erased", "settled_recalled"}:
+                        assert terminal[0]["data"]["state"] == "RECALLED"
+                    else:
+                        capture = json.loads(runtime.db.execute(
+                            "SELECT capture_json FROM window_inputs").fetchone()[0])
+                        core.store.execute("UPDATE events SET body_json=? WHERE event_id=?",
+                                           (encode({"text": "changed"}), event_id))
+                        proof = await active.client.post(
+                            "/internal/v1/owner-authority/inputs/state", json=capture)
+                        assert proof.status_code in {403, 409}
+                assert runtime.row()["state"] == "STOPPED"
+                assert runtime.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] == 1
+                assert runtime.db.execute("SELECT state FROM window_inputs").fetchone()[0] == (
+                    "CAPTURED")
+                assert runtime.db.execute("SELECT COUNT(*) FROM window_attempts").fetchone()[0] == 0
+            assert sends == []
+            assert len(calls) == int(generated)
+            assert accounting == {table: core.store.rows(f"SELECT * FROM {table}")
+                                  for table in accounting}
 
     run(scenario())
 

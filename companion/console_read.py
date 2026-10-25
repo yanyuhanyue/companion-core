@@ -190,7 +190,7 @@ def _review_count(core):
 
 
 def overview(core):
-    s = core.store
+    s, now = core.store, core.clock()
     counts = {
         "pending_jobs": s.one("SELECT COUNT(*) n FROM jobs WHERE state IN "
                               "('QUEUED','RUNNING','RETRY_WAIT')")["n"],
@@ -202,11 +202,11 @@ def overview(core):
             "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
         if s.one("SELECT 1 FROM sqlite_master WHERE name='capability_overrides'") else 0,
     }
-    worker = worker_loop.snapshot(s, datetime.fromisoformat(core.clock()))
+    worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
     budget = budget_view(core)
     blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN "
                     "('model_budget_blocked','model_budget_restore_required')")
-    return {"schema_version": 1, "observed_at": core.clock(),
+    return {"schema_version": 1, "observed_at": now,
             "runtime": {"mode": core.settings.mode, "worker": worker,
                         "state": "ATTENTION" if blocked or counts["unknown_calls"]
                         or budget["admission_blocked"] or worker["state"] != "RECORDED"
@@ -218,8 +218,10 @@ def overview(core):
 def diagnostics(core):
     s, now = core.store, core.clock()
     worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
+    summary = ("最近一次完成后进入等待，当前存活未验证" if worker.get("stage") in
+               worker_loop.WAITING_STAGES else "最近一次完整处理循环")
     items = [entry("worker", "runtime", "聊天处理进程", worker["state"],
-                   worker.get("completed_at"), "最近一次完整处理循环", **worker)]
+                   worker.get("completed_at"), summary, **worker)]
     for row in s.rows("SELECT scenario,state,COUNT(*) count,SUM(billed_micro_usd) amount "
                       "FROM model_usage GROUP BY scenario,state ORDER BY scenario,state"):
         items.append(entry("usage:" + row["scenario"] + ":" + row["state"], "budget",

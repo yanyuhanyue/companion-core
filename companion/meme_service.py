@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import AwareDatetime, Field
 
-from companion import live_text, private_life, qq_source, reply_revision
+from companion import owner_authority, owner_input, private_life, reply_revision
 from companion.contracts import CoreError, StrictModel
 from companion.expression import MemeIntent
 from companion.store import after, encode, uid
@@ -106,17 +106,36 @@ class DiscoverySettlement(StrictModel):
     state: Literal["SETTLED", "UNKNOWN"]
 
 
+def policy_hash(settings):
+    """Bind the existing discovery and caption policies as one native capability."""
+    if not (settings.expression_enabled or settings.meme_discovery_enabled
+            or settings.meme_semantics_enabled):
+        return None
+    paid = settings.paid_model
+    return digest({
+        "discovery": settings.meme_discovery_enabled,
+        "semantics": settings.meme_semantics_enabled,
+        "expression": settings.expression_enabled,
+        "caption_input": paid.meme_input.model_dump(mode="json")
+        if paid and paid.meme_input else None,
+        **{key: getattr(settings, key) for key in (
+            "meme_caption_daily_micro_usd", "meme_discovery_daily_queries",
+            "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes",
+            "expression_selection_probability", "expression_cooldown_minutes",
+            "expression_meme_categories",
+        )},
+    })
+
+
 def _scope(store, settings, clock):
     if not getattr(settings, "meme_discovery_enabled", False):
         raise CoreError("MEME_DISCOVERY_DISABLED", 403)
-    if not private_life.enabled(settings):
-        raise CoreError("MEME_DISCOVERY_PRIVATE_SCOPE_REQUIRED", 403)
-    return live_text.guard(store, settings, clock)[0]
+    return owner_authority.current(store, settings, clock, purpose="meme")
 
 
-def _source(store, settings, approval, event_id, revision):
+def _source(store, settings, approval, event_id, revision, clock):
     reply_revision.require_current(store, event_id, revision)
-    event, _, _ = qq_source.source(store, settings, approval, event_id)
+    event, _, _ = owner_input.source(store, settings, approval, event_id, clock(), purpose="meme")
     return event
 
 
@@ -145,10 +164,10 @@ def _check(store, settings, clock, job_id, body):
     approval = _scope(store, settings, clock)
     job, value = _owned(store, job_id, body)
     if (job["state"] != "RUNNING" or job["lease_token"] != body.lease_token
-        or not job["lease_until"] or job["lease_until"] <= clock()
-        or value["plan_sha256"] != approval.plan_sha256):
+        or not job["lease_until"] or job["lease_until"] <= clock()):
         raise CoreError("MEME_DISCOVERY_STALE_LEASE", 409)
-    _source(store, settings, approval, value["event_id"], value["reply_revision"])
+    owner_authority.check_job(store, settings, clock, job, purpose="meme", executing=True)
+    _source(store, settings, approval, value["event_id"], value["reply_revision"], clock)
     reservation = store.one("SELECT state FROM meme_discovery_reservations WHERE job_id=?",
                             (job_id,))
     if reservation and reservation["state"] != "RESERVED":
@@ -159,7 +178,7 @@ def _check(store, settings, clock, job_id, body):
 def submit(store, settings, clock, body):
     with store.transaction():
         approval = _scope(store, settings, clock)
-        _source(store, settings, approval, body.event_id, body.reply_revision)
+        _source(store, settings, approval, body.event_id, body.reply_revision, clock)
         request = body.model_dump()
         key = "meme_discovery:" + digest(request)
         prior = store.one("SELECT * FROM jobs WHERE idempotency_key=?", (key,))
@@ -172,8 +191,9 @@ def submit(store, settings, clock, body):
         store.insert("jobs", job_id=job_id, event_id=body.event_id, kind="meme_discovery",
                      state="QUEUED", idempotency_key=key, max_attempts=1, context_tracked=1,
                      created_at=now, updated_at=now)
+        owner_authority.bind_job(store, settings, clock, job_id, purpose="meme")
         store.insert("job_sources", job_id=job_id, event_id=body.event_id)
-        _save(store, job_id, {**request, "plan_sha256": approval.plan_sha256})
+        _save(store, job_id, request)
         return DiscoverySubmission(job_id=job_id, event_id=body.event_id,
             reply_revision=body.reply_revision, state="QUEUED", duplicate=False).model_dump()
 
@@ -215,9 +235,9 @@ def lease(store, settings, clock, body):
                                "ORDER BY rowid LIMIT 32"):
             value = _metadata(store, job["job_id"])
             try:
-                if value["plan_sha256"] != approval.plan_sha256:
-                    raise CoreError("LIVE_TEXT_WINDOW_MISMATCH", 409)
-                _source(store, settings, approval, value["event_id"], value["reply_revision"])
+                owner_authority.check_job(store, settings, clock, job, purpose="meme")
+                _source(store, settings, approval, value["event_id"], value["reply_revision"],
+                        clock)
             except CoreError as error:
                 store.execute("UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
                               "WHERE job_id=?", (error.code, clock(), job["job_id"]))

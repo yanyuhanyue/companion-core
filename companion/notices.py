@@ -5,6 +5,7 @@ import json
 import re
 from contextlib import nullcontext
 
+from companion import owner_authority
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.paid_budget import sha
@@ -36,6 +37,21 @@ def required(store, job_id):
     return bool(isinstance(value, dict) and value.get("kind") == "commitment")
 
 
+def shadow(job):
+    value = reference(job)
+    return isinstance(value, dict) and value.get("kind") == "life"
+
+
+def _key(store, kind, ref):
+    key = "notice:" + kind + ":" + ref
+    if kind == "life":
+        topic = store.one("SELECT revision FROM life_topics WHERE topic_id=?", (ref,))
+        if not topic:
+            raise CoreError("LIFE_TOPIC_UNAVAILABLE", 409)
+        key += ":" + str(topic["revision"])
+    return key
+
+
 def _source(store, event_id):
     row = store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
     if not row or row["redacted"] or row["privacy_scope"] != "private":
@@ -46,6 +62,10 @@ def _source(store, event_id):
 
 
 def _material(store, settings, kind, ref, now):
+    if kind == "life":
+        from companion.life_topics import LifeTopics
+
+        return LifeTopics(store, settings, lambda: now).material(ref)
     if kind == "share":
         from companion.social import _share_url, share_source, text_key
 
@@ -114,7 +134,7 @@ def _material(store, settings, kind, ref, now):
 
 def schedule(store, settings, kind, ref, conversation_id, now):
     """Reserve one native activity job; never create a deliverable before wording exists."""
-    key = "notice:" + kind + ":" + ref
+    key = _key(store, kind, ref)
     with nullcontext() if store.db.in_transaction else store.transaction():
         previous = store.one("SELECT job_id FROM jobs WHERE idempotency_key=?", (key,))
         if previous:
@@ -126,11 +146,14 @@ def schedule(store, settings, kind, ref, conversation_id, now):
             raise CoreError("NOTICE_PRIVATE_OWNER_REQUIRED", 403)
         data = _material(store, settings, kind, ref, now)
         event_id = "evt_" + sha(key)
+        body = {"text": "", "notice": {
+            "kind": kind, "ref": ref, "material_sha256": sha(data)}}
+        if kind == "life":
+            body["life_material"] = data
         store.insert("events", event_id=event_id, schema_version=1, source="system.timer",
             source_event_id=key, conversation_id=conversation_id, actor_id="system",
             event_type="activity.tick", occurred_at=now, ingested_at=now, privacy_scope="private",
-            body_json=encode({"text": "", "notice": {
-                "kind": kind, "ref": ref, "material_sha256": sha(data)}}),
+            body_json=encode(body),
             trace_id=event_id, memory_processed=1)
         for source_id in data["source_events"]:
             store.execute("INSERT INTO event_dependencies(event_id,source_event_id) VALUES (?,?)",
@@ -138,6 +161,11 @@ def schedule(store, settings, kind, ref, conversation_id, now):
         job_id = uid("job")
         store.insert("jobs", job_id=job_id, event_id=event_id, kind="activity", state="QUEUED",
             idempotency_key=key, max_attempts=1, context_tracked=1, created_at=now, updated_at=now)
+        if owner_authority.required(store, settings):
+            owner_authority.bind_job(
+                store, settings, lambda: now, job_id,
+                purpose=owner_authority.model_purpose(store, "activity", job_id),
+            )
         for source_id in {event_id, *data["source_events"]}:
             store.insert("job_sources", job_id=job_id, event_id=source_id)
         return job_id
@@ -145,15 +173,22 @@ def schedule(store, settings, kind, ref, conversation_id, now):
 
 def validate(store, settings, job, now):
     current = store.one(
-        "SELECT j.kind,e.*,c.scope,c.owner_actor_id,c.platform FROM jobs j JOIN events e "
+        "SELECT j.kind,j.state AS job_state,e.*,c.scope,c.owner_actor_id,c.platform "
+        "FROM jobs j JOIN events e "
         "USING(event_id) JOIN conversations c USING(conversation_id) WHERE job_id=?",
         (job["job_id"],),
     )
     value = reference(current)
     if value is None:
         return None
+    if owner_authority.required(store, settings):
+        owner_authority.check_job(
+            store, settings, lambda: now, job,
+            purpose=owner_authority.model_purpose(store, "activity", job["job_id"]),
+            executing=current["job_state"] == "RUNNING",
+        )
     if (not isinstance(value, dict) or set(value) != {"kind", "ref", "material_sha256"}
-        or value["kind"] not in {"share", "commitment"}
+        or value["kind"] not in {"share", "commitment", "life"}
         or not isinstance(value["ref"], str) or not 1 <= len(value["ref"]) <= 128
         or not isinstance(value["material_sha256"], str)
         or not re.fullmatch(r"[a-f0-9]{64}", value["material_sha256"])
@@ -161,12 +196,27 @@ def validate(store, settings, job, now):
         or current["privacy_scope"] != "private" or current["scope"] != "private"
         or current["owner_actor_id"] != "owner" or current["platform"] != "qq.onebot"
         or current["actor_id"] != "system" or current["event_type"] != "activity.tick"
-        or current["source_event_id"] != "notice:" + value["kind"] + ":" + value["ref"]
+        or current["source_event_id"] != _key(store, value["kind"], value["ref"])
         or current["event_id"] != "evt_" + sha(current["source_event_id"])):
         raise CoreError("NOTICE_SCOPE_INVALID", 403)
+    if value["kind"] == "life" and current["job_state"] == "SUCCEEDED":
+        from companion.life_topics import LifeTopics
+
+        return LifeTopics(store, settings, lambda: now).delivery_material(job["job_id"])
     data = _material(store, settings, value["kind"], value["ref"], now)
     dependencies = {row["source_event_id"] for row in store.rows(
         "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (current["event_id"],))}
+    if value["kind"] == "life":
+        from companion import reply_revision
+
+        result = store.one("SELECT * FROM life_activity_results WHERE job_id=?", (job["job_id"],))
+        if not result or result["authority_sha256"] != data["authority_sha256"]:
+            raise CoreError("LIFE_AUTHORITY_CHANGED", 403)
+        if (json.loads(result["source_fingerprints_json"]) != data["source_events"]
+            or dependencies != set(data["source_events"])):
+            raise CoreError(reply_revision.SOURCE_RECALLED, 409)
+        if sha(data) != value["material_sha256"]:
+            raise CoreError(reply_revision.SUPERSEDED, 409)
     if sha(data) != value["material_sha256"] or dependencies != set(data["source_events"]):
         raise CoreError("NOTICE_SOURCE_CHANGED", 409)
     return data
@@ -183,16 +233,22 @@ def check_request(store, settings, request_id, now):
 
 
 def messages(store, settings, job, now, principles):
-    from companion.budget import token_upper_bound
+    from companion.token_measurement import measure_request
 
     data = validate(store, settings, job, now)
     if data is None:
         return None
     payload = {key: value for key, value in data.items() if key != "source_events"}
-    result = [{"role": "system", "content": principles + "\n" + RULES},
+    rules = RULES
+    if data["kind"] == "life":
+        from companion.life_topics import RULES as LIFE_RULES
+
+        rules = LIFE_RULES
+    result = [{"role": "system", "content": principles + "\n" + rules},
               {"role": "user", "content": encode(payload)}]
     while (payload["text"]
-           and (excess := token_upper_bound(result) - settings.context_soft_tokens) > 0):
+           and (excess := measure_request(settings, result, "activity").reserved_input_tokens
+                - settings.context_soft_tokens) > 0):
         payload["text"] = payload["text"].encode("utf-8")[:-excess].decode("utf-8", errors="ignore")
         payload["excerpt_truncated"] = True
         result[-1]["content"] = encode(payload)
@@ -200,6 +256,11 @@ def messages(store, settings, job, now, principles):
 
 
 def parts(store, settings, job, text, now):
+    if shadow(job):
+        from companion.life_topics import LifeTopics
+
+        LifeTopics(store, settings, lambda: now).commit(job, text)
+        return []
     data = validate(store, settings, job, now)
     if data is None:
         return None
@@ -221,6 +282,8 @@ def record(store, settings, job, message_ids, now):
     value = reference(job)
     if not value:
         return
+    if value["kind"] == "life":
+        return
     if value["kind"] == "share":
         store.execute("UPDATE social_candidates SET message_id=?,updated_at=? "
                       "WHERE candidate_id=? AND state='QUEUED'",
@@ -240,6 +303,60 @@ def _settled(store, job_id):
         "SELECT 1 FROM model_usage WHERE job_id=? AND scenario='activity' AND state='SETTLED'",
         (job_id,),
     ) and not store.one("SELECT 1 FROM model_usage WHERE job_id=? AND state<>'SETTLED'", (job_id,)))
+
+
+def retry_required_wording(store, settings, job, code, now):
+    """One additional native job attempt for a known, charged, empty required reply."""
+    if code not in {"NOTICE_MODEL_REPLY_REQUIRED", "MODEL_EMPTY_RESPONSE"}:
+        return False
+    if not store.db.in_transaction:
+        raise RuntimeError("NOTICE_RETRY_TRANSACTION_REQUIRED")
+    current = store.one(
+        "SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) WHERE job_id=?",
+        (job["job_id"],),
+    )
+    value = reference(current)
+    if (not isinstance(value, dict) or value.get("kind") != "commitment"
+        or not isinstance(value.get("ref"), str) or current["state"] != "RUNNING"
+        or current["lease_token"] != job["lease_token"]
+        or (current["attempts"], current["max_attempts"]) not in {(1, 1), (2, 2)}
+        or not _settled(store, job["job_id"])):
+        return False
+    usages = store.rows("SELECT scenario,state FROM model_usage WHERE job_id=?",
+                        (job["job_id"],))
+    if (len(usages) != current["attempts"]
+        or any(row != {"scenario": "activity", "state": "SETTLED"}
+               for row in usages)
+        or store.one("SELECT 1 FROM outbox WHERE origin_event_id=? OR reply_group_id=?",
+                     (current["event_id"], job["job_id"]))):
+        return False
+    commitment = store.one(
+        "SELECT feedback_message_id,state FROM commitments WHERE commitment_id=?", (value["ref"],),
+    )
+    if (not commitment or commitment["feedback_message_id"] is not None
+        or commitment["state"] != "IN_PROGRESS"):
+        return False
+    from companion import paid_budget
+
+    try:
+        validate(store, settings, current, now)
+        if settings.mode == "live":
+            paid_budget.contract(settings, now)
+        if owner_authority.required(store, settings):
+            owner_authority.check_job(store, settings, lambda: now, current,
+                                      purpose="goals", executing=True)
+    except CoreError:
+        return False
+    state = "RETRY_WAIT" if current["attempts"] == 1 else "FAILED"
+    # Keep the original attempt count and charges; next claim/admission owns a fresh request.
+    store.execute(
+        "UPDATE jobs SET state=?,max_attempts=2,last_error_code=?,next_attempt_at=?,"
+        "lease_token=NULL,updated_at=? WHERE job_id=? AND state='RUNNING' AND lease_token=?",
+        (state, code, after(now, 5 * 2 ** (current["attempts"] - 1)), now,
+         job["job_id"], job["lease_token"]),
+    )
+    store.audit("job.failed", job["job_id"], job["trace_id"], now, code=code, state=state)
+    return True
 
 
 def delivery_job(store, message_id):
@@ -280,6 +397,10 @@ def delivery_problem(store, settings, message_id, now, *, job=None):
             or delivery["content_sha256"] != sha(json.loads(delivery["content_json"]))
             or not _settled(store, job["job_id"])):
             raise CoreError("NOTICE_JOB_UNSETTLED", 409)
+        if data["kind"] == "life" and json.loads(delivery["content_json"]) != {
+            "text": data["text"],
+        }:
+            raise CoreError("LIFE_DRAFT_CHANGED", 409)
     except (CoreError, KeyError, TypeError, ValueError) as error:
         return error.code if isinstance(error, CoreError) else "NOTICE_SOURCE_CHANGED"
     return None

@@ -107,14 +107,34 @@ class Publish(Strict):
         return value
 
 
+def _profile_text(value, *, nickname=False):
+    # Match the existing account-probe plain-text contract; do not interpret text as commands.
+    if (not value.strip() or any(
+        ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+        or ord(c) < 32 and (nickname or c not in "\n\t") for c in value
+    )):
+        raise ValueError("profile value must be valid nonblank plain text")
+    return value
+
+
 class SetNickname(Strict):
     kind: Literal["nickname"]
     value: str = Field(min_length=1, max_length=128)
+
+    @field_validator("value")
+    @classmethod
+    def plain_text(cls, value):
+        return _profile_text(value, nickname=True)
 
 
 class SetSignature(Strict):
     kind: Literal["signature"]
     value: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("value")
+    @classmethod
+    def plain_text(cls, value):
+        return _profile_text(value)
 
 
 class SetAvatar(Strict):

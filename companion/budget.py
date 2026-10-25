@@ -10,12 +10,13 @@ import httpx
 from companion import cloud_budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
+from companion.token_measurement import byte_estimate, measure_request
 from companion.video_input import SCENARIOS as VIDEO_SCENARIOS
 
 
 def token_upper_bound(messages):
     # Conservative byte bound, not a tokenizer measurement; actual usage replaces it.
-    return sum(len(m["content"].encode("utf-8")) + 24 for m in messages) + 32
+    return byte_estimate(messages)
 
 
 def cost(settings, input_tokens, output_tokens, cached=0, *, scenario=None):
@@ -71,8 +72,11 @@ def reader_video_binding(store, settings, clock, request_id, *, job_id=None, sce
 
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
-    clock=None, cloud_task_kind=None, cloud_task_id=None,
+    clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
 ):
+    from companion import owner_authority
+
+    native_image_chat = False
     cumulative.preflight(store, settings, clock or now)
     approval = paid_budget.contract(settings, now) if settings.mode == "live" else None
     video_binding = (reader_video_binding(store, settings, clock or (lambda: now), request_id,
@@ -94,7 +98,7 @@ def reserve(
             from companion.model import model_payload
 
             if (video_binding["payload_sha256"] != paid_budget.sha(
-                model_payload(settings, messages, scenario))
+                model_payload(settings, messages, scenario, tools=tools))
                 or cloud_task_kind not in {None, "video"}
                 or cloud_task_id not in {None, video_binding["task_id"]}):
                 raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
@@ -107,21 +111,21 @@ def reserve(
 
         logical_request_id = logical_request_id or job_id
         image_contract(settings, job_id, logical_request_id)
-        if scenario != "content_vision" and (
+        if scenario == "chat" and owner_authority.required(store, settings):
+            native_image_chat = True
+        elif scenario != "content_vision" and (
             scenario != "chat" or not settings.live_text_window
             or settings.live_text_window.image_scope != "owner_image_v1"
         ):
             raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-    autonomous = scenario not in {"chat", "qq_poke"}
+    autonomous = scenario not in {"chat", "qq_poke", "evaluation"}
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-    estimated_input = (
-        paid_budget.estimate_input_tokens(approval, messages, scenario) if approval
-        else token_upper_bound(messages)
-    )
+    measurement = measure_request(settings, messages, scenario, tools=tools)
+    estimated_input = measurement.reserved_input_tokens
     output_tokens = settings.output_tokens(scenario)
     if approval:
         if estimated_input > approval.max_input_tokens:
@@ -130,7 +134,7 @@ def reserve(
             raise CoreError("MODEL_OUTPUT_LIMIT", 429)
     estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
-        from companion import live_text
+        from companion import live_text, owner_authority
 
         if job_id is not None:
             from companion.reply_revision import check_job
@@ -138,6 +142,16 @@ def reserve(
             job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
             if job:
                 check_job(store, job)
+        if source_check is not None:
+            source_check()
+        if native_image_chat:
+            from companion import agent_images
+
+            if not job or job["kind"] != "chat":
+                raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+            owner_authority.check_job(store, settings, clock or (lambda: now), job,
+                                      purpose="image", executing=True)
+            agent_images.check_payload(store, settings, clock or (lambda: now), job, messages)
 
         if job_id is None and scenario in {"memory_extract", "memory_review"} and chat_pending(
             store, clock() if callable(clock) else now,
@@ -158,10 +172,33 @@ def reserve(
             scenario=scenario, logical_request_id=logical_request_id,
         ) != video_binding:
             raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
-        live_text.reserve_model(store, settings, clock, job_id, scenario)
+        owner_view = None
+        if scenario == "evaluation":
+            from companion import evaluation
+
+            evaluation.admit(store, settings, clock, job_id, request_id, messages,
+                             estimate, estimated_input)
+        elif owner_authority.required(store, settings):
+            owner_view = owner_authority.admit_model(
+                store, settings, clock or (lambda: now), job_id, scenario)
+        else:
+            live_text.reserve_model(store, settings, clock, job_id, scenario)
+        if scenario == "rem":
+            from companion import rem
+
+            rem.admit(store, settings, clock or (lambda: now), job_id,
+                      estimated_input, estimate)
         request_id = request_id or uid("model")
         if store.one("SELECT 1 FROM model_usage WHERE request_id=?", (request_id,)):
             raise CoreError("MODEL_REQUEST_ALREADY_RESERVED", 409)
+        if scenario == "social_autonomy":
+            from companion.social_autonomy import SocialAutonomy
+
+            if job_id is not None and source_check is None:
+                raise CoreError("SOCIAL_MODEL_SCOPE_REQUIRED", 403)
+            SocialAutonomy(store, settings, clock=clock or (lambda: now)).admit_model(
+                request_id, logical_request_id, messages, job_id=job_id,
+            )
         if scenario in {"content_vision", *VIDEO_SCENARIOS}:
             if not store.one("SELECT 1 FROM jobs WHERE job_id=? AND kind='chat'", (job_id,)):
                 raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
@@ -177,7 +214,8 @@ def reserve(
                             "WHERE job_id=?", (job_id,))
             if notices.reference(job) is not None:
                 notices.validate(store, settings, job, now)
-            if not notices.required(store, job_id) and not proactive_allowed(store, settings, now):
+            if (not notices.shadow(job) and not notices.required(store, job_id)
+                and not proactive_allowed(store, settings, now)):
                 raise CoreError("AUTONOMY_PAUSED", 409)
         total = total_monthly(store, month.isoformat(timespec="microseconds"))
         unlimited_period = bool(approval and approval.unlimited_period_spend)
@@ -188,6 +226,9 @@ def reserve(
             if scenario in {"memory_extract", "memory_review"}:
                 scenarios = ("memory_extract", "memory_review")
                 limit = settings.memory_daily_micro_usd
+            elif scenario == "rem":
+                scenarios = ("rem",)
+                limit = settings.rem.daily_micro_usd
             elif scenario == "diary":
                 scenarios = ("diary",)
                 limit = settings.diary_daily_micro_usd
@@ -299,8 +340,10 @@ def reserve(
                 )["n"],
                 window_id=approval.window_id,
                 contract_sha256=contract_hash,
-                payload_sha256=paid_budget.sha(model_payload(settings, messages, scenario)),
+                payload_sha256=paid_budget.sha(model_payload(
+                    settings, messages, scenario, tools=tools)),
                 snapshot_json=encode(snapshot),
+                measurement_json=encode(measurement.receipt()),
                 reserved_micro_usd=estimate,
                 input_bound=estimated_input,  # Historical SQL column; this is a local estimate.
                 output_bound=output_tokens,
@@ -320,12 +363,26 @@ def reserve(
                     "request_id": request_id,
                     "minimum_micro_usd": estimate,
                     "contract_sha256": contract_hash,
+                    "measurement": {"version": 1, "sha256": paid_budget.sha(
+                        measurement.receipt())},
                     **({"quota": quota} if quota else {}),
                 },
             )
             from companion.private_life import freeze_model
 
-            freeze_model(store, settings, request_id)
+            if owner_view is not None:
+                store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
+                              (encode(owner_view.authority.as_dict()), request_id))
+            elif scenario != "evaluation":
+                freeze_model(store, settings, request_id)
+            else:
+                from companion import owner_authority
+
+                view = owner_authority.check_job(store, settings, clock,
+                    store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,)),
+                    purpose="evaluation", executing=True)
+                store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
+                              (encode(view.authority.as_dict()), request_id))
         return request_id
 
 
@@ -600,6 +657,13 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
     day = day.astimezone(UTC).isoformat(timespec="microseconds")
     month = month.astimezone(UTC).isoformat(timespec="microseconds")
     limits = []
+    if usage["scenario"] == "evaluation":
+        from companion.evaluation import COST
+
+        total = store.one("SELECT COALESCE(SUM(billed_micro_usd),0) AS n FROM model_usage "
+                          "WHERE job_id=?", (usage["job_id"],))["n"]
+        if actual > 5000 or total + delta > COST:
+            limits.append("EVALUATION_AMOUNT")
     if actual > snapshot["per_attempt_micro_usd"]:
         limits.append("ATTEMPT_AMOUNT")
     for column, value, cap, code in (
@@ -736,25 +800,40 @@ def _persist_accounting(
     cloud_budget.sync_reference(store, "model", admission["request_id"])
 
 
+def _check_measurement(settings, admission, messages, scenario, *, tools=()):
+    measured = measure_request(settings, messages, scenario, tools=tools)
+    if measured.reserved_input_tokens != admission["input_bound"]:
+        raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
+    saved = json.loads(admission["measurement_json"])
+    if saved:
+        if saved != measured.receipt() or saved["payload_sha256"] != admission["payload_sha256"]:
+            raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
+    elif settings.token_measurement is not None:
+        # Empty migrated rows mean historical estimates; never upgrade their evidence.
+        raise CoreError("MODEL_TOKEN_MEASUREMENT_CHANGED", 503)
+
+
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
-                   source_check=None):
+                   source_check=None, tools=()):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
-    from companion.model import ModelClient, ModelResponseError
+    from companion.model import ModelClient, ModelDispatchRefused, ModelResponseError
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
 
     response = None
     dispatch = {"dispatched": False}
     try:
         response = await _dispatch(model, store, settings, request_id, messages, scenario, clock,
-                                   dispatch=dispatch, source_check=source_check)
+                                   dispatch=dispatch, source_check=source_check, tools=tools)
         return response
     except ModelResponseError as error:
         # An unusable reply can still carry observed usage.
         response = error.response
         raise
     except CoreError as error:
-        if (error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED}
-            and isinstance(model, ModelClient) and settings.mode == "live"):
+        known_not_sent = (isinstance(error, ModelDispatchRefused)
+                          and error.admission is dispatch.get("admission"))
+        if (isinstance(model, ModelClient) and (known_not_sent or settings.mode == "live"
+            and error.code in {CANCELLED, SOURCE_RECALLED, SUPERSEDED})):
             _settle_unstarted_reply(store, request_id, dispatch, error.code, clock())
         raise
     finally:
@@ -762,31 +841,40 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         settle(store, settings, request_id, response)
 
 
+def _model_scope(store, settings, clock, request_id, scenario):
+    from companion import evaluation, live_text, owner_authority
+
+    if scenario == "evaluation":
+        return evaluation.check_request(store, settings, clock, request_id)
+    if owner_authority.required(store, settings):
+        return owner_authority.check_model(store, settings, clock, request_id)
+    return live_text.check_model(store, settings, clock, request_id)
+
+
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
-    source_check=None,
+    source_check=None, tools=(),
 ):
     """Persisted admission is fenced before adapter I/O."""
-    from companion import live_text, notices
+    from companion import live_text, notices, owner_authority
 
     if source_check is not None:
         source_check()
-    live_text.check_model(store, settings, clock, request_id)
+    _model_scope(store, settings, clock, request_id, scenario)
     notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
         with store.transaction():
             cloud_budget.mark_dispatched(store, "model", request_id,
                                          clock() if callable(clock) else clock)
-        return await model.complete(messages, scenario)
+        return await model.complete(messages, scenario, **({"tools": tools} if tools else {}))
     if not callable(clock):
         raise CoreError("MODEL_ADMISSION_CLOCK_REQUIRED", 503)
     cumulative.preflight(store, settings, clock)
     now = clock()
     from companion.model import ModelAdmission, ModelClient, model_payload
 
-    if live_text.active(store, settings) or scenario in {
-        "content_vision", *VIDEO_SCENARIOS, "meme_caption",
-    }:
+    if (owner_authority.required(store, settings) or live_text.active(store, settings)
+        or scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"}):
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
         target_url = (settings.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
@@ -838,10 +926,10 @@ async def _dispatch(
         snapshot = paid_budget.snapshot(settings)
         if row["contract_sha256"] != paid_budget.sha(snapshot):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-        if paid_budget.estimate_input_tokens(approval, messages, scenario) != row["input_bound"]:
-            raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
-        if row["payload_sha256"] != paid_budget.sha(model_payload(settings, messages, scenario)):
+        if row["payload_sha256"] != paid_budget.sha(model_payload(
+            settings, messages, scenario, tools=tools)):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+        _check_measurement(settings, row, messages, scenario, tools=tools)
         if store.one(
             "SELECT 1 FROM runtime_meta WHERE key IN "
             "('model_budget_blocked','model_budget_restore_required')"
@@ -875,7 +963,7 @@ async def _dispatch(
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     cumulative.preflight(store, settings, clock)
     paid_budget.contract(settings, clock())
-    live_text.check_model(store, settings, clock, request_id)
+    _model_scope(store, settings, clock, request_id, scenario)
     if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
         raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
     if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
@@ -887,7 +975,7 @@ async def _dispatch(
             with store.transaction():
                 custody = paid_budget.journal(store, approval)
                 quota_state = cumulative.check(store, settings, clock(), custody=custody)
-                current_job = live_text.check_model(store, settings, clock, request_id)
+                current_job = _model_scope(store, settings, clock, request_id, scenario)
                 notices.check_request(store, settings, request_id, clock())
                 current = store.one(
                     "SELECT a.*,m.state,m.scenario,m.job_id AS usage_job_id "
@@ -900,6 +988,7 @@ async def _dispatch(
                     or current["io_started_at"] != now
                     or current["payload_sha256"] != row["payload_sha256"]
                     or current["contract_sha256"] != row["contract_sha256"]
+                    or current["measurement_json"] != row["measurement_json"]
                     or (scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"} and (
                         current["scenario"] != scenario
                         or current["usage_job_id"] != row["usage_job_id"]
@@ -927,9 +1016,10 @@ async def _dispatch(
             if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                 raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
             if row["payload_sha256"] != paid_budget.sha(
-                model_payload(settings, messages, scenario),
+                model_payload(settings, messages, scenario, tools=tools),
             ):
                 raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+            _check_measurement(settings, current, messages, scenario, tools=tools)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
@@ -937,7 +1027,7 @@ async def _dispatch(
                     source_check()
             with store.transaction():
                 cloud_budget.mark_dispatched(store, "model", request_id, clock())
-            if live_text.active(store, settings):
+            if live_text.active(store, settings) and not owner_authority.required(store, settings):
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport
                 ):
@@ -949,6 +1039,10 @@ async def _dispatch(
             else:
                 paid = paid_budget.contract(settings, clock())
                 lease_deadline = datetime.fromisoformat(current["lease_until"])
+                if owner_authority.required(store, settings):
+                    # Budget synchronization can race a separate owner's STOP.
+                    # Re-read its native authority/consent before the final clock sample.
+                    current_job = _model_scope(store, settings, clock, request_id, scenario)
                 # All preceding checks are complete. One final sample must fence
                 # every time limit, not only the longer admission lease.
                 dispatch_now = datetime.fromisoformat(clock())
@@ -958,17 +1052,25 @@ async def _dispatch(
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+                if current_job and dispatch_now >= datetime.fromisoformat(
+                    current_job["lease_until"]
+                ):
+                    raise CoreError("EVALUATION_JOB_FENCED" if scenario == "evaluation"
+                                    else "JOB_LEASE_LOST", 409)
                 cumulative.final_fence(settings, quota_state, dispatch_now, request_id)
             if dispatch is not None:
                 # The checked model transport calls its delegate immediately after
                 # this hook; no await separates the final proof from that handoff.
                 dispatch["dispatched"] = True
         admission = ModelAdmission(row["payload_sha256"], before_dispatch)
+        if dispatch is not None:
+            dispatch["admission"] = admission
     if isinstance(model, ModelClient):
-        return await model.complete(messages, scenario, admission=admission)
+        return await model.complete(messages, scenario, admission=admission,
+                                    **({"tools": tools} if tools else {}))
     with store.transaction():
         cloud_budget.mark_dispatched(store, "model", request_id, clock())
-    return await model.complete(messages, scenario)
+    return await model.complete(messages, scenario, **({"tools": tools} if tools else {}))
 
 
 def record_provider_discrepancy(

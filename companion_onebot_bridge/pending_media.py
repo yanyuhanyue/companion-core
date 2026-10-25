@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import re
+import sqlite3
 from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import datetime
@@ -13,30 +14,111 @@ import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+import companion_delivery_protocol as wire
+
 from .files import MAX_FILE_BYTES, OriginalFile, fetch_file, original_files
 from .images import OriginalImage, fetch_image, original_images, source_url
-from .network import private_http_client
-from .onebot_client import OneBotClient
+from .network import checked_http_client, private_http_client
+from .onebot_client import OneBotClient, bounded_post
 from .spool import encode
 from .voice_media import OriginalRecord, original_records
 from .window import digest
 
 DOMAIN = b"companion-core/onebot-owner-media-queue/v1\x00"
+OWNER_DOMAIN = b"companion-core/onebot-owner-media-queue/v2\x00"
 TERMINAL = {"DONE", "CANCELLED"}
 
 
+def _execute(window, sql, args=()):
+    cursor = window.db.cursor()
+    cursor.row_factory = sqlite3.Row
+    return cursor.execute(sql, args)
+
+
+def _binding(window):
+    return digest(window.authority) if hasattr(window, "authority") else window.plan.sha256
+
+
+def _head(window, head):
+    table = "owner_runtime" if hasattr(window, "authority") else "test_window"
+    _execute(window, "UPDATE " + table + " SET journal_head=?", (head,))
+
+
 def exists(window):
-    return bool(window.db.execute("SELECT 1 FROM sqlite_master WHERE name='automatic_media'")
+    return bool(_execute(window, "SELECT 1 FROM sqlite_master WHERE name='automatic_media'")
                 .fetchone())
 
 
 def prepare(window):
-    window.db.execute("CREATE TABLE IF NOT EXISTS automatic_media(event_id TEXT PRIMARY KEY,"
+    in_transaction = window.db.in_transaction
+    _execute(window, "CREATE TABLE IF NOT EXISTS automatic_media(event_id TEXT PRIMARY KEY,"
                       "plan_hash TEXT NOT NULL,capture_sha256 TEXT NOT NULL,"
                       "manifest_sha256 TEXT NOT NULL,manifest_json TEXT,"
                       "image_count INTEGER NOT NULL,"
                       "next_slot INTEGER NOT NULL,state TEXT NOT NULL,receipt_json TEXT)")
-    window.db.commit()
+    if not in_transaction:
+        window.db.commit()
+
+
+def queue_owner(runtime, event, media, capture, raw):
+    """Persist private originals in the existing queue, inside CAPTURED's transaction."""
+    from .reference_reader import captured_media
+    from .rich_input import media_segments
+
+    images = [OriginalImage(**value) for value in media.get("images", [])]
+    files = [OriginalFile(**value) for value in media.get("files", [])]
+    records = [OriginalRecord(**value) for value in media.get("records", [])]
+    if set(media) - {"images", "files", "records", "references"}:
+        raise ValueError("AUTOMATIC_MEDIA_CHANGED")
+    if not images and not files and not records:
+        return
+    projected = list(media_segments(event["payload"].get("rich")))
+    expected_images, expected_files = captured_media(event, raw["message"],
+                                                     media.get("references", ()))
+    originals = [*images, *files]
+
+    def location(item):
+        return item["index"], item.get("path", [])
+    if (not 1 <= len(originals) + len(records) <= 64
+        or images != expected_images or files != expected_files
+        or sorted((item.projection() for item in originals), key=location)
+        != sorted((item for item in projected if item.get("type") in {"image", "file", "face"}
+                   and item.get("coverage") == "UNREAD"), key=location)
+        or any(image.slot != slot or image.url != source_url(image)
+               for slot, image in enumerate(images))
+        or any(file.slot != slot for slot, file in enumerate(files))
+        or records and records != list(original_records(raw["message"]))
+        or records and [{"index": record.index, "type": "record", "actor": "UNVERIFIED",
+             "coverage": "UNSUPPORTED"} for record in records]
+        != [item for item in projected if item.get("type") == "record"]):
+        raise ValueError("AUTOMATIC_MEDIA_CHANGED")
+    prepare(runtime)
+    value = {"authority": runtime.authority, "event_id": event["event_id"],
+             "capture_sha256": digest(capture), "input_sha256": capture["input_sha256"],
+             "images": [asdict(image) for image in images]}
+    if files:
+        value["files"] = [asdict(file) for file in files]
+    if records:
+        value.update(records=[asdict(record) for record in records],
+                     source_event_id=event["source_event_id"])
+    value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
+        runtime.config.capture_signing_key)).sign(OWNER_DOMAIN + encode(value).encode()).hex()
+    prior = _execute(runtime, "SELECT * FROM automatic_media WHERE event_id=?",
+                     (event["event_id"],)).fetchone()
+    manifest_hash = digest(value)
+    if prior:
+        if prior["manifest_sha256"] != manifest_hash:
+            raise ValueError("AUTOMATIC_MEDIA_CHANGED")
+        return
+    runtime.spool.capacity(len(encode(value).encode()) * 3)
+    head = runtime.append("MEDIA_QUEUED", {"event_hash": digest(event["event_id"]),
+        "manifest_sha256": manifest_hash, "capture_sha256": digest(capture),
+        "image_count": len(images), **({"file_count": len(files)} if files else {}),
+        **({"record_count": len(records)} if records else {})})
+    _execute(runtime, "INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
+        (event["event_id"], _binding(runtime), digest(capture), manifest_hash,
+         encode(value), len(images)))
+    _head(runtime, head)
 
 
 def queue(window, event, raw, capture):
@@ -57,7 +139,8 @@ def queue(window, event, raw, capture):
     value = {"window_sha256": window.plan.sha256, "event_id": event["event_id"],
              "capture_sha256": digest(capture), "input_sha256": capture["input_sha256"],
              "images": [{key: item for key, item in asdict(image).items()
-                         if key != "face_id" or item is not None} for image in images]}
+                         if (key != "face_id" or item is not None)
+                         and (key not in {"path", "origin"} or item)} for image in images]}
     # Keep pre-file image manifests, signatures, counts and journal bytes exact.
     if files:
         value["files"] = [asdict(file) for file in files]
@@ -66,7 +149,7 @@ def queue(window, event, raw, capture):
                      source_event_id=event["source_event_id"])
     value["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
         window.plan.config.capture_signing_key)).sign(DOMAIN + encode(value).encode()).hex()
-    prior = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    prior = _execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                               (event["event_id"],)).fetchone()
     manifest_hash = digest(value)
     if prior:
@@ -79,31 +162,34 @@ def queue(window, event, raw, capture):
         "image_count": len(images), **({"file_count": len(files)} if files else {}),
         **({"record_count": len(records)} if records else {})})
     with window.db:
-        window.db.execute("INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
+        _execute(window, "INSERT INTO automatic_media VALUES(?,?,?,?,?,?,0,'PENDING',NULL)",
             (event["event_id"], window.plan.sha256, digest(capture), manifest_hash,
              encode(value), len(images)))
-        window.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        _head(window, head)
 
 
 def manifest(window, row):
     value = json.loads(row["manifest_json"])
+    native = hasattr(window, "authority")
+    config = window.config if native else window.plan.config
     try:
-        fields = {"window_sha256", "event_id", "capture_sha256", "input_sha256",
-                  "images", "signature"}
+        fields = {"authority" if native else "window_sha256", "event_id", "capture_sha256",
+                  "input_sha256", "images", "signature"}
         if (set(value) not in (fields, fields | {"files"},
                               fields | {"records", "source_event_id"},
                               fields | {"files", "records", "source_event_id"})
             or digest(value) != row["manifest_sha256"]):
             raise ValueError()
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(
-            window.plan.config.capture_public_key)).verify(bytes.fromhex(value["signature"]),
-                DOMAIN + encode({key: item for key, item in value.items()
-                                 if key != "signature"}).encode())
-        source = window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
+            config.capture_public_key)).verify(bytes.fromhex(value["signature"]),
+                (OWNER_DOMAIN if native else DOMAIN) + encode({
+                    key: item for key, item in value.items() if key != "signature"}).encode())
+        source = _execute(window, "SELECT * FROM window_inputs WHERE event_id=?",
                                     (row["event_id"],)).fetchone()
         if (not source or value["event_id"] != row["event_id"]
-            or value["window_sha256"] != row["plan_hash"]
-            or row["plan_hash"] != window.plan.sha256
+            or (value.get("authority") != window.authority if native
+                else value.get("window_sha256") != row["plan_hash"])
+            or row["plan_hash"] != _binding(window)
             or value["capture_sha256"] != row["capture_sha256"]
             or value["capture_sha256"] != digest(json.loads(source["capture_json"]))
             or value["input_sha256"] != source["input_hash"]
@@ -116,10 +202,10 @@ def manifest(window, row):
                for slot, image in enumerate(images)):
             raise ValueError()
         if (not 1 <= len(images) + len(files) + len(records) <= 64
-            or ("files" in value and (not files or window.plan.value.get(
+            or ("files" in value and (not files or not native and window.plan.value.get(
                 "live_text", {}).get("file_scope") != "owner_file_v1"))
             or any(file.slot != slot for slot, file in enumerate(files))
-            or ("records" in value and (not records or window.plan.value.get(
+            or ("records" in value and (not records or not native and window.plan.value.get(
                 "live_text", {}).get("voice_scope") != "owner_voice_v1"
                 or value["source_event_id"] != json.loads(source["capture_json"])[
                     "source_event_id"]))
@@ -132,26 +218,43 @@ def manifest(window, row):
 
 
 def transition(window, event_id, state, next_slot, receipt=None):
-    row = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    row = _execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                             (event_id,)).fetchone()
     if row["state"] in TERMINAL:
         return
     head = window.append("MEDIA_STATE", {"event_hash": digest(event_id), "state": state,
         "next_slot": next_slot, "receipt_sha256": digest(receipt) if receipt is not None else None})
     with window.db:
-        window.db.execute("UPDATE automatic_media SET state=?,next_slot=?,receipt_json=?,"
+        _execute(window, "UPDATE automatic_media SET state=?,next_slot=?,receipt_json=?,"
                           "manifest_json=CASE WHEN ? THEN NULL ELSE manifest_json END "
                           "WHERE event_id=?",
                           (state, next_slot, encode(receipt) if receipt else None,
                            state in TERMINAL, event_id))
-        window.db.execute("UPDATE test_window SET journal_head=?", (head,))
+        _head(window, head)
     if state in TERMINAL:
-        window.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _execute(window, "PRAGMA wal_checkpoint(TRUNCATE)")
 
 
-def verify_history(window, history):
+def verify_owner_history(runtime, records):
+    history = []
+    current = None
+    entries = []
+    for record in records:
+        if record["kind"] in {"OWNER_BOUND", "OWNER_REBOUND"}:
+            if current is not None:
+                history.append((current, entries))
+            current, entries = digest(record["data"]["authority"]), []
+        else:
+            entries.append(record)
+    if current is not None:
+        history.append((current, entries))
+    verify_history(runtime, history, native_only=bool(runtime.legacy))
+
+
+def verify_history(window, history, *, native_only=False):
     projected = {}
     for plan, entries in history:
+        plan_hash = plan if isinstance(plan, str) else plan.sha256
         for entry in entries:
             if entry["kind"] == "MEDIA_QUEUED":
                 data = entry["data"]
@@ -172,15 +275,18 @@ def verify_history(window, history):
                 key = data["event_hash"]
                 if key in projected:
                     raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
-                projected[key] = {**data, "plan_hash": plan.sha256, "state": "PENDING",
+                projected[key] = {**data, "plan_hash": plan_hash, "state": "PENDING",
                                   "next_slot": 0, "receipt_sha256": None}
             elif entry["kind"] == "MEDIA_STATE":
                 data = entry["data"]
                 prior = projected.get(data["event_hash"])
-                if not prior or prior["state"] in TERMINAL or prior["plan_hash"] != plan.sha256:
+                if not prior or prior["state"] in TERMINAL or prior["plan_hash"] != plan_hash:
                     raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
                 prior.update(data)
-    rows = window.db.execute("SELECT * FROM automatic_media").fetchall() if exists(window) else []
+    rows = _execute(window, "SELECT * FROM automatic_media").fetchall() if exists(window) else []
+    if native_only:
+        bindings = {plan for plan, _ in history}
+        rows = [row for row in rows if row["plan_hash"] in bindings]
     if set(projected) != {digest(row["event_id"]) for row in rows}:
         raise ValueError("AUTOMATIC_MEDIA_JOURNAL_CHANGED")
     for row in rows:
@@ -204,7 +310,7 @@ def verify_history(window, history):
 def cancel(window, event_id, receipt):
     if not exists(window):
         return
-    row = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    row = _execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                             (event_id,)).fetchone()
     if row and row["state"] not in TERMINAL:
         transition(window, event_id, "CANCELLED", row["next_slot"], receipt)
@@ -212,19 +318,21 @@ def cancel(window, event_id, receipt):
 
 def stop(window):
     if exists(window):
-        for row in window.db.execute("SELECT event_id FROM automatic_media WHERE plan_hash=? "
+        for row in _execute(window, "SELECT event_id FROM automatic_media WHERE plan_hash=? "
                                       "AND state NOT IN ('DONE','CANCELLED')",
-                                      (window.plan.sha256,)).fetchall():
-            cancel(window, row["event_id"], {"window_sha256": window.plan.sha256,
-                                           "reason": "WINDOW_STOPPED"})
+                                      (_binding(window),)).fetchall():
+            cancel(window, row["event_id"], (
+                {"authority": window.authority, "reason": "AUTHORITY_STOPPED"}
+                if hasattr(window, "authority") else
+                {"window_sha256": window.plan.sha256, "reason": "WINDOW_STOPPED"}))
 
 
 async def upload(window, client, event_id, images, *, files=(), records=(), start_slot=0,
-                 check=None, stage=None,
+                 check=None, stage=None, resume_claim=None,
                  image_transport=None, image_resolver=None, protocol=None,
                  file_transport=None, file_resolver=None, voice_transport=None, voice_resolver=None,
                  set_phase=lambda phase: None):
-    """Shared one-shot transfer, with every external boundary revalidating the source."""
+    """Transfer with source checks; resume only an unuploaded read under its original lease."""
     check = check or (lambda: window.verify())
 
     async def guard():
@@ -235,6 +343,49 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     async def progress(state, slot, receipt=None):
         if stage:
             stage(state, slot, receipt)
+
+    if hasattr(window, "authority"):
+        from .images import upload_original
+
+        async def check_request(_request):
+            await guard()
+
+        for image in images[start_slot:]:
+            await guard()
+            options = {"resolver": image_resolver} if image_resolver is not None else {}
+            async with checked_http_client(client, check_request) as scoped:
+                result = await upload_original(window, scoped, event_id, image,
+                    resume_claim=resume_claim if image.slot == start_slot else None,
+                    progress=lambda state, receipt, slot=image.slot: progress(state, slot, receipt),
+                    transport=image_transport, **options)
+            await guard()
+            await progress("DONE" if image.slot + 1 == len(images) + len(files) + len(records)
+                           else "PENDING", image.slot + 1, result)
+        for original in files[max(0, start_slot - len(images)):]:
+            from .files import upload_original as upload_file
+
+            position = len(images) + original.slot
+            await guard()
+            options = {"resolver": file_resolver} if file_resolver is not None else {}
+            async with checked_http_client(client, check_request) as scoped:
+                result = await upload_file(window, scoped, event_id, original, onebot=protocol,
+                    resume_claim=resume_claim if position == start_slot else None,
+                    progress=lambda state, receipt, slot=position: progress(state, slot, receipt),
+                    transport=file_transport, **options)
+            await guard()
+            await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
+                           else "PENDING", position + 1, result)
+        for original in records[max(0, start_slot - len(images) - len(files)):]:
+            from .voice_runtime import upload as upload_voice
+
+            position = len(images) + len(files) + original.slot
+            result = await upload_voice(window, client, event_id, original, check=guard,
+                progress=lambda state, receipt, pos=position: progress(state, pos, receipt),
+                protocol=protocol, voice_transport=voice_transport, voice_resolver=voice_resolver,
+                set_phase=set_phase)
+            await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
+                           else "PENDING", position + 1, result)
+        return
 
     if (start_slot < len(images)
         and window.plan.value["live_text"].get("companion_scope") == "owner_private_v1"):
@@ -247,9 +398,13 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     prefix = "/internal/v2/content/" + event_id + "/image"
     for image in images[start_slot:]:
         await guard()
-        await progress("CLAIMING", image.slot)
-        claim = await window.core_post(client, prefix + "/claim",
-            {"request_key": f"image:{image.slot}", "source_sha256": image.source_sha256})
+        if resume_claim is not None and image.slot == start_slot:
+            claim = resume_claim
+        else:
+            await progress("CLAIMING", image.slot)
+            claim = await window.core_post(client, prefix + "/claim",
+                {"request_key": f"image:{image.slot}", "source_sha256": image.source_sha256})
+        _download_claim(claim, window, kind="IMAGE")
         await progress("DOWNLOADING", image.slot, claim)
 
         async def check_image(*, image=image, claim=claim):
@@ -291,12 +446,15 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     for original in files[max(0, start_slot - len(images)):]:
         position = len(images) + original.slot
         await guard()
-        await progress("CLAIMING", position)
         prefix = "/internal/v2/content/" + event_id + "/file"
-        claim = await window.core_post(client, prefix + "/claim", {
-            "request_key": f"file:{original.slot}", "source_sha256": original.source_sha256,
-        })
-        _file_claim(claim, window)
+        if resume_claim is not None and position == start_slot:
+            claim = resume_claim
+        else:
+            await progress("CLAIMING", position)
+            claim = await window.core_post(client, prefix + "/claim", {
+                "request_key": f"file:{original.slot}", "source_sha256": original.source_sha256,
+            })
+        _download_claim(claim, window)
         await progress("DOWNLOADING", position, claim)
 
         async def check_file(*, original=original, claim=claim, prefix=prefix):
@@ -375,7 +533,7 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
                        else "PENDING", position + 1, result)
 
 
-def _file_claim(value, window):
+def _download_claim(value, window, *, kind="FILE"):
     try:
         if (not isinstance(value, dict)
             or set(value) != {"state", "lease_token", "lease_until", "max_bytes"}
@@ -390,7 +548,7 @@ def _file_claim(value, window):
         if not until.tzinfo or not window.clock() < until:
             raise ValueError()
     except (TypeError, ValueError):
-        raise ValueError("FILE_DOWNLOAD_CLAIM_REJECTED") from None
+        raise ValueError(kind + "_DOWNLOAD_CLAIM_REJECTED") from None
 
 
 class MediaPump:
@@ -405,16 +563,82 @@ class MediaPump:
                              "voice_resolver": voice_resolver, "set_phase": set_phase}
 
     async def check_source(self, row):
+        if hasattr(self.window, "authority"):
+            current = _execute(self.window, "SELECT * FROM automatic_media WHERE event_id=?",
+                                (row["event_id"],)).fetchone()
+            if not current or current["state"] in TERMINAL:
+                raise SourceCancelled()
+            self.window.verify()
+            source = _execute(self.window,
+                              "SELECT capture_json FROM window_inputs WHERE event_id=?",
+                              (row["event_id"],)).fetchone()
+            if source is None:
+                raise ValueError("OWNER_CAPTURE_REQUIRED")
+            capture = json.loads(source["capture_json"])
+            state = await bounded_post(self.client,
+                "/internal/v1/owner-authority/inputs/state", capture)
+            fields = {"authority", "event_id", "input_sha256", "reply_revision",
+                      "terminal", "state", "unsettled_work", "unsettled_model",
+                      "unsettled_delivery", "work_sha256"}
+            if (not isinstance(state, dict) or set(state) != fields
+                or any(state[key] != capture[key] for key in (
+                    "authority", "event_id", "input_sha256"))
+                or type(state["reply_revision"]) is not int or state["reply_revision"] < 0
+                or state["state"] not in {"PENDING", "COMPLETE", "CANCELLED", "RECALLED"}
+                or any(type(state[key]) is not bool for key in (
+                    "terminal", "unsettled_work", "unsettled_model", "unsettled_delivery"))
+                or not wire.hash_value(state["work_sha256"])):
+                raise ValueError("OWNER_INPUT_STATE_INVALID")
+            self.window.verify()
+            if state["state"] in {"CANCELLED", "RECALLED"}:
+                # Stop this local transfer, preserving the original unsettled Core responsibility.
+                cancel(self.window, row["event_id"], state)
+                raise SourceCancelled()
+            media = manifest(self.window, current)
+            if (0 <= current["next_slot"] < len(media)
+                and isinstance(media[current["next_slot"]], OriginalRecord)):
+                return await self.window.check(self.client, purpose="voice")
+            return await self.status(row["event_id"])
         from .continuous import require_scope
 
         require_scope(self.window)
-        source = self.window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
+        source = _execute(self.window, "SELECT * FROM window_inputs WHERE event_id=?",
                                         (row["event_id"],)).fetchone()
         state = await self.window.input_state(self.client, source)
         if state["state"] in {"SUPERSEDED", "RECALLED"}:
             cancel(self.window, row["event_id"], state)
             raise SourceCancelled()
         return state
+
+    async def status(self, event_id):
+        path = "/internal/v2/content/" + event_id
+        if not hasattr(self.window, "authority"):
+            return await self.window.core_get(self.client, path)
+        from .event_normalizer import decode
+        from .network import checked_http_client, private_request_matches
+
+        def validate(request):
+            if (request.method != "GET" or request.content
+                or not private_request_matches(request, self.window.config.core_url, path)
+                or request.headers.get("Authorization") !=
+                    "Bearer " + self.window.config.bridge_token):
+                raise ValueError("MEDIA_STATUS_REQUEST_CHANGED")
+
+        async def boundary(request):
+            validate(request)
+            await self.window.check(self.client, purpose="content")
+            validate(request)
+            self.window.verify()
+
+        async with checked_http_client(self.client, boundary) as scoped:
+            async with scoped.stream("GET", path) as response:
+                response.raise_for_status()
+                data = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    data.extend(chunk)
+                    if len(data) > 65536:
+                        raise ValueError("INVALID_CORE_RECEIPT")
+        return decode(bytes(data), 65536)
 
     async def execute(self, row):
         try:
@@ -423,6 +647,25 @@ class MediaPump:
             images = [item for item in media if isinstance(item, OriginalImage)]
             files = [item for item in media if isinstance(item, OriginalFile)]
             records = [item for item in media if isinstance(item, OriginalRecord)]
+            if row["state"] == "DOWNLOADING":
+                if not 0 <= row["next_slot"] < len(media):
+                    raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
+                original = media[row["next_slot"]]
+                claim = None
+                if not isinstance(original, OriginalRecord):
+                    claim = json.loads(row["receipt_json"]) if row["receipt_json"] else None
+                    _download_claim(claim, self.window, kind=(
+                        "FILE" if isinstance(original, OriginalFile) else "IMAGE"))
+                # No upload can have started before the durable UPLOADING marker.
+                # Recheck the same source and lease before GET; never issue another
+                # claim, extend its deadline, or replay a Core/provider effect.
+                await upload(self.window, self.client, row["event_id"], images, files=files,
+                    records=records, start_slot=row["next_slot"], resume_claim=claim,
+                    check=lambda: self.check_source(row),
+                    stage=lambda state, slot, receipt: transition(
+                        self.window, row["event_id"], state, slot, receipt),
+                    **self.image_options, **self.file_options)
+                return
             if row["state"] != "PENDING":
                 if not 0 <= row["next_slot"] < len(media):
                     raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
@@ -440,8 +683,7 @@ class MediaPump:
                 async with asyncio.timeout(300):
                     while True:
                         await self.check_source(row)
-                        status = await self.window.core_get(self.client,
-                            "/internal/v2/content/" + row["event_id"])
+                        status = await self.status(row["event_id"])
                         items = {item["slot"]: item["state"] for item in status.get("items", [])
                                  if item.get("kind") == kind}
                         state = items.get(original.slot)
@@ -484,25 +726,28 @@ class MediaPump:
         if self.task is not None:
             if not self.task.done():
                 return
-            self.task.result()
-            self.task = None
+            task, self.task = self.task, None
+            task.result()
         if exists(self.window):
-            row = self.window.db.execute("SELECT * FROM automatic_media WHERE plan_hash=? "
-                "AND state NOT IN ('DONE','CANCELLED') ORDER BY rowid LIMIT 1",
-                (self.window.plan.sha256,)).fetchone()
+            accepted = ("AND event_id IN (SELECT key FROM inbox WHERE state='accepted') "
+                        if hasattr(self.window, "authority") else "")
+            row = _execute(self.window, "SELECT * FROM automatic_media WHERE plan_hash=? "
+                "AND state NOT IN ('DONE','CANCELLED') " + accepted + "ORDER BY rowid LIMIT 1",
+                (_binding(self.window),)).fetchone()
             if row:
                 self.task = asyncio.create_task(self.execute(row))
 
     def pending(self, event_id):
-        return exists(self.window) and bool(self.window.db.execute(
+        return exists(self.window) and bool(_execute(self.window, 
             "SELECT 1 FROM automatic_media WHERE event_id=? AND state NOT IN ('DONE','CANCELLED')",
             (event_id,),
         ).fetchone())
 
     async def close(self):
         if self.task is not None:
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
+            task, self.task = self.task, None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 class SourceCancelled(Exception):

@@ -27,12 +27,16 @@ from companion.store import encode
 class ConsoleConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
-    public_origin: str = "https://console.11314520.xyz"
+    public_origin: str = ""
     session_seconds: int = Field(default=3600, ge=300, le=86400)
     max_sessions: int = Field(default=5, ge=1, le=20)
 
     @model_validator(mode="after")
     def valid_origin(self):
+        if not self.public_origin:
+            if self.enabled:
+                raise ValueError("enabled console requires an explicit HTTPS public_origin")
+            return self
         url = AnyHttpUrl(self.public_origin)
         if (url.scheme != "https" or url.username is not None or url.password is not None
             or urlsplit(self.public_origin).username is not None
@@ -205,6 +209,29 @@ def _candidate(settings, overrides):
         raise CoreError("INVALID_OPERATOR_CONFIGURATION", 400) from None
 
 
+def _endpoint_changes(before, after, changes):
+    # Write-only null means keep the key only while its destination is unchanged.
+    # A new endpoint requires an explicit credential choice, not an invisible reuse.
+    pairs = [(before.model_url, after.model_url, before.model_key,
+              changes.get("model_key"), "model_url" in changes)]
+    content = changes.get("content", {})
+    vision = content.get("vision", {}) if isinstance(content, dict) else {}
+    if isinstance(vision, dict):
+        pairs.append((before.content.vision.url, after.content.vision.url,
+                      before.content.vision.key, vision.get("key"), "url" in vision))
+    for old_url, new_url, old_key, supplied_key, edited in pairs:
+        if not edited or not new_url:
+            continue
+        if urlsplit(new_url).scheme != "https":
+            raise CoreError("CONFIGURATION_ENDPOINT_HTTPS_REQUIRED", 400)
+        if old_url.rstrip("/") != new_url.rstrip("/") and old_key.get_secret_value():
+            if not isinstance(supplied_key, str):
+                raise CoreError("CONFIGURATION_ENDPOINT_KEY_REQUIRED", 400)
+            if (urlsplit(old_url).netloc != urlsplit(new_url).netloc
+                and supplied_key == old_key.get_secret_value()):
+                raise CoreError("CONFIGURATION_ENDPOINT_KEY_REQUIRED", 400)
+
+
 def load(settings):
     """Read a committed desired version once; in-flight processes retain their settings."""
     path = Path(settings.database).resolve()
@@ -302,6 +329,7 @@ def update(store, settings, body, key, now):
             overrides = _decode(current, settings)
             desired = _candidate(settings, overrides)
             validated = _candidate(desired, body.changes)
+            _endpoint_changes(desired, validated, body.changes)
             overrides.update({name: _raw(getattr(validated, name)) for name in body.changes})
             encrypted = _cipher(settings).encrypt(encode(_raw(overrides)).encode()).decode()
             store.insert("operator_configuration", version=version + 1, request_id=key,

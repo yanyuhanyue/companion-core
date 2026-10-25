@@ -15,11 +15,10 @@ Core 与 Bridge 同一冻结计划须显式声明 `companion_approval_sha256`、
 图片、引用和网页不自动成为主人事实。`/记住这个`、`/你记得什么`、
 `/确认这一条`、`/忘记这一条` 和 `/纠正这一条` 沿用原生命令。
 
-`companion-worker` 处理聊天与低频主动聊天；`companion-life-worker` 提取记忆、整合夜间
-来源、反思并生成待审目标，同时协调自主探索与主动分享；`companion-diary-worker`
-生成私人日记。探索继续使用单独的 Source Reader、来源授权、请求/字节预算和执行租约。
-日记不自动分享。反思保持假设和原始来源引用，不直接修改人格或权限。
-交互状态来自主人明确的简短、详细、暂停或继续等反馈，并会到期衰减。
+`companion-worker` 处理前台聊天及其原生回复路径；`companion-life-worker` 是自主生成的唯一
+选择者，有界轮转原生 Life、Diary、Social、Memory 与 Consolidator 操作。独立的 Content、
+Reader、Executive 和 Voice 执行路径继续服务已绑定的前台依赖。完整切换要求 Core 路由与
+原生单步接口同时接入，见 [原生调度边界](p10-operations-observation.md#原生调度边界)。
 
 以上能力须启用对应配置。反思默认费用配置为零，部署时须提供正的
 `reflection_daily_micro_usd` 与 `reflection_monthly_micro_usd`；无限周期费用批准仍保留

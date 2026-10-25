@@ -1,4 +1,4 @@
-"""Owner control authentication is an API boundary; device grants are short lived records."""
+"""Owner control authentication is an API boundary; scoped grants are short lived records."""
 
 import json
 
@@ -8,10 +8,11 @@ from companion.contracts import CoreError, StrictModel
 from companion.privacy import advance_epoch
 from companion.store import after, encode, uid
 
-DEVICE_CAPABILITIES = {
+CAPABILITY_FLAGS = {
     "audio.transcribe": "voice_enabled",
     "camera.observe": "camera_enabled",
     "android.observe": "android_enabled",
+    "model.evaluate": "evaluation_enabled",
 }
 
 
@@ -28,7 +29,7 @@ class ConsentService:
 
     def grant(self, request):
         for capability in request.capabilities:
-            flag = DEVICE_CAPABILITIES.get(capability)
+            flag = CAPABILITY_FLAGS.get(capability)
             if not flag or not getattr(self.settings, flag):
                 raise CoreError("CAPABILITY_DISABLED", 403)
         consent_id, now = uid("consent"), self.clock()
@@ -46,7 +47,7 @@ class ConsentService:
         return self.store.one("SELECT * FROM consents WHERE consent_id=?", (consent_id,))
 
     def require(self, consent_id, capability, device_id, session_id, observed_at=None):
-        flag = DEVICE_CAPABILITIES.get(capability)
+        flag = CAPABILITY_FLAGS.get(capability)
         if not flag or not getattr(self.settings, flag):
             raise CoreError("CAPABILITY_DISABLED", 403)
         row = self.store.one("SELECT * FROM consents WHERE consent_id=?", (consent_id,))
@@ -69,6 +70,9 @@ class ConsentService:
                 (self.clock(), consent_id),
             ).rowcount
             if changed:
+                from companion.evaluation import revoke_jobs
+
+                revoke_jobs(self.store, consent_id, self.clock())
                 advance_epoch(self.store)
                 self.store.audit("consent.revoked", consent_id, consent_id, self.clock())
         return {"consent_id": consent_id, "revoked": True}

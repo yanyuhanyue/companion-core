@@ -6,7 +6,7 @@ import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
-from datetime import UTC, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
@@ -43,11 +43,11 @@ from companion.reading_protocol import ReadObservation
 from companion.store import Store, encode
 from companion.video_media_contract import AssetManifest, MediaAsset
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, source_window
+from tests.support.native_consumer import admit, select_tools, source_window
 from tests.test_onebot_direct import raw_event
-from tests.test_reading_followup import admit
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import queued
+from tests.test_test_fixtures import historical_database
 from tests.test_video_understanding import scope_options
 
 
@@ -549,20 +549,23 @@ def test_restore_fences_pending_native_work_without_clearing_its_reservations(co
         module.prepare("bili", item["request_id"], preparation(item))
 
 
-def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_history(core):
+def test_migration_preserves_existing_data_and_refuses_downgrade_with_media_history(core, tmp_path):
     module, item, _, _ = prepared(core)
     before = core.store.rows("SELECT * FROM reading_attempts")
+    database = historical_database(core.store, tmp_path / "bili.db", "0032_bili_video")
     config = Config()
     config.set_main_option(
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     config.set_main_option(
-        "sqlalchemy.url", "sqlite:///" + core.settings.database.replace("\\", "/")
+        "sqlalchemy.url", "sqlite:///" + database.as_posix()
     )
     with pytest.raises(RuntimeError, match="BILI_VIDEO_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"):
         command.downgrade(config, "0031_voice_nodes")
-    assert core.store.rows("SELECT * FROM reading_attempts") == before
-    assert module.context(item["media"]["content_item_id"])["state"] == "PREPARED"
+    with closing(Store(database)) as store:
+        assert store.rows("SELECT * FROM reading_attempts") == before
+        historical = BiliVideoService(store, core.settings, module.reading, clock=core.clock)
+        assert historical.context(item["media"]["content_item_id"])["state"] == "PREPARED"
 
 
 def paid_options(core, *, cloud=None, short_window=False, call_limit=4):
@@ -611,19 +614,6 @@ def paid_options(core, *, cloud=None, short_window=False, call_limit=4):
 
 
 @asynccontextmanager
-async def checked_source_window(*args, **kwargs):
-    try:
-        async with source_window(*args, **kwargs) as value:
-            yield value
-    except httpx.HTTPStatusError as error:
-        from companion import live_text
-
-        core = args[0]
-        live_text.guard(core.store, core.settings, core.clock, opening=True)
-        raise error
-
-
-@asynccontextmanager
 async def paid_media(
     core,
     tmp_path,
@@ -638,18 +628,13 @@ async def paid_media(
         text = "请看看这个视频 https://www.bilibili.com/video/BV1xx411c7mD"
         if two_links:
             text += " https://www.bilibili.com/video/BV1yy411c7mE"
-        await ws.send(json.dumps(raw_event(text=text)))
+        await ws.send(json.dumps(raw_event(time=int(core.clock.now.timestamp()), text=text)))
         await ws.wait_closed()
 
     async with (
-        checked_source_window(
-            core,
-            tmp_path,
-            source,
-            live=True,
-            approved=True,
-            rich_input_scope="references_v1",
-            scope_options=paid_options(core, **options),
+        source_window(core, tmp_path, source,
+            scope_options=paid_options(core, **{"call_limit": 5,
+                **{k: v for k, v in options.items() if k != "cloud"}}),
         ) as (window, client, protocol, _, sends),
         httpx.AsyncClient(transport=httpx.MockTransport(provider)) as provider_http,
     ):
@@ -657,7 +642,10 @@ async def paid_media(
         core.model = ModelClient(core.settings, provider_http)
         core.bili_video.model = core.model
         await window.capture_once(client, protocol)
-        await window.approve_captured(client, capture_approval(window))
+        assert await window.runtime.flush_one(client)
+        urls = [row["target_url"] for row in core.store.rows(
+            "SELECT target_url FROM content_items")]
+        await select_tools(core, "read_content", urls)
         for index in range(2 if two_links else 1):
             item = core.reading.lease("bili")
             assert item is not None and "media" not in item
@@ -685,15 +673,25 @@ async def paid_media(
                 ],
             )
             if followup_before_metadata and index == 0:
-                await admit(client, core, window.plan.config, window.plan, 2, "继续读一下")
+                await admit(client, core, window, 2, "继续读一下")
             core.reading.complete("bili", item["request_id"], ReadObservation.model_validate(body))
+        await select_tools(core, "analyze_shared_video", urls)
+        if options.get("cloud") is not None:
+            from tests.test_cloud_budget import change
+
+            change(core, **options["cloud"].model_dump())
         child = core.reading.lease("bili", capabilities=[CAPABILITY])
         assert child is not None and "media" in child
         module = core.bili_video
         prepare = module.prepare("bili", child["request_id"], preparation(child))
         if controls is not None:
-            controls.update(window=window, client=client)
+            controls.update(window=window, client=client, url=urls[0])
+        selectors = core.store.rows("SELECT * FROM model_usage WHERE scenario='chat'")
+        assert len(selectors) == 2 and all(row["state"] == "SETTLED" for row in selectors)
         yield module, child, prepare
+        for row in selectors:
+            assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                                  (row["request_id"],)) == row
         assert sends == []
 
 
@@ -705,6 +703,15 @@ def model_response(content, *, tokens=100):
             "usage": {"prompt_tokens": tokens, "completion_tokens": 20},
         },
     )
+
+
+def phase_usage(core):
+    return core.store.rows("SELECT * FROM model_usage WHERE scenario LIKE 'content_video%' "
+                           "ORDER BY rowid")
+
+
+def phase_costs(core):
+    return core.store.rows("SELECT * FROM cloud_cost_snapshots WHERE task_kind='video'")
 
 
 @pytest.mark.parametrize("need_clips", [False, True])
@@ -757,7 +764,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
                 "SELECT * FROM observations WHERE event_id=?", (result["event_id"],)
             )
             assert output["source_kind"] == "text" and output["result_status"] == "FETCHED"
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = phase_usage(core)
             assert [row["scenario"] for row in usage] == (
                 ["content_video_preview", "content_video"]
                 if need_clips
@@ -766,7 +773,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
             assert all(
                 row["state"] == "SETTLED" and row["billed_micro_usd"] == 140 for row in usage
             )
-            costs = core.store.rows("SELECT * FROM cloud_cost_snapshots")
+            costs = phase_costs(core)
             assert len(costs) == len(phases)
             assert {row["task_id"] for row in costs} == {
                 "content:" + item["media"]["content_item_id"]
@@ -780,7 +787,7 @@ def test_paid_preview_and_optional_clips_share_native_video_task_and_partial_evi
                 assert "base64" not in json.dumps(row) and "data:image" not in json.dumps(row)
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], preview_body)
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert phase_usage(core) == usage
 
     run(scenario())
     assert len(calls) == (2 if need_clips else 1)
@@ -805,8 +812,8 @@ def test_cloud_zero_limit_rejects_before_provider_and_native_charge(core, tmp_pa
             with pytest.raises(CoreError, match="CLOUD_.*BUDGET_EXHAUSTED"):
                 await module.upload("bili", item["request_id"], upload_body(item, prepared))
             assert not calls
-            assert not core.store.rows("SELECT * FROM model_usage")
-            assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
+            assert not phase_usage(core)
+            assert not phase_costs(core)
 
     run(scenario())
 
@@ -826,7 +833,7 @@ def test_paid_invalid_proposal_keeps_known_fee_without_making_observation(core, 
         ) as (module, item, prepared):
             with pytest.raises(CoreError, match="BILI_VIDEO_ANALYSIS_INVALID"):
                 await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            usage = core.store.one("SELECT * FROM model_usage")
+            usage = phase_usage(core)[0]
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] == 140
             assert (
                 core.store.one("SELECT output_event_id FROM bili_video_items")["output_event_id"]
@@ -852,7 +859,7 @@ def test_lost_model_response_retains_unknown_cost_and_forbids_upload_repayment(c
             body = upload_body(item, prepared)
             with pytest.raises(CoreError, match="MODEL_RETRYABLE"):
                 await module.upload("bili", item["request_id"], body)
-            usage = core.store.one("SELECT * FROM model_usage")
+            usage = phase_usage(core)[0]
             assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
             assert module.receipt("bili", item["request_id"], receipt(item, "preview", body)) == {
                 "state": "PENDING"
@@ -860,7 +867,7 @@ def test_lost_model_response_retains_unknown_cost_and_forbids_upload_repayment(c
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], body)
             assert len(calls) == 1
-            assert core.store.rows("SELECT * FROM model_usage") == [usage]
+            assert phase_usage(core) == [usage]
             module.result(
                 "bili",
                 item["request_id"],
@@ -886,7 +893,7 @@ def test_source_erased_during_paid_await_keeps_fee_and_cannot_resurrect_analysis
         async with paid_media(core, tmp_path, provider) as (module, item, prepared):
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            usage = core.store.one("SELECT * FROM model_usage")
+            usage = phase_usage(core)[0]
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] == 140
             row = core.store.one("SELECT * FROM bili_video_items")
             assert row["redacted"] == 1 and row["output_event_id"] is None
@@ -910,8 +917,11 @@ def test_offset_live_window_is_the_shortest_child_deadline(core, tmp_path):
             item,
             _,
         ):
-            expected = core.settings.live_text_window.ends_at.astimezone(UTC)
-            assert item["media"]["deadline"] == expected.isoformat(timespec="microseconds")
+            from companion import owner_authority
+
+            expected = owner_authority.current(core.store, core.settings, core.clock,
+                purpose="bili_video").policy.expires_at.astimezone(UTC)
+            assert datetime.fromisoformat(item["media"]["deadline"]) == expected
             assert expected == core.clock.now + timedelta(seconds=45)
 
     run(scenario())
@@ -931,7 +941,7 @@ def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(cor
         async with paid_media(core, tmp_path, provider, cloud=cloud) as (module, item, prepared):
             preview = await module.upload("bili", item["request_id"], upload_body(item, prepared))
             assert preview["next_selection"] is not None
-            cost = core.store.one("SELECT * FROM cloud_cost_snapshots")
+            cost = core.store.one("SELECT * FROM cloud_cost_snapshots WHERE task_kind='video'")
             assert cost["accounted_micro_usd"] == 18040
             assert cost["task_id"] == "content:" + item["media"]["content_item_id"]
             assert 18040 * 8 < cloud.video_per_item_micro_cny
@@ -942,8 +952,8 @@ def test_clip_reservation_counts_the_preview_fee_against_the_same_item_limit(cor
                     upload_body(item, prepared, preview["next_selection"]),
                 )
             assert len(calls) == 1
-            assert len(core.store.rows("SELECT * FROM model_usage")) == 1
-            assert core.store.rows("SELECT * FROM cloud_cost_snapshots") == [cost]
+            assert len(phase_usage(core)) == 1
+            assert phase_costs(core) == [cost]
             partial = module.context(item["media"]["content_item_id"])
             assert partial["result_status"] == "FETCHED"
             assert [phase["phase"] for phase in partial["evidence"]["phases"]] == ["preview"]
@@ -957,6 +967,8 @@ def test_native_budget_rejects_changed_model_payload_before_any_reservation(
     original_reserve = budget.reserve
 
     def change_payload(store, settings, job_id, scenario, messages, now, **kwargs):
+        if scenario not in {"content_video_preview", "content_video"}:
+            return original_reserve(store, settings, job_id, scenario, messages, now, **kwargs)
         changed = json.loads(json.dumps(messages))
         changed[0]["content"][0]["text"] += "被替换的请求"
         return original_reserve(store, settings, job_id, scenario, changed, now, **kwargs)
@@ -973,8 +985,8 @@ def test_native_budget_rejects_changed_model_payload_before_any_reservation(
             with pytest.raises(CoreError, match="BILI_VIDEO_MODEL_BINDING_CHANGED"):
                 await module.upload("bili", item["request_id"], upload_body(item, prepared))
             assert not calls
-            assert not core.store.rows("SELECT * FROM model_usage")
-            assert not core.store.rows("SELECT * FROM cloud_cost_snapshots")
+            assert not phase_usage(core)
+            assert not phase_costs(core)
 
     run(scenario())
 
@@ -1046,9 +1058,9 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
 
             async def followup(text="继续读一下"):
                 window = controls["window"]
-                return await admit(
-                    controls["client"], core, window.plan.config, window.plan, 2, text
-                )
+                admitted = await admit(controls["client"], core, window, 2, text)
+                await select_tools(core, "analyze_shared_video", [item["url"]])
+                return admitted
 
             if when == "before_preview":
                 await followup()
@@ -1082,11 +1094,11 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
             )
             assert phases[-1]["model_job_id"] == consumer["job_id"]
             assert core.store.one("SELECT job_id FROM bili_video_items")["job_id"] == root["job_id"]
-            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            usage = phase_usage(core)
             assert [row["job_id"] for row in usage] == [phase["model_job_id"] for phase in phases]
             assert all(row["state"] == "SETTLED" for row in usage)
             assert {
-                row["task_id"] for row in core.store.rows("SELECT * FROM cloud_cost_snapshots")
+                row["task_id"] for row in phase_costs(core)
             } == {"content:" + root["item_id"]}
             module.result(
                 "bili", item["request_id"], final_result(item, prepared, results, status="SUCCESS")
@@ -1113,7 +1125,7 @@ def test_exact_followup_binds_only_new_phases_to_current_consumer(core, tmp_path
             assert core.store.one(
                 "SELECT redacted FROM events WHERE event_id=?", (result["event_id"],)
             ) == {"redacted": 1}
-            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
+            assert phase_usage(core) == usage
 
     run(scenario())
 
@@ -1124,7 +1136,14 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
     async def provider(request):
         calls.append(request)
         window = controls["window"]
-        await admit(controls["client"], core, window.plan.config, window.plan, 2, "继续读一下")
+        _, admitted = await admit(controls["client"], core, window, 2, "继续读一下")
+        from companion.core import Core
+
+        with Core(core.settings, clock=core.clock) as independent:
+            assert independent.store is not core.store
+            assert independent.claim_job("wait-for-original-preview") is None
+            assert independent.store.one("SELECT state FROM jobs WHERE job_id=?",
+                (admitted["job_id"],)) == {"state": "QUEUED"}
         return model_response({"analysis": "旧阶段返回的局部结果", "need_clips": False})
 
     async def scenario():
@@ -1135,10 +1154,10 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
         ):
             initial_job = core.store.one("SELECT job_id FROM bili_video_items")["job_id"]
             body = upload_body(item, prepared)
-            with pytest.raises(CoreError, match="BILI_VIDEO_MODEL_CONSUMER_CHANGED"):
+            with pytest.raises(CoreError, match="BILI_VIDEO_OWNER_SOURCE_REQUIRED"):
                 await module.upload("bili", item["request_id"], body)
             phase = core.store.one("SELECT * FROM bili_video_phases WHERE phase='preview'")
-            usage = core.store.one("SELECT * FROM model_usage")
+            usage = phase_usage(core)[0]
             assert phase["model_job_id"] == usage["job_id"] == initial_job
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] == 140
             assert phase["state"] == "REJECTED"
@@ -1148,7 +1167,12 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
             )
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], body)
-            assert len(calls) == 1 and core.store.rows("SELECT * FROM model_usage") == [usage]
+            assert len(calls) == 1 and phase_usage(core) == [usage]
+            await select_tools(core, "analyze_shared_video", [controls["url"]])
+            assert core.store.one("SELECT * FROM bili_video_phases WHERE phase='preview'") == phase
+            with pytest.raises(CoreError):
+                await module.upload("bili", item["request_id"], body)
+            assert len(calls) == 1 and phase_usage(core) == [usage]
 
     run(scenario())
 
@@ -1168,15 +1192,14 @@ def test_unrelated_or_negative_followup_cannot_authorize_new_phase(core, tmp_pat
             await admit(
                 controls["client"],
                 core,
-                window.plan.config,
-                window.plan,
+                window,
                 2,
                 text,
                 reference=reference,
             )
-            with pytest.raises(CoreError, match="REPLY_SUPERSEDED"):
+            with pytest.raises(CoreError, match="BILI_VIDEO_OWNER_SOURCE_REQUIRED"):
                 await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            assert not core.store.rows("SELECT * FROM model_usage")
+            assert not phase_usage(core)
             assert not core.store.rows("SELECT * FROM bili_video_phases WHERE phase='preview'")
 
     run(scenario())
@@ -1203,12 +1226,13 @@ def test_erasing_new_consumer_during_await_scrubs_its_phase_without_erasing_orig
             )
             window = controls["window"]
             consumer, _ = await admit(
-                controls["client"], core, window.plan.config, window.plan, 2, "继续读一下"
+                controls["client"], core, window, 2, "继续读一下"
             )
             controls["consumer_id"] = consumer["event_id"]
+            await select_tools(core, "analyze_shared_video", [item["url"]])
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], upload_body(item, prepared))
-            usage = core.store.one("SELECT * FROM model_usage")
+            usage = phase_usage(core)[0]
             assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] == 140
             phase = core.store.one("SELECT * FROM bili_video_phases WHERE phase='preview'")
             assert (
@@ -1283,31 +1307,33 @@ def test_two_video_inputs_keep_foreground_call_room_and_still_produce_a_reply(
                 )
                 return results
 
-            assert len(await complete(first, first_prepared)) == 2
+            assert len(await complete(first, first_prepared)) == (1 if call_limit == 4 else 2)
             second = core.reading.lease("bili", capabilities=[CAPABILITY])
             assert second is not None and second["request_id"] != first["request_id"]
             second_prepared = module.prepare("bili", second["request_id"], preparation(second))
-            if call_limit == 4:
+            if call_limit <= 5:
                 with pytest.raises(CoreError, match="BILI_VIDEO_CHAT_HEADROOM_REQUIRED"):
                     await complete(second, second_prepared)
                 module.result("bili", second["request_id"], final_result(second, second_prepared))
             else:
                 results = await complete(second, second_prepared)
-                assert len(results) == (1 if call_limit == 5 else 2)
+                assert len(results) == 1
                 partial = module.context(second["media"]["content_item_id"])
                 assert len(partial["evidence"]["phases"]) == len(results)
-            usage = core.store.rows("SELECT * FROM model_usage")
-            assert len(usage) == media_calls and call_limit - len(usage) >= 2
+            usage = phase_usage(core)
+            # The native SDK has spent two selection calls and still reserves its final reply.
+            assert len(usage) == media_calls - 1
+            assert call_limit - len(core.store.rows("SELECT * FROM model_usage")) >= 1
             assert {row["job_id"] for row in usage} == {original_job}
-            costs = core.store.rows("SELECT task_id FROM cloud_cost_snapshots")
-            assert len({row["task_id"] for row in costs}) == (1 if call_limit == 4 else 2)
+            costs = phase_costs(core)
+            assert len({row["task_id"] for row in costs}) == (1 if call_limit <= 5 else 2)
             assert await core.run_once()
             assert (
                 core.store.one("SELECT state FROM jobs WHERE job_id=?", (original_job,))["state"]
                 == "SUCCEEDED"
             )
             assert (
-                core.store.one("SELECT COUNT(*) n FROM model_usage WHERE scenario='chat'")["n"] == 1
+                core.store.one("SELECT COUNT(*) n FROM model_usage WHERE scenario='chat'")["n"] == 3
             )
             reply = core.store.one(
                 "SELECT state,content_json FROM outbox WHERE action_type='qq.private.reply'"

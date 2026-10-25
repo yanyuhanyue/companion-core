@@ -239,12 +239,16 @@ def test_cli_revocation_tolerates_code_drift_and_expiry_without_inventory_or_one
 
     monkeypatch.setattr("companion_onebot_bridge.window.private_http_client", client)
     monkeypatch.setattr("companion_onebot_bridge.window.bridge_code_sha256", lambda: "f" * 64)
-    # The fixture's historical end precedes the real CLI clock. Normal open
-    # continues to enforce both expiry and current code; cancellation needs neither.
+    # Revocation of historical custody retains its original confirmed stop even
+    # after the deployment code changes and the authorization expires.
     assert now + timedelta(minutes=30) < __import__("datetime").datetime.now(now.tzinfo)
-    result = run(command(cfg, SimpleNamespace(command="window-abort-handoff", window=proposal)))
-    assert result["state"] == "ABORTED_BEFORE_PREPARE"
-    assert len(contract.calls) == 1 and contract.calls[0][0] == ABORT
+    before = plan.journal.read_bytes()
+    with pytest.raises(ValueError, match="LEGACY_WINDOW_EXECUTION_RETIRED"):
+        run(command(cfg, SimpleNamespace(command="window-abort-handoff", window=proposal)))
+    assert not contract.calls and plan.journal.read_bytes() == before
+    result = run(command(cfg, SimpleNamespace(command="window-stop")))
+    assert result["state"] == "STOPPED" and result["core_stop_confirmed"]
+    assert not contract.calls  # The original confirmed Core stop is idempotent.
     with Spool(cfg) as spool:
         old = TestWindow(spool, stored_plan(encode(plan.value), cfg))
         assert old.status()["state"] == "STOPPED"
