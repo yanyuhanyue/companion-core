@@ -1,20 +1,26 @@
 """Synthetic fragment envelopes and original Bridge delivery boundaries."""
 
 import json
+import sqlite3
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 
+from companion.reply_segments import SegmentedReplyConfig
 from companion_onebot_bridge.onebot_client import OneBotClient
 from companion_onebot_bridge.outbound import deliver_tick, validate_item
+from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan, digest
 from tests.conftest import run
+from tests.native_continuous_support import host
 from tests.support.onebot import provider
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_direct import config, normalized
+from tests.test_onebot_direct import config, normalized, raw_event
+from tests.test_trial_limits import native_quota
 
 PARTS = ["第一条是可以独立阅读的完整句子。", "第二条继续这次回复并保留真实内容。"]
 SEGMENT_POLICY = {"max_segments": 3, "min_chars": 12, "interval_ms": 1500}
@@ -226,179 +232,178 @@ async def fragment_clients(cfg, fake, *, fail_at=None, hook=None):
         yield client, protocol, sends, requests
 
 
+
+@asynccontextmanager
+async def native_fragments(core, tmp_path, *, parts=None, quota=None, period="account",
+                           segmented=True, generate=True, fail_at=None):
+    parts = parts or PARTS
+    sends, paths = [], []
+
+    async def source(ws):
+        await ws.send(json.dumps(raw_event(1, text="请分段说明",
+                                          time=int(core.clock.now.timestamp()))))
+        await ws.wait_closed()
+
+    def native(request):
+        paths.append(request.url.path)
+        receipt = (httpx.ReadTimeout("synthetic lost segment ACK")
+                   if request.url.path == "/send_private_msg" and len(sends) == fail_at else None)
+        return provider(request, sends, receipt)
+
+    def model(request):
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": "\n".join(parts)}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+
+    paid = (native_quota(core, tmp_path, **{period: {"send_attempts": quota}})
+            if quota is not None else {})
+    policy = SegmentedReplyConfig(**SEGMENT_POLICY, mode="semantic") if segmented else None
+    async with host(core, tmp_path, source, ticking=False, policy=policy,
+                    model_reply=model, protocol_reply=native, paid_options=paid) as (
+        active, _, _, calls,
+    ):
+        await active.capture()
+        # Native socket receipt time precedes the fixed Core clock used for pacing.
+        core.clock.now = datetime.now(UTC)
+        await active.flush()
+        if generate:
+            assert await core.run_once("native-segment-producer")
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == (
+                len(parts) if segmented else 1)
+        yield active, sends, paths, calls
+
+
+async def original_input_state(active):
+    capture = json.loads(active.db.execute("SELECT capture_json FROM window_inputs").fetchone()[0])
+    before = active.core.store.db.total_changes
+    response = await active.client.post("/internal/v1/owner-authority/inputs/state", json=capture)
+    assert response.status_code == 200 and response.headers["Cache-Control"] == "no-store"
+    assert active.core.store.db.total_changes == before
+    return response.json()
+
+
 def test_controlled_group_waits_restarts_and_acks_input_only_after_last_fragment(core, tmp_path):
-    cfg, plan = fragment_plan(core, tmp_path)
-    fake = FragmentCore(plan, core.clock)
-
     async def scenario():
-        async with fragment_clients(cfg, fake) as (client, protocol, sends, _):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                record_approved_input(window)
-                fake.load()
-                await window.send_once(client, protocol, approve_fragment(plan, fake.items[0]))
-                assert window.count("window_inputs", "state='APPROVED'") == 1
-                waiting = await window.send_once(
-                    client, protocol, approve_fragment(plan, fake.items[1]))
-                assert waiting["state"] == "OPEN"
-                assert waiting["delivery_wait"] == "SEGMENT_NOT_READY"
-                assert len(sends) == 1 and window.count("window_attempts") == 1
+        async with native_fragments(core, tmp_path) as (active, sends, _, calls):
+            assert await active.pump()
+            assert not (await original_input_state(active))["terminal"]
+            assert not await active.pump()
+            assert active.attempts() == {"ACK": 1} and len(sends) == 1
+            active.restart()
+            assert not await active.pump()
             core.clock.advance(1.5)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                result = await window.send_once(
-                    client, protocol, approve_fragment(plan, fake.items[1]))
-                assert result["state"] == "OPEN"
-                assert window.count("window_inputs", "state='ACK'") == 1
-                assert window.count("window_attempts", "state='ACK'") == 2
-                assert [item["message"][0]["data"]["text"] for item in sends] == PARTS
-                records, _ = window.read_journal()
-                assert PARTS[0] not in json.dumps(records, ensure_ascii=False)
-                assert "job_" + "a" * 32 not in json.dumps(records)
-
+            assert await active.pump()
+            assert (await original_input_state(active))["terminal"]
+            assert active.attempts() == {"ACK": 2}
+            assert len(calls) == 1
+            assert [item["message"][0]["data"]["text"] for item in sends] == PARTS
+            records = active.runtime.verify()
+            assert PARTS[0] not in json.dumps(records, ensure_ascii=False)
+            job = core.store.one("SELECT job_id FROM jobs")["job_id"]
+            assert job not in json.dumps(records)
     run(scenario())
 
 
 @pytest.mark.parametrize("limit", ["window", "cumulative", "scope"])
 def test_first_fragment_checks_whole_group_allowance_before_any_onebot_io(core, tmp_path, limit):
-    cfg, plan = fragment_plan(core, tmp_path, cap=1 if limit == "window" else 5,
-                              cumulative_cap=1 if limit == "cumulative" else None,
-                              segmented=limit != "scope")
-    fake = FragmentCore(plan, core.clock)
-
     async def scenario():
-        async with fragment_clients(cfg, fake) as (client, protocol, sends, requests):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                record_approved_input(window)
-                fake.load(PARTS if limit != "scope" else ["".join(PARTS)])
-                with pytest.raises(ValueError):
-                    await window.send_once(client, protocol, approve_fragment(plan, fake.items[0]))
-                assert sends == requests == []
-                assert window.count("window_attempts") == 0
-
+        async with native_fragments(core, tmp_path, quota=None if limit == "scope" else 1,
+            period="window" if limit == "window" else "account", segmented=limit != "scope",
+        ) as (active, sends, _, calls):
+            if limit == "scope":
+                # Native chat authority permits an ordinary reply; no retired segment scope.
+                row = core.store.one("SELECT segment_count,reply_group_id FROM outbox")
+                assert row == {"segment_count": 1, "reply_group_id": None}
+                assert await active.pump() and len(sends) == 1
+            else:
+                with pytest.raises(httpx.HTTPStatusError) as error:
+                    await active.pump()
+                assert error.value.response.status_code == 429
+                assert sends == [], "Original whole-group allowance requirement is not satisfied"
+                assert active.attempts() == {}
+            assert len(calls) == 1
     run(scenario())
 
 
 def test_middle_unknown_keeps_spent_fragments_and_stops_remaining_after_restart(core, tmp_path):
-    cfg, plan = fragment_plan(core, tmp_path)
-    fake = FragmentCore(plan, core.clock)
     parts = PARTS + ["第三条必须在前两条确实送达之后才发送。"]
-
     async def scenario():
-        async with fragment_clients(cfg, fake, fail_at=1) as (client, protocol, sends, _):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                record_approved_input(window)
-                fake.load(parts)
-                await window.send_once(client, protocol, approve_fragment(plan, fake.items[0]))
-                core.clock.advance(1.5)
-                result = await window.send_once(
-                    client, protocol, approve_fragment(plan, fake.items[1]))
-                assert result["state"] == "STOPPED"
-                assert window.count("window_attempts", "state='UNKNOWN'") == 1
-                assert window.count("window_inputs", "state='APPROVED'") == 1
+        async with native_fragments(core, tmp_path, parts=parts, fail_at=1) as (
+            active, sends, _, calls,
+        ):
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert await active.pump()
+            core.clock.advance(1.5)
+            assert await active.pump()
+            assert active.runtime.row()["state"] == "STOPPED"
+            assert active.attempts() == {"ACK": 1, "UNKNOWN": 1}
+            assert not (await original_input_state(active))["terminal"]
             core.clock.advance(10)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                with pytest.raises(ValueError, match="WINDOW_STOPPED"):
-                    await window.send_once(client, protocol, approve_fragment(plan, fake.items[2]))
-                assert window.count("window_attempts") == 2
-                assert len(sends) == 2
-
+            active.restart()
+            with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                await active.pump()
+            assert active.attempts() == {"ACK": 1, "UNKNOWN": 1}
+            assert len(calls) == 1 and len(sends) == 2
+            assert core.store.rows("SELECT * FROM model_usage") == usage
     run(scenario())
 
 
 @pytest.mark.parametrize("damage", ["index", "count", "group", "text", "event"])
 def test_later_fragment_cannot_replace_acknowledged_group_manifest(core, tmp_path, damage):
-    cfg, plan = fragment_plan(core, tmp_path)
-    fake = FragmentCore(plan, core.clock)
-
     async def scenario():
-        async with fragment_clients(cfg, fake) as (client, protocol, sends, _):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                record_approved_input(window)
-                fake.load()
-                await window.send_once(client, protocol, approve_fragment(plan, fake.items[0]))
-                core.clock.advance(1.5)
-                item = fake.items[1]
-                part = item["reply_segment"]
-                if damage == "index":
-                    item["delivery_key"] = item["delivery_key"].rsplit(":", 1)[0] + ":0"
-                    item["content"]["text"] = PARTS[0]
-                    part["index"] = 0
-                elif damage == "count":
-                    part["count"] = 3
-                    part["part_sha256s"].append(digest("未批准的新第三条"))
-                    part["total_chars"] += 10
-                elif damage == "group":
-                    part["group_id"] = "job_" + "c" * 32
-                elif damage == "text":
-                    item["content"]["text"] += "替换"
-                    part["part_sha256s"][1] = digest(item["content"]["text"])
-                    part["total_chars"] += 2
-                else:
-                    item["delivery_key"] = "reply:evt_" + "e" * 64 + ":v2:1"
-                part["group_sha256"] = digest({
-                    "job_id": part["group_id"], "parts_sha256": part["part_sha256s"],
-                    "interval_ms": part["interval_ms"], "total_chars": part["total_chars"],
-                })
-                with pytest.raises(ValueError, match="REPLY_SEGMENT"):
-                    await window.send_once(client, protocol, approve_fragment(plan, item))
-                assert len(sends) == window.count("window_attempts") == 1
-
+        async with native_fragments(core, tmp_path) as (active, sends, _, calls):
+            assert await active.pump()
+            core.clock.advance(1.5)
+            row = core.store.rows("SELECT * FROM outbox ORDER BY rowid")[1]
+            field, value = {
+                "index": ("segment_index", 3), "count": ("segment_count", 3),
+                "group": ("reply_group_id", "job_" + "c" * 32),
+                "text": ("content_json", json.dumps({"text": PARTS[1] + "替换"})),
+                "event": ("delivery_key", "reply:evt_" + "e" * 64 + ":v2:1"),
+            }[damage]
+            if damage in {"index", "group"}:
+                with pytest.raises(sqlite3.IntegrityError):
+                    core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
+                                       (value, row["message_id"]))
+                assert core.store.one("SELECT * FROM outbox WHERE message_id=?",
+                                      (row["message_id"],)) == row
+                assert len(sends) == len(calls) == 1 and active.attempts() == {"ACK": 1}
+                return
+            core.store.execute(f"UPDATE outbox SET {field}=? WHERE message_id=?",
+                               (value, row["message_id"]))
+            try:
+                await active.pump()
+            except httpx.HTTPStatusError as error:
+                assert error.response.status_code in {403, 409}
+            assert len(sends) == len(calls) == 1
+            assert active.attempts() == {"ACK": 1}
     run(scenario())
 
 
 def test_empty_first_lease_is_not_reported_as_a_segment_delay(core, tmp_path):
-    cfg, plan = fragment_plan(core, tmp_path)
-    fake = FragmentCore(plan, core.clock)
-    fake.force_empty = True
-
     async def scenario():
-        async with fragment_clients(cfg, fake) as (client, protocol, sends, _):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                record_approved_input(window)
-                fake.load()
-                with pytest.raises(ValueError, match="NO_APPROVED_DELIVERY_READY"):
-                    await window.send_once(client, protocol, approve_fragment(plan, fake.items[0]))
-                assert sends == [] and window.count("window_attempts") == 0
-
+        async with native_fragments(core, tmp_path, generate=False) as (active, sends, _, calls):
+            assert not OwnerSendGuard(active.runtime, active.client).waiting_for_segment()
+            assert not await active.pump()
+            assert active.attempts() == {} and sends == calls == []
     run(scenario())
 
 
 def test_final_http_guard_rechecks_segment_envelope_after_reservation(core, tmp_path, monkeypatch):
-    from companion_onebot_bridge.window import SendOperation
-
-    cfg, plan = fragment_plan(core, tmp_path)
-    fake = FragmentCore(plan, core.clock)
-    before_io = SendOperation.before_io
-
-    def changed(operation, text):
-        before_io(operation, text)
-        operation.current_item["reply_segment"]["group_sha256"] = "d" * 64
-
-    monkeypatch.setattr(SendOperation, "before_io", changed)
-
     async def scenario():
-        async with fragment_clients(cfg, fake) as (client, protocol, sends, _):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                record_approved_input(window)
-                fake.load()
-                with pytest.raises(ValueError):
-                    await window.send_once(client, protocol, approve_fragment(plan, fake.items[0]))
-                assert sends == []
-                assert window.count("window_attempts") == 1
+        async with native_fragments(core, tmp_path) as (active, sends, _, _):
+            guard = OwnerSendGuard(active.runtime, active.client)
 
+            async def mutate(response):
+                if response.request.url.path.endswith("/begin-send"):
+                    guard.current_item["reply_segment"]["group_sha256"] = "d" * 64
+
+            active.client.event_hooks["response"].append(mutate)
+            with pytest.raises(ValueError):
+                await deliver_tick(active.client, OwnerOneBot(guard, active.protocol),
+                                   active.spool, guard=guard)
+            assert sends == []
+            assert sum(active.attempts().values()) == 1
     run(scenario())
 
 
@@ -445,61 +450,26 @@ def test_segment_schema_preparation_preserves_legacy_rowids_and_unknowns(core, t
 
 
 def test_real_core_one_model_job_keeps_per_piece_approval(core, tmp_path):
-    from companion.config import LiveTextWindowApproval
-    from companion.reply_segments import SegmentedReplyConfig
-    from tests.test_live_text_window import live_clients
-    from tests.test_onebot_direct import raw_event
-    from tests.test_onebot_window import input_approval
-
-    cfg, base = live_fixture(core, tmp_path, core_options={
-        "segmented_reply": SegmentedReplyConfig(**SEGMENT_POLICY),
-    })
-    live = LiveTextWindowApproval.model_validate(core.settings.live_text_window.model_dump() | {
-        "segmented_reply": SEGMENT_POLICY, "max_send_attempts": 5, "max_inputs": 1,
-    })
-    value = deepcopy(base.value)
-    value.update(max_new_inputs=1, live_text=live.model_dump(mode="json", exclude={"plan_sha256"}))
-    core.settings.live_text_window = live.model_copy(update={"plan_sha256": digest(value)})
-    inventory = {key: value[key] for key in (
-        "identity_sha256", "protocol_epoch", "config_sha256", "config_version", "image_ids",
-    )}
-    plan = WindowPlan(value, cfg, inventory)
-
-    def reply(_):
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": "".join(PARTS)}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
-
-    def approval(index):
-        row = core.store.rows("SELECT * FROM outbox ORDER BY rowid")[index]
-        return {"window_sha256": plan.sha256, "event_id": row["origin_event_id"],
-                "message_id": row["message_id"],
-                "reply_sha256": digest(json.loads(row["content_json"])["text"]),
-                "evidence_sha256": "f" * 64}
-
+    checks = []
     async def scenario():
-        async with live_clients(core, cfg, respond=reply) as (client, protocol, models, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                raw = raw_event(1)
-                await window.ingest(client, raw, input_approval(plan, raw))
-                assert await core.run_once()
-                assert len(core.store.rows("SELECT * FROM outbox")) == 2
-                await window.send_once(client, protocol, approval(0))
-                assert (await window.send_once(client, protocol, approval(1)))[
-                    "delivery_wait"] == "SEGMENT_NOT_READY"
-            core.clock.advance(1.5)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.send_once(client, protocol, approval(1))
-                assert window.count("window_inputs", "state='ACK'") == 1
-                assert len(models) == 1 and len(sends) == 2
-                assert [r["state"] for r in core.store.rows("SELECT * FROM outbox")] == [
-                    "SENT", "SENT",
-                ]
+        async with native_fragments(core, tmp_path) as (active, sends, _, calls):
+            async def checked(request):
+                if request.url.path.endswith("/owner-authority/send-check"):
+                    checks.append(json.loads(request.content))
 
+            active.client.event_hooks["request"].append(checked)
+            assert await active.pump()
+            assert not await active.pump()
+            core.clock.advance(1.5)
+            active.restart()
+            assert await active.pump()
+            assert len(calls) == 1 and len(sends) == len(checks) == 2
+            assert len({value["message_id"] for value in checks}) == 2
+            assert len({value["content_sha256"] for value in checks}) == 2
+            assert len({value["event_id"] for value in checks}) == 1
+            assert all(value["authority"] == active.runtime.authority for value in checks)
+            assert [row["state"] for row in core.store.rows("SELECT state FROM outbox")] == [
+                "SENT", "SENT"]
     run(scenario())
 
 

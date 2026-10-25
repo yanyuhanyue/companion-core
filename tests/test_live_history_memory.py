@@ -1,24 +1,26 @@
 """Explicit B1 scopes: native retrieval, loopback capture and synthetic model/send I/O."""
 
 import json
+from contextlib import asynccontextmanager
 from copy import deepcopy
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet
 from pydantic import ValidationError
 
-from companion import live_text
+from companion import live_text, owner_authority, owner_input, paid_budget
 from companion.backup import backup, restore
 from companion.config import LiveTextWindowApproval
 from companion.privacy import advance_epoch
 from companion.store import after, encode
 from companion_onebot_bridge.window import WindowPlan, digest, stored_plan
 from tests.conftest import run
-from tests.test_live_continuity import continuity_window
-from tests.test_live_memory_recall import readonly_window
-from tests.test_onebot_window import reply_approval
+from tests.sdk_reader_fixture import answer, call
+from tests.test_live_continuity import history_snapshot, native_continuity
+from tests.test_live_text_window import live_fixture
+from tests.test_memory_commands import fact
+from tests.test_owner_authority import activate
 
 
 def combined_options(**changes):
@@ -31,9 +33,58 @@ def combined_options(**changes):
     }
 
 
+@asynccontextmanager
+async def native_combined(core, tmp_path, *, options=None, core_options=None,
+                          queries=None, paid=None, respond=None):
+    memory_id = fact(core, 900, "本次临时项目的验收代号是青竹七号。")
+    outsider = fact(core, 901, "未批准的另一个项目代号是紫云三号。")
+    # Preserve valid evidence; native owner-private recall excludes public facts.
+    core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?", (outsider,))
+    scores = []
+    original_recall = core.memory_context.recall
+
+    def observed_recall(*args, **kwargs):
+        result = original_recall(*args, **kwargs)
+        scores.append([row["memory_id"] for row in result["rows"]])
+        return result
+
+    core.memory_context.recall = observed_recall
+    number = 0
+
+    def response(request):
+        nonlocal number
+        number += 1
+        payload = json.loads(request.content)
+        if respond:
+            return respond(request, payload, number)
+        if payload["messages"][-1]["role"] == "tool":
+            found = "青竹七号" in payload["messages"][-1]["content"]
+            content = "青竹七号。" if found else "未查到记录。"
+            return httpx.Response(200, json=answer(content))
+        return httpx.Response(200, json=answer(calls=[call(
+            f"recall-{number}", "memory_recall", {"query": "本次临时项目的验收代号"},
+        )]))
+
+    options = combined_options() if options is None else options
+    turns = options.get("max_history_turns", 0)
+    try:
+        async with native_continuity(
+            core, tmp_path, turns=turns,
+            byte_limit=options.get("max_history_utf8_bytes", 0),
+            texts=queries or ["本次临时项目的验收代号是什么？"] * 5,
+            core_options={"memory_enabled": True, **(core_options or {})},
+            paid_options={"per_request_calls": 2, **(paid or {})},
+            purposes=["chat", "memory", *(["history"] if turns else [])],
+            respond=response,
+        ) as (active, client, calls, sends, capture, _):
+            yield active, client, capture, active.pump, calls, sends, scores, memory_id, outsider
+    finally:
+        core.memory_context.recall = original_recall
+
+
 def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact(core, tmp_path):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -50,23 +101,23 @@ def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact
             assert await core.run_once()
             assert await send()
             assert len(calls) == 4 and len(sends) == 2
-            assert all(ids == [memory_id] for ids in scores)
-            review = json.loads(calls[2]["messages"][-1]["content"])
-            assert review["recent_dialogue"][0]["role"] == "user"
-            assert "城西旧书店" in review["recent_dialogue"][0]["content"]
+            assert scores == [[memory_id], [memory_id]]
+            assert calls[2]["messages"][1]["role"] == "user"
+            assert "城西旧书店" in calls[2]["messages"][1]["content"]
             chat = calls[3]["messages"]
             assert "城西旧书店" in encode(chat)
             assert "青竹七号" in encode(chat)
-            assert chat[-1]["content"] == "刚才这个项目在哪里碰头，长期确认的验收代号又是什么？"
+            assert chat[-3]["content"] == "刚才这个项目在哪里碰头，长期确认的验收代号又是什么？"
             assert [m["role"] for m in chat] == [
                 "system",
                 "user",
-                "user",
                 "assistant",
                 "user",
+                "assistant",
+                "tool",
             ]
             stages = core.store.rows("SELECT job_id,scenario,state FROM model_usage ORDER BY rowid")
-            assert [r["scenario"] for r in stages] == ["memory_review", "chat"] * 2
+            assert [r["scenario"] for r in stages] == ["chat"] * 4
             assert all(r["state"] == "SETTLED" for r in stages)
             assert stages[0]["job_id"] == stages[1]["job_id"]
             assert stages[2]["job_id"] == stages[3]["job_id"]
@@ -75,6 +126,7 @@ def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact
                 (live_text.MEMORY + "%", live_text.CONTEXT + "%"),
             )
             assert "城西旧书店" not in encode(frozen) and "青竹七号" not in encode(frozen)
+            assert "城西旧书店" not in encode(history_snapshot(core))
 
     run(scenario())
 
@@ -85,7 +137,7 @@ def test_utf8_history_boundary_crops_a_whole_pair_before_review(core, tmp_path, 
     limit = len((texts[0] + "青竹七号。").encode("utf-8")) + delta
 
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             queries=texts,
@@ -97,41 +149,41 @@ def test_utf8_history_boundary_crops_a_whole_pair_before_review(core, tmp_path, 
             assert await send()
             await capture()
             assert await core.run_once()
-            review = json.loads(calls[2]["messages"][-1]["content"])
-            assert len(review.get("recent_dialogue", [])) == (2 if kept else 0)
+            assert len(history_snapshot(core)) == int(kept)
             chat = calls[3]["messages"]
-            assert sum(m["role"] == "assistant" for m in chat) == int(kept)
+            assert sum(m["role"] == "assistant" for m in chat) == 1 + int(kept)
             assert ("城西旧书店" in encode(chat)) == kept
-            assert chat[-1]["content"] == texts[-1]
+            assert chat[-3]["content"] == texts[-1]
 
     run(scenario())
 
 
-def test_empty_scoped_search_combines_history_with_one_chat_per_input(core, tmp_path, monkeypatch):
+def test_empty_scoped_search_combines_history_with_native_recall_per_input(core, tmp_path):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
             core_options={"max_recent_messages": 4},
-        ) as (_, _, capture, send, calls, sends, _, _, _):
-            # Only semantic scores are substituted; native scoped SQL and all receipts remain real.
-            monkeypatch.setattr(
-                core.memory.index, "scores_async",
-                AsyncMock(side_effect=lambda q, rows, **kw: {r["memory_id"]: -1 for r in rows})
-            )
+        ) as (_, _, capture, send, calls, sends, _, memory_id, _):
+            core.memory.decide(memory_id, "forget", core.clock())
             for _ in range(2):
                 await capture()
                 assert await core.run_once()
                 assert await send()
-            assert len(calls) == len(sends) == 2
+            assert len(calls) == 4 and len(sends) == 2
+            assert "NO_RECORD" in calls[-1]["messages"][-1]["content"]
             assert [m["role"] for m in calls[-1]["messages"]] == [
                 "system",
                 "user",
                 "assistant",
                 "user",
+                "assistant",
+                "tool",
             ]
             assert [r["scenario"] for r in core.store.rows("SELECT scenario FROM model_usage")] == [
+                "chat",
+                "chat",
                 "chat",
                 "chat",
             ]
@@ -144,7 +196,7 @@ def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core,
     from companion.core import Core
 
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -164,7 +216,7 @@ def test_latest_ledger_replay_of_old_combined_backup_cannot_revive_sources(core,
             key = Fernet.generate_key()
             archive, destination = tmp_path / "before.enc", tmp_path / "restored.db"
             backup(core.settings.database, archive, key)
-            await window.stop_live(client)
+            await window.pause()
             if erased == "history":
                 with core.store.transaction():
                     core.ledger.expire_events(core.store, [source], core.clock())
@@ -254,18 +306,23 @@ def mutate(core, kind):
     elif kind == "epoch":
         advance_epoch(core.store)
     elif kind in {"history_approval", "memory_approval"}:
-        core.settings.live_text_window = core.settings.live_text_window.model_copy(
-            update={kind + "_sha256": "a" * 64},
-        )
+        view = owner_authority.current(core.store, core.settings, core.clock)
+        purpose = kind.removesuffix("_approval")
+        value = view.policy.model_dump(mode="json")
+        value["purposes"].remove(purpose)
+        value["history" if purpose == "history" else "memory_scope"] = (
+            {"scope": "none"} if purpose == "history" else "none")
+        policy = type(view.policy).model_validate(value)
+        activate(core, policy, revision=view.authority.revision, operation=f"withdraw-{purpose}")
     else:
         row = core.store.one(
-            "SELECT * FROM runtime_meta WHERE key=?", (live_text.INPUT + event_id,)
+            "SELECT * FROM runtime_meta WHERE key=?", (owner_input.INPUT + event_id,)
         )
         value = json.loads(row["value"])
         if kind == "signature":
             value["capture"]["signature"] = "0" * 128
         elif kind == "window":
-            value["window_sha256"] = "a" * 64
+            value["authority"]["policy_sha256"] = "a" * 64
         else:
             raise AssertionError(kind)
         core.store.execute(
@@ -273,7 +330,7 @@ def mutate(core, kind):
         )
 
 
-@pytest.mark.parametrize("stage", ["memory_review", "chat"])
+@pytest.mark.parametrize("stage", ["memory_tool", "answer"])
 @pytest.mark.parametrize(
     "kind",
     [
@@ -288,9 +345,9 @@ def mutate(core, kind):
         "memory_approval",
     ],
 )
-def test_both_source_scopes_recheck_in_final_http_hook_before_new_io(core, tmp_path, stage, kind):
+def test_both_source_scopes_recheck_before_next_model_io(core, tmp_path, monkeypatch, stage, kind):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -301,45 +358,53 @@ def test_both_source_scopes_recheck_in_final_http_hook_before_new_io(core, tmp_p
             assert await send()
             await capture()
 
+            original_recall = core.memory_context.recall
+
+            def recalled(*args, **kwargs):
+                result = original_recall(*args, **kwargs)
+                mutate(core, kind)
+                return result
+
             async def hook(request):
-                reviewing = (
-                    '"operation":"recall"' in json.loads(request.content)["messages"][-1]["content"]
-                )
-                if reviewing == (stage == "memory_review"):
+                if json.loads(request.content)["messages"][-1]["role"] == "tool":
                     mutate(core, kind)
 
-            core.model.client.event_hooks["request"].append(hook)
+            if stage == "memory_tool":
+                monkeypatch.setattr(core.memory_context, "recall", recalled)
+            else:
+                core.model.client.event_hooks["request"].append(hook)
             assert await core.run_once()
-            assert len(calls) == (2 if stage == "memory_review" else 3)
+            # Epoch-only movement preserves exact source proofs; changed original
+            # sources or withdrawn authority block the next answer request.
+            assert len(calls) == (4 if kind == "epoch" else 3)
             assert len(sends) == 1
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
-            assert (
-                core.store.one("SELECT state FROM jobs ORDER BY rowid DESC LIMIT 1")["state"]
-                == "FAILED"
-            )
+            job = core.store.one("SELECT state FROM jobs ORDER BY rowid DESC LIMIT 1")
+            expected = (
+                "RETRY_WAIT" if kind == "epoch" or (
+                    stage == "memory_tool" and kind in {"fact", "expired_evidence"})
+                else "FAILED" if kind.endswith("_approval") else "CANCELLED")
+            assert job["state"] == expected, job
             assert not await core.run_once()
 
     run(scenario())
 
 
-@pytest.mark.parametrize("stage", ["memory_review", "chat"])
+@pytest.mark.parametrize("stage", ["memory_tool", "answer"])
 def test_history_drift_after_received_response_keeps_cost_but_never_enqueues(core, tmp_path, stage):
     def respond(request, payload, number):
-        reviewing = '"operation":"recall"' in payload["messages"][-1]["content"]
-        if number > 2 and reviewing == (stage == "memory_review"):
+        reviewing = payload["messages"][-1]["role"] != "tool"
+        if number > 2 and reviewing == (stage == "memory_tool"):
             mutate(core, "history")
         return httpx.Response(
             200,
-            json={
-                "choices": [
-                    {"message": {"content": '{"relevant":["m0"]}' if reviewing else "合成回复"}}
-                ],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
+            json=answer(calls=[call(f"recall-{number}", "memory_recall",
+                                   {"query": "本次临时项目的验收代号"})])
+                if reviewing else answer("合成回复"),
         )
 
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -351,7 +416,7 @@ def test_history_drift_after_received_response_keeps_cost_but_never_enqueues(cor
             assert await send()
             await capture()
             assert await core.run_once()
-            assert len(calls) == (3 if stage == "memory_review" else 4) and len(sends) == 1
+            assert len(calls) == (3 if stage == "memory_tool" else 4) and len(sends) == 1
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             assert all(r["state"] == "SETTLED" and r["billed_micro_usd"] > 0 for r in usage)
@@ -362,7 +427,7 @@ def test_history_drift_after_received_response_keeps_cost_but_never_enqueues(cor
 @pytest.mark.parametrize("kind", ["history", "fact", "epoch"])
 def test_delivery_check_refuses_either_changed_scope_without_sending(core, tmp_path, kind):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -373,19 +438,22 @@ def test_delivery_check_refuses_either_changed_scope_without_sending(core, tmp_p
             assert await send()
             await capture()
             assert await core.run_once()
-            row = core.store.one("SELECT * FROM outbox ORDER BY rowid DESC LIMIT 1")
-            lease = "lease_" + "f" * 32
-            core.store.execute(
-                "UPDATE outbox SET state='SENDING',lease_token=?,lease_until=? WHERE message_id=?",
-                (lease, after(core.clock(), 60), row["message_id"]),
-            )
-            check = {**reply_approval(window.plan, core), "lease_token": lease}
-            del check["evidence_sha256"]
-            assert (await client.post("/internal/v1/live-text/send-check", json=check)).json()[
+            leased = await client.post("/internal/v1/deliveries/lease", json={
+                "worker_id": "native-combined-check", "authority": window.runtime.authority})
+            assert leased.status_code == 200, leased.text
+            row = leased.json()["items"][0]
+            begun = await client.post(f"/internal/v1/deliveries/{row['message_id']}/begin-send",
+                                      json={"lease_token": row["lease_token"]})
+            assert begun.status_code == 200, begun.text
+            check = {"authority": window.runtime.authority, "event_id": row["origin_event_id"],
+                "message_id": row["message_id"], "content_sha256": paid_budget.sha(row["content"]),
+                "reply_revision": row["reply_revision"], "lease_token": row["lease_token"]}
+            path = "/internal/v1/owner-authority/send-check"
+            assert (await client.post(path, json=check)).json()[
                 "approved"
             ]
             mutate(core, kind)
-            response = await client.post("/internal/v1/live-text/send-check", json=check)
+            response = await client.post(path, json=check)
             assert response.status_code >= 400
             assert len(calls) == 4 and len(sends) == 1
             assert (
@@ -398,13 +466,13 @@ def test_delivery_check_refuses_either_changed_scope_without_sending(core, tmp_p
     run(scenario())
 
 
-def test_conflicting_history_and_confirmed_fact_survive_soft_capacity_and_current_input(
+def test_soft_capacity_keeps_current_input_and_native_fact_without_rewriting_fact(
     core, tmp_path
 ):
     texts = ["本次临时项目的验收代号改说白帆九号。", "那这个临时项目的代号还是原来的？"]
 
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             queries=texts,
@@ -416,11 +484,12 @@ def test_conflicting_history_and_confirmed_fact_survive_soft_capacity_and_curren
             assert await send()
             await capture()
             assert await core.run_once()
-            for payload in calls[2:]:
-                assert "白帆九号" in encode(payload) and "青竹七号" in encode(payload)
+            assert history_snapshot(core) == []
+            assert "白帆九号" not in encode(calls[2:])
             messages = calls[-1]["messages"]
-            assert "不确定" in messages[0]["content"] and "投票" in messages[0]["content"]
-            assert messages[-1] == {"role": "user", "content": texts[-1]}
+            assert "青竹七号" in messages[-1]["content"]
+            assert json.loads(messages[-1]["content"])["state"] == "FOUND"
+            assert messages[-3] == {"role": "user", "content": texts[-1]}
             assert core.store.one(
                 "SELECT status,content FROM memories WHERE memory_id=?", (memory_id,)
             ) == {
@@ -436,7 +505,7 @@ def test_unknown_review_preserves_budget_and_never_falls_back_to_chat(core, tmp_
         raise httpx.ReadTimeout("SYNTHETIC_B1_UNKNOWN", request=request)
 
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -447,7 +516,7 @@ def test_unknown_review_preserves_budget_and_never_falls_back_to_chat(core, tmp_
             assert await core.run_once()
             assert len(calls) == 1 and sends == []
             assert core.store.one("SELECT scenario,state FROM model_usage") == {
-                "scenario": "memory_review",
+                "scenario": "chat",
                 "state": "UNKNOWN",
             }
             assert core.store.rows("SELECT * FROM outbox") == []
@@ -460,11 +529,12 @@ def test_five_total_attempt_cap_survives_combined_stages_and_fresh_core(core, tm
     from companion.core import Core
 
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
             core_options={"max_recent_messages": 4},
+            paid={"window_calls": 5},
         ) as (_, _, capture, send, calls, sends, _, _, _):
             for _ in range(2):
                 await capture()
@@ -489,7 +559,7 @@ def test_five_total_attempt_cap_survives_combined_stages_and_fresh_core(core, tm
 
 def test_combined_budget_too_small_rejects_before_model_http(core, tmp_path):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -513,49 +583,36 @@ def test_combined_budget_too_small_rejects_before_model_http(core, tmp_path):
     ],
 )
 def test_scopes_cannot_inherit_or_reassign_each_others_approval(core, tmp_path, change):
-    async def scenario():
-        async with readonly_window(
-            core,
-            tmp_path,
-            options=combined_options(),
-            core_options={"max_recent_messages": 4},
-        ) as (window, _, _, _, calls, sends, _, _, _):
-            value = core.settings.live_text_window.model_dump(mode="json")
-            with pytest.raises(ValidationError):
-                LiveTextWindowApproval.model_validate({**value, **change})
-            plan = deepcopy(window.plan.value)
-            plan["live_text"].update(change)
-            with pytest.raises(ValueError, match="HISTORY_APPROVAL|MEMORY_SCOPE"):
-                WindowPlan(plan, window.plan.config, {})
-            assert calls == sends == []
-
-    run(scenario())
+    memory_id = fact(core, 900, "本次临时项目的验收代号是青竹七号。")
+    _, historical = live_fixture(core, tmp_path,
+        bridge_options={"capture_signing_key": "c" * 64},
+        memory_scope="approved_facts", memory_approval_sha256="f" * 64,
+        memory_facts=[live_text.memory_fact(core.store, core.settings, core.clock, memory_id)],
+        **combined_options())
+    value = core.settings.live_text_window.model_dump(mode="json")
+    with pytest.raises(ValidationError):
+        LiveTextWindowApproval.model_validate({**value, **change})
+    plan = deepcopy(historical.value)
+    plan["live_text"].update(change)
+    with pytest.raises(ValueError, match="HISTORY_APPROVAL|MEMORY_SCOPE"):
+        WindowPlan(plan, historical.config, {})
+    assert not core.store.one("SELECT 1 FROM model_usage")
 
 
 def test_old_history_only_plan_without_new_field_remains_byte_exact_readable(core, tmp_path):
-    async def scenario():
-        async with continuity_window(core, tmp_path) as (window, _, calls, sends, _, _):
-            value = deepcopy(window.plan.value)
-            del value["live_text"]["history_approval_sha256"]
-            inventory = {
-                key: value[key]
-                for key in (
-                    "identity_sha256",
-                    "protocol_epoch",
-                    "config_sha256",
-                    "config_version",
-                    "image_ids",
-                )
-            }
-            raw = encode(value)
-            historical = WindowPlan(value, window.plan.config, inventory)
-            assert historical.sha256 == digest(json.loads(raw))
-            assert "history_approval_sha256" not in historical.value["live_text"]
-            archived = stored_plan(raw, window.plan.config)
-            assert archived.sha256 == historical.sha256 and encode(archived.value) == raw
-            assert calls == sends == []
-
-    run(scenario())
+    cfg, plan = live_fixture(core, tmp_path,
+        bridge_options={"capture_signing_key": "c" * 64}, **combined_options())
+    value = deepcopy(plan.value)
+    del value["live_text"]["history_approval_sha256"]
+    inventory = {key: value[key] for key in (
+        "identity_sha256", "protocol_epoch", "config_sha256", "config_version", "image_ids")}
+    raw = encode(value)
+    historical = WindowPlan(value, cfg, inventory)
+    assert historical.sha256 == digest(json.loads(raw))
+    assert "history_approval_sha256" not in historical.value["live_text"]
+    archived = stored_plan(raw, cfg)
+    assert archived.sha256 == historical.sha256 and encode(archived.value) == raw
+    assert not core.store.one("SELECT 1 FROM model_usage")
 
 
 @pytest.mark.parametrize("history", [False, True])
@@ -566,7 +623,7 @@ def test_fsynced_forget_with_rolled_back_db_blocks_the_next_model_http(
     history,
 ):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options() if history else {},
@@ -604,7 +661,7 @@ def test_fsynced_forget_with_rolled_back_db_blocks_the_next_model_http(
 
 def test_foreign_window_is_excluded_before_reading_its_stage_metadata(core, tmp_path):
     async def scenario():
-        async with readonly_window(
+        async with native_combined(
             core,
             tmp_path,
             options=combined_options(),
@@ -615,18 +672,14 @@ def test_foreign_window_is_excluded_before_reading_its_stage_metadata(core, tmp_
             assert await send()
             await capture()
             mutate(core, "window")
-            # A foreign scope's stage metadata is not current-window evidence.
-            row = core.store.one(
-                "SELECT * FROM runtime_meta WHERE key LIKE ?", (live_text.MEMORY + "%",)
-            )
-            value = json.loads(row["value"])
-            del value["history_sources"]
+            # The rejected history source cannot authorize reading its old snapshots.
             core.store.execute(
-                "UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), row["key"])
+                "UPDATE agent_conversations SET snapshots_json='{}'"
             )
             assert await core.run_once()
             assert len(calls) == 4
-            assert "recent_dialogue" not in json.loads(calls[2]["messages"][-1]["content"])
-            assert [m["role"] for m in calls[-1]["messages"]] == ["system", "user", "user"]
+            assert history_snapshot(core) == []
+            assert [m["role"] for m in calls[-1]["messages"]] == [
+                "system", "user", "assistant", "tool"]
 
     run(scenario())
