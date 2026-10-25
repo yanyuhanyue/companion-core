@@ -201,6 +201,11 @@ def overview(core):
         "companion_proposals": s.one(
             "SELECT COUNT(*) n FROM capability_overrides WHERE state='PROPOSED'")["n"]
         if s.one("SELECT 1 FROM sqlite_master WHERE name='capability_overrides'") else 0,
+        "pending_goals": s.one("SELECT COUNT(*) n FROM goals WHERE state='PENDING'")["n"]
+        if s.one("SELECT 1 FROM sqlite_master WHERE name='goals'") else 0,
+        "pending_reflections": s.one(
+            "SELECT COUNT(*) n FROM reflection_suggestions WHERE state='PENDING'")["n"]
+        if s.one("SELECT 1 FROM sqlite_master WHERE name='reflection_suggestions'") else 0,
     }
     worker = worker_loop.snapshot(s, datetime.fromisoformat(now))
     budget = budget_view(core)

@@ -259,8 +259,8 @@ def register_console_routes(app, settings):
 
     register_console_cognition_routes(app, prefix, auth, _operation)
 
-    @app.get(prefix + "/decisions", dependencies=auth)
-    async def decisions():
+    @app.get(prefix + "/thinking", dependencies=auth)
+    async def thinking():
         return console_read.decisions(app.state.core)
 
     @app.get(prefix + "/life", dependencies=auth)

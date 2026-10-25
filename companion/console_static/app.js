@@ -157,66 +157,13 @@ const CAP_FIELDS = {
   "reading.web": ["web_reading_enabled", "web_reading_hosts", "content_enabled"], "reading.bilibili": ["observation_enabled", "content_enabled"], "reading.heybox": ["observation_enabled", "content_enabled"],
   "bilibili.video": ["bili_video"], "model.understand_video": ["bili_video", "video_model_key"], "qq.images": ["content"], "qq.animation": ["content"], "qq.files": ["private_files"],
   expression: ["expression_enabled", "expression_cooldown_minutes", "expression_selection_probability", "expression_meme_categories"],
-  expression_learning: ["expression_learning_enabled"], "unicode.emoji": [], "qq.face_names": ["rich_input_scope"], "qq.face_images": ["content_enabled"],
-  "memes.catalog": ["expression_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
+  expression_learning: ["expression_learning_enabled"], "unicode.emoji": ["expression_enabled"], "qq.face_names": ["expression_enabled"], "qq.face_images": ["expression_enabled"],
+  "memes.catalog": ["meme_discovery_enabled"], "memes.search": ["meme_discovery_enabled", "meme_discovery_daily_queries"],
   "memes.community_import": ["meme_discovery_enabled", "meme_discovery_daily_download_bytes", "meme_discovery_daily_storage_bytes"],
   "memes.semantic": ["meme_semantics_enabled", "meme_caption_daily_micro_usd", "meme_caption_max_output_tokens"],
   "qq.voice.asr": ["voice_enabled", "voice"], "qq.voice.tts": ["voice_enabled", "voice"], "media.voice": ["voice_enabled"], "media.camera": ["camera_enabled"], "media.android": ["android_enabled"],
   "qq.profile.observe": ["social_autonomy"], "qq.account.signature": ["social_autonomy"], "qq.account.nickname": ["social_autonomy"], "qq.account.avatar": ["social_autonomy"], "qq.account.qzone_publish": ["social_autonomy"],
 };
-// One release switch removes all backend implementation notes; runtime state remains separate.
-const SHOW_IMPLEMENTATION_STATUS = true;
-const CAPABILITY_IMPLEMENTATION = {
-  "memory.manage": ["已实现", "可查询、确认、纠正和忘记记忆。"],
-  "memory.recall": ["已实现", "已有来源约束的检索；控制台尚无原话摘录和召回解释。"],
-  diary: ["已实现", "已有日记读取、纠正、忘记与暂停；此处展示日记能力的操作范围。"],
-  consolidation: ["已实现", "已有夜间整理；尚无 N1/N2/N3 阶段观察。"],
-  reflection: ["已实现", "已有来源支持的反思；控制台尚不能接受或拒绝建议。"],
-  goals: ["已实现", "已有目标与承诺；控制台目前只读，尚无逐步执行视图。"],
-  wake: ["已实现", "已有受限调度与暂停；尚未接入完整自主决策观察。"],
-  affect: ["已实现", "已有反馈与衰减；控制台尚无来源、重置和撤销视图。"],
-  expression: ["已实现", "已有受限表情选择及投递流程；实际表达效果仍需体验验证。"],
-  expression_learning: ["已实现", "已有有来源的表达偏好；尚无跨日变化与证据详情。"],
-  proactive: ["已实现", "已有主动私聊和暂停；尚无逐轮发送或跳过的决策视图。"],
-  social: ["已实现", "已有来源支持的分享候选；尚无统一表达意图视图。"],
-  "reading.web": ["已实现", "已有授权网站读取；控制台只读任务，授权由部署保管。"],
-  "reading.bilibili": ["已实现", "已有 B站读取回执；控制台尚无读取授权管理。"],
-  "reading.heybox": ["已实现", "已有小黑盒读取回执；控制台尚无读取授权管理。"],
-  exploration: ["已实现", "已有内容发现；控制台尚无逐步探索与来源授权操作。"],
-  "bilibili.video": ["已实现", "已有受限视频分析；控制台尚无采样范围详情。"],
-  "model.understand_video": ["已实现", "仅本轮实际开放工具时可调用；控制台尚无工具回执详情。"],
-  "qq.files": ["已实现", "已有私人文件解析和任务记录；尚无页级证据详情。"],
-  "qq.images": ["已实现", "已有认证图片理解；控制台尚无图像来源详情。"],
-  "qq.animation": ["已实现", "已有受限动图理解；控制台尚无帧级证据详情。"],
-  "qq.voice.asr": ["已实现", "已有语音转写与节点状态；控制台不提供字幕或音频回放。"],
-  "qq.voice.tts": ["已实现", "已有语音合成及原投递回执；控制台不提供音频回放。"],
-  "qq.poke": ["已实现", "已有受限拍一拍回应；控制台尚无批次详情。"],
-  "qq.poke.native": ["已实现", "已有独立许可与原生回拍回执；控制台尚无操作详情。"],
-  "qq.account.qzone_publish": ["已实现", "已有独立授权发布与回执；控制台尚不能审核草稿。"],
-  "qq.account.nickname": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
-  "qq.account.signature": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
-  "qq.account.avatar": ["已实现", "已有审核素材与回执；控制台尚无头像预览或计划决定。"],
-  "qq.profile.observe": ["已实现", "已有资料观测；缓存观测不能证明网络刷新或修改成功。"],
-  "unicode.emoji": ["已实现", "保留输入中的 Unicode 表情原文。"],
-  "qq.face_names": ["已实现", "在富媒体输入范围内识别 QQ 原生表情名称。"],
-  "qq.face_images": ["已实现", "在图片许可内接收认证表情图；是否看过以本轮回执为准。"],
-  "memes.catalog": ["已实现", "已有审核素材目录；控制台尚无编辑、上传或隔离操作。"],
-  "memes.community_import": ["已实现", "已有受限素材导入；控制台尚无素材审核操作。"],
-  "memes.search": ["已实现", "已有配置搜索服务的发现路径；控制台尚无搜索操作。"],
-  "memes.semantic": ["已实现", "已有带来源的理解任务；控制台目前只读任务记录。"],
-  "media.voice": ["已实现", "已有独立媒体会话；控制台尚无启动和关闭入口。"],
-  "media.camera": ["已实现", "已有受限摄像头观察；控制台尚无会话控制。"],
-  "media.android": ["已实现", "已有受限设备观察；不代表已实现设备操作。"],
-  executive: ["已实现", "已有独立审批执行器；控制台尚无任务提交、审批和撤销入口。"],
-};
-function implementationNote(id) {
-  const item = CAPABILITY_IMPLEMENTATION[id];
-  return SHOW_IMPLEMENTATION_STATUS && item ? el("small", {
-    class: "note cap-implementation", "data-implementation": id,
-    title: "能力后端：" + item[0] + "。" + item[1],
-    "aria-label": "能力后端" + item[0],
-  }, "后端" + item[0]) : null;
-}
 /* 可以立即暂停的能力对应 /mode 的 target */
 const CAP_RUNTIME = { diary: "diary", wake: "life", proactive: "proactive" };
 const REASONS = {
@@ -235,89 +182,6 @@ const REASONS = {
   TOOL_NOT_EXPOSED_THIS_TURN: "这轮对话没有开放", STATIC_FACE_IMAGES_PAUSED: "QQ 表情图像已暂停",
 };
 
-/* ================= 中文标签：原因码、限额、对象配置子项 ================= */
-Object.assign(REASONS, {
-  BILI_VIDEO_CONCURRENCY_LIMIT: "B 站视频分析已到并发上限", BILI_VIDEO_READER_PAUSED: "B 站读取已暂停", BILI_VIDEO_READER_UNAVAILABLE: "B 站读取不可用",
-  BILI_VIDEO_RECONCILIATION_REQUIRED: "B 站视频费用需要核对", BILI_VIDEO_SCOPE_REQUIRED: "B 站视频需要授权范围", BRIDGE_CAPABILITY_PAUSED: "AstrBot 这项能力已暂停",
-  BRIDGE_OBSERVATION_STALE: "AstrBot 很久没有上报状态", CUMULATIVE_ACCOUNT_NOT_ENROLLED: "账号没有加入累计额度", CUMULATIVE_PAUSED: "累计额度已暂停",
-  CUMULATIVE_POLICY_EXPIRED: "累计额度策略已过期", CUMULATIVE_SCOPE_REQUIRED: "累计额度需要授权范围", LIVE_IMAGE_APPROVAL_REQUIRED: "图片需要当前窗口的授权",
-  LIVE_LINK_SCOPE_REQUIRED: "链接需要当前窗口的授权", LIVE_WINDOW_STOPPED: "私人窗口已停止", MEME_DISCOVERY_PRIVATE_SCOPE_REQUIRED: "表情获取需要私人授权范围",
-  MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED: "历史模型费用需要核对", MODEL_PROVIDER_CONCURRENCY_EXHAUSTED: "模型服务并发已满", MODEL_USAGE_UNRECONCILED: "模型费用还没核对",
-  MODEL_WINDOW_BUDGET_EXHAUSTED: "窗口额度已用完", OWNER_COMMAND_SCOPE_REQUIRED: "需要你的指令授权", PAID_IMAGE_APPROVAL_REQUIRED: "付费图片理解需要授权",
-  PAID_MEME_APPROVAL_REQUIRED: "付费表情理解需要授权", PRIVATE_FILE_CONFIG_INVALID: "私人文件配置无效", PRIVATE_FILE_SCOPE_REQUIRED: "私人文件需要授权范围",
-  PRIVATE_FILE_TRAFFIC_EXHAUSTED: "私人文件今日流量已用完", PRIVATE_POKE_NATIVE_DISABLED: "原生拍一拍没有开启", PRIVATE_POKE_SCOPE_REQUIRED: "拍一拍需要授权范围",
-  QUARANTINED: "已隔离", READER_NOT_ACCEPTING_TASKS: "读取程序暂不接收任务", READER_OPERATION_UNAVAILABLE: "读取程序不支持这项操作",
-  READ_BUDGET_UNAVAILABLE: "读取额度不可用", SCENARIO_MONTHLY_BUDGET_EXHAUSTED: "这个场景本月额度已用完", SEARCH_PROVIDER_UNOBSERVED: "搜索服务还没有上报状态",
-  STATIC_FACE_OBSERVATION_STALE: "QQ 表情图像很久没有更新", VOICE_ASR_SCOPE_REQUIRED: "语音转写需要授权范围", VOICE_CAPACITY_EXCEEDED: "语音任务已满",
-  VOICE_RESOURCE_RECONCILIATION_REQUIRED: "语音资源需要核对", STALE: "记录已过期", UNKNOWN: "结果不明", UNOBSERVED: "还没有观测", UNAVAILABLE: "不可用",
-  BRIDGE_TIMEOUT: "连接 AstrBot 超时", MODEL_TIMEOUT: "模型请求超时", NETWORK_ERROR: "网络错误",
-});
-/* 未收录的原因码按词尾给出中文，界面上不出现英文代码 */
-const REASON_TAILS = [["_SCOPE_REQUIRED", "需要授权范围"], ["_APPROVAL_REQUIRED", "需要授权"], ["_RECONCILIATION_REQUIRED", "需要先核对"], ["_NOT_CONFIGURED", "没有配置"],
-  ["_DISABLED", "没有开启"], ["_PAUSED", "已暂停"], ["_UNAVAILABLE", "不可用"], ["_EXHAUSTED", "额度已用完"], ["_STALE", "很久没有联系"], ["_EXPIRED", "已过期"],
-  ["_INVALID", "配置无效"], ["_LIMIT", "已到上限"], ["_COOLDOWN", "冷却中"], ["_TIMEOUT", "超时"], ["_FAILED", "失败"], ["_REQUIRED", "缺少前置条件"]];
-function reasonText(code) {
-  if (!code) return "";
-  if (REASONS[code]) return REASONS[code];
-  const tail = REASON_TAILS.find(([t]) => String(code).endsWith(t));
-  return tail ? tail[1] : "未归类的原因";
-}
-const LIMIT_NAMES = {
-  daily_micro_usd: "每日额度", monthly_micro_usd: "每月额度", daily_calls: "每日调用", daily_limit: "每日次数", cooldown_seconds: "冷却", mode: "模式",
-  max_daily_images: "每日图片", max_daily_files: "每日文件", daily_requests: "每日请求", monthly_requests: "每月请求", daily_bytes: "每日流量",
-  max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
-};
-const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子长度分段", semantic: "按语义分段（由她写的换行决定）", unlimited: "不限",
-  happy: "开心", like: "喜欢", surprised: "惊讶", morning: "早安", sleep: "晚安", sad: "难过", angry: "生气", shy: "害羞", tired: "困了", thinking: "思考", love: "爱心", cry: "哭哭" };
-function limitValue(k, v) {
-  if (v === null || v === undefined) return "未设置";
-  if (typeof v === "boolean") return v ? "开" : "关";
-  if (typeof v === "string") return VALUE_NAMES[v] || v;
-  if (/micro_usd/.test(k)) return money(v, "usd");
-  if (/micro_cny/.test(k)) return yuan(v);
-  if (/_seconds$/.test(k)) return duration(v);
-  if (/_bytes$/.test(k)) return bytes(v);
-  return count(v);
-}
-const limitName = k => LIMIT_NAMES[k] || subLabel(k);
-
-/* 对象配置的子项名称 */
-const SUB = {
-  enabled: "开启", mode: "模式", scope: "范围", url: "地址", model: "模型", key: "密钥", protocol: "协议", nodes: "节点", reply: "语音回复", asr: "语音转写",
-  proactive: "主动消息也用语音", media: "媒体处理", sampling: "抽样", limits: "资源限制", vision: "图片理解", adapter_id: "适配器", parser_image: "解析镜像",
-  parser_socket: "解析通道", public_origin: "控制台地址", session_seconds: "会话时长", max_sessions: "最多同时登录", allow_native: "允许原生拍一拍",
-  coalesce_seconds: "合并间隔", cooldown_seconds: "冷却", daily_limit: "每天最多", max_coalesced: "最多合并", max_text_chars: "文字上限", max_pending_seconds: "最长等待",
-  max_links_per_event: "每条消息最多链接", max_images_per_event: "每条消息最多图片", max_images_per_article: "每篇文章最多图片", article_image_micro_usd: "文章图片单价",
-  use_chat_model_for_vision: "用对话模型理解图片", max_image_bytes: "单张图片上限", max_daily_image_bytes: "每日图片流量", max_daily_images: "每日最多图片",
-  image_daily_micro_usd: "图片理解每日额度", wait_seconds: "回复前最多等待", upload_window_seconds: "上传窗口", max_request_micro_usd: "单次请求上限",
-  max_files_per_event: "每条消息最多文件", max_daily_files: "每日最多文件", max_daily_bytes: "每日流量", upload_lease_seconds: "上传租约", worker_lease_seconds: "处理租约",
-  spool_retention_seconds: "暂存保留", max_file_bytes: "单个文件上限", max_expanded_bytes: "解压后上限", max_zip_entries: "压缩包最多条目", max_compression_ratio: "最大压缩比",
-  max_pages: "最多页数", max_records: "最多条数", max_text_chars_file: "文字上限", max_table_depth: "表格最深层级", max_pdf_stream_bytes: "PDF 单流上限",
-  cpu_seconds: "CPU 时间", wall_seconds: "总时长", memory_bytes: "内存上限", scratch_bytes: "临时空间", max_processes: "最多进程",
-  signing_private_key: "签名私钥", job_ttl_seconds: "任务有效期", lease_ttl_seconds: "租约有效期", result_ttl_seconds: "结果有效期", max_pending_jobs: "排队上限",
-  max_private_blob_bytes: "私有数据上限", max_chars: "字数上限", max_context_chars: "带入对话的字数", authorization_sha256: "授权摘要", asset_policy_sha256: "素材策略摘要",
-  policy_version: "策略版本", qzone_enabled: "允许 QQ 空间发布", nickname_enabled: "允许改昵称", signature_enabled: "允许改签名", avatar_enabled: "允许改头像",
-  qzone_daily_limit: "QQ 空间每天最多", profile_daily_limit: "资料每天最多改", qzone_cooldown_seconds: "QQ 空间冷却", profile_cooldown_seconds: "资料改动冷却",
-  model_daily_calls: "模型每日调用", model_daily_micro_usd: "模型每日额度", decision_interval_seconds: "决策间隔", max_publish_chars: "发布字数上限",
-  max_nickname_chars: "昵称字数上限", max_signature_chars: "签名字数上限", max_source_refs: "最多引用来源", max_source_chars: "来源字数上限", max_input_bytes: "输入上限",
-  max_output_tokens: "输出上限", timeout_seconds: "超时", plan_ttl_seconds: "计划有效期", profile_baseline_seconds: "资料观测有效期", max_pending_plans: "最多待执行计划",
-  max_asset_bytes: "素材大小上限", max_asset_dimension: "素材边长上限", deadline_seconds: "处理时限", max_concurrent: "并发", max_preview_frames: "最多预览帧",
-  max_clips: "最多片段", max_clip_seconds: "单段时长", max_total_clip_seconds: "片段总时长", max_total_output_bytes: "输出总上限", max_width: "最大宽度", max_height: "最大高度",
-  max_source_pixels: "源视频像素上限", max_source_seconds: "源视频时长上限", max_decoded_frames: "最多解码帧", max_output_frames: "最多输出帧", output_fps: "输出帧率",
-  timestamp_tolerance_seconds: "时间戳容差", max_frame_gap_seconds: "最大帧间隔", min_frame_gap_seconds: "最小帧间隔", terminate_grace_seconds: "终止宽限",
-  max_process_output_bytes: "进程输出上限", max_memory_bytes: "内存上限", initial_frames: "初始帧数", max_segments: "最多分段", max_segment_seconds: "单段时长",
-  max_total_segment_seconds: "分段总时长", max_subtitles: "最多字幕", max_danmaku: "最多弹幕", subtitle_similarity: "字幕相似度", subtitle_duplicate_seconds: "字幕去重间隔",
-  danmaku_duplicate_seconds: "弹幕去重间隔", danmaku_bin_seconds: "弹幕统计间隔", min_danmaku_support: "弹幕最少支持数", min_density_ratio: "最小密度比",
-  local_window_seconds: "局部窗口", context_before_seconds: "之前的上下文", context_after_seconds: "之后的上下文", baseline_floor_per_second: "每秒基线",
-  focus_terms: "关注词", max_evidence_per_selection: "每次选取最多证据", max_duration_seconds: "最长时长", provider_timeout_seconds: "服务商超时", image_adapter: "图片适配器",
-  max_segments_reply: "最多分段", min_chars: "最少字数", interval_ms: "间隔（毫秒）",
-};
-const TOKENS = { max: "最多", min: "最少", daily: "每日", monthly: "每月", total: "总", seconds: "时长", bytes: "大小", chars: "字数", enabled: "开启", limit: "上限" };
-const subLabel = k => SUB[k] || String(k).split("_").map(t => TOKENS[t] || "").join("") || "其他设置";
-/* 与 poke_protocol / voice_config / social_autonomy_protocol 中的 Literal 保持一致 */
-const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"], segmented_reply: ["sentence", "semantic"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
-const isSensitiveSub = k => /(_sha256|private_key|_socket|parser_image|token|secret)$/.test(k) || k === "key";
-
 /* ================= 状态与接口 ================= */
 const SECRET_KEY = /password|cookie|authorization|api_key|access_token|refresh_token|csrf|secret|credential/i;
 const state = {
@@ -325,7 +189,7 @@ const state = {
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
   actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
-  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", decKind: "all", decSel: null, decTab: "record",
+  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview",
 };
 
 class ApiError extends Error {
@@ -569,7 +433,16 @@ const LOADERS = {
   memories: signal => api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: signal => api.get("/life", signal), content: signal => api.get("/content", signal), memes: signal => api.get("/memes", signal),
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
-  diagnostics: signal => api.get("/diagnostics", signal), thinking: signal => api.get("/decisions", signal),
+  diagnostics: signal => api.get("/diagnostics", signal),
+  thinking: async signal => {
+    const kinds = ["wake", "life", "goal", "diary", "reflection", "nightly", "model", "rem"];
+    const results = await Promise.allSettled(kinds.map(k => api.get("/cognition?kind=" + k + "&limit=30", signal)));
+    const data = {};
+    for (let i = 0; i < kinds.length; i++) {
+      data[kinds[i]] = results[i].status === "fulfilled" ? results[i].value : { items: [] };
+    }
+    return data;
+  },
   caps: async signal => {
     const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
       api.get("/autonomy", signal).catch(e => { if (e.name === "AbortError") throw e; return null; })]);
@@ -760,11 +633,13 @@ PAGES.overview.after = () => { const day = $(".day"); const sc = $(".day-scroll"
 function todoList(data) {
   const out = [], counts = data.counts || {}, b = data.budget || {};
   const uncertain = (data.diagnostics?.items || []).filter(i => i.status === "DELIVERY_UNCERTAIN");
-  if (uncertain.length) out.push(["bad", uncertain.length, "条投递结果不明", "不会自动重发，请到 QQ 里看看是否已出现", "去核对", "diagnostics"]);
+  if (uncertain.length) out.push(["bad", uncertain.length, "条投递结果不明", "不会自动重发,请到 QQ 里看看是否已出现", "去核对", "diagnostics"]);
   if (counts.review_memories) out.push(["", counts.review_memories, "条记忆等你确认", "确认后她才会在对话里用到", "去确认", "memories"]);
-  if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下，等你批准", "去看看", "caps/wake"]);
-  if (counts.unknown_calls) out.push(["", counts.unknown_calls, "次模型调用结果不明", "相关费用会一直占用额度，直到核对完成", "查看诊断", "diagnostics"]);
-  if (b.reconciliation_required || b.restore_reconciliation_required) out.push(["bad", "!", "费用记录需要核对", b.admission_blocked ? "云调用已暂停，需核对独立账本" : "请核对独立费用记录", "查看诊断", "diagnostics"]);
+  if (counts.companion_proposals) out.push(["info", counts.companion_proposals, "条她的调整提议", "她想少打扰或休息一下,等你批准", "去看看", "caps/wake"]);
+  if (counts.pending_goals) out.push(["", counts.pending_goals, "个目标等你决定", "她提出了新目标,需要你接受或取消", "去看看", "life"]);
+  if (counts.pending_reflections) out.push(["", counts.pending_reflections, "条反思等你批准", "每日反思已完成,需要你批准或拒绝", "去看看", "life"]);
+  if (counts.unknown_calls) out.push(["", counts.unknown_calls, "次模型调用结果不明", "相关费用会一直占用额度,直到核对完成", "查看诊断", "diagnostics"]);
+  if (b.reconciliation_required || b.restore_reconciliation_required) out.push(["bad", "!", "费用记录需要核对", b.admission_blocked ? "云调用已暂停,需核对独立账本" : "请核对独立费用记录", "查看诊断", "diagnostics"]);
   if (b.fx_expired) out.push(["bad", "!", "汇率已过期", "过期后不会发起新的云调用", "更新汇率", "configuration/budget"]);
   if (data.runtime?.worker?.state && data.runtime.worker.state !== "RECORDED") out.push(["info", "!", "聊天处理进程没有近期记录", "进程可能没有启动或已经停止", "查看诊断", "diagnostics"]);
   if (!out.length) return el("div", { class: "todo-clear" }, icon("check"), "没有需要你处理的事。");
@@ -888,108 +763,6 @@ function memoryAction(item, decision) {
   openDialog(titles[decision], form);
 }
 
-/* ================= 记忆关系图 =================
-   参考 AstrBot 插件 LivingMemory 的图谱视图（选中节点列出关联记忆、图谱与列表互相定位）。
-   现有记忆只有类型、主体和来源消息，所以这里按“主体 → 类型 → 记忆”连接，
-   并把引用同一条来源消息的记忆连起来；实体与关系抽取需要后端新增后再接入。 */
-const GPOS = new Map();
-function graphModel(items) {
-  const nodes = [{ id: "me", label: "你", type: "self" }], edges = [];
-  const herItems = items.filter(m => ["self", "companion"].includes(m.detail?.subject));
-  if (herItems.length) { nodes.push({ id: "her", label: "她", type: "her" }); edges.push({ a: "me", b: "her", kind: "root" }); }
-  const kinds = new Map();
-  for (const m of items) {
-    const root = ["self", "companion"].includes(m.detail?.subject) ? "her" : "me", kind = m.detail?.memory_kind || "other";
-    const cid = root + ":" + kind;
-    if (!kinds.has(cid)) { kinds.set(cid, true); nodes.push({ id: cid, label: MEM_KIND[kind] || "其他", type: "kind", root }); edges.push({ a: root, b: cid, kind: "root" }); }
-    nodes.push({ id: "m:" + m.id, label: m.title.length > 12 ? m.title.slice(0, 11) + "…" : m.title, type: "mem", m, cat: cid });
-    edges.push({ a: cid, b: "m:" + m.id, kind: m.detail?.needs_review ? "conflict" : m.status === "CONFIRMED" ? "solid" : "hyp" });
-  }
-  const byEvidence = new Map();
-  for (const m of items) for (const e of m.detail?.evidence_ids || []) { if (!byEvidence.has(e)) byEvidence.set(e, []); byEvidence.get(e).push(m.id); }
-  const seen = new Set();
-  for (const ids of byEvidence.values()) for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
-    const key = ids[i] + "|" + ids[j]; if (seen.has(key)) continue; seen.add(key);
-    edges.push({ a: "m:" + ids[i], b: "m:" + ids[j], kind: "shared" });
-  }
-  return { nodes, edges };
-}
-function layoutGraph(nodes, edges) {
-  const W = 1000, H = 620, cx = W / 2, cy = H / 2, kindsList = nodes.filter(n => n.type === "kind");
-  for (const n of nodes) {
-    if (GPOS.has(n.id)) continue;
-    if (n.type === "self") GPOS.set(n.id, { x: cx, y: cy });
-    else if (n.type === "her") GPOS.set(n.id, { x: cx + 260, y: cy - 170 });
-    else if (n.type === "kind") { const k = kindsList.indexOf(n), a = k / Math.max(1, kindsList.length) * Math.PI * 2 - Math.PI / 2; GPOS.set(n.id, { x: cx + Math.cos(a) * 210, y: cy + Math.sin(a) * 160 }); }
-    else { const p = GPOS.get(n.cat) || { x: cx, y: cy }, siblings = nodes.filter(x => x.cat === n.cat), k = siblings.indexOf(n), a = Math.atan2(p.y - cy, p.x - cx) + (k - (siblings.length - 1) / 2) * .55;
-      GPOS.set(n.id, { x: p.x + Math.cos(a) * 120, y: p.y + Math.sin(a) * 100 }); }
-  }
-  for (let it = 0; it < 160; it++) for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-    const a = GPOS.get(nodes[i].id), b = GPOS.get(nodes[j].id); const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy) || 1;
-    if (d < 92) { const push = (92 - d) / 2, ux = dx / d, uy = dy / d;
-      if (nodes[i].type !== "self") { a.x += ux * push; a.y += uy * push; } if (nodes[j].type !== "self") { b.x -= ux * push; b.y -= uy * push; } }
-  }
-  for (const n of nodes) { const p = GPOS.get(n.id); p.x = Math.max(60, Math.min(W - 60, p.x)); p.y = Math.max(36, Math.min(H - 36, p.y)); }
-}
-function edgeD(e) { const a = GPOS.get(e.a), b = GPOS.get(e.b); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, bend = e.kind === "shared" ? 40 : 10;
-  return `M${a.x.toFixed(1)} ${a.y.toFixed(1)} Q${(mx - dy / d * bend).toFixed(1)} ${(my + dx / d * bend).toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`; }
-function memoryGraph(items) {
-  if (!items.length) return empty("还没有可以画成关系图的记忆", state.memTab === "review" ? "切到“全部”看看。" : "记忆形成后会出现在这里。");
-  const { nodes, edges } = graphModel(items); layoutGraph(nodes, edges);
-  const sel = nodes.find(n => n.id === state.gSel) || null;
-  const near = sel ? new Set([sel.id, ...edges.filter(e => e.a === sel.id || e.b === sel.id).flatMap(e => [e.a, e.b])]) : null;
-  const q = state.memQ.trim();
-  const svg = el("svg", { class: "graph", viewBox: "0 0 1000 620", role: "img", "aria-label": `记忆关系图，${nodes.length} 个节点` },
-    edges.map(e => el("path", { class: "ge " + e.kind + (near && !(near.has(e.a) && near.has(e.b)) ? " dim" : ""), d: edgeD(e), "data-a": e.a, "data-b": e.b })),
-    nodes.map(n => { const p = GPOS.get(n.id), r = n.type === "self" ? 30 : n.type === "her" ? 24 : n.type === "kind" ? 20 : 11;
-      const dim = near ? !near.has(n.id) : q ? !(n.label.includes(q) || n.m?.title.includes(q)) && n.type === "mem" : false;
-      return el("g", { class: `gn ${n.type}${n === sel ? " sel" : ""}${dim ? " dim" : ""}${n.m && n.m.status !== "CONFIRMED" ? " pending" : ""}`, transform: `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`,
-        tabindex: "0", role: "button", "data-gn": n.id, "aria-label": n.m ? n.m.title : n.label },
-        el("circle", { r: String(r) }), el("text", { y: String(n.type === "self" || n.type === "her" ? 5 : n.type === "kind" ? 5 : r + 15), class: n.type === "mem" ? "out" : "in" }, n.label));
-    }));
-  bindGraphEvents(svg, edges);
-  return el("div", { class: "gwrap" }, el("section", { class: "gcanvas" }, svg,
-    el("div", { class: "glegend" }, el("span", {}, el("i", { class: "l solid" }), "已确认"), el("span", {}, el("i", { class: "l hyp" }), "待确认"),
-      el("span", {}, el("i", { class: "l conflict" }), "需要核对"), el("span", {}, el("i", { class: "l shared" }), "来自同一条消息"), el("span", { class: "muted" }, "拖动节点调整位置"),
-      btn("重新排列", () => { GPOS.clear(); rerender(); }, { cls: "sm quiet", symbol: "refresh" }))),
-    el("aside", { class: "gpanel", "aria-live": "polite" }, sel ? graphPanel(sel, nodes, edges) : graphSummary(items, nodes, edges)));
-}
-function graphSummary(items, nodes, edges) {
-  const kinds = nodes.filter(n => n.type === "kind");
-  return el("div", {}, el("h3", {}, "关系概览"), el("div", { class: "gstats" },
-      el("div", {}, el("b", { class: "num" }, String(items.length)), el("span", {}, "条记忆")), el("div", {}, el("b", { class: "num" }, String(kinds.length)), el("span", {}, "个类型")),
-      el("div", {}, el("b", { class: "num" }, String(items.filter(m => m.status !== "CONFIRMED").length)), el("span", {}, "条待确认"))),
-    el("p", { class: "note mt" }, "点一个节点，右边会列出相关的记忆，可以直接确认、纠正或忘记。"),
-    el("h4", { class: "gsub" }, "各类型"), el("ul", { class: "gtop" }, kinds.map(k => el("li", {}, el("button", { type: "button", onclick: () => pick(k.id) }, el("i"), k.label,
-      el("span", { class: "num" }, String(nodes.filter(n => n.cat === k.id).length)))))));
-}
-function graphPanel(sel, nodes, edges) {
-  const mems = sel.type === "mem" ? [sel.m, ...edges.filter(e => e.kind === "shared" && (e.a === sel.id || e.b === sel.id)).map(e => nodes.find(n => n.id === (e.a === sel.id ? e.b : e.a)).m)]
-    : nodes.filter(n => n.type === "mem" && (n.cat === sel.id || (sel.type !== "kind" && nodes.find(k => k.id === n.cat)?.root === sel.id))).map(n => n.m);
-  return el("div", {}, el("div", { class: "gp-head" }, el("button", { type: "button", class: "icon-btn", "aria-label": "返回概览", onclick: () => pick(null) }, icon("left")),
-      el("h3", {}, sel.type === "mem" ? "这条记忆" : sel.label)),
-    el("p", { class: "note" }, sel.type === "mem" && mems.length > 1 ? `还有 ${mems.length - 1} 条记忆来自同一条消息` : `${mems.length} 条记忆`),
-    mems.map(m => el("article", { class: "gmem" + (m.status !== "CONFIRMED" ? " review" : "") }, el("b", {}, m.title),
-      el("div", { class: "meta" }, tag(m.status), m.detail?.memory_kind ? el("span", { class: "chip" }, MEM_KIND[m.detail.memory_kind] || "其他") : null, el("span", { class: "note" }, fmtDate(m.occurred_at))),
-      el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
-        btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }), btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })))));
-}
-function pick(id) { state.gSel = id; rerender(); if (id) $(`[data-gn="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }); }
-function bindGraphEvents(svg, edges) {
-  let drag = null;
-  const pt = ev => { const m = svg.getScreenCTM?.(); if (!m) return null; const p = svg.createSVGPoint(); p.x = ev.clientX; p.y = ev.clientY; return p.matrixTransform(m.inverse()); };
-  svg.addEventListener("pointerdown", ev => { const g = ev.target.closest("[data-gn]"); if (!g) return; const p = pt(ev); const o = GPOS.get(g.dataset.gn);
-    drag = { id: g.dataset.gn, g, sx: p ? p.x : 0, sy: p ? p.y : 0, ox: o.x, oy: o.y, moved: false }; g.setPointerCapture?.(ev.pointerId); });
-  svg.addEventListener("pointermove", ev => { if (!drag) return; const p = pt(ev); if (!p) return; const dx = p.x - drag.sx, dy = p.y - drag.sy;
-    if (Math.hypot(dx, dy) > 3) drag.moved = true; if (!drag.moved) return;
-    const pos = { x: Math.max(30, Math.min(970, drag.ox + dx)), y: Math.max(30, Math.min(590, drag.oy + dy)) }; GPOS.set(drag.id, pos);
-    drag.g.setAttribute("transform", `translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})`);
-    $$(".ge", svg).forEach(path => { if (path.dataset.a === drag.id || path.dataset.b === drag.id) path.setAttribute("d", edgeD({ a: path.dataset.a, b: path.dataset.b, kind: path.classList.contains("shared") ? "shared" : "" })); }); });
-  const end = () => { if (!drag) return; const d = drag; drag = null; if (!d.moved) pick(state.gSel === d.id ? null : d.id); };
-  svg.addEventListener("pointerup", end); svg.addEventListener("pointercancel", () => { drag = null; });
-  svg.addEventListener("keydown", ev => { const g = ev.target.closest("[data-gn]"); if (g && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); pick(g.dataset.gn); } });
-}
-
 /* ================= 日记与成长 ================= */
 const WEEK = ["日", "一", "二", "三", "四", "五", "六"];
 PAGES.life = data => {
@@ -1009,7 +782,7 @@ PAGES.life = data => {
   const goals = items.filter(i => i.kind === "goal"), reflections = items.filter(i => i.kind === "reflection");
   const paper = el("article", { class: "paper", id: "diary-paper", "aria-live": "polite" }, el("p", { class: "note" }, "正在读取日记…"));
   queueMicrotask(() => loadDiary(state.diaryDay, paper));
-  return el("div", {}, head("日记与成长", "日记由独立进程在自然日结束后整理，只根据核验过的真实互动书写。", btn("暂停或恢复写日记", openModeDialog, { symbol: "pause" })),
+  return el("div", {}, head("日记与成长", "日记由独立进程在自然日结束后整理,只根据核验过的真实互动书写。", btn("暂停或恢复写日记", openModeDialog, { symbol: "pause" })),
     el("div", { class: "diary-wrap" },
       el("div", { class: "stack" },
         el("section", { class: "sheet cal" }, el("div", { class: "cal-head" },
@@ -1017,11 +790,20 @@ PAGES.life = data => {
           el("button", { type: "button", class: "icon-btn", "aria-label": "下个月", onclick: () => shift(1) }, icon("right"))),
           el("div", { class: "cal-grid" }, WEEK.map(w => el("span", { class: "wd" }, w)), cells),
           el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看"))),
-        sheet("目标与承诺", goals.length ? goals.map(g => el("div", { class: "goal" }, el("b", {}, g.title), tag(g.status),
-          el("p", {}, g.detail?.commitment_state ? "承诺：" + statusOf(g.detail.commitment_state)[0] : "更新于 " + fmtDate(g.occurred_at)))) : el("p", { class: "note" }, "还没有目标。"))),
+        sheet("目标与承诺", goals.length ? goals.map(g => el("div", { class: "goal" },
+          el("div", {}, el("b", {}, g.title), tag(g.status),
+            el("p", {}, g.detail?.commitment_state ? "承诺：" + statusOf(g.detail.commitment_state)[0] : "更新于 " + fmtDate(g.occurred_at))),
+          el("div", { class: "goal-acts" },
+            g.status === "PENDING" ? btn("接受", () => goalAction(g.id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
+            g.status === "PENDING" ? btn("取消", () => goalAction(g.id, "CANCEL"), { cls: "sm", symbol: "close" }) : null,
+            g.status === "ACCEPTED" ? btn("续行", () => goalContinuation(g.id), { cls: "sm", symbol: "next" }) : null))) : el("p", { class: "note" }, "还没有目标。"))),
       el("div", { class: "stack" }, paper,
-        sheet("最近的反思", reflections.length ? el("ul", { class: "rows" }, reflections.map(r => el("li", { class: "block" }, el("b", {}, r.title),
-          el("span", { class: "meta-line" }, tag(r.status), el("span", { class: "note" }, fmtDate(r.occurred_at)))))) : el("p", { class: "note" }, "还没有反思记录。")))));
+        sheet("最近的反思", reflections.length ? el("ul", { class: "rows" }, reflections.map(r => el("li", { class: "block" },
+          el("div", {}, el("b", {}, r.title),
+            el("span", { class: "meta-line" }, tag(r.status), el("span", { class: "note" }, fmtDate(r.occurred_at)))),
+          r.status === "PENDING" ? el("div", { class: "acts" },
+            btn("批准", () => reflectionAction(r.id, "ACCEPT"), { cls: "sm primary", symbol: "check" }),
+            btn("拒绝", () => reflectionAction(r.id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null))) : el("p", { class: "note" }, "还没有反思记录。")))));
 };
 async function loadDiary(day, paper) {
   const epoch = state.epoch;
@@ -1076,6 +858,48 @@ function openModeDialog() {
       async () => { closeDialog(); toast("已保存，立即生效"); await loadRoute({ reset: true }); });
   });
   openDialog("管理主动行为", form);
+}
+function goalAction(goalId, decision) {
+  const titles = { ACCEPT: "接受这个目标", CANCEL: "取消这个目标" };
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后她会开始执行这个目标。" : "取消后这个目标不会再执行。"));
+  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "接受" : "取消");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goalId) + "/decision", { decision }, "POST",
+      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      async () => { closeDialog(); toast(decision === "ACCEPT" ? "已接受" : "已取消"); await loadRoute({ reset: true }); });
+  });
+  openDialog(titles[decision], form);
+}
+function goalContinuation(goalId) {
+  const form = el("form", { class: "dlg-form" });
+  const choice = el("select", { class: "input", id: "goal-cont", required: true },
+    el("option", { value: "" }, "请选择"), el("option", { value: "CONTINUE" }, "继续执行"), el("option", { value: "COMPLETE" }, "标记为完成"));
+  form.append(el("label", { class: "field" }, el("span", {}, "续行方式"), choice));
+  const submit = el("button", { type: "submit", class: "btn primary" }, "确定");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    if (!choice.value) { formError(form, "请选择续行方式。"); return; }
+    perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goalId) + "/continuation", { decision: choice.value }, "POST",
+      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      async () => { closeDialog(); toast("已保存"); await loadRoute({ reset: true }); });
+  });
+  openDialog("目标续行", form);
+}
+function reflectionAction(suggestionId, decision) {
+  const titles = { ACCEPT: "批准这条反思", REJECT: "拒绝这条反思" };
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "批准后这条反思会进入记录。" : "拒绝后这条反思不会保留。"));
+  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "批准" : "拒绝");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/reflections/" + encodeURIComponent(suggestionId) + "/decision", { decision }, "POST",
+      r => typeof r.suggestion_id === "string" && typeof r.state === "string"),
+      async () => { closeDialog(); toast(decision === "ACCEPT" ? "已批准" : "已拒绝"); await loadRoute({ reset: true }); });
+  });
+  openDialog(titles[decision], form);
 }
 
 /* ================= 阅读与文件 ================= */
@@ -1217,75 +1041,6 @@ function reconcileBox(item) {
   form.append(el("div", { class: "row-gap" }, buttons));
   return form;
 }
-
-/* ================= 思考与决策 ================= */
-const WAKE_REASON = { PAUSED: "你暂停了自主活动", COMPANION_PAUSED: "她自己先停一下", QUIET_HOURS: "现在是免打扰时段", OWNER_REQUESTED_PAUSE: "你让她先别打扰",
-  RESOURCE_UNAVAILABLE: "价格未知或内容发现没有开启", DAILY_LIMIT: "今天已到每日上限", COOLDOWN: "离上次运行还没到间隔", NO_CANDIDATE: "没有到期的目标",
-  GOAL_DUE: "有目标到期", DISCOVERY_DUE: "可以去发现新内容" };
-const SHARE_REASON = { DUPLICATE_CONTENT: "和之前分享过的内容重复", SIMILAR_CONTENT: "和最近分享的内容相似", SOURCE_EXPIRED: "来源已经过期",
-  SOURCE_CHANGED: "来源内容已经变化", DEDUPE_UNAVAILABLE: "去重检查暂时不可用", DEDUPE_CONTENDED: "去重检查正忙" };
-const DK = {
-  wake: { name: "自主活动", ic: "timeline", options: { EXPLORE: "读到期的目标", OBSERVE: "发现新内容", SKIP: "这一轮不安排" },
-    result: { EXPLORE: "已安排阅读", OBSERVE: "已安排内容发现", SKIP: "未运行" } },
-  share: { name: "主动分享", ic: "spark", options: { SHARE: "分享给你", SKIP: "不分享" },
-    decision: { CANDIDATE: "等待发送评估", QUEUED: "安排发送", SKIPPED: "不分享", EXPIRED: "已过期" } },
-  account: { name: "QQ 资料", ic: "qq", options: { PLAN: "改动资料", SKIP: "不改" },
-    decision: { PLANNING: "正在规划", READY: "计划改动", SKIPPED: "这次不改", REJECTED: "计划未通过", CANCELLED: "已取消" } },
-  reflection: { name: "反思", ic: "memory", options: { SUGGEST: "提出建议", SKIP: "不提出" },
-    decision: { COMMITTED: "提出建议", SKIPPED: "不提出", FAILED: "整理失败", CANCELLED: "已取消", RUNNING: "整理中" } },
-};
-const DEC_TONE = { SKIP: "off", SKIPPED: "off", EXPIRED: "off", CANCELLED: "off", FAILED: "bad", REJECTED: "bad", RUNNING: "run", PLANNING: "run", CANDIDATE: "warn" };
-function decisionView(i) {
-  const d = i.detail || {}, k = DK[i.kind] || { name: "其他", ic: "spark", options: {} };
-  const decisionText = i.kind === "wake" ? k.options[i.status] : (k.decision || {})[i.status] || statusOf(i.status)[0];
-  const why = i.kind === "wake" ? WAKE_REASON[i.summary] || reasonText(i.summary) : i.kind === "share" ? SHARE_REASON[i.summary] || reasonText(i.summary)
-    : i.kind === "reflection" ? (i.status === "COMMITTED" ? `当天有 ${d.sources ?? "—"} 条互动可以引用` : reasonText(i.summary) || "来源不足") : reasonText(i.summary) || "没有记录原因";
-  const trigger = i.kind === "wake" ? (d.trigger === "event" ? "收到你的消息后" : "定时醒来") : i.kind === "share" ? "发现了一条可以分享的内容"
-    : i.kind === "reflection" ? (d.local_date || "") + " 的日记整理完成" : "资料行为定时检查";
-  const result = i.kind === "wake" ? k.result[i.status] : i.kind === "share" ? (d.delivery_state ? statusOf(d.delivery_state)[0] : "未发送")
-    : i.kind === "reflection" ? (d.suggestions ? `${d.suggestions} 条建议等你查看` + (d.adjustments ? `，其中 ${d.adjustments} 条是能力调整` : "") : "没有建议") : statusOf(i.status)[0];
-  const context = i.kind === "wake" ? [["每日次数", "已采用", d.limit != null ? `${d.daily_runs ?? 0} / ${d.limit}` : ""], ["到期目标", d.goal ? "已采用" : "无", d.goal || ""]]
-    : i.kind === "share" ? [["内容去重", i.summary ? "已采用" : "已采用", i.summary ? SHARE_REASON[i.summary] || "" : "没有重复"], ["发送记录", d.delivery_state ? "已采用" : "无", d.delivery_state ? statusOf(d.delivery_state)[0] : ""]]
-    : i.kind === "reflection" ? [["当天互动", d.sources ? "已采用" : "无", d.sources ? d.sources + " 条" : ""], ["她可以调整的能力", d.adjustments ? "已采用" : "无", d.adjustments ? d.adjustments + " 条调整" : ""]]
-    : [["资料观测与次数", "已采用", "详见 QQ 资料行为"]];
-  return { k, decisionText, why, trigger, result, context, options: (d.options || []).map(o => k.options[o] || o) };
-}
-PAGES.thinking = data => {
-  const items = (data.items || []).filter(i => state.decKind === "all" || i.kind === state.decKind);
-  const sel = items.find(i => String(i.id) === state.decSel) || items[0];
-  const today = localDay(new Date().toISOString()), todays = (data.items || []).filter(i => localDay(i.occurred_at) === today);
-  const n = f => todays.filter(f).length;
-  const stats = el("div", { class: "dk-stats" }, [["今天的决策", todays.length], ["已执行", n(i => ["EXPLORE", "OBSERVE", "QUEUED", "READY", "COMMITTED"].includes(i.status))],
-    ["暂缓或跳过", n(i => ["SKIP", "SKIPPED", "CANDIDATE"].includes(i.status))], ["失败", n(i => ["FAILED", "REJECTED"].includes(i.status))]]
-    .map(([t, v]) => el("div", {}, el("b", { class: "num" }, String(v)), el("span", {}, t))));
-  const filters = el("div", { class: "toolbar" }, el("div", { class: "seg" }, [["all", "全部"], ...Object.entries(DK).map(([k, v]) => [k, v.name])].map(([k, t]) =>
-    el("button", { type: "button", "aria-pressed": String(state.decKind === k), onclick: () => { state.decKind = k; state.decSel = null; rerender(); } }, t))));
-  if (!sel) return el("div", {}, head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"), stats, filters,
-    empty("还没有决策记录", "自主活动调度、主动分享、QQ 资料行为和每日反思做出决定后，会出现在这里。"));
-  const v = decisionView(sel);
-  const tabs = [["record", "决策记录"], ["context", "上下文"], ["reasoning", "原始推理"]];
-  const r = data.reasoning || {};
-  const body = state.decTab === "context" ? [el("h3", { class: "dk-title" }, "本轮实际可用信息"), el("p", { class: "note" }, "展示经过权限和来源校验的上下文，区分已采用与未采用。"),
-      el("ul", { class: "dk-ctx" }, v.context.map(([name, st, extra]) => el("li", {}, el("span", { class: "dk-n" }, name),
-        el("span", { class: "tag " + ({ "已采用": "ok", "未采用": "warn" }[st] || "off") }, st), el("span", { class: "note" }, extra))))]
-    : state.decTab === "reasoning" ? [el("h3", { class: "dk-title" }, "模型推理诊断"),
-      el("div", { class: "alert" }, icon("warn"), el("span", {}, r.provider_thinking === "disabled" ? "当前配置关闭了 DeepSeek 思考模式，这一轮没有生成推理内容。" : "这一轮没有采集推理内容。")),
-      el("p", { class: "note" }, "这里只显示服务商实际返回的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。"),
-      el("p", { class: "note mt" }, sel.kind === "wake" ? "自主活动调度按规则判断，不调用模型。" : "普通回复和主动私聊“发不发”的逐轮记录还没有采集，暂时不在这里显示。")]
-    : [el("h3", { class: "dk-title" }, sel.title, el("span", { class: "note" }, fmtDate(sel.occurred_at))),
-      el("dl", { class: "dk-rows" }, [["触发原因", v.trigger], ["可选行动", v.options.join(" / ") || "未记录"],
-        ["她的决定", el("b", {}, v.decisionText || "未记录")],
-        ["决策说明", v.why], ["执行结果", v.result]].map(([dt, dd]) => el("div", {}, el("dt", {}, dt), el("dd", {}, dd))))];
-  return el("div", {}, head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"), stats, filters,
-    el("div", { class: "dk-wrap" }, el("ul", { class: "dk-list" }, items.map(i => { const k = DK[i.kind] || { name: "其他", ic: "spark" };
-        return el("li", {}, el("button", { type: "button", class: i === sel ? "sel" : "", onclick: () => { state.decSel = String(i.id); rerender(); } },
-          el("span", { class: "ic" }, icon(k.ic)), el("span", { class: "dk-l" }, el("b", {}, i.title), el("small", {}, fmtDate(i.occurred_at) + "，" + k.name)),
-          el("span", { class: "tag " + (DEC_TONE[i.status] || "ok") }, decisionView(i).decisionText || statusOf(i.status)[0]))); })),
-      el("section", { class: "dk-card" }, el("div", { class: "dk-head" }, el("div", {}, el("h2", {}, "思考与决策"), el("p", { class: "note" }, sel.title + "，" + fmtDate(sel.occurred_at))),
-          el("span", { class: "dk-ic" }, icon("spark"))),
-        el("div", { class: "dk-tabs", role: "tablist" }, tabs.map(([k, t]) => el("button", { type: "button", role: "tab", "aria-selected": String(state.decTab === k),
-          onclick: () => { state.decTab = k; rerender(); } }, t))), el("div", { class: "dk-body" }, body))));
-};
 
 /* ================= 配置字段（能力页与配置页共用一份草稿） ================= */
 /* 服务端标签里的计价单位由输入框旁的单位显示，这里去掉，避免选人民币时仍写着美元 */
@@ -1534,7 +1289,7 @@ const capFieldsOf = id => (CAP_FIELDS[id] || []).map(fieldOf).filter(Boolean);
 function capMarks(id) {
   const a = state.data?.autonomy, d = (a?.capabilities || []).find(x => x.capability === id);
   const proposals = (a?.adjustments || []).filter(x => x.capability === id && x.state === "PROPOSED").length;
-  return [d && d.mode !== "owner" ? el("span", { class: "auto-ic", title: d.mode === "self" ? "已允许她调整；运行接入范围见详情" : "已允许她提议；运行接入范围见详情" }, icon("spark")) : null,
+  return [d && d.mode !== "owner" ? el("span", { class: "auto-ic", title: d.mode === "self" ? "她在范围内自己调整" : "她提议，你批准" }, icon("spark")) : null,
     proposals ? el("span", { class: "pdot", title: proposals + " 条提议等你批准" }) : null,
     capFieldsOf(id).some(f => state.draft.has(f.key)) || state.autoDraft?.[id] ? el("span", { class: "ddot", title: "有没保存的修改" }) : null];
 }
@@ -1556,10 +1311,6 @@ const CAP_SUB = {
   "qq.animation": { content: ["use_chat_model_for_vision", "max_image_bytes", "max_daily_images", "max_daily_image_bytes"] },
 };
 const CAP_SUB_LABEL = { social_autonomy: "相关设置", poke_policy: "相关设置", voice: "相关设置", bili_video: "相关设置", content: "相关设置" };
-const CAP_NO_SWITCH = {
-  "unicode.emoji": "输入协议能力，没有独立开关。",
-  "qq.face_names": "由富媒体输入范围和已批准窗口决定，没有独立开关。",
-};
 /* 每项能力的总开关：配置键，或对象配置里的子项路径。共用一个开关的能力会同时变化 */
 const CAP_SWITCH = {
   "memory.manage": "memory_enabled", "memory.recall": "memory_enabled", diary: "diary_enabled", consolidation: "consolidation_enabled",
@@ -1568,8 +1319,8 @@ const CAP_SWITCH = {
   "reading.web": "web_reading_enabled", "reading.bilibili": "observation_enabled", "reading.heybox": "observation_enabled",
   "bilibili.video": "bili_video.enabled", "model.understand_video": "bili_video.enabled", "qq.images": "content_enabled", "qq.animation": "content_enabled",
   "qq.files": "private_files.enabled", expression: "expression_enabled", expression_learning: "expression_learning_enabled",
-  "qq.face_images": "content_enabled",
-  "memes.catalog": "expression_enabled", "memes.search": "meme_discovery_enabled", "memes.community_import": "meme_discovery_enabled",
+  "unicode.emoji": "expression_enabled", "qq.face_names": "expression_enabled", "qq.face_images": "expression_enabled",
+  "memes.catalog": "meme_discovery_enabled", "memes.search": "meme_discovery_enabled", "memes.community_import": "meme_discovery_enabled",
   "memes.semantic": "meme_semantics_enabled", "qq.voice.asr": "voice.asr.enabled", "qq.voice.tts": "voice.reply.enabled",
   "media.voice": "voice_enabled", "media.camera": "camera_enabled", "media.android": "android_enabled",
   "qq.profile.observe": "social_autonomy.enabled", "qq.account.signature": "social_autonomy.signature_enabled",
@@ -1586,7 +1337,7 @@ function capMain(id) {
 }
 function capSwitch(id, name, small) {
   const m = capMain(id);
-  if (!m) return el("span", { class: "sw-lock", title: CAP_NO_SWITCH[id] || "开关在部署配置里" }, icon("lock"));
+  if (!m) return el("span", { class: "sw-lock", title: "开关在部署配置里" }, icon("lock"));
   return el("button", { type: "button", class: "switch" + (small ? " sm" : ""), role: "switch", "aria-checked": String(m.read()), "data-k": "sw-" + id,
     "aria-label": name + "总开关", title: m.shared.length ? "和" + m.shared.join("、") + "共用这个开关" : null, onclick: m.toggle });
 }
@@ -1597,7 +1348,6 @@ const CAP_DEPLOY = {
   "reading.bilibili": "B 站读取适配器和账号授权在部署环境里配置。", "reading.heybox": "小黑盒读取适配器在部署环境里配置。",
   "model.understand_video": "视频理解模型的审批窗口（paid_model）在部署配置里设置。",
   "qq.images": "付费图片理解的审批窗口（paid_model.image_input）在部署配置里设置。",
-  "qq.face_images": "共享内容开关只控制接收条件；认证捕获、图片审批和 Bridge 状态仍由后端核对。",
 };
 PAGES.caps = data => {
   const caps = capList(), known = new Set(CAP_GROUPS.flatMap(g => g[1]));
@@ -1617,7 +1367,7 @@ PAGES.caps = data => {
         return el("div", { class: "ci-row" + (c === sel ? " sel" : "") + (["DISABLED", "UNAVAILABLE"].includes(c.state) ? " off" : "") },
           el("a", { class: "ci-name", href: "#caps/" + encodeURIComponent(c.id), "aria-current": c === sel ? "true" : null, onclick: () => { state.capMobile = true; state.capScrolled = c.id; state.capTop = innerWidth <= 860; } },
             el("span", { class: "dot " + statusOf(c.state)[1], title: statusOf(c.state)[0] }), el("span", { class: "nm" }, CAP_NAMES[c.id] || "未命名能力"),
-            implementationNote(c.id), ...capMarks(c.id)),
+            ...capMarks(c.id)),
           capSwitch(c.id, CAP_NAMES[c.id] || "", true));
       }) : null);
   });
@@ -1644,9 +1394,9 @@ function capDetail(c) {
   const limits = Object.entries(c.limits || {}).filter(([, v]) => v !== null && v !== undefined && v !== "");
   const reasons = [...new Set((c.reason_codes || []).map(reasonText))];
   return el("div", {}, btn("全部能力", () => { state.capMobile = false; rerender(); }, { cls: "sm quiet cd-back", symbol: "left" }),
-    el("header", { class: "cd-head" }, el("div", {}, el("h2", {}, name), implementationNote(c.id), el("p", {}, c.summary || "")),
-      el("div", { class: "cd-switch" }, tag(c.state), el("label", {}, el("span", {}, main ? "总开关" : "开关范围"), capSwitch(c.id, name)),
-        main?.shared.length ? el("span", { class: "note" }, "和" + main.shared.join("、") + "共用") : !main ? el("span", { class: "note" }, CAP_NO_SWITCH[c.id] || "在部署配置里开关") : null)),
+    el("header", { class: "cd-head" }, el("div", {}, el("h2", {}, name), el("p", {}, c.summary || "")),
+      el("div", { class: "cd-switch" }, tag(c.state), el("label", {}, el("span", {}, "总开关"), capSwitch(c.id, name)),
+        main?.shared.length ? el("span", { class: "note" }, "和" + main.shared.join("、") + "共用") : !main ? el("span", { class: "note" }, "在部署配置里开关") : null)),
     reasons.length ? el("ul", { class: "needs" }, reasons.map(r => el("li", { class: "no" }, icon("close"), el("span", {}, r)))) : null,
     CAP_DEPLOY[c.id] ? el("p", { class: "lockline" }, icon("lock"), el("span", {}, CAP_DEPLOY[c.id])) : null,
     el("div", { class: "cd-stats" },
@@ -1663,23 +1413,14 @@ function capDetail(c) {
       fields.length ? el("div", { class: "pf-list" }, fields.map(f => CAP_SUB[c.id]?.[f.key] ? fieldRow(f, CAP_SUB_LABEL[f.key], CAP_SUB[c.id][f.key]) : fieldRow(f))) : el("p", { class: "note" }, CAP_DEPLOY[c.id] ? "这项能力的设置都在部署配置里。" : "这项能力没有可以在控制台修改的参数。")));
 }
 /* ================= 交给她决定 ================= */
-const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，由你批准。"],
-  ["self", "她在范围内自己调整", "在你划定的范围内调整已接入的参数，事后可以撤销。"]];
+const AUTO_MODES = [["owner", "只由我控制", "她不能改这项能力的任何设置。"], ["propose", "她提议，我批准", "她提出调整和理由，你批准后才生效。"],
+  ["self", "她在范围内自己调整", "在你划定的范围内她可以直接调整，事后可以撤销。"]];
 const AUTO_FIELDS = { pause: "暂停到第二天 08:00", wake_max_daily_runs: "每天最多运行", wake_min_interval_minutes: "两次之间至少间隔" };
 const ADJ_STATE = { PROPOSED: ["待你批准", "warn"], ACTIVE: ["生效中", "ok"], REJECTED: ["已拒绝", "off"], REVERTED: ["已撤销", "off"], EXPIRED: ["已结束", "off"],
   SUPERSEDED: ["已被新的调整替代", "off"], DISCARDED: ["恢复备份后作废", "off"] };
-const AUTO_LOCKED = "这项能力没有开放自主调整；相关配置和授权仍由你控制。";
+const AUTO_LOCKED = "这项能力会改动对外可见的内容、私人文件或费用账本，只能由你控制。";
 function autoLabel(field) { return field === "pause" ? "暂停到第二天 08:00" : (fieldOf(field)?.label || AUTO_FIELDS[field] || subLabel(field)); }
 function autoValue(field, v) { if (field === "pause") return "暂停"; const u = unitFor(field, Number.isInteger(v) ? "integer" : "number"); return (u.pre || "") + (+(v / u.scale).toFixed(u.money ? 4 : 2)) + (u.unit ? " " + u.unit : ""); }
-function autonomyWiring(id) {
-  const a = state.data?.autonomy;
-  if (!a) return "自主调整：状态未读取";
-  const cap = (a.capabilities || []).find(x => x.capability === id);
-  if (!cap) return "自主调整：只由你控制";
-  const fields = cap.fields || [], wired = fields.filter(f => (cap.wired || []).includes(f));
-  return "自主调整：" + (!wired.length ? "尚未接入" :
-    wired.length < fields.length ? `部分接入（${wired.length}/${fields.length} 项）` : "已接入");
-}
 function autonomySection(id) {
   const a = state.data?.autonomy;
   if (!a) return el("section", { class: "cd-sec" }, el("h3", {}, "交给她决定"), el("p", { class: "note" }, "授权接口暂时不可用，刷新后再试。"));
@@ -1706,8 +1447,7 @@ function autonomySection(id) {
   };
   const wired = new Set(cap.wired || []), notWired = cap.fields.filter(f => !wired.has(f));
   const adjustments = (a.adjustments || []).filter(x => x.capability === id).slice(0, 8);
-  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "授权保存后，按已接入范围生效")),
-    el("p", { class: "note", "data-autonomy-wiring": id }, autonomyWiring(id)),
+  return el("section", { class: "cd-sec auto-sec" }, el("h3", {}, "交给她决定", el("span", {}, "保存后立即生效，不需要重启")),
     el("div", { class: "mode-pick", role: "radiogroup", "aria-label": "由谁决定" }, AUTO_MODES.map(([m, n, d]) =>
       el("button", { type: "button", role: "radio", "aria-checked": String(draft.mode === m), onclick: () => set({ mode: m }) }, el("b", {}, n), el("span", {}, d)))),
     draft.mode !== "owner" ? [
@@ -1728,7 +1468,7 @@ function autonomySection(id) {
     }))] : null);
 }
 async function saveAutonomy(id, body) {
-  try { await api.write("/autonomy/" + id, body, "PUT", r => r.state === "COMPLETE"); delete state.autoDraft[id]; toast("已保存授权；调整按已接入范围生效"); await loadRoute({ reset: true }); }
+  try { await api.write("/autonomy/" + id, body, "PUT", r => r.state === "COMPLETE"); delete state.autoDraft[id]; toast("已保存授权，立即生效"); await loadRoute({ reset: true }); }
   catch (error) { notice(errorText(error)); }
 }
 async function decideAdjustment(x, decision) {
@@ -1969,3 +1709,486 @@ async function start() {
   catch (error) { clearSession(error.status === 401 ? "" : "暂时无法恢复会话。" + errorText(error)); }
 }
 start();
+
+/* ================= 中文标签：原因码、限额、对象配置子项 ================= */
+Object.assign(REASONS, {
+  BILI_VIDEO_CONCURRENCY_LIMIT: "B 站视频分析已到并发上限", BILI_VIDEO_READER_PAUSED: "B 站读取已暂停", BILI_VIDEO_READER_UNAVAILABLE: "B 站读取不可用",
+  BILI_VIDEO_RECONCILIATION_REQUIRED: "B 站视频费用需要核对", BILI_VIDEO_SCOPE_REQUIRED: "B 站视频需要授权范围", BRIDGE_CAPABILITY_PAUSED: "AstrBot 这项能力已暂停",
+  BRIDGE_OBSERVATION_STALE: "AstrBot 很久没有上报状态", CUMULATIVE_ACCOUNT_NOT_ENROLLED: "账号没有加入累计额度", CUMULATIVE_PAUSED: "累计额度已暂停",
+  CUMULATIVE_POLICY_EXPIRED: "累计额度策略已过期", CUMULATIVE_SCOPE_REQUIRED: "累计额度需要授权范围", LIVE_IMAGE_APPROVAL_REQUIRED: "图片需要当前窗口的授权",
+  LIVE_LINK_SCOPE_REQUIRED: "链接需要当前窗口的授权", LIVE_WINDOW_STOPPED: "私人窗口已停止", MEME_DISCOVERY_PRIVATE_SCOPE_REQUIRED: "表情获取需要私人授权范围",
+  MODEL_LEGACY_USAGE_RECONCILIATION_REQUIRED: "历史模型费用需要核对", MODEL_PROVIDER_CONCURRENCY_EXHAUSTED: "模型服务并发已满", MODEL_USAGE_UNRECONCILED: "模型费用还没核对",
+  MODEL_WINDOW_BUDGET_EXHAUSTED: "窗口额度已用完", OWNER_COMMAND_SCOPE_REQUIRED: "需要你的指令授权", PAID_IMAGE_APPROVAL_REQUIRED: "付费图片理解需要授权",
+  PAID_MEME_APPROVAL_REQUIRED: "付费表情理解需要授权", PRIVATE_FILE_CONFIG_INVALID: "私人文件配置无效", PRIVATE_FILE_SCOPE_REQUIRED: "私人文件需要授权范围",
+  PRIVATE_FILE_TRAFFIC_EXHAUSTED: "私人文件今日流量已用完", PRIVATE_POKE_NATIVE_DISABLED: "原生拍一拍没有开启", PRIVATE_POKE_SCOPE_REQUIRED: "拍一拍需要授权范围",
+  QUARANTINED: "已隔离", READER_NOT_ACCEPTING_TASKS: "读取程序暂不接收任务", READER_OPERATION_UNAVAILABLE: "读取程序不支持这项操作",
+  READ_BUDGET_UNAVAILABLE: "读取额度不可用", SCENARIO_MONTHLY_BUDGET_EXHAUSTED: "这个场景本月额度已用完", SEARCH_PROVIDER_UNOBSERVED: "搜索服务还没有上报状态",
+  STATIC_FACE_OBSERVATION_STALE: "QQ 表情图像很久没有更新", VOICE_ASR_SCOPE_REQUIRED: "语音转写需要授权范围", VOICE_CAPACITY_EXCEEDED: "语音任务已满",
+  VOICE_RESOURCE_RECONCILIATION_REQUIRED: "语音资源需要核对", STALE: "记录已过期", UNKNOWN: "结果不明", UNOBSERVED: "还没有观测", UNAVAILABLE: "不可用",
+  BRIDGE_TIMEOUT: "连接 AstrBot 超时", MODEL_TIMEOUT: "模型请求超时", NETWORK_ERROR: "网络错误",
+});
+/* 未收录的原因码按词尾给出中文，界面上不出现英文代码 */
+const REASON_TAILS = [["_SCOPE_REQUIRED", "需要授权范围"], ["_APPROVAL_REQUIRED", "需要授权"], ["_RECONCILIATION_REQUIRED", "需要先核对"], ["_NOT_CONFIGURED", "没有配置"],
+  ["_DISABLED", "没有开启"], ["_PAUSED", "已暂停"], ["_UNAVAILABLE", "不可用"], ["_EXHAUSTED", "额度已用完"], ["_STALE", "很久没有联系"], ["_EXPIRED", "已过期"],
+  ["_INVALID", "配置无效"], ["_LIMIT", "已到上限"], ["_COOLDOWN", "冷却中"], ["_TIMEOUT", "超时"], ["_FAILED", "失败"], ["_REQUIRED", "缺少前置条件"]];
+function reasonText(code) {
+  if (!code) return "";
+  if (REASONS[code]) return REASONS[code];
+  const tail = REASON_TAILS.find(([t]) => String(code).endsWith(t));
+  return tail ? tail[1] : "未归类的原因";
+}
+const LIMIT_NAMES = {
+  daily_micro_usd: "每日额度", monthly_micro_usd: "每月额度", daily_calls: "每日调用", daily_limit: "每日次数", cooldown_seconds: "冷却", mode: "模式",
+  max_daily_images: "每日图片", max_daily_files: "每日文件", daily_requests: "每日请求", monthly_requests: "每月请求", daily_bytes: "每日流量",
+  max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
+};
+const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子长度分段", semantic: "按语义分段（由她写的换行决定）", unlimited: "不限",
+  happy: "开心", like: "喜欢", surprised: "惊讶", morning: "早安", sleep: "晚安", sad: "难过", angry: "生气", shy: "害羞", tired: "困了", thinking: "思考", love: "爱心", cry: "哭哭" };
+function limitValue(k, v) {
+  if (v === null || v === undefined) return "未设置";
+  if (typeof v === "boolean") return v ? "开" : "关";
+  if (typeof v === "string") return VALUE_NAMES[v] || v;
+  if (/micro_usd/.test(k)) return money(v, "usd");
+  if (/micro_cny/.test(k)) return yuan(v);
+  if (/_seconds$/.test(k)) return duration(v);
+  if (/_bytes$/.test(k)) return bytes(v);
+  return count(v);
+}
+const limitName = k => LIMIT_NAMES[k] || subLabel(k);
+
+/* 对象配置的子项名称 */
+const SUB = {
+  enabled: "开启", mode: "模式", scope: "范围", url: "地址", model: "模型", key: "密钥", protocol: "协议", nodes: "节点", reply: "语音回复", asr: "语音转写",
+  proactive: "主动消息也用语音", media: "媒体处理", sampling: "抽样", limits: "资源限制", vision: "图片理解", adapter_id: "适配器", parser_image: "解析镜像",
+  parser_socket: "解析通道", public_origin: "控制台地址", session_seconds: "会话时长", max_sessions: "最多同时登录", allow_native: "允许原生拍一拍",
+  coalesce_seconds: "合并间隔", cooldown_seconds: "冷却", daily_limit: "每天最多", max_coalesced: "最多合并", max_text_chars: "文字上限", max_pending_seconds: "最长等待",
+  max_links_per_event: "每条消息最多链接", max_images_per_event: "每条消息最多图片", max_images_per_article: "每篇文章最多图片", article_image_micro_usd: "文章图片单价",
+  use_chat_model_for_vision: "用对话模型理解图片", max_image_bytes: "单张图片上限", max_daily_image_bytes: "每日图片流量", max_daily_images: "每日最多图片",
+  image_daily_micro_usd: "图片理解每日额度", wait_seconds: "回复前最多等待", upload_window_seconds: "上传窗口", max_request_micro_usd: "单次请求上限",
+  max_files_per_event: "每条消息最多文件", max_daily_files: "每日最多文件", max_daily_bytes: "每日流量", upload_lease_seconds: "上传租约", worker_lease_seconds: "处理租约",
+  spool_retention_seconds: "暂存保留", max_file_bytes: "单个文件上限", max_expanded_bytes: "解压后上限", max_zip_entries: "压缩包最多条目", max_compression_ratio: "最大压缩比",
+  max_pages: "最多页数", max_records: "最多条数", max_text_chars_file: "文字上限", max_table_depth: "表格最深层级", max_pdf_stream_bytes: "PDF 单流上限",
+  cpu_seconds: "CPU 时间", wall_seconds: "总时长", memory_bytes: "内存上限", scratch_bytes: "临时空间", max_processes: "最多进程",
+  signing_private_key: "签名私钥", job_ttl_seconds: "任务有效期", lease_ttl_seconds: "租约有效期", result_ttl_seconds: "结果有效期", max_pending_jobs: "排队上限",
+  max_private_blob_bytes: "私有数据上限", max_chars: "字数上限", max_context_chars: "带入对话的字数", authorization_sha256: "授权摘要", asset_policy_sha256: "素材策略摘要",
+  policy_version: "策略版本", qzone_enabled: "允许 QQ 空间发布", nickname_enabled: "允许改昵称", signature_enabled: "允许改签名", avatar_enabled: "允许改头像",
+  qzone_daily_limit: "QQ 空间每天最多", profile_daily_limit: "资料每天最多改", qzone_cooldown_seconds: "QQ 空间冷却", profile_cooldown_seconds: "资料改动冷却",
+  model_daily_calls: "模型每日调用", model_daily_micro_usd: "模型每日额度", decision_interval_seconds: "决策间隔", max_publish_chars: "发布字数上限",
+  max_nickname_chars: "昵称字数上限", max_signature_chars: "签名字数上限", max_source_refs: "最多引用来源", max_source_chars: "来源字数上限", max_input_bytes: "输入上限",
+  max_output_tokens: "输出上限", timeout_seconds: "超时", plan_ttl_seconds: "计划有效期", profile_baseline_seconds: "资料观测有效期", max_pending_plans: "最多待执行计划",
+  max_asset_bytes: "素材大小上限", max_asset_dimension: "素材边长上限", deadline_seconds: "处理时限", max_concurrent: "并发", max_preview_frames: "最多预览帧",
+  max_clips: "最多片段", max_clip_seconds: "单段时长", max_total_clip_seconds: "片段总时长", max_total_output_bytes: "输出总上限", max_width: "最大宽度", max_height: "最大高度",
+  max_source_pixels: "源视频像素上限", max_source_seconds: "源视频时长上限", max_decoded_frames: "最多解码帧", max_output_frames: "最多输出帧", output_fps: "输出帧率",
+  timestamp_tolerance_seconds: "时间戳容差", max_frame_gap_seconds: "最大帧间隔", min_frame_gap_seconds: "最小帧间隔", terminate_grace_seconds: "终止宽限",
+  max_process_output_bytes: "进程输出上限", max_memory_bytes: "内存上限", initial_frames: "初始帧数", max_segments: "最多分段", max_segment_seconds: "单段时长",
+  max_total_segment_seconds: "分段总时长", max_subtitles: "最多字幕", max_danmaku: "最多弹幕", subtitle_similarity: "字幕相似度", subtitle_duplicate_seconds: "字幕去重间隔",
+  danmaku_duplicate_seconds: "弹幕去重间隔", danmaku_bin_seconds: "弹幕统计间隔", min_danmaku_support: "弹幕最少支持数", min_density_ratio: "最小密度比",
+  local_window_seconds: "局部窗口", context_before_seconds: "之前的上下文", context_after_seconds: "之后的上下文", baseline_floor_per_second: "每秒基线",
+  focus_terms: "关注词", max_evidence_per_selection: "每次选取最多证据", max_duration_seconds: "最长时长", provider_timeout_seconds: "服务商超时", image_adapter: "图片适配器",
+  max_segments_reply: "最多分段", min_chars: "最少字数", interval_ms: "间隔（毫秒）",
+};
+const TOKENS = { max: "最多", min: "最少", daily: "每日", monthly: "每月", total: "总", seconds: "时长", bytes: "大小", chars: "字数", enabled: "开启", limit: "上限" };
+const subLabel = k => SUB[k] || String(k).split("_").map(t => TOKENS[t] || "").join("") || "其他设置";
+/* 与 poke_protocol / voice_config / social_autonomy_protocol 中的 Literal 保持一致 */
+const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"], segmented_reply: ["sentence", "semantic"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
+const isSensitiveSub = k => /(_sha256|private_key|_socket|parser_image|token|secret)$/.test(k) || k === "key";
+
+/* ================= 记忆关系图 =================
+   参考 AstrBot 插件 LivingMemory 的图谱视图（选中节点列出关联记忆、图谱与列表互相定位）。
+   现有记忆只有类型、主体和来源消息，所以这里按“主体 → 类型 → 记忆”连接，
+   并把引用同一条来源消息的记忆连起来；实体与关系抽取需要后端新增后再接入。 */
+const GPOS = new Map();
+function graphModel(items) {
+  const nodes = [{ id: "me", label: "你", type: "self" }], edges = [];
+  const herItems = items.filter(m => ["self", "companion"].includes(m.detail?.subject));
+  if (herItems.length) { nodes.push({ id: "her", label: "她", type: "her" }); edges.push({ a: "me", b: "her", kind: "root" }); }
+  const kinds = new Map();
+  for (const m of items) {
+    const root = ["self", "companion"].includes(m.detail?.subject) ? "her" : "me", kind = m.detail?.memory_kind || "other";
+    const cid = root + ":" + kind;
+    if (!kinds.has(cid)) { kinds.set(cid, true); nodes.push({ id: cid, label: MEM_KIND[kind] || "其他", type: "kind", root }); edges.push({ a: root, b: cid, kind: "root" }); }
+    nodes.push({ id: "m:" + m.id, label: m.title.length > 12 ? m.title.slice(0, 11) + "…" : m.title, type: "mem", m, cat: cid });
+    edges.push({ a: cid, b: "m:" + m.id, kind: m.detail?.needs_review ? "conflict" : m.status === "CONFIRMED" ? "solid" : "hyp" });
+  }
+  const byEvidence = new Map();
+  for (const m of items) for (const e of m.detail?.evidence_ids || []) { if (!byEvidence.has(e)) byEvidence.set(e, []); byEvidence.get(e).push(m.id); }
+  const seen = new Set();
+  for (const ids of byEvidence.values()) for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
+    const key = ids[i] + "|" + ids[j]; if (seen.has(key)) continue; seen.add(key);
+    edges.push({ a: "m:" + ids[i], b: "m:" + ids[j], kind: "shared" });
+  }
+  return { nodes, edges };
+}
+function layoutGraph(nodes, edges) {
+  const W = 1000, H = 620, cx = W / 2, cy = H / 2, kindsList = nodes.filter(n => n.type === "kind");
+  for (const n of nodes) {
+    if (GPOS.has(n.id)) continue;
+    if (n.type === "self") GPOS.set(n.id, { x: cx, y: cy });
+    else if (n.type === "her") GPOS.set(n.id, { x: cx + 260, y: cy - 170 });
+    else if (n.type === "kind") { const k = kindsList.indexOf(n), a = k / Math.max(1, kindsList.length) * Math.PI * 2 - Math.PI / 2; GPOS.set(n.id, { x: cx + Math.cos(a) * 210, y: cy + Math.sin(a) * 160 }); }
+    else { const p = GPOS.get(n.cat) || { x: cx, y: cy }, siblings = nodes.filter(x => x.cat === n.cat), k = siblings.indexOf(n), a = Math.atan2(p.y - cy, p.x - cx) + (k - (siblings.length - 1) / 2) * .55;
+      GPOS.set(n.id, { x: p.x + Math.cos(a) * 120, y: p.y + Math.sin(a) * 100 }); }
+  }
+  for (let it = 0; it < 160; it++) for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+    const a = GPOS.get(nodes[i].id), b = GPOS.get(nodes[j].id); const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy) || 1;
+    if (d < 92) { const push = (92 - d) / 2, ux = dx / d, uy = dy / d;
+      if (nodes[i].type !== "self") { a.x += ux * push; a.y += uy * push; } if (nodes[j].type !== "self") { b.x -= ux * push; b.y -= uy * push; } }
+  }
+  for (const n of nodes) { const p = GPOS.get(n.id); p.x = Math.max(60, Math.min(W - 60, p.x)); p.y = Math.max(36, Math.min(H - 36, p.y)); }
+}
+function edgeD(e) { const a = GPOS.get(e.a), b = GPOS.get(e.b); const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, bend = e.kind === "shared" ? 40 : 10;
+  return `M${a.x.toFixed(1)} ${a.y.toFixed(1)} Q${(mx - dy / d * bend).toFixed(1)} ${(my + dx / d * bend).toFixed(1)} ${b.x.toFixed(1)} ${b.y.toFixed(1)}`; }
+function memoryGraph(items) {
+  if (!items.length) return empty("还没有可以画成关系图的记忆", state.memTab === "review" ? "切到“全部”看看。" : "记忆形成后会出现在这里。");
+  const { nodes, edges } = graphModel(items); layoutGraph(nodes, edges);
+  const sel = nodes.find(n => n.id === state.gSel) || null;
+  const near = sel ? new Set([sel.id, ...edges.filter(e => e.a === sel.id || e.b === sel.id).flatMap(e => [e.a, e.b])]) : null;
+  const q = state.memQ.trim();
+  const svg = el("svg", { class: "graph", viewBox: "0 0 1000 620", role: "img", "aria-label": `记忆关系图，${nodes.length} 个节点` },
+    edges.map(e => el("path", { class: "ge " + e.kind + (near && !(near.has(e.a) && near.has(e.b)) ? " dim" : ""), d: edgeD(e), "data-a": e.a, "data-b": e.b })),
+    nodes.map(n => { const p = GPOS.get(n.id), r = n.type === "self" ? 30 : n.type === "her" ? 24 : n.type === "kind" ? 20 : 11;
+      const dim = near ? !near.has(n.id) : q ? !(n.label.includes(q) || n.m?.title.includes(q)) && n.type === "mem" : false;
+      return el("g", { class: `gn ${n.type}${n === sel ? " sel" : ""}${dim ? " dim" : ""}${n.m && n.m.status !== "CONFIRMED" ? " pending" : ""}`, transform: `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`,
+        tabindex: "0", role: "button", "data-gn": n.id, "aria-label": n.m ? n.m.title : n.label },
+        el("circle", { r: String(r) }), el("text", { y: String(n.type === "self" || n.type === "her" ? 5 : n.type === "kind" ? 5 : r + 15), class: n.type === "mem" ? "out" : "in" }, n.label));
+    }));
+  bindGraphEvents(svg, edges);
+  return el("div", { class: "gwrap" }, el("section", { class: "gcanvas" }, svg,
+    el("div", { class: "glegend" }, el("span", {}, el("i", { class: "l solid" }), "已确认"), el("span", {}, el("i", { class: "l hyp" }), "待确认"),
+      el("span", {}, el("i", { class: "l conflict" }), "需要核对"), el("span", {}, el("i", { class: "l shared" }), "来自同一条消息"), el("span", { class: "muted" }, "拖动节点调整位置"),
+      btn("重新排列", () => { GPOS.clear(); rerender(); }, { cls: "sm quiet", symbol: "refresh" }))),
+    el("aside", { class: "gpanel", "aria-live": "polite" }, sel ? graphPanel(sel, nodes, edges) : graphSummary(items, nodes, edges)));
+}
+function graphSummary(items, nodes, edges) {
+  const kinds = nodes.filter(n => n.type === "kind");
+  return el("div", {}, el("h3", {}, "关系概览"), el("div", { class: "gstats" },
+      el("div", {}, el("b", { class: "num" }, String(items.length)), el("span", {}, "条记忆")), el("div", {}, el("b", { class: "num" }, String(kinds.length)), el("span", {}, "个类型")),
+      el("div", {}, el("b", { class: "num" }, String(items.filter(m => m.status !== "CONFIRMED").length)), el("span", {}, "条待确认"))),
+    el("p", { class: "note mt" }, "点一个节点，右边会列出相关的记忆，可以直接确认、纠正或忘记。"),
+    el("h4", { class: "gsub" }, "各类型"), el("ul", { class: "gtop" }, kinds.map(k => el("li", {}, el("button", { type: "button", onclick: () => pick(k.id) }, el("i"), k.label,
+      el("span", { class: "num" }, String(nodes.filter(n => n.cat === k.id).length)))))));
+}
+function graphPanel(sel, nodes, edges) {
+  const mems = sel.type === "mem" ? [sel.m, ...edges.filter(e => e.kind === "shared" && (e.a === sel.id || e.b === sel.id)).map(e => nodes.find(n => n.id === (e.a === sel.id ? e.b : e.a)).m)]
+    : nodes.filter(n => n.type === "mem" && (n.cat === sel.id || (sel.type !== "kind" && nodes.find(k => k.id === n.cat)?.root === sel.id))).map(n => n.m);
+  return el("div", {}, el("div", { class: "gp-head" }, el("button", { type: "button", class: "icon-btn", "aria-label": "返回概览", onclick: () => pick(null) }, icon("left")),
+      el("h3", {}, sel.type === "mem" ? "这条记忆" : sel.label)),
+    el("p", { class: "note" }, sel.type === "mem" && mems.length > 1 ? `还有 ${mems.length - 1} 条记忆来自同一条消息` : `${mems.length} 条记忆`),
+    mems.map(m => el("article", { class: "gmem" + (m.status !== "CONFIRMED" ? " review" : "") }, el("b", {}, m.title),
+      el("div", { class: "meta" }, tag(m.status), m.detail?.memory_kind ? el("span", { class: "chip" }, MEM_KIND[m.detail.memory_kind] || "其他") : null, el("span", { class: "note" }, fmtDate(m.occurred_at))),
+      el("div", { class: "acts" }, m.status !== "CONFIRMED" ? btn("确认", () => memoryAction(m, "confirm"), { cls: "sm primary", symbol: "check" }) : null,
+        btn("纠正", () => memoryAction(m, "correct"), { cls: "sm", symbol: "edit" }), btn("忘记", () => memoryAction(m, "forget"), { cls: "sm danger", symbol: "trash" })))));
+}
+function pick(id) { state.gSel = id; rerender(); if (id) $(`[data-gn="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }); }
+function bindGraphEvents(svg, edges) {
+  let drag = null;
+  const pt = ev => { const m = svg.getScreenCTM?.(); if (!m) return null; const p = svg.createSVGPoint(); p.x = ev.clientX; p.y = ev.clientY; return p.matrixTransform(m.inverse()); };
+  svg.addEventListener("pointerdown", ev => { const g = ev.target.closest("[data-gn]"); if (!g) return; const p = pt(ev); const o = GPOS.get(g.dataset.gn);
+    drag = { id: g.dataset.gn, g, sx: p ? p.x : 0, sy: p ? p.y : 0, ox: o.x, oy: o.y, moved: false }; g.setPointerCapture?.(ev.pointerId); });
+  svg.addEventListener("pointermove", ev => { if (!drag) return; const p = pt(ev); if (!p) return; const dx = p.x - drag.sx, dy = p.y - drag.sy;
+    if (Math.hypot(dx, dy) > 3) drag.moved = true; if (!drag.moved) return;
+    const pos = { x: Math.max(30, Math.min(970, drag.ox + dx)), y: Math.max(30, Math.min(590, drag.oy + dy)) }; GPOS.set(drag.id, pos);
+    drag.g.setAttribute("transform", `translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})`);
+    $$(".ge", svg).forEach(path => { if (path.dataset.a === drag.id || path.dataset.b === drag.id) path.setAttribute("d", edgeD({ a: path.dataset.a, b: path.dataset.b, kind: path.classList.contains("shared") ? "shared" : "" })); }); });
+  const end = () => { if (!drag) return; const d = drag; drag = null; if (!d.moved) pick(state.gSel === d.id ? null : d.id); };
+  svg.addEventListener("pointerup", end); svg.addEventListener("pointercancel", () => { drag = null; });
+  svg.addEventListener("keydown", ev => { const g = ev.target.closest("[data-gn]"); if (g && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); pick(g.dataset.gn); } });
+}
+
+/* ================= 思考与决策 ================= */
+const COGNITION_KINDS = {
+  wake: { name: "自主活动", ic: "timeline" },
+  life: { name: "生活话题", ic: "diary" },
+  goal: { name: "目标", ic: "spark" },
+  diary: { name: "日记", ic: "book" },
+  reflection: { name: "反思", ic: "memory" },
+  nightly: { name: "夜间整理", ic: "moon" },
+  model: { name: "模型调用", ic: "chip" },
+  rem: { name: "REM 记录", ic: "pulse" },
+};
+const COGNITION_CHOICES = {
+  SKIP: "跳过", EXPLORE: "读到期的目标", OBSERVE: "发现新内容",
+  CONTINUE: "继续", FOLLOW_UP: "跟进", SHARE: "分享", DEFER: "推迟",
+  ACCEPTED: "接受", CANCELLED: "取消", COMMITTED: "完成", SKIPPED: "跳过",
+};
+const COGNITION_TONE = {
+  SKIP: "off", SKIPPED: "off", CANCELLED: "off", EXPIRED: "off",
+  FAILED: "bad", REJECTED: "bad", UNKNOWN: "bad",
+  RUNNING: "run", PENDING: "run", WAITING: "warn", WAITING_DECISION: "warn",
+};
+const REASON_NAMES = {
+  PAUSED: "你暂停了", QUIET_HOURS: "免打扰时段", OWNER_REQUESTED_PAUSE: "你让她先别打扰",
+  RESOURCE_UNAVAILABLE: "资源不可用", DAILY_LIMIT: "今日上限", COOLDOWN: "冷却中",
+  NO_CANDIDATE: "无候选", GOAL_DUE: "目标到期", DISCOVERY_DUE: "可以发现内容",
+  OWNER_AUTHORITY_DISABLED: "权限未开启", OWNER_AUTHORITY_EXPIRED: "权限已过期",
+  PRIVACY_CHANGED: "隐私设置变化",
+};
+
+function cognitionTitle(item, kind) {
+  const k = COGNITION_KINDS[kind] || { name: "认知" };
+  if (kind === "wake") return item.choice ? COGNITION_CHOICES[item.choice] || item.choice : "自主活动决策";
+  if (kind === "life") return item.choice ? COGNITION_CHOICES[item.choice] || item.choice : "生活话题决策";
+  if (kind === "goal") return item.topic || "目标";
+  if (kind === "diary") return localDay(item.id) || "日记";
+  if (kind === "reflection") return "每日反思";
+  if (kind === "nightly") return "夜间整理";
+  if (kind === "model") return "模型调用";
+  if (kind === "rem") return "REM";
+  return k.name;
+}
+
+function cognitionSummary(item, kind) {
+  if (kind === "wake") return item.goal_id ? `关联目标 ${item.goal_id}` : "";
+  if (kind === "life") {
+    const dest = { PRIVATE_DIARY: "日记", PRIVATE_MESSAGE_DRAFT: "私聊草稿", QZONE_DRAFT: "空间草稿" }[item.destination] || "";
+    return dest ? `去向：${dest}` : "";
+  }
+  if (kind === "goal") return item.state || "";
+  if (kind === "diary") return item.state || "";
+  if (kind === "reflection") return item.state || "";
+  if (kind === "nightly") {
+    const steps = item.steps || {};
+    const done = Object.values(steps).filter(s => s === "DONE" || s === "COMPLETE").length;
+    const total = Object.keys(steps).length;
+    return `${done} / ${total} 完成`;
+  }
+  if (kind === "model") {
+    const u = item.usage || {};
+    return `${u.input_tokens || 0} 输入，${u.output_tokens || 0} 输出`;
+  }
+  return "";
+}
+
+PAGES.thinking = data => {
+  const allItems = [];
+  for (const kind of Object.keys(COGNITION_KINDS)) {
+    const kindData = data[kind];
+    if (kindData && kindData.items) {
+      for (const item of kindData.items) {
+        allItems.push({ ...item, _kind: kind, _title: cognitionTitle(item, kind), _summary: cognitionSummary(item, kind) });
+      }
+    }
+  }
+  allItems.sort((a, b) => {
+    const aId = String(a.id), bId = String(b.id);
+    return bId.localeCompare(aId);
+  });
+
+  const filtered = allItems.filter(i => state.cogKind === "all" || i._kind === state.cogKind);
+  const sel = filtered.find(i => String(i.id) === state.cogSel && i._kind === state.cogKind) || filtered[0];
+
+  const today = localDay(new Date().toISOString());
+  const todayItems = allItems.filter(i => {
+    const itemDay = i.id && typeof i.id === "string" && i.id.includes("T") ? localDay(i.id) : null;
+    return itemDay === today;
+  });
+
+  const stats = el("div", { class: "dk-stats" }, [
+    ["今天的记录", todayItems.length],
+    ["已完成", todayItems.filter(i => ["DONE", "COMPLETE", "COMMITTED", "EXPLORE", "OBSERVE"].includes(i.state)).length],
+    ["跳过", todayItems.filter(i => ["SKIP", "SKIPPED"].includes(i.state || i.choice)).length],
+    ["失败", todayItems.filter(i => ["FAILED", "REJECTED", "UNKNOWN"].includes(i.state)).length]
+  ].map(([t, v]) => el("div", {}, el("b", { class: "num" }, String(v)), el("span", {}, t))));
+
+  const filters = el("div", { class: "toolbar" }, el("div", { class: "seg" },
+    [["all", "全部"], ...Object.entries(COGNITION_KINDS).map(([k, v]) => [k, v.name])].map(([k, t]) =>
+      el("button", { type: "button", "aria-pressed": String(state.cogKind === k),
+        onclick: () => { state.cogKind = k; state.cogSel = null; rerender(); } }, t))));
+
+  if (!sel) return el("div", {},
+    head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
+    stats, filters,
+    empty("还没有认知记录", "自主活动、生活话题、目标、日记、反思等决策记录会出现在这里。"));
+
+  const k = COGNITION_KINDS[sel._kind] || { name: "认知", ic: "spark" };
+  const stateName = sel.state ? (statusOf(sel.state)[0] || sel.state) : sel.choice ? (COGNITION_CHOICES[sel.choice] || sel.choice) : "—";
+
+  const tabs = [["overview", "概览"], ["sources", "来源"], ["details", "详情"]];
+
+  const body = state.cogTab === "sources" ? [
+    el("h3", { class: "dk-title" }, "来源消息"),
+    el("p", { class: "note" }, "这条记录引用的消息编号。"),
+    el("ul", { class: "dk-ctx" },
+      (sel.source_event_ids || []).length > 0
+        ? (sel.source_event_ids || []).map(eid => el("li", {}, el("code", {}, eid)))
+        : [el("li", { class: "note" }, "没有来源消息")]
+    )
+  ] : state.cogTab === "details" ? [
+    el("h3", { class: "dk-title" }, "原始字段"),
+    el("pre", { class: "note", style: { whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "0.875rem" } },
+      JSON.stringify(sel, null, 2))
+  ] : [
+    el("h3", { class: "dk-title" }, sel._title, el("span", { class: "note" }, fmtDate(sel.id))),
+    el("dl", { class: "dk-rows" }, [
+      ["类型", k.name],
+      ["状态", el("b", {}, stateName)],
+      ["原因代码", sel.reason_code && sel.reason_code !== "NOT_RECORDED" ? (REASON_NAMES[sel.reason_code] || sel.reason_code) : "—"],
+      ["摘要", sel._summary || "—"],
+    ].map(([dt, dd]) => el("div", {}, el("dt", {}, dt), el("dd", {}, dd))))
+  ];
+
+  return el("div", {},
+    head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
+    stats, filters,
+    el("div", { class: "dk-wrap" },
+      el("ul", { class: "dk-list" }, filtered.map(i => {
+        const ik = COGNITION_KINDS[i._kind] || { name: "其他", ic: "spark" };
+        const iState = i.state || i.choice || "UNKNOWN";
+        const tone = COGNITION_TONE[iState] || "ok";
+        return el("li", {},
+          el("button", { type: "button", class: i === sel ? "sel" : "",
+            onclick: () => { state.cogSel = String(i.id); state.cogKind = i._kind; rerender(); } },
+            el("span", { class: "ic" }, icon(ik.ic)),
+            el("span", { class: "dk-l" },
+              el("b", {}, i._title),
+              el("small", {}, fmtDate(i.id) + "，" + ik.name)),
+            el("span", { class: "tag " + tone }, stateName)));
+      })),
+      el("section", { class: "dk-card" },
+        el("div", { class: "dk-head" },
+          el("div", {},
+            el("h2", {}, "思考与决策"),
+            el("p", { class: "note" }, sel._title + "，" + fmtDate(sel.id))),
+          el("span", { class: "dk-ic" }, icon("spark"))),
+        el("div", { class: "dk-tabs", role: "tablist" }, tabs.map(([k, t]) =>
+          el("button", { type: "button", role: "tab", "aria-selected": String(state.cogTab === k),
+            onclick: () => { state.cogTab = k; rerender(); } }, t))),
+        el("div", { class: "dk-body" }, body))));
+};
+
+/* ================= 日记与成长页增强（目标、反思、话题操作） ================= */
+
+function goalCard(g) {
+  const steps = g.steps || {};
+  const remaining = steps.remaining || [], completed = steps.completed_count || 0;
+  const lastResult = steps.last_result;
+  return el("div", { class: "goal-card" },
+    el("div", { class: "goal-head" }, el("h3", {}, g.title), tag(g.status),
+      g.detail?.commitment_state ? el("span", { class: "chip" }, "承诺：" + statusOf(g.detail.commitment_state)[0]) : null),
+    el("p", { class: "meta" }, "更新于 " + fmtDate(g.occurred_at)),
+    remaining.length || completed > 0 ? el("div", { class: "goal-steps" },
+      el("p", {}, el("b", {}, "进度"), `已完成 ${completed} 步${remaining.length ? `，剩余 ${remaining.length} 步` : ""}`),
+      remaining.length ? el("ul", {}, remaining.map(s => el("li", {}, s))) : null,
+      lastResult ? el("p", { class: "note" }, "上一步：" + lastResult.step + "（" + statusOf(lastResult.outcome)[0] + "）") : null) : null,
+    el("div", { class: "goal-acts" },
+      g.state === "PROPOSED" ? btn("接受", () => goalDecision(g.goal_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
+      ["PROPOSED", "ACTIVE"].includes(g.state) ? btn("取消", () => goalDecision(g.goal_id, "CANCEL"), { cls: "sm danger", symbol: "close" }) : null,
+      g.state === "ACTIVE" && remaining.length ? btn("续行", () => goalContinue(g), { cls: "sm", symbol: "play" }) : null));
+}
+
+function goalDecision(goal_id, decision) {
+  const titles = { ACCEPT: "接受这个目标", CANCEL: "取消这个目标？" };
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后她会开始执行这个目标。" : "取消后不会再执行，但已完成的步骤会保留记录。"));
+  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "接受" : "取消");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goal_id) + "/decision", { decision }, "POST",
+      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      async r => { closeDialog(); toast((decision === "ACCEPT" ? "已接受" : "已取消") + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+  });
+  openDialog(titles[decision], form);
+}
+
+function goalContinue(g) {
+  const form = el("form", { class: "dlg-form" });
+  const remaining = g.steps?.remaining || [];
+  const actionSel = el("select", { class: "input", id: "goal-action", required: true },
+    el("option", { value: "" }, "选择操作"),
+    el("option", { value: "CONTINUE" }, "继续执行"),
+    el("option", { value: "WAIT" }, "等待到期"),
+    el("option", { value: "ABANDON" }, "放弃目标"));
+  const stepsArea = el("div", { class: "field", id: "goal-steps-area", hidden: true },
+    el("label", {}, el("span", {}, "剩余步骤（最多 3 步，一行一个）"),
+      el("textarea", { class: "input", id: "goal-steps", rows: "3", placeholder: remaining.join("\n") })));
+  const waitArea = el("div", { class: "field", id: "goal-wait-area", hidden: true },
+    el("label", {}, el("span", {}, "等待到期时间"), el("input", { class: "input", type: "datetime-local", id: "goal-wait-until" })));
+  actionSel.addEventListener("change", () => {
+    stepsArea.hidden = actionSel.value !== "CONTINUE";
+    waitArea.hidden = actionSel.value !== "WAIT";
+  });
+  form.append(el("label", { class: "field" }, el("span", {}, "操作"), actionSel), stepsArea, waitArea,
+    el("p", { class: "muted" }, "继续执行：你可以调整剩余步骤的顺序或内容；等待到期：暂时搁置，到期后再评估；放弃目标：不再执行，保留已完成记录。"));
+  const submit = el("button", { type: "submit", class: "btn primary" }, "确认");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const action = actionSel.value;
+    if (!action) { formError(form, "请选择操作。"); return; }
+    /** @type {{expected_version: number, action: string, step_order?: string[], wait_until?: string}} */
+    const body = { expected_version: g.version || 1, action };
+    if (action === "CONTINUE") {
+      const steps = ($("#goal-steps").value || "").split("\n").map(s => s.trim()).filter(Boolean);
+      if (!steps.length || steps.length > 3) { formError(form, "剩余步骤为 1–3 行，一行一个步骤。"); return; }
+      if (new Set(steps).size !== steps.length) { formError(form, "剩余步骤不能重复。"); return; }
+      body.step_order = steps;
+    } else if (action === "WAIT") {
+      const until = $("#goal-wait-until").value;
+      if (!until) { formError(form, "请选择等待到期时间。"); return; }
+      body.wait_until = new Date(until).toISOString();
+    }
+    perform(form, submit, () => api.write("/goals/" + encodeURIComponent(g.goal_id) + "/continuation", body, "POST",
+      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      async r => { closeDialog(); toast({ CONTINUE: "已继续执行", WAIT: "已等待到期", ABANDON: "已放弃目标" }[action] + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+  });
+  openDialog("续行目标：" + g.title, form, { wide: true });
+}
+
+function reflectionCard(r) {
+  const evidence = r.evidence || [];
+  return el("div", { class: "reflection-card" },
+    el("div", { class: "refl-head" }, el("h3", {}, r.content), tag(r.state)),
+    el("p", { class: "meta" }, fmtDate(r.occurred_at)),
+    evidence.length ? el("details", { class: "refl-evidence" }, el("summary", {}, "证据（" + evidence.length + " 条原话）"),
+      el("ul", {}, evidence.map(e => el("li", {}, """ + e.exact_quote + """)))
+    ) : null,
+    r.state === "PROPOSED" ? el("div", { class: "refl-acts" },
+      btn("接受", () => reflectionDecision(r.suggestion_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }),
+      btn("拒绝", () => reflectionDecision(r.suggestion_id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null);
+}
+
+function reflectionDecision(suggestion_id, decision) {
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后这条建议会进入下一步执行。" : "拒绝后不会再提示，但证据仍会保留在对话记录里。"));
+  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "接受" : "拒绝");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/reflections/" + encodeURIComponent(suggestion_id) + "/decision", { decision }, "POST",
+      r => typeof r.suggestion_id === "string" && typeof r.state === "string"),
+      async r => { closeDialog(); toast((decision === "ACCEPT" ? "已接受" : "已拒绝") + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+  });
+  openDialog(decision === "ACCEPT" ? "接受这条反思建议" : "拒绝这条反思建议？", form);
+}
+
+function topicCard(t) {
+  const sources = t.sources || [], results = t.results || [];
+  return el("div", { class: "topic-card" },
+    el("div", { class: "topic-head" }, el("h3", {}, t.kind === "conversation" ? "对话话题" : "阅读话题"), tag(t.state)),
+    el("p", {}, sources.length + " 条来源，" + results.length + " 次执行结果"),
+    el("p", { class: "meta" }, "创建于 " + fmtDate(t.created_at)),
+    ["WAITING", "DUE"].includes(t.state) && sources.length ? btn("关闭话题", () => topicClose(t), { cls: "sm danger", symbol: "close" }) : null);
+}
+
+function topicClose(t) {
+  const form = el("form", { class: "dlg-form" });
+  const sources = t.sources || [];
+  if (!sources.length) { form.append(el("p", { class: "note" }, "这个话题没有可用的来源事件。")); }
+  else {
+    form.append(el("p", { class: "muted" }, "关闭话题需要从来源事件中选择一条作为关闭依据。"));
+    const sel = el("select", { class: "input", id: "topic-source", required: true },
+      el("option", { value: "" }, "选择来源事件"),
+      ...sources.map(s => el("option", { value: s.event_id }, s.event_id.slice(0, 16) + "...")));
+    form.append(el("label", { class: "field" }, el("span", {}, "来源事件"), sel));
+  }
+  const submit = el("button", { type: "submit", class: "btn danger", disabled: !sources.length }, "关闭话题");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const source_event_id = $("#topic-source").value;
+    if (!source_event_id) { formError(form, "请选择来源事件。"); return; }
+    perform(form, submit, () => api.write("/life/topics/" + encodeURIComponent(t.topic_id) + "/close", { source_event_id }, "POST",
+      r => typeof r.topic_id === "string" && typeof r.state === "string"),
+      async r => { closeDialog(); toast("已关闭话题（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+  });
+  openDialog("关闭话题？", form);
+}

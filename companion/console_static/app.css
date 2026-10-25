@@ -636,6 +636,11 @@ dialog::backdrop { background: rgba(35,38,74,.38); backdrop-filter: blur(2px); }
 .login-art { background: var(--ink); color: #d9dcf0; padding: 40px 48px; display: flex; flex-direction: column; position: relative; overflow: hidden; }
 .login-art h1 { font-family: var(--serif); font-size: clamp(30px, 3.4vw, 44px); line-height: 1.35; color: #fff; margin-top: auto; max-width: 13em; font-weight: 700; }
 .login-art p { margin-top: 14px; color: #a9aed3; max-width: 32em; }
+.login-art .strip { margin-top: 44px; position: relative; height: 70px; }
+.login-art .strip i { position: absolute; bottom: 24px; width: 6px; border-radius: 3px; background: #4b5088; }
+.login-art .strip i.lit { background: var(--lamp); box-shadow: 0 0 14px rgba(240,180,41,.5); }
+.login-art .strip .axis { position: absolute; left: 0; right: 0; bottom: 18px; height: 1px; background: #4b5088; }
+.login-art .strip span { position: absolute; bottom: 0; font: 500 11px var(--num); color: #7c81b0; transform: translateX(-50%); }
 .login-art .moon { position: absolute; right: -90px; top: -90px; width: 320px; height: 320px; border-radius: 50%; background: radial-gradient(circle at 40% 60%, rgba(240,180,41,.35), rgba(240,180,41,0) 65%); }
 .login-form { display: grid; place-items: center; padding: 40px 28px; background: var(--canvas); }
 .login-form form { width: min(360px, 100%); display: grid; gap: 16px; }
@@ -669,6 +674,7 @@ dialog::backdrop { background: rgba(35,38,74,.38); backdrop-filter: blur(2px); }
   .paper { padding: 20px 18px; }
   .login { grid-template-columns: minmax(0, 1fr); }
   .login-art { padding: 28px 24px 24px; min-height: 300px; }
+  .login-art .strip { display: none; }
 }
 /* ===== 正式版补充 ================================================== */
 :root { --lane-chat: #8b90c4; --lane-auto: #23264a; --lane-read: #6e9bd0; --lane-mind: #7aa98f; --lane-cost: #b06f12; --lane-owner: #9aa0bb; }
