@@ -37,13 +37,17 @@ def row(runtime):
     return pending_media._execute(runtime, "SELECT * FROM automatic_media").fetchone()
 
 
-@pytest.mark.parametrize("recovery", ["pending", "downloading", "lost_receipt"])
+@pytest.mark.parametrize("recovery", [
+    "pending", "uncommitted_claim", "downloading", "lost_receipt",
+])
 def test_original_queue_recovers_native_transfer(core, tmp_path, recovery):
     async def scenario():
         async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
             spool, runtime = native_spool(core, tmp_path, config, plan)
             try:
                 prepared = await captured(core, client, runtime)
+                if recovery == "uncommitted_claim":
+                    pending_media.transition(runtime, prepared["event"]["event_id"], "CLAIMING", 0)
                 if recovery == "downloading":
                     image = prepared["media"]["images"][0]
                     pending_media.transition(runtime, prepared["event"]["event_id"], "CLAIMING", 0)
@@ -54,6 +58,8 @@ def test_original_queue_recovers_native_transfer(core, tmp_path, recovery):
                     pending_media.transition(runtime, prepared["event"]["event_id"],
                                                "DOWNLOADING", 0, response.json())
                     original_claim = response.json()
+                    core.clock.advance(16)
+                    await core.content.run_once()
             finally:
                 spool.close()
             downloads, claims, uploads = [], [], []
@@ -82,6 +88,11 @@ def test_original_queue_recovers_native_transfer(core, tmp_path, recovery):
                     transfer.event_hooks["response"].append(response_hook)
                     pump = pending_media.MediaPump(runtime, transfer,
                         image_transport=httpx.MockTransport(download), image_resolver=resolve)
+                    if recovery == "uncommitted_claim":
+                        await pump.execute(row(runtime))
+                        assert row(runtime)["state"] == "PENDING" and not claims
+                        assert core.store.one("SELECT state FROM content_items")["state"] == (
+                            "WAITING")
                     if recovery == "lost_receipt":
                         with pytest.raises(httpx.ReadTimeout):
                             await pump.execute(row(runtime))
@@ -103,13 +114,15 @@ def test_original_queue_recovers_native_transfer(core, tmp_path, recovery):
                     assert row(runtime)["state"] == "DONE"
                     assert row(runtime)["manifest_json"] is None
                     runtime.verify()
-                assert len(downloads) == len(uploads) == 1
+                assert len(downloads) == len(uploads) == (0 if recovery == "downloading" else 1)
                 assert len(claims) == (0 if recovery == "downloading" else 1)
                 item = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
                 if recovery == "downloading":
+                    assert item["state"] == "FAILED"
                     assert item["lease_token"] == original_claim["lease_token"]
                     assert item["lease_until"] == original_claim["lease_until"]
-                assert len(core.store.rows("SELECT * FROM captured_images")) == 1
+                assert len(core.store.rows("SELECT * FROM captured_images")) == (
+                    0 if recovery == "downloading" else 1)
                 assert not core.store.rows("SELECT * FROM model_usage")
             finally:
                 spool.close()
@@ -147,6 +160,8 @@ def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
                           "source_sha256": prepared["media"]["images"][0]["source_sha256"]})
                 assert response.status_code == 200
                 original = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
+                core.clock.advance(16)
+                await core.content.run_once()
             finally:
                 spool.close()
             spool, runtime = native_spool(core, tmp_path, config, plan)
@@ -159,12 +174,60 @@ def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
                 async with private_http_client(config.core_url, config.bridge_token) as transfer:
                     transfer.event_hooks["request"].append(request_hook)
                     pump = pending_media.MediaPump(runtime, transfer)
-                    with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED"):
-                        await pump.execute(row(runtime))
-                assert row(runtime)["state"] == "CLAIMING"
+                    await pump.execute(row(runtime))
+                assert row(runtime)["state"] == "DONE"
                 assert not any(path.endswith(("/claim", "/image")) for path in requests)
-                assert core.store.one(
-                    "SELECT * FROM content_items WHERE kind='qq_image'") == original
+                closed = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
+                assert closed["state"] == "FAILED"
+                assert {key: closed[key] for key in ("lease_token", "lease_until", "reserved_bytes")
+                        } == {key: original[key]
+                              for key in ("lease_token", "lease_until", "reserved_bytes")}
+                assert not core.store.rows("SELECT * FROM captured_images")
+                runtime.verify()
+            finally:
+                spool.close()
+    run(scenario())
+
+
+@pytest.mark.parametrize("change", ["slot", "kind", "duplicate"])
+def test_failed_status_must_identify_the_original_media_slot(core, tmp_path, change):
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True) as (client, config, plan):
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            try:
+                prepared = await captured(core, client, runtime)
+                event_id = prepared["event"]["event_id"]
+                path = "/internal/v2/content/" + event_id
+                pending_media.transition(runtime, event_id, "CLAIMING", 0)
+                response = await client.post(path + "/image/claim", json={
+                    "request_key": "image:0",
+                    "source_sha256": prepared["media"]["images"][0]["source_sha256"]})
+                assert response.status_code == 200
+                pending_media.transition(runtime, event_id, "DOWNLOADING", 0, response.json())
+                core.clock.advance(16)
+                await core.content.run_once()
+                before = dict(row(runtime))
+
+                async def changed(response):
+                    if response.request.url.path != path:
+                        return
+                    await response.aread()
+                    body = response.json()
+                    if change == "duplicate":
+                        body["items"].append(body["items"][0])
+                    else:
+                        body["items"][0][change] = 1 if change == "slot" else "qq_file"
+                    response._content = encode(body).encode()
+
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    transfer.event_hooks["response"].append(changed)
+                    pump = pending_media.MediaPump(runtime, transfer,
+                        image_transport=httpx.MockTransport(
+                            lambda _: pytest.fail("No repeated GET")))
+                    with pytest.raises(ValueError, match="INVALID_CORE_RECEIPT") as caught:
+                        await pump.execute(row(runtime))
+                assert caught.value.capture_diagnostic.phase == "core_check"
+                assert dict(row(runtime)) == before
                 assert not core.store.rows("SELECT * FROM captured_images")
                 runtime.verify()
             finally:

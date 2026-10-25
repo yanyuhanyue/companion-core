@@ -151,6 +151,24 @@ STOP 取消尚可撤销的原生任务和待发项，保留 `SENDING`、`DELIVER
 旧固定 timer 问候仅在 `QUEUED`/`RETRY_WAIT` 且没有任何 model usage 或 Outbox 时退休；
 原生审计记录 `LEGACY_TIMER_RETIRED`。有执行或交付责任的旧工作保留对账依据。
 
+原进程退出后，`owner-delivery-prepare --message-id ...` 继续使用原 Spool 排他锁、
+capture key 签名的 v2 quiescence 证明及 Core STOP 回执。对于原日志最后仍为
+`RESERVED`、没有原投递结果的普通私聊回复，Core 只在原 STOP 已取消该项、
+`attempt_count=0`、没有 provider/native ACK、投递结果审计或独立账本 send 责任时，
+返回 `owner_delivery_not_sent_v1` 回执。原授权、来源、内容及 delivery 绑定须完整匹配。
+已过期的明文 lease 不重建；回执保留原签名 lease 哈希，原模型费用和尝试记录保持原值。
+
+该分支复用 `/internal/v1/deliveries/reconciliation/prepare`，返回 `NOT_SENT`。
+Bridge 将原尝试记为 `NOT_SENT`，保存 accepted 收口结果；丢失 HTTP 响应可用同一证明
+重新取得同一回执，不同证明拒绝冲突。它不要求主人猜测平台结果，也不生成
+`owner_manual` 决定；原 `SENDING`/`DELIVERY_UNCERTAIN` 的主人 `SENT`/`CANCELLED`
+核对合同保持严格。原图、模型或其他任务仍有未知责任时，输入终态及 handoff 继续阻止恢复。
+所有原责任闭合后，才由既有 `owner-handoff-prepare`、后继授权及 `owner-handoff` 接续。
+
+`tests/test_bridge_owner_no_io.py` 通过真实 HTTP、独立 Core worker 和独立 Bridge
+核对进程验证 lease 回收、Core 回执丢失后的幂等恢复与原生交接；外部模型仅使用合成传输。
+该扩展沿用本文已记录的 DSH producer 终态投影、SQLite 原事务及既有停机证明职责划分。
+
 `tests/test_owner_runtime_process.py` 通过真实 TCP API 与独立 Core worker 验证正常文字链和
 HTTP 钩子等待期间的 STOP；所有外部 provider 使用强制 synthetic `MockTransport`。
 `tests/test_owner_wire.py` 验证共享编解码与无 guard 宿主拒绝，

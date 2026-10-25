@@ -217,15 +217,27 @@ class OwnerRuntime:
                     or (record["kind"] == "IO_STARTED"
                         and (attempt["state"] != "RESERVED" or state != "ACTIVE"))):
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+                before_state = attempt["state"]
                 attempt.update(state=record["kind"], provider_ack_hash=value["provider_ack_hash"])
                 if record["kind"] == "NOT_SENT":
+                    from companion_delivery_protocol import no_io
+
                     receipt = {"cancelled": True, "message_id": value["message_id"],
                                "state": "CANCELLED", "send_attempt_retained": True}
                     result = self.db.execute("SELECT body,state FROM results WHERE message_id=?",
                                               (value["message_id"],)).fetchone()
                     body = json.loads(result[0]) if result else {}
                     binding = bindings[value["message_id"]]
-                    if binding.get("payload_kind") == "account_payload_sha256":
+                    if value.get("core_receipt", {}).get("kind") == no_io.KIND:
+                        receipt = no_io.receipt(value["core_receipt"])
+                        proof = receipt["quiescence"]
+                        if (before_state != "RESERVED" or proof["authority"] != current
+                            or proof["message_id"] != value["message_id"]
+                            or body != {"result": "NOT_SENT",
+                                        "lease_sha256": binding["lease_sha256"],
+                                        "core_receipt": receipt}):
+                            raise ValueError("OWNER_NOT_SENT_PROOF_REQUIRED")
+                    elif binding.get("payload_kind") == "account_payload_sha256":
                         from .account_actions import cancelled_proof
 
                         receipt = cancelled_proof(value.get("core_receipt"),

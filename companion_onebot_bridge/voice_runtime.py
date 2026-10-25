@@ -12,6 +12,17 @@ from .network import checked_http_client, private_http_client
 from .onebot_client import OneBotClient
 
 STATES = {"QUEUED", "LEASED", "RUNNING", "TRANSCRIBED", "CANCELLED", "EXPIRED", "UNKNOWN"}
+INPUT_UNAVAILABLE = frozenset({
+    "VOICE_FETCH_TIMEOUT", "VOICE_FETCH_FAILED", "VOICE_URL_RESOLUTION_FAILED",
+    "VOICE_RECORD_SOURCE_CHANGED", "VOICE_SOURCE_TOO_LARGE", "VOICE_SOURCE_INCOMPLETE",
+    "VOICE_DOWNLOAD_REJECTED", "VOICE_ENCODING_UNSUPPORTED", "VOICE_MIME_UNSUPPORTED",
+    "VOICE_DECODE_TIMEOUT", "VOICE_DECODE_FAILED", "VOICE_DECODE_RESPONSE_LIMIT",
+    "VOICE_DECODE_RESPONSE_INVALID", "VOICE_DECODE_OUTPUT_LIMIT", "VOICE_DECODE_INVALID",
+    "VOICE_DECODE_LIMIT", "VOICE_WAV_INVALID", "VOICE_WAV_TOO_LONG", "VOICE_SILK_INVALID",
+    "VOICE_SILK_DECODER_UNAVAILABLE", "VOICE_DECODER_UNAVAILABLE", "VOICE_CONTAINER_UNSUPPORTED",
+    "VOICE_EXTERNAL_MEDIA_REFUSED", "VOICE_AUDIO_STREAM_REQUIRED", "VOICE_SAMPLE_RATE_INVALID",
+    "VOICE_AUDIO_EMPTY", "VOICE_RESOURCE_LIMIT_UNAVAILABLE",
+})
 
 
 def enabled(window):
@@ -163,12 +174,22 @@ async def upload(window, client, event_id, original, *, check, progress, protoco
                 "reason": "VOICE_INPUT_NOT_REQUESTED", "state": current["state"]}
     deadline = datetime.fromisoformat(current["wait_until"])
     revision = current["reply_revision"]
+    guard_error = None
+    guard_active = False
 
     async def guard():
-        value, slot = await status(window, client, bound, original, check)
-        if (slot is None or not slot["upload_allowed"] or value["reply_revision"] != revision
-            or value["wait_until"] != current["wait_until"] or window.clock() >= deadline):
-            raise ValueError("VOICE_INPUT_FENCED")
+        nonlocal guard_error, guard_active
+        guard_active = True
+        try:
+            value, slot = await status(window, client, bound, original, check)
+            if (slot is None or not slot["upload_allowed"] or value["reply_revision"] != revision
+                or value["wait_until"] != current["wait_until"] or window.clock() >= deadline):
+                raise ValueError("VOICE_INPUT_FENCED")
+        except Exception as error:
+            guard_error = error
+            raise
+        else:
+            guard_active = False
 
     await progress("DOWNLOADING", None)
     set_phase("voice_download")
@@ -190,9 +211,9 @@ async def upload(window, client, event_id, original, *, check, progress, protoco
             work_dir=window.spool.directory / "voice-work")
     except ValueError as error:
         code = error.args[0] if error.args else ""
-        if (not isinstance(code, str) or not re.fullmatch(r"VOICE_[A-Z_]{1,56}", code)
-            or code in {"VOICE_SOURCE_CHANGED", "VOICE_INPUT_RECEIPT_INVALID",
-                        "VOICE_INPUT_CHANGED", "VOICE_AUTHORIZATION_INVALID"}):
+        if guard_error is not None:
+            raise guard_error from None
+        if guard_active or not isinstance(code, str) or code not in INPUT_UNAVAILABLE:
             raise
         # No upload has started. Core owns whether its original wait becomes fallback.
         value, slot = await status(window, client, bound, original, check)

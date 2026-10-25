@@ -50,19 +50,26 @@ def media_row(window):
 
 
 @asynccontextmanager
-async def media_host(core, tmp_path, source, *, model_reply=None):
+async def media_host(core, tmp_path, source, *, model_reply=None, independent_api=False):
     options = scope(core)
     options["core_options"]["rich_input_scope"] = "references_v1"
     async with host(core, tmp_path, source, model_reply=model_reply,
-        purposes=("chat", "image", "content"), core_options=options["core_options"],
+        purposes=("chat", "image", "content", "history"), core_options=options["core_options"],
         paid_options=image_options()["paid_options"],
-        bridge_options={"rich_input_scope": "references_v1"}) as values:
+        bridge_options={"rich_input_scope": "references_v1"},
+        independent_api=independent_api) as values:
         yield values
 
 
 @pytest.mark.parametrize("phase", ["download", "upload"])
 @pytest.mark.parametrize("control", ["new_input", "recall"])
 def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypatch, phase, control):
+    from companion import api
+    from companion.core import Core
+    from tests.test_owner_image_recovery import run_worker
+
+    monkeypatch.setattr(api, "Core", lambda *args, **kwargs: Core(
+        *args, clock=core.clock, **kwargs))
     started, release = asyncio.Event(), asyncio.Event()
     downloads, calls = [], []
 
@@ -70,7 +77,7 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
         await ws.send(json.dumps(original() | {"time": int(datetime.now(UTC).timestamp())}))
         await asyncio.wait_for(started.wait(), 15)
         await ws.send(recall_frame() if control == "recall" else frame(
-            2, text="先不用看图，换个话题"))
+            2, text="请结合刚才的图片继续说明"))
         await ws.wait_closed()
 
     async def cdn(request):
@@ -82,10 +89,10 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
 
     async def answer(request):
         calls.append(json.loads(request.content)["messages"])
-        return model_response("好，我们换个话题。")
+        return model_response("好，结合刚才的原图继续说明。")
 
     async def scenario():
-        async with media_host(core, tmp_path, source, model_reply=answer) as (
+        async with media_host(core, tmp_path, source, model_reply=answer, independent_api=True) as (
             window, _, sends, _,
         ):
             async def accepted(response):
@@ -94,7 +101,7 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
                     (control == "recall" and path.endswith("/inputs/recall"))
                     or (control == "new_input" and path == "/internal/v1/inbox/events"
                         and json.loads(response.request.content)["payload"]["text"]
-                        == "先不用看图，换个话题")
+                        == "请结合刚才的图片继续说明")
                 ):
                     assert started.is_set() and not release.is_set()
                     release.set()
@@ -108,13 +115,12 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
             window.client.event_hooks["request"].append(uploading)
             pump = pending_media.MediaPump(window.runtime, window.client,
                 image_transport=httpx.MockTransport(cdn), image_resolver=resolve)
-            window.start()
+            window.start(worker=False)
             task = asyncio.create_task(app.transfer_media(pump, window.stop))
             try:
                 try:
                     await until(lambda: release.is_set() and window.db.execute(
-                        "SELECT state FROM automatic_media").fetchone()[0] in {"DONE", "CANCELLED"}
-                        and len(sends) == int(control == "new_input"),
+                        "SELECT state FROM automatic_media").fetchone()[0] in {"DONE", "CANCELLED"},
                         tasks=[task, *window.tasks], deadline_seconds=15)
                 except TimeoutError as error:
                     raise AssertionError(json.dumps({"released": release.is_set(),
@@ -124,12 +130,22 @@ def test_media_wait_does_not_block_new_input_or_recall(core, tmp_path, monkeypat
                         "jobs": core.store.rows("SELECT kind,state,last_error_code FROM jobs"),
                         "content": core.store.rows(
                             "SELECT kind,state FROM content_items")})) from error
+                if control == "new_input":
+                    requests = await run_worker(core, tmp_path, 1, "结合原图继续说明。")
+                    calls.extend(request["messages"] for request in requests)
+                    await until(lambda: len(sends) == 1, tasks=[task, *window.tasks],
+                                deadline_seconds=15)
                 assert window.runtime.row()["state"] == "ACTIVE"
                 assert len(downloads) == 1
                 # Native upload stores bytes; only a surviving SDK chat invokes the model.
                 assert len(calls) == int(control == "new_input")
                 media = media_row(window)
-                assert media["state"] == "CANCELLED" and media["manifest_json"] is None
+                assert media["state"] == ("DONE" if control == "new_input" else "CANCELLED")
+                assert media["manifest_json"] is None
+                if control == "new_input":
+                    assert any(part["type"] == "image_url" for message in calls[0]
+                               if isinstance(message["content"], list)
+                               for part in message["content"])
                 assert not core.store.one("SELECT 1 FROM model_usage WHERE state!='SETTLED'")
                 window.runtime.verify()
             finally:
@@ -202,7 +218,7 @@ def test_restart_recovers_queued_or_confirmed_upload_without_repeating_io(
 
 
 @pytest.mark.parametrize("recovery", ["active", "expired", "erased"])
-def test_restart_download_reuses_only_original_valid_lease(core, tmp_path, recovery):
+def test_restart_download_waits_original_lease_without_replaying_get(core, tmp_path, recovery):
     downloads, claims, checks = [], [], []
 
     async def source(ws):
@@ -211,7 +227,7 @@ def test_restart_download_reuses_only_original_valid_lease(core, tmp_path, recov
 
     def cdn(request):
         downloads.append(request)
-        raise httpx.ReadTimeout("synthetic response lost after original GET")
+        raise RuntimeError("synthetic crash after original GET")
 
     async def scenario():
         async with media_host(core, tmp_path, source) as (window, _, sends, _):
@@ -229,7 +245,7 @@ def test_restart_download_reuses_only_original_valid_lease(core, tmp_path, recov
             row = media_row(window)
             first = pending_media.MediaPump(window.runtime, client,
                 image_transport=httpx.MockTransport(cdn), image_resolver=resolve)
-            with pytest.raises(ValueError, match="IMAGE_FETCH_FAILED"):
+            with pytest.raises(RuntimeError, match="synthetic crash"):
                 await first.execute(row)
             row = media_row(window)
             assert row["state"] == "DOWNLOADING"
@@ -238,21 +254,27 @@ def test_restart_download_reuses_only_original_valid_lease(core, tmp_path, recov
             item = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
             if recovery == "expired":
                 core.clock.advance(16)
+                await core.content.run_once()
             elif recovery == "erased":
                 with core.store.transaction():
                     core.ledger.expire_events(core.store, [row["event_id"]], core.clock())
             window.restart()
             resumed = pending_media.MediaPump(window.runtime, client,
                 image_transport=httpx.MockTransport(cdn), image_resolver=resolve)
-            if recovery == "expired":
-                with pytest.raises(ValueError, match="IMAGE_DOWNLOAD_CLAIM_REJECTED"):
-                    await resumed.execute(row)
-            elif recovery == "active":
-                with pytest.raises(ValueError, match="IMAGE_FETCH_FAILED"):
-                    await resumed.execute(row)
+            if recovery == "active":
+                task = asyncio.create_task(resumed.execute(row))
+                try:
+                    await asyncio.sleep(0.1)
+                    assert not task.done() and len(downloads) == 1
+                    core.clock.advance(16)
+                    await core.content.run_once()
+                    await asyncio.wait_for(task, 5)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             else:
                 await resumed.execute(row)
-            assert len(downloads) == (2 if recovery == "active" else 1) and sends == []
+            assert len(downloads) == 1 and sends == []
             assert core.store.rows("SELECT * FROM model_usage") == []
             assert claims == [{"request_key": "image:0", "source_sha256": original_source}]
             assert checks and all(check == {"lease_token": original_claim["lease_token"],
@@ -260,19 +282,18 @@ def test_restart_download_reuses_only_original_valid_lease(core, tmp_path, recov
             current = core.store.one("SELECT * FROM content_items WHERE item_id=?",
                                      (item["item_id"],))
             assert current["reserved_bytes"] == item["reserved_bytes"]
-            if recovery == "active":
-                assert current["state"] == "FETCHING"
+            if recovery != "erased":
+                assert current["state"] == "FAILED"
                 assert current["lease_token"] == original_claim["lease_token"]
                 assert current["lease_until"] == original_claim["lease_until"]
                 retry = media_row(window)
-                assert retry["state"] == "DOWNLOADING"
-                assert json.loads(retry["receipt_json"]) == original_claim
+                assert retry["state"] == "DONE"
             if recovery == "erased":
                 cancelled = media_row(window)
                 assert cancelled["state"] == "CANCELLED" and cancelled["manifest_json"] is None
             window.runtime.stop()
             row = media_row(window)
-            assert row["state"] == "CANCELLED"
+            assert row["state"] == ("CANCELLED" if recovery == "erased" else "DONE")
             assert row["manifest_json"] is None
             before = len(downloads), len(claims), len(checks)
             with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):

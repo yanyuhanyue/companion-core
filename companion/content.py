@@ -1326,6 +1326,7 @@ class ContentService:
 
         if not self.settings.content_enabled:
             return False
+        agent_images.expire_downloads(self)
         if await content_files.run_file_once(self):
             return True
         s, now = self.store, self.clock()

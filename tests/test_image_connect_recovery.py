@@ -110,7 +110,7 @@ def test_actual_httpcore_connect_failure_trace_recovers_without_repeating_get():
     assert addresses == ["1.1.1.1", "8.8.8.8"] and len(checks) == 3
 
 
-def test_native_image_failure_preserves_queue_stage_without_the_signed_url(
+def test_native_image_failure_closes_expired_slot_without_the_signed_url(
     core, tmp_path, caplog,
 ):
     async def source(ws):
@@ -121,7 +121,9 @@ def test_native_image_failure_preserves_queue_stage_without_the_signed_url(
     async def resolve(*_):
         return ["1.1.1.1"]
 
-    def refused(request):
+    async def refused(request):
+        core.clock.advance(16)
+        await core.content.run_once()
         raise httpx.ConnectError(URL, request=request)
 
     async def scenario():
@@ -130,11 +132,10 @@ def test_native_image_failure_preserves_queue_stage_without_the_signed_url(
         ):
             await active.capture()
             await active.flush()
-            with pytest.raises(ValueError) as caught:
-                await upload(active, transport=httpx.MockTransport(refused), resolver=resolve)
-            assert str(caught.value) == "IMAGE_CONNECTION_FAILED"
+            await upload(active, transport=httpx.MockTransport(refused), resolver=resolve)
             assert active.db.execute("SELECT state FROM automatic_media").fetchone()[0] == (
-                "DOWNLOADING")
+                "DONE")
+            assert core.store.one("SELECT state FROM content_items")["state"] == "FAILED"
             assert calls == sends == []
             assert not core.store.rows("SELECT * FROM model_usage")
 

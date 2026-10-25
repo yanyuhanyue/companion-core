@@ -247,6 +247,24 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
     target = httpx.URL(url)
     delegate = transport or httpx.AsyncHTTPTransport(trust_env=False, retries=0)
     response = None
+    guard_error = None
+    guard_active = False
+
+    async def checked():
+        nonlocal guard_error, guard_active
+        guard_active = True
+        try:
+            await check()
+        except Exception as error:
+            from .capture import capture_diagnostic
+
+            if not hasattr(error, "capture_diagnostic"):
+                error.capture_diagnostic = capture_diagnostic(error, "core_check")
+            guard_error = error
+            raise
+        else:
+            guard_active = False
+
     quiet = _private_download.set(True)
     try:
         async with asyncio.timeout(10):
@@ -255,7 +273,7 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
                 raise ValueError("IMAGE_NONPUBLIC_ADDRESS")
             candidates = addresses[:3] if len(addresses) > 1 else addresses * 2
             for pin in candidates:
-                response = await _connect_image(delegate, target, pin, check)
+                response = await _connect_image(delegate, target, pin, checked)
                 if response is not None:
                     break
             if response is None:
@@ -281,10 +299,17 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
             if not body:
                 raise ValueError("IMAGE_EMPTY")
             return bytes(body), mime
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        raise ValueError("IMAGE_CONNECTION_FAILED") from None
-    except (httpx.HTTPError, OSError):
-        raise ValueError("IMAGE_FETCH_FAILED") from None
+    except (httpx.HTTPError, OSError) as error:
+        if guard_error is not None:
+            raise guard_error from None
+        if guard_active:
+            from .capture import capture_diagnostic
+
+            error.capture_diagnostic = capture_diagnostic(error, "core_check")
+            raise
+        code = ("IMAGE_CONNECTION_FAILED" if isinstance(error, (
+            httpx.ConnectError, httpx.ConnectTimeout)) else "IMAGE_FETCH_FAILED")
+        raise ValueError(code) from None
     finally:
         try:
             if response is not None:
@@ -323,15 +348,21 @@ async def owner_media_request(runtime, client, path, body=b"", headers=None, *, 
         runtime.verify()
         seal_protocol_content(request, expected)
 
-    async with checked_http_client(client, boundary) as scoped:
-        async with scoped.stream(method, path, content=expected, headers=headers,
-                                 timeout=30) as response:
-            response.raise_for_status()
-            result = bytearray()
-            async for chunk in response.aiter_bytes(chunk_size=8192):
-                result.extend(chunk)
-                if len(result) > 65536:
-                    raise ValueError("INVALID_CORE_RECEIPT")
+    try:
+        async with checked_http_client(client, boundary) as scoped:
+            async with scoped.stream(method, path, content=expected, headers=headers,
+                                     timeout=30) as response:
+                response.raise_for_status()
+                result = bytearray()
+                async for chunk in response.aiter_bytes(chunk_size=8192):
+                    result.extend(chunk)
+                    if len(result) > 65536:
+                        raise ValueError("INVALID_CORE_RECEIPT")
+    except Exception as error:
+        from .capture import capture_diagnostic
+
+        error.capture_diagnostic = capture_diagnostic(error, "core_check")
+        raise
     return decode(bytes(result), 65536)
 
 

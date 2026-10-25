@@ -37,6 +37,61 @@ def erase_images(store, event_ids):
                       "(SELECT item_id FROM content_items WHERE owner_event_id=?)", (event_id,))
 
 
+def expire_downloads(service):
+    """Close only proven native downloads; retain their lease and traffic reservation.
+
+    Native claim never admits inference. Accept commits the original proof and
+    SUCCEEDED together, so an expired, unstaged claim has no uncertain image model
+    effect. Verify its original capture even after authority STOP; do not grant I/O.
+    """
+    from companion.owner_input_state import _source
+
+    store, now = service.store, service.clock()
+    with nullcontext() if store.db.in_transaction else store.transaction():
+        rows = store.rows(
+            "SELECT c.*,m.value AS input_receipt FROM content_items c JOIN runtime_meta m "
+            "ON m.key=? || c.owner_event_id WHERE c.kind='qq_image' AND c.redacted=0 "
+            "AND (c.state='FETCHING' OR (c.state='UNKNOWN' "
+            "AND c.error_code='CONTENT_PROCESSOR_LOST')) AND c.lease_until<=? "
+            "AND c.lease_token IS NOT NULL AND c.reserved_bytes>0 "
+            "AND c.usage_request_id IS NULL AND c.media_sha256='' AND c.fingerprint='' "
+            "AND c.target_url='' AND c.source_event_id IS NULL AND c.read_request_id IS NULL "
+            "AND c.output_event_id IS NULL AND NOT EXISTS "
+            "(SELECT 1 FROM captured_images p WHERE p.item_id=c.item_id) "
+            "AND NOT EXISTS (SELECT 1 FROM agent_image_inputs a WHERE a.item_id=c.item_id) "
+            "AND NOT EXISTS (SELECT 1 FROM runtime_meta p WHERE p.key=? || c.item_id)",
+            (owner_input.INPUT, now, qq_images.STAGED),
+        )
+        for row in rows:
+            try:
+                if image_spool._path(store, row["item_id"]).exists():
+                    continue
+                saved = json.loads(row["input_receipt"])
+                capture, original = owner_input.verify(store, service.settings, saved["capture"])
+                _source(store, capture, saved, original.policy.owner_qq_id)
+                event = store.one("SELECT body_json FROM events WHERE event_id=?",
+                                  (row["owner_event_id"],))
+                images = qq_images.manifest(json.loads(event["body_json"]))
+                jobs = store.rows("SELECT authority_json FROM jobs WHERE event_id=? "
+                                   "AND kind='chat'", (row["owner_event_id"],))
+                if (capture.event_id != row["owner_event_id"]
+                    or "image" not in original.policy.purposes
+                    or not images or not 0 <= row["slot"] < len(images)
+                    or len(jobs) != 1
+                    or json.loads(jobs[0]["authority_json"]) != capture.authority
+                    or type(saved.get("privacy_epoch")) is not int
+                    or not 0 <= saved["privacy_epoch"] <= row["captured_privacy_epoch"]
+                    <= epoch(store)):
+                    continue
+            except (CoreError, ValueError, KeyError, TypeError):
+                continue
+            store.execute(
+                "UPDATE content_items SET state='FAILED',"
+                "error_code='CONTENT_IMAGE_DOWNLOAD_EXPIRED',updated_at=? WHERE item_id=?",
+                (now, row["item_id"]),
+            )
+
+
 def source(store, settings, clock, event_id):
     """Use the native source receipt while retaining its independent upload lease."""
     view = owner_authority.current(store, settings, clock, purpose="image")

@@ -381,6 +381,39 @@ def test_record_alias_drift_is_unavailable_and_never_fetches_different_audio(cor
     run(scenario())
 
 
+@pytest.mark.parametrize("failure", ["request", "receipt"])
+def test_voice_native_integrity_failure_is_not_an_unavailable_attachment(core, tmp_path, failure):
+    calls = []
+
+    def native(request):
+        calls.append(request.url.path)
+        if failure == "receipt" and request.url.path == "/get_record":
+            return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": {
+                "file": URL, "url": URL, "file_size": str(len(wav())),
+                "file_name": "cache-123.amr", "unexpected": "changed protocol receipt"}})
+
+    async def mutate(request):
+        if failure == "request" and request.url.path == "/get_record":
+            request.headers["Authorization"] = "Bearer changed-after-preparation"
+
+    async def scenario():
+        async with fixture(core, tmp_path, native=native) as (window, client, protocol, _, _):
+            await capture(window, client, protocol)
+            protocol.event_hooks["request"].append(mutate)
+            media = pump(window, client, protocol, download=lambda _: pytest.fail(
+                "native integrity failure must never reach public GET"))
+            code = "VOICE_ACTION_CHANGED" if failure == "request" else "VOICE_FIELDS_INVALID"
+            with pytest.raises(ValueError, match=code):
+                await media.execute(media_row(window))
+            row = media_row(window)
+            assert row["state"] == "DOWNLOADING" and row["manifest_json"]
+            assert not core.store.rows("SELECT * FROM voice_jobs")
+            assert calls == ([] if failure == "request" else ["/get_record"])
+            window.verify()
+
+    run(scenario())
+
+
 @pytest.mark.parametrize("failure", [None, "lost_ack"])
 def test_large_tts_lease_sends_only_record_with_actual_message_ack(core, tmp_path, failure):
     sent, checks = [], []

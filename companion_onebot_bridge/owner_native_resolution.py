@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import companion_delivery_protocol as wire
+from companion_delivery_protocol import no_io
 
 from . import reply_segments
 from .onebot_client import bounded_post
@@ -72,6 +73,21 @@ def _source(runtime, records, message_id):
     result = runtime.db.execute("SELECT body FROM results WHERE message_id=?",
                                 (message_id,)).fetchone()
     body = json.loads(result[0]) if result else None
+    if (isinstance(body, dict) and body.get("result") == "NOT_SENT"
+        and isinstance(body.get("core_receipt"), dict)
+        and body["core_receipt"].get("kind") == no_io.KIND):
+        receipt = no_io.receipt(body["core_receipt"])
+        proof = receipt["quiescence"]
+        if (entries[-1]["kind"] != "RESERVED" or proof["message_id"] != message_id
+            or proof["authority"] != runtime.authority
+            or proof["reserved_record_sha256"] != wire.digest(reserved[0])
+            or any(proof[key] != item for key, item in original.items())
+            or body != {"result": "NOT_SENT", "lease_sha256": original["lease_sha256"],
+                        "core_receipt": receipt}):
+            raise ValueError("DELIVERY_ORIGINAL_BINDING_REQUIRED")
+        # This accepted result was appended after the quiescence proof. It is not
+        # an original provider result and cannot change that proof's source hash.
+        body = None
     if body is not None:
         check = {"authority": runtime.authority, "event_id": value["event_id"],
             "message_id": message_id, "lease_token": body.get("lease_token"),
@@ -169,6 +185,13 @@ def verify(runtime, records):
                 or wire.timestamp(record["at"]) < wire.timestamp(receipt["at"])):
                 raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
             accepted[message_id] = (receipt, wire.digest(record))
+        elif kind == "NOT_SENT" and value.get("core_receipt", {}).get("kind") == no_io.KIND:
+            receipt = no_io.receipt(value["core_receipt"])
+            message_id = receipt["delivery"]["message_id"]
+            if (message_id in accepted or receipt["quiescence"] != prepared.get(message_id)
+                or wire.timestamp(record["at"]) < wire.timestamp(receipt["at"])):
+                raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
+            accepted[message_id] = (receipt, wire.digest(record))
     projected = {row["message_id"]: row for row in rows(runtime)}
     if set(projected) != set(prepared):
         raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
@@ -231,11 +254,51 @@ async def prepare(runtime, client, message_id):
                 (message_id, wire.digest(runtime.authority), encode(proof)))
     _, before = _stopped(runtime)
     result = await bounded_post(client, "/internal/v1/deliveries/reconciliation/prepare", proof)
-    if _stopped(runtime)[1] != before or result != {
+    if _stopped(runtime)[1] != before:
+        raise ValueError("DELIVERY_PREPARATION_RECEIPT_INVALID")
+    if isinstance(result, dict) and result.get("state") == "NOT_SENT":
+        if set(result) != {"state", "message_id", "receipt"} or result["message_id"] != message_id:
+            raise ValueError("DELIVERY_NOT_SENT_RECEIPT_INVALID")
+        return _accept_not_sent(runtime, proof, result["receipt"])
+    if result != {
         "state": "READY", "message_id": message_id, "quiescence_sha256": wire.digest(proof),
     }:
         raise ValueError("DELIVERY_PREPARATION_RECEIPT_INVALID")
     return result | {"paused": True}
+
+
+def _accept_not_sent(runtime, proof, value):
+    receipt = no_io.receipt(value)
+    message_id = proof["message_id"]
+    if receipt["quiescence"] != proof or wire.timestamp(receipt["at"]) > runtime.clock():
+        raise ValueError("DELIVERY_NOT_SENT_RECEIPT_INVALID")
+    stored = next(row for row in rows(runtime) if row["message_id"] == message_id)
+    if stored["receipt_json"] is not None:
+        if json.loads(stored["receipt_json"]) != receipt:
+            raise ValueError("DELIVERY_NOT_SENT_RECEIPT_INVALID")
+    else:
+        if runtime.db.execute("SELECT 1 FROM results WHERE message_id=?", (message_id,)).fetchone():
+            raise ValueError("DELIVERY_ORIGINAL_BINDING_REQUIRED")
+        attempt = runtime.db.execute("SELECT state FROM window_attempts WHERE message_id=?",
+                                     (message_id,)).fetchone()
+        if not attempt or attempt[0] != "RESERVED":
+            raise ValueError("DELIVERY_NOT_SENT_PROOF_REQUIRED")
+        runtime.spool.capacity(len(encode(receipt).encode()) * 3)
+        with runtime.db:
+            head = runtime.append("NOT_SENT", {"message_id": message_id,
+                "provider_ack_hash": None, "core_receipt": receipt})
+            runtime.db.execute("UPDATE window_attempts SET state='NOT_SENT' WHERE message_id=?",
+                               (message_id,))
+            # The original plaintext lease may be gone after Core expiry. Keep its
+            # signed hash; never synthesize a token or queue a delivery-result POST.
+            runtime.db.execute("INSERT INTO results(message_id,body,state) VALUES (?,?,'accepted')",
+                (message_id, encode({"result": "NOT_SENT", "lease_sha256": proof["lease_sha256"],
+                                     "core_receipt": receipt})))
+            runtime.db.execute(f"UPDATE {TABLE} SET receipt_json=?,receipt_record_sha256=? "
+                               "WHERE message_id=?", (encode(receipt), head, message_id))
+    runtime.verify(active=False)
+    return {"state": "NOT_SENT", "message_id": message_id, "paused": True,
+            "receipt_sha256": receipt["receipt_sha256"]}
 
 
 async def reconcile(runtime, client, message_id):
@@ -244,6 +307,9 @@ async def reconcile(runtime, client, message_id):
     if not stored:
         raise ValueError("DELIVERY_QUIESCENCE_REQUIRED")
     proof = json.loads(stored["proof_json"])
+    saved = json.loads(stored["receipt_json"]) if stored["receipt_json"] else None
+    if saved is not None and saved.get("kind") == no_io.KIND:
+        return _accept_not_sent(runtime, proof, saved)
     result = await bounded_post(client,
         f"/internal/v1/deliveries/{message_id}/reconciliation/lookup",
         {"proof_sha256": wire.digest(proof)})

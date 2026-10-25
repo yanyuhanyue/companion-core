@@ -40,7 +40,7 @@ def stopped(store, proof, stop, *, current=False):
         raise ValueError("original native STOP required")
 
 
-def binding(store, proof, row, authority, recorded):
+def binding(store, proof, row, authority, recorded, *, not_sent=False):
     from companion.private_life import event_digest
 
     original, policy = frozen(store, proof)
@@ -50,7 +50,8 @@ def binding(store, proof, row, authority, recorded):
         or json.loads(row["authority_json"]) != proof["authority"]
         or any(authority.get(k) != proof[k] for k in ("message_id", "event_id", "action_type"))
         or row["origin_event_id"] != proof["event_id"]
-        or row["action_type"] != proof["action_type"] or row["attempt_count"] < 1
+        or row["action_type"] != proof["action_type"]
+        or (row["attempt_count"] != 0 if not_sent else row["attempt_count"] < 1)
         or authority.get("delivery_key") != row["delivery_key"]):
         raise ValueError("original native delivery changed")
     event = store.one("SELECT * FROM events WHERE event_id=?", (proof["event_id"],))
@@ -97,7 +98,7 @@ def binding(store, proof, row, authority, recorded):
         if (wire.digest(token) != proof["lease_sha256"]
             or wire.digest(check) != proof["send_check_sha256"]):
             raise ValueError("original native send fence changed")
-    elif recorded is None:
+    elif recorded is None and not not_sent:
         raise ValueError("original native send lease missing")
     delivery = {"message_id": row["message_id"], "event_id": row["origin_event_id"],
         "action_type": row["action_type"], "content_sha256": content_hash,
@@ -105,7 +106,12 @@ def binding(store, proof, row, authority, recorded):
         "authority_sha256": wire.digest(authority), "attempt_count": row["attempt_count"],
         "created_at": row["created_at"], "lease_until": row["lease_until"],
         "original_state": recorded["original_state"] if recorded else row["state"]}
-    wire.validate_delivery(delivery)
+    if not_sent:
+        from companion_delivery_protocol import no_io
+
+        no_io.delivery(delivery)
+    else:
+        wire.validate_delivery(delivery)
     if recorded is not None and recorded != delivery:
         raise ValueError("retained native delivery binding changed")
     return row, {"original": original, "policy": policy}, delivery

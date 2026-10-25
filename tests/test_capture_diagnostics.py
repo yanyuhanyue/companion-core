@@ -195,6 +195,30 @@ def test_unknown_or_malformed_diagnostic_never_exports_exception_arguments(monke
     assert capture.capture_diagnostic(error, "admission").reason == "CAPTURE_CHECK_REJECTED"
 
 
+def test_daemon_task_group_retains_only_safe_leaf_diagnostic(monkeypatch, capsys):
+    async def failed_transfer():
+        error = httpx.ReadTimeout("https://private.example/image?secret=token")
+        error.capture_diagnostic = capture.capture_diagnostic(error, "image_download")
+        raise error
+
+    async def daemon():
+        async with asyncio.TaskGroup() as group:
+            group.create_task(failed_transfer())
+
+    with pytest.raises(ExceptionGroup) as caught:
+        run(daemon())
+    nested = ExceptionGroup("private outer detail", [
+        ValueError("private unrelated detail"), caught.value,
+    ])
+    output, value = cli_failure(monkeypatch, capsys, nested)
+    assert value == {
+        "state": "STOPPED", "error": "BRIDGE_FAILED_CLOSED",
+        "capture_phase": "image_download", "capture_reason": "CAPTURE_TIMEOUT",
+    }
+    assert "private" not in output and "secret" not in output
+    assert capture.diagnostic_fields(ExceptionGroup("private", [ValueError("secret")])) == {}
+
+
 @pytest.mark.parametrize("fresh", [True, False])
 def test_delayed_owner_message_waits_independently_of_thirty_second_freshness(
     core, tmp_path, monkeypatch, fresh
