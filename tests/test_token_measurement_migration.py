@@ -59,7 +59,9 @@ def test_upgrade_and_legacy_downgrade_preserve_accounting_and_snapshot_bytes(tmp
         after = snapshot(store)
         assert after["model_admissions"][0].pop("measurement_json") == "{}"
         assert after == before
-        assert store.schema_capabilities()
+        # Measurement alone does not supply the current native execution schema.
+        assert not store.schema_capabilities()
+        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == REVISION
         assert store.rows("PRAGMA foreign_key_check") == []
         assert store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
                           "AND tbl_name='model_admissions' ORDER BY name") == indexes
@@ -71,6 +73,15 @@ def test_upgrade_and_legacy_downgrade_preserve_accounting_and_snapshot_bytes(tmp
     with closing(Store(str(path))) as store:
         assert store.one("SELECT measurement_json FROM model_admissions") == {
             "measurement_json": "{}"}
+    migrate(str(path))
+    with closing(Store(str(path))) as store:
+        current = snapshot(store)
+        admission = current["model_admissions"][0]
+        assert admission.pop("measurement_json") == "{}"
+        assert admission.pop("authority_json") == "{}"
+        assert current == before
+        assert store.schema_capabilities()
+        assert store.rows("PRAGMA foreign_key_check") == []
 
 
 def test_measured_admission_blocks_evidence_losing_downgrade(tmp_path):

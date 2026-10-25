@@ -72,5 +72,10 @@ def test_real_api_input_and_worker_final_authority_fence(core, tmp_path, stop):
                 assert checked.status_code == 200, checked.text
                 assert checked.headers["Cache-Control"] == "no-store"
     asyncio.run(scenario())
-    usage = core.store.one("SELECT state FROM model_usage")
-    assert usage["state"] == ("UNKNOWN" if stop else "SETTLED")
+    usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage")
+    assert usage["state"] == "SETTLED"
+    if stop:
+        assert usage["billed_micro_usd"] == 0
+        assert core.store.one("SELECT 1 FROM audit_log WHERE action='model.not_dispatched'")
+    else:
+        assert usage["billed_micro_usd"] > 0
