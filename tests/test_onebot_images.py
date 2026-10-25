@@ -48,15 +48,16 @@ def test_real_httpcore_trace_does_not_log_signed_redirect_header(caplog):
     assert URL not in caplog.text and "synthetic-private-reference" not in caplog.text
 
 
-def image_segment(url=URL):
+def image_segment(url=URL, *, subtype=0):
     return {
         "type": "image",
-        "data": {"url": url, "file": "synthetic-file", "summary": "", "sub_type": 0},
+        "data": {"url": url, "file": "synthetic-file", "summary": "", "sub_type": subtype},
     }
 
 
-def test_top_level_images_keep_source_order_and_hash_without_url_projection():
-    raw = image_segment()
+@pytest.mark.parametrize("subtype", [0, 1, 11])
+def test_top_level_images_keep_source_order_and_hash_without_url_projection(subtype):
+    raw = image_segment(subtype=subtype)
     values = images.original_images(
         [
             {"type": "reply", "data": {"id": "42"}},
@@ -87,6 +88,56 @@ def test_top_level_images_keep_source_order_and_hash_without_url_projection():
         images.original_images([raw] * (images.MAX_OWNER_IMAGES + 1))
 
 
+@pytest.mark.parametrize("data", [
+    {"sub_type": value} for value in (True, False, "1", 1.0, None, -1, 2, 7, 12)
+] + [
+    {"type": "flash"}, {"emoji_id": "fake"}, {"emoji_package_id": "fake"},
+    {"key": "fake"}, {"file_size": 100}, {"summary": ["fake"]},
+    {"file": {"url": URL}}, {"url": [URL]}, {"file": "file\x00name"},
+    {"summary": "summary\x00text"},
+])
+def test_custom_sticker_keeps_strict_subtype_and_field_validation(data):
+    segment = image_segment(subtype=1)
+    segment["data"].update(data)
+    with pytest.raises(ValueError, match="IMAGE_KIND_UNSUPPORTED"):
+        images.original_images([segment])
+    assert images.original_images([segment], skip_unsupported=True) == []
+
+
+@pytest.mark.parametrize("unsupported", [
+    {"type": "image", "data": {}},
+    {"type": "image", "data": {"url": URL, "sub_type": 999}},
+    {"type": "image", "data": {"url": "http://127.0.0.1/private"}},
+    {"type": "image", "data": {"url": URL}, "extra": "unknown"},
+])
+def test_skipping_unsupported_images_preserves_original_indices_and_compacts_slots(unsupported):
+    first, last = image_segment(subtype=1), image_segment(subtype=11)
+    message = [unsupported, first, {"type": "text", "data": {"text": "owner text"}},
+               unsupported, last]
+    with pytest.raises(ValueError):
+        images.original_images(message)
+    retained = images.original_images(message, skip_unsupported=True)
+    assert [(image.index, image.slot, image.source_sha256) for image in retained] == [
+        (1, 0, digest(first)), (4, 1, digest(last)),
+    ]
+
+
+def test_skipping_images_does_not_skip_invalid_face_or_unexpected_internal_errors(monkeypatch):
+    with pytest.raises(ValueError, match="INVALID_QQ_FACE"):
+        images.original_images([{"type": "face", "data": {"id": "14", "extra": True}}],
+                               skip_unsupported=True)
+    with pytest.raises(ValueError, match="INVALID_IMAGE_MESSAGE"):
+        images.original_images([image_segment()] * 65, skip_unsupported=True)
+
+    def changed(*_):
+        raise ValueError("IMAGE_SOURCE_CHANGED")
+
+    monkeypatch.setattr(images, "_original_image", changed)
+    with pytest.raises(ValueError, match="IMAGE_SOURCE_CHANGED"):
+        images.original_images([image_segment(subtype=1)], skip_unsupported=True)
+
+
+@pytest.mark.parametrize("subtype", [0, 1, 11])
 @pytest.mark.parametrize(
     "url",
     [
@@ -102,16 +153,17 @@ def test_top_level_images_keep_source_order_and_hash_without_url_projection():
         "data:image/png;base64,private",
     ],
 )
-def test_unknown_or_confused_image_destinations_are_rejected_before_io(url):
+def test_unknown_or_confused_image_destinations_are_rejected_before_io(url, subtype):
     with pytest.raises(ValueError, match="IMAGE_URL_NOT_ALLOWED"):
-        images.original_images([image_segment(url)])
+        images.original_images([image_segment(url, subtype=subtype)])
 
 
 @pytest.mark.parametrize(
     "addresses",
     [[], ["127.0.0.1"], ["1.1.1.1", "10.0.0.1"], ["::1"], ["224.0.0.1"], ["::ffff:127.0.0.1"]],
 )
-def test_dns_private_or_mixed_answers_never_get(addresses):
+@pytest.mark.parametrize("subtype", [0, 1, 11])
+def test_dns_private_or_mixed_answers_never_get(addresses, subtype):
     calls = []
 
     async def resolve(host, port):
@@ -127,7 +179,7 @@ def test_dns_private_or_mixed_answers_never_get(addresses):
     with pytest.raises(ValueError, match="IMAGE_NONPUBLIC_ADDRESS"):
         run(
             images.fetch_image(
-                images.original_images([image_segment()])[0],
+                images.original_images([image_segment(subtype=subtype)])[0],
                 100,
                 check=check,
                 resolver=resolve,
@@ -140,7 +192,8 @@ def test_dns_private_or_mixed_answers_never_get(addresses):
 @pytest.mark.parametrize(
     "failure", [None, "source", "redirect", "bytes", "mime", "encoding", "error"]
 )
-def test_single_bounded_get_is_pinned_source_checked_and_never_logs_url(caplog, failure):
+@pytest.mark.parametrize("subtype", [0, 1, 11])
+def test_single_bounded_get_is_pinned_source_checked_and_never_logs_url(caplog, failure, subtype):
     calls = []
     caplog.set_level(logging.DEBUG)
 
@@ -174,7 +227,7 @@ def test_single_bounded_get_is_pinned_source_checked_and_never_logs_url(caplog, 
         )
 
     invocation = images.fetch_image(
-        images.original_images([image_segment()])[0],
+        images.original_images([image_segment(subtype=subtype)])[0],
         5,
         check=check,
         resolver=resolve,

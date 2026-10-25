@@ -89,8 +89,12 @@ def image_url(value):
         raise ValueError("IMAGE_URL_NOT_ALLOWED") from None
 
 
-def original_images(message):
-    """Caller has authenticated the envelope; never walk node/reply/card descendants."""
+def original_images(message, *, skip_unsupported=False):
+    """Caller authenticated the envelope; never walk node/reply/card descendants.
+
+    Native intake may leave unsupported images in its rich projection while
+    selecting only downloadable originals. All other callers remain strict.
+    """
     if isinstance(message, str):
         return []
     if not isinstance(message, list) or not 1 <= len(message) <= 64:
@@ -101,7 +105,19 @@ def original_images(message):
         if isinstance(value, dict) and (value.get("type") == "image" or (
             value.get("type") == "face" and _face_graphic(value) is not None))
     ]
-    return [_original_image(index, slot, value) for slot, (index, value) in enumerate(images)]
+    originals = []
+    for index, value in images:
+        try:
+            image = _original_image(index, len(originals), value)
+        except ValueError as error:
+            if (skip_unsupported and value.get("type") == "image" and error.args in {
+                ("INVALID_IMAGE_SEGMENT",), ("IMAGE_KIND_UNSUPPORTED",),
+                ("IMAGE_URL_NOT_ALLOWED",),
+            }):
+                continue
+            raise
+        originals.append(image)
+    return originals
 
 
 def _original_image(index, slot, value):
@@ -112,12 +128,13 @@ def _original_image(index, slot, value):
     data = value.get("data")
     if set(value) != {"type", "data"} or not isinstance(data, dict):
         raise ValueError("INVALID_IMAGE_SEGMENT")
-    # SnowLuma emits subtype 11 for owner-sent animated image emoji. The original
-    # CDN bytes still cross the signed upload boundary; flash/market-face do not.
+    # SnowLuma uses subtype 1 for custom/favorite stickers and 11 for animated
+    # image emoji. Both keep the original CDN bytes and signed upload boundary;
+    # flash/market-face carry extra fields and remain unsupported.
     if (
         not set(data) <= {"url", "file", "sub_type", "summary"}
         or type(data.get("sub_type", 0)) is not int
-        or data.get("sub_type", 0) not in {0, 11}
+        or data.get("sub_type", 0) not in {0, 1, 11}
         or any(
             not isinstance(data[key], str) or (key != "url" and "\x00" in data[key])
             for key in ("url", "file", "summary") if key in data
