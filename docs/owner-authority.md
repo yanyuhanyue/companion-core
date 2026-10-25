@@ -93,6 +93,10 @@ STOP、恢复代际变化、修订不符或用途不符均拒绝请求。发送�
 以及 [Pydantic AI 的会话消息保存](https://ai.pydantic.dev/message-history/)；
 授权、有效期和来源校验继续由 Core 的既有证据机制负责。
 
+记忆工具使用的原事实与完整来源快照，在领取和最终发送时复用 `MemoryContext.revalidate`
+检查内容、有效期与擦除状态；快照本身的增删受同一冻结摘要约束。该校验只读取原记录，
+不进行向量检索或额外付费复核，取消旧回复时仍保留原模型费用。
+
 原生分段回复沿用 `continuous.segment_pacing_pending` 的本地 ACK 计时原则：
 RESERVED 保存既有 `reply_segments.journal_value`，下一次领取租约前读取原 ACK
 journal 时间并等待该段间隔，重启后仍使用同一证据。缺少分段元数据的历史 ACK

@@ -56,6 +56,25 @@ def _images(store, settings, clock, job, *, executing):
         raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
 
 
+def _memories(store, settings, clock, job, view):
+    from companion.memory import Memory
+    from companion.memory_context import MemoryContext
+    from companion.privacy import ErasureLedger
+
+    try:
+        proofs = [item["proof"] for item in _snapshots(store, job) if item["kind"] == "memory"]
+        if proofs:
+            owner_authority.current(store, settings, clock, purpose="memory",
+                                     authority=view.authority)
+            # Revalidation uses the original rows and full evidence roots. It
+            # neither searches the embedding index nor invokes a model.
+            context = MemoryContext(Memory(store, settings, ErasureLedger(settings.erasure_ledger)))
+            for proof in proofs:
+                context.revalidate(proof, clock())
+    except (ValueError, KeyError, TypeError, CoreError) as error:
+        raise CoreError("OWNER_DELIVERY_SOURCE_CHANGED", 403) from error
+
+
 def _sources(store, settings, clock, job, *, executing=False):
     if job is None:
         raise CoreError("OWNER_DELIVERY_JOB_REQUIRED", 403)
@@ -68,6 +87,7 @@ def _sources(store, settings, clock, job, *, executing=False):
         owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
         owner_input.check_history(store, settings, clock, job, _history_proof(store, job))
         _images(store, settings, clock, job, executing=executing)
+        _memories(store, settings, clock, job, view)
     elif job["kind"] == "activity":
         notices.validate(store, settings, job, clock())
     elif job["kind"] == "poke":
