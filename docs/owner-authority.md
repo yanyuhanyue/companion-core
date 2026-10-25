@@ -176,3 +176,18 @@ HTTP 钩子等待期间的 STOP；所有外部 provider 使用强制 synthetic `
 `tests/test_owner_recall_bridge.py` 使用真实认证 WebSocket、Core HTTP 与独立 Core API/worker
 实例，覆盖通知先到、引用请求前及响应后到达、发送请求前和 Core send-check 响应后到达，
 以及外部委托后超时；仅外部供应商 HTTP 使用合成响应。
+
+
+### 停止后的原输入材料校验
+
+2026-10-25 检查 DSH jobs-local
+[原始 producer 与终态投影](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts)：
+终态由所属 producer 的已提交记录产生，读者获得保留投影。本项目沿用原责任与终态分离的原则，
+在 `owner_input_state` 只读回执中复用已有签名 capture、model admission、冻结 delivery 材料。
+[SQLite 外键](https://www.sqlite.org/foreignkeys.html)保证声明方向的存在关系；
+`model_usage` 仍须显式检查对应 admission，不能仅凭 SETTLED 字符串关闭责任。
+
+输入正文、来源身份和发生时间必须匹配原签名；模型保留原 admission 的 authority/job 关联，
+投递终态保留原 `owner_delivery` 身份与内容摘要。真实撤回或擦除沿既有 tombstone 和清空内容分支读回，
+不要求旧输入 epoch 等于当前 epoch，也不获取当前执行许可。回执仍分别报告 work/model/delivery
+未决状态；CHAT 停止不等于全部责任关闭。校验只读，不重开任务、不重发、不退还或改写历史费用。

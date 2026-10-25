@@ -1,11 +1,62 @@
 """Read-only original input completion receipts for stopped Bridge custody."""
 
 import json
+from datetime import datetime
 
 import companion_delivery_protocol as wire
 from companion import owner_authority, owner_input, poke
 from companion.contracts import CoreError
 from companion.poke_protocol import OwnerPokeCapture
+from companion.qq_rich import input_digest
+from companion_delivery_protocol.authority import validate_authority_ref
+
+
+def _source(store, original, saved, owner_id):
+    """Reuse signed input identity checks without requiring current execution authority."""
+    row = store.one("SELECT e.*,c.scope,c.owner_actor_id,c.platform_session_key FROM events e "
+                    "JOIN conversations c USING(conversation_id) WHERE e.event_id=?",
+                    (original.event_id,))
+    try:
+        body = json.loads(row["body_json"])
+        if (not isinstance(body, dict) or row["redacted"]
+            or (row["source"], row["actor_id"], row["event_type"], row["privacy_scope"],
+                row["scope"], row["owner_actor_id"]) != (
+                "qq.onebot", "owner", "message.received", "private", "private", "owner")
+            or row["platform_session_key"] != "onebot-direct:FriendMessage:" + owner_id
+            or row["source_event_id"] != original.source_event_id
+            or datetime.fromisoformat(row["occurred_at"]) != original.occurred_at
+            or input_digest(body) != original.input_sha256
+            or saved.get("input_sha256") != original.input_sha256
+            or saved.get("event_id") != original.event_id
+            or saved.get("authority") != original.authority):
+            raise ValueError("original input changed")
+    except (ValueError, KeyError, TypeError):
+        raise CoreError("OWNER_APPROVED_INPUT_REQUIRED", 409) from None
+
+
+def _deliveries(store, rows, jobs, *, erased):
+    """Terminal states retain the original native delivery identity and frozen bytes."""
+    for row in rows:
+        saved = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                          ("owner_delivery:" + row["message_id"],))
+        original = store.one("SELECT * FROM outbox WHERE message_id=?", (row["message_id"],))
+        try:
+            material = json.loads(saved["value"]) if saved else {}
+            job = jobs.get(material.get("job_id"))
+            authority = validate_authority_ref(json.loads(row["authority_json"]))
+            content = json.loads(original["content_json"])
+            intact = (material.get("content_sha256") == original["content_sha256"]
+                      and wire.digest(content) == original["content_sha256"])
+            retired = erased and original["content_sha256"] == "" and content == {}
+            if (not job or not authority or material.get("authority") != authority
+                or authority != json.loads(job["authority_json"])
+                or any(material.get(key) != original[key] for key in (
+                    "message_id", "action_type", "delivery_key"))
+                or material.get("event_id") != original["origin_event_id"]
+                or not (intact or retired)):
+                raise ValueError("original delivery changed")
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise CoreError("OWNER_DELIVERY_BINDING_REQUIRED", 409) from None
 
 
 def read(store, settings, capture):
@@ -16,7 +67,7 @@ def read(store, settings, capture):
                 store, settings, capture.model_dump(mode="json"))
             input_hash = source["notice_sha256"]
         else:
-            original, _ = owner_input.verify(store, settings, capture.model_dump(mode="json"))
+            original, view = owner_input.verify(store, settings, capture.model_dump(mode="json"))
             input_hash = original.input_sha256
         event_id = original.event_id
         erased = bool(store.one("SELECT 1 FROM runtime_meta WHERE key=?",
@@ -42,17 +93,37 @@ def read(store, settings, capture):
                    if native_poke else saved_capture.get("capture") == original_value)
         if not erased and (saved and not matches or not saved and not unadmitted):
             raise CoreError("OWNER_APPROVED_INPUT_REQUIRED", 404)
+        if not native_poke and event and not erased:
+            _source(store, original, saved_capture, view.policy.owner_qq_id)
         maximum = wire.MAX_INPUT_DELIVERIES
         jobs = store.rows("SELECT j.job_id,j.kind,j.state,j.authority_json FROM jobs j "
             "WHERE j.event_id=? OR EXISTS (SELECT 1 FROM job_sources s "
             "WHERE s.job_id=j.job_id AND s.event_id=?) ORDER BY j.job_id LIMIT ?",
             (event_id, event_id, maximum + 1))
-        models = store.rows("SELECT request_id,state FROM model_usage WHERE job_id IN "
-            "(SELECT j.job_id FROM jobs j WHERE j.event_id=? OR EXISTS "
-            "(SELECT 1 FROM job_sources s WHERE s.job_id=j.job_id AND s.event_id=?)) "
-            "ORDER BY request_id LIMIT ?", (event_id, event_id, maximum + 1))
+        job_map = {job["job_id"]: job for job in jobs}
+        ids = list(job_map)
+        placeholders = ",".join("?" for _ in ids)
+        models = store.rows("SELECT m.request_id,m.state,m.job_id,a.request_id AS admission,"
+            "a.authority_json,a.logical_request_id FROM model_usage m "
+            "LEFT JOIN model_admissions a USING(request_id) "
+            f"WHERE m.job_id IN ({placeholders}) OR a.logical_request_id IN ({placeholders}) "
+            "ORDER BY m.request_id LIMIT ?", (*ids, *ids, maximum + 1)) if ids else []
+        for model in models:
+            job = job_map.get(model["job_id"])
+            try:
+                authority = validate_authority_ref(json.loads(model["authority_json"]))
+                if (not job or not model["admission"]
+                    or authority != json.loads(job["authority_json"])
+                    or (job["kind"] in {"chat", "poke"}
+                        or model["logical_request_id"].startswith("job_"))
+                    and model["logical_request_id"] != model["job_id"]):
+                    raise ValueError("original model admission changed")
+            except (ValueError, TypeError, KeyError):
+                raise CoreError("OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED", 409) from None
+        models = [{key: model[key] for key in ("request_id", "state")} for model in models]
         deliveries = store.rows("SELECT message_id,state,attempt_count,authority_json FROM outbox "
             "WHERE origin_event_id=? ORDER BY message_id LIMIT ?", (event_id, maximum + 1))
+        _deliveries(store, deliveries, job_map, erased=erased)
         reads = store.rows("SELECT item_id AS id,state FROM content_items "
             "WHERE owner_event_id=? ORDER BY item_id LIMIT ?", (event_id, maximum + 1))
         reads.extend(store.rows("SELECT request_id AS id,state FROM exploration_requests WHERE "
