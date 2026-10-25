@@ -6,7 +6,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import timedelta
 
 import httpx
@@ -61,7 +61,7 @@ def file_plan(tmp_path, port=3001, *, images=False, file_scope="owner_file_v1"):
         value["live_text"].update(image_scope="owner_image_v1", image_approval_sha256="d" * 64)
     inventory = {key: value[key] for key in (
         "identity_sha256", "protocol_epoch", "config_sha256", "config_version", "image_ids")}
-    inventory["config_sha256"] = digest(asdict(cfg))
+    inventory["config_sha256"] = digest(cfg.snapshot())
     value.update(config_sha256=inventory["config_sha256"],
                  runtime_attestation_sha256=digest(inventory))
     return cfg, WindowPlan(value, cfg, inventory), now, inventory

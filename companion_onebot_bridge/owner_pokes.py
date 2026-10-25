@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-from dataclasses import asdict
 from datetime import UTC, datetime
 
 import httpx
@@ -41,7 +40,7 @@ async def put(runtime, client, frame, received_at, peer):
     receipt = {"kind": "authenticated_onebot_poke", "authority": runtime.authority,
         **identity, "notice": value, "protocol_epoch": runtime.config.protocol_epoch,
         "identity_sha256": journal.digest([runtime.config.owner_qq_id, runtime.config.bot_qq_id]),
-        "config_sha256": journal.digest(asdict(runtime.config)),
+        "config_sha256": journal.digest(runtime.config.snapshot()),
         "frame_sha256": hashlib.sha256(frame_bytes).hexdigest(),
         "occurred_at": occurred.isoformat(), "received_at": received_at.isoformat()}
     receipt["evidence_sha256"] = journal.digest({"receipt": dict(receipt), "peer": list(peer),

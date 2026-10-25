@@ -15,7 +15,8 @@ from .owner_handoff import terminal
 class MemePump:
     def __init__(self, runtime, client):
         self.owner, self.client = runtime, client
-        self.runtime = runtime.memes if runtime.config.meme_enabled else None
+        self.runtime = runtime.memes if runtime.config.meme_enabled \
+            and runtime.config.meme_catalog_owner == "bridge" else None
         self.task = self.query_task = None
         self.query_tasks = set()
         self.query_event = self.submitted_event = None

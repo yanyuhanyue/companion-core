@@ -32,6 +32,7 @@ from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
+from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import provider
 from tests.test_onebot_capture import real_core_http
 from tests.test_onebot_direct import config, raw_event
@@ -88,7 +89,8 @@ async def core_http(core, *, independent=False, provider_reply=None):
     api = create_app(core.settings)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
-    server = Server(uvicorn.Config(api, lifespan="on", log_config=None, access_log=False))
+    server = Server(uvicorn.Config(api, lifespan="on", log_config=None, access_log=False,
+                                   http=owned_http_protocol(lambda: server.servers)))
     # API vision may call the external model; only its HTTP transport is replaced.
     substitute = patch("companion.api.AsyncClient", lambda **kwargs: httpx.AsyncClient(
         transport=httpx.MockTransport(provider_reply), **kwargs,
