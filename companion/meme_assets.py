@@ -87,6 +87,73 @@ def _capture(store, settings, event_id, custody, authority):
         raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
 
 
+def original_custody(store, settings, event_id):
+    """Derive custody from the original signed capture, never a new grant."""
+    event = store.one("SELECT platform_session_key FROM events JOIN conversations "
+                      "USING(conversation_id) WHERE event_id=?", (event_id,))
+    saved = store.one("SELECT value FROM runtime_meta WHERE key=?", ("owner_input:" + event_id,))
+    if not event or not saved:
+        raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+    value = strict_json(saved["value"])
+    capture, view = owner_input.verify(store, settings, value.get("capture", {}))
+    custody = {
+        "identity": [settings.owner_qq_id, settings.bot_qq_id,
+                     event["platform_session_key"], capture.protocol_epoch],
+        "capture_public_key": view.policy.capture.public_key,
+    }
+    _capture(store, settings, event_id, custody, capture.authority)
+    return custody
+
+
+def extend_reuse_provenance(store, settings, affected_caption_job_ids):
+    """Maintain complete attribution in the caller's original repoint transaction."""
+    from companion.store import encode
+
+    if not store.db.in_transaction:
+        raise RuntimeError("MEME_ASSET_REPOINT_REQUIRES_TRANSACTION")
+    assets = store.rows(
+        "SELECT DISTINCT a.* FROM meme_assets a JOIN meme_asset_sources src USING(asset_id) "
+        "WHERE a.state='STAGED' AND src.caption_job_id IN (SELECT value FROM json_each(?))",
+        (encode(sorted(affected_caption_job_ids)),),
+    )
+    try:
+        for asset in assets:
+            meta = metadata(strict_json(asset["metadata_json"]))
+            item = {"asset_sha256": asset["asset_sha256"],
+                    "source_sha256": asset["source_sha256"], "active": True, "metadata": meta}
+            if (not asset["data"]
+                or hashlib.sha256(asset["data"]).hexdigest() != asset["asset_sha256"]
+                or source_digest(meta) != asset["source_sha256"]
+                or digest({"asset_sha256": asset["asset_sha256"],
+                           "source_sha256": asset["source_sha256"],
+                           "metadata_sha256": digest(meta)}) != asset["record_sha256"]):
+                raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+            anchors = store.rows(
+                "SELECT DISTINCT c.job_id,j.event_id FROM meme_asset_sources src "
+                "JOIN meme_captions c ON c.job_id=src.caption_job_id JOIN jobs j USING(job_id) "
+                "WHERE src.asset_id=? AND c.asset_sha256=? AND c.source_sha256=?",
+                (asset["asset_id"], asset["asset_sha256"], asset["source_sha256"]),
+            )
+            if not anchors:
+                raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+            for anchor in anchors:
+                custody = original_custody(store, settings, anchor["event_id"])
+                if (custody_digest(custody) != asset["custody_sha256"]
+                    or asset_id(custody, item) != asset["asset_id"]):
+                    raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+                sources, withdrawn = provenance(store, settings, custody, item, asset["data"],
+                                                caption_job_id=anchor["job_id"])
+                if not sources or withdrawn:
+                    raise ValueError("MEME_ASSET_SOURCE_UNATTRIBUTED")
+                # Old ancestors remain conservative erasure attribution. Tuple identity
+                # includes caption_job_id even when every ancestor shares one event.
+                for event, job in sources:
+                    store.execute("INSERT OR IGNORE INTO meme_asset_sources VALUES (?,?,?)",
+                                  (asset["asset_id"], event, job))
+    except (CoreError, ValueError, KeyError, TypeError) as error:
+        raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403) from error
+
+
 def provenance(store, settings, custody, item, data, *, caption_job_id=None):
     """Resolve originals independently of manifest hints, including reuse ancestors.
 

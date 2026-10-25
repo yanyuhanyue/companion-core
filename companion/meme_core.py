@@ -552,6 +552,39 @@ class MemeCaptionService:
         ):
             raise CoreError("MEME_CAPTION_LEASE_EXPIRED", 409)
 
+    def _repoint(self, job, prior):
+        from companion.meme_assets import extend_reuse_provenance
+
+        s = self.store
+        if not s.db.in_transaction:
+            raise RuntimeError("MEME_CAPTION_REPOINT_REQUIRES_TRANSACTION")
+        if prior["result_json"] or s.one(
+            "SELECT 1 FROM model_usage WHERE job_id=? OR request_id=?",
+            (prior["job_id"], prior["usage_request_id"]),
+        ):
+            raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
+        affected = {job["job_id"]}
+        affected.update(r["job_id"] for r in s.rows(
+            "SELECT c.job_id FROM meme_captions c JOIN jobs j USING(job_id) "
+            "WHERE c.reuse_job_id=? AND j.state='QUEUED'", (prior["job_id"],),
+        ))
+        frontier = set(affected)
+        while frontier:
+            children = {r["job_id"] for r in s.rows(
+                "SELECT job_id FROM meme_captions WHERE reuse_job_id IN "
+                "(SELECT value FROM json_each(?))", (encode(sorted(frontier)),),
+            )}
+            if children & affected or len(affected) + len(children) > MAX_ROWS:
+                raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
+            affected.update(children)
+            frontier = children
+        s.execute("UPDATE meme_captions SET reuse_job_id=NULL,usage_request_id=NULL "
+                  "WHERE job_id=?", (job["job_id"],))
+        s.execute("UPDATE meme_captions SET reuse_job_id=? WHERE reuse_job_id=? "
+                  "AND job_id<>? AND job_id IN (SELECT job_id FROM jobs WHERE state='QUEUED')",
+                  (job["job_id"], prior["job_id"], job["job_id"]))
+        extend_reuse_provenance(s, self.settings, affected)
+
     async def run_once(self, worker_id):
         s, now = self.store, self.clock()
         if not self.settings.meme_semantics_enabled:
@@ -569,77 +602,88 @@ class MemeCaptionService:
                     "last_error_code='MEME_CAPTION_UNKNOWN',updated_at=? WHERE job_id=?",
                     (now, row["job_id"]),
                 )
-        with s.transaction():
-            if (
-                private_life.busy(s, now)
-                or private_life.owner_waiting(s, self.settings, now)
-                or s.one(
-                    "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING') LIMIT 1"
-                )
-            ):
-                return False
-            job = s.one(
-                "SELECT j.* FROM jobs j JOIN meme_captions c USING(job_id) "
-                "WHERE j.state='QUEUED' ORDER BY j.rowid LIMIT 1"
-            )
-            if not job:
-                return False
-            try:
-                approval = scope(s, self.settings, self.clock)
-                check_caption_job(s, self.settings, approval, job, clock=self.clock)
-            except CoreError as error:
-                s.execute(
-                    "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
-                    "WHERE job_id=?",
-                    (error.code, now, job["job_id"]),
-                )
-                return True
-            row = s.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
-            if row["reuse_job_id"]:
-                prior = s.one(
-                    "SELECT c.*,j.state FROM meme_captions c JOIN jobs j USING(job_id) "
-                    "WHERE job_id=?",
-                    (row["reuse_job_id"],),
-                )
-                if prior["state"] in {"QUEUED", "RUNNING"}:
-                    return False
-                if prior["result_json"] or s.one(
-                    "SELECT 1 FROM model_usage WHERE request_id=?", (prior["usage_request_id"],)
-                ):
-                    s.execute(
-                        "UPDATE meme_captions SET result_json=?,usage_request_id=?,updated_at=? "
-                        "WHERE job_id=?",
-                        (prior["result_json"], prior["usage_request_id"], now, job["job_id"]),
+        job = None
+        try:
+            with s.transaction():
+                if (
+                    private_life.busy(s, now)
+                    or private_life.owner_waiting(s, self.settings, now)
+                    or s.one(
+                        "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING') LIMIT 1"
                     )
+                ):
+                    return False
+                job = s.one(
+                    "SELECT j.* FROM jobs j JOIN meme_captions c USING(job_id) "
+                    "WHERE j.state='QUEUED' ORDER BY j.rowid LIMIT 1"
+                )
+                if not job:
+                    return False
+                try:
+                    approval = scope(s, self.settings, self.clock)
+                    check_caption_job(s, self.settings, approval, job, clock=self.clock)
+                except CoreError as error:
                     s.execute(
-                        "UPDATE jobs SET state=?,updated_at=? WHERE job_id=?",
-                        ("SUCCEEDED" if prior["result_json"] else "FAILED", now, job["job_id"]),
+                        "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
+                        "WHERE job_id=?",
+                        (error.code, now, job["job_id"]),
                     )
                     return True
-                # A failed pre-admission attempt has no paid responsibility to
-                # reuse. This independently authorized request can execute once.
+                row = s.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
+                if row["reuse_job_id"]:
+                    prior = s.one(
+                        "SELECT c.*,j.state FROM meme_captions c JOIN jobs j USING(job_id) "
+                        "WHERE job_id=?",
+                        (row["reuse_job_id"],),
+                    )
+                    if prior["state"] in {"QUEUED", "RUNNING"}:
+                        return False
+                    paid = s.one(
+                        "SELECT request_id FROM model_usage WHERE job_id=? OR request_id=?",
+                        (prior["job_id"], prior["usage_request_id"]),
+                    )
+                    if paid and paid["request_id"] != prior["usage_request_id"]:
+                        raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
+                    if prior["result_json"] or paid:
+                        s.execute(
+                            "UPDATE meme_captions SET result_json=?,usage_request_id=?,"
+                            "updated_at=? "
+                            "WHERE job_id=?",
+                            (prior["result_json"], prior["usage_request_id"], now, job["job_id"]),
+                        )
+                        s.execute(
+                            "UPDATE jobs SET state=?,updated_at=? WHERE job_id=?",
+                            ("SUCCEEDED" if prior["result_json"] else "FAILED", now, job["job_id"]),
+                        )
+                        return True
+                    # Full current ancestry changes atomically with every affected asset's
+                    # attribution. Original paid responsibility cannot authorize takeover.
+                    self._repoint(job, prior)
+                job["lease_token"] = uid("lease")
                 s.execute(
-                    "UPDATE meme_captions SET reuse_job_id=NULL,usage_request_id=NULL "
-                    "WHERE job_id=?",
-                    (job["job_id"],),
+                    "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
+                    "attempts=1,updated_at=? WHERE job_id=?",
+                    (
+                        worker_id,
+                        job["lease_token"],
+                        after(now, self.settings.lease_seconds),
+                        now,
+                        job["job_id"],
+                    ),
                 )
+        except CoreError as error:
+            if job is None:
+                raise
+            # The failed transaction restored both graph and attribution. Cancel only
+            # this still-unconsumed request; retain all original bodies and obligations.
+            with s.transaction():
                 s.execute(
-                    "UPDATE meme_captions SET reuse_job_id=? WHERE reuse_job_id=? "
-                    "AND job_id<>? AND job_id IN (SELECT job_id FROM jobs WHERE state='QUEUED')",
-                    (job["job_id"], prior["job_id"], job["job_id"]),
+                    "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
+                    "WHERE job_id=? AND state='QUEUED' AND NOT EXISTS "
+                    "(SELECT 1 FROM model_usage WHERE job_id=jobs.job_id)",
+                    (error.code, now, job["job_id"]),
                 )
-            job["lease_token"] = uid("lease")
-            s.execute(
-                "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
-                "attempts=1,updated_at=? WHERE job_id=?",
-                (
-                    worker_id,
-                    job["lease_token"],
-                    after(now, self.settings.lease_seconds),
-                    now,
-                    job["job_id"],
-                ),
-            )
+            return True
         request_id = None
         try:
             sampling, frames = sample_frames(
