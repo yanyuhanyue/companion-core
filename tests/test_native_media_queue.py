@@ -21,8 +21,9 @@ from tests.test_onebot_direct import raw_event
 from tests.test_prepare_owner_input import native_spool, window
 
 
-async def captured(core, client, runtime):
-    frame = encode(raw_event(time=int(core.clock.now.timestamp()), message=[
+async def captured(core, client, runtime, *, number=42, message=None):
+    frame = encode(raw_event(number=number, time=int(core.clock.now.timestamp()),
+        message=message or [
         {"type": "image", "data": {"url": "https://gchat.qpic.cn/queue-original"}}]))
     prepared = await prepare_owner_input(runtime, client, None, frame, core.clock.now,
                                           ("127.0.0.1", 3001))
@@ -35,6 +36,85 @@ async def captured(core, client, runtime):
 
 def row(runtime):
     return pending_media._execute(runtime, "SELECT * FROM automatic_media").fetchone()
+
+
+@pytest.mark.parametrize("kind", ["text_image", "images_then_text", "card_image"])
+def test_native_image_queue_preserves_lease_under_core_roundtrip_latency(core, tmp_path, kind):
+    from tests.sdk_reader_fixture import answer
+
+    async def scenario():
+        async with window(core, tmp_path, media=True, content=True, history=True,
+                          image_count="unlimited") as (client, config, plan):
+            spool, runtime = native_spool(core, tmp_path, config, plan)
+            downloads, requests = [], []
+
+            async def resolve(host, port):
+                return ["8.8.8.8"]
+
+            async def download(request):
+                downloads.append(request)
+                return httpx.Response(200, content=pixels(), headers={"content-type": "image/png"})
+
+            async def latency(response):
+                requests.append(response.request.url.path)
+                # The synthetic Core and Bridge clocks share elapsed roundtrip time.
+                core.clock.advance(0.5)
+
+            try:
+                image = {"type": "image", "data": {"url": "https://gchat.qpic.cn/latency-original"}}
+                message = [image, {"type": "text", "data": {"text": "请描述这张图片。"}}]
+                if kind == "card_image":
+                    message.append({"type": "json", "data": {"data": json.dumps({
+                        "meta": {"news": {"jumpUrl": "https://www.bilibili.com/video/BV1xx411c7mD"}},
+                    })}})
+                prepared = await captured(core, client, runtime, message=message)
+                if kind == "images_then_text":
+                    await captured(core, client, runtime, number=43, message=[image])
+                    prepared = await captured(core, client, runtime, number=44, message=[
+                        {"type": "text", "data": {"text": "请结合刚才的两张原图。"}}])
+                async with private_http_client(config.core_url, config.bridge_token) as transfer:
+                    transfer.event_hooks["response"].append(latency)
+                    pump = pending_media.MediaPump(runtime, transfer,
+                        image_transport=httpx.MockTransport(download), image_resolver=resolve)
+                    while current := pending_media._execute(runtime,
+                        "SELECT * FROM automatic_media WHERE state<>'DONE' ORDER BY rowid"
+                    ).fetchone():
+                        await pump.execute(current)
+                count = 2 if kind == "images_then_text" else 1
+                assert len(downloads) == count, requests
+                assert core.store.rows("SELECT state FROM content_items WHERE kind='qq_image'") == (
+                    [{"state": "SUCCEEDED"}] * count)
+                assert len(core.store.rows("SELECT * FROM captured_images")) == count
+                assert not core.store.rows("SELECT * FROM model_usage")
+                runtime.verify()
+            finally:
+                spool.close()
+            job = core.store.one("SELECT * FROM jobs WHERE event_id=?",
+                                 (prepared["event"]["event_id"],))
+            config_path, output = tmp_path / "latency-worker.pickle", tmp_path / "latency-wire.json"
+            config_path.write_bytes(pickle.dumps((core.settings, core.clock.now, job["job_id"],
+                [answer("已经收到原图。")], "SUCCEEDED", str(output))))
+            process = await asyncio.create_subprocess_exec(sys.executable,
+                str(Path(__file__).with_name("reader_sdk_worker.py")), str(config_path),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                logs, _ = await asyncio.wait_for(process.communicate(), 45)
+            except BaseException:
+                process.kill()
+                await process.wait()
+                raise
+            assert process.returncode == 0, logs.decode(errors="replace")
+            wire = json.loads(output.read_text(encoding="utf-8"))
+            assert len(wire) == 1
+            image_parts = [part for message in wire[0]["messages"]
+                           if isinstance(message["content"], list) for part in message["content"]
+                           if part["type"] == "image_url"]
+            assert len(image_parts) == count
+            if kind == "images_then_text":
+                assert wire[0]["messages"][-1]["content"] == "请结合刚才的两张原图。"
+            assert core.store.rows("SELECT origin_event_id FROM outbox") == [
+                {"origin_event_id": prepared["event"]["event_id"]}]
+    run(scenario())
 
 
 @pytest.mark.parametrize("recovery", [
