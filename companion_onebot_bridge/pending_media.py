@@ -139,7 +139,8 @@ def queue(window, event, raw, capture):
     value = {"window_sha256": window.plan.sha256, "event_id": event["event_id"],
              "capture_sha256": digest(capture), "input_sha256": capture["input_sha256"],
              "images": [{key: item for key, item in asdict(image).items()
-                         if key != "face_id" or item is not None} for image in images]}
+                         if (key != "face_id" or item is not None)
+                         and (key not in {"path", "origin"} or item)} for image in images]}
     # Keep pre-file image manifests, signatures, counts and journal bytes exact.
     if files:
         value["files"] = [asdict(file) for file in files]

@@ -85,6 +85,10 @@ def record(window, kind, material):
 
 
 def due(window):
+    from .owner_runtime import OwnerRuntime
+
+    if not isinstance(window, OwnerRuntime):
+        return False
     records = window.verify()
     previous = next((row for row in reversed(records)
                      if row["kind"] == "PROFILE_PROBE_STARTED"), None)
