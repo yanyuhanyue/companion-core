@@ -50,36 +50,36 @@ def test_console_rejects_plain_http_model_endpoint_before_saving(client, core):
     assert not core.store.rows("SELECT * FROM operator_configuration")
 
 
-def test_endpoint_change_stays_fenced_in_real_api_and_independent_worker(core, tmp_path):
+def test_endpoint_change_stays_fenced_in_real_api_and_independent_worker(
+    core, tmp_path, monkeypatch,
+):
     import asyncio
     import json
     import subprocess
     import sys
 
-    import httpx
-
     from companion import console_api
-    from tests.conftest import ingest
-    from tests.test_onebot_capture import real_core_http
-    from tests.test_paid_model_gate import approved_live
+    from tests import native_input_protocol_fixture as native
 
-    job = ingest(core, text="SYNTHETIC pending owner chat")
-    approved_live(core, tmp_path)
     core.settings.console = operator_config.ConsoleConfig(
         enabled=True, public_origin=test_owner_console.ORIGIN,
     )
     core.settings.control_token = SecretStr(test_owner_console.PASSWORD)
-    base = core.settings.model_dump(mode="json")
-    for name in ("model_key", "bridge_token", "control_token"):
-        base[name] = getattr(core.settings, name).get_secret_value()
-    assert base["model_key"] == "synthetic-key"
     config = tmp_path / "synthetic-worker.json"
-    config.write_text(json.dumps(base), encoding="utf-8")
 
     async def save():
-        async with real_core_http(core) as port, httpx.AsyncClient(
-            base_url=f"http://127.0.0.1:{port}", trust_env=False,
-        ) as http:
+        async with native.environment(core, tmp_path, monkeypatch) as values:
+            http, bridge, grant, now = values
+            core.settings.control_token = SecretStr(test_owner_console.PASSWORD)
+            # Persist native custody for the independent worker before changing
+            # the endpoint; the HTTP Core shares these Settings.
+            _, accepted = await native.admit(http, bridge, grant, now)
+            assert accepted.status_code == 202, accepted.text
+            base = core.settings.model_dump(mode="json")
+            for name in ("model_key", "bridge_token", "control_token"):
+                base[name] = getattr(core.settings, name).get_secret_value()
+            assert base["model_key"] == "synthetic-key"
+            config.write_text(json.dumps(base), encoding="utf-8")
             session = await http.post("/v1/console/session", json={
                 "password": test_owner_console.PASSWORD,
             }, headers={"Origin": test_owner_console.ORIGIN})
@@ -94,7 +94,8 @@ def test_endpoint_change_stays_fenced_in_real_api_and_independent_worker(core, t
                 "Idempotency-Key": "synthetic-endpoint-edit",
             })
             assert response.status_code == 200, response.text
-    asyncio.run(save())
+            return accepted.json()
+    job = asyncio.run(save())
     script = '''
 import asyncio,json,sys
 from pathlib import Path
@@ -122,8 +123,8 @@ asyncio.run(run())
                               job["job_id"]], capture_output=True, text=True,
                              encoding="utf-8", timeout=20, check=True)
     observed = json.loads(process.stdout.strip().splitlines()[-1])
-    assert observed == {"job": {"state": "FAILED",
-                                "last_error_code": "PAID_PROVIDER_CONTRACT_MISMATCH"},
+    assert observed == {"job": {"state": "CANCELLED",
+                                "last_error_code": "OWNER_AUTHORITY_PAID_POLICY_CHANGED"},
                         "calls": 0, "usage": 0}
 def test_console_origin_requires_explicit_deployment_value():
     import pytest

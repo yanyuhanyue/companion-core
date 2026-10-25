@@ -181,6 +181,7 @@ def test_scan_deadline_race_rescans_once_without_spinning_on_fenced_work(
         return (start + timedelta(seconds=elapsed[0])).isoformat()
 
     with closing(Store(":memory:")) as store:
+        store.execute("CREATE TABLE runtime_meta (key TEXT PRIMARY KEY,value TEXT)")
         fields = {"lease_until", "deadline"} if kind == "content-worker" else {"lease_until"}
         store.execute(f"CREATE TABLE {table} (state TEXT, "
                       + ", ".join(f"{column} TEXT" for column in fields) + ")")

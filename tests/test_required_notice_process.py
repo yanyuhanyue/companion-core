@@ -7,34 +7,27 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-import httpx
 import pytest
 from pydantic import SecretStr
 
+from companion import owner_authority
 from companion.store import encode
-from tests.conftest import event, run
-from tests.test_onebot_capture import real_core_http
-from tests.test_paid_model_gate import approved_live
+from tests import native_input_protocol_fixture as native
+from tests.conftest import run
+from tests.test_owner_authority import activate
 
 
 @pytest.mark.parametrize("first_text,delivery", [("[SKIP]", "SENT"), (" ", "DELIVERY_UNCERTAIN")])
 def test_required_wording_retries_in_new_process_without_replaying_paid_request(
     core,
     tmp_path,
+    monkeypatch,
     first_text,
     delivery,
 ):
     core.settings.goals_enabled = core.settings.exploration_enabled = True
     core.settings.control_token = SecretStr("synthetic-notice-owner-" * 3)
-    approved_live(core, tmp_path)
-    config = core.settings.model_dump(mode="json")
-    config.update(
-        model_key=core.settings.model_key.get_secret_value(),
-        bridge_token=core.settings.bridge_token.get_secret_value(),
-        control_token=core.settings.control_token.get_secret_value(),
-    )
     settings_path = tmp_path / "worker-settings.json"
-    settings_path.write_text(encode(config), encoding="utf-8")
     workspace = Path(__file__).resolve().parents[1]
 
     async def worker(text):
@@ -68,21 +61,17 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
                 await child.communicate()
 
     async def scenario():
-        async with (
-            real_core_http(core) as port,
-            httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}",
-                trust_env=False,
-                headers={
-                    "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()
-                },
-            ) as client,
-        ):
-            accepted = await client.post(
-                "/internal/v1/inbox/events",
-                json=event(core, 1, "请稍后读这篇资料").model_dump(mode="json"),
-                headers={"X-Idempotency-Key": "required-notice-source"},
-            )
+        async with native.environment(core, tmp_path, monkeypatch) as values:
+            client, config, grant, now = values
+            current = owner_authority.current(core.store, core.settings, core.clock)
+            policy = current.policy.model_copy(update={"purposes": ["chat", "goals"]})
+            grant.authority = activate(core, policy, revision=grant.authority["revision"],
+                operation="required-notice-purpose")[0]["authority"]
+            settings = core.settings.model_dump(mode="json")
+            for name in ("model_key", "bridge_token", "control_token"):
+                settings[name] = getattr(core.settings, name).get_secret_value()
+            settings_path.write_text(encode(settings), encoding="utf-8")
+            source, accepted = await native.admit(client, config, grant, now)
             assert accepted.status_code == 202, accepted.text
             core.store.execute(
                 "UPDATE jobs SET state='CANCELLED',"
@@ -93,10 +82,10 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
                 json={
                     "proposal": {
                         "topic": "阅读资料",
-                        "source_event_ids": ["evt_test_1"],
+                        "source_event_ids": [source["event_id"]],
                         "scope": {"operation": "read_content", "url": "https://example.org/a"},
                     },
-                    "accepted_event_id": "evt_test_1",
+                    "accepted_event_id": source["event_id"],
                     "deadline": (core.clock.now + timedelta(seconds=60)).isoformat(),
                 },
                 headers={
@@ -123,7 +112,8 @@ def test_required_wording_retries_in_new_process_without_replaying_paid_request(
             assert [row["attempt_number"] for row in admissions] == [1, 2]
             assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
             lease = await client.post(
-                "/internal/v1/deliveries/lease", json={"worker_id": "synthetic"}
+                "/internal/v1/deliveries/lease",
+                json={"worker_id": "synthetic", "authority": grant.authority}
             )
             assert lease.status_code == 200, lease.text
             (item,) = lease.json()["items"]
