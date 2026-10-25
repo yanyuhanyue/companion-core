@@ -2,23 +2,19 @@
 
 import json
 
-import httpx
 import pytest
 
 from companion import budget, dialogue_history, private_life, reply_revision
 from companion.contracts import CoreError, DeliveryResult
 from companion.core import Core
-from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
 from companion.transport import (
     begin_send,
-    cancel_proactive_work,
     delivery_result,
     enqueue,
     enqueue_reply_parts,
 )
 from tests.conftest import ingest, run
-from tests.test_paid_model_gate import approved_live
 from tests.test_segmented_delivery import PARTS, acknowledge, lease
 
 
@@ -253,39 +249,17 @@ def test_source_opaque_read_command_is_explicitly_conservative(core):
     }
 
 
-def test_owner_interrupts_dispatched_activity_without_poisoning_observed_usage(core, tmp_path):
-    accept(core)
-    assert run(core.run_once())
-    acknowledge(core, lease(core)[0])
-    core.settings.proactive_enabled = True
-    core.settings.quiet_start = core.settings.quiet_end = 0
-    core.clock.advance(core.settings.proactive_idle_seconds + 1)
-    approved_live(core, tmp_path)
-    assert core.schedule_proactive()
-    activity = core.store.one("SELECT job_id FROM jobs WHERE kind='activity'")["job_id"]
+def test_owner_interrupts_dispatched_activity_without_poisoning_observed_usage(
+    core, tmp_path, monkeypatch,
+):
+    from tests.test_life_worker_integration import (
+        test_real_http_source_to_independent_worker_shadow as produce,
+    )
 
-    def provider(request):
-        assert core.store.one("SELECT state FROM model_usage WHERE job_id=?", (activity,)) == {
-            "state": "RESERVED",
-        }
-        accept(core, 2, "我现在想和你说件事")
-        with core.store.transaction():
-            cancel_proactive_work(core.store, core.clock())
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": "被打断的主动分享"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
-
-    async def scenario():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
-            core.model = ModelClient(core.settings, client)
-            assert await core.run_once()
-
-    run(scenario())
-    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (activity,)) == {
-        "state": "CANCELLED",
-    }
-    assert core.store.one("SELECT state FROM model_usage WHERE job_id=?", (activity,)) == {
-        "state": "SETTLED",
-    }
+    produce(core, tmp_path, monkeypatch, "preempt")
+    result = core.store.one("SELECT * FROM life_activity_results")
+    assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (result["job_id"],)) == {
+        "state": "CANCELLED"}
+    usage = core.store.one("SELECT * FROM model_usage WHERE job_id=?", (result["job_id"],))
+    assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
     assert not core.store.one("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")

@@ -2,31 +2,31 @@
 
 import json
 from datetime import timedelta
-from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import SecretStr
 
-from companion import live_text
+from companion import owner_authority
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.exploration import ReadResult
 from companion.goals import GoalProposal
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.life_topics import _source, authority
+from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.store import encode
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
 from source_reader.worker_v1 import tick
-from tests.conftest import event, run
+from tests.conftest import run
+from tests.support.owner_memory import environment
 from tests.test_exploration import URL, configure
 from tests.test_heybox_reader import mock_pool
 from tests.test_life_topics import assert_no_delivery, bug, due, proposal
 from tests.test_life_worker_integration import native_worker
-from tests.test_live_text_window import live_fixture
 from tests.test_onebot_capture import real_core_http
-from tests.test_private_companion import companion_options
+from tests.test_owner_authority import activate
 from tests.test_source_reader import META, PLAYER, SUBTITLE, response
 
 
@@ -72,6 +72,14 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
     configure(core)
     core.settings.observation_adapters["bili"].reader_max_requests = 4
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW", read_goals_enabled=True)
+    core.settings.control_token = SecretStr("synthetic-life-goal-control" * 2)
+    core.settings.wake_enabled = True
+    core.settings.quiet_start = core.settings.quiet_end = 0
+    core.settings.content_enabled = True
+    core.settings.rich_input_scope = "references_v1"
+    core.settings.extraction_min_events = 100
+    core.settings.diary_min_source_events = 100
+    core.settings.reflection_min_sources = 100
     calls = []
 
     def model(request):
@@ -120,129 +128,105 @@ def test_live_authority_full_loop_independent_workers(core, tmp_path, monkeypatc
                 ),
             )
 
-        async with (
-            real_core_http(core) as port,
-            httpx.AsyncClient(
-                base_url=f"http://127.0.0.1:{port}",
-                trust_env=False,
+        async with environment(core, tmp_path, history=False,
+            additional_purposes=("goals", "content", "exploration")) as (admit, _, reference):
+            inbound, _ = await admit(1, "有空可以看看这个星空介绍，明天聊聊。")
+            view = owner_authority.current(core.store, core.settings, core.clock)
+            control = {"Authorization": "Bearer " + core.settings.control_token.get_secret_value()}
+            async with real_core_http(core) as port, httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{port}", trust_env=False,
                 event_hooks={"response": [require_success]},
-            ) as client,
-        ):
-            inbound = event(core, text="有空可以看看这个星空介绍，明天聊聊。")
-            admitted = await client.post(
-                "/internal/v1/inbox/events",
-                json=inbound.model_dump(mode="json"),
-                headers={
-                    "Authorization": "Bearer " + core.settings.bridge_token.get_secret_value(),
-                    "X-Idempotency-Key": "life-execution-owner-input",
-                },
-            )
-            assert admitted.status_code == 202, admitted.text
-            core.store.execute(
-                "UPDATE jobs SET state='CANCELLED',last_error_code='SYNTHETIC_BACKGROUND_ONLY'"
-            )
-            options = companion_options(core)
-            options.update(rich_input_scope="references_v1", link_scope="owner_links_v1")
-            options["core_options"].update(rich_input_scope="references_v1", content_enabled=True)
-            options["core_options"]["extraction_min_events"] = 100
-            options["core_options"]["diary_min_source_events"] = 100
-            options["core_options"]["reflection_min_sources"] = 100
-            options["bridge_options"] = {
-                "capture_signing_key": Ed25519PrivateKey.generate().private_bytes_raw().hex(),
-            }
-            options["window_options"]["ends_at"] = (
-                (core.clock.now + timedelta(days=2))
-                .astimezone(ZoneInfo("Asia/Shanghai"))
-                .isoformat()
-            )
-            options["core_options"]["life_loop"] = core.settings.life_loop
-            options["life_shadow"] = LifeShadowApproval(
-                scope="owner_private_life_shadow_v1",
-                authorization_sha256="e" * 64,
-                conversation_id=core.store.one(
-                    "SELECT conversation_id FROM events WHERE event_id=?", (inbound.event_id,)
-                )["conversation_id"],
-                source_event_ids=[inbound.event_id],
-                purposes=["PRIVATE_MESSAGE_DRAFT"],
-                expires_at=core.clock.now + timedelta(days=2),
-                max_items=2,
-            )
-            _, plan = live_fixture(core, tmp_path, **options)
-            live_text.open_window(
-                core.store,
-                core.settings,
-                core.clock,
-                live_text.OpenWindow(window_sha256=plan.sha256),
-            )
-            core.life_topics.synchronize()
-            core.clock.advance(86400)
-            await native_worker(core, model, monkeypatch)
-            result = core.store.one("SELECT * FROM life_activity_results")
-            assert result["goal_id"], core.store.rows("SELECT state,last_error_code FROM jobs")
-            pool, backend = mock_pool(response(META), response(PLAYER), response(SUBTITLE))
-            client.headers["Authorization"] = (
-                "Bearer " + core.settings.observation_adapters["bili"].token.get_secret_value()
-            )
-            async with PublicHTTP(pool) as public:
-                assert await tick(
-                    client,
-                    BilibiliReader(public, clock=core.clock),
-                    "bili",
-                    source="bilibili",
-                    clock=lambda: core.clock.now,
+            ) as client:
+                stopped = await client.post("/internal/v1/owner-authority/stop", headers=control,
+                    json={"authority": reference, "operation_id": "life-goal-source-complete"})
+                assert stopped.status_code == 200
+                scope = LifeShadowApproval(scope="owner_private_life_shadow_v1",
+                    authorization_sha256="e" * 64,
+                    conversation_id=core.store.one("SELECT conversation_id FROM events "
+                        "WHERE event_id=?", (inbound.event_id,))["conversation_id"],
+                    source_event_ids=[inbound.event_id], purposes=["PRIVATE_MESSAGE_DRAFT"],
+                    expires_at=core.clock.now + timedelta(days=2), max_items=2)
+                policy = OwnerGrantPolicy.model_validate({**view.policy.model_dump(),
+                    "purposes": [*view.policy.purposes, "life"], "life_shadow": scope})
+                activate(core, policy, revision=stopped.json()["authority"]["revision"],
+                         operation="life-goal-explicit-scope")
+                core.life_topics.synchronize()
+                core.clock.advance(86400)
+                await native_worker(core, model, monkeypatch)
+                result = core.store.one("SELECT * FROM life_activity_results")
+                assert result["goal_id"], core.store.rows("SELECT state,last_error_code FROM jobs")
+                with Core(core.settings, clock=core.clock) as goal_worker:
+                    assert goal_worker.exploration.schedule_goal()
+                pool, backend = mock_pool(response(META), response(PLAYER), response(SUBTITLE))
+                client.headers["Authorization"] = (
+                    "Bearer " + core.settings.observation_adapters["bili"].token.get_secret_value()
                 )
-            assert len(backend.requests) == 3
-            goal = core.goals.get(result["goal_id"])
-            assert goal["state"] == "DONE"
-            core.clock.advance(3600)
-            await native_worker(core, model, monkeypatch)
-            shared = core.store.one("SELECT * FROM life_activity_results WHERE action='SHARE'")
-            assert shared and shared["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
-            assert [source["event_id"] for source in calls[1]["sources"]] == [
-                goal["result_event_id"]
-            ]
-            assert "QZONE_DRAFT" not in calls[1]["allowed_destinations"]
-            assert len(calls) == 2
-            assert_no_delivery(core)
-            sources = [_source(core.store, core.settings, goal["result_event_id"], core.clock())]
-            scope = core.settings.live_text_window.life_shadow
+                async with PublicHTTP(pool) as public:
+                    assert await tick(
+                        client,
+                        BilibiliReader(public, clock=core.clock),
+                        "bili",
+                        source="bilibili",
+                        clock=lambda: core.clock.now,
+                    )
+                assert len(backend.requests) == 3
+                goal = core.goals.get(result["goal_id"])
+                assert goal["state"] == "DONE"
+                core.clock.advance(3600)
+                await native_worker(core, model, monkeypatch)
+                shared = core.store.one("SELECT * FROM life_activity_results WHERE action='SHARE'")
+                assert shared and shared["state"] == "SHADOW", core.store.rows("SELECT * FROM jobs")
+                assert {source["event_id"] for source in calls[1]["sources"]} == {
+                    inbound.event_id, goal["result_event_id"]
+                }
+                assert "QZONE_DRAFT" not in calls[1]["allowed_destinations"]
+                assert len(calls) == 2
+                assert_no_delivery(core)
+                sources = [_source(core.store, core.settings,
+                                   goal["result_event_id"], core.clock())]
+                scope = policy.life_shadow
 
-            def current_authority():
-                return authority(
-                    core.store,
-                    core.settings,
-                    scope.conversation_id,
-                    sources,
-                    core.clock(),
-                    check_limit=False,
-                )
+                def current_authority():
+                    return authority(
+                        core.store,
+                        core.settings,
+                        scope.conversation_id,
+                        sources,
+                        core.clock(),
+                        check_limit=False,
+                    )
 
-            assert current_authority()["destinations"] == ["PRIVATE_MESSAGE_DRAFT"]
-            for mutation in (
-                "UPDATE life_activity_results SET goal_id=NULL WHERE action='EXPLORE'",
-                "UPDATE life_activity_results SET authority_sha256='changed' "
-                "WHERE action='EXPLORE'",
-                "UPDATE life_activity_results SET source_fingerprints_json='{}' "
-                "WHERE action='EXPLORE'",
-                "UPDATE goals SET state='FAILED'",
-                "UPDATE goal_steps SET outcome_event_id=NULL",
-                "UPDATE model_usage SET state='UNKNOWN'",
-                "UPDATE events SET body_json='{\"text\":\"changed\"}' WHERE event_id='evt_test_1'",
-                "UPDATE events SET redacted=1 WHERE event_id='evt_test_1'",
-            ):
-                core.store.execute("SAVEPOINT authority_negative")
-                try:
-                    core.store.execute(mutation)
-                    with pytest.raises(CoreError, match="LIFE_SHADOW_SCOPE_REQUIRED"):
-                        current_authority()
-                finally:
-                    core.store.execute("ROLLBACK TO authority_negative")
-                    core.store.execute("RELEASE authority_negative")
-            with core.store.transaction():
-                core.ledger.expire_events(core.store, [inbound.event_id], core.clock())
-            assert not core.store.rows("SELECT * FROM life_activity_results WHERE state='SHADOW'")
-            with pytest.raises(CoreError, match="GOAL_NOT_FOUND"):
-                core.goals.get(goal["goal_id"])
+                assert current_authority()["destinations"] == ["PRIVATE_MESSAGE_DRAFT"]
+                for mutation in (
+                    "UPDATE life_activity_results SET goal_id=NULL WHERE action='EXPLORE'",
+                    "UPDATE life_activity_results SET authority_sha256='changed' "
+                    "WHERE action='EXPLORE'",
+                    "UPDATE life_activity_results SET source_fingerprints_json='{}' "
+                    "WHERE action='EXPLORE'",
+                    "UPDATE goals SET state='FAILED'",
+                    "UPDATE goal_steps SET outcome_event_id=NULL",
+                    "UPDATE model_usage SET state='UNKNOWN'",
+                    "UPDATE events SET body_json='{\"text\":\"changed\"}' "
+                    f"WHERE event_id='{inbound.event_id}'",
+                    f"UPDATE events SET redacted=1 WHERE event_id='{inbound.event_id}'",
+                ):
+                    core.store.execute("SAVEPOINT authority_negative")
+                    try:
+                        core.store.execute(mutation)
+                        code = ("MODEL_BUDGET_RECONCILIATION_REQUIRED"
+                                if mutation.startswith("UPDATE model_usage")
+                                else "LIFE_SHADOW_SCOPE_REQUIRED")
+                        with pytest.raises(CoreError, match=code):
+                            current_authority()
+                    finally:
+                        core.store.execute("ROLLBACK TO authority_negative")
+                        core.store.execute("RELEASE authority_negative")
+                with core.store.transaction():
+                    core.ledger.expire_events(core.store, [inbound.event_id], core.clock())
+                assert not core.store.rows(
+                    "SELECT * FROM life_activity_results WHERE state='SHADOW'")
+                with pytest.raises(CoreError, match="GOAL_NOT_FOUND"):
+                    core.goals.get(goal["goal_id"])
 
     run(exercise())
 
@@ -318,8 +302,23 @@ def test_unsuccessful_read_does_not_invent_share_or_repeat_receipt(core, outcome
     assert not core.store.rows("SELECT * FROM observations")
     assert core.store.one("SELECT state FROM exploration_requests")["state"] == outcome
     core.clock.advance(3600)
-    assert core.life_topics.schedule() is None
-    assert len(core.model.calls) == 1
+    next_job = core.life_topics.schedule()
+    if outcome == "UNKNOWN":
+        assert next_job is None and len(core.model.calls) == 1
+    else:
+        # A known failure may be reviewed once; it is not a read result or retry.
+        assert next_job
+        proposal(core, action="SKIP", destination="NONE", text="")
+        assert run(core.run_once(job_id=next_job))
+        context = json.loads(core.model.calls[-1][0][-1]["content"])["decision_context"]
+        assert context["execution_outcomes"][0]["state"] == "FAILED"
+        assert context["execution_outcomes"][0]["requires_reconciliation"] is False
+        assert len(core.model.calls) == 2
+        core.clock.advance(3600)
+        assert core.life_topics.schedule() is None
+    assert not core.store.rows("SELECT * FROM observations")
+    assert not core.store.rows("SELECT * FROM life_activity_results WHERE action='SHARE'")
+    assert len(core.store.rows("SELECT * FROM exploration_requests")) == 1
     assert_no_delivery(core)
 
 
