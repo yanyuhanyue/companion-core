@@ -61,9 +61,9 @@ function icon(name, cls = "i") {
 
 /** @type {Array<[string, Array<[string, string, string]>]>} */
 const ROUTES = [
-  ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["thinking", "思考与决策", "spark"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"]]],
+  ["日常", [["overview", "今天", "home"], ["activity", "活动时间线", "timeline"], ["thinking", "思考与决策", "spark"], ["memories", "记忆", "memory"], ["life", "日记与成长", "diary"], ["self", "情绪与偏好", "smile"]]],
   ["内容", [["content", "阅读与文件", "book"], ["memes", "表情素材", "smile"], ["voice", "语音与节点", "mic"], ["account-actions", "QQ 资料行为", "qq"]]],
-  ["管理", [["caps", "能力与开关", "toggle"], ["diagnostics", "运行诊断", "pulse"], ["configuration", "配置", "gear"]]],
+  ["管理", [["caps", "能力与开关", "toggle"], ["tools", "执行任务", "file"], ["diagnostics", "运行诊断", "pulse"], ["configuration", "配置", "gear"]]],
 ];
 const ROUTE_NAME = Object.fromEntries(ROUTES.flatMap(([, list]) => list.map(([key, name]) => [key, name])));
 
@@ -192,7 +192,7 @@ const state = {
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
   actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
-  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview",
+  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, contentTab: "items",
 };
 
 class ApiError extends Error {
@@ -438,18 +438,29 @@ const LOADERS = {
   },
   memories: signal => api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: async signal => {
-    const [life, goals, reflections] = await Promise.all([
+    const [life, goals, reflections, topics] = await Promise.all([
       api.get("/life", signal), api.get("/goals", signal), api.get("/reflections", signal),
+      api.get("/life/topics", signal),
     ]);
-    return { ...life, goals: goals.items, reflections: reflections.items };
+    return { ...life, goals: goals.items, reflections: reflections.items, topics };
   },
-  content: signal => api.get("/content", signal), memes: signal => api.get("/memes", signal),
+  content: async signal => {
+    const [content, grants] = await Promise.allSettled([api.get("/content", signal), api.get("/source-grants", signal)]);
+    if (content.status !== "fulfilled") throw content.reason;
+    return { ...content.value, grants: settled(grants) };
+  },
+  memes: signal => api.get("/memes", signal),
+  tools: async signal => { const v = await api.get("/tools", signal); return { tasks: Array.isArray(v.items) ? v.items : [], enabled: v.enabled === true }; },
+  self: async signal => {
+    const [affect, interests, expression] = await Promise.allSettled([api.get("/affect", signal), api.get("/interests", signal), api.get("/expression-learning", signal)]);
+    return { affect: settled(affect), interests: settled(interests), expression: settled(expression) };
+  },
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
   thinking: async signal => {
-    const kinds = ["wake", "life", "goal", "diary", "reflection", "nightly", "model", "rem"];
-    const results = await Promise.all(kinds.map(k => api.get("/cognition?kind=" + k + "&limit=30", signal)));
-    return Object.fromEntries(kinds.map((kind, i) => [kind, results[i]]));
+    const pages = await Promise.all(COG_LIST.map(k => cognitionPage(k, signal)));
+    const data = Object.fromEntries(COG_LIST.map((k, i) => [k, pages[i]]));
+    return locateCognition(data, signal);
   },
   caps: async signal => {
     const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
@@ -521,7 +532,8 @@ async function navigate() {
     if (!DRAFT_ROUTES.includes(route)) state.draft.clear();
     state.data = null; state.capMobile = false; closeDrawer();
   }
-  const same = route === state.route && state.data;
+  // 思考与决策按编号定位时，换一个编号需要重新读取
+  const same = route === state.route && state.data && !(route === "thinking" && decodeURIComponent(sub) !== state.sub);
   state.route = route; state.sub = decodeURIComponent(sub);
   document.title = ROUTE_NAME[route] + " · Companion 主人控制台";
   $("#crumb").replaceChildren(el("b", {}, ROUTE_NAME[route]));
@@ -537,6 +549,7 @@ async function loadRoute({ reset = false, more = false } = {}) {
   if (!reset && state.draft.size && DRAFT_ROUTES.includes(state.route) && !confirm("刷新会丢弃没保存的配置修改，继续吗？")) return;
   if (!reset) state.draft.clear();
   const generation = ++state.generation, epoch = state.epoch, route = state.route;
+  state.cogMore = null;
   state.controller?.abort(); state.controller = new AbortController();
   const signal = state.controller.signal;
   if (!state.data) $("#page").replaceChildren(el("div", { class: "loading", role: "status" }, el("span", { class: "spin" }), "正在读取…"));
@@ -799,7 +812,8 @@ PAGES.life = data => {
           el("button", { type: "button", class: "icon-btn", "aria-label": "下个月", onclick: () => shift(1) }, icon("right"))),
           el("div", { class: "cal-grid" }, WEEK.map(w => el("span", { class: "wd" }, w)), cells),
           el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看"))),
-        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, goals.map(g => goalCard(g))) : el("p", { class: "note" }, "还没有目标。"))),
+        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, goals.map(g => goalCard(g))) : el("p", { class: "note" }, "还没有目标。")),
+        topicsSheet(data.topics)),
       el("div", { class: "stack" }, paper,
         sheet("最近的反思", reflections.length ? el("div", { class: "stack" }, reflections.map(r => reflectionCard(r))) : el("p", { class: "note" }, "还没有反思记录。")))));
 };
@@ -861,8 +875,12 @@ function openModeDialog() {
 const CONTENT_KIND = { link: ["链接", "#3b4070"], qq_image: ["图片", "#2f8a62"], link_image: ["文章图", "#6e9bd0"], file: ["文件", "#6c7190"], video: ["视频", "#fb7299"] };
 PAGES.content = data => {
   const items = (data.items || []).filter(i => state.contentF === "all" || (state.contentF === "running" ? ["run"].includes(statusOf(i.status)[1]) : ["warn", "bad"].includes(statusOf(i.status)[1])));
+  const tabs = el("div", { class: "seg", role: "group", "aria-label": "内容或授权" }, [["items", "内容记录"], ["grants", "来源授权"]].map(([k, n]) =>
+    el("button", { type: "button", "aria-pressed": String(state.contentTab === k), onclick: () => { state.contentTab = k; rerender(); } }, n)));
+  if (state.contentTab === "grants") return el("div", {}, head("阅读与文件", "读取程序登记的来源授权。撤回只停止之后的读取，遗忘会同时清除按授权读到的内容。"),
+    el("div", { class: "toolbar" }, tabs), grantsView(data.grants));
   return el("div", {}, head("阅读与文件", "你分享的链接、图片和文件。外部内容只作为证据进入对话，不能改变权限或人格。"),
-    el("div", { class: "toolbar" }, el("div", { class: "seg" }, [["all", "全部"], ["running", "进行中"], ["attention", "需要留意"]].map(([k, n]) =>
+    el("div", { class: "toolbar" }, tabs, el("div", { class: "seg" }, [["all", "全部"], ["running", "进行中"], ["attention", "需要留意"]].map(([k, n]) =>
       el("button", { type: "button", "aria-pressed": String(state.contentF === k), onclick: () => { state.contentF = k; rerender(); } }, n)))),
     items.length ? el("section", { class: "sheet table-wrap" }, el("table", { class: "t" }, el("thead", {}, el("tr", {}, el("th", {}, "类型"), el("th", {}, "内容"), el("th", {}, "状态"), el("th", { class: "r" }, "时间"))),
       el("tbody", {}, items.map(i => { const [k, c] = CONTENT_KIND[i.kind] || ["内容", "#6c7190"];
@@ -1953,41 +1971,39 @@ PAGES.thinking = data => {
     ["失败", todayItems.filter(i => ["FAILED", "REJECTED", "UNKNOWN"].includes(i.state)).length]
   ].map(([t, v]) => el("div", {}, el("b", { class: "num" }, String(v)), el("span", {}, t))));
 
-  const filters = el("div", { class: "toolbar" }, el("div", { class: "seg" },
+  const filters = el("div", {}, el("div", { class: "toolbar" }, el("div", { class: "seg" },
     [["all", "全部"], ...Object.entries(COGNITION_KINDS).map(([k, v]) => [k, v.name])].map(([k, t]) =>
       el("button", { type: "button", "aria-pressed": String(state.cogKind === k),
-        onclick: () => { state.cogKind = k; state.cogSel = null; rerender(); } }, t))));
+        onclick: () => { state.cogKind = k; state.cogSel = null; rerender(); } }, t))), cognitionFinder()), locateNote(data));
 
   if (!sel) return el("div", {},
     head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
     stats, coverage, filters,
-    empty("还没有认知记录", "自主活动、生活话题、目标、日记、反思等决策记录会出现在这里。"));
+    empty("还没有认知记录", "自主活动、生活话题、目标、日记、反思等决策记录会出现在这里。"), cognitionMore());
 
   const k = COGNITION_KINDS[sel._kind] || { name: "认知", ic: "spark" };
   const stateName = cognitionStateName(sel);
 
-  const tabs = [["overview", "概览"], ["sources", "来源"], ["details", "详情"]];
+  const tabs = [["overview", "决策记录"], ["sources", "上下文"], ["reasoning", "原始推理"]];
 
   const body = state.cogTab === "sources" ? [
-    el("h3", { class: "dk-title" }, "来源消息"),
-    el("p", { class: "note" }, "这条记录引用的消息编号。"),
+    el("h3", { class: "dk-title" }, "本轮依据的来源"),
+    el("p", { class: "note" }, "这条记录引用的消息编号，都经过权限和来源校验；来源被清除后这条记录不再显示。"),
     el("ul", { class: "dk-ctx" },
       (sel.source_event_ids || []).length > 0
-        ? (sel.source_event_ids || []).map(eid => el("li", {}, el("code", {}, eid)))
+        ? (sel.source_event_ids || []).map((eid, n) => el("li", {}, el("span", { class: "dk-n" }, "第 " + (n + 1) + " 条来源"),
+            el("span", { class: "tag ok" }, "已核验"), el("span", { class: "note" }, "编号尾号 " + shortId(eid))))
         : [el("li", { class: "note" }, "没有来源消息")]
     )
-  ] : state.cogTab === "details" ? [
-    el("h3", { class: "dk-title" }, "原始字段"),
-    el("pre", { class: "note", style: { whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "0.875rem" } },
-      JSON.stringify(sel, null, 2))
-  ] : [
+  ] : state.cogTab === "reasoning" ? reasoningView(sel, data[sel._kind]) : [
     el("h3", { class: "dk-title" }, sel._title, el("span", { class: "note" }, fmtDate(sel.occurred_at))),
     el("dl", { class: "dk-rows" }, [
       ["类型", k.name],
       ["状态", el("b", {}, stateName)],
       ["原因代码", sel.reason_code && sel.reason_code !== "NOT_RECORDED" ? (REASON_NAMES[sel.reason_code] || sel.reason_code) : "—"],
       ["摘要", sel._summary || "—"],
-    ].map(([dt, dd]) => el("div", {}, el("dt", {}, dt), el("dd", {}, dd))))
+    ].map(([dt, dd]) => el("div", {}, el("dt", {}, dt), el("dd", {}, dd)))),
+    cognitionExtra(sel)
   ];
 
   return el("div", {},
@@ -1999,14 +2015,14 @@ PAGES.thinking = data => {
         const iState = cognitionState(i) || "UNKNOWN";
         const tone = COGNITION_TONE[iState] || "ok";
         return el("li", {},
-          el("button", { type: "button", class: i === sel ? "sel" : "",
+          el("button", { type: "button", class: i === sel ? "sel" : "", "data-record-id": i.id,
             onclick: () => { state.cogSel = i._kind + ":" + i.id; rerender(); } },
             el("span", { class: "ic" }, icon(ik.ic)),
             el("span", { class: "dk-l" },
               el("b", {}, i._title),
               el("small", {}, fmtDate(i.occurred_at) + "，" + ik.name)),
             el("span", { class: "tag " + tone }, cognitionStateName(i))));
-      })),
+      }), el("li", { class: "dk-more" }, cognitionMore())),
       el("section", { class: "dk-card" },
         el("div", { class: "dk-head" },
           el("div", {},
@@ -2131,35 +2147,404 @@ function reflectionDecision(suggestion_id, decision) {
   openDialog(labels[decision], form);
 }
 
-function topicCard(t) {
-  const sources = t.sources || [], results = t.results || [];
-  return el("div", { class: "topic-card" },
-    el("div", { class: "topic-head" }, el("h3", {}, t.kind === "conversation" ? "对话话题" : "阅读话题"), tag(t.state)),
-    el("p", {}, sources.length + " 条来源，" + results.length + " 次执行结果"),
-    el("p", { class: "meta" }, "创建于 " + fmtDate(t.created_at)),
-    ["WAITING", "DUE"].includes(t.state) && sources.length ? btn("关闭话题", () => topicClose(t), { cls: "sm danger", symbol: "close" }) : null);
+/* ================= 补齐：来源授权、执行任务、生活话题、情绪与偏好、认知分页与定位 =================
+   这一段只读取已有接口：/source-grants、/tools、/life/topics、/affect、/interests、
+   /expression-learning 和 /cognition 的 before、record_id。写操作都走统一的操作回执，
+   只校验回执里的 state，不依赖回执带回业务编号。 */
+Object.assign(STATUS, Object.fromEntries(Object.entries({
+  WAITING_APPROVAL: ["等你批准", "warn"], EXECUTION_UNCERTAIN: ["执行结果不明", "warn"], DUE: ["已到期", "warn"],
+  CLOSED: ["已关闭", "off"], CANDIDATE: ["候选", "warn"], EMERGING: ["正在形成", "run"], STABLE: ["已稳定", "ok"],
+  EXPLORING: ["在探索", "run"], FADING: ["渐淡", "off"], SHADOW: ["只记录未执行", "off"], INVALIDATED: ["已作废", "off"],
+  WAITING_INPUT: ["等待新输入", "warn"], WAITING_RESOURCE: ["等待资源", "warn"], WAITING_DECISION: ["等你决定", "warn"],
+  DEFERRED: ["已推迟", "off"], SCHEDULED: ["已安排", "run"], NOT_RECORDED: ["未记录", "off"],
+}).filter(([k]) => !(k in STATUS))));
+Object.assign(REASONS, Object.fromEntries(Object.entries({
+  OWNER_REVOKED: "你撤回了", EXECUTION_UNCERTAIN: "执行结果不明", TOOL_SCOPE_CHANGED: "执行内容已变化",
+  SOURCE_GRANT_REVOKED: "来源授权已撤回", OWNER_CLOSED: "你关闭了", LIFE_SOURCE_UNAVAILABLE: "来源已失效",
+  CONSUMED: "她已经做了决定", LIFE_NEW_INPUT: "你发来了新消息，换成新话题", SOURCE_WITHDRAWN: "来源被撤回",
+  GOAL_RESULT: "由目标结果接续", LIFE_DRAFT_EXPIRED: "草稿已过期",
+}).filter(([k]) => !(k in REASONS))));
+const failNote = (what, error) => el("div", { class: "alert bad" }, icon("warn"), el("span", {}, what + "暂时读不到。" + (error ? errorText(error) : "")));
+/** allSettled 的结果：成功给值，失败给 { error }，取消请求时整体中止 */
+function settled(result) {
+  if (result.status === "fulfilled") return result.value;
+  if (result.reason?.name === "AbortError") throw result.reason;
+  return { error: result.reason };
 }
 
-function topicClose(t) {
-  const form = el("form", { class: "dlg-form" });
-  const sources = t.sources || [];
-  if (!sources.length) { form.append(el("p", { class: "note" }, "这个话题没有可用的来源事件。")); }
-  else {
-    form.append(el("p", { class: "muted" }, "关闭话题需要从来源事件中选择一条作为关闭依据。"));
-    const sel = el("select", { class: "input", id: "topic-source", required: true },
-      el("option", { value: "" }, "选择来源事件"),
-      ...sources.map(s => el("option", { value: s.event_id }, s.event_id.slice(0, 16) + "...")));
-    form.append(el("label", { class: "field" }, el("span", {}, "来源事件"), sel));
-  }
-  const submit = el("button", { type: "submit", class: "btn danger", disabled: !sources.length }, "关闭话题");
+/* ---------- 来源授权（阅读与文件页的第二个标签） ---------- */
+const GRANT_SOURCE = { web: "网页", bilibili: "B 站", heybox: "小黑盒", simulation: "模拟来源" };
+const grantName = g => GRANT_SOURCE[g.source] || g.source || "未记录来源";
+function grantState(g) {
+  if (g.forgotten_at) return ["FORGOTTEN", "已遗忘"];
+  if (g.revoked_at) return ["REVOKED", "已撤回"];
+  if (valid(g.expires_at) && Date.parse(g.expires_at) <= Date.now()) return ["EXPIRED", "已过期"];
+  return ["ENABLED", "有效"];
+}
+function grantsView(grants) {
+  if (!grants || grants.error) return failNote("来源授权", grants?.error);
+  const items = grants.items || [];
+  if (!items.length) return empty("还没有来源授权", "读取程序登记授权后会出现在这里。授权只决定能不能读，不包含账号或密码。");
+  return el("div", {},
+    el("p", { class: "note mb" }, "授权由读取程序登记，这里只能撤回或遗忘，不能新建或延长。"),
+    el("section", { class: "sheet table-wrap" }, el("table", { class: "t" },
+      el("thead", {}, el("tr", {}, el("th", {}, "来源"), el("th", {}, "状态"), el("th", {}, "版本"), el("th", {}, "有效期至"), el("th", { class: "r" }, "操作"))),
+      el("tbody", {}, items.map(g => {
+        const [st, label] = grantState(g);
+        return el("tr", { class: "static" },
+          el("td", { class: "title-cell" }, grantName(g), el("small", {}, "读取程序 " + (g.adapter_id || "—") + "，编号 " + shortId(g.grant_id))),
+          el("td", {}, tag(st, label)),
+          el("td", { class: "num" }, "第 " + count(g.epoch) + " 版"),
+          el("td", { class: "muted" }, g.forgotten_at ? "遗忘于 " + fmtDate(g.forgotten_at) : g.revoked_at ? "撤回于 " + fmtDate(g.revoked_at) : fmtDate(g.expires_at)),
+          el("td", { class: "r" }, el("span", { class: "row-gap end" },
+            !g.revoked_at && !g.forgotten_at ? btn("撤回", () => grantAction(g, "revoke"), { cls: "sm" }) : null,
+            !g.forgotten_at ? btn("遗忘", () => grantAction(g, "forget"), { cls: "sm danger" }) : null)));
+      })))),
+    items.length >= (grants.limit || 100) ? el("p", { class: "note mt" }, "只显示最近 " + count(grants.limit || 100) + " 条授权。") : null);
+}
+function grantAction(g, action) {
+  const forget = action === "forget";
+  const form = el("form", { class: "dlg-form" },
+    el("p", {}, grantName(g) + "的读取授权，编号 " + shortId(g.grant_id)),
+    el("ul", { class: "consequence" }, forget ? [
+      el("li", {}, "之后不再按这个授权读取，进行中的读取会取消"),
+      el("li", {}, "清除按这个授权读到的内容，以及由这些内容产生的记忆"),
+      el("li", {}, "从旧备份恢复时也会重新执行这次遗忘"),
+      el("li", {}, "已经发到 QQ 的消息无法撤回")] : [
+      el("li", {}, "之后不再按这个授权读取，进行中的读取会取消"),
+      el("li", {}, "已经读到的内容和由此产生的记忆保留，要一并清除请用“遗忘”"),
+      el("li", {}, "撤回后这个授权不能恢复，需要读取程序重新登记")]));
+  const submit = el("button", { type: "submit", class: "btn " + (forget ? "danger solid" : "primary") }, forget ? "遗忘这个授权" : "撤回授权");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
-    const source_event_id = $("#topic-source").value;
-    if (!source_event_id) { formError(form, "请选择来源事件。"); return; }
-    perform(form, submit, () => api.write("/life/topics/" + encodeURIComponent(t.topic_id) + "/close", { source_event_id }, "POST",
-      r => typeof r.topic_id === "string" && typeof r.state === "string"),
-      async r => { closeDialog(); toast("已关闭话题（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+    perform(form, submit, () => api.write("/source-grants/" + encodeURIComponent(g.grant_id), { action }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast(forget ? "已遗忘这个授权" : "已撤回授权"); await loadRoute({ reset: true }); });
   });
-  openDialog("关闭话题？", form);
+  openDialog(forget ? "遗忘这个来源授权？" : "撤回这个来源授权？", form);
+}
+
+/* ---------- 执行任务 ---------- */
+const TOOL_CAPS = { "windows.read_text": ["读取文件", "只读"], "windows.write_text": ["写入文件", "会改动文件"], "dsh.run": ["运行 DSH 任务", "会执行操作"] };
+const TOOL_OPEN = ["WAITING_APPROVAL", "QUEUED", "LEASED", "RUNNING"];
+PAGES.tools = data => {
+  if (data.error) return el("div", {}, head("执行任务", ""), failNote("执行任务", data.error));
+  const tasks = data.tasks || [], waiting = tasks.filter(t => t.state === "WAITING_APPROVAL").length;
+  return el("div", {}, head("执行任务", "她提出的读写文件或 DSH 任务。会改动内容的任务要你看过具体内容并批准后才会执行，批准只对这里显示的这一份内容有效。"),
+    data.enabled ? null : el("div", { class: "alert" }, icon("warn"), el("span", {}, "执行任务在部署配置里没有开启，现在不能批准或拒绝；已有任务仍可查看和撤回。")),
+    waiting ? el("p", { class: "note mb" }, waiting + " 个任务等你批准。") : null,
+    tasks.length ? el("div", { class: "stack" }, tasks.map(t => toolCard(t, data.enabled)))
+      : empty("还没有执行任务", "她提出读写文件或运行 DSH 的任务后，会出现在这里。"));
+};
+function scopeText(label, v) {
+  if (!v) return null;
+  if (v.state !== "RECORDED") return kv(label, "含有可能敏感的内容，不在这里显示（" + count(v.chars) + " 字）");
+  return el("div", { class: "scope-field" }, el("span", { class: "note" }, label + "，" + count(v.chars) + " 字"), el("pre", { class: "scope-text" }, v.value));
+}
+function scopeView(scope) {
+  if (!scope || scope.state !== "RECORDED") {
+    const text = scope?.sources_live === false ? "依据的私聊消息已经失效或被清除，执行内容不再显示，可以撤回这个任务。"
+      : { ERASED: "执行内容已经随来源一起清除。", MISMATCH: "保存的执行内容和批准摘要对不上，不能批准，请撤回这个任务。" }[scope?.state] || "执行内容读不到。";
+    return el("div", { class: "alert" + (scope?.state === "MISMATCH" ? " bad" : "") }, icon("warn"), el("span", {}, text));
+  }
+  const L = scope.limits || {};
+  return el("div", { class: "scope-box" },
+    kv("工作区", scope.workspace || "—"),
+    scope.path ? kv("路径", scope.path.state === "RECORDED" ? el("code", {}, scope.path.value) : "含有可能敏感的内容，不在这里显示") : null,
+    scopeText("写入内容", scope.text), scopeText("任务说明", scope.prompt),
+    el("div", { class: "scope-limits" }, [["费用上限", usd(L.max_cost_micro_usd)], ["模型调用", count(L.max_model_calls) + " 次"], ["输入上限", bytes(L.max_input_bytes)],
+      ["输出上限", count(L.max_output_tokens) + " token"], ["时限", duration(L.timeout_seconds)]].map(([k, v]) => el("span", {}, el("small", {}, k), el("b", {}, v)))),
+    scope.sources_live ? el("p", { class: "note" }, "依据你的 " + count(scope.source_count) + " 条私聊消息，来源仍然有效。")
+      : el("div", { class: "alert" }, icon("warn"), el("span", {}, "依据的私聊消息已经失效或被清除，批准和拒绝都会被拒绝，可以撤回这个任务。")));
+}
+function toolCard(t, enabled) {
+  const [name, risk] = TOOL_CAPS[t.capability] || ["其他工具", t.risk_level ? "会改动" : "只读"];
+  const reviewable = t.state === "WAITING_APPROVAL" && t.scope?.state === "RECORDED" && t.scope.sources_live;
+  const visible = reviewable && ["path", "text", "prompt"].every(k => !t.scope[k] || t.scope[k].state === "RECORDED");
+  return el("article", { class: "sheet tool-card" }, el("div", { class: "sheet-body" },
+    el("div", { class: "tool-head" }, el("div", {}, el("h3", {}, name),
+      el("p", { class: "note" }, risk + "，提出于 " + fmtDate(t.created_at) + (t.dispatched_at ? "，开始执行于 " + fmtDate(t.dispatched_at) : ""))), tag(t.state)),
+    t.state === "UNKNOWN" ? el("div", { class: "alert bad" }, icon("warn"), el("span", {}, "执行结果不明：执行端可能已经动手。不会自动重试，相关费用会一直占用额度，请到执行端核对。")) : null,
+    t.last_error_code ? el("p", { class: "note mb" }, "原因：" + reasonText(t.last_error_code)) : null,
+    scopeView(t.scope),
+    reviewable && !visible ? el("p", { class: "note" }, "具体执行内容没有完整显示，不能批准；可以拒绝或撤回任务。") : null,
+    el("div", { class: "tool-foot" }, el("span", { class: "note" }, "预留 " + usd(t.reserved_micro_usd) + "，已计 " + usd(t.billed_micro_usd) + "，编号 " + shortId(t.task_id)),
+      el("span", { class: "row-gap" },
+        t.state === "WAITING_APPROVAL" ? btn("批准", () => toolDecision(t, "APPROVE"), { cls: "sm primary", symbol: "check", disabled: !enabled || !visible }) : null,
+        t.state === "WAITING_APPROVAL" ? btn("拒绝", () => toolDecision(t, "REJECT"), { cls: "sm", disabled: !enabled || !reviewable }) : null,
+        TOOL_OPEN.includes(t.state) ? btn("撤回", () => toolRevoke(t), { cls: "sm danger" }) : null))));
+}
+function toolDecision(t, decision) {
+  const approve = decision === "APPROVE", [name] = TOOL_CAPS[t.capability] || ["这个任务"];
+  const check = approve ? el("input", { type: "checkbox", id: "tool-seen" }) : null;
+  const form = el("form", { class: "dlg-form" },
+    approve ? el("ul", { class: "consequence" }, el("li", {}, "批准只对刚才显示的这一份内容有效，内容一变就需要重新批准"),
+      el("li", {}, "批准后一小时内会执行，期间可以撤回"), el("li", {}, "执行会占用费用额度，上限见任务卡片"))
+      : el("p", {}, "拒绝后这个任务不会执行，预留的额度会释放。"),
+    approve ? el("label", { class: "ck" }, check, el("span", {}, "我已经看过" + name + "的具体内容")) : null);
+  const submit = el("button", { type: "submit", class: "btn " + (approve ? "primary" : "danger") }, approve ? "批准执行" : "拒绝");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    if (check && !check.checked) { formError(form, "请先确认看过具体内容。"); return; }
+    perform(form, submit, () => api.write("/tools/" + encodeURIComponent(t.task_id) + "/decision", { decision, scope_sha256: t.scope_sha256 }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast(approve ? "已批准，等待执行" : "已拒绝"); await loadRoute({ reset: true }); });
+  });
+  openDialog(approve ? "批准" + name + "？" : "拒绝" + name + "？", form);
+}
+function toolRevoke(t) {
+  const started = ["LEASED", "RUNNING"].includes(t.state);
+  const form = el("form", { class: "dlg-form" }, el("ul", { class: "consequence" },
+    started ? [el("li", {}, "执行端可能已经开始，撤回不能保证没有动手"), el("li", {}, "正在执行的会记为结果不明，之后送回的结果不会被接受"), el("li", {}, "已经产生的费用保留")]
+      : [el("li", {}, "这个任务不会再执行"), el("li", {}, "已有的批准一并作废")]));
+  const submit = el("button", { type: "submit", class: "btn danger solid" }, "撤回任务");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/tools/" + encodeURIComponent(t.task_id) + "/revoke", {}, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast("已撤回"); await loadRoute({ reset: true }); });
+  });
+  openDialog("撤回这个执行任务？", form);
+}
+
+/* ---------- 生活话题（日记与成长页） ---------- */
+const TOPIC_KIND = { conversation: "对话话题", reading: "阅读话题" };
+const LIFE_ACTION = { SKIP: "这次不跟进", CONTINUE: "继续聊", EXPLORE: "去查一查", FOLLOW_UP: "回头再问", SHARE: "分享给你", DEFER: "推迟" };
+const LIFE_DEST = { NONE: "只记录", PRIVATE_DIARY: "写进日记", PRIVATE_MESSAGE_DRAFT: "私聊草稿", QZONE_DRAFT: "QQ 空间草稿" };
+function topicsSheet(topics) {
+  if (!topics || topics.error) return sheet("生活话题", failNote("生活话题", topics?.error));
+  const items = topics.items || [], candidates = topics.candidate_sources || [];
+  return sheet("生活话题", [
+    topics.mode === "OFF" ? el("p", { class: "note mb" }, "生活循环没有开启，下面只显示已有记录。") : null,
+    items.length ? el("div", { class: "topics" }, items.map(topicCard)) : el("p", { class: "note" }, "还没有生活话题。"),
+    candidates.length ? el("p", { class: "note mt" }, "另有 " + candidates.length + " 条来源可以成为新话题，由她在下一轮决定。") : null]);
+}
+function topicCard(t) {
+  const sources = t.sources || [], results = t.results || [];
+  const owner = sources.filter(s => s.kind === "owner_message"), open = ["WAITING", "DUE"].includes(t.state);
+  const closeable = open || t.state === "CLOSED" && t.reason_code === "CONSUMED";
+  return el("article", { class: "topic" },
+    el("div", { class: "topic-head" }, el("b", {}, TOPIC_KIND[t.kind] || "话题"), tag(t.state),
+      el("span", { class: "note" }, open ? (t.state === "DUE" ? "已到期，" : "到期于 " + fmtDate(t.due_at) + "，") + "有效期至 " + fmtDate(t.expires_at)
+        : t.reason_code ? reasonText(t.reason_code) : "")),
+    sources.length ? el("ul", { class: "topic-src" }, sources.slice(0, 4).map(s => el("li", {},
+      el("span", { class: "chip" }, s.kind === "owner_message" ? "你说" : "她读到"), el("span", { class: "txt" }, s.text),
+      safeUrl(s.url) ? el("a", { href: safeUrl(s.url), target: "_blank", rel: "noopener noreferrer" }, "原文") : null,
+      el("small", { class: "note" }, fmtDate(s.occurred_at)))))
+      : el("p", { class: "note" }, t.state === "EXPIRED" ? "来源已过期或被清除，原文不再显示。" : "没有可以显示的来源。"),
+    sources.length > 4 ? el("p", { class: "note" }, "还有 " + (sources.length - 4) + " 条来源") : null,
+    results.length ? el("div", { class: "topic-res" }, results.map(r => el("div", { class: "topic-r" },
+      el("div", { class: "row-gap" }, el("b", {}, LIFE_ACTION[r.action] || "其他决定"), el("span", { class: "chip" }, LIFE_DEST[r.destination] || "未记录去向"), tag(r.state)),
+      r.reason ? el("p", {}, r.reason) : null, r.text ? el("blockquote", {}, r.text) : null,
+      r.goal ? el("p", { class: "note" }, "关联目标：" + statusOf(r.goal.state)[0] + "，", linkTo("thinking/goal:" + r.goal.goal_id, "查看目标")) : null))) : null,
+    closeable ? (owner.length ? el("div", { class: "row-gap mt" }, btn("关闭话题", () => topicClose(t, owner), { cls: "sm", symbol: "close" }))
+      : el("p", { class: "note mt" }, "这个话题里没有你的原话，不能在这里关闭；在私聊里说一句不想聊这个，她会自己收起。")) : null);
+}
+function topicClose(t, owner) {
+  const sel = el("select", { class: "input", id: "topic-source", required: true },
+    owner.map(s => el("option", { value: s.event_id }, fmtDate(s.occurred_at) + "：" + String(s.text).slice(0, 40))));
+  const form = el("form", { class: "dlg-form" },
+    el("ul", { class: "consequence" }, el("li", {}, "她不再跟进这个话题"), el("li", {}, "这个话题下的决定和草稿会作废，排队中的处理会取消"),
+      el("li", {}, "已经发出的消息不受影响")),
+    el("label", { class: "field" }, el("span", {}, "以哪句话作为关闭依据"), sel));
+  const submit = el("button", { type: "submit", class: "btn danger solid" }, "关闭话题");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/life/topics/" + encodeURIComponent(t.topic_id) + "/close", { source_event_id: sel.value }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast("已关闭话题"); await loadRoute({ reset: true }); });
+  });
+  openDialog("关闭这个话题？", form);
+}
+
+/* ---------- 情绪与偏好 ---------- */
+const AFFECT_DIMS = {
+  interaction_tone: ["回复风格", { neutral: "默认", concise: "简短一点", detailed: "详细一点" }],
+  engagement: ["聊天意愿", { neutral: "默认", pause: "先不聊这个", continue: "继续聊" }],
+  cognitive_load: ["讲解方式", { normal: "默认", stepwise: "分步骤" }],
+  novelty_interest: ["新话题", { unknown: "没表态", open: "想试新话题" }],
+};
+const AFFECT_REASON = { OWNER_REQUESTED_CONCISE: "你说过“简短一点”", OWNER_REQUESTED_DETAIL: "你说过“详细一点”", OWNER_REQUESTED_STEPS: "你说过“分步骤说”",
+  OWNER_REQUESTED_PAUSE: "你说过“先不聊了”", OWNER_REQUESTED_CONTINUE: "你说过“继续聊”", OWNER_REQUESTED_NOVELTY: "你说过“换个新话题”" };
+const dimLabel = d => (AFFECT_DIMS[d] || [d || "其他"])[0];
+const dimValue = (d, v) => (AFFECT_DIMS[d]?.[1] || {})[v] || v || "—";
+PAGES.self = data => el("div", {}, head("情绪与偏好", "她只根据你明确说过的话调整，不推测你的情绪。偏好来自你，兴趣来自她自己完成的阅读，两者分开记录。"),
+  affectSheet(data.affect),
+  el("div", { class: "grid-2 mt-lg" }, preferenceSheet(data.interests), interestSheet(data.interests)),
+  expressionSheet(data.expression));
+function affectSheet(a) {
+  if (!a || a.error) return sheet("情绪观察", failNote("情绪观察", a?.error));
+  const evidence = a.evidence || [];
+  return sheet("情绪观察", [
+    a.enabled ? null : el("p", { class: "note mb" }, "情绪观察没有开启，下面是默认状态。重置仍然可以使用。"),
+    el("div", { class: "affect-dims" }, Object.keys(AFFECT_DIMS).map(d => {
+      const v = a.state?.[d], ev = evidence.find(x => x.dimension === d);
+      return el("div", { class: "affect-dim" + (ev ? " set" : "") }, el("small", {}, dimLabel(d)), el("b", {}, dimValue(d, v)),
+        el("span", { class: "note" }, ev ? (AFFECT_REASON[ev.reason_code] || reasonText(ev.reason_code)) + "，到 " + fmtDate(ev.expires_at) + " 失效" : "没有明确反馈"));
+    })),
+    el("p", { class: "note mt" }, evidence.length ? "每条反馈都来自你的私聊原话，到期后自动恢复默认。" : "最近没有明确反馈。",
+      a.reset_at ? "上次重置在 " + fmtDate(a.reset_at) + "。" : ""),
+    el("div", { class: "row-gap mt" }, btn("重置情绪观察", affectReset, { cls: "sm", symbol: "refresh" }))]);
+}
+function affectReset() {
+  const form = el("form", { class: "dlg-form" }, el("ul", { class: "consequence" },
+    el("li", {}, "到现在为止的明确反馈都不再生效，之后只看新的原话"), el("li", {}, "表达习惯学习也从现在开始重新累计"),
+    el("li", {}, "不会删除聊天记录和记忆"), el("li", {}, "从旧备份恢复时也会保持这次重置")));
+  const submit = el("button", { type: "submit", class: "btn danger solid" }, "重置");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/affect/reset", { confirm: true }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast("已重置情绪观察"); await loadRoute({ reset: true }); });
+  });
+  openDialog("重置情绪观察？", form);
+}
+function evidenceDates(list) {
+  const days = [...new Set((list || []).map(e => localDay(e.occurred_at)).filter(Boolean))].sort();
+  return days.length ? (days.length === 1 ? days[0] : days[0] + " 到 " + days.at(-1)) : "日期未记录";
+}
+function preferenceSheet(p) {
+  if (!p || p.error) return sheet("你的偏好", failNote("偏好档案", p?.error));
+  const items = p["owner.preference"] || [];
+  return sheet("你的偏好", items.length ? el("ul", { class: "rows" }, items.map(m => el("li", { class: "block" }, el("b", {}, m.content),
+    el("span", { class: "meta-line" }, el("span", { class: "chip" }, "来自你的 " + (m.evidence || []).length + " 条原话"), el("span", { class: "note" }, evidenceDates(m.evidence))))))
+    : el("p", { class: "note" }, "还没有确认过的偏好。在记忆页确认一条偏好后会出现在这里。"));
+}
+function interestSheet(p) {
+  if (!p || p.error) return sheet("她的兴趣", failNote("兴趣档案", p?.error));
+  const items = p["self.interest"] || [];
+  return sheet("她的兴趣", [items.length ? el("ul", { class: "rows" }, items.map(i => el("li", { class: "block" },
+    el("div", { class: "row-gap" }, el("b", {}, i.topic), tag(i.status)),
+    el("span", { class: "meta-line" }, el("span", { class: "note" }, "读完 " + count(i.independent_sessions) + " 篇，分布在 " + count(i.independent_days) + " 天，证据覆盖 " + Math.round((i.confidence || 0) * 100) + "%")),
+    (i.evidence || []).length ? el("details", { class: "ev" }, el("summary", {}, "看读过的内容"), el("ul", {}, i.evidence.slice(0, 8).map(e => el("li", {},
+      safeUrl(e.canonical_url) ? el("a", { href: safeUrl(e.canonical_url), target: "_blank", rel: "noopener noreferrer" }, new URL(safeUrl(e.canonical_url)).hostname) : el("span", {}, "来源"),
+      el("span", { class: "note" }, " " + fmtDate(e.occurred_at) + "，" + statusOf(String(e.evidence_level || "").replace(/^SIMULATED_/, ""))[0] + (String(e.evidence_level).startsWith("SIMULATED_") ? "（模拟）" : "")))))) : null)))
+    : el("p", { class: "note" }, "还没有兴趣记录。她完成自己的阅读目标后才会累计。"),
+    el("p", { class: "note mt" }, "兴趣只说明她自己读过什么，不会当成你的偏好，也不会授予任何权限。")]);
+}
+function expressionSheet(x) {
+  if (!x || x.error) return sheet("表达习惯学习", failNote("表达习惯学习", x?.error));
+  const items = x.items || [];
+  return sheet("表达习惯学习", [
+    el("p", { class: "note mb" }, "稳定偏好可在表达习惯学习和表达能力开启、当前授权有效时用于回复；短时反馈优先。这里展示当前学习结果。"),
+    items.length ? el("ul", { class: "rows" }, items.map(i => el("li", { class: "block" },
+      el("div", { class: "row-gap" }, el("b", {}, dimLabel(i.dimension) + "：" + dimValue(i.dimension, i.value)), tag(i.status)),
+      el("span", { class: "meta-line" }, el("span", { class: "note" }, "有 " + count(i.independent_days) + " 天的明确反馈，证据覆盖 " + Math.round((i.confidence || 0) * 100) + "%" + (i.strength ? "，影响强度 " + i.strength : ""))),
+      el("div", { class: "days" }, (i.local_dates || []).map(d => el("span", { class: "chip" }, d))))))
+      : el("p", { class: "note" }, "还没有可以学习的反馈。你说“简短一点”“分步骤说”这类话之后会开始累计。"),
+    x.truncated ? el("p", { class: "note mt" }, "反馈太多，只看了最近 500 条，暂时不会判定为稳定。") : null,
+    el("p", { class: "note mt" }, "这里是按保留期内的原话重新算出的当前结果，不另外保存逐日变化。出现相反的反馈或重置情绪观察后，会从那时重新累计。")]);
+}
+
+/* ---------- 认知记录：分页、按编号定位、跨记录跳转、目标步骤 ---------- */
+const COG_LIST = ["wake", "life", "goal", "diary", "reflection", "nightly", "model", "rem"];
+/** 读取一页认知记录：失败时保留错误，不当成空记录 */
+async function cognitionPage(kind, signal, query = "") {
+  return api.get("/cognition?kind=" + kind + "&limit=30" + query, signal);
+}
+/** #thinking/goal:goal_xxx 定位到一条记录；不在第一页时单独读取并放在最前面 */
+async function locateCognition(data, signal) {
+  const m = /^([a-z]+):(.{1,160})$/.exec(state.sub || "");
+  if (!m || !COG_LIST.includes(m[1])) return data;
+  const [, kind, id] = m;
+  state.cogKind = kind; state.cogSel = kind + ":" + id; state.cogTab = "overview";
+  const page = data[kind] || { items: [] };
+  if (!(page.items || []).some(i => String(i.id) === id)) {
+    const one = await cognitionPage(kind, signal, "&record_id=" + encodeURIComponent(id));
+    if (!(one.items || []).length) data.locate = { kind, id, missing: true };
+    else data[kind] = { ...page, items: [...one.items, ...(page.items || [])] };
+  }
+  return data;
+}
+async function moreCognition(kind) {
+  const page = state.data?.[kind];
+  if (!page?.next_cursor || state.cogMore) return;
+  state.cogMore = kind; rerender();
+  const epoch = state.epoch, generation = state.generation;
+  try {
+    const next = await cognitionPage(kind, state.controller?.signal, "&before=" + encodeURIComponent(page.next_cursor));
+    if (epoch !== state.epoch || generation !== state.generation || state.route !== "thinking" || !state.data) return;
+    if (next.privacy_epoch !== page.privacy_epoch) { await loadRoute({ reset: true }); return; }
+    const seen = new Set(page.items.map(i => String(i.id)));
+    state.data[kind] = { ...next, items: [...page.items, ...(next.items || []).filter(i => !seen.has(String(i.id)))] };
+  } catch (error) {
+    if (error.name !== "AbortError" && epoch === state.epoch && generation === state.generation) {
+      notice("更早的" + (COGNITION_KINDS[kind]?.name || "") + "记录没有读到。" + errorText(error), false);
+    }
+  } finally {
+    if (epoch === state.epoch && generation === state.generation) { state.cogMore = null; rerender(); }
+  }
+}
+function cognitionMore() {
+  const kinds = state.cogKind === "all" ? COG_LIST : [state.cogKind];
+  const more = kinds.filter(k => state.data?.[k]?.next_cursor);
+  const failed = COG_LIST.filter(k => state.data?.[k]?.error);
+  return [
+    failed.length ? el("div", { class: "alert bad mt" }, icon("warn"), el("span", {}, failed.map(k => COGNITION_KINDS[k]?.name || k).join("、") + "暂时读不到，列表里缺少这部分记录。")) : null,
+    more.length ? el("div", { class: "row-gap mt" }, more.map(k => btn(state.cogMore === k ? "正在读取…" : "更早的" + (COGNITION_KINDS[k]?.name || "记录"),
+      () => moreCognition(k), { cls: "sm quiet", disabled: !!state.cogMore }))) : null];
+}
+function cognitionFinder() {
+  const kind = el("select", { class: "input sm-select", "aria-label": "记录类型" }, COG_LIST.map(k => el("option", { value: k, selected: state.cogKind === k }, COGNITION_KINDS[k]?.name || k)));
+  const id = el("input", { class: "input", placeholder: "按编号查找", "aria-label": "记录编号", maxlength: "160" });
+  return el("form", { class: "cog-find", onsubmit: e => { e.preventDefault(); const v = id.value.trim(); if (v) location.hash = "thinking/" + kind.value + ":" + encodeURIComponent(v); } },
+    kind, id, btn("查找", () => {}, { cls: "sm", type: "submit", symbol: "search" }));
+}
+function locateNote(data) {
+  const l = data.locate; if (!l) return null;
+  return el("div", { class: "alert" + (l.error ? " bad" : "") }, icon("warn"),
+    el("span", {}, (COGNITION_KINDS[l.kind]?.name || "记录") + " " + shortId(l.id) + (l.error ? " 暂时读不到。" + errorText(l.error) : " 没有找到，可能已被清除或来源已失效。")));
+}
+/** 记录之间的跳转：只链到能在控制台打开的记录 */
+function cognitionLinks(sel) {
+  const links = [];
+  if (sel.goal_id) links.push(linkTo("thinking/goal:" + encodeURIComponent(sel.goal_id), "查看关联目标"));
+  if (sel.model_request_id) links.push(linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看模型调用"));
+  if (sel._kind === "life" && sel.topic_id) links.push(linkTo("life", "查看生活话题"));
+  if (sel._kind === "reflection") links.push(linkTo("life", "查看反思建议"));
+  if (sel._kind === "diary") links.push(linkTo("life", "查看日记"));
+  return links.length ? el("div", { class: "row-gap mt" }, links) : null;
+}
+const STEP_EXEC = { planned: ["待执行", "off"], running: ["执行中", "run"], done: ["已完成，结果已核验", "ok"], failed: ["失败", "bad"],
+  closed: ["已关闭", "off"], discussed: ["只讨论过", "off"], UNKNOWN: ["结果不明", "warn"] };
+const STEP_OP = { read_content: "读取内容", investigate: "调查" };
+function goalStepsView(g) {
+  const steps = g.steps || [], ex = g.execution || {}, [exText, exTone] = STEP_EXEC[ex.state] || ["未记录", "off"];
+  return el("section", { class: "steps-view" }, el("h4", {}, "执行进度"),
+    el("p", { class: "row-gap" }, el("span", { class: "tag " + exTone }, exText), el("span", { class: "note" }, "已核验完成 " + count(g.verified_completed_steps) + " / " + steps.length + " 步")),
+    ex.state === "UNKNOWN" ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "有一步的读取结果不明：读取程序可能已经读过，但没有能核验的回执。不会当作完成，也不会自动重试。")) : null,
+    steps.length ? el("ol", { class: "steps" }, steps.map(st => {
+      const [t, tone] = STEP_EXEC[st.execution?.state] || ["未记录", "off"], receipts = st.execution?.receipts || [];
+      return el("li", {}, el("div", { class: "row-gap" }, el("b", {}, "第 " + st.position + " 步：" + (STEP_OP[st.operation] || "其他操作")), el("span", { class: "tag " + tone }, t), tag(st.state)),
+        el("p", { class: "note" }, "尝试 " + count(st.attempts) + " / " + count(st.max_attempts) + " 次，依据 " + (st.source_event_ids || []).length + " 条来源" + (st.outcome_event_id ? "，结果记录 " + shortId(st.outcome_event_id) : "")),
+        receipts.length ? el("ul", { class: "receipts" }, receipts.map(r => el("li", {}, el("span", { class: "num" }, "读取请求 " + shortId(r.request_id)), tag(r.state),
+          r.attempt_state ? el("span", { class: "note" }, "读取尝试：" + statusOf(r.attempt_state)[0]) : null))) : el("p", { class: "note" }, "还没有执行回执。"),
+        st.execution?.truncated ? el("p", { class: "note" }, "回执较多，只显示 20 条，结果不明的排在前面。") : null);
+    })) : el("p", { class: "note" }, "这个目标没有分步计划。"));
+}
+function lifeDecisionView(sel) {
+  const reason = sel.decision_reason || {};
+  return el("section", { class: "steps-view" }, el("h4", {}, "这次决定"),
+    kv("决定", LIFE_ACTION[sel.choice] || "未记录"), kv("去向", LIFE_DEST[sel.destination] || "未记录"),
+    kv("理由", reason.state === "RECORDED" ? reason.text + (reason.truncated ? "…" : "") : reason.state === "REDACTED" ? "含可能敏感的内容，不显示" : "没有记录理由"),
+    sel.job ? kv("处理任务", sel.job.state === "NOT_RECORDED" ? "未记录" : statusOf(sel.job.state)[0]) : null);
+}
+function cognitionExtra(sel) {
+  return [sel._kind === "goal" ? goalStepsView(sel) : sel._kind === "life" ? lifeDecisionView(sel) : null, cognitionLinks(sel)];
+}
+
+/* 原始推理：只说明有没有、为什么没有，不展示内部字段，也不根据最终结果补写推理 */
+const REASONING_NOTE = {
+  wake: "自主活动调度按规则判断，这一步不调用模型，所以没有推理内容。",
+  nightly: "夜间整理的各阶段只记录状态，阶段里的模型调用可以在“模型调用”里查看用量。",
+  model: "这里是一次模型调用的用量记录，服务商返回的推理字段没有保存。",
+  rem: "REM 只保存私人虚构的元数据，生成时的推理没有保存。",
+};
+function reasoningView(sel, page) {
+  const exposed = page?.reasoning && page.reasoning !== "NOT_EXPOSED";
+  return [el("h3", { class: "dk-title" }, "模型推理诊断"),
+    el("div", { class: "alert" }, icon("warn"), el("span", {}, exposed ? "这类记录带有推理字段，但控制台还没有展示它。" : "这一轮没有可以查看的原始推理：推理内容没有采集或保存。")),
+    el("p", { class: "note" }, "这里只显示服务商实际返回并保存下来的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。"),
+    el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。"),
+    sel.model_request_id ? el("div", { class: "row-gap mt" }, linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看这次模型调用的用量")) : null];
 }
