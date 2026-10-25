@@ -14,10 +14,12 @@ import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
+import companion_delivery_protocol as wire
+
 from .files import MAX_FILE_BYTES, OriginalFile, fetch_file, original_files
 from .images import OriginalImage, fetch_image, original_images, source_url
-from .network import private_http_client
-from .onebot_client import OneBotClient
+from .network import checked_http_client, private_http_client
+from .onebot_client import OneBotClient, bounded_post
 from .spool import encode
 from .voice_media import OriginalRecord, original_records
 from .window import digest
@@ -344,13 +346,18 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
     if hasattr(window, "authority"):
         from .images import upload_original
 
+        async def check_request(_request):
+            await guard()
+
         for image in images[start_slot:]:
             await guard()
             options = {"resolver": image_resolver} if image_resolver is not None else {}
-            result = await upload_original(window, client, event_id, image,
-                resume_claim=resume_claim if image.slot == start_slot else None,
-                progress=lambda state, receipt, slot=image.slot: progress(state, slot, receipt),
-                transport=image_transport, **options)
+            async with checked_http_client(client, check_request) as scoped:
+                result = await upload_original(window, scoped, event_id, image,
+                    resume_claim=resume_claim if image.slot == start_slot else None,
+                    progress=lambda state, receipt, slot=image.slot: progress(state, slot, receipt),
+                    transport=image_transport, **options)
+            await guard()
             await progress("DONE" if image.slot + 1 == len(images) + len(files) + len(records)
                            else "PENDING", image.slot + 1, result)
         for original in files[max(0, start_slot - len(images)):]:
@@ -359,10 +366,12 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
             position = len(images) + original.slot
             await guard()
             options = {"resolver": file_resolver} if file_resolver is not None else {}
-            result = await upload_file(window, client, event_id, original, onebot=protocol,
-                resume_claim=resume_claim if position == start_slot else None,
-                progress=lambda state, receipt, slot=position: progress(state, slot, receipt),
-                transport=file_transport, **options)
+            async with checked_http_client(client, check_request) as scoped:
+                result = await upload_file(window, scoped, event_id, original, onebot=protocol,
+                    resume_claim=resume_claim if position == start_slot else None,
+                    progress=lambda state, receipt, slot=position: progress(state, slot, receipt),
+                    transport=file_transport, **options)
+            await guard()
             await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
                            else "PENDING", position + 1, result)
         for original in records[max(0, start_slot - len(images) - len(files)):]:
@@ -557,6 +566,32 @@ class MediaPump:
             current = _execute(self.window, "SELECT * FROM automatic_media WHERE event_id=?",
                                 (row["event_id"],)).fetchone()
             if not current or current["state"] in TERMINAL:
+                raise SourceCancelled()
+            self.window.verify()
+            source = _execute(self.window,
+                              "SELECT capture_json FROM window_inputs WHERE event_id=?",
+                              (row["event_id"],)).fetchone()
+            if source is None:
+                raise ValueError("OWNER_CAPTURE_REQUIRED")
+            capture = json.loads(source["capture_json"])
+            state = await bounded_post(self.client,
+                "/internal/v1/owner-authority/inputs/state", capture)
+            fields = {"authority", "event_id", "input_sha256", "reply_revision",
+                      "terminal", "state", "unsettled_work", "unsettled_model",
+                      "unsettled_delivery", "work_sha256"}
+            if (not isinstance(state, dict) or set(state) != fields
+                or any(state[key] != capture[key] for key in (
+                    "authority", "event_id", "input_sha256"))
+                or type(state["reply_revision"]) is not int or state["reply_revision"] < 0
+                or state["state"] not in {"PENDING", "COMPLETE", "CANCELLED", "RECALLED"}
+                or any(type(state[key]) is not bool for key in (
+                    "terminal", "unsettled_work", "unsettled_model", "unsettled_delivery"))
+                or not wire.hash_value(state["work_sha256"])):
+                raise ValueError("OWNER_INPUT_STATE_INVALID")
+            self.window.verify()
+            if state["state"] in {"CANCELLED", "RECALLED"}:
+                # Stop this local transfer, preserving the original unsettled Core responsibility.
+                cancel(self.window, row["event_id"], state)
                 raise SourceCancelled()
             media = manifest(self.window, current)
             if (0 <= current["next_slot"] < len(media)

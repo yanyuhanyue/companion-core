@@ -121,8 +121,14 @@ def read(store, settings, capture):
             except (ValueError, TypeError, KeyError):
                 raise CoreError("OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED", 409) from None
         models = [{key: model[key] for key in ("request_id", "state")} for model in models]
-        deliveries = store.rows("SELECT message_id,state,attempt_count,authority_json FROM outbox "
-            "WHERE origin_event_id=? ORDER BY message_id LIMIT ?", (event_id, maximum + 1))
+        # Frozen responsibility survives a changed/null origin pointer. Inspect only
+        # source-linked identity metadata; _deliveries checks the selected original records.
+        deliveries = store.rows("SELECT o.message_id,o.state,o.attempt_count,o.authority_json "
+            "FROM outbox o LEFT JOIN runtime_meta m ON m.key='owner_delivery:' || o.message_id "
+            "WHERE o.origin_event_id=? OR CASE WHEN json_valid(m.value) THEN "
+            "json_extract(m.value,'$.event_id')=? OR "
+            f"json_extract(m.value,'$.job_id') IN ({placeholders or 'NULL'}) ELSE 0 END "
+            "ORDER BY o.message_id LIMIT ?", (event_id, event_id, *ids, maximum + 1))
         _deliveries(store, deliveries, job_map, erased=erased)
         reads = store.rows("SELECT item_id AS id,state FROM content_items "
             "WHERE owner_event_id=? ORDER BY item_id LIMIT ?", (event_id, maximum + 1))
@@ -151,7 +157,8 @@ def read(store, settings, capture):
                 for item in reads)
         unsettled_model = any(item["state"] != "SETTLED" for item in models)
         unsettled_delivery = any(item["state"] not in wire.DELIVERY_TERMINAL for item in deliveries)
-        primary = [job for job in jobs if job["kind"] == ("poke" if native_poke else "chat")]
+        primary = store.rows("SELECT job_id,state,authority_json FROM jobs "
+            "WHERE event_id=? AND kind=? LIMIT 2", (event_id, "poke" if native_poke else "chat"))
         bound = bool(len(primary) == 1
                      and json.loads(primary[0]["authority_json"]) == original.authority)
         suppressed = bool(native_poke and event and saved and not jobs and not deliveries)
@@ -159,11 +166,14 @@ def read(store, settings, capture):
             or unadmitted and not jobs and not deliveries)
             and not (
             unsettled_work or unsettled_model or unsettled_delivery))
+        cancelled = bool(not native_poke and bound and primary[0]["state"] == "CANCELLED")
+        # Source cancellation stops further I/O; only terminal proves all liability is settled.
         return {"authority": original.authority, "event_id": event_id,
             "reply_revision": revision,
             "input_sha256": input_hash, "terminal": terminal,
             "state": "RECALLED" if erased or event and event["redacted"] else (
-                "CANCELLED" if unadmitted and terminal else "COMPLETE" if terminal else "PENDING"),
+                "CANCELLED" if cancelled or unadmitted and terminal
+                else "COMPLETE" if terminal else "PENDING"),
             "unsettled_work": unsettled_work, "unsettled_model": unsettled_model,
             "unsettled_delivery": unsettled_delivery,
             "work_sha256": wire.digest({"event": event, "jobs": jobs, "models": models,
