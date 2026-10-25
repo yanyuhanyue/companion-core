@@ -40,7 +40,19 @@ Bridge 收到 Core 的成功接收或事件已删除回执后，会清除对应�
 
 联合理解的顺序为：批量识图提取线索 → 在批准事实中检索并用 `memory_review` 核对候选 → 将原图、选中的确认记忆和当前问题交给 `chat`。没有检索候选时跳过核对调用；图片线索本身不作为长期记忆证据。
 
-原图仅通过内嵌 base64 传给同一个获准视觉模型。支持单帧 PNG、JPEG、WebP；GIF、动态 WebP 和 APNG 经已有帧数、像素与字节限制校验后，生成有序抽样拼图并标明抽样范围。图片子类型和 `summary` 不替代实际字节的格式校验，也不成为视觉证据。API 与聊天 worker 之间的原图暂存在数据库旁的私有目录，有效期为上传后 300 秒；事件正文、数据库和账本只保留必要的来源、摘要与状态，不存原图字节或 QQ 签名 URL。最终调用前重新核对原图哈希、隐私版本和到期时间。成功、失败、取消、停止窗口和删除来源会移除暂存文件；启动及 worker 运行时清理到期文件，删除回放也处理旧备份旁残留的原图。
+原图仅通过内嵌 base64 传给同一个获准视觉模型。支持单帧 PNG、JPEG、WebP；GIF、动态 WebP 和 APNG 经已有帧数、像素与字节限制校验后，生成有序抽样拼图并标明抽样范围。图片子类型和 `summary` 不替代实际字节的格式校验，也不成为视觉证据。API 与聊天 worker 之间的原图暂存在数据库旁的私有目录，有效期为上传后 300 秒；事件正文、数据库和账本只保留必要的来源、摘要与状态，不存原图字节或 QQ 签名 URL。最终调用前重新核对原图哈希、隐私版本和到期时间。原生主人原图在上述期限内可供获准的同会话历史使用；其他原图按任务终态清理。启动及 worker 运行时清理到期文件，删除回放也处理旧备份旁残留的原图。
+
+原生主人连续输入中，新文字替换前一条的回复任务，原媒体来源仍由其原签名、租约和保留期限约束。
+先发图片、再补文字时，后一个任务在获准历史范围内等待前图完成，并把仍有效的原图放回所属的
+主人消息中；只为最新输入生成回复。Bridge 不把旧聊天任务的 `CANCELLED` 当成图片或文件来源撤回。
+真正撤回、擦除、授权停止和原租约到期仍阻止后续下载或上传。
+
+图片或文件的普通下载失败只结束该附件的处理。Core 对可证明未成功保存原始附件、未启动解析或模型的
+过期原生下载使用既有 `FAILED` 状态，保留原租约、流量预留和费用记录；Bridge 根据原 slot 的
+Core 终态推进队列，后续附件和文字继续处理。队列 `DONE` 表示本地处理已结束，各附件的成功或
+失败仍由 Core 的状态说明。恢复时只查询原状态，不重新领取下载额度、重放 GET 或重复上传。
+已经发生但结果不确定的处理保留原责任；鉴权、签名和来源绑定异常仍使 Bridge 停止。
+安全日志使用 `media_unavailable`，嵌套异常保留已校验的阶段和原因码，不输出图片 URL 或正文。
 
 常规聊天启用后台记忆提取时，应同时运行 `life` profile，由现有 `companion-life-worker` 执行提取。原批准事实范围只读取批准事实；私人陪伴范围可从主人原始文字自动提取记忆。图片参与检索不会使图中文字成为主人事实证据。
 
@@ -53,5 +65,9 @@ Bridge 收到 Core 的成功接收或事件已删除回执后，会清除对应�
 2026-10-25 核对同一固定 SnowLuma 版本的 [image 消息转换](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/event-converter/element-codecs.ts)：普通图片投影为 `url/file/sub_type/summary`，闪照另带 `type`；[收藏表情测试](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/protocol/tests/highway/image-sticker.test.ts)明确使用 `subType=1`。Bridge 只扩展整数允许集到 `0/1/11`，仍限制字段和 QQ CDN 主机、固定解析到公网 IP 的 HTTPS 请求、禁止重定向、体积和格式。原始段摘要仍绑定完整来源，未支持图片不会获取下载租约。
 
 故障隔离参考 DSH QQ 固定 `c8b9158` 的[逐附件下载](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/attachment.ts)与[正文和附件装配](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/inbound.ts)：单个附件不支持时仍保留当前正文及附件缺失标记。本项目复用既有 `UNSUPPORTED` 投影与 OwnerAuthority 签名队列，下载约束继续由自己的来源、公网地址和签名边界负责。
+
+常驻循环遵循 [Python 3.12 TaskGroup 的取消语义](https://docs.python.org/3.12/library/asyncio-task.html#task-groups)：
+子任务未处理的失败会取消同组任务。因此普通附件下载失败在原媒体任务内收口，保留 Core 终态证据；
+真正的授权或完整性异常继续向外传播，停止同组执行。
 
 本轮验证使用合成消息、认证本地 HTTP/WebSocket、真实数据库与文件、模拟模型和网络传输，覆盖幂等、费用、来源漂移、删除回放及停止窗口。未调用真实 QQ 或付费模型；实际正文可取得率和视觉回答质量仍需在已配置运行环境验证。

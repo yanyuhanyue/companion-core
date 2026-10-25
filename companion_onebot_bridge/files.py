@@ -245,10 +245,24 @@ async def fetch_file(original, max_bytes, *, onebot, check, transport=None,
     delegate = transport or httpx.AsyncHTTPTransport(trust_env=False, retries=0)
     response = None
     delegate_closed = False
+    guard_error = None
+    guard_active = False
+
+    async def checked():
+        nonlocal guard_error, guard_active
+        guard_active = True
+        try:
+            await check()
+        except Exception as error:
+            guard_error = error
+            raise
+        else:
+            guard_active = False
+
     quiet = _private_download.set(True)
     try:
         async with asyncio.timeout(TIMEOUT_SECONDS):
-            target = _destination(await _native_url(original, onebot, check, synthetic),
+            target = _destination(await _native_url(original, onebot, checked, synthetic),
                                   allowed_hosts, allowed_ports)
             try:
                 ipaddress.ip_address(target.host)
@@ -264,8 +278,8 @@ async def fetch_file(original, max_bytes, *, onebot, check, transport=None,
                 addresses = [target.host]
             if not addresses or any(not global_address(address) for address in addresses):
                 raise ValueError("FILE_NONPUBLIC_ADDRESS")
-            response = await _get(delegate, target, addresses[0], check)
-            await check()
+            response = await _get(delegate, target, addresses[0], checked)
+            await checked()
             if 300 <= response.status_code <= 399:
                 raise ValueError("FILE_REDIRECT_REFUSED")
             if response.status_code != 200:
@@ -295,7 +309,7 @@ async def fetch_file(original, max_bytes, *, onebot, check, transport=None,
             if transport is None:
                 await delegate.aclose()
                 delegate_closed = True
-            await check()
+            await checked()
             if not body:
                 raise ValueError("FILE_EMPTY")
             if ((declared is not None and len(body) != declared)
@@ -303,12 +317,18 @@ async def fetch_file(original, max_bytes, *, onebot, check, transport=None,
                 raise ValueError("FILE_SIZE_MISMATCH")
             data = bytes(body)
             return DownloadedFile(original, data, mime, hashlib.sha256(data).hexdigest())
-    except (TimeoutError, httpx.TimeoutException):
-        raise ValueError("FILE_FETCH_TIMEOUT") from None
-    except httpx.ConnectError:
-        raise ValueError("FILE_CONNECTION_FAILED") from None
-    except (httpx.HTTPError, OSError):
-        raise ValueError("FILE_FETCH_FAILED") from None
+    except (httpx.HTTPError, OSError) as error:
+        if guard_error is not None:
+            raise guard_error from None
+        if guard_active:
+            from .capture import capture_diagnostic
+
+            error.capture_diagnostic = capture_diagnostic(error, "core_check")
+            raise
+        code = ("FILE_FETCH_TIMEOUT" if isinstance(error, (TimeoutError, httpx.TimeoutException))
+                else "FILE_CONNECTION_FAILED" if isinstance(error, httpx.ConnectError)
+                else "FILE_FETCH_FAILED")
+        raise ValueError(code) from None
     finally:
         try:
             if response is not None:

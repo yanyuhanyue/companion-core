@@ -237,7 +237,7 @@ async def run(config):
             from .pending_media import MediaPump
             from .profile_probe import ProfilePump
 
-            media = MediaPump(runtime, core, protocol=onebot)
+            media = MediaPump(runtime, core, protocol=onebot, metrics=metrics)
             profile = ProfilePump(runtime, core, protocol)
             memes = MemePump(runtime, core)
             status = await runtime.probe(core, protocol)

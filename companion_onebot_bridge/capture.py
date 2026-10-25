@@ -49,6 +49,9 @@ CAPTURE_PHASES = frozenset(
         "image_upload",
         "file_download",
         "file_upload",
+        "voice_download",
+        "voice_decode",
+        "voice_upload",
     }
 )
 CAPTURE_REASONS = frozenset(
@@ -184,6 +187,10 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
 
 
 def diagnostic_fields(error):
+    if isinstance(error, BaseExceptionGroup):
+        for child in error.exceptions:
+            if fields := diagnostic_fields(child):
+                return fields
     value = getattr(error, "capture_diagnostic", None)
     if (
         isinstance(value, CaptureDiagnostic)

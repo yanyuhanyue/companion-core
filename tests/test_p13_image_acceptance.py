@@ -22,6 +22,8 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
     class PartialBody(httpx.AsyncByteStream):
         async def __aiter__(self):
             yield png()[:16]
+            core.clock.advance(16)
+            await core.content.run_once()
             if failure == "read_timeout":
                 raise httpx.ReadTimeout(URL)
             # The actual stream exceeds the approved 50,000 bytes, despite a small header.
@@ -54,12 +56,10 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
         ):
             await active.capture()
             await active.flush()
-            with pytest.raises(ValueError, match=(
-                "IMAGE_FETCH_FAILED" if failure == "read_timeout" else "IMAGE_TOO_LARGE"
-            )):
-                await upload(active, transport=httpx.MockTransport(cdn), resolver=resolve)
+            await upload(active, transport=httpx.MockTransport(cdn), resolver=resolve)
             assert active.db.execute("SELECT state FROM automatic_media").fetchone()[0] == (
-                "DOWNLOADING")
+                "DONE")
+            assert core.store.one("SELECT state FROM content_items")["state"] == "FAILED"
             assert len(downloads) == 1 and closed == [True]
             assert calls == sends == []
             assert not core.store.one("SELECT 1 FROM model_usage")
@@ -69,8 +69,7 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
             assert core.store.one("SELECT COUNT(*) n FROM content_items")["n"] == 1
             core.clock.advance(181)
             active.restart()
-            with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                await upload(active, transport=httpx.MockTransport(cdn), resolver=resolve)
+            await upload(active, transport=httpx.MockTransport(cdn), resolver=resolve)
             assert len(downloads) == 1 and calls == sends == []
 
     run(scenario())

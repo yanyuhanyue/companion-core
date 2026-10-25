@@ -1,5 +1,6 @@
 """No CDN/socket/provider I/O: raw image source fixtures and HTTP MockTransport."""
 
+import asyncio
 import logging
 
 import httpx
@@ -10,6 +11,43 @@ from companion_onebot_bridge.window import digest
 from tests.conftest import run
 
 URL = "https://multimedia.nt.qq.com.cn/download?appid=1407&rkey=synthetic-private-reference"
+
+
+@pytest.mark.parametrize("failure", ["authority", "transport", "storage"])
+def test_core_guard_errors_are_not_relabelled_as_download_failure(failure):
+    error = (httpx.HTTPStatusError("denied", request=httpx.Request("POST", "https://core/check"),
+                                  response=httpx.Response(403)) if failure == "authority" else
+             httpx.ReadTimeout("Core unavailable") if failure == "transport" else
+             OSError("local custody unavailable"))
+
+    async def resolve(*_):
+        return ["1.1.1.1"]
+
+    async def check():
+        raise error
+
+    with pytest.raises(type(error)) as caught:
+        run(images.fetch_image(images.original_images([image_segment()])[0], 100,
+            check=check, resolver=resolve,
+            transport=httpx.MockTransport(lambda _: pytest.fail("Guard rejected before GET"))))
+    assert caught.value is error
+
+
+def test_timeout_while_guard_is_suspended_remains_core_check_failure(monkeypatch):
+    timeout = asyncio.timeout
+    monkeypatch.setattr(images.asyncio, "timeout", lambda _: timeout(0.01))
+
+    async def resolve(*_):
+        return ["1.1.1.1"]
+
+    async def check():
+        await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError) as caught:
+        run(images.fetch_image(images.original_images([image_segment()])[0], 100,
+            check=check, resolver=resolve,
+            transport=httpx.MockTransport(lambda _: pytest.fail("Guard did not complete"))))
+    assert caught.value.capture_diagnostic.phase == "core_check"
 
 
 def test_real_httpcore_trace_does_not_log_signed_redirect_header(caplog):

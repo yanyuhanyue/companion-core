@@ -27,6 +27,14 @@ from .window import digest
 DOMAIN = b"companion-core/onebot-owner-media-queue/v1\x00"
 OWNER_DOMAIN = b"companion-core/onebot-owner-media-queue/v2\x00"
 TERMINAL = {"DONE", "CANCELLED"}
+DOWNLOAD_FAILURES = frozenset({
+    "IMAGE_CONNECTION_FAILED", "IMAGE_FETCH_FAILED", "IMAGE_FETCH_REJECTED",
+    "IMAGE_ENCODING_UNSUPPORTED", "IMAGE_MIME_UNSUPPORTED", "IMAGE_SIZE_INVALID",
+    "IMAGE_TOO_LARGE", "IMAGE_EMPTY", "FILE_FETCH_TIMEOUT", "FILE_CONNECTION_FAILED",
+    "FILE_FETCH_FAILED", "FILE_FETCH_REJECTED", "FILE_REDIRECT_REFUSED",
+    "FILE_ENCODING_UNSUPPORTED", "FILE_MIME_UNSUPPORTED", "FILE_SIZE_INVALID",
+    "FILE_TOO_LARGE", "FILE_EMPTY", "FILE_SIZE_MISMATCH", "FILE_URL_RESOLUTION_FAILED",
+})
 
 
 def _execute(window, sql, args=()):
@@ -350,13 +358,24 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
         async def check_request(_request):
             await guard()
 
+        async def image_progress(state, receipt, slot):
+            set_phase({"CLAIMING": "core_check", "DOWNLOADING": "image_download",
+                       "UPLOADING": "image_upload"}[state])
+            await progress(state, slot, receipt)
+
+        async def file_progress(state, receipt, slot):
+            set_phase({"CLAIMING": "core_check", "DOWNLOADING": "file_download",
+                       "UPLOADING": "file_upload"}[state])
+            await progress(state, slot, receipt)
+
         for image in images[start_slot:]:
             await guard()
             options = {"resolver": image_resolver} if image_resolver is not None else {}
             async with checked_http_client(client, check_request) as scoped:
                 result = await upload_original(window, scoped, event_id, image,
                     resume_claim=resume_claim if image.slot == start_slot else None,
-                    progress=lambda state, receipt, slot=image.slot: progress(state, slot, receipt),
+                    progress=lambda state, receipt, slot=image.slot:
+                        image_progress(state, receipt, slot),
                     transport=image_transport, **options)
             await guard()
             await progress("DONE" if image.slot + 1 == len(images) + len(files) + len(records)
@@ -370,7 +389,8 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
             async with checked_http_client(client, check_request) as scoped:
                 result = await upload_file(window, scoped, event_id, original, onebot=protocol,
                     resume_claim=resume_claim if position == start_slot else None,
-                    progress=lambda state, receipt, slot=position: progress(state, slot, receipt),
+                    progress=lambda state, receipt, slot=position:
+                        file_progress(state, receipt, slot),
                     transport=file_transport, **options)
             await guard()
             await progress("DONE" if position + 1 == len(images) + len(files) + len(records)
@@ -555,8 +575,9 @@ class MediaPump:
     def __init__(self, window, client, *, image_transport=None, image_resolver=None,
                  protocol=None, file_transport=None, file_resolver=None,
                  voice_transport=None, voice_resolver=None,
-                 set_phase=lambda phase: None):
+                 set_phase=lambda phase: None, metrics=None):
         self.window, self.client, self.task = window, client, None
+        self.metrics = metrics
         self.image_options = {"image_transport": image_transport, "image_resolver": image_resolver}
         self.file_options = {"protocol": protocol, "file_transport": file_transport,
                              "file_resolver": file_resolver, "voice_transport": voice_transport,
@@ -590,14 +611,18 @@ class MediaPump:
                 or not wire.hash_value(state["work_sha256"])):
                 raise ValueError("OWNER_INPUT_STATE_INVALID")
             self.window.verify()
-            if state["state"] in {"CANCELLED", "RECALLED"}:
+            media = manifest(self.window, current)
+            original = (media[current["next_slot"]]
+                        if 0 <= current["next_slot"] < len(media) else None)
+            if state["state"] == "RECALLED" or (state["state"] == "CANCELLED"
+                and not isinstance(original, (OriginalImage, OriginalFile))):
                 # Stop this local transfer, preserving the original unsettled Core responsibility.
                 cancel(self.window, row["event_id"], state)
                 raise SourceCancelled()
-            media = manifest(self.window, current)
-            if (0 <= current["next_slot"] < len(media)
-                and isinstance(media[current["next_slot"]], OriginalRecord)):
+            if isinstance(original, OriginalRecord):
                 return await self.window.check(self.client, purpose="voice")
+            # A new text turn cancels the old chat job, not its admitted original.
+            # Core's source/status and upload lease still decide whether bytes may be used.
             return await self.status(row["event_id"])
         from .continuous import require_scope
 
@@ -640,13 +665,85 @@ class MediaPump:
                         raise ValueError("INVALID_CORE_RECEIPT")
         return decode(bytes(data), 65536)
 
+    @staticmethod
+    def media_state(status, original):
+        """Read one exact original slot from the authenticated event status response."""
+        kind = "qq_file" if isinstance(original, OriginalFile) else "qq_image"
+        if (not isinstance(status, dict) or set(status) != {"items", "pending", "wait_until"}
+            or not isinstance(status["items"], list) or type(status["pending"]) is not bool
+            or status["wait_until"] is not None and not isinstance(status["wait_until"], str)):
+            raise ValueError("INVALID_CORE_RECEIPT")
+        selected = []
+        for item in status["items"]:
+            if not isinstance(item, dict):
+                raise ValueError("INVALID_CORE_RECEIPT")
+            if item.get("kind") != kind or item.get("slot") != original.slot:
+                continue
+            if (set(item) != {"kind", "slot", "state", "error_code"}
+                or type(item["slot"]) is not int
+                or item["state"] not in {"WAITING", "QUEUED", "FETCHING", "RUNNING",
+                                         "STAGED", "SUCCEEDED", "FAILED", "UNKNOWN", "ERASED"}
+                or item["error_code"] is not None and (not isinstance(item["error_code"], str)
+                    or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,99}", item["error_code"]))):
+                raise ValueError("INVALID_CORE_RECEIPT")
+            selected.append(item["state"])
+        if len(selected) != 1:
+            raise ValueError("INVALID_CORE_RECEIPT")
+        return selected[0]
+
+    async def reconcile_media(self, row, original, total, status=None):
+        """Observe the original lease outcome; never replay a download, claim or upload."""
+        async with asyncio.timeout(300):
+            while True:
+                if status is None:
+                    status = await self.check_source(row)
+                state = self.media_state(status, original)
+                accepted = ({"QUEUED", "RUNNING", "SUCCEEDED"}
+                            if isinstance(original, OriginalFile) else {"STAGED", "SUCCEEDED"})
+                failed = state == "FAILED"
+                if failed or row["state"] == "UPLOADING" and state in accepted:
+                    next_slot = row["next_slot"] + 1
+                    transition(self.window, row["event_id"],
+                        "DONE" if next_slot == total else "PENDING", next_slot, status)
+                    if failed and self.metrics is not None:
+                        self.metrics.emit("media_unavailable")
+                    return
+                if state != "FETCHING":
+                    raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
+                await asyncio.sleep(0.25)
+                status = None
+
     async def execute(self, row):
+        phase = "core_check"
+
+        def set_phase(value):
+            nonlocal phase
+            phase = value
+            self.file_options["set_phase"](value)
+
+        options = {**self.file_options, "set_phase": set_phase}
         try:
-            await self.check_source(row)
+            status = await self.check_source(row)
             media = manifest(self.window, row)
             images = [item for item in media if isinstance(item, OriginalImage)]
             files = [item for item in media if isinstance(item, OriginalFile)]
             records = [item for item in media if isinstance(item, OriginalRecord)]
+            if not 0 <= row["next_slot"] < len(media):
+                raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
+            original = media[row["next_slot"]]
+            if hasattr(self.window, "authority") and isinstance(
+                original, (OriginalImage, OriginalFile)
+            ):
+                state = self.media_state(status, original)
+                if row["state"] == "CLAIMING" and state == "WAITING":
+                    # Core proves this claim never committed; no existing lease is renewed.
+                    transition(self.window, row["event_id"], "PENDING", row["next_slot"], status)
+                    return
+                if state == "FAILED" or row["state"] != "PENDING":
+                    await self.reconcile_media(row, original, len(media), status)
+                    return
+                if state != "WAITING":
+                    raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
             if row["state"] == "DOWNLOADING":
                 if not 0 <= row["next_slot"] < len(media):
                     raise ValueError("AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED")
@@ -664,7 +761,7 @@ class MediaPump:
                     check=lambda: self.check_source(row),
                     stage=lambda state, slot, receipt: transition(
                         self.window, row["event_id"], state, slot, receipt),
-                    **self.image_options, **self.file_options)
+                    **self.image_options, **options)
                 return
             if row["state"] != "PENDING":
                 if not 0 <= row["next_slot"] < len(media):
@@ -710,17 +807,41 @@ class MediaPump:
                 start_slot=row["next_slot"], check=lambda: self.check_source(row),
                 stage=lambda state, slot, receipt: transition(
                     self.window, row["event_id"], state, slot, receipt),
-                **self.image_options, **self.file_options)
+                **self.image_options, **options)
         except SourceCancelled:
             return
-        except (httpx.HTTPError, ValueError):
-            # A failed source check proves cancellation, not a successful upload.
-            # Other errors retain their exact stage and remain fail-closed.
+        except Exception as error:
             try:
-                await self.check_source(row)
+                if not isinstance(error, (httpx.HTTPError, ValueError)):
+                    raise
+                status = await self.check_source(row)
+                if (hasattr(self.window, "authority") and isinstance(error, ValueError)
+                    and len(error.args) == 1 and error.args[0] in DOWNLOAD_FAILURES):
+                    current = _execute(self.window, "SELECT * FROM automatic_media "
+                        "WHERE event_id=?", (row["event_id"],)).fetchone()
+                    originals = manifest(self.window, current)
+                    position = current["next_slot"]
+                    if (current["state"] == "DOWNLOADING" and 0 <= position < len(originals)
+                        and isinstance(originals[position], (OriginalImage, OriginalFile))):
+                        from .continuous import emit
+
+                        try:
+                            emit("media_download_failed", error_code=error.args[0])
+                        except OSError:
+                            pass  # Diagnostics cannot change the retained transfer outcome.
+                        phase = "core_check"
+                        await self.reconcile_media(current, originals[position],
+                                                   len(originals), status)
+                        return
+                raise
             except SourceCancelled:
                 return
-            raise
+            except Exception as failure:
+                from .capture import capture_diagnostic
+
+                if not hasattr(failure, "capture_diagnostic"):
+                    failure.capture_diagnostic = capture_diagnostic(failure, phase)
+                raise
 
     def tick(self):
         if self.task is not None:

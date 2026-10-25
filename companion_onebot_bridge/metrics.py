@@ -17,6 +17,7 @@ STAGES = {
     "ws_disconnected",
     "core_unavailable",
     "send_unavailable",
+    "media_unavailable",
     "t_bridge_send_ack",
 }
 

@@ -254,6 +254,60 @@ def _failed(service, row, code, *, state="FAILED"):
     _discard(service, row["item_id"])
 
 
+def expire_downloads(service, *, config=None):
+    """Retire only expired native file claims with proof that no bytes were staged.
+
+    Keep the original lease and traffic reservation. Parser/upload ambiguity and
+    legacy claims retain their existing recovery path; this never grants new I/O.
+    """
+    from companion import owner_input
+    from companion.owner_input_state import _source
+
+    config = _config(service, config)
+    s, now = service.store, service.clock()
+    completed = False
+    with _transaction(s):
+        rows = s.rows(
+            "SELECT c.*,m.value AS input_receipt FROM content_items c JOIN runtime_meta m "
+            "ON m.key=? || c.owner_event_id WHERE c.kind='qq_file' AND c.redacted=0 "
+            "AND c.state='FETCHING' "
+            "AND c.lease_until<=? AND c.lease_token IS NOT NULL AND c.reserved_bytes>0 "
+            "AND c.usage_request_id IS NULL AND c.media_sha256='' AND c.fingerprint='' "
+            "AND c.output_event_id IS NULL AND NOT EXISTS "
+            "(SELECT 1 FROM runtime_meta p WHERE p.key=? || c.item_id)",
+            (owner_input.INPUT, now, qq_files.STAGED),
+        )
+        for row in rows:
+            try:
+                saved = json.loads(row["input_receipt"])
+                capture, original = owner_input.verify(s, service.settings, saved["capture"])
+                _source(s, capture, saved, original.policy.owner_qq_id)
+                event = s.one("SELECT body_json FROM events WHERE event_id=?",
+                              (row["owner_event_id"],))
+                files = qq_files.manifest(json.loads(event["body_json"]))
+                jobs = s.rows("SELECT authority_json FROM jobs WHERE event_id=? AND kind='chat'",
+                              (row["owner_event_id"],))
+                if (capture.event_id != row["owner_event_id"]
+                    or "file" not in original.policy.purposes or not files
+                    or len(jobs) != 1 or json.loads(jobs[0]["authority_json"]) != capture.authority
+                    or type(saved.get("privacy_epoch")) is not int
+                    or not 0 <= saved["privacy_epoch"] <= row["captured_privacy_epoch"] <= epoch(s)
+                    or not re.fullmatch(r"content_lease_[a-f0-9]{32}", row["lease_token"])):
+                    continue
+                snapshot = _snapshot(row, _original(files, row), config)
+                if (snapshot["mime_type"] or snapshot["actual_bytes"]
+                    or row["reserved_bytes"] != snapshot["max_bytes"]
+                    or image_spool._path(s, row["item_id"]).exists()):
+                    continue
+            except (CoreError, ValueError, KeyError, TypeError, OSError):
+                continue
+            s.execute("UPDATE content_items SET state='FAILED',"
+                      "error_code='PRIVATE_FILE_DOWNLOAD_EXPIRED',updated_at=? WHERE item_id=?",
+                      (now, row["item_id"]))
+            completed = True
+    return completed
+
+
 def _record(service, row, snapshot, result, config):
     from companion.observation import ObservationEvent, ObservationPayload
 
@@ -286,6 +340,8 @@ async def run_file_once(service, *, config=None, parse=None):
     config = _config(service, config)
     if not config.enabled:
         return False
+    if expire_downloads(service, config=config):
+        return True
     s, now = service.store, service.clock()
     with _transaction(s):
         lost = s.one("SELECT * FROM content_items WHERE kind='qq_file' AND redacted=0 "
@@ -293,7 +349,17 @@ async def run_file_once(service, *, config=None, parse=None):
                      "ORDER BY rowid LIMIT 1",
                      (now,))
         if lost:
-            _failed(service, lost, "PRIVATE_FILE_PROCESSOR_LOST", state="UNKNOWN")
+            if lost["state"] == "FETCHING" and s.one(
+                "SELECT 1 FROM runtime_meta WHERE key=?", ("owner_input:" + lost["owner_event_id"],)
+            ):
+                # Expiry could not prove a pure native download. Keep original
+                # lease/proof/accounting metadata; normal spool cleanup still
+                # removes UNKNOWN bytes without extending their retention.
+                s.execute("UPDATE content_items SET state='UNKNOWN',"
+                          "error_code='PRIVATE_FILE_PROCESSOR_LOST',updated_at=? WHERE item_id=?",
+                          (now, lost["item_id"]))
+            else:
+                _failed(service, lost, "PRIVATE_FILE_PROCESSOR_LOST", state="UNKNOWN")
             return True
         row = s.one("SELECT * FROM content_items WHERE kind='qq_file' AND state='QUEUED' "
                     "AND redacted=0 ORDER BY rowid LIMIT 1")

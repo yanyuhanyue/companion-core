@@ -43,7 +43,7 @@ def test_normalized_images_preserve_slots_positions_and_owner_question():
 @pytest.mark.parametrize("count, failure", [
     (2, None), (7, None), (3, "second"), (2, "policy"),
 ])
-def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
+def test_authenticated_batch_downloads_once_in_order_and_isolates_download_failure(
     core, tmp_path, count, failure,
 ):
     downloads, uploads, calls = [], [], []
@@ -67,10 +67,13 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
         assert (host, port) == ("gchat.qpic.cn", 443)
         return ["1.1.1.1"]
 
-    def cdn(request):
+    async def cdn(request):
         index = len(downloads)
         assert request.url.path == f"/synthetic-{index}.png"
         downloads.append(request)
+        if failure == "second" and index == 1:
+            core.clock.advance(16)
+            await core.content.run_once()
         return httpx.Response(
             404 if failure and index == 1 else 200,
             content=data[index], headers={"Content-Type": "image/png"},
@@ -105,7 +108,9 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
                 active.client.event_hooks["response"].append(checked)
             async def observe_upload(request):
                 if request.url.path.endswith("/image"):
-                    index = len(uploads)
+                    slots = [slot for slot in range(count)
+                             if not (failure == "second" and slot == 1)]
+                    index = slots[len(uploads)]
                     assert request.headers["X-Content-Key"] == f"image:{index}"
                     assert request.content == data[index]
                     proof = json.loads(request.headers["X-Content-Proof"])
@@ -121,26 +126,21 @@ def test_authenticated_batch_downloads_once_in_order_and_stops_on_failure(
                 assert not core.store.one("SELECT 1 FROM model_usage")
             else:
                 await active.flush()
-                operation = upload(active, resolver=resolve, transport=httpx.MockTransport(cdn))
-                if failure:
-                    with pytest.raises(ValueError, match="IMAGE_FETCH_REJECTED"):
-                        await operation
-                    assert len(downloads) == 2 and len(uploads) == 1
-                    assert not calls and not core.store.one("SELECT 1 FROM model_usage")
-                    assert not core.store.one("SELECT 1 FROM outbox")
-                else:
-                    await operation
-                    assert len(downloads) == len(uploads) == count and calls == []
-                    assert not core.store.one("SELECT 1 FROM model_usage")
-                    assert await core.run_once()
-                    assert len(calls) == 1
-                    parts = [part for message in calls[0]["messages"]
-                             if isinstance(message["content"], list) for part in message["content"]]
-                    assert len([part for part in parts if part["type"] == "image_url"]) == count
-                    assert [row["state"] for row in core.store.rows(
-                        "SELECT state FROM content_items ORDER BY slot")] == ["SUCCEEDED"] * count
-                    assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
-                    assert core.store.one("SELECT state FROM outbox")["state"] == "PENDING"
+                await upload(active, resolver=resolve, transport=httpx.MockTransport(cdn))
+                accepted = count - int(failure == "second")
+                assert len(downloads) == count and len(uploads) == accepted and calls == []
+                assert not core.store.one("SELECT 1 FROM model_usage")
+                assert await core.run_once()
+                assert len(calls) == 1
+                parts = [part for message in calls[0]["messages"]
+                         if isinstance(message["content"], list) for part in message["content"]]
+                assert len([part for part in parts if part["type"] == "image_url"]) == accepted
+                assert [row["state"] for row in core.store.rows(
+                    "SELECT state FROM content_items ORDER BY slot")] == [
+                        "FAILED" if failure == "second" and slot == 1 else "SUCCEEDED"
+                        for slot in range(count)]
+                assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 1
+                assert core.store.one("SELECT state FROM outbox")["state"] == "PENDING"
             assert not sends
 
     run(scenario())

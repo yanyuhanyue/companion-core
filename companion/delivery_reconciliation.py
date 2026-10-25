@@ -605,6 +605,11 @@ def prepare(store, settings, proof, now):
             custody = _custody(store, proof["message_id"])
             if custody is None:
                 raise CoreError("DELIVERY_RECONCILIATION_SOURCE_REQUIRED", 409)
+            from companion import owner_delivery_no_io
+
+            if owner_delivery_no_io.candidate(store, proof):
+                result = owner_delivery_no_io.prepare(store, custody, proof, now)
+                return {"state": "NOT_SENT", "message_id": proof["message_id"], "receipt": result}
             _ready(store, custody, proof, now)
             existing = _meta(store, PREPARED + proof["message_id"])
             if existing is not None and existing != proof:

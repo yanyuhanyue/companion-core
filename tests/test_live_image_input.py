@@ -248,10 +248,12 @@ def test_native_image_intake_failure_retains_source_and_one_shot_accounting(
                     monkeypatch.setattr(budget, "reserve", refused)
                 assert await core.run_once()
             elif failure == "dns_stop":
-                await upload(active, transport=httpx.MockTransport(cdn), resolver=dns)
-                assert active.runtime.db.execute(
-                    "SELECT state,manifest_json FROM automatic_media").fetchone() == (
-                        "CANCELLED", None)
+                with pytest.raises(httpx.HTTPStatusError) as stopped:
+                    await upload(active, transport=httpx.MockTransport(cdn), resolver=dns)
+                assert stopped.value.response.status_code == 403
+                state, manifest = active.runtime.db.execute(
+                    "SELECT state,manifest_json FROM automatic_media").fetchone()
+                assert state == "DOWNLOADING" and manifest is not None
             else:
                 with pytest.raises((ValueError, httpx.HTTPStatusError, CoreError)):
                     await upload(active, transport=httpx.MockTransport(cdn), resolver=dns)

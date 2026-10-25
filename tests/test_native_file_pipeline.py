@@ -127,6 +127,8 @@ def test_native_file_bridge_queue_recovery(core, tmp_path, recovery):
                     assert response.status_code == 200, response.text
                     original_claim = response.json()
                     pending_media.transition(runtime, event_id, "DOWNLOADING", 0, original_claim)
+                    core.clock.advance(core.settings.private_files.upload_lease_seconds + 1)
+                    assert await content_files.run_file_once(core.content)
             finally:
                 spool.close()
 
@@ -183,13 +185,15 @@ def test_native_file_bridge_queue_recovery(core, tmp_path, recovery):
                 assert row(runtime)["state"] == "DONE"
                 runtime.verify()
                 assert len(claims) == (0 if recovery == "downloading" else 1)
-                assert len(uploads) == len(lookups) == len(downloads) == 1
+                assert len(uploads) == len(lookups) == len(downloads) == (
+                    0 if recovery == "downloading" else 1)
                 item = core.store.one("SELECT * FROM content_items WHERE kind='qq_file'")
                 if recovery == "downloading":
-                    saved = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
-                        ("live_text_file_upload:" + item["item_id"],))["value"])
-                    assert saved["lease_token"] == original_claim["lease_token"]
-                assert item["state"] == "QUEUED"
+                    assert item["lease_token"] == original_claim["lease_token"]
+                    assert item["state"] == "FAILED"
+                    assert item["error_code"] == "PRIVATE_FILE_DOWNLOAD_EXPIRED"
+                else:
+                    assert item["state"] == "QUEUED"
             finally:
                 spool.close()
     run(scenario())

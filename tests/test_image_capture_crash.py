@@ -146,11 +146,12 @@ def test_child_exit_before_reserve_keeps_one_shot_content_custody(
                     core.clock.now = (datetime.fromisoformat(item["lease_until"])
                                       + timedelta(seconds=1))
                     await core.content.run_once()
-                    assert core.store.one("SELECT state FROM content_items")["state"] == "UNKNOWN"
+                    assert core.store.one("SELECT state FROM content_items")["state"] == "FAILED"
                     recovery.tick()
-                    with pytest.raises(ValueError, match="AUTOMATIC_MEDIA_RECONCILIATION_REQUIRED"):
-                        await recovery.task
-                    with pytest.raises(CoreError, match="CONTENT_IMAGE_ALREADY_UNKNOWN"):
+                    await recovery.task
+                    assert active.db.execute(
+                        "SELECT state FROM automatic_media").fetchone()[0] == "DONE"
+                    with pytest.raises(CoreError, match="CONTENT_IMAGE_ALREADY_FAILED"):
                         core.content.claim_upload(item["owner_event_id"], "image:0",
                                                   records[1]["proof"]["source_sha256"])
                     assert core.store.rows("SELECT * FROM captured_images") == []

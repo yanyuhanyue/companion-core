@@ -47,6 +47,7 @@ UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v1\x00"
 ACTION = "/get_record"
 PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
 MAX_AUDIO_BYTES = 8_000_000
+DOWNLOAD_TIMEOUT_SECONDS = 10
 MIMES = frozenset({
     "application/octet-stream", "audio/wav", "audio/x-wav", "audio/amr", "audio/amr-wb",
     "audio/silk", "audio/x-silk", "audio/mpeg", "audio/mp3", "audio/ogg", "application/ogg",
@@ -278,16 +279,26 @@ async def fetch_record(original, max_bytes=MAX_AUDIO_BYTES, *, onebot, check, tr
         or type(synthetic) is not bool):
         raise ValueError("VOICE_DOWNLOAD_GRANT_INVALID")
     _integer(max_bytes, 1, MAX_AUDIO_BYTES)
+    guard_error = None
+    guard_active = False
 
     async def guard():
-        if await check() is not None:
-            raise ValueError("VOICE_AUTHORIZATION_INVALID")
+        nonlocal guard_error, guard_active
+        guard_active = True
+        try:
+            if await check() is not None:
+                raise ValueError("VOICE_AUTHORIZATION_INVALID")
+        except Exception as error:
+            guard_error = error
+            raise
+        else:
+            guard_active = False
 
     delegate = transport or httpx.AsyncHTTPTransport(trust_env=False, retries=0)
     response, closed = None, False
     quiet = _private_download.set(True)
     try:
-        async with asyncio.timeout(10):
+        async with asyncio.timeout(DOWNLOAD_TIMEOUT_SECONDS):
             locator, native_size = await _record_info(original, onebot, guard, synthetic)
             if native_size > max_bytes:
                 raise ValueError("VOICE_SOURCE_TOO_LARGE")
@@ -331,10 +342,17 @@ async def fetch_record(original, max_bytes=MAX_AUDIO_BYTES, *, onebot, check, tr
                 raise ValueError("VOICE_SOURCE_INCOMPLETE")
             data = bytes(body)
             return DownloadedRecord(original, data, mime, hashlib.sha256(data).hexdigest())
-    except (TimeoutError, httpx.TimeoutException):
-        raise ValueError("VOICE_FETCH_TIMEOUT") from None
-    except (httpx.HTTPError, OSError):
-        raise ValueError("VOICE_FETCH_FAILED") from None
+    except (httpx.HTTPError, OSError) as error:
+        if guard_error is not None:
+            raise guard_error from None
+        if guard_active:
+            from .capture import capture_diagnostic
+
+            error.capture_diagnostic = capture_diagnostic(error, "core_check")
+            raise
+        code = ("VOICE_FETCH_TIMEOUT" if isinstance(error, (TimeoutError, httpx.TimeoutException))
+                else "VOICE_FETCH_FAILED")
+        raise ValueError(code) from None
     finally:
         try:
             if response is not None:

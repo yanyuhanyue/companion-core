@@ -498,6 +498,44 @@ def test_total_timeout_sanitizes_url_and_leaves_no_retry(monkeypatch):
         run(download(get=get))
 
 
+@pytest.mark.parametrize("at", [1, 4, 6])
+@pytest.mark.parametrize("failure", ["status", "timeout", "io"])
+def test_core_guard_error_is_not_reclassified_as_a_file_download_failure(at, failure):
+    request = httpx.Request("POST", "http://127.0.0.1/core-check")
+    error = {
+        "status": httpx.HTTPStatusError("denied", request=request,
+                                         response=httpx.Response(403, request=request)),
+        "timeout": httpx.ReadTimeout("core check timeout", request=request),
+        "io": OSError("local source custody failed"),
+    }[failure]
+    checks = 0
+
+    async def check():
+        nonlocal checks
+        checks += 1
+        if checks == at:
+            raise error
+
+    with pytest.raises(type(error)) as caught:
+        run(download(check=check))
+    assert caught.value is error
+    assert checks == at
+
+
+def test_file_total_timeout_inside_core_guard_stays_a_core_check_error(monkeypatch):
+    from companion_onebot_bridge.capture import diagnostic_fields
+
+    monkeypatch.setattr(files, "TIMEOUT_SECONDS", 0.01)
+
+    async def waiting_check():
+        await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError) as caught:
+        run(download(check=waiting_check))
+    assert diagnostic_fields(caught.value) == {
+        "capture_phase": "core_check", "capture_reason": "CAPTURE_TIMEOUT"}
+
+
 def test_real_httpcore_signed_redirect_trace_is_private(caplog):
     from httpcore._backends.mock import AsyncMockBackend
 
