@@ -15,16 +15,13 @@ from urllib.parse import quote
 import httpx
 import pytest
 
+from companion_meme_sources import DiscoveryLimits
+from companion_meme_sources.community import INDEX_URL, CommunityPacks, file_manifest
+from companion_meme_sources.review import TrustedReviewer
 from companion_onebot_bridge.meme_caption import CaptionIdentity, EmbeddingSpec
 from companion_onebot_bridge.meme_catalog import MemeCatalog
-from companion_onebot_bridge.meme_discovery import DiscoveryLimits, run_discovery
+from companion_onebot_bridge.meme_discovery import run_discovery
 from companion_onebot_bridge.meme_library import MemeLibrary
-from companion_onebot_bridge.meme_packs import (
-    INDEX_URL,
-    CommunityPacks,
-    file_manifest,
-)
-from companion_onebot_bridge.meme_runtime import TrustedReviewer
 from companion_onebot_bridge.meme_semantic import SemanticLibrary
 from tests.test_next_memes_catalog import check, png
 from tests.test_next_memes_discovery import DurableBudget, async_check, resolver

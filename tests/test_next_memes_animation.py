@@ -7,7 +7,8 @@ import httpx
 import pytest
 from PIL import Image
 
-from companion_onebot_bridge.meme_discovery import BraveImages, ReviewApproval, run_discovery
+from companion_meme_sources import ReviewApproval
+from companion_onebot_bridge.meme_discovery import BraveImages, run_discovery
 from tests.test_next_memes_catalog import check, metadata
 from tests.test_next_memes_discovery import async_check, resolver
 from tests.test_next_memes_discovery import setup as setup
