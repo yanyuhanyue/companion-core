@@ -19,14 +19,14 @@ import httpx
 from . import journal
 from .images import resolve_public
 from .meme_caption import CaptionContext, CaptionOutcome, parse
-from .meme_catalog import INTENTS, MOCKERY, MemeCatalog, Metadata, key_hash
+from .meme_catalog import INTENTS, MOCKERY, MemeCatalog, Metadata
 from .meme_discovery import BraveImages, DiscoveryLimits, ReviewApproval, Usage, run_discovery
 from .meme_library import CATEGORY, MemeLibrary
 from .meme_packs import CommunityPacks, relative_path
 from .meme_semantic import SemanticLibrary, installed, profile, retain_usage
 from .meme_semantic_http import CaptionEmbeddingHTTP, CaptionHTTP, SemanticHTTP, core_request
+from .meme_transport import DeliveryCustody
 from .onebot_client import bounded_post
-from .reply_segments import event_id as delivery_event_id
 from .rich_input import input_digest
 from .spool import encode
 
@@ -243,7 +243,7 @@ class TrustedReviewer:
         return None
 
 
-class MemeRuntime:
+class MemeRuntime(DeliveryCustody):
     def __init__(self, window, *, reviewer=None, transport=None, resolver=resolve_public):
         self.window, self.spool, self.db = window, window.spool, window.spool.db
         if self.db.in_transaction:
@@ -275,6 +275,7 @@ class MemeRuntime:
             ),
             max_bindings=getattr(self.config, "meme_catalog_max_bindings", 10000),
         )
+        self.pins = self.catalog.pins
         for sql in (
             "CREATE TABLE IF NOT EXISTS meme_runtime_offers (event_id TEXT PRIMARY KEY,"
             "event_sha256 TEXT NOT NULL,window_sha256 TEXT NOT NULL,offer_json TEXT NOT NULL)",
@@ -608,46 +609,6 @@ class MemeRuntime:
             return {"status": "SEMANTIC_" + status}
         return None
 
-    def _item(self, item):
-        image = item.get("content", {}).get("image")
-        event_id = delivery_event_id(item)
-        if (
-            not isinstance(image, dict)
-            or set(image) != {"source", "offer_key", "candidate_id", "category"}
-            or image["source"] != "companion.meme_catalog"
-            or image["offer_key"] != "meme:" + event_id
-            or not isinstance(image["candidate_id"], str)
-            or not SHA.fullmatch(image["candidate_id"])
-            or not isinstance(image["category"], str)
-            or not CATEGORY.fullmatch(image["category"])
-            or not isinstance(item.get("delivery_key"), str)
-            or item.get("authority") != self.authority
-        ):
-            raise ValueError("MEME_DELIVERY_BINDING_INVALID")
-        key_hash(item["delivery_key"])
-        return event_id, image
-
-    def _binding(self, item, *, create=False):
-        event_id, image = self._item(item)
-        expected = (
-            item["delivery_key"],
-            image["offer_key"],
-            event_id,
-            image["candidate_id"],
-            image["category"],
-            self.authority_sha256,
-        )
-        row = self.db.execute(
-            "SELECT * FROM meme_runtime_bindings WHERE delivery_key=? OR offer_key=?", expected[:2]
-        ).fetchone()
-        if row is not None and tuple(row) != expected:
-            raise ValueError("MEME_DELIVERY_BINDING_CONFLICT")
-        if row is None:
-            if not create or not self.db.in_transaction:
-                raise ValueError("MEME_DELIVERY_BINDING_MISSING")
-            self.db.execute("INSERT INTO meme_runtime_bindings VALUES (?,?,?,?,?,?)", expected)
-        return event_id, image
-
     def prepare(self, item, *, check):
         if self.semantics_enabled and self.semantics is None:
             raise ValueError("MEME_SEMANTIC_PROFILE_REQUIRED")
@@ -679,43 +640,6 @@ class MemeRuntime:
             self._binding(item)
 
         self.catalog.mark_sending(image["offer_key"], check=fence)
-
-    def receipt(self, item, outcome):
-        _, image = self._binding(item)
-        self.catalog.receipt(image["offer_key"], outcome)
-
-    def confirm_not_sent(self, item, operation, core_receipt):
-        self.window.verify(active=False)
-        attempt = self.db.execute(
-            "SELECT state,item_hash,plan_hash,event_id FROM window_attempts WHERE message_id=?",
-            (item["message_id"],),
-        ).fetchone()
-        expected = {
-            "cancelled": True,
-            "message_id": item["message_id"],
-            "state": "CANCELLED",
-            "send_attempt_retained": True,
-        }
-        if (
-            getattr(operation, "runtime", None) is not self.window
-            or getattr(operation, "current_item", None) is not item
-            or getattr(operation, "dispatched", None) is not False
-            or getattr(operation, "authority", None) != self.authority
-            or getattr(operation, "item_hash", None) != journal.digest(item)
-            or attempt is None or tuple(attempt) != (
-                "NOT_SENT", journal.digest(item), self.authority_sha256, delivery_event_id(item))
-            or encode(core_receipt) != encode(expected)
-        ):
-            raise ValueError("MEME_NOT_SENT_PROOF_REQUIRED")
-        with self.catalog.atomic():
-            _, image = self._binding(item)
-            key = key_hash(image["offer_key"])
-            pin = self.db.execute("SELECT sha,state FROM meme_pins WHERE key=?", (key,)).fetchone()
-            if pin is None or pin[0] != image["candidate_id"]:
-                raise ValueError("MEME_DELIVERY_BINDING_CONFLICT")
-            if pin[1] not in {"PREPARED", "SENDING", "CANCELLED"}:
-                raise ValueError("MEME_RECEIPT_CONFLICT")
-            self.db.execute("UPDATE meme_pins SET state='CANCELLED' WHERE key=?", (key,))
 
     def cancel(self, event_or_offer):
         key = event_or_offer if event_or_offer.startswith("meme:") else "meme:" + event_or_offer

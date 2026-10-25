@@ -31,7 +31,7 @@ def case(runtime):
 
 class NativeCase:
     def __init__(self, core, directory, *, rules, enabled=True, discovery=True,
-                 provider="none", key=None, semantic=False):
+                 provider="none", key=None, semantic=False, catalog_owner="bridge"):
         self.core = core
         core.clock.now = datetime.now(UTC).replace(microsecond=0)
         approved_live(core, directory, **({"max_output_tokens": 4096,
@@ -61,6 +61,7 @@ class NativeCase:
             onebot_token="s" * 32, protocol_epoch=policy.capture.protocol_epoch,
             owner_authority=authority, capture_signing_key=self.key.private_bytes_raw().hex(),
             data_dir=str(directory / "bridge"), meme_enabled=enabled,
+            meme_catalog_owner=catalog_owner,
             meme_discovery_enabled=discovery, meme_semantics_enabled=semantic,
             meme_search_provider=provider, meme_search_api_key=key, meme_trusted_sources=rules)
         self.spool = Spool(config)

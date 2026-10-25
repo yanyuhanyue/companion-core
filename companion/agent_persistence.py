@@ -12,6 +12,7 @@ from pydantic_ai import Conversation, DeferredToolRequests
 from pydantic_ai.conversation import ConversationTypeAdapter
 from pydantic_ai.exceptions import CallDeferred
 
+from companion import context_planner
 from companion.agent_runtime import check_conversation
 from companion.contracts import CoreError
 from companion.store import encode
@@ -117,8 +118,10 @@ class ConversationStore:
     def admitted(self, request_id):
         with self.store.transaction():
             self.check(current_request=request_id)
-            self.store.execute("UPDATE agent_conversations SET request_id=? WHERE job_id=? "
-                               "AND phase='MODEL_PENDING'", (request_id, self.job["job_id"]))
+            context_planner.admitted(self.core, self.job, self.snapshots, request_id)
+            self.store.execute("UPDATE agent_conversations SET request_id=?,snapshots_json=? "
+                               "WHERE job_id=? AND phase='MODEL_PENDING'",
+                               (request_id, encode(self.snapshots), self.job["job_id"]))
 
     def not_admitted(self):
         """A rejected reservation may retry only when no new chat attempt exists."""
@@ -134,8 +137,9 @@ class ConversationStore:
                 (self.job["job_id"],),
             )}
             if actual <= known:
-                self.store.execute("UPDATE agent_conversations SET phase='READY' WHERE job_id=?",
-                                   (self.job["job_id"],))
+                context_planner.not_admitted(self.core, self.job, self.snapshots)
+                self.store.execute("UPDATE agent_conversations SET phase='READY',snapshots_json=? "
+                                   "WHERE job_id=?", (encode(self.snapshots), self.job["job_id"]))
 
     async def after_model_request(self, ctx, *, request_context, response):
         with self.store.transaction():

@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from dataclasses import asdict, replace
+from dataclasses import replace
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -31,7 +31,7 @@ from tests.test_onebot_window import input_approval, plan_fixture
 def plan_for(tmp_path, number=1, *, predecessor=None, approved=False):
     cfg, value, inventory, now = plan_fixture(tmp_path)
     cfg = replace(cfg, capture_signing_key="12" * 32)
-    inventory["config_sha256"] = digest(asdict(cfg))
+    inventory["config_sha256"] = digest(cfg.snapshot())
     value.update(
         config_sha256=inventory["config_sha256"],
         window_id=f"win_{number:032x}",
@@ -216,7 +216,7 @@ def test_relative_spool_directory_can_receive_emergency_stop(tmp_path, monkeypat
     cfg, plan, now = plan_for(tmp_path)
     cfg = replace(cfg, data_dir="spool")
     value = json.loads(encode(plan.value))
-    value["config_sha256"] = digest(asdict(cfg))
+    value["config_sha256"] = digest(cfg.snapshot())
     inventory = {
         key: value[key]
         for key in (
