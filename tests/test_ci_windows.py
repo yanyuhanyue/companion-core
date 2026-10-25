@@ -166,6 +166,8 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
     tests = jobs["test"]["steps"]
     full = next(step for step in tests if "-p scripts.ci_shards" in step.get("run", ""))
     assert full["if"] == product
+    assert "python -B -m scripts.test_feedback --workers 2 --" in full["run"]
+    assert "--impact" not in full["run"] and "--skip-model-preparation" not in full["run"]
     ui = next(step for step in tests if step.get("if") == console)
     assert "-p scripts.ci_shards" not in ui["run"]
     for name in ("test_console_static.py", "test_owner_console.py", "test_console_cognition.py"):
