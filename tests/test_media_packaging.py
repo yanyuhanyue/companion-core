@@ -46,7 +46,8 @@ root = Path(sys.argv[1]).resolve()
 image_kind = sys.argv[2]
 sys.path.insert(0, str(root))
 project = {'companion', 'source_reader', 'companion_onebot_bridge',
-           'companion_meme_protocol', 'companion_voice_node', 'companion_delivery_protocol'}
+           'companion_meme_protocol', 'companion_meme_sources',
+           'companion_voice_node', 'companion_delivery_protocol'}
 gpu = {'torch', 'faster_whisper', 'ctranslate2'}
 forbidden_packages = gpu | ({'companion', 'source_reader', 'companion_voice_node'}
                             if image_kind == 'bridge' else set())
@@ -76,6 +77,9 @@ class NoProcesses(subprocess.Popen):
 subprocess.Popen = NoProcesses
 os.system = forbidden
 
+from companion_meme_sources import community, fetch, review
+assert community.CommunityPacks and fetch.PublicFetcher and review.TrustedReviewer
+
 if image_kind == 'core':
     from companion.api import create_app
     from companion.config import Settings
@@ -91,9 +95,9 @@ if image_kind == 'core':
     assert not Path(settings.database).exists()
     assert not Path(settings.erasure_ledger).exists()
 else:
-    from companion_onebot_bridge import network, owner_resolution, voice_runtime
+    from companion_onebot_bridge import meme_runtime, network, owner_resolution, voice_runtime
     from companion_onebot_bridge.window import TestWindow
-    assert network and owner_resolution and voice_runtime and TestWindow
+    assert meme_runtime and network and owner_resolution and voice_runtime and TestWindow
 assert not forbidden_packages.intersection(sys.modules)
 print(json.dumps({'image': image_kind, 'media_imports': True,
                   'gpu_packages_loaded': False, 'external_io': False}))
