@@ -439,7 +439,8 @@ const LOADERS = {
     const results = await Promise.allSettled(kinds.map(k => api.get("/cognition?kind=" + k + "&limit=30", signal)));
     const data = {};
     for (let i = 0; i < kinds.length; i++) {
-      data[kinds[i]] = results[i].status === "fulfilled" ? results[i].value : { items: [] };
+      const result = results[i];
+      data[kinds[i]] = result.status === "fulfilled" ? result.value : { items: [] };
     }
     return data;
   },
