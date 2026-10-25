@@ -15,6 +15,7 @@ import pytest
 import uvicorn
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import SecretStr
+from uvicorn.protocols.http.auto import AutoHTTPProtocol
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
@@ -163,9 +164,52 @@ async def source_window(
                 yield window, client, protocol, handshakes, sends
 
 
+def _native_http_proactor_scope(transport=None, servers=()):
+    if (sys.platform != "win32" or sys.implementation.name != "cpython"
+        or sys.version_info[:2] != (3, 12)):
+        return False
+    if transport is None:
+        return True
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+
+    return (
+        isinstance(transport, _ProactorBasePipeTransport)
+        and all(hasattr(transport, name) for name in (
+            "_call_connection_lost", "_sock", "_server", "_called_connection_lost"))
+        and callable(transport._call_connection_lost)
+        and isinstance(transport._sock, socket.socket)
+        and any(transport._server is server for server in servers)
+        and callable(getattr(transport._server, "_detach", None))
+        and type(getattr(transport._server, "_active_count", None)) is int
+    )
+
+
 @asynccontextmanager
 async def real_core_http(core):
     ready = asyncio.Event()
+
+    class HTTPProtocol(AutoHTTPProtocol):
+        def connection_made(self, transport):
+            super().connection_made(transport)
+            if not _native_http_proactor_scope(transport, server.servers):
+                return
+            original = transport._call_connection_lost
+
+            def connection_lost(exc):
+                # CPython 3.12 can raise in shutdown() before native close/detach.
+                # Complete this owned transport's cleanup and preserve the exception.
+                try:
+                    original(exc)
+                finally:
+                    if transport._sock is not None:
+                        transport._sock.close()
+                        transport._sock = None
+                    if transport._server is not None:
+                        transport._server._detach()
+                        transport._server = None
+                    transport._called_connection_lost = True
+
+            transport._call_connection_lost = connection_lost
 
     class Server(uvicorn.Server):
         async def startup(self, sockets=None):
@@ -179,6 +223,7 @@ async def real_core_http(core):
     # Native children have a 30s deadline. Keep server idle expiry beyond the
     # client's 5s pool expiry to avoid Windows timer/connection-close races.
     server = Server(uvicorn.Config(api, lifespan="off", log_config=None, access_log=False,
+                                   http=HTTPProtocol,
                                    timeout_keep_alive=60))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
