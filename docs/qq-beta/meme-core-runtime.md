@@ -1,16 +1,15 @@
-# Core 素材运行时合同（B1b）
+# Core 素材运行时合同
 
-当前是独立 B1b 本地合成候选，基于冻结 B1a `64ac829` 并集成主线图片修复及
-Context 独立提交的 Settings / Core Worker 接缝。真实签名入口、独立 Worker、实际 Bridge
-进程和 OneBot Mock 已合成验收；尚未完成主审、完整 PR CI 或生产切换。
-仍需 B2 向量/发现、B3 历史内容副本擦除与原责任闭环、B4 独立镜像的相应门禁。
+Core 运行时以 B1b 原生来源、费用和投递合同为基础，B2a 增加有界本地向量排序。
+当前候选只作本地合成验证；完整 PR CI、生产切换、真人 QQ 和检索质量验收分别记录。
+发现及新来源接入、历史副本退休与责任闭环、独立镜像仍由后续切片负责。
 
 ## 单主与兼容
 
 临时 `meme_catalog_owner` 仅允许 `bridge` / `core`，默认 `bridge`。
 默认值不进入旧 Settings / Bridge 快照，默认 paid、owner、meme 摘要及投递材料保持原语义。
 实际非默认来源规则和 cooldown 必须序列化并进入 meme 策略摘要，即使 selector 是 bridge。
-Core 模式摘要总是包含 selector、exact 来源规则和 cooldown；旧授权不能取得新模式权限。
+Core 模式摘要包含 selector、exact 来源规则、cooldown 及固定 retrieval profile；旧授权不能取得新策略权限。
 该 selector 是迁移窗口，最终退休 Bridge 业务写入，不永久维持两套可写目录。
 
 BridgeConfig.snapshot 基于 asdict 的新拷贝，仅在实际 selector 为 bridge 时删去新增字段。
@@ -37,11 +36,10 @@ Context 集成人独占 `companion/config.py` 和 `companion/core.py`。精确�
   source_check 每次实际模型请求前、await 后及 Outbox 提交前均经过它。错误必须传播。
 - Core 模式 waiting_offer=False，原 Bridge 模式的两秒等待合同保持不变。
 
-领域生成过程不访问网络、模型、向量服务或 Bridge 数据库；只使用已成功且费用已结算的
-原生 caption，移植原 caption_eligible、context_allows、分词及词法评分，最多八个候选。
-正负/GIF 固定语料仅证明词法规则等价，不声称完整向量质量等价。局部排序超时或没有
-合适候选冻结为空；STOP、来源撤回、epoch、授权和费用责任错误不能被泛捕获成空候选。
-STAGED 表示内容保管；当前 owner/private、目的、原始来源证据和租约分别复核。
+领域生成只扫描已成功且费用已结算的原生 caption。沿用原 caption_eligible、
+context_allows、分词与词法评分，再使用本地固定模型的 cosine；最多八个候选。
+STAGED 表示内容保管；当前 owner/private、目的、原始来源、usage 与租约分别复核。
+STOP、来源撤回、epoch、授权和费用错误必须传播。
 
 原生 chat-only 窗口保留原文本能力：先验证当前 chat 的来源、revision、authority、租约及
 所有原绑定策略。仅在该 job 完全没有既存 meme_offer 记录时，明确关闭 semantics/expression
@@ -50,26 +48,75 @@ STAGED 表示内容保管；当前 owner/private、目的、原始来源证据�
 一律严格检查；disabled 或缺 scope 不能抹掉既有责任。旧 grant 的 flags/mode/来源规则变化
 必须先由原 check_job/current 拒绝，STOP/撤回/epoch/paid/source/lease 错误仍原样传播。
 
-## 冻结绑定 v1
+## 有界向量与冻结绑定 v2
 
-保留 MemeOffer / ImageIntent DTO 和原图 SHA candidate_id。每个事件对相同字节
-确定唯一的 source/custody 记录，排序相同按 asset_id/caption_job_id 确定；保管目录仍保留
-独立来源。选定来源撤回后，本冻结值不能改用同字节其他来源。
+`meme_vectors` 是独立、可重建的 SQLite 派生表，Alembic `0048_meme_vectors`
+接在 `0047_meme_assets` 后。每行绑定 exact asset/custody/source/record、原 caption job、
+caption identity/content、固定模型 revision 和 512 维；不共享同字节的其他来源向量。
+缓存身份取现存 canonical SHA256。只存有限、非零范数的 512 个 float32 little-endian
+值（2048 字节），摘要与评分使用相同字节。最多 4096 行、8MiB 向量；满额时可使用
+本次合法新结果生成冻结证明而不新增缓存行，同一来源/caption slot 可替换。
+旧身份或坏缓存精确删除为 miss；新模型返回的坏向量是硬错误。
 
-原 `meme_offer:<event_id>` 严格写入现存 job_id/event_id/reply_revision/query_sha256/offer
-及 catalog_owner=core、binding_version=1、meme_policy_sha256、privacy_epoch、
-最多八项 catalog_bindings。每项 AssetBinding 字段为：
+固定 profile 绑定 BAAI/bge-small-zh-v1.5 的现有 pinned revision、f32 编码、caption_text/
+query_for 的 2000 字符边界、词法上限 0.49/除数 20、cosine 门槛 0.5、score 降序与物理
+SHA 升序、4096 扫描、8 offer、32 cold batch、2000ms 可选预算，以及
+`coverage_policy=per-candidate-bounded-v1`。Core capability hash 包含 profile，Bridge
+模式的策略输入和默认/历史 golden 保持原形状。
 
-`version=1, asset_id, asset_sha256, custody_sha256, source_sha256, record_sha256,
-caption_job_id, caption_sha256, caption_identity_sha256, meme_policy_sha256, privacy_epoch`。
+每个物理 SHA 先按 asset_id/caption_job_id 选定合法来源，再检查该来源的语境与自身缓存。
+有 query 和自身 passage vector 时沿用词法分数加 cosine（仅 cosine>=0.5 时加入）；
+语义可引入词法零重合的合适候选。单次只补首批 32 个 miss；其余本轮按词法并记录
+BATCH_LIMIT。此策略不声称完整语义覆盖。来源撤回后不能换用同字节其他来源。
 
-摘要使用现存 canonical SHA256 digest。每个入 prompt 候选的完整 source/reuse 祖先先写入
-原 chat job_sources，后续每次请求重新核验。owner_delivery 原材料只增加
-meme_binding_version=1 与 meme_binding_sha256；默认 Bridge 材料不增加字段。
-Core 模式缺少新字段或具有旧 Bridge offer 时拒绝，不自动补签/提升。
-读取时还复核严格版本/epoch 类型、当前 query 摘要/intent，并从原 caption 重建候选描述、
-tags 和 category；不能只保留正确来源 hash 而篡改进入 prompt 的内容。
-擦除沿现存 Ledger handler 清除资产内容与派生 offer；残余摘要/ID 不授予读或发送权限。
+现存 `meme_offer:<event_id>` 严格写入 job/event/revision/query/offer、catalog_owner=core、
+binding_version=2、meme_policy_sha256、privacy_epoch、catalog_bindings 与 ranking。
+AssetBinding v2 保留原 source/custody/record/caption/epoch 字段，增加 ranking_sha256，
+其摘要覆盖本次 ranking header 和本候选证明。owner_delivery 从已严格校验的 selected
+binding 取得版本，并摘要整个绑定。HTTP 取图 DTO 和原费用、ACK/UNKNOWN 责任保持原合同。
+
+Ranking v1 保存 exact profile、query 摘要、SEMANTIC/HYBRID/LEXICAL 模式、真实覆盖计数与
+fallback 理由，以及一份 query 和最多八份选中 passage 的 canonical base64 f32 字节、
+SHA、词法/cosine/总分。ranking 上限 48KiB，整个 offer 上限 192KiB；原 JSON 字节在解码前
+设限，所有证明类型严格、拒绝多余字段、NaN/Inf、非 canonical base64 和不一致算术。
+没有意图或 eligible=0 且未发起 query 时允许空结果 fallback=null；其他缺 query 情形必须
+记录 LOCAL_WEIGHTS_MISSING、INFERENCE_BUSY 或 LOCAL_DEADLINE。
+
+后续每次模型请求、取图与最终发送只复核冻结来源、当前权限/revision/epoch/usage/lease、
+原 caption 重建内容及证明的单项算术（绝对容差 1e-12），不重新 embedding/rank 或换源。
+合法删除缓存、缺本地权重后仍可验证自含证明；来源、caption、profile 或证明损坏则拒绝。
+证明摘要只检测原材料内的不一致，不证明全目录最优、模型真实性或授予新权限。
+所有旧 Core v1/null/opaque/未知记录是显式执行阻断，保留原费用、Outbox 与恢复责任，
+不能当缺项重建或自动补签。
+
+## CPU 生命周期与遗忘
+
+扫描及冻结各用原 Store 短事务，await 前释放。持久 MemeCaptionService 的 index 仅保留
+一个强 future 引用；复用 `_inference_lock(str(Path(cache_dir).resolve()))` 非阻塞锁。
+使用原默认线程池的同步 run_in_executor 提交，再 shield 等待剩余可选预算；没有新增队列。
+仅 immutable query/最多32段 caption、固定模型事实与 finally 还锁对象进入 CPU，
+不传 Store、service、权限回调或凭据。encoder(local_only=True) 使用现有 CPU threads=2，
+不下载、不新增 provider/caption/付费工作。输出在线程内完全物化为最多33份有界 f32。
+
+取消向调用方传播；超时允许已核验词法结果。成功提交后只由 CPU finally 还锁，排队中
+取消也不提前解锁；迟到结果不写缓存或 offer，异常被消费。忙锁或未完成 future 直接
+INFERENCE_BUSY，不积压工作。不能强制中止 native 模型或承诺两秒 CPU 退出；若 native
+调用卡住，锁持续忙，后续请求保持词法。提交前失败才由调用方还锁。
+
+await 后重查原 job、policy、epoch、revision、lease、费用及所有拟缓存/选中来源的 exact
+快照，缓存与首个 offer 同事务提交。竞争连接已冻结 offer 时只验证原结果，不覆盖。
+每个选中来源/reuse 祖先及自身 chat root 登记到原 job_sources。
+
+`meme_assets.erase` 在原 Ledger 事务内按资产来源及 caption job_sources/root 删除缓存；
+原 meme-captions handler 清除整份 offer（含 query/选中向量证明）。现有 erasure contract
+revision 从2变3，保留 registry/order/Ledger 格式；旧 COMPLETE 通过签名差异做定向修复，
+不重清后来无关回复。失败时 DB 回滚、已 fsync 的独立 Ledger 保留并要求 replay。
+实际 pre0048 加密备份恢复先正常迁移再重放最新匹配 Ledger，之后才暴露数据库。
+正常 downgrade 只丢弃派生缓存；任意旧 binary 配新 schema 不是支持的自动回退。
+
+线程生命周期复用 Python 的 [shield 取消语义](https://docs.python.org/3.11/library/asyncio-task.html#shielding-from-cancellation)
+与 [primitive Lock 规则](https://docs.python.org/3.11/library/threading.html#lock-objects)。
+固定模型和原始来源/费用研究继续复用现存 original-receipts 文档中的来源；未引入新依赖或模型版本。
 
 原 Outbox 是按物理 byte SHA 的占用及 cooldown 权威，不按许可别名绕过；PENDING、
 RETRY_WAIT、LEASED、SENDING、DELIVERY_UNCERTAIN 保持占用，SENT 使用原 sent_at。
@@ -120,6 +167,7 @@ Bridge ACK 验证了原图一致、单次原聊天模型选择、原 caption 费
 恢复冻结投递旧备份时先用最新独立 Ledger 重放，原图及派生 offer 擦除、旧租约拒读，
 费用逐行保留。合法缺可选能力继续文本，已有冻结 null/opaque 记录后撤权仍严格拒绝。
 
-唯一 .local/b1b-validation/receipt.json 保留原测试 fixture/进程等待失败、修复节点和逐项
-复用证据。合成、真人及发布门禁分列；不声明真人 QQ、生产切换、付费模型、独立镜像或
-完整 CI 已通过。原 ACK/UNKNOWN/fence/独立遗忘账本仍由既有机制负责。
+B1b 历史回执保留原 fixture/进程等待失败与修复；B2a 唯一
+`.local/b2a-validation/receipt.json` 记录当前源树、逐项最新检查、已修失败及复用范围。
+合成、真人及发布门禁分列；不声明真人 QQ、生产切换、付费模型、独立镜像或完整 CI
+已通过。原 ACK/UNKNOWN/fence/独立遗忘账本仍由既有机制负责。
