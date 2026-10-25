@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import companion_delivery_protocol as wire
+from companion import delivery_reconciliation as reconciliation
 from companion_onebot_bridge import meme_retirement
 from companion_onebot_bridge.instance_lock import acquire
 from companion_onebot_bridge.meme_runtime import MemeRuntime
@@ -22,6 +24,7 @@ from tests.support.native_meme import NativeCase
 from tests.test_meme_asset_migration import config_file
 from tests.test_next_memes_catalog import metadata, png
 from tests.test_next_memes_semantic import EMBEDDING, IDENTITY
+from tests.test_owner_delivery_reconciliation import pending
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 64
@@ -285,17 +288,33 @@ def test_known_column_names_with_changed_primary_key_are_unknown_schema(stopped)
     assert cli(stopped)["reasons"]["MISSING_OR_UNKNOWN_SCHEMA"] == 1
 
 
-def test_original_resolution_never_projects_unknown_pin_or_removes_blocker(stopped):
+def test_original_resolution_never_projects_unknown_pin_or_removes_blocker(
+    stopped, core_factory, tmp_path
+):
+    directory = tmp_path / "original-resolution"
+    directory.mkdir()
+    with core_factory(directory) as core:
+        proof, _ = pending(core, directory)
+        assert reconciliation.prepare(core.store, core.settings, proof, core.clock())["state"] == (
+            "READY")
+        resolved = reconciliation.resolve(core.store, core.settings, proof["message_id"], "SENT",
+            core.clock(), operation_id="meme-retirement-pin-resolution", operation_sha256="e" * 64)
+        receipt = wire.validate_receipt(resolved["receipt"])
+        record = {"seq": 1, "previous": "0" * 64, "kind": "OWNER_RECONCILED",
+                  "at": core.clock(), "data": receipt}
     sql(stopped, "INSERT INTO meme_pins VALUES (?,?,?,NULL)", (SHA, SOURCE, "UNKNOWN"))
+    before = snapshot(stopped.directory)
     issues = Counter()
     # The owner verifier is responsible for the original resolution's integrity.
     # Even after that verification this diagnosis must not infer a pin projection.
     with closing(sqlite3.connect(stopped.database)) as db:
-        result = meme_retirement._pins(db, [{"kind": "OWNER_RECONCILED"}],
-                                      datetime.now(UTC), issues)
+        result = meme_retirement._pins(db, [record], datetime.now(UTC), issues)
     assert result["states"]["original_owner_resolutions"] == 1
     assert issues["PIN_UNPROJECTED_OR_UNSETTLED"] == 1
+    assert issues["ORIGINAL_COOLDOWN_UNVERIFIED"] == 1
+    assert result["verified_times"][0]["resolution_sha256"] == wire.digest(receipt)
     assert cli(stopped)["reasons"]["PIN_UNPROJECTED_OR_UNSETTLED"] == 1
+    assert snapshot(stopped.directory) == before
 
 
 def test_unattributed_asset_content_is_counted_but_never_printed_or_removed(stopped):
