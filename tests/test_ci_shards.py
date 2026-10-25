@@ -1,6 +1,8 @@
+import json
 import os
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -32,27 +34,77 @@ def test_updated_weights_balance_slow_files_without_splitting_modules(monkeypatc
                       {"tests/test_other.py"}, {"tests/test_last.py", "tests/test_new.py"}]
 
 
-def test_cli_shards_execute_every_parametrized_case_exactly_once(tmp_path):
+@pytest.mark.parametrize("workers", [0, 2])
+def test_cli_shards_execute_every_parametrized_case_exactly_once(tmp_path, workers):
     (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(
+        "import json,os\nfrom pathlib import Path\nimport pytest\n"
+        "@pytest.hookimpl(hookwrapper=True)\n"
+        "def pytest_runtest_makereport(item,call):\n"
+        "    report = (yield).get_result()\n"
+        "    path = Path(os.environ['PHASE_REPORTS']) / (str(os.getpid()) + '.jsonl')\n"
+        "    with path.open('a') as stream:\n"
+        "        stream.write(json.dumps([report.nodeid,report.when,report.duration]) + '\\n')\n",
+        encoding="utf-8",
+    )
     for name in ("alpha", "beta", "new", "fourth", "fifth"):
         (tmp_path / f"test_{name}.py").write_text(
-            "import pytest\n@pytest.mark.parametrize('value', [1, 2])\n"
+            "import os\nfrom pathlib import Path\nimport pytest\n"
+            "def record(phase):\n"
+            "    with Path(__file__).with_suffix('.events').open('a') as stream:\n"
+            "        stream.write(phase + ' ' + str(os.getpid()) + '\\n')\n"
+            "@pytest.fixture(scope='module',autouse=True)\n"
+            "def module_state():\n    record('setup')\n    yield\n    record('teardown')\n"
+            "@pytest.mark.parametrize('value', [1, 2])\n"
             "def test_case(value):\n    assert value > 0\n", encoding="utf-8",
         )
     cases = []
     for index in range(SHARD_COUNT):
         report = tmp_path / f"shard-{index}.xml"
+        phases = tmp_path / f"phases-{index}"
+        phases.mkdir()
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "scripts.ci_shards", "--ci-shard", str(index),
-             "-q", "--basetemp=" + str(tmp_path / f"tmp-{index}"),
+             "-q", "-n", str(workers), "--dist=loadfile",
+             "--basetemp=" + str(tmp_path / f"tmp-{index}"),
              "-o", "cache_dir=" + str(tmp_path / "cache"), "--junitxml=" + str(report)],
-            cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(ROOT)},
+            cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(ROOT), "PHASE_REPORTS": str(phases)},
             capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        cases.extend((case.attrib["classname"], case.attrib["name"])
-                     for case in ElementTree.parse(report).iter("testcase"))
+        elapsed = defaultdict(dict)
+        for path in phases.glob("*.jsonl"):
+            for line in path.read_text().splitlines():
+                nodeid, phase, seconds = json.loads(line)
+                assert phase not in elapsed[nodeid]
+                elapsed[nodeid][phase] = seconds
+        for case in ElementTree.parse(report).iter("testcase"):
+            module, name = case.attrib["classname"], case.attrib["name"]
+            durations = elapsed.pop(module + ".py::" + name)
+            assert set(durations) == {"setup", "call", "teardown"}
+            assert float(case.attrib["time"]) == pytest.approx(sum(durations.values()), abs=0.001)
+            cases.append((module, name))
+        assert not elapsed
     assert len(cases) == len(set(cases)) == 10
+    for path in tmp_path.glob("*.events"):
+        setup, teardown = [line.split() for line in path.read_text().splitlines()]
+        assert setup[0] == "setup" and teardown == ["teardown", setup[1]]
+    assert len(list(tmp_path.glob("*.events"))) == 5
+
+
+def test_parallel_shard_returns_real_test_failure(tmp_path):
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "test_failure.py").write_text("def test_failure():\n    assert False\n")
+    report = tmp_path / "failed.xml"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "scripts.ci_shards", "--ci-shard=0",
+         "-q", "-n", "2", "--dist=loadfile", "--basetemp=" + str(tmp_path / "tmp"),
+         "-o", "cache_dir=" + str(tmp_path / "cache"), "--junitxml=" + str(report)],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True, text=True, encoding="utf-8", timeout=30,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert len(list(ElementTree.parse(report).iter("failure"))) == 1
 
 
 def test_junit_refresh_keeps_total_fixture_time_and_max_across_platforms(tmp_path):
