@@ -70,6 +70,24 @@ def reader_video_binding(store, settings, clock, request_id, *, job_id=None, sce
                          logical_request_id=logical_request_id)
 
 
+def check_request_limits(approval, measured, scenario):
+    """Apply the approved local input/output and routed joint window to one measurement.
+
+    An estimate remains an estimate; this does not attest remote tokenization.
+    A separate video route never inherits the chat model's context window.
+    """
+    if approval is None:
+        return
+    if measured.reserved_input_tokens > approval.max_input_tokens:
+        raise CoreError("MODEL_INPUT_LIMIT", 429)
+    if measured.output_allowance > approval.max_output_tokens:
+        raise CoreError("MODEL_OUTPUT_LIMIT", 429)
+    route = approval.video_input if scenario in VIDEO_SCENARIOS else approval
+    limit = route.max_context_tokens if route is not None else None
+    if limit is not None and measured.reserved_input_tokens + measured.output_allowance > limit:
+        raise CoreError("MODEL_CONTEXT_LIMIT", 429)
+
+
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
@@ -127,11 +145,7 @@ def reserve(
     measurement = measure_request(settings, messages, scenario, tools=tools)
     estimated_input = measurement.reserved_input_tokens
     output_tokens = settings.output_tokens(scenario)
-    if approval:
-        if estimated_input > approval.max_input_tokens:
-            raise CoreError("MODEL_INPUT_LIMIT", 429)
-        if output_tokens > approval.max_output_tokens:
-            raise CoreError("MODEL_OUTPUT_LIMIT", 429)
+    check_request_limits(approval, measurement, scenario)
     estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
         from companion import live_text, owner_authority
@@ -802,6 +816,7 @@ def _persist_accounting(
 
 def _check_measurement(settings, admission, messages, scenario, *, tools=()):
     measured = measure_request(settings, messages, scenario, tools=tools)
+    check_request_limits(settings.paid_model, measured, scenario)
     if measured.reserved_input_tokens != admission["input_bound"]:
         raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
     saved = json.loads(admission["measurement_json"])
