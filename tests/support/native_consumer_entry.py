@@ -99,7 +99,8 @@ class Entry(Capture):
 
 @asynccontextmanager
 async def environment(core, tmp_path, *, purposes=("chat", "memory", "history"),
-                      core_options=None, paid_options=None, expires_in=None):
+                      core_options=None, paid_options=None, expires_in=None,
+                      history_bytes=16000, history_start_offset=-1):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     for name, value in (core_options or {}).items():
         setattr(core.settings, name, value)
@@ -115,8 +116,9 @@ async def environment(core, tmp_path, *, purposes=("chat", "memory", "history"),
         authorization_sha256="d" * 64,
         paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings)),
         capability_policies={name: value for name, value in hashes.items() if name in purposes},
-        history={"scope": "owner_private", "not_before": after(core.clock(), -1),
-                 "max_turns": 15, "max_utf8_bytes": 16000} if "history" in purposes else {},
+        history={"scope": "owner_private",
+                 "not_before": after(core.clock(), history_start_offset),
+                 "max_turns": 15, "max_utf8_bytes": history_bytes} if "history" in purposes else {},
         expires_at=core.clock.now + timedelta(seconds=expires_in) if expires_in else None,
         capture={"public_key": key.public_key().public_bytes_raw().hex(),
                  "identity_sha256": paid_budget.sha(

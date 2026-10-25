@@ -23,7 +23,8 @@ QUESTION = "结合我以前的需求，这两张图里的哪一个更合适？"
 
 
 @asynccontextmanager
-async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None, mutation=None):
+async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None, mutation=None,
+                              core_options=None, reply=None):
     originals, calls, downloads = [], [], []
     for color in ("red", "blue"):
         stream = io.BytesIO()
@@ -51,14 +52,16 @@ async def native_image_memory(core, tmp_path, *, no_candidates=False, limit=None
             if mutation == "unknown_tool_request":
                 body.pop("usage")
         else:
-            body = answer("图1可见红色。按你提到的轻便需求更倾向图1；隔音仅凭图片无法确认。")
+            body = answer(reply or (
+                "图1可见红色。按你提到的轻便需求更倾向图1；隔音仅凭图片无法确认。"))
         if "usage" in body:
             body["usage"] = {"prompt_tokens": 200, "completion_tokens": 30}
         return httpx.Response(200, json=body)
 
     async with environment(core, tmp_path, purposes=("chat", "memory", "image", "content"),
         core_options={"content_enabled": True, "observation_enabled": True,
-                      "lease_seconds": 600 if mutation == "expired" else 120},
+                      "lease_seconds": 600 if mutation == "expired" else 120,
+                      **(core_options or {})},
         paid_options=paid) as (entry, sends):
         ids = []
         for number, content in ((900, PREFERENCE), (901, "过期秘密偏好：紫色键盘。")):

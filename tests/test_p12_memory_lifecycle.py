@@ -1,23 +1,19 @@
-"""Full synthetic native lifecycle under a stopped paid window and its original custody."""
+"""Native memory lifecycle preserves paid custody, source erasure and restore replay."""
 
-import json
+import asyncio
 from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from companion import live_text, paid_budget
 from companion.backup import backup, restore
 from companion.contracts import Candidate
 from companion.memory import Memory
 from companion.privacy import epoch
 from companion.store import Store, encode
 from companion.timeline import recent_timeline
-from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow
 from tests.conftest import ingest, run
-from tests.test_live_text_window import live_clients, live_fixture
-from tests.test_memory_control import bridge, captured, grant, remember, service
-from tests.test_onebot_window import stage
+from tests.sdk_reader_fixture import Provider, answer, worker_for
+from tests.support.native_consumer_entry import environment
 
 
 def test_native_lifecycle_restore_and_rebuild_preserve_independent_fact(core, tmp_path):
@@ -82,47 +78,57 @@ def test_native_lifecycle_restore_and_rebuild_preserve_independent_fact(core, tm
         reopened.close()
 
 
-def test_control_lifecycle_cannot_reset_original_paid_and_window_journals(core, tmp_path):
-    cfg, plan = live_fixture(core, tmp_path)
+def test_native_control_lifecycle_preserves_paid_and_authority_journals(core, tmp_path):
+    async def scenario():
+        async with environment(core, tmp_path, purposes=("chat", "memory")) as (entry, sends):
+            model = Provider(answer("收到这条项目消息。"))
+            async with worker_for(core, model) as worker:
+                await entry.admit(1, "合成原生项目输入")
+                assert await worker.run_once("original-paid-answer")
+                assert (await entry.send(entry.client, entry.protocol))["worked"]
+                assert len(model.requests) == len(sends) == 1
+                journal = Path(core.settings.paid_model.journal_path)
+                paid_bytes = await asyncio.to_thread(journal.read_bytes)
+                usage = core.store.rows("SELECT * FROM model_usage")
+                admissions = core.store.rows("SELECT * FROM model_admissions")
+                windows = core.store.rows("SELECT * FROM model_budget_windows")
+                authority = core.store.rows("SELECT * FROM owner_authority_revisions")
 
-    async def close_window():
-        async with live_clients(core, cfg) as (client, protocol, calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core, text="合成旧窗口输入")
-                await window.send_once(client, protocol, approval)
-                window.stop()
-                await window.stop_core(client)
-                assert len(calls) == len(sends) == 1
-                return window.row()["journal_head"]
+                await entry.admit(101, "/记住这个：项目的代号是青竹七号。")
+                assert await worker.run_once("native-remember")
+                mid = core.store.one("SELECT memory_id FROM memories")["memory_id"]
+                assert (await entry.send(entry.client, entry.protocol))["worked"]
+                await entry.admit(102, f"/纠正这一条 {mid} 项目的代号是白帆九号。")
+                assert await worker.run_once("native-correct")
+                revised = core.store.one("SELECT memory_id FROM memories WHERE status='CONFIRMED'")[
+                    "memory_id"]
+                assert revised != mid
+                assert (await entry.send(entry.client, entry.protocol))["worked"]
+                await entry.admit(103, f"/忘记这一条 {revised}")
+                assert await worker.run_once("native-forget")
+                assert (await entry.send(entry.client, entry.protocol))["worked"]
 
-    bridge_head = run(close_window())
-    paths = [Path(core.settings.paid_model.journal_path), plan.journal]
-    snapshots = [path.read_bytes() for path in paths]
-    usage = core.store.rows("SELECT * FROM model_usage")
-    admissions = core.store.rows("SELECT * FROM model_admissions")
-    windows = core.store.rows("SELECT * FROM model_budget_windows")
-    old_scope = json.loads(core.store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", (live_text.BINDING,))["value"])
-    cfg = bridge(core)
-    # These synthetic acceptance references exercise the production-shaped gate, not real approval.
-    real_shape = dict(execution="approved_stopped_r5", b1_acceptance_sha256="f" * 64,
-                      predecessor_window_sha256=plan.sha256,
-                      bridge_journal_head_sha256=bridge_head)
-    mid = remember(core, cfg, 101, **real_shape)
-    text = f"/纠正这一条 {mid} 项目的代号是白帆九号。"
-    approval = grant(core, cfg, text, operation="correct", target=mid, **real_shape)
-    revised = service(core, approval).apply(captured(core, cfg, approval, text, 102))["memory_id"]
-    text = f"/忘记这一条 {revised}"
-    approval = grant(core, cfg, text, operation="forget", target=revised, **real_shape)
-    service(core, approval).apply(captured(core, cfg, approval, text, 103))
-    assert [path.read_bytes() for path in paths] == snapshots
-    assert core.store.rows("SELECT * FROM model_usage") == usage
-    assert core.store.rows("SELECT * FROM model_admissions") == admissions
-    assert core.store.rows("SELECT * FROM model_budget_windows") == windows
-    assert json.loads(core.store.one(
-        "SELECT value FROM runtime_meta WHERE key=?", (live_text.BINDING,))["value"]) == old_scope
-    assert live_text.stopped(core.store)
-    assert len(core.ledger.read()) == 2
-    assert paid_budget.live_lifecycle(core.store)["state"] == "STOPPED"
+                assert await asyncio.to_thread(journal.read_bytes) == paid_bytes
+                assert core.store.rows("SELECT * FROM model_usage") == usage
+                assert core.store.rows("SELECT * FROM model_admissions") == admissions
+                assert core.store.rows("SELECT * FROM model_budget_windows") == windows
+                assert core.store.rows("SELECT * FROM owner_authority_revisions") == authority
+                assert len(model.requests) == 1 and len(sends) == 4
+                assert len(core.ledger.read()) == 2
+                assert not core.store.rows("SELECT * FROM memory_evidence WHERE memory_id IN (?,?)",
+                                           (mid, revised))
+
+                await entry.stop()
+                stopped_bytes = await asyncio.to_thread(journal.read_bytes)
+                assert stopped_bytes.startswith(paid_bytes) and stopped_bytes != paid_bytes
+                assert core.store.one("SELECT state FROM owner_authority_revisions "
+                                      "ORDER BY revision DESC LIMIT 1") == {"state": "STOPPED"}
+                denied = await entry.client.post(f"/internal/v1/memories/{mid}/decisions",
+                    json={"actor_id": "owner", "decision": "confirm"})
+                assert denied.status_code == 403, denied.text
+                assert not await worker.run_once("stopped-cannot-reset-custody")
+                assert await asyncio.to_thread(journal.read_bytes) == stopped_bytes
+                assert core.store.rows("SELECT * FROM model_usage") == usage
+                assert core.store.rows("SELECT * FROM model_admissions") == admissions
+                assert core.store.rows("SELECT * FROM model_budget_windows") == windows
+    run(scenario())

@@ -1,4 +1,4 @@
-"""Joint original-image/memory evidence must survive every real fragment boundary."""
+"""Original image and memory evidence survive every native fragment boundary."""
 
 import json
 
@@ -9,10 +9,9 @@ from companion import image_spool
 from companion.reply_segments import SegmentedReplyConfig
 from companion.store import encode
 from companion_onebot_bridge.network import private_http_client
-from companion_onebot_bridge.window import digest
 from tests.conftest import run
+from tests.support.native_image_memory import PREFERENCE, native_image_memory
 from tests.support.onebot import provider
-from tests.test_image_memory_context import PREFERENCE, image_memory_window
 
 PARTS = [
     "图1是红色耳机，我会结合你已确认的轻便需求考虑。",
@@ -22,121 +21,118 @@ PARTS = [
 REPLY = "".join(PARTS)
 
 
-def scope(cap=5):
-    policy = SegmentedReplyConfig(min_chars=12, interval_ms=500)
-    return {
-        "segmented_reply": policy, "max_send_attempts": cap,
-        "core_options": {"segmented_reply": policy},
-        "window_options": {"max_attempts": cap, "max_visible_replies": cap},
-    }
-
-
-def approval(window, row):
-    return {
-        "window_sha256": window.plan.sha256, "event_id": row["origin_event_id"],
-        "message_id": row["message_id"],
-        "reply_sha256": digest(json.loads(row["content_json"])["text"]),
-        "evidence_sha256": "f" * 64,
-    }
-
-
 @pytest.mark.parametrize("no_candidates", [False, True])
 def test_multi_image_memory_reply_sends_all_parts_from_one_final_generation(
     core, tmp_path, no_candidates,
 ):
     async def scenario():
-        async with image_memory_window(
-            core, tmp_path, no_candidates=no_candidates, scope_options=scope(), reply=REPLY,
-        ) as values:
-            window, client, protocol, sends, calls, downloads, _, _, _, _, _ = values
-            assert await core.run_once()
+        async with native_image_memory(core, tmp_path, no_candidates=no_candidates, reply=REPLY,
+            core_options={"segmented_reply": SegmentedReplyConfig(min_chars=12, interval_ms=500)}
+        ) as value:
+            assert await value.worker.run_once("native-segmented-image-memory")
             rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
             assert [json.loads(row["content_json"])["text"] for row in rows] == PARTS
-            assert len(downloads) == 2 and len(calls) == (2 if no_candidates else 3)
-            final = calls[-1]["messages"]
-            assert len(final[-1]["content"]) == 3  # Owner text plus both original images.
+            assert len(value.downloads) == len(value.calls) == 2
+            final = value.calls[-1]["messages"]
+            images = [part for message in final if isinstance(message["content"], list)
+                      for part in message["content"] if part["type"] == "image_url"]
+            assert len(images) == 2
             assert (PREFERENCE in encode(final)) == (not no_candidates)
-            assert not list(image_spool.directory(core.store).glob("*.raw"))
-            usage_ids = [row["request_id"] for row in core.store.rows(
-                "SELECT request_id FROM model_usage ORDER BY rowid",
-            )]
+            # Every fragment still needs the original bytes at its final delivery check.
+            assert len(list(image_spool.directory(core.store).glob("*.raw"))) == 2
+            usage = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+            assert len(usage) == 2 and all(row["state"] == "SETTLED" for row in usage)
+            usage_ids = [row["request_id"] for row in usage]
             for index, row in enumerate(rows):
-                receipt = json.loads(core.store.one(
-                    "SELECT value FROM runtime_meta WHERE key=?",
-                    ("live_text_reply:" + row["message_id"],),
-                )["value"])
+                receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                    ("owner_delivery:" + row["message_id"],))["value"])
                 assert receipt["request_ids"] == usage_ids
-                assert receipt["reply_segments"]["index"] == index
+                assert row["segment_index"] == index
                 if index:
-                    waiting = await window.send_once(client, protocol, approval(window, row))
-                    assert waiting["delivery_wait"] == "SEGMENT_NOT_READY"
-                    assert len(sends) == index
+                    assert not (await value.entry.send(value.entry.client,
+                                                       value.entry.protocol))["worked"]
+                    assert len(value.sends) == index
+                    assert value.entry.db.execute(
+                        "SELECT COUNT(*) FROM window_attempts").fetchone()[0] == index
                     core.clock.advance(0.5)
-                await window.send_once(client, protocol, approval(window, row))
-                assert window.count("window_inputs", "state='ACK'") == int(index == 2)
-            assert [item["message"][0]["data"]["text"] for item in sends] == PARTS
-            assert window.status()["attempt_states"] == {"ACK": 3}
-            assert len(calls) == len(usage_ids)
+                assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+                event = {"event_id": value.job["event_id"]}
+                assert (await value.entry.state(event))["state"] == (
+                    "COMPLETE" if index == 2 else "PENDING")
+            assert [item["message"][0]["data"]["text"] for item in value.sends] == PARTS
+            assert value.entry.db.execute(
+                "SELECT COUNT(*) FROM window_attempts WHERE state='ACK'").fetchone()[0] == 3
+            assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == usage
             assert len(core.store.rows("SELECT * FROM memories")) == 2
-
     run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["memory_drift", "image_evidence_drift", "unknown_send"])
 def test_joint_evidence_loss_or_unknown_send_stops_remaining_fragments(core, tmp_path, failure):
     async def scenario():
-        async with image_memory_window(
-            core, tmp_path, scope_options=scope(), reply=REPLY,
-        ) as values:
-            window, client, protocol, sends, calls, _, _, _, memory_id, _, _ = values
-            assert await core.run_once()
-            rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
-            await window.send_once(client, protocol, approval(window, rows[0]))
+        async with native_image_memory(core, tmp_path, reply=REPLY,
+            core_options={"segmented_reply": SegmentedReplyConfig(min_chars=12, interval_ms=500)}
+        ) as value:
+            assert await value.worker.run_once("native-fragment-fence")
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            usage = core.store.rows("SELECT * FROM model_usage")
             core.clock.advance(0.5)
             if failure == "memory_drift":
-                core.store.execute(
-                    "UPDATE memories SET content='已改变' WHERE memory_id=?", (memory_id,),
-                )
+                core.store.execute("UPDATE memories SET content='已改变' WHERE memory_id=?",
+                                   (value.memory_id,))
             elif failure == "image_evidence_drift":
-                core.store.execute("UPDATE observations SET source_sha256=?", ("0" * 64,))
+                row = core.store.one("SELECT item_id,proof_json FROM captured_images")
+                proof = json.loads(row["proof_json"])
+                proof["signature"] = "0" * 128
+                core.store.execute("UPDATE captured_images SET proof_json=? WHERE item_id=?",
+                                   (encode(proof), row["item_id"]))
 
             def uncertain(request):
-                response = provider(request, sends)
+                response = provider(request, value.sends)
                 if request.url.path == "/send_private_msg":
                     raise httpx.ReadTimeout("synthetic lost acknowledgement", request=request)
                 return response
 
-            async with private_http_client(
-                str(protocol.base_url).rstrip("/"), window.plan.config.onebot_token,
-                transport=httpx.MockTransport(uncertain),
-            ) as failing_protocol:
-                if failure == "unknown_send":
-                    result = await window.send_once(
-                        client, failing_protocol, approval(window, rows[1]),
-                    )
-                    assert result["state"] == "STOPPED"
-                    assert window.count("window_attempts", "state='UNKNOWN'") == 1
-                else:
-                    with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                        await window.send_once(client, protocol, approval(window, rows[1]))
-            with pytest.raises(ValueError, match="WINDOW_STOPPED"):
-                await window.send_once(client, protocol, approval(window, rows[2]))
-            assert len(sends) == (2 if failure == "unknown_send" else 1)
-            assert len(calls) == 3 and window.count("window_inputs", "state='ACK'") == 0
-
+            if failure == "unknown_send":
+                async with private_http_client(value.entry.config.onebot_http_url,
+                    value.entry.config.onebot_token, transport=httpx.MockTransport(uncertain)
+                ) as protocol:
+                    assert (await value.entry.send(value.entry.client, protocol))["worked"]
+                assert value.entry.runtime.row()["state"] == "STOPPED"
+                assert value.entry.db.execute("SELECT COUNT(*) FROM window_attempts "
+                    "WHERE state='UNKNOWN'").fetchone()[0] == 1
+                with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                    value.entry.runtime.verify()
+                assert not (await value.entry.send(value.entry.client,
+                                                   value.entry.protocol))["worked"]
+            else:
+                assert not (await value.entry.send(value.entry.client,
+                                                   value.entry.protocol))["worked"]
+                assert not (await value.entry.send(value.entry.client,
+                                                   value.entry.protocol))["worked"]
+            assert len(value.sends) == (2 if failure == "unknown_send" else 1)
+            assert len(value.calls) == 2
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            states = [row["state"] for row in core.store.rows(
+                "SELECT state FROM outbox ORDER BY segment_index")]
+            assert states[0] == "SENT" and states[2] == "CANCELLED"
+            assert states[1] == ("DELIVERY_UNCERTAIN" if failure == "unknown_send" else "CANCELLED")
     run(scenario())
 
 
-def test_joint_reply_keeps_full_text_when_remaining_send_budget_cannot_fit_parts(core, tmp_path):
+def test_joint_reply_keeps_full_text_with_native_two_segment_limit(core, tmp_path):
     async def scenario():
-        async with image_memory_window(
-            core, tmp_path, scope_options=scope(cap=2), reply=REPLY,
-        ) as values:
-            window, client, protocol, sends, calls, *_ = values
-            assert await core.run_once()
-            rows = core.store.rows("SELECT * FROM outbox")
-            assert len(rows) == 1 and json.loads(rows[0]["content_json"])["text"] == REPLY
-            await window.send_once(client, protocol, approval(window, rows[0]))
-            assert len(sends) == 1 and len(calls) == 3
-
+        async with native_image_memory(core, tmp_path, reply=REPLY,
+            core_options={"segmented_reply": SegmentedReplyConfig(
+                min_chars=12, interval_ms=500, max_segments=2)}
+        ) as value:
+            assert await value.worker.run_once("native-two-fragment-limit")
+            rows = core.store.rows("SELECT * FROM outbox ORDER BY segment_index")
+            texts = [json.loads(row["content_json"])["text"] for row in rows]
+            assert texts == [PARTS[0], PARTS[1] + PARTS[2]]
+            assert "".join(texts) == REPLY
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            core.clock.advance(0.5)
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            assert len(value.sends) == len(value.calls) == 2
     run(scenario())
