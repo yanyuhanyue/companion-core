@@ -1,4 +1,4 @@
-"""Production lifespan and worker share revisions; provider transport alone is synthetic."""
+"""Native HTTP and original worker share revisions; provider transport is synthetic."""
 
 import asyncio
 import hashlib
@@ -10,16 +10,14 @@ from types import SimpleNamespace
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from companion import __main__, api, live_text, paid_budget
+from companion import __main__, live_text, owner_authority, paid_budget
 from companion.core import Core
 from companion.store import encode
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
-from tests import test_onebot_window as window_fixtures
 from tests.conftest import run
-from tests.test_onebot_capture import pinned_plan
+from tests.support.native_consumer_entry import environment
 from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
 
 
 async def admit(client, config, plan, number, text):
@@ -54,11 +52,6 @@ async def admit(client, config, plan, number, text):
 def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
     core, tmp_path, monkeypatch,
 ):
-    now = datetime.now(UTC)
-    core.clock.now = now
-    monkeypatch.setattr(window_fixtures, "raw_event", lambda: raw_event(time=int(now.timestamp())))
-    config, plan = pinned_plan(core, tmp_path, 3001, live=True, approved=True,
-                               scope_options=companion_options(core))
     calls = []
 
     async def scenario():
@@ -70,7 +63,8 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                 entered.set()
                 await release.wait()
             return httpx.Response(200, json={
-                "choices": [{"message": {"content": "最新问题的合成回复"}}],
+                "choices": [{"finish_reason": "stop",
+                             "message": {"content": "最新问题的合成回复"}}],
                 "usage": {"prompt_tokens": 100, "completion_tokens": 20},
             })
 
@@ -84,22 +78,18 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                 replied.set()
 
         monkeypatch.setattr(__main__.Recorder, "completed", observed)
-        app = api.create_app(core.settings)
-        async with app.router.lifespan_context(app), httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1",
-            headers={"Authorization": "Bearer " + config.bridge_token},
-        ) as client:
-            assert app.state.core is not core
-            opened = await client.post("/internal/v1/live-text/open",
-                                       json={"window_sha256": plan.sha256})
-            assert opened.status_code == 200, opened.text
-            first, first_result = await admit(client, config, plan, 1, "先记下青竹项目")
+        async with environment(core, tmp_path) as (entry, sends):
+            client = entry.client
+            first = await entry.admit(1, "先记下青竹项目")
+            first_result = entry.accepted[first["event_id"]]
             worker = asyncio.create_task(__main__.worker(core.settings))
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 started = time.monotonic()
-                second, second_result = await admit(client, config, plan, 2, "补充地点在城西")
-                third, third_result = await admit(client, config, plan, 3, "请把前两条一起回答")
+                second = await entry.admit(2, "补充地点在城西")
+                third = await entry.admit(3, "请把前两条一起回答")
+                second_result = entry.accepted[second["event_id"]]
+                third_result = entry.accepted[third["event_id"]]
                 assert not release.is_set() and not replied.is_set()
                 assert time.monotonic() - started < 3  # Local acceptance, not QQ latency.
                 duplicate = await client.post("/internal/v1/inbox/events", json=third,
@@ -114,7 +104,11 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                 )] == ["CANCELLED", "CANCELLED", "QUEUED"]
                 assert core.store.one("SELECT state FROM model_usage") == {"state": "RESERVED"}
                 with Core(core.settings) as second_worker:
-                    assert second_worker.claim_job("concurrent-worker") is None
+                    assert second_worker.store is not core.store
+                    assert second_worker.store.rows("SELECT state FROM model_usage") == [
+                        {"state": "RESERVED"}]
+                    assert second_worker.store.one("SELECT state FROM jobs WHERE job_id=?",
+                        (third_result["job_id"],)) == {"state": "QUEUED"}
                 release.set()
                 await asyncio.wait_for(replied.wait(), 5)
                 assert not worker.done(), worker.exception()
@@ -130,8 +124,12 @@ def test_native_api_accepts_burst_while_independent_worker_drains_old_model(
                 assert {row["event_id"] for row in core.store.rows(
                     "SELECT event_id FROM job_sources WHERE job_id=?", (third_result["job_id"],),
                 )} == {first["event_id"], second["event_id"], third["event_id"]}
-                assert not live_text.stopped(core.store, plan.sha256)
+                assert owner_authority.current(core.store, core.settings, core.clock
+                    ).authority.as_dict() == entry.runtime.authority
                 assert paid_budget.journal(core.store, core.settings.paid_model)["head_sha256"]
+                assert (await entry.send(client, entry.protocol))["worked"]
+                assert len(sends) == 1
+                assert sends[0]["message"][0]["data"]["text"] == "最新问题的合成回复"
             finally:
                 release.set()
                 worker.cancel()
