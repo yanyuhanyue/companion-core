@@ -165,6 +165,17 @@ Bridge 将原尝试记为 `NOT_SENT`，保存 accepted 收口结果；丢失 HTT
 核对合同保持严格。原图、模型或其他任务仍有未知责任时，输入终态及 handoff 继续阻止恢复。
 所有原责任闭合后，才由既有 `owner-handoff-prepare`、后继授权及 `owner-handoff` 接续。
 
+同一命令也可补交已经持久化的普通私聊成功 ACK：原进程须停止并持有排他锁，
+Core 须确认对应授权已 STOP，原日志须为同一 `RESERVED → IO_STARTED` 尝试，
+保存的 `SENT` 回执、provider ID、原 lease 与发送绑定须完整一致。它只向现有
+`/internal/v1/deliveries/{message_id}/result` 幂等接口补交原回执；Core 确认 `SENT`
+后才将本地结果记为 accepted，并补齐原尝试的 `ACK`。返回 `ACK` 时仍保持停止，
+随后执行既有交接。Core 响应丢失时重交同一回执，不再次调用 QQ 发送，不恢复已取消尾段。
+不确定结果、缺少成功 ACK、来源不符或已经人工核对的责任不能用此分支覆盖。
+
+正常发送使用同一进程的 `OwnerRuntime` 校验回执队列，不在正在发送时重新执行
+启动恢复检查。真正的进程重启仍会对遗留 `RESERVED`、`IO_STARTED`、`UNKNOWN` 停止。
+
 `tests/test_bridge_owner_no_io.py` 通过真实 HTTP、独立 Core worker 和独立 Bridge
 核对进程验证 lease 回收、Core 回执丢失后的幂等恢复与原生交接；外部模型仅使用合成传输。
 该扩展沿用本文已记录的 DSH producer 终态投影、SQLite 原事务及既有停机证明职责划分。

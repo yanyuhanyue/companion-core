@@ -214,6 +214,79 @@ def _stopped(runtime):
     return records, runtime.row()["journal_head"]
 
 
+def _saved_ack(runtime, records, message_id):
+    saved = runtime.db.execute("SELECT body,state FROM results WHERE message_id=?",
+                               (message_id,)).fetchone()
+    body = json.loads(saved[0]) if saved else None
+    if not isinstance(body, dict) or body.get("result") != "SENT":
+        return None
+    entries = [record for record in records if record["kind"] in UNCERTAIN | {"ACK", "NOT_SENT"}
+               and record["data"].get("message_id") == message_id]
+    kinds = [record["kind"] for record in entries]
+    if kinds not in (["RESERVED", "IO_STARTED"], ["RESERVED", "IO_STARTED", "ACK"]):
+        raise ValueError("DELIVERY_SAVED_ACK_BINDING_REQUIRED")
+    reserved = entries[0]["data"]
+    original = reserved.get("delivery_binding")
+    provider = body.get("provider_message_id")
+    if (saved[1] not in {"pending", "accepted"}
+        or set(body) not in ({"lease_token", "result", "provider_message_id"},
+                            {"lease_token", "result", "provider_message_id", "error_code"})
+        or "error_code" in body and body["error_code"] != "IMAGE_PREFLIGHT_SKIPPED"
+        or not isinstance(provider, str) or not 1 <= len(provider) <= 128
+        or not wire.identifier(body.get("lease_token"), r"lease_[a-f0-9]{32}")
+        or reserved["plan_hash"] != wire.digest(runtime.authority)
+        or not isinstance(original, dict) or set(original) != BINDING_FIELDS
+        or original["action_type"] not in {"qq.private.reply", "qq.private.proactive"}
+        or original["payload_kind"] != "reply_sha256"
+        or original["content_sha256"] != reserved["text_hash"]
+        or original["lease_sha256"] != wire.digest(body["lease_token"])
+        or any(not wire.hash_value(original[key]) for key in (
+            "content_sha256", "payload_sha256", "send_check_sha256"))):
+        raise ValueError("DELIVERY_SAVED_ACK_BINDING_REQUIRED")
+    check = {"authority": runtime.authority, "event_id": reserved["event_id"],
+        "message_id": message_id, "lease_token": body["lease_token"],
+        "content_sha256": original["content_sha256"]}
+    if original["reply_revision"] is not None:
+        check["reply_revision"] = original["reply_revision"]
+    resolution = None
+    if runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (TABLE,)).fetchone():
+        resolution = runtime.db.execute(f"SELECT 1 FROM {TABLE} WHERE message_id=?",
+                                        (message_id,)).fetchone()
+    if (wire.digest(check) != original["send_check_sha256"]
+        or kinds[-1] == "ACK" and (saved[1] != "accepted"
+            or entries[-1]["data"]["provider_ack_hash"] != wire.digest(provider))
+        or resolution is not None):
+        raise ValueError("DELIVERY_SAVED_ACK_BINDING_REQUIRED")
+    return {"body": body, "state": saved[1], "attempt_state": kinds[-1],
+            "provider_ack_sha256": wire.digest(provider)}
+
+
+async def _recover_saved_ack(runtime, client, records, message_id):
+    original = _saved_ack(runtime, records, message_id)
+    if original is None:
+        return None
+    _, before = _stopped(runtime)
+    # Replay only the durable provider receipt through Core's existing idempotent
+    # result endpoint. This path never constructs a OneBot client or sends again.
+    result = await bounded_post(client, f"/internal/v1/deliveries/{message_id}/result",
+                                original["body"])
+    records, head = _stopped(runtime)
+    if (result != {"state": "SENT"} or head != before
+        or _saved_ack(runtime, records, message_id) != original):
+        raise ValueError("DELIVERY_SAVED_ACK_CONFIRMATION_REQUIRED")
+    if original["attempt_state"] != "ACK":
+        with runtime.db:
+            runtime.append("ACK", {"message_id": message_id,
+                                   "provider_ack_hash": original["provider_ack_sha256"]})
+            runtime.db.execute("UPDATE window_attempts SET state='ACK',provider_ack_hash=? "
+                "WHERE message_id=?", (original["provider_ack_sha256"], message_id))
+            runtime.db.execute("UPDATE results SET state='accepted' WHERE message_id=?",
+                               (message_id,))
+    runtime.verify(active=False)
+    return {"state": "ACK", "message_id": message_id, "paused": True,
+            "provider_ack_sha256": original["provider_ack_sha256"], "core_result_confirmed": True}
+
+
 async def prepare(runtime, client, message_id):
     _, before = _stopped(runtime)
     confirmation = await bounded_post(client, "/internal/v1/owner-authority/stop-receipt",
@@ -222,13 +295,16 @@ async def prepare(runtime, client, message_id):
     records, head = _stopped(runtime)
     if before != head:
         raise ValueError("DELIVERY_RESOLUTION_JOURNAL_REQUIRED")
-    previous = [record for record in records if record["kind"] == "CORE_STOP_CONFIRMED"]
+    previous = [record for record in records if record["kind"] == "CORE_STOP_CONFIRMED"
+                and record["data"]["authority"] == runtime.authority]
     if previous and previous[-1]["data"] != confirmation:
         raise ValueError("OWNER_CORE_STOP_RECEIPT_INVALID")
     if not previous:
         with runtime.db:
             runtime.append("CORE_STOP_CONFIRMED", confirmation)
         records, head = _stopped(runtime)
+    if acknowledged := await _recover_saved_ack(runtime, client, records, message_id):
+        return acknowledged
     stored = next((row for row in rows(runtime) if row["message_id"] == message_id), None)
     if stored:
         proof = json.loads(stored["proof_json"])

@@ -1,6 +1,6 @@
 {
   "source_run": "https://github.com/yanyuhanyue/companion-core/actions/runs/40192916567",
-  "source_note": "All eight JUnit reports completed with zero failures or errors. One Linux job reached its time limit after pytest completed, while uploading artifacts. These are timing measurements, not a full-CI verification receipt.",
+  "source_note": "All eight JUnit reports completed with zero failures or errors. One Linux job reached its time limit after pytest completed, while uploading artifacts. These are timing measurements, not a full-CI verification receipt. The two changed Bridge recovery files use the conservative Windows Python 3.12 measurements from scripts/check.ps1 on 2026-10-25 (83 focused tests passed): test_bridge_owner_no_io.py 127.310s and test_bridge_owner_resolution.py 30.390s.",
   "file_seconds": {
     "tests/test_account_actions_entrypoint.py": 4.871,
     "tests/test_account_original_proof.py": 3.194,
@@ -33,9 +33,9 @@
     "tests/test_bridge_native_pokes.py": 18.061,
     "tests/test_bridge_owner_cutover.py": 1.638,
     "tests/test_bridge_owner_handoff.py": 1.471,
-    "tests/test_bridge_owner_no_io.py": 17.82,
+    "tests/test_bridge_owner_no_io.py": 127.31,
     "tests/test_bridge_owner_notices.py": 1.034,
-    "tests/test_bridge_owner_resolution.py": 8.6,
+    "tests/test_bridge_owner_resolution.py": 30.39,
     "tests/test_bridge_owner_runtime.py": 0.185,
     "tests/test_bridge_pump_lifecycle.py": 0.009,
     "tests/test_bridge_stop_recovery.py": 3.417,

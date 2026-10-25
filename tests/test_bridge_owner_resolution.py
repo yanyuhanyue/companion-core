@@ -160,6 +160,55 @@ def reserve_uncertain(config):
     return item
 
 
+@pytest.mark.parametrize("mutation", [None, "lease", "missing_ack", "native_ack", "queue",
+                                     "reserved", "unknown", "authority"])
+def test_saved_success_ack_requires_original_attempt_and_durable_result(config, mutation):
+    now = datetime.now(UTC)
+    item = {"authority": config.owner_authority, "message_id": "msg_" + "a" * 32,
+        "lease_token": "lease_" + "b" * 32, "lease_until": (now + timedelta(minutes=2)).isoformat(),
+        "origin_event_id": "evt_" + "c" * 64, "action_type": "qq.private.proactive",
+        "content": {"text": "synthetic saved acknowledgement"}}
+    with Spool(config) as spool:
+        runtime = OwnerRuntime(spool)
+        OwnerSendGuard(runtime, None).reserve(item)
+        spool.start_delivery(item)
+        if mutation != "reserved":
+            with spool.db:
+                runtime.append("IO_STARTED", {"message_id": item["message_id"],
+                                               "provider_ack_hash": None})
+                spool.db.execute("UPDATE window_attempts SET state='IO_STARTED'")
+        spool.finish_delivery(item["message_id"], "synthetic-provider-id")
+        if mutation in {"lease", "missing_ack", "native_ack"}:
+            body = json.loads(spool.db.execute("SELECT body FROM results").fetchone()[0])
+            if mutation == "lease":
+                body["lease_token"] = "lease_" + "d" * 32
+            elif mutation == "missing_ack":
+                body["provider_message_id"] = None
+            else:
+                body["native_ack"] = {"action": "friend_poke"}
+            with spool.db:
+                spool.db.execute("UPDATE results SET body=?", (encode(body),))
+        elif mutation == "queue":
+            with spool.db:
+                spool.db.execute("UPDATE results SET state='rejected'")
+        elif mutation == "unknown":
+            with spool.db:
+                runtime.append("UNKNOWN", {"message_id": item["message_id"],
+                                            "provider_ack_hash": None})
+                spool.db.execute("UPDATE window_attempts SET state='UNKNOWN'")
+        runtime.stop()
+        records = runtime.verify(active=False)
+        if mutation == "authority":
+            runtime.authority = runtime.authority | {"revision": 3}
+        if mutation:
+            with pytest.raises(ValueError, match="DELIVERY_SAVED_ACK_BINDING_REQUIRED"):
+                owner_native_resolution._saved_ack(runtime, records, item["message_id"])
+        else:
+            saved = owner_native_resolution._saved_ack(runtime, records, item["message_id"])
+            assert saved["attempt_state"] == "IO_STARTED" and saved["state"] == "pending"
+            assert saved["provider_ack_sha256"] == journal.digest("synthetic-provider-id")
+
+
 def test_active_bridge_cannot_prove_quiescence(config):
     with Spool(config) as spool:
         runtime = OwnerRuntime(spool)

@@ -98,10 +98,10 @@ class DeliveryReceipts:
                             "ON CONFLICT(message_id) DO UPDATE SET body=excluded.body,"
                             "state='accepted'", (item["message_id"], value))
 
-    async def flush_result(self, client):
+    async def flush_result(self, client, *, runtime=None):
         from .owner_resolution import pending_result
 
-        row = pending_result(self)
+        row = pending_result(self, runtime=runtime)
         if not row:
             return False
         status, result = await bounded_post(
