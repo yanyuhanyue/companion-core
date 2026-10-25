@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from companion.cognition_read import measurement, observed_usage
 from companion.contracts import CoreError
 from companion.ops_status import _ReadView, schema_head
 from companion.paid_budget import sha
@@ -258,7 +259,8 @@ def _trace(view, trace_id):
             "SELECT m.request_id,m.state,m.scenario,m.input_tokens,m.cached_input_tokens,"
             "m.output_tokens,a.logical_request_id,"
             "m.billed_micro_usd,m.pricing_known,a.io_started_at,a.attempt_number,"
-            "a.reserved_micro_usd FROM model_usage m LEFT JOIN model_admissions a "
+            "a.reserved_micro_usd,a.measurement_json "
+            "FROM model_usage m LEFT JOIN model_admissions a "
             "USING(request_id) WHERE m.job_id=? ORDER BY m.rowid LIMIT 101", (job["job_id"],),
         )
         if len(usage) > 100:
@@ -266,7 +268,7 @@ def _trace(view, trace_id):
         calls = []
         for row in usage:
             # RESERVED/UNKNOWN tokens may be estimates. Demo calls are never real usage proof.
-            actual = row["state"] == "SETTLED" and row["io_started_at"] is not None
+            actual = observed_usage(row, row)
             calls.append({
                 "request_ref_sha256": _hash(row["request_id"]),
                 "logical_request_ref_sha256": (
@@ -284,6 +286,8 @@ def _trace(view, trace_id):
                 ),
                 "accounted_or_reserved_micro_usd": _number(row["billed_micro_usd"]),
                 "reservation_micro_usd": _number(row["reserved_micro_usd"]),
+                "measurement": measurement(row["measurement_json"]),
+                "context_regions": "NOT_RECORDED", "trimming_reason": "NOT_RECORDED",
             })
         inspected.append({
             "job_ref_sha256": _hash(job["job_id"]),

@@ -28,6 +28,38 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(core, tmp_path):
+    from pathlib import Path
+
+    from tests.test_context_meter_inspector import recorded_attempts
+
+    core.clock.now = datetime.now(UTC)
+    run(recorded_attempts(core, tmp_path, unknown=True))
+    attempts = core.store.rows("SELECT request_id,state FROM model_usage ORDER BY rowid")
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            for attempt in attempts:
+                await page.evaluate("id => { location.hash = 'thinking/model:' + id; }",
+                                    attempt["request_id"])
+                await page.locator("#page[aria-busy=false]").wait_for()
+                panel = page.locator(".steps-view").filter(has_text="本次请求计量")
+                await panel.wait_for()
+                assert "固定渲染器本地计数" in await panel.inner_text()
+                assert "上下文区域分布与裁剪原因未记录" in await panel.inner_text()
+                usage = panel.locator(".kv").filter(has_text="实际输入 / 输出")
+                assert ("未记录" if attempt["state"] == "UNKNOWN" else "100 / 4") in (
+                    await usage.inner_text())
+                assert "SYNTHETIC_PRIVATE_TOOL_RESULT" not in (
+                    await page.locator("#page").inner_text())
+            # Retain one synthetic screenshot for the local verification receipt.
+            target = Path(__file__).parents[1] / ".local/test-results/context-meter-browser.png"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(target), full_page=True)
+
+    run(scenario())
+
+
 def assert_receipts(core, states):
     receipts = core.store.rows("SELECT state,result_json FROM console_operations ORDER BY rowid")
     assert all(item["state"] == "COMPLETE" for item in receipts)
