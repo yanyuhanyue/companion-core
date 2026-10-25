@@ -113,6 +113,24 @@ package checks run once per platform, on the existing designated shard. A failed
 shard fails the final gate; full-tree reuse requires all eight test jobs as well as the
 remaining full-validation jobs. An old two-shard receipt is insufficient.
 
+Each product shard uses the existing `scripts.test_feedback` entry point with two
+pytest-xdist workers and `--dist=loadfile`. The shard plugin still selects the
+same complete files before xdist assigns those files to workers; no impact
+selection is enabled in CI. Module fixtures and parametrized cases stay together.
+The shared empty-schema fixture performs one real migration per job, then creates
+independent test databases. Each worker and its children keep their own scratch
+directory and real port tests continue binding kernel-assigned ports.
+
+Before starting workers, the coordinator prepares the pinned BGE file snapshot
+once per job. A cold model cache still downloads the required files; a warm cache
+uses the local snapshot. Each worker retains its own real ONNX inference session
+and process-local encoder cache. Dependency/model caches, four-shard weights,
+platform matrix, required jobs and full-tree proof format are unchanged. JUnit
+continues recording setup, call and teardown durations. If resource pressure or
+instability outweighs the measured gain, set `--workers 0` in the product command
+to restore serial execution without changing its scope; test failures never
+trigger an automatic passing fallback.
+
 `scripts/ci_weights.json` records file durations from a successful full run.
 Weights use the slower platform's per-file JUnit total, including setup and
 teardown. The existing longest-first/lightest-shard algorithm balances those
@@ -204,3 +222,35 @@ was rechecked: its synthetic host/client entrypoint validation supports retainin
 HTTP/browser checks. GitHub's [matrix outputs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations#using-an-output-to-define-two-matrices)
 provide the existing mechanism for scheduling the one Console job. No dependency analysis
 or new evidence/reuse format is introduced; selected results still cannot mint full-tree proof.
+
+## October 25 local worker comparison
+
+The same 40 M0, Console HTTP/proxy, native TLS voice cancellation and independent
+worker STOP/lock cases passed in every run below, with identical JUnit case IDs.
+The order was serial, parallel, parallel, serial, using the same checkout,
+Python 3.12.10, dependency lock and warm model cache on Windows 11 with an
+i9-14900HX, 32 logical CPUs and 31.6 GiB RAM. The entry time includes `check.ps1`,
+Ruff, parent preparation, pytest and cleanup:
+
+| Warm-cache run | Workers | Entry wall time | Pytest wall time |
+|---|---:|---:|---:|
+| A | 0 | 105.494 s | 95.60 s |
+| A | 2 | 95.275 s | 88.20 s |
+| B | 2 | 114.424 s | 106.47 s |
+| B | 0 | 144.660 s | 133.71 s |
+
+The two-sample medians are 125.077 and 104.850 seconds, a 16.2% reduction for
+this scope. Background system CPU rose from 23.3% to 34.0% across the sequence;
+the spread prevents a stable CI speedup claim. Process-tree samples every 0.2 s
+recorded 728–730 MiB peak working sets in serial and 1058–1078 MiB in parallel,
+with sampled CPU time of 108–150 and 138–164 seconds respectively. Samples can
+miss short children, and summed working sets count shared pages more than once.
+A separate cold-cache serial run took 123.397 seconds including the initial
+public model download; it is excluded from the warm comparison. Hosted runner
+images, queues, cache state and complete-suite wall time require the candidate's
+CI receipt before accepting the optimization.
+
+An offline check through the same worker entry point also ran real BGE inference
+in two distinct worker processes. Each returned a finite 512-dimensional vector,
+initialized its own encoder once and hit that process's encoder cache on reuse;
+the pinned file cache was shared and worker scratch paths were distinct.

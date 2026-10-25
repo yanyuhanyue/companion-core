@@ -60,16 +60,29 @@ def test_real_schema_is_prepared_once_across_workers_and_backups_stay_private(tm
         "    return original(path)\nshared.migrate = counted\n")
     for index in range(4):
         (root / f"test_isolation_{index}.py").write_text(
-            "import json,os,sqlite3\nfrom pathlib import Path\n"
+            "import json,os,socket,sqlite3,subprocess,sys\nfrom pathlib import Path\n"
             "def test_copy(core,tmp_path,migrated_database):\n"
             "    sql = \"SELECT name FROM sqlite_master WHERE name='private'\"\n"
             "    assert not core.store.rows(sql)\n"
             "    core.store.execute('CREATE TABLE private(value)')\n"
             "    with sqlite3.connect(migrated_database) as db:\n"
             "        assert not db.execute(sql).fetchall()\n"
+            "    with socket.socket() as server:\n"
+            "        server.bind(('127.0.0.1',0))\n        server.listen()\n"
+            "        port = server.getsockname()[1]\n"
+            "        code = (\"import json,os,socket,sys; \"\n"
+            "                \"peer=socket.create_connection(('127.0.0.1',int(sys.argv[1]))); \"\n"
+            "                \"peer.sendall(b'SYNTHETIC'); peer.close(); \"\n"
+            "                \"keys=('TMP','TEMP','TMPDIR'); \"\n"
+            "                \"print(json.dumps([os.environ[k] for k in keys]))\")\n"
+            "        child = subprocess.run([sys.executable,'-c',code,str(port)],\n"
+            "                               capture_output=True,text=True,check=True,timeout=10)\n"
+            "        peer,_ = server.accept()\n"
+            "        with peer:\n            assert peer.recv(64) == b'SYNTHETIC'\n"
             f"    (Path(__file__).parent / '.local/worker-{index}.json').write_text(json.dumps(\n"
             "        {'pid':os.getpid(),'schema':str(migrated_database),'tmp':str(tmp_path),\n"
-            "         'child_tmp':os.environ['TMP']}))\n")
+            "         'child_tmp':os.environ['TMP'],'child_env':json.loads(child.stdout),\n"
+            "         'port':port}))\n")
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
     command = [sys.executable, "-m", "pytest", "-q", "-n", "2", "--dist=loadfile",
                "--basetemp=" + str(root / ".local/pytest"), "-o", "cache_dir=.local/cache"]
@@ -81,6 +94,7 @@ def test_real_schema_is_prepared_once_across_workers_and_backups_stay_private(tm
     assert len({r["schema"] for r in records}) == 1
     assert len({r["tmp"] for r in records}) == 4
     assert len({r["child_tmp"] for r in records}) == 2
+    assert all(r["child_env"] == [r["child_tmp"]] * 3 and r["port"] > 0 for r in records)
     assert all(Path(r["child_tmp"]).is_relative_to(root / ".local/pytest") for r in records)
 
 

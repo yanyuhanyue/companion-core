@@ -1,4 +1,4 @@
-"""Local pytest-xdist/testmon entry point; the plugins own scheduling and impact data."""
+"""Pytest-xdist/testmon entry point; the plugins own scheduling and impact data."""
 
 import argparse
 import hashlib
