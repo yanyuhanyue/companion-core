@@ -25,7 +25,12 @@ def transport_case(core, tmp_path, monkeypatch):
     core.settings = core.settings.model_copy(update={"meme_catalog_owner": "core"})
     native = NativeCase(core, tmp_path, rules=(), semantic=True, catalog_owner="core")
     owner = native.owner
-    owner.config = native.spool.config = replace(owner.config, core_url="http://127.0.0.1:8765")
+    owner.config = native.spool.config = replace(
+        owner.config,
+        core_url="http://127.0.0.1:8765",
+        onebot_http_url="http://127.0.0.1:3000",
+        onebot_ws_url="ws://127.0.0.1:3001",
+    )
     original_import = builtins.__import__
 
     def isolated(name, *args, **kwargs):
@@ -57,6 +62,7 @@ def transport_case(core, tmp_path, monkeypatch):
         "action_type": "qq.private.reply",
         "lease_until": (owner.clock() + timedelta(seconds=60)).isoformat(),
         "lease_token": "lease_" + "a" * 32,
+        "conversation_platform_session_key": owner.config.origin,
     }
     value = {
         "message_id": item["message_id"],

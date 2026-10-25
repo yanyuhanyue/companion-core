@@ -145,3 +145,72 @@ def test_root_erasure_refuses_asset_under_old_lease_and_preserves_fees(runtime_c
                 assert c.core.store.rows("SELECT * FROM model_usage") == usage
 
     run(scenario())
+
+
+def test_old_frozen_delivery_backup_replays_newest_ledger_before_any_asset_read(
+    runtime_case, tmp_path
+):
+    from contextlib import closing
+
+    from cryptography.fernet import Fernet
+
+    from companion.backup import backup, restore
+    from companion.contracts import CoreError
+    from companion.meme_delivery import AssetRequest, read_asset
+    from companion.store import Store
+
+    c = runtime_case
+    archive, restored = tmp_path / "frozen.enc", tmp_path / "restored.db"
+    key = Fernet.generate_key()
+
+    async def scenario():
+        await settled_reply(c)
+        with Core(c.core.settings, clock=c.core.clock) as api_core:
+            async with (
+                real_core_http(api_core) as port,
+                httpx.AsyncClient(
+                    base_url=f"http://127.0.0.1:{port}",
+                    trust_env=False,
+                    headers={"Authorization": "Bearer " + c.config.bridge_token},
+                ) as client,
+            ):
+                item, body = await lease(c, client)
+                path = "/internal/v1/memes/deliveries/" + item["message_id"] + "/asset"
+                assert (await client.post(path, json=body)).status_code == 200
+                before = c.core.store.rows("SELECT * FROM model_usage")
+                backup(c.core.settings.database, archive, key)
+                with c.core.store.transaction():
+                    c.core.ledger.expire_events(
+                        c.core.store, [c.source["event_id"]], c.core.clock()
+                    )
+                restore(archive, restored, key, c.core.settings.erasure_ledger)
+                with closing(Store(str(restored))) as store:
+                    asset = store.one("SELECT * FROM meme_assets")
+                    assert (
+                        asset["state"] == "ERASED"
+                        and asset["data"] is asset["metadata_json"] is None
+                    )
+                    assert not store.one(
+                        "SELECT 1 FROM runtime_meta WHERE key=?",
+                        ("meme_offer:" + c.job["event_id"],),
+                    )
+                    assert (
+                        store.one(
+                            "SELECT state FROM outbox WHERE message_id=?", (item["message_id"],)
+                        )["state"]
+                        == "CANCELLED"
+                    )
+                    assert store.rows("SELECT * FROM model_usage") == before
+                    settings = c.core.settings.model_copy(update={"database": str(restored)})
+                    import pytest
+
+                    with pytest.raises(CoreError):
+                        read_asset(
+                            store,
+                            settings,
+                            c.core.clock,
+                            item["message_id"],
+                            AssetRequest.model_validate(body),
+                        )
+
+    run(scenario())

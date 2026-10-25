@@ -95,27 +95,63 @@ def query_for(text):
     }
 
 
+def _candidate(sha, caption, meta):
+    return {
+        "candidate_id": sha,
+        "category": meta["category"],
+        "description": (
+            caption.description
+            + "\n图中文字："
+            + caption.visible_text
+            + "\n语气："
+            + caption.tone
+            + "；对象："
+            + caption.target
+        )[:2000],
+        "tags": list(caption.tags),
+    }
+
+
 class MemeRetrieval:
     def __init__(self, service):
         self.service = service
         self.store, self.settings, self.clock = service.store, service.settings, service.clock
 
+    def _chat(self, job, *, executing):
+        view = owner_authority.check_job(
+            self.store, self.settings, self.clock, job, purpose="chat", executing=executing
+        )
+        reply_revision.check_job(self.store, job)
+        event, body, _ = owner_input.source(
+            self.store, self.settings, view, job["event_id"], self.clock(), allow_commands=True
+        )
+        return view, event, body
+
+    def optional_disabled(self, job, *, executing=True):
+        # Validate the original chat grant and all of its bound policies first.
+        # A changed/expired grant or source is never an optional capability miss.
+        view, _, _ = self._chat(job, executing=executing)
+        if self.store.one("SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)):
+            return False  # Even null/empty/corrupt frozen records retain their contract.
+        return (
+            not self.settings.meme_semantics_enabled
+            or not self.settings.expression_enabled
+            or not {"meme", "expression"} <= set(view.policy.purposes)
+        )
+
     def _scope(self, job, *, executing):
+        view, event, body = self._chat(job, executing=executing)
         if (
             not core_owned(self.settings)
             or not self.settings.meme_semantics_enabled
             or not self.settings.expression_enabled
         ):
             raise CoreError("MEME_CORE_MODE_REQUIRED", 403)
-        view = owner_authority.check_job(
-            self.store, self.settings, self.clock, job, purpose="meme", executing=executing
+        owner_authority.current(
+            self.store, self.settings, self.clock, purpose="meme", authority=view.authority
         )
         owner_authority.current(
             self.store, self.settings, self.clock, purpose="expression", authority=view.authority
-        )
-        reply_revision.check_job(self.store, job)
-        event, body, _ = owner_input.source(
-            self.store, self.settings, view, job["event_id"], self.clock(), purpose="meme"
         )
         return view, event, body
 
@@ -290,23 +326,7 @@ class MemeRetrieval:
                     score = meme_policy.lexical_score(caption, query)
                     if not score:
                         continue
-                    ranked[sha] = (
-                        score,
-                        {
-                            "candidate_id": sha,
-                            "category": meta["category"],
-                            "description": (
-                                caption.description
-                                + "\n图中文字："
-                                + caption.visible_text
-                                + "\n语气："
-                                + caption.tone
-                                + "；对象："
-                                + caption.target
-                            )[:2000],
-                            "tags": list(caption.tags),
-                        },
-                    )
+                    ranked[sha] = (score, _candidate(sha, caption, meta))
                     bindings[sha], roots[sha] = binding.model_dump(mode="json"), sources
             selected = sorted(ranked, key=lambda sha: (-ranked[sha][0], sha))[:8]
             offer = (
@@ -348,13 +368,14 @@ class MemeRetrieval:
     def check(self, job, *, executing=True):
         from companion import meme_service
 
-        self._scope(job, executing=executing)
+        _, _, body = self._scope(job, executing=executing)
         saved = self.store.one(
             "SELECT value FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)
         )
         value = json.loads(saved["value"]) if saved else {}
         if (
-            set(value)
+            not isinstance(value, dict)
+            or set(value)
             != {
                 "job_id",
                 "event_id",
@@ -372,7 +393,10 @@ class MemeRetrieval:
             or value["binding_version"] != 1
             or value["job_id"] != job["job_id"]
             or value["event_id"] != job["event_id"]
+            or type(value["privacy_epoch"]) is not int
+            or type(value["reply_revision"]) is not int
             or value["privacy_epoch"] != epoch(self.store)
+            or value["query_sha256"] != digest(query_for(body["text"]))
             or value["meme_policy_sha256"] != meme_service.policy_hash(self.settings)
         ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
@@ -385,14 +409,28 @@ class MemeRetrieval:
             or set(value["catalog_bindings"]) != expected_ids
         ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
-        if offer and offer.offer_key != "meme:" + job["event_id"]:
+        query = query_for(body["text"])
+        if offer and (
+            offer.offer_key != "meme:" + job["event_id"] or offer.intent != query["intent"]
+        ):
             raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
         for sha, raw in value["catalog_bindings"].items():
+            if (
+                not isinstance(raw, dict)
+                or type(raw.get("version")) is not int
+                or raw["version"] != 1
+            ):
+                raise CoreError("MEME_OFFER_BINDING_INVALID", 403)
             binding = AssetBinding.model_validate(raw)
-            actual, _, _, sources, _ = self._resolve(binding.asset_id, binding.caption_job_id)
+            actual, caption, meta, sources, _ = self._resolve(
+                binding.asset_id, binding.caption_job_id
+            )
+            candidate = next(c for c in offer.candidates if c.candidate_id == sha)
             if (
                 actual != binding
                 or binding.asset_sha256 != sha
+                or candidate.model_dump(mode="json") != _candidate(sha, caption, meta)
+                or meme_policy.lexical_score(caption, query) <= 0
                 or any(
                     not self.store.one(
                         "SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",

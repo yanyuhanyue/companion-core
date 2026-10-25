@@ -898,11 +898,15 @@ class MemeCaptionService:
 
         if (core_owned(self.settings) and job["kind"] == "chat"
             and not reply_revision.control_job(self.store, job)):
-            MemeRetrieval(self).prepare(job)
+            retrieval = MemeRetrieval(self)
+            if not retrieval.optional_disabled(job):
+                retrieval.prepare(job)
 
     def check_offer(self, job):
         from companion.meme_retrieval import MemeRetrieval, core_owned
 
         if (core_owned(self.settings) and job["kind"] == "chat"
             and not reply_revision.control_job(self.store, job)):
-            MemeRetrieval(self).check(job)
+            retrieval = MemeRetrieval(self)
+            if not retrieval.optional_disabled(job):
+                retrieval.check(job)

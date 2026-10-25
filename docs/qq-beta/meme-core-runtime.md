@@ -1,7 +1,8 @@
 # Core 素材运行时合同（B1b）
 
-当前是独立 B1b 本地接口里程碑，基于冻结 B1a `64ac829`；尚未完成
-Settings / Core Worker 集成或独立进程端到端验收，不代表可生产切换。
+当前是独立 B1b 本地合成候选，基于冻结 B1a `64ac829` 并集成主线图片修复及
+Context 独立提交的 Settings / Core Worker 接缝。真实签名入口、独立 Worker、实际 Bridge
+进程和 OneBot Mock 已合成验收；尚未完成主审、完整 PR CI 或生产切换。
 仍需 B2 向量/发现、B3 历史内容副本擦除与原责任闭环、B4 独立镜像的相应门禁。
 
 ## 单主与兼容
@@ -42,6 +43,13 @@ Context 集成人独占 `companion/config.py` 和 `companion/core.py`。精确�
 合适候选冻结为空；STOP、来源撤回、epoch、授权和费用责任错误不能被泛捕获成空候选。
 STAGED 表示内容保管；当前 owner/private、目的、原始来源证据和租约分别复核。
 
+原生 chat-only 窗口保留原文本能力：先验证当前 chat 的来源、revision、authority、租约及
+所有原绑定策略。仅在该 job 完全没有既存 meme_offer 记录时，明确关闭 semantics/expression
+或原 grant 明确没有 meme/expression purpose 才可 no-op，返回空可选 offer。此路径不检索素材、
+创建 caption/embedding/其他工作或额外模型调用。已有记录包括 null、空候选、损坏/未知绑定
+一律严格检查；disabled 或缺 scope 不能抹掉既有责任。旧 grant 的 flags/mode/来源规则变化
+必须先由原 check_job/current 拒绝，STOP/撤回/epoch/paid/source/lease 错误仍原样传播。
+
 ## 冻结绑定 v1
 
 保留 MemeOffer / ImageIntent DTO 和原图 SHA candidate_id。每个事件对相同字节
@@ -59,6 +67,8 @@ caption_job_id, caption_sha256, caption_identity_sha256, meme_policy_sha256, pri
 原 chat job_sources，后续每次请求重新核验。owner_delivery 原材料只增加
 meme_binding_version=1 与 meme_binding_sha256；默认 Bridge 材料不增加字段。
 Core 模式缺少新字段或具有旧 Bridge offer 时拒绝，不自动补签/提升。
+读取时还复核严格版本/epoch 类型、当前 query 摘要/intent，并从原 caption 重建候选描述、
+tags 和 category；不能只保留正确来源 hash 而篡改进入 prompt 的内容。
 擦除沿现存 Ledger handler 清除资产内容与派生 offer；残余摘要/ID 不授予读或发送权限。
 
 原 Outbox 是按物理 byte SHA 的占用及 cooldown 权威，不按许可别名绕过；PENDING、
@@ -84,7 +94,10 @@ bounded_post，保留普通 images.py 的 64KiB 边界。对 echoed identities�
 canonical base64、实际 SHA/MIME/长度逐项验证，await 后重读 STOP/recall/新输入。
 来源和 caption 的最终执行权限由 Core 的原发送检查复核，摘要不代替授权。
 
-Bridge 原图仅在准备好的单次发送 RAM 中，成功、失败或取消时清理；不新建原图、
+Bridge 原图仅在准备好的单次发送 RAM 中，原 deliver_item 外层唯一 finally 调用同步、
+无 I/O 的可选 release_prepared；OwnerOneBot 仅 Core 模式清空 prepared_message。
+覆盖 prepare→reserve STOP、probe、CancelledError、成功及 UNKNOWN，保留原异常和所有
+持久责任；无此 hook 的适配器维持原行为。不新建原图、
 缩略图、caption、向量或 query 持久副本。PinCustody 复用原 PREPARED/SENDING/UNKNOWN/
 SENT/CANCELLED 转移、原 NOT_SENT 证明及晚到 ACK；重复 ACK 不改原 sent_at。
 原窗口 journal、IO_STARTED、租约、fence 和实际传输 seal 不变。
@@ -96,8 +109,17 @@ SENT/CANCELLED 转移、原 NOT_SENT 证明及晚到 ACK；重复 ACK 不改原 
 
 ## 本地验证边界
 
-已执行领域来源冻结/撤权/费用/epoch、原 catalog pin 回归、Core transport 故障注入和
-实际 native poke 签名/Worker/route 检查；测试 fixture 的修复及原始失败保留在唯一回执。
-Settings / Worker hooks 接入后仍须完成签名 API + 独立 Core Worker + Bridge 进程 +
-OneBot Mock 的合成验收、同字节双来源、并发同库、擦除/旧备份、崩溃及回退检查。
-该文档不声明真人 QQ、生产切换、付费模型、镜像或完整 CI 已通过。
+已执行来源冻结/撤权/费用/epoch、同字节双来源、双连接竞争同一权威 SQLite、固定词法/GIF
+语料、实际租约 API、原 catalog/pin/回执回归、Core transport 故障注入、RAM finally、
+默认及历史快照 golden、包边界、当前 media 限额、实际 native poke/memory-control 签名路由，
+并验证受影响的文本、语音、账号和旧表情发送入口。
+
+真实签名 WS→API→独立 Core Worker 进程→实际 Bridge daemon→OneBot Mock→Core SENT/
+Bridge ACK 验证了原图一致、单次原聊天模型选择、原 caption 费用保留和 Bridge 无业务表。
+实际模型 HTTP hook 处撤回原 root，验证 provider 零调用、无 Outbox 和原费用保留。
+恢复冻结投递旧备份时先用最新独立 Ledger 重放，原图及派生 offer 擦除、旧租约拒读，
+费用逐行保留。合法缺可选能力继续文本，已有冻结 null/opaque 记录后撤权仍严格拒绝。
+
+唯一 .local/b1b-validation/receipt.json 保留原测试 fixture/进程等待失败、修复节点和逐项
+复用证据。合成、真人及发布门禁分列；不声明真人 QQ、生产切换、付费模型、独立镜像或
+完整 CI 已通过。原 ACK/UNKNOWN/fence/独立遗忘账本仍由既有机制负责。

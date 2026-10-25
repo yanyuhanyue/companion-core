@@ -76,7 +76,8 @@ class BridgeConfig:
     account_asset_max_dimension: int = 2048
 
     def __post_init__(self):
-        if self.meme_catalog_owner not in {"bridge", "core"}:
+        if (not isinstance(self.meme_catalog_owner, str)
+            or self.meme_catalog_owner not in {"bridge", "core"}):
             raise ValueError("INVALID_MEME_CATALOG_OWNER")
         if self.owner_authority is not None:
             from companion_delivery_protocol.authority import validate_authority_ref

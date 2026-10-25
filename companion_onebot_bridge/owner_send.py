@@ -233,8 +233,6 @@ class OwnerSendGuard:
         self.dispatched = True
 
     async def cancel_before_send(self, item):
-        if self.config.meme_catalog_owner == "core" and item["content"].get("image") is not None:
-            self.prepared_message = None
         if (self.dispatched or item is not self.current_item
             or self.item_hash != journal.digest(item)):
             return False
@@ -324,6 +322,10 @@ class OwnerOneBot:
     async def probe(self):
         return await self.delegate.probe()
 
+    def release_prepared(self):
+        if self.config.meme_catalog_owner == "core":
+            self.guard.prepared_message = None
+
     async def prepare_delivery(self, item):
         if account_actions.is_account(item):
             permission = await self.guard.runtime.check(self.guard.client,
@@ -380,16 +382,12 @@ class OwnerOneBot:
             if self.guard.prepared_message is None:
                 raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
             try:
-                try:
-                    provider_id = await self.delegate.send_message(self.guard.prepared_message)
-                except BaseException:
-                    if self.guard.meme_sending and self.guard.dispatched:
-                        self.guard.runtime.memes.receipt(item, "UNKNOWN")
-                    raise
-                if self.guard.meme_sending:
-                    self.guard.runtime.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
-                return provider_id
-            finally:
-                if self.config.meme_catalog_owner == "core":
-                    self.guard.prepared_message = None
+                provider_id = await self.delegate.send_message(self.guard.prepared_message)
+            except BaseException:
+                if self.guard.meme_sending and self.guard.dispatched:
+                    self.guard.runtime.memes.receipt(item, "UNKNOWN")
+                raise
+            if self.guard.meme_sending:
+                self.guard.runtime.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
+            return provider_id
         return await self.delegate.send_text(reply_segments.wire_text(item))

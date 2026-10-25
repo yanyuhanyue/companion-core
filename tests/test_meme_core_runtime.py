@@ -161,8 +161,28 @@ def runtime_case(core, tmp_path, monkeypatch, request):
                     "meme_discovery_enabled": False,
                 }
             )
-            policy = grant.policy.model_copy(
-                update={"capability_policies": {"meme": meme_service.policy_hash(core.settings)}}
+            variant = getattr(request, "param", None)
+            if variant == "semantics_off":
+                core.settings.meme_semantics_enabled = False
+            if variant == "expression_off":
+                core.settings.expression_enabled = False
+            # The older discovery fixture uses model_copy(probability=1), which
+            # bypasses Settings' float validation. A real process loads validated
+            # settings (1.0); issue the new grant against that exact roundtrip.
+            core.settings = type(core.settings).model_validate(core.settings.model_dump())
+            purposes = {
+                "chat_only": ["chat"],
+                "no_meme": ["chat", "expression"],
+                "no_expression": ["chat", "meme"],
+            }.get(variant, grant.policy.purposes)
+            policy = type(grant.policy).model_validate(
+                {
+                    **grant.policy.model_dump(),
+                    "purposes": purposes,
+                    "capability_policies": {"meme": meme_service.policy_hash(core.settings)}
+                    if "meme" in purposes
+                    else {},
+                }
             )
             active, _ = activate(core, policy, revision=2, operation="activate-core-catalog")
             new_grant = SimpleNamespace(authority=active["authority"], key=grant.key, policy=policy)
@@ -200,7 +220,12 @@ def runtime_case(core, tmp_path, monkeypatch, request):
                     ) as current_client,
                 ):
                     current, accepted = await admit(
-                        current_client, config, new_grant, now, 2, text="想要温暖的抱抱"
+                        current_client,
+                        config,
+                        new_grant,
+                        now,
+                        2,
+                        text="合成闲聊，没有意图词" if variant == "no_match" else "想要温暖的抱抱",
                     )
                     assert accepted.status_code == 202, accepted.text
             with Core(core.settings, clock=core.clock) as claimant:
@@ -475,8 +500,42 @@ def test_current_exact_license_rule_keeps_original_no_redirect_archive_boundary(
     acquired = json.loads(metadata["acquisition_json"])
     original_url = acquired["fetch"]["requested_url"]
     redirected = "https://public.example/another-archive.zip"
-    acquired["fetch"].update(final_url=redirected, hops=[
-        {"url": original_url, "address": "8.8.8.8", "status": 302},
-        {"url": redirected, "address": "8.8.8.8", "status": 200}])
+    acquired["fetch"].update(
+        final_url=redirected,
+        hops=[
+            {"url": original_url, "address": "8.8.8.8", "status": 302},
+            {"url": redirected, "address": "8.8.8.8", "status": 200},
+        ],
+    )
     metadata["acquisition_json"] = encode(acquired)
     assert not meme_policy.trusted_source(metadata, rules)
+
+
+@pytest.mark.parametrize(
+    "field", ["epoch_type", "binding_version_type", "query", "intent", "description", "tags"]
+)
+def test_frozen_prompt_and_binding_reject_tampering_before_new_model_work(runtime_case, field):
+    c = runtime_case
+    c.retrieval.prepare(c.job)
+    saved = c.retrieval.check(c.job)
+    if field == "epoch_type":
+        saved["privacy_epoch"] = bool(saved["privacy_epoch"])
+    elif field == "binding_version_type":
+        next(iter(saved["catalog_bindings"].values()))["version"] = True
+    elif field == "query":
+        saved["query_sha256"] = "f" * 64
+    elif field == "intent":
+        saved["offer"]["intent"] = "celebrate"
+    else:
+        saved["offer"]["candidates"][0][field] = (
+            "invented" if field == "description" else ["invented"]
+        )
+    before = c.core.store.rows("SELECT * FROM model_usage")
+    c.core.store.execute(
+        "UPDATE runtime_meta SET value=? WHERE key=?",
+        (encode(saved), "meme_offer:" + c.job["event_id"]),
+    )
+    with pytest.raises(CoreError):
+        c.service.check_offer(c.job)
+    assert c.core.store.rows("SELECT * FROM model_usage") == before
+    assert not c.core.store.rows("SELECT * FROM outbox")

@@ -87,8 +87,12 @@ class ExpressionEngine:
             job = self.store.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'", (event_id,))
             if not job or reply_revision.control_job(self.store, job):
                 return True, None
-            value = MemeRetrieval(MemeCaptionService(self.store, self.settings, None,
-                self.clock)).check(job, executing=job["state"] == "RUNNING")
+            retrieval = MemeRetrieval(MemeCaptionService(self.store, self.settings, None,
+                                                         self.clock))
+            executing = job["state"] == "RUNNING"
+            if retrieval.optional_disabled(job, executing=executing):
+                return True, None
+            value = retrieval.check(job, executing=executing)
             return True, MemeOffer.model_validate(value["offer"]) if value["offer"] else None
         if getattr(self.settings, "meme_semantics_enabled", False):
             row = self.store.one("SELECT value FROM runtime_meta WHERE key=?",
