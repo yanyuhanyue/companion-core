@@ -117,7 +117,15 @@ Each tool requires its current purpose on the original owner-authorized job.
             query: The subject or question to recall, not an instruction to change memory.
         """
         check("memory")
-        result = core.memory_context.recall(query, core.clock(), project_query=query)
+        try:
+            result = await core.memory_context.recall_async(
+                query, core.clock(), project_query=query, clock=core.clock,
+                source_check=lambda: check("memory"),
+            )
+        except CoreError as error:
+            if error.code == "PRIVACY_CHANGED":
+                raise CoreError(reply_revision.CANCELLED, 409) from error
+            raise
         pin(result["rows"])
         return {key: value for key, value in result.items() if key != "rows"}
 
