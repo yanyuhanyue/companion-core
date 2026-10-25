@@ -12,6 +12,8 @@ from pydantic import ValidationError
 from companion import live_text, owner_authority, owner_input, paid_budget
 from companion.backup import backup, restore
 from companion.config import LiveTextWindowApproval
+from companion.contracts import CoreError
+from companion.owner_authority_protocol import AuthorityStop
 from companion.privacy import advance_epoch
 from companion.store import after, encode
 from companion_onebot_bridge.window import WindowPlan, digest, stored_plan
@@ -41,14 +43,14 @@ async def native_combined(core, tmp_path, *, options=None, core_options=None,
     # Preserve valid evidence; native owner-private recall excludes public facts.
     core.store.execute("UPDATE memories SET privacy_scope='public' WHERE memory_id=?", (outsider,))
     scores = []
-    original_recall = core.memory_context.recall
+    original_recall = core.memory_context.recall_async
 
-    def observed_recall(*args, **kwargs):
-        result = original_recall(*args, **kwargs)
+    async def observed_recall(*args, **kwargs):
+        result = await original_recall(*args, **kwargs)
         scores.append([row["memory_id"] for row in result["rows"]])
         return result
 
-    core.memory_context.recall = observed_recall
+    core.memory_context.recall_async = observed_recall
     number = 0
 
     def response(request):
@@ -79,7 +81,7 @@ async def native_combined(core, tmp_path, *, options=None, core_options=None,
         ) as (active, client, calls, sends, capture, _):
             yield active, client, capture, active.pump, calls, sends, scores, memory_id, outsider
     finally:
-        core.memory_context.recall = original_recall
+        core.memory_context.recall_async = original_recall
 
 
 def test_same_job_review_and_chat_use_authenticated_sent_history_and_native_fact(core, tmp_path):
@@ -313,7 +315,9 @@ def mutate(core, kind):
         value["history" if purpose == "history" else "memory_scope"] = (
             {"scope": "none"} if purpose == "history" else "none")
         policy = type(view.policy).model_validate(value)
-        activate(core, policy, revision=view.authority.revision, operation=f"withdraw-{purpose}")
+        stopped = owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+            operation_id=f"stop-before-withdraw-{purpose}", authority=view.authority.as_dict()))
+        return policy, stopped["authority"]
     else:
         row = core.store.one(
             "SELECT * FROM runtime_meta WHERE key=?", (owner_input.INPUT + event_id,)
@@ -358,22 +362,42 @@ def test_both_source_scopes_recheck_before_next_model_io(core, tmp_path, monkeyp
             assert await send()
             await capture()
 
-            original_recall = core.memory_context.recall
+            original_recall = core.memory_context.recall_async
+            mutations = []
+            pending_revision = []
 
-            def recalled(*args, **kwargs):
-                result = original_recall(*args, **kwargs)
-                mutate(core, kind)
+            def change():
+                revision = mutate(core, kind)
+                if revision is not None:
+                    pending_revision.append(revision)
+                mutations.append(kind)
+
+            async def recalled(*args, **kwargs):
+                result = await original_recall(*args, **kwargs)
+                change()
                 return result
 
             async def hook(request):
                 if json.loads(request.content)["messages"][-1]["role"] == "tool":
-                    mutate(core, kind)
+                    change()
 
             if stage == "memory_tool":
-                monkeypatch.setattr(core.memory_context, "recall", recalled)
+                monkeypatch.setattr(core.memory_context, "recall_async", recalled)
             else:
                 core.model.client.event_hooks["request"].append(hook)
             assert await core.run_once()
+            assert mutations == [kind]
+            if pending_revision:
+                # STOP fences the current attempt; revise only after its original usage settles.
+                assert all(row["state"] == "SETTLED" for row in core.store.rows(
+                    "SELECT state FROM model_usage"))
+                policy, stopped = pending_revision[0]
+                activate(core, policy, revision=stopped["revision"], operation=f"withdraw-{kind}")
+                purpose = kind.removesuffix("_approval")
+                assert purpose not in owner_authority.current(
+                    core.store, core.settings, core.clock).policy.purposes
+                with pytest.raises(CoreError, match="OWNER_AUTHORITY_PURPOSE_REQUIRED"):
+                    owner_authority.current(core.store, core.settings, core.clock, purpose=purpose)
             # Epoch-only movement preserves exact source proofs; changed original
             # sources or withdrawn authority block the next answer request.
             assert len(calls) == (4 if kind == "epoch" else 3)
@@ -383,7 +407,7 @@ def test_both_source_scopes_recheck_before_next_model_io(core, tmp_path, monkeyp
             expected = (
                 "RETRY_WAIT" if kind == "epoch" or (
                     stage == "memory_tool" and kind in {"fact", "expired_evidence"})
-                else "FAILED" if kind.endswith("_approval") else "CANCELLED")
+                else "CANCELLED")
             assert job["state"] == expected, job
             assert not await core.run_once()
 

@@ -1,6 +1,7 @@
 """Project recall can nominate confirmed facts without bypassing relevance review."""
 
 import json
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -108,6 +109,11 @@ def test_ordinary_catalog_is_bounded_and_selector_can_reject_every_candidate(cor
     assert "琥珀" not in encode(core.model.calls[-1][0])
 
 
+async def low_native_scores(query, rows, *, revalidate):
+    revalidate()
+    return {row["memory_id"]: 0.1 for row in rows}
+
+
 @pytest.mark.parametrize("select", [True, False])
 def test_native_project_fallback_keeps_tool_proofs_and_same_answer_review(
     core, tmp_path, monkeypatch, select,
@@ -123,11 +129,12 @@ def test_native_project_fallback_keeps_tool_proofs_and_same_answer_review(
         async with native_recall(core, tmp_path, query="我让你记住的项目事实是什么？",
                                  respond=response) as value:
             # Exercise the original project fallback inside the actual memory tool.
-            monkeypatch.setattr(value.worker.memory.index, "scores",
-                lambda query, rows: {row["memory_id"]: 0.1 for row in rows})
+            scores = AsyncMock(side_effect=low_native_scores)
+            monkeypatch.setattr(value.worker.memory.index, "scores_async", scores)
             source = await value.capture()
             assert await value.worker.run_once("native-project-fallback")
             assert len(value.calls) == 2 and "紫云三号" not in encode(value.calls)
+            assert scores.await_count == 1
             result = json.loads(returned(value.calls[-1])[0]["content"])
             assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
             assert result["requires_relevance_review"]
@@ -149,11 +156,12 @@ def test_live_fallback_still_consumes_the_paid_call_budget(core, tmp_path, monke
     async def scenario():
         async with native_recall(core, tmp_path, query="之前确认的项目设定是什么？",
                                  paid={"window_calls": 1, "daily_calls": 1}) as value:
-            monkeypatch.setattr(value.worker.memory.index, "scores",
-                lambda query, rows: {row["memory_id"]: 0.1 for row in rows})
+            scores = AsyncMock(side_effect=low_native_scores)
+            monkeypatch.setattr(value.worker.memory.index, "scores_async", scores)
             await value.capture()
             assert await value.worker.run_once("native-project-budget")
             assert len(value.calls) == 1 and not value.sends
+            assert scores.await_count == 1
             assert_settled_calls(core, 1)
             assert core.store.rows("SELECT * FROM outbox") == []
             assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 1
@@ -175,13 +183,14 @@ def test_selected_fact_reaches_chat_with_deployed_rich_content_configuration(
                           "max_output_tokens": 768},
             paid={**image["paid_options"], "per_request_calls": 3,
                   "max_input_tokens": input_limit, "max_output_tokens": 768}) as value:
-            monkeypatch.setattr(value.worker.memory.index, "scores",
-                lambda query, rows: {row["memory_id"]: 0.1 for row in rows})
+            scores = AsyncMock(side_effect=low_native_scores)
+            monkeypatch.setattr(value.worker.memory.index, "scores_async", scores)
             assert len(value.source["event_id"]) == 68
             source = await value.capture()
             assert await value.worker.run_once("rich-native-project-context")
             if input_limit == 16000:
                 assert len(value.calls) == 2
+                assert scores.await_count == 1
                 result = json.loads(returned(value.calls[-1])[0]["content"])
                 assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
                 assert "青竹七号" in encode(value.calls[-1]["messages"])

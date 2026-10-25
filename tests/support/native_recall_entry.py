@@ -60,13 +60,13 @@ async def native_recall(core, tmp_path, *, respond=None, paid=None, core_options
             return await entry.admit(number, text, message=message)
 
         async with worker_for(core, provider) as worker:
-            original = worker.memory.index.scores
+            original = worker.memory.index.scores_async
 
-            def observe(query, rows):
+            async def observe(query, rows, **kwargs):
                 scores.append([row["memory_id"] for row in rows])
-                return original(query, rows)
+                return await original(query, rows, **kwargs)
 
-            worker.memory.index.scores = observe
+            worker.memory.index.scores_async = observe
             if request_hook:
                 worker.model.client.event_hooks["request"].append(request_hook)
             yield SimpleNamespace(entry=entry, worker=worker, capture=capture,
