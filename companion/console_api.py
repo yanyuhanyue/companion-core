@@ -255,6 +255,10 @@ def register_console_routes(app, settings):
                 owner_check=lambda: check_owner(request),
             ), rejected_errors=MEMORY_REJECTIONS)
 
+    from companion.console_cognition import register_console_cognition_routes
+
+    register_console_cognition_routes(app, prefix, auth, _operation)
+
     @app.get(prefix + "/decisions", dependencies=auth)
     async def decisions():
         return console_read.decisions(app.state.core)
