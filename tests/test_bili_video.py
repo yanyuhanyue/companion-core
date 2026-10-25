@@ -1136,8 +1136,14 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
     async def provider(request):
         calls.append(request)
         window = controls["window"]
-        await admit(controls["client"], core, window, 2, "继续读一下")
-        await select_tools(core, "analyze_shared_video", [controls["url"]])
+        _, admitted = await admit(controls["client"], core, window, 2, "继续读一下")
+        from companion.core import Core
+
+        with Core(core.settings, clock=core.clock) as independent:
+            assert independent.store is not core.store
+            assert independent.claim_job("wait-for-original-preview") is None
+            assert independent.store.one("SELECT state FROM jobs WHERE job_id=?",
+                (admitted["job_id"],)) == {"state": "QUEUED"}
         return model_response({"analysis": "旧阶段返回的局部结果", "need_clips": False})
 
     async def scenario():
@@ -1148,7 +1154,7 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
         ):
             initial_job = core.store.one("SELECT job_id FROM bili_video_items")["job_id"]
             body = upload_body(item, prepared)
-            with pytest.raises(CoreError, match="BILI_VIDEO_MODEL_CONSUMER_CHANGED"):
+            with pytest.raises(CoreError, match="BILI_VIDEO_OWNER_SOURCE_REQUIRED"):
                 await module.upload("bili", item["request_id"], body)
             phase = core.store.one("SELECT * FROM bili_video_phases WHERE phase='preview'")
             usage = phase_usage(core)[0]
@@ -1159,6 +1165,11 @@ def test_followup_arriving_during_model_cannot_move_or_repay_started_phase(core,
                 core.store.one("SELECT output_event_id FROM bili_video_items")["output_event_id"]
                 is None
             )
+            with pytest.raises(CoreError):
+                await module.upload("bili", item["request_id"], body)
+            assert len(calls) == 1 and phase_usage(core) == [usage]
+            await select_tools(core, "analyze_shared_video", [controls["url"]])
+            assert core.store.one("SELECT * FROM bili_video_phases WHERE phase='preview'") == phase
             with pytest.raises(CoreError):
                 await module.upload("bili", item["request_id"], body)
             assert len(calls) == 1 and phase_usage(core) == [usage]
