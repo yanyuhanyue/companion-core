@@ -2010,21 +2010,17 @@ PAGES.thinking = data => {
   const k = COGNITION_KINDS[sel._kind] || { name: "认知", ic: "spark" };
   const stateName = sel.state ? (statusOf(sel.state)[0] || sel.state) : sel.choice ? (COGNITION_CHOICES[sel.choice] || sel.choice) : "—";
 
-  const tabs = [["overview", "概览"], ["sources", "来源"], ["details", "详情"]];
+  const tabs = [["overview", "决策记录"], ["sources", "上下文"], ["reasoning", "原始推理"]];
 
   const body = state.cogTab === "sources" ? [
-    el("h3", { class: "dk-title" }, "来源消息"),
-    el("p", { class: "note" }, "这条记录引用的消息编号。"),
+    el("h3", { class: "dk-title" }, "本轮依据的来源"),
+    el("p", { class: "note" }, "这条记录引用的消息编号，都经过权限和来源校验；来源被清除后这条记录不再显示。"),
     el("ul", { class: "dk-ctx" },
       (sel.source_event_ids || []).length > 0
         ? (sel.source_event_ids || []).map(eid => el("li", {}, el("code", {}, eid)))
         : [el("li", { class: "note" }, "没有来源消息")]
     )
-  ] : state.cogTab === "details" ? [
-    el("h3", { class: "dk-title" }, "原始字段"),
-    el("pre", { class: "note", style: { whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "0.875rem" } },
-      JSON.stringify(sel, null, 2))
-  ] : [
+  ] : state.cogTab === "reasoning" ? reasoningView(sel, data[sel._kind]) : [
     el("h3", { class: "dk-title" }, sel._title, el("span", { class: "note" }, fmtDate(sel.id))),
     el("dl", { class: "dk-rows" }, [
       ["类型", k.name],
@@ -2564,4 +2560,20 @@ function lifeDecisionView(sel) {
 }
 function cognitionExtra(sel) {
   return [sel._kind === "goal" ? goalStepsView(sel) : sel._kind === "life" ? lifeDecisionView(sel) : null, cognitionLinks(sel)];
+}
+
+/* 原始推理：只说明有没有、为什么没有，不展示内部字段，也不根据最终结果补写推理 */
+const REASONING_NOTE = {
+  wake: "自主活动调度按规则判断，这一步不调用模型，所以没有推理内容。",
+  nightly: "夜间整理的各阶段只记录状态，阶段里的模型调用可以在“模型调用”里查看用量。",
+  model: "这里是一次模型调用的用量记录，服务商返回的推理字段没有保存。",
+  rem: "REM 只保存私人虚构的元数据，生成时的推理没有保存。",
+};
+function reasoningView(sel, page) {
+  const exposed = page?.reasoning && page.reasoning !== "NOT_EXPOSED";
+  return [el("h3", { class: "dk-title" }, "模型推理诊断"),
+    el("div", { class: "alert" }, icon("warn"), el("span", {}, exposed ? "这类记录带有推理字段，但控制台还没有展示它。" : "这一轮没有可以查看的原始推理：推理内容没有采集或保存。")),
+    el("p", { class: "note" }, "这里只显示服务商实际返回并保存下来的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。"),
+    el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。"),
+    sel.model_request_id ? el("div", { class: "row-gap mt" }, linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看这次模型调用的用量")) : null];
 }
