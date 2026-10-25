@@ -42,7 +42,7 @@ Nightly 与独立记忆 lane 共用 `Core.extract_step()`、原跨进程提取�
 
 日记现在可使用观察来源，明确标注“发现的标题”“获取的来源内容”“视频分析记录”。失败和未知结果不当作完成经历；引用仍须逐字匹配。媒体原件不会进入日记。
 
-默认配置保持全部新模块关闭。Docker 的日记及生活 Worker 分别使用 `diary`、`life` profile，显式运行 `docker compose --profile diary --profile life up -d` 才启动这些进程；对应功能还受配置开关和预算约束。
+默认配置保持全部新模块关闭。Docker 的日记与生活调度由统一 Life Worker 执行，使用 `life` profile，显式运行 `docker compose --profile life up -d` 才启动该进程；对应功能还受配置开关和预算约束。
 
 管理接口使用主人 control token：`GET /internal/v2/consolidation`，`POST /internal/v2/consolidation/{day}`，`GET /internal/v2/reflections`，`POST /internal/v2/reflections/{suggestion_id}/decision`。任务入队与付费执行分开，HTTP 进程不会直接等待模型。
 

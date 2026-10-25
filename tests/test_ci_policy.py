@@ -306,3 +306,15 @@ def test_docs_gate_requires_its_documentation_validation(state):
     results = needs("docs")
     results["quality"]["result"] = state
     assert not check_results("docs", results)
+
+
+def test_every_workflow_action_is_pinned_to_a_full_commit_sha():
+    import re
+
+    refs = [match.group(1)
+            for path in sorted((ROOT / ".github/workflows").glob("*.yml"))
+            for match in re.finditer(r"^\s*-?\s*uses:\s*(\S+)", path.read_text(encoding="utf-8"),
+                                     re.MULTILINE)]
+    assert refs
+    # Tags are mutable; a regressed merge once restored tag pins after they were fixed.
+    assert [ref for ref in refs if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", ref)] == []

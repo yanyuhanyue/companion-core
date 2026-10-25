@@ -1,5 +1,6 @@
 """One in-process turn at a time over native queues; no scheduler persistence."""
 
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from time import monotonic
@@ -11,6 +12,11 @@ from companion.wake import WAKE_PURPOSES
 from companion.worker_schedule import UnitResult, run_native_unit
 from companion.worker_wakeup import MAINTENANCE_SECONDS
 
+log = logging.getLogger(__name__)
+# A failing lane backs off exponentially so it cannot starve later lanes or spin.
+FAILURE_BACKOFF_SECONDS = 5
+FAILURE_BACKOFF_MAX_SECONDS = 15 * 60
+
 
 @dataclass
 class Lane:
@@ -18,6 +24,11 @@ class Lane:
     run: Callable[[], Awaitable[UnitResult]]
     interval: float | None = None
     next_at: float = 0
+    failures: int = 0
+    retry_at: float = 0
+    # Local bookkeeping with no model or network I/O; it keeps running while
+    # foreground chat has precedence, as it did before the selector.
+    maintenance: bool = False
 
 
 @dataclass(frozen=True)
@@ -46,26 +57,66 @@ class RoundRobin:
 
     @property
     def next_maintenance(self):
-        return min((lane.next_at for lane in self.lanes if lane.interval is not None),
-                   default=None)
+        # A backed-off maintenance lane is not due before its retry, so an overdue
+        # next_at cannot turn the idle wait into a spin.
+        return self._next_due(lambda lane: lane.interval is not None)
+
+    @property
+    def next_blocked_maintenance(self):
+        """The only wake-up a foreground-blocked selector needs: local bookkeeping."""
+        return self._next_due(lambda lane: lane.maintenance)
+
+    def _next_due(self, selected):
+        # A backed-off lane is not due before its retry, so an overdue next_at
+        # cannot turn the idle wait into a spin.
+        return min((max(lane.next_at, lane.retry_at) for lane in self.lanes
+                    if lane.interval is not None and selected(lane)), default=None)
+
+    @staticmethod
+    def _due(lane):
+        now = monotonic()
+        return not ((lane.interval is not None and now < lane.next_at) or now < lane.retry_at)
 
     async def step(self) -> Selection:
         if not self.can_start():
             self.remaining = 0
-            return Selection(None, UnitResult(False), False, blocked=True)
+            # Foreground precedence pauses model and network work only. Due local
+            # bookkeeping (retention, diary scheduling, commitment expiry) still runs.
+            lane = next((lane for lane in self.lanes if lane.maintenance and self._due(lane)),
+                        None)
+            if lane is None:
+                return Selection(None, UnitResult(False), False, blocked=True)
+            selected = await self._run(lane)
+            return Selection(selected.lane, selected.result, False, blocked=True)
         while self.remaining:
             lane = self.lanes[self.cursor]
             self.cursor = (self.cursor + 1) % len(self.lanes)
             self.remaining -= 1
-            if lane.interval is not None and monotonic() < lane.next_at:
+            if not self._due(lane):
                 continue
-            result = await lane.run()
-            if lane.interval is not None:
-                lane.next_at = monotonic() + lane.interval
-            if result.progressed:
-                self.resume()
-            return Selection(lane.name, result, bool(self.remaining))
+            return await self._run(lane)
         return Selection(None, UnitResult(False), False)
+
+    async def _run(self, lane) -> Selection:
+        try:
+            result = await lane.run()
+        except Exception as error:
+            # One domain's failure must not stop diary or the other lanes. The
+            # turn is still consumed: the failed operation may have used its
+            # one model attempt, and its domain keeps lease/UNKNOWN custody.
+            lane.failures += 1
+            delay = min(FAILURE_BACKOFF_SECONDS * 2 ** (lane.failures - 1),
+                        FAILURE_BACKOFF_MAX_SECONDS)
+            lane.retry_at = monotonic() + delay
+            log.warning("autonomous lane %s failed (%s); retry in %ss",
+                        lane.name, getattr(error, "code", type(error).__name__), delay)
+            return Selection(lane.name, UnitResult(False), bool(self.remaining))
+        lane.failures, lane.retry_at = 0, 0
+        if lane.interval is not None:
+            lane.next_at = monotonic() + lane.interval
+        if result.progressed:
+            self.resume()
+        return Selection(lane.name, result, bool(self.remaining))
 
 
 def foreground_clear(core):
@@ -107,13 +158,13 @@ def native_selector(core, worker_id) -> RoundRobin:
         and not callable(getattr(core, "extract_step", None))):
         raise CoreError("NATIVE_MEMORY_STEP_REQUIRED", 503)
 
-    def lane(name, operation, purposes=(), *, interval=None):
+    def lane(name, operation, purposes=(), *, interval=None, maintenance=False):
         async def run():
             if not _allowed(core, purposes):
                 return UnitResult(False)
             return await operation()
 
-        return Lane(name, run, interval=interval)
+        return Lane(name, run, interval=interval, maintenance=maintenance)
 
     def maintenance(name, operation, purposes=()):
         async def run():
@@ -122,7 +173,7 @@ def native_selector(core, worker_id) -> RoundRobin:
             # advances once; rescan to observe any work enqueued on our own Store.
             return UnitResult(True)
 
-        return lane(name, run, purposes, interval=MAINTENANCE_SECONDS)
+        return lane(name, run, purposes, interval=MAINTENANCE_SECONDS, maintenance=True)
 
     async def wake_goal():
         decisions = core.wake.evaluate()

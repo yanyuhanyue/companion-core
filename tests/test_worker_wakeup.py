@@ -254,3 +254,28 @@ def test_waiting_record_cannot_prove_activity_or_console_health(core):
     }, 0, [])
     assert activity["state"] == "UNPROVEN"
     assert activity["reasons"] == ["LOOP_WAITING_UNVERIFIED"]
+
+
+def test_waiting_chat_job_bounds_chat_rescan_to_former_polling_cadence(core, monkeypatch):
+    start = datetime.fromisoformat(core.clock())
+    idle = worker_deadlines.chat(core.store, core.settings, start)
+    assert idle > start + timedelta(seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS)
+    ingest(core)
+    # A short wait (here a pending meme offer) leaves the due job unclaimed and
+    # writes nothing when it expires; the chat worker must still look again soon.
+    monkeypatch.setattr(type(core.memes), "waiting_offer", lambda *_: True)
+    assert run(core.run_once("wait-test")) is False
+    job = core.store.one("SELECT state FROM jobs WHERE kind='chat'")
+    assert job["state"] == "QUEUED"
+    before = core.store.db.total_changes
+    deadline = worker_deadlines.chat(core.store, core.settings, start)
+    assert deadline == start + timedelta(seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS)
+    assert core.store.db.total_changes == before
+    future = start + timedelta(hours=1)
+    core.store.execute("UPDATE jobs SET next_attempt_at=? WHERE kind='chat'",
+                       (future.isoformat(),))
+    # _next adds 2 ms so a crossed boundary rescans after, not before, it.
+    assert worker_deadlines.chat(core.store, core.settings, start) <= future + timedelta(
+        milliseconds=10)
+    assert worker_deadlines.chat(core.store, core.settings, start) > (
+        start + timedelta(seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS))

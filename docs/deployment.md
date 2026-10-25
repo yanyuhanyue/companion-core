@@ -23,7 +23,7 @@ docker compose up -d --build
 docker compose exec companion-api /app/.venv/bin/python -m companion status
 ```
 
-Compose 默认启动一次性迁移容器、API 和聊天 Worker。日记、生活、工具、内容 Worker 分别通过 `--profile diary`、`--profile life`、`--profile tools`、`--profile content` 启用；对应功能还需配置开关。数据库和遗忘日志分别放在 `core-data`、`erasure-ledger` 卷中。API **没有宿主机端口映射**，通过 Docker 网络 `companion-internal` 访问；网络保留模型 API 所需的出网能力。不得给 8765 添加公网端口或公网反向代理。容器以非 root 用户运行、只读根文件系统、删除 Linux capabilities。
+Compose 默认启动一次性迁移容器、API 和聊天 Worker。生活 Worker（含日记、目标、探索、分享与社交）、工具、内容 Worker 分别通过 `--profile life`、`--profile tools`、`--profile content` 启用；`diary` profile 已移除，日记需启用 `life`；对应功能还需配置开关。数据库和遗忘日志分别放在 `core-data`、`erasure-ledger` 卷中。API **没有宿主机端口映射**，通过 Docker 网络 `companion-internal` 访问；网络保留模型 API 所需的出网能力。不得给 8765 添加公网端口或公网反向代理。容器以非 root 用户运行、只读根文件系统、删除 Linux capabilities。
 
 `.env` 由宿主 Compose 读取，保留宿主部署用户或 root 所有；不要将它交给容器用户。
 后续编辑替换 `config.toml` 时重新核对其 UID/GID 与 `0600` 权限。
@@ -214,7 +214,10 @@ uv run python -m companion restore backups/core.enc data/restored.sqlite3
 
 自主调度切换时，须先使用旧版本 compose 配置停止独立的 `companion-diary-worker`，
 再应用统一 Life Worker 的 Core／领域／部署改动。新版本只启动 `companion-life-worker` 消费
-自主任务；不得保留旧日记进程并行生成。此步骤需要独立部署授权，代码验收不会自动执行。
+自主任务；不得保留旧日记进程并行生成。新版 Life Worker 同时持有旧 `diary-worker` 文件锁：
+遗留的旧日记容器仍在运行时，它会以 `WORKER_ALREADY_RUNNING` 启动失败，而不是并行写日记。
+使用 `docker compose up -d --remove-orphans` 移除旧容器。原先只启用 `diary` profile 的部署须改为
+`--profile life`，否则升级后不会生成日记。此步骤需要独立部署授权，代码验收不会自动执行。
 
 ### Bridge 分层依据与验证
 
