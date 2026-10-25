@@ -40,6 +40,7 @@ from companion_onebot_bridge.memory_control import capture_once, execute_once
 from companion_onebot_bridge.rich_input import input_digest
 from companion_onebot_bridge.window import bridge_code_sha256
 from tests.conftest import ingest, run
+from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import onebot_http
 from tests.test_onebot_direct import config, raw_event
 
@@ -119,7 +120,8 @@ async def real_http(app, listener=None):
     if listener is None:
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
-    server = Server(uvicorn.Config(app, lifespan="off", log_config=None, access_log=False))
+    server = Server(uvicorn.Config(app, lifespan="off", log_config=None, access_log=False,
+                                   http=owned_http_protocol(lambda: server.servers)))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         await asyncio.wait_for(ready.wait(), 5)

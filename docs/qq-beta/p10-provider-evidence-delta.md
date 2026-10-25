@@ -69,3 +69,18 @@ loader，并在真实 ModelClient 的模拟 transport 边界核对声明被篡�
 计量与实际用量分离、预留输出空间复用
 [DSH token-meter](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/llm/token-meter/src/types.ts)
 及其 compaction-basic 思路；DSH 的 chars/4 仍为估算，本片没有将它标作精确计数。
+
+## 可选请求联合窗口
+
+`paid_model.max_context_tokens` 可选，默认省略；它约束同一聊天路由的本地输入计数加预留裕量，
+再加本次 scenario 的真实输出预留。输入、输出和费用原限制继续生效。视频的独立路由使用
+`paid_model.video_input.max_context_tokens`，不继承另一模型的聊天窗口。
+超过联合窗口返回 `MODEL_CONTEXT_LIMIT`，不降低输出或截断当前输入。
+
+原 reserve 与发送前的两处 measurement 复核共用此检查，最终 HTTP hooks 之后仍会执行。
+未设置时不增加 null 序列化字段；原 approval、Settings、snapshot、policy 与 journal 合同保持不变。
+设置非空值会改变付费合同摘要，已有 owner grant 不会自动获得该新合同。
+
+该限制约束本地计量。未知 tokenizer、图片和视频仍保持原 estimate 身份与已授权路径，
+不能把估算加裕量称为供应商 tokenizer 的严格上界。它不改变全局计量策略，不产生远程计数请求，
+也不配置任何生产限额。验证使用合成配置、签名 HTTP 入站及独立 worker，外部模型 transport 为 Mock。

@@ -26,6 +26,7 @@ from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import SendOperation, TestWindow, WindowPlan, digest
 from tests.conftest import run
 from tests.journal_assertions import assert_private_journal
+from tests.support.native_http import owned_http_protocol
 from tests.support.onebot import onebot_http, provider
 from tests.test_live_text_window import live_fixture
 from tests.test_onebot_direct import config, raw_event
@@ -179,6 +180,7 @@ async def real_core_http(core):
     # Native children have a 30s deadline. Keep server idle expiry beyond the
     # client's 5s pool expiry to avoid Windows timer/connection-close races.
     server = Server(uvicorn.Config(api, lifespan="off", log_config=None, access_log=False,
+                                   http=owned_http_protocol(lambda: server.servers),
                                    timeout_keep_alive=60))
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
