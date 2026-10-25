@@ -301,11 +301,12 @@ class MemeIndex:
         cache_dir, held_lock = self._local_lock(cache_dir)
         if not held_lock.acquire(blocking=False):
             return None, (), "INFERENCE_BUSY"
+        unique_texts = tuple(dict.fromkeys(texts))
         try:
             # Synchronous submission makes pre-submission failure distinguishable.
             # Shield keeps even a queued worker alive to release its lock in finally.
             future = asyncio.get_running_loop().run_in_executor(
-                None, _infer, cache_dir, query, texts, held_lock
+                None, _infer, cache_dir, query, unique_texts, held_lock
             )
         except BaseException:
             held_lock.release()
@@ -316,7 +317,8 @@ class MemeIndex:
             query_vector, vectors = await asyncio.wait_for(
                 asyncio.shield(future), max(0, deadline - time.monotonic())
             )
-            return query_vector, vectors, None
+            by_text = dict(zip(unique_texts, vectors, strict=True))
+            return query_vector, tuple(by_text[text] for text in texts), None
         except TimeoutError:
             return None, (), "LOCAL_DEADLINE"
         except (LocalEntryNotFoundError, FileNotFoundError):

@@ -21,6 +21,7 @@ def vector(first=1.0, second=0.0):
 class Encoder:
     def passage_embed(self, texts, *, batch_size):
         assert type(texts) is tuple and len(texts) <= 32 and batch_size == 32
+        assert len(texts) == len(set(texts))
         return (vector() for _ in texts)
 
     def query_embed(self, query):
