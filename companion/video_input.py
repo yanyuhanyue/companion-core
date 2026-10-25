@@ -29,6 +29,9 @@ class VideoInputPolicy(BaseModel):
     cached_input_rate: int = Field(strict=True, gt=0)
     output_rate: int = Field(strict=True, gt=0)
     max_output_tokens: int = Field(default=1000, strict=True, ge=128, le=4096)
+    max_context_tokens: int | None = Field(
+        default=None, strict=True, gt=0, le=1000000, exclude_if=lambda value: value is None,
+    )
     timeout_seconds: int = Field(default=45, strict=True, ge=5, le=60)
     estimated_tokens_per_second: int = Field(strict=True, ge=1, le=10000)
     estimated_tokens_per_image: int = Field(default=1024, strict=True, ge=1, le=1000000)

@@ -65,7 +65,8 @@ def approve(store, settings, clock, capture, *, meme_offer=None):
             from companion.expression import MemeOffer
 
             offer = MemeOffer.model_validate(meme_offer).model_dump(mode="json")
-            if (not settings.expression_enabled or settings.meme_semantics_enabled
+            if (getattr(settings, "meme_catalog_owner", "bridge") == "core"
+                or not settings.expression_enabled or settings.meme_semantics_enabled
                 or offer["offer_key"] != "meme:" + capture.event_id):
                 raise CoreError("OWNER_MEME_OFFER_INVALID", 403)
             for purpose in ("meme", "expression"):

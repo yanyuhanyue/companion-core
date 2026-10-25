@@ -30,7 +30,7 @@ def plan_fixture(tmp_path, **changes):
     inventory = {
         "identity_sha256": digest([cfg.owner_qq_id, cfg.bot_qq_id]),
         "protocol_epoch": cfg.protocol_epoch,
-        "config_sha256": digest(asdict(cfg)),
+        "config_sha256": digest(cfg.snapshot()),
         "config_version": "SYNTHETIC-ONLY-1",
         "image_ids": {
             name: "sha256:" + digit * 64
@@ -296,7 +296,7 @@ def test_mutated_runtime_or_window_rejected_before_any_io(tmp_path, mutation):
         value["execution"] = "approved_live"
     elif mutation == "nonlocal":
         cfg = replace(cfg, core_url="http://companion-api:8765")
-        value["config_sha256"] = inventory["config_sha256"] = digest(asdict(cfg))
+        value["config_sha256"] = inventory["config_sha256"] = digest(cfg.snapshot())
         value["runtime_attestation_sha256"] = digest(inventory)
     with pytest.raises(ValueError):
         WindowPlan(value, cfg, inventory)
@@ -570,7 +570,7 @@ def test_full_spool_rejects_input_before_core_http(core, tmp_path):
     cfg, value, inventory, now = plan_fixture(tmp_path)
     core.clock.now = now
     cfg = replace(cfg, max_pending=1)
-    value["config_sha256"] = inventory["config_sha256"] = digest(asdict(cfg))
+    value["config_sha256"] = inventory["config_sha256"] = digest(cfg.snapshot())
     value["runtime_attestation_sha256"] = digest(inventory)
     plan = WindowPlan(value, cfg, inventory)
 

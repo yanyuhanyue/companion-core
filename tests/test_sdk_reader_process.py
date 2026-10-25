@@ -40,6 +40,15 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
                 call("read-original", "read_content", {"url": URL}),
             ))], "RETRY_WAIT", 1)
             assert len(first) == 1
+            from companion.context_planner import check_bound
+            from companion.privacy import epoch
+
+            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            checkpoint = core.store.one("SELECT phase,snapshots_json FROM agent_conversations")
+            assert checkpoint["phase"] == "WAITING"
+            plan = check_bound(core.store, job, json.loads(checkpoint["snapshots_json"]),
+                               epoch(core.store))
+            assert len(plan["requests"]) == 1 and plan["pending"] is None
             assert not core.store.one("SELECT 1 FROM outbox")
             request = core.store.one("SELECT * FROM exploration_requests")
             item = await lease(client)
@@ -65,5 +74,9 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
             assert core.store.rows("SELECT origin_event_id FROM outbox") == [
                 {"origin_event_id": event["event_id"]}]
             assert core.store.one("SELECT phase FROM agent_conversations")["phase"] == "COMPLETE"
+            checkpoint = core.store.one("SELECT snapshots_json FROM agent_conversations")
+            plan = check_bound(core.store, job, json.loads(checkpoint["snapshots_json"]),
+                               epoch(core.store))
+            assert len(plan["requests"]) == 2 and plan["pending"] is None
 
     run(scenario())
