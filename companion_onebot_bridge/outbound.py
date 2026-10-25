@@ -89,7 +89,7 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
 async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
                        delivery_lane="owner_private"):
     # Finish reporting interrupted sends before taking new work; never repeat send I/O.
-    if await spool.flush_result(client):
+    if await spool.flush_result(client, runtime=getattr(guard, "runtime", None)):
         return True
     if not onebot.config.delivery_enabled and guard is None:
         return False
@@ -183,7 +183,7 @@ async def deliver_item(client, onebot, spool, item, *, metrics=None, guard=None,
             at_ns=ack_ns,
         )
         metrics.delivered(item.get("delivery_key", ""), provider_id, ack_ns)
-    await spool.flush_result(client)
+    await spool.flush_result(client, runtime=getattr(guard, "runtime", None))
     if guard is not None:
         guard.complete(item, provider_id)
     return True

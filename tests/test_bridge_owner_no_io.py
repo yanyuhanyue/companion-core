@@ -11,11 +11,14 @@ from pydantic import SecretStr
 
 from companion import paid_budget
 from companion.transport import recover_deliveries
-from companion_onebot_bridge import owner_handoff, owner_native_resolution
+from companion_onebot_bridge import delivery_receipts, owner_handoff, owner_native_resolution
 from companion_onebot_bridge.event_normalizer import normalize
+from companion_onebot_bridge.network import private_http_client
+from companion_onebot_bridge.outbound import deliver_tick
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
-from companion_onebot_bridge.owner_send import OwnerSendGuard
+from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool, encode
+from tests.support.onebot import provider
 from tests.test_bridge_owner_resolution import child
 from tests.test_evaluation_process import process_config
 from tests.test_onebot_direct import raw_event
@@ -33,7 +36,8 @@ def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
         async with window(core, tmp_path, monkeypatch) as (client, base, plan):
             config = replace(base, owner_authority=plan.authority,
                 capture_signing_key=plan.key.private_bytes_raw().hex(),
-                data_dir=str(tmp_path / "native-bridge"), core_url=str(client.base_url).rstrip("/"))
+                data_dir=str(tmp_path / "native-bridge"), core_url=str(client.base_url).rstrip("/"),
+                onebot_http_url="http://127.0.0.1:3000", onebot_ws_url="ws://127.0.0.1:3001")
             with Spool(config) as spool:
                 runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
                 raw = encode(raw_event(1, time=int(core.clock.now.timestamp()),
@@ -127,7 +131,103 @@ def test_reserved_before_begin_send_closes_and_handoffs_without_owner_guess(
                 assert not await runtime.flush_one(client)
                 assert not await spool.flush_result(client)
                 assert "未开始发送的合成输入" not in runtime.path.read_text("utf-8")
-            assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
-            assert not core.store.one("SELECT 1 FROM audit_log WHERE action='delivery.result'")
+                assert not core.store.one("SELECT 1 FROM outbox WHERE state='SENT'")
+                assert not core.store.one("SELECT 1 FROM audit_log WHERE action='delivery.result'")
+                # A completed recovery remains in the spool while the successor
+                # receives and sends new work. Receipt lookup must not invoke the
+                # startup recovery fence on this process's in-flight send.
+                raw = encode(raw_event(2, time=int(core.clock.now.timestamp()),
+                                       text="交接后的新输入"))
+                event = normalize(raw, spool.config, now=core.clock.now.timestamp())
+                runtime.persist_capture(event, raw, received_at=core.clock.now,
+                                        peer=("127.0.0.1", 1))
+                assert await runtime.flush_one(client)
+                assert await child("tests.owner_runtime_process", "--config", str(worker_config),
+                                   "--now", core.clock()) == {"worked": True, "calls": 1}
+                sends = []
+                transport = httpx.MockTransport(lambda request: provider(request, sends))
+                async with private_http_client(config.onebot_http_url, config.onebot_token,
+                                               transport=transport) as protocol:
+                    guard = OwnerSendGuard(runtime, client)
+                    assert await deliver_tick(client, OwnerOneBot(guard, protocol),
+                                              spool, guard=guard)
+                runtime.verify()
+                assert len(sends) == 1
+                assert spool.db.execute("SELECT state FROM window_attempts ORDER BY fence DESC "
+                                        "LIMIT 1").fetchone() == ("ACK",)
+                assert core.store.one("SELECT state,attempt_count FROM outbox "
+                    "WHERE origin_event_id=?", (event["event_id"],)) == {
+                        "state": "SENT", "attempt_count": 1}
+                raw = encode(raw_event(3, time=int(core.clock.now.timestamp()),
+                                       text="保留已发送回执"))
+                event = normalize(raw, spool.config, now=core.clock.now.timestamp())
+                runtime.persist_capture(event, raw, received_at=core.clock.now,
+                                        peer=("127.0.0.1", 1))
+                assert await runtime.flush_one(client)
+                assert await child("tests.owner_runtime_process", "--config", str(worker_config),
+                                   "--now", core.clock()) == {"worked": True, "calls": 1}
+                original_result = delivery_receipts.bounded_post
+
+                async def lose_result(client, path, body, **kwargs):
+                    if path.endswith("/result"):
+                        if lost_ack:
+                            await original_result(client, path, body, **kwargs)
+                        raise httpx.ReadTimeout("synthetic result response lost")
+                    return await original_result(client, path, body, **kwargs)
+
+                async with private_http_client(config.onebot_http_url, config.onebot_token,
+                                               transport=transport) as protocol:
+                    guard = OwnerSendGuard(runtime, client)
+                    with monkeypatch.context() as patch:
+                        patch.setattr(delivery_receipts, "bounded_post", lose_result)
+                        with pytest.raises(httpx.ReadTimeout):
+                            await deliver_tick(client, OwnerOneBot(guard, protocol),
+                                               spool, guard=guard)
+                assert len(sends) == 2
+                ack_message = spool.db.execute("SELECT message_id FROM window_attempts "
+                                               "ORDER BY fence DESC LIMIT 1").fetchone()[0]
+                saved, queue = spool.db.execute("SELECT body,state FROM results WHERE message_id=?",
+                                                (ack_message,)).fetchone()
+                assert queue == "pending" and json.loads(saved)["result"] == "SENT"
+            core.clock.advance(core.settings.lease_seconds + 1)
+            recover_deliveries(core.store, core.clock())
+            stopped = await client.post("/internal/v1/owner-authority/stop", headers=owner,
+                json={"authority": successor, "operation_id": "stop-retained-success-ack"})
+            assert stopped.status_code == 200, stopped.text
+            fees = core.store.rows("SELECT * FROM model_usage")
+            if lost_ack:
+                post = owner_native_resolution.bounded_post
+
+                async def lose_recovery_result(client, path, body):
+                    result = await post(client, path, body)
+                    if path.endswith("/result"):
+                        raise httpx.ReadTimeout("synthetic recovery response lost")
+                    return result
+
+                with Spool(replace(config, owner_authority=successor),
+                           reconciliation_only=True) as spool:
+                    runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                    with monkeypatch.context() as patch:
+                        patch.setattr(owner_native_resolution, "bounded_post", lose_recovery_result)
+                        with pytest.raises(httpx.ReadTimeout):
+                            await owner_native_resolution.prepare(runtime, client, ack_message)
+            bridge_config.write_text(
+                json.dumps(asdict(replace(config, owner_authority=successor))), "utf-8")
+            args = ("--config", str(bridge_config), "--now", core.clock(),
+                    "--message-id", ack_message, "--operation", "prepare")
+            receipt = await child("tests.owner_reconcile_process", *args)
+            assert receipt["state"] == "ACK" and receipt["paused"]
+            assert receipt["core_result_confirmed"]
+            assert await child("tests.owner_reconcile_process", *args) == receipt
+            assert len(sends) == 2
+            assert core.store.rows("SELECT * FROM model_usage") == fees
+            assert core.store.one("SELECT state,attempt_count FROM outbox WHERE message_id=?",
+                                   (ack_message,)) == {"state": "SENT", "attempt_count": 1}
+            with Spool(replace(config, owner_authority=successor),
+                       reconciliation_only=True) as spool:
+                runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                assert spool.db.execute("SELECT body,state FROM results WHERE message_id=?",
+                                       (ack_message,)).fetchone() == (saved, "accepted")
+                assert (await owner_handoff.prepare(runtime, client))["state"] == "HANDOFF_PREPARED"
             paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
     asyncio.run(scenario())

@@ -158,7 +158,7 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
                 from .owner_send import OwnerOneBot, OwnerSendGuard
 
                 # Reports remain replayable after STOP; sends never are.
-                if await spool.flush_result(client):
+                if await spool.flush_result(client, runtime=runtime):
                     continue
                 runtime.verify()
                 guard = OwnerSendGuard(runtime, client)

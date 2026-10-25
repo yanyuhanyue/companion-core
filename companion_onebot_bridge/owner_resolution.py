@@ -67,13 +67,18 @@ def resolved(window):
     return {row["message_id"] for row in rows(window) if row["receipt_json"] is not None}
 
 
-def pending_result(spool):
+def pending_result(spool, *, runtime=None):
     done = set()
     if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (TABLE,)).fetchone():
         if spool.db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_runtime'").fetchone():
             from .owner_runtime import OwnerRuntime
 
-            runtime = OwnerRuntime(spool)
+            # An active sender owns its existing runtime. Constructing another
+            # one here would apply the startup fence to its in-flight attempt.
+            if runtime is None:
+                runtime = OwnerRuntime(spool)
+            elif runtime.spool is not spool:
+                raise ValueError("OWNER_RECEIPT_SPOOL_REQUIRED")
             runtime.verify(active=False)
             done = {row[0] for row in spool.db.execute(
                 f"SELECT message_id FROM {TABLE} WHERE receipt_json IS NOT NULL")}
