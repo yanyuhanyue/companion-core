@@ -79,3 +79,49 @@ def test_reflection_decision_uses_native_service_once(client, core):
 def test_affect_reset_requires_confirmation(client):
     headers = {**login(client), "Idempotency-Key": "affect-reset-1"}
     assert client.post("/v1/console/affect/reset", json={}, headers=headers).status_code == 400
+
+
+def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
+    from tests.test_executive import configured, proposal
+
+    executive = configured(core, allow_changes=True)
+    task = executive.submit(proposal(2, "windows.write_text", text="明天的购物清单"))
+    headers = login(client)
+    value = client.get("/v1/console/tools").json()
+    item = next(row for row in value["items"] if row["task_id"] == task["task_id"])
+    assert value["enabled"] is True and "scope_json" not in item
+    scope = item["scope"]
+    assert scope["state"] == "RECORDED" and scope["capability"] == "windows.write_text"
+    assert scope["path"]["value"] == "result.txt"
+    assert scope["text"]["value"] == "明天的购物清单"
+    assert scope["sources_live"] and scope["source_count"] == 1
+    assert "127.0.0.1" not in json.dumps(value) and "executor-test-token" not in json.dumps(value)
+    url = f"/v1/console/tools/{task['task_id']}/decision"
+    body = {"decision": "APPROVE", "scope_sha256": item["scope_sha256"]}
+    response = client.post(url, json=body, headers={**headers, "Idempotency-Key": "approve-1"})
+    assert response.status_code == 200, response.text
+    assert core.store.one("SELECT state FROM tool_tasks WHERE task_id=?",
+                          (task["task_id"],))["state"] == "QUEUED"
+
+
+def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core):
+    from tests.test_executive import configured, proposal
+
+    executive = configured(core, allow_changes=True)
+    task = executive.submit(proposal(3, "windows.write_text", text="原始内容"))
+    scope = json.loads(task["scope_json"])
+    scope["arguments"]["text"] = "被改过的内容"
+    core.store.execute("UPDATE tool_tasks SET scope_json=? WHERE task_id=?",
+                       (json.dumps(scope, ensure_ascii=False), task["task_id"]))
+    login(client)
+    item = next(row for row in client.get("/v1/console/tools").json()["items"]
+                if row["task_id"] == task["task_id"])
+    assert item["scope"] == {"state": "MISMATCH"}
+
+
+def test_affect_view_distinguishes_disabled_from_neutral(client, core):
+    login(client)
+    core.settings.affect_enabled = False
+    value = client.get("/v1/console/affect").json()
+    assert value["enabled"] is False and value["reset_at"] is None
+    assert value["state"]["engagement"] == "neutral"

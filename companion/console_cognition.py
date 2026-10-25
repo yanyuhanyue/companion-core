@@ -10,12 +10,15 @@ from typing import Literal
 
 from fastapi import Header, Request
 
+from companion.affect import feedback_reset_at
 from companion.cognition_read import CognitionRead
 from companion.contracts import CoreError, StrictModel
 from companion.executive_protocol import ToolDecision
 from companion.goal_protocol import GoalContinuationDecision, GoalDecision
 from companion.life_protocol import TopicClosure
+from companion.privacy import redact, sensitive
 from companion.reflection import ReflectionDecision
+from companion.transport import digest
 
 COGNITION_KINDS = ("wake", "life", "goal", "diary", "reflection", "nightly", "model", "rem")
 GOAL_FIELDS = ("goal_id", "kind", "topic", "state", "priority", "next_due_at", "last_error_code",
@@ -23,9 +26,51 @@ GOAL_FIELDS = ("goal_id", "kind", "topic", "state", "priority", "next_due_at", "
                "reflection_suggestion_id", "steps")
 REFLECTION_FIELDS = ("suggestion_id", "run_id", "kind", "content", "state", "created_at",
                      "updated_at", "local_date")
+TOOL_LIMITS = ("max_cost_micro_usd", "max_model_calls", "max_input_bytes", "max_output_tokens",
+               "timeout_seconds")
 TOOL_FIELDS = ("task_id", "executor_id", "capability", "risk_level", "state", "scope_sha256",
                "reserved_micro_usd", "billed_micro_usd", "dispatched_at", "last_error_code",
                "created_at", "updated_at")
+
+
+def tool_scope(core, row):
+    """What an approval would release, read back from the exact scope bound to its digest.
+
+    Approval binds `scope_sha256`; this view shows the same retained scope only when it still
+    matches that digest, its owner sources are still live and the text passes redaction again.
+    Endpoint URLs and credentials never appear; the executor target stays a digest.
+    """
+    if row["redacted"]:
+        return {"state": "ERASED"}
+    try:
+        scope = json.loads(row["scope_json"] or "{}")
+    except ValueError:
+        return {"state": "UNAVAILABLE"}
+    if not scope:
+        return {"state": "ERASED"}
+    if digest(scope) != row["scope_sha256"]:
+        return {"state": "MISMATCH"}
+    executive = core.executive
+    sources = executive.sources(row["task_id"])
+    try:
+        executive.validate_sources(sources)
+        sources_live = True
+    except CoreError:
+        sources_live = False
+    args = scope.get("arguments") or {}
+    view = {"state": "RECORDED", "capability": scope.get("capability"),
+            "workspace": scope.get("workspace"), "sources_live": sources_live,
+            "source_count": len(sources),
+            "limits": {key: scope.get(key) for key in TOOL_LIMITS}}
+    for key in ("path", "text", "prompt"):
+        value = args.get(key) or ""
+        if not value:
+            continue
+        if sensitive(value) or redact(value, core.settings) != value:
+            view[key] = {"state": "REDACTED", "chars": len(value)}
+        else:
+            view[key] = {"state": "RECORDED", "value": value, "chars": len(value)}
+    return view
 
 
 class AffectReset(StrictModel):
@@ -51,7 +96,10 @@ def register_console_cognition_routes(app, prefix, auth, operation):
 
     @app.get(prefix + "/affect", dependencies=auth)
     async def affect():
-        return app.state.core.affect.snapshot()
+        core = app.state.core
+        # A disabled feature also returns the neutral snapshot; say which one it is.
+        return {**core.affect.snapshot(), "enabled": bool(core.settings.affect_enabled),
+                "reset_at": feedback_reset_at(core.store)}
 
     @app.post(prefix + "/affect/reset", dependencies=auth)
     async def affect_reset(body: AffectReset, request: Request,
@@ -127,11 +175,17 @@ def register_console_cognition_routes(app, prefix, auth, operation):
 
     @app.get(prefix + "/tools", dependencies=auth)
     async def tools():
-        rows = app.state.core.store.rows(
-            "SELECT " + ",".join(TOOL_FIELDS) + " FROM tool_tasks WHERE redacted=0 "
-            "ORDER BY rowid DESC LIMIT 30"
+        core = app.state.core
+        rows = core.store.rows(
+            "SELECT " + ",".join(TOOL_FIELDS) + ",scope_json,redacted FROM tool_tasks "
+            "WHERE redacted=0 ORDER BY rowid DESC LIMIT 30"
         )
-        return {"items": rows}
+        items = []
+        for row in rows:
+            item = {key: row[key] for key in TOOL_FIELDS}
+            item["scope"] = tool_scope(core, row)
+            items.append(item)
+        return {"items": items, "enabled": bool(core.executive.config.enabled)}
 
     @app.post(prefix + "/tools/{task_id}/decision", dependencies=auth)
     async def tool_decision(task_id: str, body: ToolDecision, request: Request,
