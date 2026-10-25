@@ -20,6 +20,7 @@ from companion.core import Core
 from tests.conftest import event, run
 from tests.sdk_reader_fixture import Provider, answer, call, worker_for
 from tests.support.native_consumer_entry import environment
+from tests.support.native_http import owned_http_protocol
 from tests.test_next_reading import HTML, WEB
 from tests.test_onebot_capture import real_core_http
 from tests.test_reading_protocol import envelope
@@ -36,7 +37,8 @@ def test_inbox_to_independent_reader_cli_then_restart_cannot_reexecute(core, tmp
         bound = socket.socket()
         bound.bind(("127.0.0.1", 0))
         origin = f"http://127.0.0.1:{bound.getsockname()[1]}"
-        server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off"))
+        server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off",
+                                http=owned_http_protocol(lambda: server.servers)))
         ready = threading.Event()
         startup = server.startup
 

@@ -6,13 +6,17 @@ import httpx
 import pytest
 from uvicorn.protocols.http.auto import AutoHTTPProtocol
 
-from tests.test_onebot_capture import _native_http_proactor_scope, real_core_http
+from tests.native_continuous_support import core_http
+from tests.support.native_http import native_http_proactor_scope
 
 
-@pytest.mark.skipif(not _native_http_proactor_scope(),
+@pytest.mark.skipif(not native_http_proactor_scope(),
                     reason="Windows CPython 3.12 Proactor cleanup compatibility")
+@pytest.mark.parametrize("independent", [False, True], ids=["shared", "independent"])
 @pytest.mark.parametrize("failure", [None, "reset", "other"])
-def test_native_http_closes_real_socket_and_preserves_callback_error(core, monkeypatch, failure):
+def test_native_http_closes_real_socket_and_preserves_callback_error(
+    core, monkeypatch, failure, independent,
+):
     transports, servers, sockets, errors, lost = [], [], [], [], []
     made, connection_lost = AutoHTTPProtocol.connection_made, AutoHTTPProtocol.connection_lost
 
@@ -58,14 +62,15 @@ def test_native_http_closes_real_socket_and_preserves_callback_error(core, monke
 
         loop.set_exception_handler(handler)
         try:
-            async with real_core_http(core) as port:
+            async with core_http(core, independent=independent) as (port, served_core):
+                assert (served_core is not core) if independent else (served_core is core)
                 async with httpx.AsyncClient(trust_env=False) as client:
                     assert client._transport._pool._keepalive_expiry == 5
                     response = await client.get(
                         f"http://127.0.0.1:{port}/internal/v1/health/live")
                     assert response.status_code == 200 and len(transports) == 1
-                    assert _native_http_proactor_scope(transports[0], servers)
-                    assert not _native_http_proactor_scope(transports[0], ())
+                    assert native_http_proactor_scope(transports[0], servers)
+                    assert not native_http_proactor_scope(transports[0], ())
                     assert sockets[0].fileno() >= 0
                     if expected is not None:
                         transports[0]._sock = FailedShutdown(sockets[0])
