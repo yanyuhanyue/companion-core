@@ -3,14 +3,24 @@
 import json
 from contextlib import nullcontext
 from datetime import UTC
-from typing import Literal
-from urllib.parse import urlsplit
-
-from pydantic import AwareDatetime, Field, model_serializer, model_validator
 
 from companion import goal_plan
-from companion.contracts import CoreError, StrictModel
-from companion.goal_plan import GoalContinuationDecision as GoalContinuationDecision
+from companion.contracts import CoreError
+from companion.goal_protocol import (
+    CommitmentRequest as CommitmentRequest,
+)
+from companion.goal_protocol import (
+    GoalContinuationDecision as GoalContinuationDecision,
+)
+from companion.goal_protocol import (
+    GoalDecision as GoalDecision,
+)
+from companion.goal_protocol import (
+    GoalProposal as GoalProposal,
+)
+from companion.goal_protocol import (
+    GoalScope,
+)
 from companion.observation import expired_sources
 from companion.privacy import epoch, redact
 from companion.store import after, encode, uid
@@ -48,58 +58,6 @@ def withdraw_reflection_goals(store, suggestion_id, now):
             "AND json_extract(goal_step_json,'$.goal_id')=?", (now, goal_id)
         )
         store.audit("goal.reflection_withdrawn", goal_id, suggestion_id, now)
-
-
-class GoalScope(StrictModel):
-    operation: Literal["read_content", "investigate", "read_plan"] = "investigate"
-    url: str = Field(default="", max_length=2048)
-    urls: list[str] = Field(default_factory=list, max_length=3)
-
-    @model_serializer(mode="wrap")
-    def serialized(self, handler):
-        value = handler(self)
-        if self.operation != "read_plan":
-            value.pop("urls", None)
-        return value
-
-    def targets(self):
-        return self.urls if self.operation == "read_plan" else [self.url] if self.url else []
-
-    @model_validator(mode="after")
-    def validate_scope(self):
-        if self.operation == "read_plan":
-            if self.url or not self.urls or len(set(self.urls)) != len(self.urls):
-                raise ValueError("read_plan requires distinct ordered URLs")
-        elif self.urls:
-            raise ValueError("urls are only valid for read_plan")
-        if self.operation in {"read_content", "read_plan"}:
-            if not self.targets():
-                raise ValueError("read requires at least one target")
-            for target in self.targets():
-                url = urlsplit(target)
-                if (len(target) > 2048 or url.scheme != "https" or not url.hostname
-                    or url.username is not None or url.fragment):
-                    raise ValueError("read requires an HTTPS URL without credentials")
-        elif self.url:
-            raise ValueError("investigate has no fixed URL")
-        return self
-
-
-class GoalProposal(StrictModel):
-    topic: str = Field(min_length=2, max_length=300)
-    source_event_ids: list[str] = Field(min_length=1, max_length=256)
-    scope: GoalScope = Field(default_factory=GoalScope)
-    priority: int = Field(default=1, ge=0, le=3)
-
-
-class CommitmentRequest(StrictModel):
-    proposal: GoalProposal
-    accepted_event_id: str = Field(min_length=1, max_length=128)
-    deadline: AwareDatetime
-
-
-class GoalDecision(StrictModel):
-    decision: Literal["ACCEPT", "CANCEL"]
 
 
 def acknowledge_commitment_delivery(store, message_id, state, now):

@@ -15,6 +15,7 @@ from companion.config import Settings
 forbidden = {
     'companion.content', 'companion.media', 'companion.media_provider',
     'companion.budget', 'companion.live_text', 'companion.observation',
+    'companion.goals', 'companion.goal_plan',
 }
 assert not forbidden.intersection(sys.modules), sorted(forbidden.intersection(sys.modules))
 settings = Settings(owner_qq_id='10001', bot_qq_id='10002', bridge_token='synthetic-config-' * 2)

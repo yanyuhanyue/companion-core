@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
 from companion.contracts import StrictModel
-from companion.goals import GoalContinuationDecision, GoalProposal
+from companion.goal_protocol import GoalContinuationDecision, GoalProposal
 from companion_delivery_protocol.authority import validate_authority_ref
 
 LifeChannelAction = Literal["qq.private.proactive", "diary.save", "qzone.publish", "rem.save"]

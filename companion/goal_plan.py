@@ -3,30 +3,10 @@
 import json
 from contextlib import nullcontext
 from datetime import UTC
-from typing import Annotated, Literal
 
-from pydantic import AwareDatetime, Field, model_validator
-
-from companion.contracts import CoreError, StrictModel
+from companion.contracts import CoreError
+from companion.goal_protocol import GoalContinuationDecision
 from companion.store import after
-
-
-class GoalContinuationDecision(StrictModel):
-    expected_version: int = Field(ge=1, strict=True)
-    action: Literal["CONTINUE", "WAIT", "ABANDON"]
-    step_order: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(
-        default_factory=list, max_length=3)
-    wait_until: AwareDatetime | None = None
-
-    @model_validator(mode="after")
-    def consistent(self):
-        if self.action == "CONTINUE":
-            if (not self.step_order or len(set(self.step_order)) != len(self.step_order)
-                or self.wait_until is not None):
-                raise ValueError("CONTINUE requires distinct remaining steps only")
-        elif self.step_order or (self.action == "WAIT") != (self.wait_until is not None):
-            raise ValueError("WAIT requires a deadline; other actions have no arguments")
-        return self
 
 
 def closure(engine, ids):
