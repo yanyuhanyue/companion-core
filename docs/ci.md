@@ -40,6 +40,8 @@ TLS/browser interactions in `test_console_browser.py`. It builds and verifies th
 archives, including the three Console resources. It does not schedule full backend shards,
 backend replay/smoke, reader browser tests or unchanged container/native-plugin checks.
 The existing backend-only selection and all full validation keep their previous coverage.
+Documentation privacy and registered evidence checks also run, so Markdown or evidence
+JSON accompanying a Console-only change retains its validators.
 
 The exact small allowlists live in `scripts/ci_policy.py`. Generic Python changes are **not**
 assumed portable or browser-independent; they keep Windows unless explicitly listed. Even

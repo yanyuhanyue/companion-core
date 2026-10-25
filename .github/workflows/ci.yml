@@ -69,7 +69,7 @@ jobs:
           npm_config_cache: ${{ github.workspace }}/.local/npm-cache
         run: npm exec --yes --package=typescript@5.9.3 -- tsc -p tsconfig.console.json
       - name: Validate documentation privacy, references and evidence
-        if: ${{ needs.preflight.outputs.profile == 'docs' }}
+        if: ${{ needs.preflight.outputs.profile == 'docs' || (needs.preflight.outputs.profile == 'selected' && !fromJSON(needs.preflight.outputs.windows).product) }}
         run: uv run --extra onebot python scripts/ci_policy.py docs
   test:
     name: test (${{ matrix.os }}, ${{ matrix.shard }})

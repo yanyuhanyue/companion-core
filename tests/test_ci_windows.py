@@ -33,6 +33,7 @@ def test_shared_platform_browser_and_unknown_paths_keep_both_windows_checks(path
 @pytest.mark.parametrize("files,product,browser", [
     (["companion/console_static/app.css"], False, True),
     (["companion/console_static/app.js", "docs/guide.md"], False, True),
+    (["companion/console_static/app.js", "docs/qq-beta/p13-gates.json"], False, True),
     (["companion/expression.py", "tests/test_expression.py"], True, False),
     (["companion/diary.py", "docs/guide.md"], True, False),
     (["companion/diary.py", "companion/console_static/app.css"], True, True),
@@ -158,6 +159,10 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
     types = next(step for step in jobs["quality"]["steps"]
                  if "tsc -p tsconfig.console.json" in step.get("run", ""))
     assert "needs.preflight.outputs.profile == 'selected'" in types["if"]
+    docs = next(step for step in jobs["quality"]["steps"]
+                if "scripts/ci_policy.py docs" in step.get("run", ""))
+    assert "needs.preflight.outputs.profile == 'selected'" in docs["if"]
+    assert "!fromJSON(needs.preflight.outputs.windows).product" in docs["if"]
     tests = jobs["test"]["steps"]
     full = next(step for step in tests if "-p scripts.ci_shards" in step.get("run", ""))
     assert full["if"] == product
