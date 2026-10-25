@@ -86,6 +86,9 @@ const STATUS = {
   REVIEWED: ["审核有效", "ok"], REVOKED: ["已撤销", "off"], AVAILABLE: ["可执行", "ok"], REJECTED: ["未通过", "bad"],
   SKIPPED: ["本轮未改动", "off"], PLANNING: ["正在规划", "run"], MATCHED: ["与计划一致", "ok"], CHANGED: ["与计划不同", "warn"],
   ACCEPTED: ["已接受", "ok"], DONE: ["已完成", "ok"], SIGNED_OUT: ["已退出", "off"],
+  CANDIDATE: ["待接受", "warn"], WAITING_INPUT: ["等待输入", "warn"], WAITING_RESOURCE: ["等待资源", "warn"],
+  WAITING_DECISION: ["等待决定", "warn"], EXECUTION_UNCERTAIN: ["执行结果不明", "warn"],
+  ACCEPT_AS_HYPOTHESIS: ["已作为假设接受", "ok"], REJECT: ["已拒绝", "off"], NEED_MORE_EVIDENCE: ["需要更多证据", "warn"],
 };
 const statusOf = s => STATUS[String(s || "").toUpperCase()] || [s ? "其他状态" : "未记录", "off"];
 function tag(s, label) { const [text, tone] = statusOf(s); return el("span", { class: "tag " + tone }, label || text); }
@@ -347,7 +350,10 @@ function toast(text) {
 }
 function notice(text, retry = false) {
   const n = $("#notice"); n.hidden = !text; n.replaceChildren();
-  if (text) n.append(icon("warn"), el("span", {}, text), retry ? btn("重试", () => loadRoute(), { cls: "sm" }) : null);
+  if (text) {
+    n.append(icon("warn"), el("span", {}, text));
+    if (retry) n.append(btn("重试", () => loadRoute(), { cls: "sm" }));
+  }
 }
 function setConnection(kind, text) { const c = $("#conn"); c.className = "conn " + kind; c.lastElementChild.textContent = text; }
 
@@ -431,18 +437,19 @@ const LOADERS = {
     return { ...page, items };
   },
   memories: signal => api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
-  life: signal => api.get("/life", signal), content: signal => api.get("/content", signal), memes: signal => api.get("/memes", signal),
+  life: async signal => {
+    const [life, goals, reflections] = await Promise.all([
+      api.get("/life", signal), api.get("/goals", signal), api.get("/reflections", signal),
+    ]);
+    return { ...life, goals: goals.items, reflections: reflections.items };
+  },
+  content: signal => api.get("/content", signal), memes: signal => api.get("/memes", signal),
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
   thinking: async signal => {
     const kinds = ["wake", "life", "goal", "diary", "reflection", "nightly", "model", "rem"];
-    const results = await Promise.allSettled(kinds.map(k => api.get("/cognition?kind=" + k + "&limit=30", signal)));
-    const data = {};
-    for (let i = 0; i < kinds.length; i++) {
-      const result = results[i];
-      data[kinds[i]] = result.status === "fulfilled" ? result.value : { items: [] };
-    }
-    return data;
+    const results = await Promise.all(kinds.map(k => api.get("/cognition?kind=" + k + "&limit=30", signal)));
+    return Object.fromEntries(kinds.map((kind, i) => [kind, results[i]]));
   },
   caps: async signal => {
     const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
@@ -780,8 +787,8 @@ PAGES.life = data => {
       "aria-label": `${mo}月${d}日${has ? "，有日记" : ""}`, onclick: () => { state.diaryDay = key; rerender(); } }, String(d)));
   }
   const shift = n => { const dt = new Date(Date.UTC(y, mo - 1 + n, 1)); state.diaryDay = dt.toISOString().slice(0, 10); rerender(); };
-  const goals = items.filter(i => i.kind === "goal").map(g => ({ goal_id: g.id, title: g.title, state: g.status, status: g.status, occurred_at: g.occurred_at, detail: g.detail, steps: {} }));
-  const reflections = items.filter(i => i.kind === "reflection").map(r => ({ suggestion_id: r.id, content: r.title, state: r.status, created_at: r.occurred_at, evidence: [] }));
+  const goals = data.goals || [];
+  const reflections = data.reflections || [];
   const paper = el("article", { class: "paper", id: "diary-paper", "aria-live": "polite" }, el("p", { class: "note" }, "正在读取日记…"));
   queueMicrotask(() => loadDiary(state.diaryDay, paper));
   return el("div", {}, head("日记与成长", "日记由独立进程在自然日结束后整理,只根据核验过的真实互动书写。", btn("暂停或恢复写日记", openModeDialog, { symbol: "pause" })),
@@ -850,49 +857,6 @@ function openModeDialog() {
   });
   openDialog("管理主动行为", form);
 }
-function goalAction(goalId, decision) {
-  const titles = { ACCEPT: "接受这个目标", CANCEL: "取消这个目标" };
-  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后她会开始执行这个目标。" : "取消后这个目标不会再执行。"));
-  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "接受" : "取消");
-  form.append(el("div", { class: "dlg-acts" }, submit));
-  form.addEventListener("submit", e => {
-    e.preventDefault();
-    perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goalId) + "/decision", { decision }, "POST",
-      r => typeof r.state === "string"),
-      async () => { closeDialog(); toast(decision === "ACCEPT" ? "已接受" : "已取消"); await loadRoute({ reset: true }); });
-  });
-  openDialog(titles[decision], form);
-}
-function goalContinuation(goalId) {
-  const form = el("form", { class: "dlg-form" });
-  const choice = el("select", { class: "input", id: "goal-cont", required: true },
-    el("option", { value: "" }, "请选择"), el("option", { value: "CONTINUE" }, "继续执行"), el("option", { value: "COMPLETE" }, "标记为完成"));
-  form.append(el("label", { class: "field" }, el("span", {}, "续行方式"), choice));
-  const submit = el("button", { type: "submit", class: "btn primary" }, "确定");
-  form.append(el("div", { class: "dlg-acts" }, submit));
-  form.addEventListener("submit", e => {
-    e.preventDefault();
-    if (!choice.value) { formError(form, "请选择续行方式。"); return; }
-    perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goalId) + "/continuation", { decision: choice.value }, "POST",
-      r => typeof r.state === "string"),
-      async () => { closeDialog(); toast("已保存"); await loadRoute({ reset: true }); });
-  });
-  openDialog("目标续行", form);
-}
-function reflectionAction(suggestionId, decision) {
-  const titles = { ACCEPT: "批准这条反思", REJECT: "拒绝这条反思" };
-  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "批准后这条反思会进入记录。" : "拒绝后这条反思不会保留。"));
-  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "批准" : "拒绝");
-  form.append(el("div", { class: "dlg-acts" }, submit));
-  form.addEventListener("submit", e => {
-    e.preventDefault();
-    perform(form, submit, () => api.write("/reflections/" + encodeURIComponent(suggestionId) + "/decision", { decision }, "POST",
-      r => typeof r.state === "string"),
-      async () => { closeDialog(); toast(decision === "ACCEPT" ? "已批准" : "已拒绝"); await loadRoute({ reset: true }); });
-  });
-  openDialog(titles[decision], form);
-}
-
 /* ================= 阅读与文件 ================= */
 const CONTENT_KIND = { link: ["链接", "#3b4070"], qq_image: ["图片", "#2f8a62"], link_image: ["文章图", "#6e9bd0"], file: ["文件", "#6c7190"], video: ["视频", "#fb7299"] };
 PAGES.content = data => {
@@ -1425,7 +1389,7 @@ function autonomySection(id) {
     const lim = cap.limits?.[field]; if (!lim) return null;
     const floor = lim.kind === "floor", key = floor ? "min" : "max", on = !!draft.ranges[field];
     const type = Number.isInteger(lim.configured) ? "integer" : "number", u = unitFor(field, type);
-    const show = v => +(v / u.scale).toFixed(u.money ? 4 : 2);
+    const show = v => +(v / u.scale).toFixed(u.money ? 4 : 6);
     const dflt = floor ? (type === "integer" ? Math.floor(lim.configured / 2) : lim.configured / 2) : lim.configured * 2;
     return el("li", { class: on ? "on" : "" }, el("label", { class: "ck" }, el("input", { type: "checkbox", checked: on, onchange: e => {
         const ranges = { ...draft.ranges }; if (e.target.checked) ranges[field] = { [key]: dflt }; else delete ranges[field]; set({ ranges }); } }),
@@ -1905,7 +1869,8 @@ const COGNITION_CHOICES = {
 const COGNITION_TONE = {
   SKIP: "off", SKIPPED: "off", CANCELLED: "off", EXPIRED: "off",
   FAILED: "bad", REJECTED: "bad", UNKNOWN: "bad",
-  RUNNING: "run", PENDING: "run", WAITING: "warn", WAITING_DECISION: "warn",
+  RUNNING: "run", PENDING: "run", WAITING: "warn", WAITING_DECISION: "warn", CANDIDATE: "warn",
+  WAITING_INPUT: "warn", WAITING_RESOURCE: "warn", EXECUTION_UNCERTAIN: "warn",
 };
 const REASON_NAMES = {
   PAUSED: "你暂停了", QUIET_HOURS: "免打扰时段", OWNER_REQUESTED_PAUSE: "你让她先别打扰",
@@ -1920,12 +1885,20 @@ function cognitionTitle(item, kind) {
   if (kind === "wake") return item.choice ? COGNITION_CHOICES[item.choice] || item.choice : "自主活动决策";
   if (kind === "life") return item.choice ? COGNITION_CHOICES[item.choice] || item.choice : "生活话题决策";
   if (kind === "goal") return item.topic || "目标";
-  if (kind === "diary") return localDay(item.id) || "日记";
+  if (kind === "diary") return "日记";
   if (kind === "reflection") return "每日反思";
   if (kind === "nightly") return "夜间整理";
   if (kind === "model") return "模型调用";
   if (kind === "rem") return "REM";
   return k.name;
+}
+
+function cognitionState(item) {
+  return item._kind === "wake" ? item.choice : item.state || item.choice;
+}
+function cognitionStateName(item) {
+  const value = cognitionState(item);
+  return COGNITION_CHOICES[value] || statusOf(value)[0];
 }
 
 function cognitionSummary(item, kind) {
@@ -1961,23 +1934,22 @@ PAGES.thinking = data => {
     }
   }
   allItems.sort((a, b) => {
-    const aId = String(a.id), bId = String(b.id);
-    return bId.localeCompare(aId);
+    const at = Date.parse(a.occurred_at), bt = Date.parse(b.occurred_at);
+    return (Number.isFinite(bt) ? bt : 0) - (Number.isFinite(at) ? at : 0) || String(a.id).localeCompare(String(b.id));
   });
 
   const filtered = allItems.filter(i => state.cogKind === "all" || i._kind === state.cogKind);
-  const sel = filtered.find(i => String(i.id) === state.cogSel && i._kind === state.cogKind) || filtered[0];
+  const sel = filtered.find(i => i._kind + ":" + i.id === state.cogSel) || filtered[0];
 
   const today = localDay(new Date().toISOString());
-  const todayItems = allItems.filter(i => {
-    const itemDay = i.id && typeof i.id === "string" && i.id.includes("T") ? localDay(i.id) : null;
-    return itemDay === today;
-  });
+  const todayItems = allItems.filter(i => i.occurred_at && localDay(i.occurred_at) === today);
+  const bounded = Object.values(data).some(page => page.truncated);
+  const coverage = el("p", { class: "note" }, "统计仅包含本页加载的记录。" + (bounded ? "部分类型还有更早的记录未展示。" : ""));
 
   const stats = el("div", { class: "dk-stats" }, [
-    ["今天的记录", todayItems.length],
-    ["已完成", todayItems.filter(i => ["DONE", "COMPLETE", "COMMITTED", "EXPLORE", "OBSERVE"].includes(i.state)).length],
-    ["跳过", todayItems.filter(i => ["SKIP", "SKIPPED"].includes(i.state || i.choice)).length],
+    ["本页今日记录", todayItems.length],
+    ["已完成", todayItems.filter(i => ["DONE", "COMPLETE", "COMMITTED", "SUCCEEDED"].includes(i.state)).length],
+    ["跳过", todayItems.filter(i => ["SKIP", "SKIPPED"].includes(cognitionState(i))).length],
     ["失败", todayItems.filter(i => ["FAILED", "REJECTED", "UNKNOWN"].includes(i.state)).length]
   ].map(([t, v]) => el("div", {}, el("b", { class: "num" }, String(v)), el("span", {}, t))));
 
@@ -1988,11 +1960,11 @@ PAGES.thinking = data => {
 
   if (!sel) return el("div", {},
     head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
-    stats, filters,
+    stats, coverage, filters,
     empty("还没有认知记录", "自主活动、生活话题、目标、日记、反思等决策记录会出现在这里。"));
 
   const k = COGNITION_KINDS[sel._kind] || { name: "认知", ic: "spark" };
-  const stateName = sel.state ? (statusOf(sel.state)[0] || sel.state) : sel.choice ? (COGNITION_CHOICES[sel.choice] || sel.choice) : "—";
+  const stateName = cognitionStateName(sel);
 
   const tabs = [["overview", "概览"], ["sources", "来源"], ["details", "详情"]];
 
@@ -2009,7 +1981,7 @@ PAGES.thinking = data => {
     el("pre", { class: "note", style: { whiteSpace: "pre-wrap", fontFamily: "monospace", fontSize: "0.875rem" } },
       JSON.stringify(sel, null, 2))
   ] : [
-    el("h3", { class: "dk-title" }, sel._title, el("span", { class: "note" }, fmtDate(sel.id))),
+    el("h3", { class: "dk-title" }, sel._title, el("span", { class: "note" }, fmtDate(sel.occurred_at))),
     el("dl", { class: "dk-rows" }, [
       ["类型", k.name],
       ["状态", el("b", {}, stateName)],
@@ -2020,26 +1992,26 @@ PAGES.thinking = data => {
 
   return el("div", {},
     head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
-    stats, filters,
+    stats, coverage, filters,
     el("div", { class: "dk-wrap" },
       el("ul", { class: "dk-list" }, filtered.map(i => {
         const ik = COGNITION_KINDS[i._kind] || { name: "其他", ic: "spark" };
-        const iState = i.state || i.choice || "UNKNOWN";
+        const iState = cognitionState(i) || "UNKNOWN";
         const tone = COGNITION_TONE[iState] || "ok";
         return el("li", {},
           el("button", { type: "button", class: i === sel ? "sel" : "",
-            onclick: () => { state.cogSel = String(i.id); state.cogKind = i._kind; rerender(); } },
+            onclick: () => { state.cogSel = i._kind + ":" + i.id; rerender(); } },
             el("span", { class: "ic" }, icon(ik.ic)),
             el("span", { class: "dk-l" },
               el("b", {}, i._title),
-              el("small", {}, fmtDate(i.id) + "，" + ik.name)),
-            el("span", { class: "tag " + tone }, stateName)));
+              el("small", {}, fmtDate(i.occurred_at) + "，" + ik.name)),
+            el("span", { class: "tag " + tone }, cognitionStateName(i))));
       })),
       el("section", { class: "dk-card" },
         el("div", { class: "dk-head" },
           el("div", {},
             el("h2", {}, "思考与决策"),
-            el("p", { class: "note" }, sel._title + "，" + fmtDate(sel.id))),
+            el("p", { class: "note" }, sel._title + "，" + fmtDate(sel.occurred_at))),
           el("span", { class: "dk-ic" }, icon("spark"))),
         el("div", { class: "dk-tabs", role: "tablist" }, tabs.map(([k, t]) =>
           el("button", { type: "button", role: "tab", "aria-selected": String(state.cogTab === k),
@@ -2047,29 +2019,25 @@ PAGES.thinking = data => {
         el("div", { class: "dk-body" }, body))));
 };
 
-/* ================= 日记与成长页增强（目标、反思、话题操作） ================= */
+/* ================= 目标与反思 ================= */
 
 function goalCard(g) {
-  const steps = g.steps || {};
-  const remaining = steps.remaining || [], completed = steps.completed_count || 0;
-  const lastResult = steps.last_result;
-  return el("div", { class: "goal-card" },
-    el("div", { class: "goal-head" }, el("h3", {}, g.title), tag(g.status),
-      g.detail?.commitment_state ? el("span", { class: "chip" }, "承诺：" + statusOf(g.detail.commitment_state)[0]) : null),
-    el("p", { class: "meta" }, "更新于 " + fmtDate(g.occurred_at)),
-    remaining.length || completed > 0 ? el("div", { class: "goal-steps" },
-      el("p", {}, el("b", {}, "进度"), `已完成 ${completed} 步${remaining.length ? `，剩余 ${remaining.length} 步` : ""}`),
-      remaining.length ? el("ul", {}, remaining.map(s => el("li", {}, s))) : null,
-      lastResult ? el("p", { class: "note" }, "上一步：" + lastResult.step + "（" + statusOf(lastResult.outcome)[0] + "）") : null) : null,
-    el("div", { class: "goal-acts" },
+  const steps = g.steps || [], actions = g.allowed_actions || [];
+  return el("div", { class: "goal" },
+    el("div", {}, el("b", {}, g.topic), tag(g.state),
+      el("p", {}, "更新于 " + fmtDate(g.updated_at)),
+      g.commitment_state ? el("p", {}, "承诺：" + statusOf(g.commitment_state)[0]) : null,
+      steps.length ? el("ul", { class: "goal-steps" }, steps.map(s =>
+        el("li", {}, `第 ${s.position} 步：${statusOf(s.state)[0]}`))) : null),
+    el("div", { class: "goal-acts row-gap" },
       g.state === "CANDIDATE" ? btn("接受", () => goalDecision(g.goal_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
-      ["CANDIDATE", "ACTIVE"].includes(g.state) ? btn("取消", () => goalDecision(g.goal_id, "CANCEL"), { cls: "sm danger", symbol: "close" }) : null,
-      g.state === "ACTIVE" && remaining.length ? btn("续行", () => goalContinue(g), { cls: "sm", symbol: "play" }) : null));
+      !["DONE", "FAILED", "CANCELLED"].includes(g.state) && !actions.includes("ABANDON") ? btn("取消", () => goalDecision(g.goal_id, "CANCEL"), { cls: "sm danger", symbol: "close" }) : null,
+      actions.length ? btn("续行", () => goalContinue(g), { cls: "sm", symbol: "arrow" }) : null));
 }
 
 function goalDecision(goal_id, decision) {
   const titles = { ACCEPT: "接受这个目标", CANCEL: "取消这个目标？" };
-  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后她会开始执行这个目标。" : "取消后不会再执行，但已完成的步骤会保留记录。"));
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后按当前权限和资源安排执行。" : "取消后停止后续执行，已有结果和结果不明的记录会保留。"));
   const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "接受" : "取消");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
@@ -2083,90 +2051,84 @@ function goalDecision(goal_id, decision) {
 
 function goalContinue(g) {
   const form = el("form", { class: "dlg-form" });
-  const remaining = g.steps?.remaining || [];
-  const actionSel = el("select", { class: "input", id: "goal-action", required: true },
+  const remaining = (g.steps || []).filter(s => s.state === "WAITING_DECISION").sort((a, b) => a.position - b.position);
+  const actions = g.allowed_actions || [];
+  const labels = { CONTINUE: "继续执行", WAIT: "等待到期", ABANDON: "放弃目标" };
+  const actionSel = el("select", { class: "input", id: "goal-action", "aria-label": "操作", required: true },
     el("option", { value: "" }, "选择操作"),
-    el("option", { value: "CONTINUE" }, "继续执行"),
-    el("option", { value: "WAIT" }, "等待到期"),
-    el("option", { value: "ABANDON" }, "放弃目标"));
-  const stepsArea = el("div", { class: "field", id: "goal-steps-area", hidden: true },
-    el("label", {}, el("span", {}, "剩余步骤（最多 3 步，一行一个）"),
-      el("textarea", { class: "input", id: "goal-steps", rows: "3", placeholder: remaining.join("\n") })));
+    actions.map(action => el("option", { value: action }, labels[action])));
+  const stepList = el("ol", { class: "stack" });
+  const renderSteps = () => stepList.replaceChildren(...remaining.map((step, index) => {
+    const move = delta => { [remaining[index], remaining[index + delta]] = [remaining[index + delta], remaining[index]]; renderSteps(); };
+    return el("li", { class: "row-gap" }, el("span", {}, `原第 ${step.position} 步`),
+      btn("上移", () => move(-1), { cls: "sm", label: `上移第 ${step.position} 步`, disabled: index === 0 }),
+      btn("下移", () => move(1), { cls: "sm", label: `下移第 ${step.position} 步`, disabled: index === remaining.length - 1 }));
+  }));
+  renderSteps();
+  const stepsArea = el("div", { class: "field", hidden: true }, el("p", {}, "剩余步骤的执行顺序"), stepList);
   const waitArea = el("div", { class: "field", id: "goal-wait-area", hidden: true },
-    el("label", {}, el("span", {}, "等待到期时间"), el("input", { class: "input", type: "datetime-local", id: "goal-wait-until" })));
+    el("label", {}, el("span", {}, "等待到期时间（浏览器本地时间）"), el("input", { class: "input", type: "datetime-local", id: "goal-wait-until" })));
   actionSel.addEventListener("change", () => {
     stepsArea.hidden = actionSel.value !== "CONTINUE";
     waitArea.hidden = actionSel.value !== "WAIT";
   });
   form.append(el("label", { class: "field" }, el("span", {}, "操作"), actionSel), stepsArea, waitArea,
-    el("p", { class: "muted" }, "继续执行：你可以调整剩余步骤的顺序或内容；等待到期：暂时搁置，到期后再评估；放弃目标：不再执行，保留已完成记录。"));
+    el("p", { class: "muted" }, "继续执行时可以调整已有步骤的顺序。等待时间最多 7 天，到期后可再次决定。放弃后保留已完成记录。"));
   const submit = el("button", { type: "submit", class: "btn primary" }, "确认");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
     const action = actionSel.value;
-    if (!action) { formError(form, "请选择操作。"); return; }
+    if (!actions.includes(action)) { formError(form, "请选择操作。"); return; }
+    if (!Number.isInteger(g.version) || g.version < 1) { formError(form, "目标版本不可用，请刷新后重试。"); return; }
     /** @type {{expected_version: number, action: string, step_order?: string[], wait_until?: string}} */
-    const body = { expected_version: g.version || 1, action };
+    const body = { expected_version: g.version, action };
     if (action === "CONTINUE") {
-      const steps = ($("#goal-steps").value || "").split("\n").map(s => s.trim()).filter(Boolean);
-      if (!steps.length || steps.length > 3) { formError(form, "剩余步骤为 1–3 行，一行一个步骤。"); return; }
-      if (new Set(steps).size !== steps.length) { formError(form, "剩余步骤不能重复。"); return; }
-      body.step_order = steps;
+      if (!remaining.length || remaining.length > 3) { formError(form, "剩余步骤不可用，请刷新后重试。"); return; }
+      body.step_order = remaining.map(step => step.step_id);
     } else if (action === "WAIT") {
       const until = $("#goal-wait-until").value;
-      if (!until) { formError(form, "请选择等待到期时间。"); return; }
+      if (!until || !Number.isFinite(Date.parse(until))) { formError(form, "请选择有效的等待到期时间。"); return; }
       body.wait_until = new Date(until).toISOString();
     }
     perform(form, submit, () => api.write("/goals/" + encodeURIComponent(g.goal_id) + "/continuation", body, "POST",
       r => typeof r.state === "string"),
       async r => { closeDialog(); toast({ CONTINUE: "已继续执行", WAIT: "已等待到期", ABANDON: "已放弃目标" }[action] + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
   });
-  openDialog("续行目标：" + g.title, form, { wide: true });
+  openDialog("续行目标：" + g.topic, form, { wide: true });
 }
 
 function reflectionCard(r) {
   const evidence = r.evidence || [];
-  return el("div", { class: "reflection-card" },
-    el("div", { class: "refl-head" }, el("h3", {}, r.content), tag(r.state)),
-    el("p", { class: "meta" }, fmtDate(r.occurred_at)),
+  return el("div", { class: "reflection-card stack" },
+    el("div", {}, el("b", {}, r.content), tag(r.state)),
+    el("p", { class: "meta" }, fmtDate(r.created_at)),
     evidence.length ? el("details", { class: "refl-evidence" }, el("summary", {}, "证据（" + evidence.length + " 条原话）"),
       el("ul", {}, evidence.map(e => el("li", {}, "\"" + e.exact_quote + "\"")))
     ) : null,
-    r.state === "PROPOSED" ? el("div", { class: "refl-acts" },
+    r.state === "PENDING" ? el("div", { class: "row-gap" },
       btn("作为假设接受", () => reflectionDecision(r.suggestion_id, "ACCEPT_AS_HYPOTHESIS"), { cls: "sm primary", symbol: "check" }),
+      btn("需要更多证据", () => reflectionDecision(r.suggestion_id, "NEED_MORE_EVIDENCE"), { cls: "sm" }),
       btn("拒绝", () => reflectionDecision(r.suggestion_id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null);
 }
 
 function reflectionDecision(suggestion_id, decision) {
-  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT_AS_HYPOTHESIS" ? "接受后这条建议会进入下一步执行。" : "拒绝后不会再提示，但证据仍会保留在对话记录里。"));
-  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT_AS_HYPOTHESIS" ? "primary" : "danger") }, decision === "ACCEPT_AS_HYPOTHESIS" ? "接受" : "拒绝");
+  const labels = { ACCEPT_AS_HYPOTHESIS: "作为假设接受", REJECT: "拒绝", NEED_MORE_EVIDENCE: "需要更多证据" };
+  const explanations = {
+    ACCEPT_AS_HYPOTHESIS: "将这条建议保存为待验证假设。",
+    REJECT: "拒绝这条建议，撤回由它派生的目标，保留已有证据和执行结果。",
+    NEED_MORE_EVIDENCE: "将建议标为需要更多证据，并撤回由它派生的目标。",
+  };
+  const form = el("form", { class: "dlg-form" }, el("p", {}, explanations[decision]));
+  const submit = el("button", { type: "submit", class: "btn " + (decision === "REJECT" ? "danger" : "primary") }, labels[decision]);
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
     perform(form, submit, () => api.write("/reflections/" + encodeURIComponent(suggestion_id) + "/decision", { decision }, "POST",
       r => typeof r.state === "string"),
-      async r => { closeDialog(); toast((decision === "ACCEPT_AS_HYPOTHESIS" ? "已接受" : "已拒绝") + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+      async r => { closeDialog(); toast(statusOf(r.state)[0]); await loadRoute({ reset: true }); });
   });
-  openDialog(decision === "ACCEPT_AS_HYPOTHESIS" ? "接受这条反思建议" : "拒绝这条反思建议？", form);
-}
-
-function goalCard(goal) {
-  return el("div", { class: "goal" },
-    el("div", {}, el("b", {}, goal.title), tag(goal.state),
-      el("p", {}, goal.detail?.commitment_state ? "承诺：" + statusOf(goal.detail.commitment_state)[0] : "更新于 " + fmtDate(goal.occurred_at))),
-    el("div", { class: "goal-acts" },
-      goal.state === "PENDING" ? btn("接受", () => goalAction(goal.goal_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
-      goal.state === "PENDING" ? btn("取消", () => goalAction(goal.goal_id, "CANCEL"), { cls: "sm", symbol: "close" }) : null,
-      goal.state === "ACCEPTED" ? btn("续行", () => goalContinuation(goal.goal_id), { cls: "sm", symbol: "next" }) : null));
-}
-function reflectionCard(reflection) {
-  return el("div", { class: "block" },
-    el("div", {}, el("b", {}, reflection.content),
-      el("span", { class: "meta-line" }, tag(reflection.state), el("span", { class: "note" }, fmtDate(reflection.created_at)))),
-    reflection.state === "PENDING" ? el("div", { class: "acts" },
-      btn("批准", () => reflectionAction(reflection.suggestion_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }),
-      btn("拒绝", () => reflectionAction(reflection.suggestion_id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null);
+  openDialog(labels[decision], form);
 }
 
 function topicCard(t) {

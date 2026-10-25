@@ -98,6 +98,8 @@ class CognitionRead:
         for row in rows[:limit]:
             item = self._record(kind, row, sources)
             if item is not None:
+                # Native record time, never an identifier or the time of this read.
+                item["occurred_at"] = row["occurred_at" if kind == "model" else "created_at"]
                 items.append(item)
         check_version(self.core.memory, version)
         return {"kind": kind, "items": items, "as_of": now, "privacy_epoch": version[0],

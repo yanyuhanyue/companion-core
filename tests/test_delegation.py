@@ -205,6 +205,39 @@ def test_console_autonomy_routes_require_session_and_are_idempotent(core, monkey
         assert again.status_code == 409
 
 
+@pytest.mark.parametrize("value,capability,field,accepted", [
+    (0.175, "expression", "expression_selection_probability", True),
+    (1, "wake", "wake_max_daily_runs", True),
+    (0.5, "wake", "wake_max_daily_runs", False),
+    (True, "wake", "wake_max_daily_runs", False),
+    ("0.175", "expression", "expression_selection_probability", False),
+    (0.9, "expression", "expression_selection_probability", False),
+])
+def test_console_ranges_preserve_numbers_and_native_bounds(
+    core, monkeypatch, value, capability, field, accepted,
+):
+    core.settings.console.enabled = True
+    core.settings.console.public_origin = ORIGIN
+    core.settings.control_token = SecretStr(PASSWORD)
+    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
+    with TestClient(create_app(core.settings), base_url=ORIGIN) as client:
+        csrf = client.post("/v1/console/session", json={"password": PASSWORD},
+            headers={"Origin": ORIGIN}).json()["csrf_token"]
+        headers = {"Origin": ORIGIN, "X-CSRF-Token": csrf, "Idempotency-Key": "range-1"}
+        body = {"mode": "propose", "allow_pause": False, "ranges": {field: {"min": value}}}
+        response = client.put("/v1/console/autonomy/" + capability, json=body, headers=headers)
+        if accepted:
+            assert response.status_code == 200, response.text
+            assert client.put("/v1/console/autonomy/" + capability, json=body,
+                headers=headers).json() == response.json()
+            saved = delegation.delegation(core.store, capability)["ranges"][field]["min"]
+            assert saved == value and type(saved) is type(value)
+        else:
+            assert response.status_code == 400, response.text
+            assert delegation.delegation(core.store, capability)["mode"] == "owner"
+            assert not core.store.rows("SELECT * FROM console_operations")
+
+
 def test_every_delegable_capability_accepts_owner_ranges_and_reports_integration(core):
     core.settings.proactive_daily_limit = 3
     delegate(core, capability="proactive", ranges={"proactive_daily_limit": {"min": 1},

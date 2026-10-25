@@ -63,8 +63,22 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.get(prefix + "/goals", dependencies=auth)
     async def goals():
         # Scope URLs and authority snapshots stay in the native record.
-        return {"items": [{key: row[key] for key in GOAL_FIELDS if key in row}
-                          for row in app.state.core.goals.recent()]}
+        core = app.state.core
+        items = []
+        for row in core.goals.recent():
+            item = {key: row[key] for key in GOAL_FIELDS if key in row}
+            item["allowed_actions"] = []
+            if core.settings.goals_enabled and row["state"] == "WAITING_INPUT":
+                try:
+                    # Reuse the native plan's source, authority, uncertainty and due checks.
+                    plan = core.goals.plan(row["goal_id"])
+                    if plan["version"] == row["version"]:
+                        item["allowed_actions"] = plan["allowed_actions"]
+                except CoreError:
+                    # Historical inspection remains available when execution is blocked.
+                    pass
+            items.append(item)
+        return {"items": items}
 
     @app.post(prefix + "/goals/{goal_id}/decision", dependencies=auth)
     async def goal_decision(goal_id: str, body: GoalDecision, request: Request,

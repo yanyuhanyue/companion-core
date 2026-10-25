@@ -1,211 +1,76 @@
-# P1–P4 控制台 UI 补充（2026-10-25）
+# 控制台 UI 与原生服务契约
 
-此文件补充 console-v2 控制台自 `0b1d70c` 加入的 cognition/life/affect 路由与决策页面。
+所有路径位于 `/v1/console`。读取需要主人会话；写入沿用同源 Origin、CSRF、
+幂等键和原生操作回执。浏览器只提交主人选择，不执行工作进程。
 
-## 新增后端路由（companion/console_cognition.py）
+## 日记与成长
 
-已注册到 `/v1/console`，复用原有会话、CSRF、幂等键与操作回执：
+页面并行读取 `life`、`goals` 和 `reflections`；日记正文按选中的日期读取
+`diary/{day}`。目标与反思使用各自完整的原生字段。
 
-| 方法 | 路径 | 说明 |
+- `goals.items` 包含 `goal_id`、`topic`、`state`、`version`、`updated_at`、
+  `commitment_state`、`next_due_at` 和原始 `steps[]`。步骤包含 `step_id`、
+  `position`、`state` 和原始结果引用，不返回目标 URL 或 authority 快照。
+- `CANDIDATE` 可接受；非终态目标可按原生取消语义停止后续工作。
+  `allowed_actions` 复用 `GoalEngine.plan()` 的续行判断。执行关闭、来源或
+  authority 不可用、结果不明时不提供续行操作，历史仍可读取。
+- `POST goals/{id}/decision` 提交 `{"decision":"ACCEPT"}` 或 `CANCEL`。
+- `POST goals/{id}/continuation` 提交当前 `expected_version` 和 `action`。
+  `CONTINUE` 的 `step_order` 是剩余 `WAITING_DECISION` 步骤 ID 的完整排列；
+  UI 允许调整顺序。`WAIT` 提交带时区的 `wait_until`，最多等待 7 天；
+  `ABANDON` 不带步骤或时间。版本变化时重新读取，不猜测版本、不重建步骤。
+- `reflections.items` 包含原始 `suggestion_id`、`content`、`state`、
+  `created_at` 和最多 3 条 `evidence[].exact_quote`。
+  `PENDING` 可选择 `ACCEPT_AS_HYPOTHESIS`、`REJECT` 或 `NEED_MORE_EVIDENCE`，
+  通过 `POST reflections/{id}/decision` 提交。接受仅保存为假设，拒绝或要求
+  更多证据沿用原生服务的派生目标撤回行为。
+
+## 思考与决策
+
+页面读取 `cognition?kind=...&limit=30` 的八类原生记录：
+`wake/life/goal/diary/reflection/nightly/model/rem`。
+
+- 每条记录的 `id` 只用于身份与选择；`occurred_at` 来自原生记录的保存时间，
+  用于排序、显示和按配置时区计算本页今日数量。`as_of` 是读取时间。
+- 统计只涵盖已加载记录；服务端 `truncated` 为真时提示有更早记录未展示。
+- 每行状态取自该行；Wake 的 `choice` 表示调度决定，不代表执行完成。
+- 任一类型读取失败时整体显示同步失败，保留已有成功快照及其读取时间。
+  首次读取失败显示错误，不显示“还没有记录”。
+- 来源展示 `source_event_ids`，详情展示已返回的有界元数据。
+  `reasoning=NOT_EXPOSED`、`candidate_set=NOT_RECORDED` 的边界保持不变。
+
+## 能力授权
+
+`PUT autonomy/{capability}` 提交 `mode`、`allow_pause` 和 `ranges`。
+数值保持 JSON 数字类型：次数仍为整数，表情选择概率可为小数。
+后端继续依据原生字段类型及主人配置校验上下界，拒绝布尔值、数字字符串、
+整数参数的小数及越界值。`wired` 继续说明哪些字段已被运行逻辑读取。
+
+## 后续 UI 覆盖清单
+
+| 优先级 | 页面能力 | 后端与控制台接口情况 |
 |---|---|---|
-| GET | `/cognition?kind=...&limit=...` | 读取认知记录（wake/life/goal/diary/reflection/nightly/model/rem），按 `before` 或 `record_id` 分页 |
-| GET | `/affect` | 情绪观察快照 |
-| POST | `/affect/reset` | 重置情绪状态（需确认） |
-| GET | `/goals` | 目标列表（仅可见字段，步骤 `steps` 含完成计数与原始回执） |
-| POST | `/goals/{goal_id}/decision` | 接受 / 取消目标（ACCEPT / CANCEL） |
-| POST | `/goals/{goal_id}/continuation` | 续行目标：CONTINUE 指定剩余步骤、WAIT 设置到期时间、ABANDON 放弃 |
-| GET | `/reflections` | 反思建议列表（含 3 条证据摘录的 `exact_quote`） |
-| POST | `/reflections/{suggestion_id}/decision` | 决定反思建议（ACCEPT / REJECT） |
-| GET | `/life/topics` | 生活话题预览（含来源事件列表与执行结果） |
-| POST | `/life/topics/{topic_id}/close` | 关闭话题（需提供来源事件 ID） |
-| GET | `/interests` | 兴趣档案 |
-| GET | `/expression-learning` | 表达习惯学习快照 |
-| GET | `/tools` | 工具任务列表（最近 30 条） |
-| POST | `/tools/{task_id}/decision` | 批准 / 拒绝工具任务 |
-| POST | `/tools/{task_id}/revoke` | 撤回工具任务 |
-| GET | `/source-grants` | 来源授权列表 |
-| POST | `/source-grants/{grant_id}` | 撤回 / 遗忘来源授权 |
+| P1 | 来源授权列表、状态、撤回、遗忘 | `source-grants` 已有读取与写入接口 |
+| P1 | 工具任务列表、审批、拒绝、撤回 | `tools` 已有操作接口；审批的具体执行内容需补安全投影，当前仅有范围哈希与任务元数据 |
+| P1 | 生活话题、来源、结果、关闭 | `life/topics` 已有预览与关闭接口 |
+| P1 | 认知历史分页、单条定位 | `cognition` 已有 `before`、`next_cursor`、`record_id`，UI 当前只加载每类最近 30 条 |
+| P2 | 情绪快照、重置与结果反馈 | `affect` 已有快照与重置接口 |
+| P2 | 主人偏好与她的兴趣分开展示 | `interests` 已有只读接口 |
+| P2 | 表达习惯学习快照与当前偏好 | `expression-learning` 已有只读接口；跨日历史须核对原始数据是否保留 |
+| P2 | 目标步骤与执行回执的可读详情 | `cognition` 已有部分元数据，UI 目前以原始字段展示 |
 
-## 新增控制台页面（companion/console_static/app.js）
+记忆原文下钻、QQ 资料计划审批、表情素材管理和媒体会话控制，需要另外核对并
+接出对应的主人控制台投影与操作。音频回放涉及原音频保留机制，不属于单纯 UI 接入。
 
-### 1. 日记与成长（PAGES.life）
+## 实现依据与验证
 
-- **左栏**：月历选择器，显示已有日记的日期。
-- **右栏**：当天日记内容（懒加载），纠正、遗忘按钮。下方显示目标与承诺、最近反思建议列表。
-- **数据源**：`GET /life`（`life.items`）、`GET /diary/{day}`（按需）。
-
-**目标与承诺子区**：
-- 显示 `kind === "goal"` 的条目，展示 `title`、`status`、承诺状态（`detail.commitment_state`）。
-- **当前 UI 缺口**：无接受 / 取消 / 续行操作按钮；`steps` 字段已返回但页面未展开显示。
-
-**反思子区**：
-- 显示 `kind === "reflection"` 的条目，`title`、`status`、更新时间。
-- **当前 UI 缺口**：无接受 / 拒绝按钮，也未展开证据 `evidence`（后端返回前 3 条 `exact_quote`）。
-
-### 2. 思考与决策（PAGES.thinking）
-
-- **顶部统计**：今天的决策总数、已执行、暂缓或跳过、失败。
-- **工具栏**：按决策类型筛选（全部、自主活动、主动分享、QQ 资料、每日反思）。
-- **左侧列表**：决策条目，点击后右侧显示详情。
-- **右侧详情**：三栏分页（决策记录 / 上下文 / 原始推理）。
-  - **决策记录**：触发原因、可选行动、她的决定、决策说明、执行结果。
-  - **上下文**：本轮实际可用的信息（近期会话、项目进展、自主兴趣记录、本次工具调用），标注"已采用 / 未采用 / 无匹配配置"。
-  - **原始推理**：显示思考模式内容（当前配置关闭 DeepSeek 思考模式，页面注明"未生成"）。
-- **数据源**：`GET /decisions`。
-
-**决策类型映射**：
-```javascript
-const DK = {
-  wake: { name: "自主活动", fields: ["trigger", "available_actions", "decision", "reason", "result"] },
-  sharing: { name: "主动分享", fields: ["source", "available_actions", "decision", "reason", "result"] },
-  account: { name: "QQ 资料", fields: ["plan_type", "proposed_change", "decision", "reason", "scheduled_at"] },
-  nightly: { name: "每日反思", fields: ["suggestions", "decision", "evidence", "result"] }
-};
-```
-
-**上下文投影字段**：
-- `recent_messages`：近期会话（已采用 / 未采用）
-- `project_progress`：项目进展
-- `autonomous_observations`：自主兴趣记录
-- `tool_calls`：本次工具调用
-
-### 3. 能力详情增强（capDetail）
-
-每项能力详情顶部新增"由谁决定"一行，显示当前授权模式（只由我控制 / 她提议我批准 / 她在范围内自己调整）。列表里的能力名称旁会显示火花图标（已授权给她）和黄色圆点（有待批准的提议）。
-
-## 数据结构示例
-
-### GET /goals 返回示例
-
-```json
-{
-  "items": [
-    {
-      "goal_id": "goal-abc123",
-      "kind": "habit",
-      "topic": "每周读一本书",
-      "state": "ACTIVE",
-      "priority": 2,
-      "next_due_at": "2026-10-26T09:00:00Z",
-      "last_error_code": null,
-      "version": 3,
-      "commitment_state": "COMMITTED",
-      "deadline": "2026-12-31T23:59:59Z",
-      "mode": "AUTOMATIC",
-      "created_at": "2026-10-01T08:00:00Z",
-      "updated_at": "2026-10-24T18:30:00Z",
-      "reflection_suggestion_id": "refl-xyz789",
-      "steps": {
-        "remaining": ["选书", "安排阅读时间"],
-        "completed_count": 1,
-        "last_result": {
-          "step": "确认兴趣方向",
-          "outcome": "SUCCESS",
-          "event_id": "evt-def456"
-        }
-      }
-    }
-  ]
-}
-```
-
-### GET /reflections 返回示例
-
-```json
-{
-  "items": [
-    {
-      "suggestion_id": "refl-xyz789",
-      "run_id": "run-20261024",
-      "kind": "habit",
-      "content": "建议将读书目标的每周时长从 10 小时减少到 5 小时",
-      "state": "PROPOSED",
-      "created_at": "2026-10-24T06:00:00Z",
-      "updated_at": "2026-10-24T06:00:00Z",
-      "local_date": "2026-10-24",
-      "evidence": [
-        {"exact_quote": "最近工作太忙了，每天只能抽出 30 分钟"},
-        {"exact_quote": "这周只读了 20 页，进度有点慢"},
-        {"exact_quote": "要不要暂时放松一下目标？"}
-      ]
-    }
-  ]
-}
-```
-
-### GET /decisions 返回示例
-
-```json
-{
-  "items": [
-    {
-      "id": "dec-20261025-wake-01",
-      "kind": "wake",
-      "occurred_at": "2026-10-25T15:42:00Z",
-      "status": "COMMITTED",
-      "detail": {
-        "trigger": "昨天的项目 Bug 尚未解决",
-        "available_actions": ["私聊 / 延后 / 跳过"],
-        "decision": "DEFER",
-        "reason": "缺少新的进展，当前主动问询可能造成打扰",
-        "model_decision": "DEFER：查时不发",
-        "execution_result": "未发送，保留待评估线索",
-        "context": {
-          "recent_messages": {"status": "USED", "count": 12},
-          "project_progress": {"status": "USED", "items": ["Bug 讨论", "方案草稿"]},
-          "autonomous_observations": {"status": "UNUSED"},
-          "tool_calls": {"status": "NONE"}
-        },
-        "reasoning": null
-      }
-    }
-  ]
-}
-```
-
-## 当前 UI 缺口汇总
-
-基于后端已返回字段，以下操作在 UI 上仍缺少交互入口：
-
-| 能力 | 已返回字段 | UI 仍缺少的操作 |
-|---|---|---|
-| Goals | `steps.remaining`、`steps.completed_count`、`steps.last_result` | 接受、取消、续行（CONTINUE 指定剩余步骤、WAIT 设置到期、ABANDON 放弃） |
-| Reflections | `evidence[].exact_quote`（前 3 条） | 接受、拒绝按钮 |
-| Life topics | `sources`、`results` | 关闭话题按钮（需选择来源事件） |
-| Tools | 任务列表 | 批准、拒绝、撤回按钮 |
-| Source grants | 授权列表 | 撤回、遗忘按钮 |
-| Affect | 当前快照 | 重置按钮 |
-
-这些缺口不影响后端接口可用性，也不影响已有能力的配置和自主调整授权保存。接口已就绪，UI 交互可按需补全。
-
-## 类型标注（已加入 app.js）
-
-```javascript
-/**
- * @typedef {Object} GoalSteps
- * @property {string[]} remaining
- * @property {number} completed_count
- * @property {{step: string, outcome: string, event_id: string}=} last_result
- */
-
-/**
- * @typedef {Object} ReflectionEvidence
- * @property {string} exact_quote
- */
-
-/**
- * @typedef {Object} DecisionContext
- * @property {{status: string, count?: number, items?: any[]}=} recent_messages
- * @property {{status: string, items?: any[]}=} project_progress
- * @property {{status: string}=} autonomous_observations
- * @property {{status: string}=} tool_calls
- */
-```
-
-## 实现状态标注
-
-当前 `app.js` 中 `SHOW_IMPLEMENTATION_STATUS` 设为 `true`，在能力列表和详情中显示"尚未接入"、"部分接入"提示。设为 `false` 可移除全部实现标注；自主调整的接入状态（`wired` 字段）和火花图标、黄点仍保留。
-
----
-
-**更新范围**：本文档记录 console-v2 在 `0b1d70c` 后新增的后端路由与 UI 投影。目标、反思、话题、工具、来源授权和情绪观察的接口均已实现，UI 交互按钮仍缺少。思考与决策页面已完整展示决策记录、上下文与推理占位，按后端实际返回字段渲染。
+- 检查 [DSH schedule 的历史读取实现](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/schedule/schedule/src/delivery-history.ts)：
+  复用原始身份与保存时间分别建模、按原始回执读取、明确缺失历史的做法。
+- 依照 [MDN Promise.allSettled](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/allSettled)
+  的失败语义，整页统计使用 `Promise.all`，由已有加载错误路径处理失败。
+  时间解析只使用原始日期字段，遵循 [Date.parse](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/parse)。
+- 复用 [Pydantic 严格数字类型](https://docs.pydantic.dev/latest/concepts/strict_mode/)
+  与原生 `delegation.validate_ranges`；保留整数/小数，不将字符串或布尔值强转为授权数值。
+- `tests/test_console_cognition.py`、`test_console_decisions.py`、`test_delegation.py`
+  覆盖真实 HTTP 契约、原始时间、版本冲突及幂等性；`test_console_browser.py`
+  在浏览器点击实际按钮并检查原生存储，覆盖排序、状态及请求失败提示。

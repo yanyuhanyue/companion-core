@@ -62,6 +62,7 @@ def test_native_cognition_http_reads_worker_receipt_after_stop(core, tmp_path):
             item = result["items"][0]
             assert item["state"] == "SETTLED"
             assert item["id"] == before[0]["request_id"]
+            assert item["occurred_at"] == before[0]["occurred_at"]
             assert item["usage"]["input_tokens"] == 30
             assert item["usage"]["output_tokens"] == 2
             assert item["measurement"]["state"] == "RECORDED"

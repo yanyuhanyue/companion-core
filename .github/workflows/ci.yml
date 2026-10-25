@@ -234,7 +234,7 @@ jobs:
       - run: uv run --group reader python -m playwright install chromium --only-shell
       - run: >-
           uv run --group reader python -m pytest -q tests/test_source_browser.py
-          tests/test_next_reading_browser.py --basetemp=.local/test-temp
+          tests/test_next_reading_browser.py tests/test_console_browser.py --basetemp=.local/test-temp
   plugin-native:
     needs: preflight
     if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}

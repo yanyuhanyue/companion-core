@@ -16,6 +16,7 @@ def test_decisions_list_wake_and_reflection_records_without_reasoning(core, clie
     assert reflection["state"] == "COMMITTED"
     core.settings.wake_enabled = core.settings.goals_enabled = True
     core.wake.evaluate()
+    core.clock.advance(120)  # Reading later must not rewrite the original record time.
     paths = ["/v1/console/cognition?kind=" + kind for kind in ("wake", "reflection")]
     for path in paths:
         assert client.get(path).status_code == 401
@@ -36,13 +37,17 @@ def test_decisions_list_wake_and_reflection_records_without_reasoning(core, clie
         pages.append(page)
     wake = pages[0]["items"][0]
     assert wake["choice"] == "SKIP" and wake["source_evidence"] == "NOT_RECORDED"
-    assert wake["id"] == core.store.one("SELECT decision_id FROM wake_decisions")["decision_id"]
+    original_wake = core.store.one("SELECT decision_id,created_at FROM wake_decisions")
+    assert wake["id"] == original_wake["decision_id"]
+    assert wake["occurred_at"] == original_wake["created_at"] != pages[0]["as_of"]
     item = pages[1]["items"][0]
     assert item["id"] == reflection["run_id"] and item["state"] == "COMMITTED"
     assert item["source_evidence"] == "RECORDED"
-    original = core.store.one("SELECT model_request_id FROM reflection_runs WHERE run_id=?",
-                              (reflection["run_id"],))
+    original = core.store.one(
+        "SELECT model_request_id,created_at FROM reflection_runs WHERE run_id=?",
+        (reflection["run_id"],))
     assert item["model_request_id"] == original["model_request_id"]
+    assert item["occurred_at"] == original["created_at"] != pages[1]["as_of"]
     assert reader.store.db.total_changes == changes and model.calls == calls
     # Suggestion content belongs to the separate Life read, not cognition metadata.
     suggestions = client.get("/v1/console/reflections").json()["items"]

@@ -55,6 +55,8 @@ def test_rem_native_metadata_pagination_and_usage(core):
     assert item["usage"] == original["usage"]
     assert item["usage"]["state"] == "UNKNOWN" and item["usage"]["billed_micro_usd"] == 700
     assert item["kind"] == "FICTION" and item["audience"] == "owner_only"
+    assert item["occurred_at"] == core.store.one(
+        "SELECT created_at FROM rem_records WHERE rem_id=?", (first,))["created_at"]
     assert item["questions"] == {"state": "UNVERIFIED", "count": 1}
     assert item["source_available"]
     assert "合成私人" not in json.dumps(item, ensure_ascii=False)

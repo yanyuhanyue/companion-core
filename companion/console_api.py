@@ -10,7 +10,7 @@ from typing import Literal
 
 from fastapi import Depends, Header, Request, Response
 from fastapi.responses import FileResponse
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, StrictFloat, StrictInt
 
 from companion import cloud_budget, console_read, delegation, operator_config
 from companion.contracts import CoreError, StrictModel
@@ -48,7 +48,8 @@ class DeliveryReconciliation(StrictModel):
 class Delegation(StrictModel):
     mode: Literal["owner", "propose", "self"]
     allow_pause: bool = Field(strict=True)
-    ranges: dict[str, dict[str, int]] = Field(default_factory=dict, max_length=4)
+    ranges: dict[str, dict[str, StrictInt | StrictFloat]] = Field(
+        default_factory=dict, max_length=4)
 
 
 class AdjustmentDecision(StrictModel):
