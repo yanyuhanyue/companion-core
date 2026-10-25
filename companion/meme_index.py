@@ -302,6 +302,9 @@ class MemeIndex:
         if not held_lock.acquire(blocking=False):
             return None, (), "INFERENCE_BUSY"
         unique_texts = tuple(dict.fromkeys(texts))
+        if time.monotonic() >= deadline:
+            held_lock.release()  # Nothing was submitted; the caller still owns this lock.
+            return None, (), "LOCAL_DEADLINE"
         try:
             # Synchronous submission makes pre-submission failure distinguishable.
             # Shield keeps even a queued worker alive to release its lock in finally.
@@ -313,14 +316,16 @@ class MemeIndex:
             raise
         self._inflight = future
         future.add_done_callback(self._finished)
+        waiting = asyncio.timeout(max(0, deadline - time.monotonic()))
         try:
-            query_vector, vectors = await asyncio.wait_for(
-                asyncio.shield(future), max(0, deadline - time.monotonic())
-            )
+            async with waiting:
+                query_vector, vectors = await asyncio.shield(future)
             by_text = dict(zip(unique_texts, vectors, strict=True))
             return query_vector, tuple(by_text[text] for text in texts), None
-        except TimeoutError:
-            return None, (), "LOCAL_DEADLINE"
+        except TimeoutError as error:
+            if waiting.expired():
+                return None, (), "LOCAL_DEADLINE"
+            raise CoreError("MEME_INDEX_INFERENCE_FAILED", 503) from error
         except (LocalEntryNotFoundError, FileNotFoundError):
             return None, (), "LOCAL_WEIGHTS_MISSING"
         except asyncio.CancelledError:

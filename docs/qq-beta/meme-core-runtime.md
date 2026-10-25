@@ -98,7 +98,10 @@ SHA、词法/cosine/总分。ranking 上限 48KiB，整个 offer 上限 192KiB�
 不传 Store、service、权限回调或凭据。encoder(local_only=True) 使用现有 CPU threads=2，
 不下载、不新增 provider/caption/付费工作。输出在线程内完全物化为最多33份有界 f32。
 
-取消向调用方传播；超时允许已核验词法结果。成功提交后只由 CPU finally 还锁，排队中
+无意图时不启动 query，也不因原权限检查耗尽可选预算而记录 query 超时。
+提交线程池前重查剩余预算；已过期则释放尚未提交的锁，不创建 future 或排队。
+取消向调用方传播；等待期限实际到达时允许已核验词法结果。CPU 自身抛出的 TimeoutError
+仍是 MEME_INDEX_INFERENCE_FAILED。成功提交后只由 CPU finally 还锁，排队中
 取消也不提前解锁；迟到结果不写缓存或 offer，异常被消费。忙锁或未完成 future 直接
 INFERENCE_BUSY，不积压工作。不能强制中止 native 模型或承诺两秒 CPU 退出；若 native
 调用卡住，锁持续忙，后续请求保持词法。提交前失败才由调用方还锁。
@@ -116,6 +119,8 @@ revision 从2变3，保留 registry/order/Ledger 格式；旧 COMPLETE 通过签
 
 线程生命周期复用 Python 的 [shield 取消语义](https://docs.python.org/3.11/library/asyncio-task.html#shielding-from-cancellation)
 与 [primitive Lock 规则](https://docs.python.org/3.11/library/threading.html#lock-objects)。
+等待超时使用 [asyncio.Timeout.expired](https://docs.python.org/3.11/library/asyncio-task.html#asyncio.Timeout.expired)
+区分上下文的期限到达和 CPU 自身异常，不改变 shield 与原共享锁的责任。
 固定模型和原始来源/费用研究继续复用现存 original-receipts 文档中的来源；未引入新依赖或模型版本。
 
 原 Outbox 是按物理 byte SHA 的占用及 cooldown 权威，不按许可别名绕过；PENDING、

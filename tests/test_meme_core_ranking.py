@@ -1,14 +1,53 @@
 """Ranker policy tests use synthetic resolved facts; native authority is tested separately."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from companion import meme_index as index
+from companion import meme_retrieval
 from companion.contracts import CoreError
 from companion.meme_retrieval import OFFER
 from companion.store import encode
 from tests.conftest import run
 from tests.test_meme_core_runtime import runtime_case as runtime_case
 from tests.test_meme_index import local_encoder, vector
+
+
+@pytest.mark.parametrize("runtime_case", ["no_match"], indirect=True)
+def test_no_intent_keeps_strict_null_offer_when_scope_exhausts_optional_budget(
+    runtime_case, monkeypatch
+):
+    c, elapsed, checks = runtime_case, [0.0], []
+    original_scope = meme_retrieval.MemeRetrieval._scope
+
+    def checked_scope(self, job, *, executing):
+        result = original_scope(self, job, executing=executing)
+        checks.append(job["job_id"])
+        elapsed[0] = 3.0
+        return result
+
+    monkeypatch.setattr(meme_retrieval, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+    monkeypatch.setattr(meme_retrieval.MemeRetrieval, "_scope", checked_scope)
+    monkeypatch.setattr(
+        index, "encoder", lambda *args, **kwargs: pytest.fail("no-intent query inference")
+    )
+    run(c.service.prepare_offer(c.job))
+    saved = c.retrieval.check(c.job)
+    assert len(checks) >= 3 and saved["offer"] is None
+    assert saved["ranking"]["query_vector_base64"] is None
+    assert saved["ranking"]["selected"] == {}
+    header = saved["ranking"]["header"]
+    assert header["query_fallback_reason"] is None
+    assert {
+        key: header[key] for key in ("scanned", "eligible", "cache_hits", "cold_batch", "unindexed")
+    } == {
+        "scanned": 0,
+        "eligible": 0,
+        "cache_hits": 0,
+        "cold_batch": 0,
+        "unindexed": 0,
+    }
 
 
 def test_partial_index_batches_32_and_never_reranks_after_later_cache_fill(

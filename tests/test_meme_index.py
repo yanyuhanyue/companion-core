@@ -6,6 +6,7 @@ import struct
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -185,6 +186,48 @@ def test_submission_failure_releases_only_unsubmitted_lock(tmp_path, monkeypatch
             patch.setattr(loop, "run_in_executor", fail)
             with pytest.raises(RuntimeError, match="SYNTHETIC_SUBMISSION_FAILURE"):
                 await index.MemeIndex().infer(tmp_path, "query", (), time.monotonic() + 2)
+        assert not index._inference_lock(str(tmp_path.resolve())).locked()
+
+    run(scenario())
+
+
+def test_worker_timeout_error_is_hard_failure_before_optional_deadline(tmp_path, monkeypatch):
+    class Failed(Encoder):
+        def query_embed(self, query):
+            raise TimeoutError("SYNTHETIC_CPU_TIMEOUT_ERROR")
+
+    calls = local_encoder(monkeypatch, Failed)
+    service_index = index.MemeIndex()
+    with pytest.raises(CoreError, match="MEME_INDEX_INFERENCE_FAILED") as caught:
+        run(service_index.infer(tmp_path, "query", (), time.monotonic() + 60))
+    assert isinstance(caught.value.__cause__, TimeoutError) and len(calls) == 1
+    assert service_index._inflight is None
+    assert not index._inference_lock(str(tmp_path.resolve())).locked()
+
+
+def test_expired_budget_after_path_resolution_never_submits_cpu(tmp_path, monkeypatch):
+    elapsed, submissions = [0.0], []
+    original_lock = index.MemeIndex._local_lock
+
+    def resolve(cache_dir):
+        result = original_lock(cache_dir)
+        elapsed[0] = 2.0
+        return result
+
+    def forbidden_submit(*args):
+        submissions.append(args)
+        raise AssertionError("SYNTHETIC_SUBMIT_AFTER_DEADLINE")
+
+    monkeypatch.setattr(index, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+    monkeypatch.setattr(index.MemeIndex, "_local_lock", staticmethod(resolve))
+
+    async def scenario():
+        service_index = index.MemeIndex()
+        with monkeypatch.context() as patch:
+            patch.setattr(asyncio.get_running_loop(), "run_in_executor", forbidden_submit)
+            result = await service_index.infer(tmp_path, "query", (), 1.0)
+        assert result == (None, (), "LOCAL_DEADLINE")
+        assert submissions == [] and service_index._inflight is None
         assert not index._inference_lock(str(tmp_path.resolve())).locked()
 
     run(scenario())

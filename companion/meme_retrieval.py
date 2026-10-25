@@ -366,7 +366,7 @@ class MemeRetrieval:
                     if vector is not None:
                         vectors[sha] = vector
                         cache_hits += 1
-            if time.monotonic() >= deadline:
+            if query["intent"] and time.monotonic() >= deadline:
                 facts, vectors, cache_hits, fallback = {}, {}, 0, "LOCAL_DEADLINE"
         cold = [sha for sha in facts if sha not in vectors][:index.BATCH]
         query_vector, computed = None, ()
