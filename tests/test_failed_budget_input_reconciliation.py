@@ -1,47 +1,24 @@
-"""Retire native pre-dispatch budget rejection without altering its original accounts."""
+"""Retire archived pre-dispatch budget rejection without altering its original accounts."""
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 
-from companion import budget, live_text, paid_budget, qq_rich
-from companion.contracts import CoreError
-from companion.core import Core
-from companion.model import ModelClient
+from companion import live_text, paid_budget, qq_rich
 from companion.privacy import advance_epoch
 from companion.retrieval import SemanticIndex
 from companion.store import encode, uid
-from companion_onebot_bridge import continuous, network
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, real_core_http, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_owner_recall_bridge import recall_frame
-from tests.test_private_companion import companion_options
+from tests.historical_input_retirement import historical_input
 from tests.test_qq_rich_input import rich_event
 
 
 @pytest.fixture(autouse=True)
 def no_embedding_download(monkeypatch):
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-
-
-@asynccontextmanager
-async def native_window(core, tmp_path, source):
-    options = companion_options(core)
-    options["core_options"]["monthly_limit_micro_usd"] = 0
-    options["paid_options"].update(unlimited_period_spend=False, daily_micro_usd=200000,
-                                   monthly_micro_usd=1000000, window_micro_usd=2000000)
-    async with real_core_http(core) as port:
-        url = f"http://127.0.0.1:{port}"
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                scope_options=options, bridge_options={"core_url": url}) as (
-            window, _, protocol, _, sends,
-        ), network.private_http_client(url, window.plan.config.bridge_token) as client:
-            yield window, client, protocol, sends
 
 
 def add_attempt(store, settings, job, now, *, admission):
@@ -70,31 +47,9 @@ def add_attempt(store, settings, job, now, *, admission):
     None, "new_privacy_epoch", "usage", "admission", "outbox", "missing_failure",
     "wrong_failure", "not_stopped", "forged_phase", "forged_attempt", "rich",
 ])
-def test_native_failed_budget_retirement_preserves_original_accounts(core, tmp_path, mutation):
-    calls = []
-
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="今天想聊聊茶"), ensure_ascii=False))
-        await ws.wait_closed()
-
-    def provider(request):
-        calls.append(request)
-        raise AssertionError("A rejected admission must never invoke the provider")
-
+def test_historical_failed_budget_retirement_preserves_original_accounts(core, tmp_path, mutation):
     async def scenario():
-        async with native_window(core, tmp_path, source) as (window, client, protocol, sends):
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
-            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as transport:
-                with Core(core.settings, ModelClient(core.settings, transport),
-                          core.clock) as worker:
-                    assert worker.store is not core.store and worker.store.db is not core.store.db
-                    job = worker.claim_job("budget-rejection-worker")
-                    with pytest.raises(CoreError, match="MONTHLY_BUDGET_EXHAUSTED") as rejected:
-                        budget.reserve(worker.store, worker.settings, job["job_id"], "chat",
-                                       [{"role": "user", "content": "今天想聊聊茶"}],
-                                       worker.clock(), clock=worker.clock)
-                    worker.fail_job(job, rejected.value.code)
+        async with historical_input(core, tmp_path) as (window, client, job):
             assert core.store.rows("SELECT * FROM model_usage") == []
             assert core.store.rows("SELECT * FROM model_admissions") == []
             assert core.store.rows("SELECT * FROM outbox") == []
@@ -106,7 +61,6 @@ def test_native_failed_budget_retirement_preserves_original_accounts(core, tmp_p
             original_job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
             assert original_job["state"] == "FAILED"
             assert original_job["last_error_code"] == "MONTHLY_BUDGET_EXHAUSTED"
-            await window.stop_live(client)
             core.clock.advance(core.settings.lease_seconds + 1)
 
             if mutation == "new_privacy_epoch":
@@ -216,37 +170,22 @@ def test_native_failed_budget_retirement_preserves_original_accounts(core, tmp_p
             assert {table: core.store.rows(f"SELECT * FROM {table} ORDER BY rowid")
                     for table in tables} == before
             assert await asyncio.to_thread(journal.read_bytes) == budget_before
-            assert calls == sends == []
+            assert core.model.calls == []
 
     run(scenario())
 
 
 @pytest.mark.parametrize("terminal", ["SUPERSEDED", "RECALLED"])
-def test_reconciliation_skips_inputs_already_retired_by_native_state(core, tmp_path, terminal):
-    number = 0
-
-    async def source(ws):
-        nonlocal number
-        number += 1
-        await ws.send(json.dumps(raw_event(number, text="本轮输入")))
-        await ws.wait_closed()
-
+def test_reconciliation_skips_inputs_already_retired_by_historical_state(core, tmp_path, terminal):
     async def scenario():
-        async with native_window(core, tmp_path, source) as (window, client, protocol, sends):
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
-            first = window.db.execute("SELECT * FROM window_inputs").fetchone()
-            if terminal == "SUPERSEDED":
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
-            else:
-                receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
-                receiver.put_recall(recall_frame(), core.clock.now, ("127.0.0.1", 12345))
-                assert await continuous.flush_recalls(window, client)
+        async with historical_input(core, tmp_path, failure="cancelled", terminal=terminal) as (
+            window, client, job,
+        ):
+            first = window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
+                                       (job["event_id"],)).fetchone()
             proof = await window.input_state(client, first)
             assert proof["state"] == terminal
             window.retire_input(first, proof)
-            await window.stop_live(client)
             records, _ = window.read_journal()
             retired = next(row for row in records if row["kind"] == "INPUT_" + terminal)
             result = await window.reconcile_cancelled_inputs(client)
@@ -257,6 +196,6 @@ def test_reconciliation_skips_inputs_already_retired_by_native_state(core, tmp_p
             assert window.verify(active=False)["state"] == "STOPPED"
             assert core.store.rows("SELECT * FROM model_usage") == []
             assert core.store.rows("SELECT * FROM outbox") == []
-            assert sends == []
+            assert core.model.calls == []
 
     run(scenario())
