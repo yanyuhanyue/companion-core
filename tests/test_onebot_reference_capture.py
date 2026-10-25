@@ -11,7 +11,8 @@ from companion_onebot_bridge.app import receive
 from companion_onebot_bridge.metrics import Metrics
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, source_window
+from tests.support.native_images import image_host
+from tests.test_live_image_input import options
 from tests.test_onebot_direct import config, raw_event
 
 
@@ -25,6 +26,7 @@ def test_capture_binds_fetched_body_and_approval_never_refetches(core, tmp_path,
     ])
 
     async def source(ws):
+        raw["time"] = int(core.clock.now.timestamp())
         await ws.send(json.dumps(raw))
         await ws.wait_closed()
 
@@ -53,40 +55,31 @@ def test_capture_binds_fetched_body_and_approval_never_refetches(core, tmp_path,
         return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": data})
 
     async def scenario():
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True,
-            rich_input_scope="references_v1", protocol_reply=protocol,
-        ) as (window, client, onebot, _, sends):
-            await window.capture_once(client, onebot)
-            row = window.db.execute("SELECT body FROM inbox").fetchone()
+        async with image_host(core, tmp_path, source, options=options(), protocol_reply=protocol,
+        ) as (active, _, sends, model_calls):
+            await active.capture()
+            row = active.db.execute("SELECT body FROM inbox").fetchone()
             event = json.loads(row[0])
             segments = event["payload"]["rich"]["segments"]
             assert segments[0]["body"]["nodes"][0]["text"] == "这是引用原文"
             assert [(node["nickname"], node["text"]) for node in segments[1]["body"]["nodes"]] == [
-                ("甲", "第一条正文"), ("乙", "第二条正文"), ("丙", "第三条正文"),
-            ]
-            assert len(calls) == 3
-            paths = list((window.spool.directory / "captures").glob("*.json"))
-            assert len(paths) == 1
-            evidence_text = paths[0].read_text("utf8")
-            assert "private-refresh" not in evidence_text and "private-refresh" not in row[0]
-            evidence = json.loads(evidence_text)
-            assert evidence["reference_projection"] == event["payload"]["rich"]
+                ("甲", "第一条正文"), ("乙", "第二条正文"), ("丙", "第三条正文")]
+            assert len(calls) == 3 and "private-refresh" not in row[0]
+            assert "private-refresh" not in active.runtime.path.read_text("utf-8")
             if corrupt:
-                evidence["reference_projection"]["segments"][0]["body"]["nodes"][0]["text"] = "伪造"
-                paths[0].write_text(json.dumps(evidence), "utf8")
-                with pytest.raises(ValueError, match="CAPTURE_EVIDENCE_CHANGED"):
-                    await window.approve_captured(client, capture_approval(window))
+                event["payload"]["rich"]["segments"][0]["body"]["nodes"][0]["text"] = "伪造"
+                with active.db:
+                    active.db.execute("UPDATE inbox SET body=?", (json.dumps(event),))
+                with pytest.raises(ValueError, match="OWNER_CAPTURE_PROJECTION_CHANGED"):
+                    await active.flush()
                 assert not core.store.one("SELECT 1 FROM events")
             else:
-                try:
-                    await window.approve_captured(client, capture_approval(window))
-                except httpx.HTTPStatusError as error:
-                    raise AssertionError(error.response.text) from error
+                await active.flush()
                 saved = core.store.one("SELECT body_json FROM events WHERE source='qq.onebot'")
                 assert json.loads(saved["body_json"])["rich"] == event["payload"]["rich"]
-                assert not paths[0].exists()
-            assert len(calls) == 3 and not sends
+                assert active.db.execute("SELECT body FROM inbox").fetchone()[0] is None
+                active.runtime.verify()
+            assert len(calls) == 3 and sends == model_calls == []
 
     run(scenario())
 

@@ -1,6 +1,7 @@
 """Voice choices attached to native Outbox rows and current dialogue input only."""
 
 import json
+import secrets
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Literal
@@ -9,11 +10,10 @@ from pydantic import AwareDatetime
 
 import companion_delivery_protocol as delivery_wire
 from companion import (
-    live_text,
     paid_budget,
     private_life,
-    qq_source,
     reply_revision,
+    voice_authority,
     voice_protocol,
 )
 from companion.contracts import CoreError
@@ -80,7 +80,7 @@ class VoiceFlow:
     def _transaction(self):
         return nullcontext() if self.store.db.in_transaction else self.store.transaction()
 
-    def _read(self, key):
+    def _read(self, key, *, allow_expired_input=False):
         row = self.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))
         if row is None:
             return None
@@ -88,7 +88,10 @@ class VoiceFlow:
             value = json.loads(row["value"])
             if not isinstance(value, dict):
                 raise ValueError()
-            if value.get("state") == "FENCED":
+            if value.get("state") == "FENCED" and not (
+                allow_expired_input and key.startswith(INPUT_RECEIPT)
+                and value.get("reason") == "VOICE_EXPIRED"
+            ):
                 raise CoreError("VOICE_FLOW_FENCED", 409)
             return value
         except (ValueError, TypeError):
@@ -104,7 +107,7 @@ class VoiceFlow:
         return row
 
     def _native_delivery(self, message_id):
-        row = private_life.check_delivery(self.store, self.settings, self.clock, message_id)
+        row = voice_authority.delivery(self.store, self.settings, self.clock, message_id)
         reply_revision.check_delivery(self.store, message_id)
         if row["action_type"] not in {"qq.private.reply", "qq.private.proactive"}:
             raise CoreError("VOICE_OUTBOX_SOURCE_REQUIRED", 403)
@@ -127,10 +130,10 @@ class VoiceFlow:
         if row["state"] not in {"PENDING", "RETRY_WAIT"}:
             raise CoreError("VOICE_DELIVERY_CHOICE_FROZEN", 409)
         if value and value.get("state") == "TEXT":
-            if self.settings.voice.enabled and private_life.enabled(self.settings):
+            if voice_authority.permitted(self.store, self.settings, self.clock):
                 self._native_delivery(message_id)
             return VoiceReplyDecision.model_validate(value)
-        if not self.settings.voice.enabled or not private_life.enabled(self.settings):
+        if not voice_authority.permitted(self.store, self.settings, self.clock):
             if value:
                 raise CoreError("VOICE_FLOW_FENCED", 409)
             return VoiceReplyDecision(state="TEXT", reason="VOICE_DISABLED")
@@ -158,12 +161,9 @@ class VoiceFlow:
                 or (policy.mode == "voice_input" and not voice_input)
             ):
                 return self._text(row, None, "VOICE_REPLY_POLICY")
-            deadline = min(
-                after(row["created_at"], policy.wait_seconds),
-                self.settings.live_text_window.ends_at.astimezone(UTC).isoformat(
-                    timespec="microseconds"
-                ),
-            )
+            view = voice_authority.current(self.store, self.settings, self.clock,
+                                           authority=json.loads(row["authority_json"]))
+            deadline = voice_authority.deadline(view, after(row["created_at"], policy.wait_seconds))
             if datetime.fromisoformat(deadline) <= datetime.fromisoformat(self.clock()):
                 return self._text(row, None, "VOICE_REPLY_WAIT_EXPIRED")
             try:
@@ -218,12 +218,13 @@ class VoiceFlow:
         ):
             raise CoreError("VOICE_DELIVERY_FENCED", 409)
         binding = voice_protocol.VoiceDeliveryBinding(
+            retirement_token=secrets.token_urlsafe(32),
             job_id=job_id,
             generation=row["generation"],
             message_id=outbox["message_id"],
             delivery_key=outbox["delivery_key"],
             event_id=row["event_id"],
-            window_sha256=row["window_sha256"],
+            authority=voice_authority.saved(row),
             source_sha256=row["source_sha256"],
             identity_sha256=row["identity_sha256"],
             privacy_epoch=row["captured_privacy_epoch"],
@@ -297,10 +298,8 @@ class VoiceFlow:
         # Source authentication also applies to a valid TTS-only installation.
         # ASR availability controls upload/admission, not whether chat may proceed.
         self.jobs._node()
-        approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
-        if approval.rich_input_scope != "references_v1":
-            raise CoreError("VOICE_ASR_SCOPE_REQUIRED", 403)
-        event, body, job = qq_source.source(self.store, self.settings, approval, event_id)
+        _, event, body, job = voice_authority.source(
+            self.store, self.settings, self.clock, event_id)
         reply_revision.require_current(self.store, event_id)
         reply_revision.check_job(self.store, job)
         if chat_job_id is not None and job["job_id"] != chat_job_id:
@@ -326,18 +325,17 @@ class VoiceFlow:
         return {
             "event_id": event["event_id"],
             "source_sha256": private_life.event_digest(event),
-            "window_sha256": self.settings.live_text_window.plan_sha256,
+            "authority": voice_authority.source(
+                self.store, self.settings, self.clock, event["event_id"])[0].authority.as_dict(),
             "privacy_epoch": epoch(self.store),
             "reply_revision": event["reply_revision"],
             "voice_policy_sha256": self.settings.voice.authority_sha256(),
         }
 
     def _input_wait_until(self, event):
-        return min(
-            datetime.fromisoformat(after(event["ingested_at"],
-                                         self.settings.voice.asr.wait_seconds)),
-            self.settings.live_text_window.ends_at,
-        ).astimezone(UTC).isoformat(timespec="microseconds")
+        view = voice_authority.source(self.store, self.settings, self.clock, event["event_id"])[0]
+        return voice_authority.deadline(
+            view, after(event["ingested_at"], self.settings.voice.asr.wait_seconds))
 
     @staticmethod
     def _stale_input_epoch(value, authority):
@@ -356,7 +354,7 @@ class VoiceFlow:
             if (
                 not self.settings.voice.enabled
                 or not self.settings.voice.asr.enabled
-                or not private_life.enabled(self.settings)
+                or not voice_authority.permitted(self.store, self.settings, self.clock)
             ):
                 return VoiceInputStatus(state="NONE")
             event = self.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
@@ -364,8 +362,10 @@ class VoiceFlow:
                 return VoiceInputStatus(state="NONE")
             event, body, job = self._input_source(event_id, chat_job_id)
             records, policy = _records(body), self.settings.voice.asr
-            value = self._read(INPUT_RECEIPT + event_id)
+            value = self._read(INPUT_RECEIPT + event_id, allow_expired_input=True)
             authority = self._input_authority(event)
+            expired_input = bool(value and value.get("state") == "FENCED"
+                                 and value.get("reason") == "VOICE_EXPIRED")
             if value is None:
                 value = {
                     **authority,
@@ -374,14 +374,15 @@ class VoiceFlow:
                     "record_count": len(records),
                     "wait_until": self._input_wait_until(event),
                 }
-            elif self._stale_input_epoch(value, authority):
+            elif expired_input or self._stale_input_epoch(value, authority):
                 if job["state"] not in {"QUEUED", "RETRY_WAIT"}:
                     raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
                 # A different source's erasure invalidates old media authority,
                 # but must not strand this still-authenticated conversation.
                 # Discard all prior audio/transcripts, retaining native UNKNOWN
                 # resource responsibility for any input already released.
-                reason = "VOICE_INPUT_PRIVACY_EPOCH_CHANGED"
+                reason = ("VOICE_TRANSCRIPTION_EXPIRED" if expired_input
+                          else "VOICE_INPUT_PRIVACY_EPOCH_CHANGED")
                 for row in self.store.rows("SELECT job_id FROM voice_jobs "
                                            "WHERE event_id=? AND operation='asr'", (event_id,)):
                     self.jobs.withdraw(row["job_id"], reason)
@@ -538,10 +539,14 @@ class VoiceFlow:
             if not indices:
                 raise CoreError("VOICE_ASR_SOURCE_INVALID", 403)
             authority = self._input_authority(event)
-            value = self._read(INPUT_RECEIPT + event_id)
-            stale_epoch = bool(value and self._stale_input_epoch(value, authority))
+            value = self._read(INPUT_RECEIPT + event_id, allow_expired_input=True)
+            expired_input = bool(value and value.get("state") == "FENCED"
+                                 and value.get("reason") == "VOICE_EXPIRED")
+            stale_epoch = bool(value and not expired_input
+                               and self._stale_input_epoch(value, authority))
             until = datetime.fromisoformat(self._input_wait_until(event))
-            state = "FALLBACK" if stale_epoch else value["state"] if value else "WAITING"
+            state = ("FALLBACK" if stale_epoch or expired_input
+                     else value["state"] if value else "WAITING")
             if state == "WAITING" and (until <= datetime.fromisoformat(self.clock())
                                         or job["state"] not in {"QUEUED", "RETRY_WAIT"}
                                         or not self._asr_available()):
@@ -552,9 +557,12 @@ class VoiceFlow:
                 row = self.store.one("SELECT * FROM voice_jobs WHERE event_id=? "
                                      "AND operation='asr' AND source_segment_index=?",
                                      (event_id, index))
-                if row and (row["source_input_sha256"] != source_hash
-                            or row["window_sha256"] != authority["window_sha256"]
-                            or row["captured_reply_revision"] != authority["reply_revision"]):
+                if row and (
+                    row["captured_reply_revision"] != authority["reply_revision"]
+                    or not row["content_retired"] and (
+                        row["source_input_sha256"] != source_hash
+                        or voice_authority.saved(row) != authority["authority"])
+                ):
                     raise CoreError("VOICE_INPUT_AUTHORITY_CHANGED", 409)
                 records.append({
                     "index": index, "state": row["state"] if row else "MISSING",
@@ -564,7 +572,7 @@ class VoiceFlow:
                     "upload_allowed": row is None and state == "WAITING",
                 })
             return {"event_id": event_id, "input_sha256": source_hash,
-                    "window_sha256": authority["window_sha256"],
+                    "authority": authority["authority"],
                     "reply_revision": authority["reply_revision"], "state": state,
                     "wait_until": until.astimezone(UTC).isoformat(timespec="microseconds"),
                     "records": records}

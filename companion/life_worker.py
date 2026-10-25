@@ -1,14 +1,16 @@
-"""Independent low-frequency worker for v0.5 background coordination."""
+"""The sole autonomous selector; native domains still own work and permission."""
 
 import asyncio
 
 import httpx
 
-from companion import budget, live_text, private_life
-from companion.contracts import CoreError
+from companion import owner_authority
+from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.model import ModelClient
 from companion.store import uid
+from companion.worker_schedule import UnitResult
+from companion.worker_wakeup import Wakeup
 
 
 async def life_worker(settings):
@@ -16,36 +18,35 @@ async def life_worker(settings):
         core = Core(settings, ModelClient(settings, client))
         worker_id = uid("life_worker")
         try:
-            ticks = 0
-            while True:
-                if private_life.enabled(settings):
-                    try:
-                        live_text.guard(core.store, settings, core.clock)
-                    except CoreError:
-                        await asyncio.sleep(1)
-                        continue
-                    if private_life.busy(core.store, core.clock()):
-                        await asyncio.sleep(1)
-                        continue
-                if ticks % 60 == 0:
-                    core.expire_raw_events()
-                    core.consolidation.schedule_due()
-                    core.exploration.schedule_wake(core.wake.evaluate())
-                    with core.store.transaction():
-                        core.goals.expire_commitments()
-                    core.exploration.schedule_goal()
-                    core.social.flush()
-                worked = False
-                if not budget.chat_pending(core.store, core.clock()):
-                    worked = await core.consolidation.run_once(worker_id)
-                    if (
-                        not worked
-                        and ticks % 60 == 0
-                        and not budget.chat_pending(core.store, core.clock())
-                    ):
-                        worked = await core.extract_once()
-                ticks += 1
-                if not worked:
-                    await asyncio.sleep(1)
+            selector = native_selector(core, worker_id)
+            # Preserve the former Diary worker's startup custody recovery under
+            # the single Life worker lock, including orphaned reservations.
+            core.store.execute(
+                "UPDATE model_usage SET state='UNKNOWN' WHERE scenario='diary' AND state='RESERVED'"
+                + (" AND request_id IN (SELECT request_id FROM model_admissions "
+                   "WHERE lease_until<=?)"
+                   if owner_authority.required(core.store, settings) else ""),
+                (core.clock(),) if owner_authority.required(core.store, settings) else (),
+            )
+            with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
+                scan, deadline = wake.before_scan(), None
+                while True:
+                    selected = await selector.step()
+                    hint = selected.result.next_deadline
+                    if hint is not None and hint >= scan.started_at:
+                        deadline = min(deadline, hint) if deadline else hint
+                    if selected.result.progressed:
+                        scan, deadline = wake.before_scan(), None
+                    elif not selected.more:
+                        await wake.wait(
+                            scan, UnitResult(False, deadline),
+                            selector.next_blocked_maintenance if selected.blocked
+                            else selector.next_maintenance,
+                        )
+                        selector.resume()
+                        scan, deadline = wake.before_scan(), None
+                    # A native step can complete synchronously. Give cancellation
+                    # and newly arrived input a boundary before the next selection.
+                    await asyncio.sleep(0)
         finally:
             core.store.close()

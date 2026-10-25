@@ -2,16 +2,17 @@
 
 import pytest
 
-from companion import input_protocol, live_text, poke, private_life
+from companion import input_protocol, poke
 from companion.contracts import CoreError
 from companion.store import after, uid
-from tests import test_poke
-from tests.test_poke import bind_receipts, claim, owner_turn, receive
+from tests.poke_authority_fixture import environment as native_environment
+from tests.poke_authority_fixture import owner_turn, settle
+from tests.test_poke import claim, receive
 
 
 @pytest.fixture
-def environment(core, monkeypatch):
-    return test_poke.environment.__wrapped__(core, monkeypatch)
+def environment(core, tmp_path):
+    return native_environment(core, tmp_path)
 
 
 @pytest.mark.parametrize("kind", ["poke", "text"])
@@ -19,16 +20,14 @@ def environment(core, monkeypatch):
 def test_consumed_history_recall_preserves_genuine_not_sent_proof(environment, kind, evidence):
     env = environment
     source = owner_turn(env, 1, "context the owner will recall")
-    bind_receipts(env)
     receive(env)
     job = claim(env)
     choice = {"kind": kind, **({"text": "short reply"} if kind == "text" else {})}
+    settle(env, job, choice)
     message_id = poke.finish(env.store, env.settings, env.approval, job, choice, env.clock())[0]
     original = env.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     token = uid("lease")
     with env.store.transaction():
-        live_text._put(env.store, private_life.DELIVERY + message_id,
-                       private_life.delivery_material(env.store, env.settings, original))
         env.store.execute("UPDATE outbox SET state='SENDING',lease_token=?,lease_until=?,"
                           "attempt_count=1 WHERE message_id=?",
                           (token, after(env.clock(), 60), message_id))
@@ -41,9 +40,9 @@ def test_consumed_history_recall_preserves_genuine_not_sent_proof(environment, k
     assert not env.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                              ("erased_event:" + job["event_id"],))
     with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
-        poke.check_delivery(env.store, env.settings, env.approval, message_id)
-    receipt = input_protocol.CancelBeforeSend(
-        window_sha256=env.approval.plan_sha256, message_id=message_id, lease_token=token,
+        poke.check_delivery(env.store, env.settings, env.approval, message_id, clock=env.clock)
+    receipt = input_protocol.OwnerCancelBeforeSend(
+        authority=env.approval.authority.as_dict(), message_id=message_id, lease_token=token,
         content_sha256="0" * 64 if evidence == "changed_hash" else original["content_sha256"],
     )
     if evidence == "valid":

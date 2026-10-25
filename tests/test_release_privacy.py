@@ -18,6 +18,8 @@ from companion.store import after, encode, uid
 from companion.transport import begin_send, enqueue, lease_deliveries
 from tests.conftest import ingest, run
 from tests.test_diary import DAY, generate, seed_day
+from tests.test_life_topics import configure as configure_life
+from tests.test_life_topics import proposal as life_proposal
 from tests.test_observations import enable_observations, observation
 
 
@@ -84,35 +86,55 @@ def prepare_idle_conversation(core, text="今天计划读一本小说"):
 
 
 def test_life_pause_prevents_new_timer_generation(core):
-    prepare_idle_conversation(core)
+    prepare_due_life_topic(core)
     core.goals.pause_autonomy(True)
-    assert not core.schedule_proactive()
+    assert core.life_topics.schedule() is None
     assert not run(core.run_once())
     assert core.model.calls == []
     assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT * FROM outbox") == []
+
+
+def prepare_due_life_topic(core):
+    configure_life(core)
+    prepare_idle_conversation(core, "导出时还有一个未解决的Bug，今天先到这里")
+    core.life_topics.synchronize()
+    assert core.store.one("SELECT state FROM life_topics")["state"] == "WAITING"
+    core.clock.advance(86400)
 
 
 def test_life_pause_during_activity_model_prevents_new_proactive_output(core):
     async def scenario():
         started, release = asyncio.Event(), asyncio.Event()
+        prepare_due_life_topic(core)
+        life_proposal(core)
+        draft = core.model.activity
 
         class WaitingModel:
             async def complete(self, messages, kind):
                 if kind == "activity":
                     started.set()
                     await release.wait()
-                return ModelResponse("今天可以继续聊聊阅读计划。", 20, 20, 0)
+                return ModelResponse(draft if kind == "activity" else "继续正常聊天。", 20, 20, 0)
 
-        prepare_idle_conversation(core)
         core.model = WaitingModel()
-        assert core.schedule_proactive()
-        work = asyncio.create_task(core.run_once())
+        job = core.life_topics.schedule()
+        assert job is not None
+        work = asyncio.create_task(core.run_once(job_id=job))
         try:
             await asyncio.wait_for(started.wait(), 2)
             core.goals.pause_autonomy(True)
         finally:
             release.set()
             await work
+        usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage "
+                               "WHERE scenario='activity'")
+        assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+        assert usage[0]["billed_micro_usd"] > 0
+        assert core.store.one("SELECT state FROM jobs WHERE job_id=?", (job,)) == {
+            "state": "CANCELLED"}
+        assert not core.store.one(
+            "SELECT 1 FROM life_activity_results WHERE job_id=? AND text<>''", (job,))
         assert not core.store.one(
             "SELECT 1 FROM outbox WHERE action_type='qq.private.proactive' "
             "AND state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
@@ -123,6 +145,8 @@ def test_life_pause_during_activity_model_prevents_new_proactive_output(core):
             core.store, core.settings, LeaseRequest(worker_id="release-test"), core.clock()
         )["items"]
         assert len(items) == 1 and items[0]["action_type"] == "qq.private.reply"
+        assert core.store.rows("SELECT state,billed_micro_usd FROM model_usage "
+                               "WHERE scenario='activity'") == usage
 
     run(scenario())
 
@@ -155,10 +179,14 @@ def test_paused_pending_proactive_does_not_block_normal_reply(core):
 
 def test_affect_pause_prevents_timer_generation(core):
     core.settings.affect_enabled = True
-    prepare_idle_conversation(core, "先不聊了")
+    prepare_due_life_topic(core)
+    ingest(core, 2, "先不聊了")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE event_id='evt_test_2'")
     assert core.affect.snapshot()["state"]["engagement"] == "pause"
-    assert not core.schedule_proactive()
+    assert core.life_topics.schedule() is None
     assert core.model.calls == []
+    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT * FROM outbox") == []
 
 
 def test_affect_pause_rechecked_after_proactive_delivery_lease(core):

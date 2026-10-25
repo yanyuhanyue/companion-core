@@ -5,7 +5,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from companion.affect import owner_feedback
+from companion.affect import feedback_reset_at, owner_feedback
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.store import after, encode
@@ -30,6 +30,8 @@ class ExpressionLearning:
             raise CoreError("OWNER_REQUIRED", 403)
         s, now = self.store, self.clock()
         with nullcontext() if s.db.in_transaction else s.transaction():
+            cutoff = max(after(now, -86400 * self.settings.raw_event_retention_days),
+                         feedback_reset_at(s) or "")
             rows = s.rows(
                 "SELECT e.event_id FROM events e JOIN conversations c USING(conversation_id) "
                 "WHERE e.actor_id='owner' AND e.source='qq.onebot' "
@@ -37,8 +39,7 @@ class ExpressionLearning:
                 "AND e.redacted=0 AND c.scope='private' AND c.owner_actor_id='owner' "
                 "AND e.ingested_at>? AND e.ingested_at<=? AND e.occurred_at<=? "
                 "ORDER BY e.occurred_at DESC,e.rowid DESC LIMIT ?",
-                (after(now, -86400 * self.settings.raw_event_retention_days), now, now,
-                 MAX_EVENTS + 1),
+                (cutoff, now, now, MAX_EVENTS + 1),
             )
             truncated = len(rows) > MAX_EVENTS
             streaks, stopped = {}, set()

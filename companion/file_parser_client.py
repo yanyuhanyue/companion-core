@@ -81,7 +81,8 @@ def _validate_response(result, data, filename, mime_type, limits):
 
 
 def parse_via_socket(data: bytes, filename: str, mime_type: str = "", *, socket_path: str | Path,
-                     image: str, limits=file_parser.DEFAULT_LIMITS, request_id: str):
+                     image: str, limits=file_parser.DEFAULT_LIMITS, request_id: str,
+                     effect_check=None):
     """No reconnect: losing a response cannot establish whether a job ran or stopped."""
     try:
         header = _request(data, filename, mime_type, image=image, limits=limits,
@@ -99,9 +100,15 @@ def parse_via_socket(data: bytes, filename: str, mime_type: str = "", *, socket_
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(limits.wall_seconds + 15)
+            if effect_check:
+                effect_check()
             connection.connect(path)
             connected = True
+            if effect_check:
+                effect_check()
             _send_frame(connection, header, HEADER_BYTES)
+            if effect_check:
+                effect_check()
             connection.sendall(data)
             # EOF delimits the request and lets the server reject trailing data before launch.
             connection.shutdown(socket.SHUT_WR)

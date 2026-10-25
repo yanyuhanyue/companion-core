@@ -289,6 +289,13 @@ async def one_case(work, variant, case, catalog, template):
                                        (row["memory_id"],)),
                       "evidence_ids": list(row["evidence_ids"])} for row in hits]
         core.memory.search = lambda *args, **kwargs: retrieved
+
+        async def fixture_search(*args, source_check=None, **kwargs):
+            if source_check:
+                source_check()
+            return retrieved
+
+        core.memory.search_async = fixture_search
         start, cpu = time.perf_counter_ns(), time.process_time_ns()
         if variant == "baseline":
             selected, paused = await core.recall_for_reply(job)

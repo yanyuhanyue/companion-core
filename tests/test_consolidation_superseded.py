@@ -22,11 +22,15 @@ def test_consolidation_drains_more_than_twenty_superseded_owner_inputs(core):
     assert cancelled["n"] == 22
     core.clock.now = datetime.fromisoformat("2026-10-19T04:00:00+00:00")
     assert core.consolidation.schedule_day(DAY)
-    assert run(core.consolidation.run_once())
-    status = core.consolidation.status(DAY)
+    for _ in range(20):
+        assert run(core.consolidation.run_step()).progressed
+        status = core.consolidation.status(DAY)
+        remaining = core.store.one("SELECT COUNT(*) AS n FROM events WHERE memory_processed=0")["n"]
+        if (json.loads(status["steps_json"]).get("memory") == "WAITING"
+            and remaining == 3):
+            break
     assert status["state"] == "PARTIAL" and json.loads(status["steps_json"])["memory"] == "WAITING"
     assert core.store.one("SELECT COUNT(*) AS n FROM events WHERE memory_processed=0")["n"] == 3
-    core.clock.advance(61)
     assert run(core.consolidation.run_once())
     assert core.consolidation.status(DAY)["state"] == "COMPLETE"
     assert not core.store.one("SELECT 1 FROM events WHERE memory_processed=0")

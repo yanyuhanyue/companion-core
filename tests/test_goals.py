@@ -180,7 +180,8 @@ def test_commitment_feedback_uncertainty_requires_owner_reconciliation(core):
     goal = setup_goal(core, commitment=True)
     step = core.goals.claim()
     core.goals.finish(step, result_for(core, goal))
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     first = lease_deliveries(
         core.store, core.settings, LeaseRequest(worker_id="bridge"), core.clock()
     )["items"][0]
@@ -219,7 +220,8 @@ def test_commitment_deadline_queues_honest_failure_without_affect(core):
     assert record["state"] == "IN_PROGRESS" and record["feedback_outcome"] == "EXPLAINED_FAILURE"
     core.model.activity = "已经过了约定的时间，这次阅读没能完成。"
     assert not core.store.rows("SELECT * FROM outbox")
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     body = json.loads(core.store.one("SELECT content_json FROM outbox")["content_json"])
     assert body["text"] == core.model.activity
     prompt = json.loads(core.model.calls[0][0][-1]["content"])
@@ -336,7 +338,8 @@ def test_restored_pending_commitment_feedback_is_never_blindly_replayed(core, tm
     goal = setup_goal(core, commitment=True)
     step = core.goals.claim()
     core.goals.finish(step, result_for(core, goal))
-    assert run(core.run_once())
+    job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
+    assert job and run(core.run_once(job_id=job["job_id"]))
     key, archive, destination = (
         Fernet.generate_key(),
         tmp_path / "delivery.enc",

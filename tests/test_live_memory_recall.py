@@ -1,4 +1,4 @@
-"""Readonly R5: native retrieval, ASGI Core, loopback capture, synthetic paid transport."""
+"""Native SDK recall plus read-only historical approval compatibility checks."""
 
 import hashlib
 import json
@@ -13,20 +13,23 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 from websockets.asyncio.server import serve
 
-from companion import beta_observation, budget, live_text
+from companion import live_text
 from companion.config import LiveTextWindowApproval
-from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.privacy import advance_epoch, epoch
 from companion.retrieval import INDEX_VERSION
 from companion.store import after, encode
+from companion_delivery_protocol import digest
 from companion_onebot_bridge import network
 from companion_onebot_bridge.spool import Spool
 from companion_onebot_bridge.window import TestWindow, WindowPlan
 from tests.conftest import run
+from tests.sdk_reader_fixture import answer, call
+from tests.support.native_recall_entry import native_recall, returned
 from tests.support.onebot import provider
 from tests.test_live_text_window import live_fixture
 from tests.test_memory_commands import fact
+from tests.test_memory_review_output import assert_settled_calls
 from tests.test_onebot_capture import bootstrap_frames, capture_approval
 from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
@@ -66,7 +69,7 @@ async def readonly_window(
 ):
     memory_id, outsider, pins = scope_facts(core)
     calls, sends, scores = [], [], []
-    original_scores = core.memory.index.scores
+    original_scores = core.memory.index.scores_async
     # An existing out-of-scope fact with missing evidence must remain untouched.
     core.store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (outsider,))
     core.memory.observe_trait(
@@ -76,11 +79,11 @@ async def readonly_window(
     )
     core.store.execute("UPDATE traits SET confidence=1")
 
-    def semantic(query, rows):
+    async def semantic(query, rows, **kwargs):
         scores.append([r["memory_id"] for r in rows])
-        return original_scores(query, rows)
+        return await original_scores(query, rows, **kwargs)
 
-    core.memory.index.scores = semantic
+    core.memory.index.scores_async = semantic
     number = 0
 
     async def source(ws):
@@ -157,77 +160,38 @@ async def readonly_window(
                 yield window, client, capture, send, calls, sends, scores, memory_id, outsider
 
 
-def test_real_bge_only_sees_approved_rows_and_two_settled_stages_share_one_reply(core, tmp_path):
+def test_native_bge_private_scope_and_sdk_calls_share_one_reply(core, tmp_path):
     async def scenario():
-        async with readonly_window(core, tmp_path) as (
-            window,
-            _,
-            capture,
-            send,
-            calls,
-            sends,
-            scores,
-            memory_id,
-            outsider,
-        ):
+        async with native_recall(core, tmp_path) as value:
             before = epoch(core.store)
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 2
-            trace = core.store.one(
-                "SELECT e.trace_id FROM events e JOIN jobs j USING(event_id) "
-                "JOIN model_usage m USING(job_id) WHERE m.scenario='memory_review' LIMIT 1",
-            )
-            diagnostic = beta_observation.inspect_context(core.settings, trace["trace_id"])
-            binding = diagnostic["trace"]["recorded_window"]
-            assert binding["state"] == "RECORDED"
-            assert binding["plan_sha256"] == core.settings.live_text_window.plan_sha256
-            assert binding["approval_sha256"] == core.settings.live_text_window.approval_sha256
-            selection = diagnostic["trace"]["jobs"][0]["memory_selection"]
-            assert selection["state"] == "SELECTION_RECORDED"
-            assert selection["candidate_count"] == selection["frozen_context_count"] == 1
-            assert selection["candidates"][0]["disposition"] == "IN_FROZEN_CHAT_CONTEXT"
-            assert all(ids == [memory_id] for ids in scores)
-            assert "紫云三号" not in encode(calls)
-            assert "未批准私密特征" not in encode(calls)
-            assert core.store.one(
-                "SELECT status,confidence FROM memories WHERE memory_id=?", (outsider,)
-            ) == {"status": "CONFIRMED", "confidence": 1.0}
-            assert core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?", (memory_id,))
-            assert not core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?", (outsider,))
-            assert [
-                r["scenario"]
-                for r in core.store.rows("SELECT scenario FROM model_usage ORDER BY rowid")
-            ] == ["memory_review", "chat"]
-            assert all(
-                r["state"] == "SETTLED" for r in core.store.rows("SELECT state FROM model_usage")
-            )
-            assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 2
-            assert (
-                len(
-                    json.loads(
-                        core.store.one(
-                            "SELECT value FROM runtime_meta WHERE key LIKE 'live_text_reply:%'"
-                        )["value"]
-                    )["request_ids"]
-                )
-                == 2
-            )
-            assert len(calls[-1]["messages"]) == 3
-            assert "青竹七号" in calls[-1]["messages"][1]["content"]
-            assert await send()
-            assert len(sends) == 1
-            assert window.status()["model_attempts"] == 2
-            assert epoch(core.store) == before
-            snapshots = encode(
-                core.store.rows(
-                    "SELECT value FROM runtime_meta WHERE key LIKE 'live_text_memory:%' "
-                    "OR key LIKE 'live_text_context:%'"
-                )
-            )
-            assert "青竹七号" not in snapshots
-
+            source = await value.capture()
+            assert await value.worker.run_once("native-memory-recall")
+            assert len(value.calls) == 2
+            assert value.scores and all(ids == [value.memory_id] for ids in value.scores)
+            assert "紫云三号" not in encode(value.calls)
+            assert core.store.one("SELECT status,confidence FROM memories WHERE memory_id=?",
+                (value.outsider,)) == {"status": "CONFIRMED", "confidence": 1.0}
+            assert core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?",
+                                  (value.memory_id,))
+            assert not core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?",
+                                      (value.outsider,))
+            result = json.loads(returned(value.calls[-1])[0]["content"])
+            assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
+            assert result["requires_relevance_review"]
+            assert_settled_calls(core, 2)
+            admissions = core.store.rows("SELECT * FROM model_admissions")
+            assert len(admissions) == 2
+            assert len({row["logical_request_id"] for row in admissions}) == 1
+            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (source["event_id"],))
+            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+                                   (job["job_id"],))
+            memories = [item for item in json.loads(saved["snapshots_json"])
+                        if item["kind"] == "memory"]
+            assert [row["memory_id"] for row in memories[0]["proof"]["rows"]] == [value.memory_id]
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            assert len(value.sends) == 1 and epoch(core.store) == before
     run(scenario())
+
 
 
 def test_bound_memory_apis_and_idle_extraction_cannot_bypass_scope(core, tmp_path):
@@ -308,314 +272,220 @@ def test_r5_scope_is_explicit_and_cannot_implicitly_include_recent_history(core,
         WindowPlan(malformed, cfg, {})
 
 
-def test_unknown_review_never_dispatches_chat_or_enqueues_a_reply(core, tmp_path):
-    def fail_review(request, payload, number):
+def test_unknown_memory_tool_request_never_enqueues_reply(core, tmp_path):
+    def fail(request, payload, number):
         raise httpx.ReadTimeout("synthetic unknown", request=request)
 
     async def scenario():
-        async with readonly_window(core, tmp_path, respond=fail_review) as (
-            _,
-            _,
-            capture,
-            _,
-            calls,
-            sends,
-            _,
-            _,
-            _,
-        ):
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 1 and sends == []
+        async with native_recall(core, tmp_path, respond=fail) as value:
+            await value.capture()
+            assert await value.worker.run_once("unknown-tool-request")
+            assert len(value.calls) == 1 and not value.sends
             assert core.store.one("SELECT scenario,state FROM model_usage") == {
-                "scenario": "memory_review",
-                "state": "UNKNOWN",
-            }
+                "scenario": "chat", "state": "UNKNOWN"}
+            assert not core.store.rows("SELECT * FROM agent_tool_calls")
+            usage = core.store.one("SELECT billed_micro_usd FROM model_usage")
+            admission = core.store.one("SELECT reserved_micro_usd FROM model_admissions")
+            assert usage["billed_micro_usd"] == admission["reserved_micro_usd"] > 0
             assert not core.store.rows("SELECT * FROM outbox")
-            assert not await core.run_once()
-
+            assert not await value.worker.run_once("no-unknown-replay")
     run(scenario())
 
 
-@pytest.mark.parametrize(
-    "mutation", ["content", "evidence", "status", "needs_review", "epoch", "snapshot"]
-)
-def test_source_or_frozen_review_drift_after_receive_prevents_chat(core, tmp_path, mutation):
-    def mutate(request, payload, number):
+
+@pytest.mark.parametrize("mutation", [
+    "content", "evidence", "status", "needs_review", "epoch", "evidence_links",
+])
+def test_memory_proof_drift_after_model_receive_prevents_reply(core, tmp_path, mutation):
+    def provider(request, payload, number):
+        if not returned(payload):
+            return httpx.Response(200, json=answer(calls=[
+                call("recall-project", "memory_recall", {"query": "*"})]))
         if mutation == "content":
-            core.store.execute("UPDATE memories SET content='漂移'")
+            core.store.execute("UPDATE memories SET content='漂移' WHERE memory_id=?",
+                               (value.memory_id,))
         elif mutation == "evidence":
-            core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_900'")
+            core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                               (value.source["event_id"],))
         elif mutation == "status":
-            core.store.execute("UPDATE memories SET status='HYPOTHESIS'")
+            core.store.execute("UPDATE memories SET status='HYPOTHESIS' WHERE memory_id=?",
+                               (value.memory_id,))
         elif mutation == "needs_review":
-            core.store.execute("UPDATE memories SET needs_review=1")
+            core.store.execute("UPDATE memories SET needs_review=1 WHERE memory_id=?",
+                               (value.memory_id,))
         elif mutation == "epoch":
             advance_epoch(core.store)
         else:
-            core.store.execute("DELETE FROM runtime_meta WHERE key LIKE 'live_text_memory:%'")
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": '{"relevant":["m0"]}'}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
-        )
+            core.store.execute("DELETE FROM memory_evidence WHERE memory_id=?", (value.memory_id,))
+        return httpx.Response(200, json=answer("旧事实不能发送。"))
 
     async def scenario():
-        async with readonly_window(core, tmp_path, respond=mutate) as (
-            _,
-            _,
-            capture,
-            _,
-            calls,
-            sends,
-            _,
-            _,
-            _,
-        ):
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 1 and sends == []
-            assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
-            assert core.store.rows("SELECT * FROM outbox") == []
-
+        nonlocal value
+        async with native_recall(core, tmp_path, respond=provider) as value:
+            await value.capture()
+            assert await value.worker.run_once("post-tool-source-drift")
+            assert len(value.calls) == 2 and not value.sends
+            assert_settled_calls(core, 2)
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert not await value.worker.run_once("no-stale-source-replay")
+    value = None
     run(scenario())
 
 
-def test_two_stage_requests_keep_the_original_five_total_call_cap(core, tmp_path):
+
+def test_native_memory_requests_share_the_five_call_cap(core, tmp_path):
     async def scenario():
-        async with readonly_window(core, tmp_path) as (
-            _,
-            _,
-            capture,
-            send,
-            calls,
-            sends,
-            _,
-            _,
-            _,
-        ):
+        async with native_recall(core, tmp_path,
+                                 paid={"window_calls": 5, "daily_calls": 5}) as value:
             for _ in range(2):
-                await capture()
-                assert await core.run_once()
-                await send()
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 5 and len(sends) == 2
+                await value.capture()
+                assert await value.worker.run_once("bounded-tool-recall")
+                assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            source = await value.capture()
+            assert await value.worker.run_once("bounded-final-answer")
+            assert len(value.calls) == 5 and len(value.sends) == 2
+            assert_settled_calls(core, 5)
             assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 5
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
-            assert core.status()["live_text_window"]["approved"] is False
-
+            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+                (source["event_id"],)) == {"state": "FAILED",
+                                         "last_error_code": "MODEL_DAILY_BUDGET_EXHAUSTED"}
     run(scenario())
 
 
-def test_duplicate_review_and_chat_stages_are_rejected(core, tmp_path):
+
+def test_duplicate_memory_tool_ids_across_requests_are_rejected(core, tmp_path):
+    def provider(request, payload, number):
+        return httpx.Response(200, json=answer(calls=[
+            call("same-tool-id", "memory_recall", {"query": "*"})]))
+
     async def scenario():
-        async with readonly_window(core, tmp_path) as (
-            _,
-            _,
-            capture,
-            _,
-            _,
-            _,
-            _,
-            _,
-            _,
-        ):
-            await capture()
-            assert await core.run_once()
-            job = core.store.one("SELECT job_id FROM jobs WHERE event_id NOT LIKE 'evt_test_%'")
-            for stage in ("memory_review", "chat"):
-                with pytest.raises(CoreError):
-                    budget.reserve(
-                        core.store,
-                        core.settings,
-                        job["job_id"],
-                        stage,
-                        [{"role": "user", "content": "duplicate"}],
-                        core.clock(),
-                        clock=core.clock,
-                    )
-            assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 2
-
+        async with native_recall(core, tmp_path, respond=provider) as value:
+            source = await value.capture()
+            assert await value.worker.run_once("duplicate-native-tool-id")
+            assert len(value.calls) == 2
+            assert_settled_calls(core, 2)
+            assert core.store.one("SELECT COUNT(*) n FROM agent_tool_calls")["n"] == 1
+            assert core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+                (source["event_id"],)) == {"state": "FAILED",
+                                         "last_error_code": "CONVERSATION_TOOL_ID_CONFLICT"}
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert not await value.worker.run_once("no-duplicate-tool-replay")
     run(scenario())
 
 
-def test_no_candidates_dispatches_only_chat_without_a_review(core, tmp_path, monkeypatch):
+
+def test_empty_recall_continues_in_the_same_sdk_conversation(core, tmp_path):
     async def scenario():
-        async with readonly_window(core, tmp_path) as (
-            _,
-            _,
-            capture,
-            send,
-            calls,
-            sends,
-            _,
-            _,
-            _,
-        ):
-            # Substitute only relevance scores; the actual scoped SQL/FTS search still runs.
-            monkeypatch.setattr(
-                core.memory.index,
-                "scores",
-                lambda query, rows: {row["memory_id"]: -1 for row in rows},
-            )
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 1
-            assert core.store.one("SELECT scenario,state FROM model_usage") == {
-                "scenario": "chat",
-                "state": "SETTLED",
-            }
-            assert len(calls[0]["messages"]) == 2
-            await send()
-            assert len(sends) == 1
-
+        async with native_recall(core, tmp_path) as value:
+            core.store.execute("UPDATE memories SET valid_to=? WHERE memory_id=?",
+                               (after(core.clock(), -1), value.memory_id))
+            await value.capture()
+            assert await value.worker.run_once("no-memory-candidate")
+            assert len(value.calls) == 2
+            result = json.loads(returned(value.calls[-1])[0]["content"])
+            assert result["state"] == "NO_RECORD" and result["facts"] == []
+            assert "青竹七号" not in encode(value.calls)
+            assert_settled_calls(core, 2)
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            assert len(value.sends) == 1
     run(scenario())
 
 
-@pytest.mark.parametrize("stage", ["memory_review", "chat"])
+
+@pytest.mark.parametrize("stage", ["owner_input", "memory_result"])
 def test_source_drift_in_http_hook_is_rechecked_before_actual_model_io(core, tmp_path, stage):
     async def hook(request):
-        reviewing = '"operation":"recall"' in json.loads(request.content)["messages"][-1]["content"]
-        if reviewing == (stage == "memory_review"):
-            core.store.execute(
-                "UPDATE memories SET confidence=0.8 WHERE memory_id IN "
-                "(SELECT memory_id FROM memory_evidence WHERE event_id='evt_test_900')"
-            )
+        if stage == "owner_input":
+            core.store.execute("UPDATE events SET redacted=1 WHERE event_id=?",
+                               (source["event_id"],))
+        elif returned(json.loads(request.content)):
+            core.store.execute("UPDATE memories SET confidence=0 WHERE memory_id=?",
+                               (value.memory_id,))
 
     async def scenario():
-        async with readonly_window(core, tmp_path, request_hook=hook) as (
-            _,
-            _,
-            capture,
-            _,
-            calls,
-            sends,
-            _,
-            _,
-            _,
-        ):
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == (0 if stage == "memory_review" else 1)
-            assert sends == [] and not core.store.rows("SELECT * FROM outbox")
-
+        nonlocal value, source
+        async with native_recall(core, tmp_path, request_hook=hook) as value:
+            source = await value.capture()
+            assert await value.worker.run_once("last-request-source-check")
+            assert len(value.calls) == (0 if stage == "owner_input" else 1)
+            assert not value.sends and not core.store.rows("SELECT * FROM outbox")
+    value = source = None
     run(scenario())
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "source",
-        "epoch",
-        "memory_snapshot",
-        "chat_snapshot",
-        "review_payload",
-        "chat_payload",
-        "selected",
-    ],
-)
-def test_final_core_send_check_rechecks_both_stages_and_sources(core, tmp_path, mutation):
+
+@pytest.mark.parametrize("mutation", [
+    "source", "epoch", "memory_snapshot", "history_snapshot",
+    "memory_proof", "history_proof", "memory_rows",
+])
+def test_final_native_send_check_rechecks_memory_and_history_proofs(core, tmp_path, mutation):
     async def scenario():
-        async with readonly_window(core, tmp_path) as (
-            window,
-            client,
-            capture,
-            _,
-            calls,
-            sends,
-            _,
-            memory_id,
-            _,
-        ):
-            await capture()
-            assert await core.run_once()
-            row = core.store.one("SELECT * FROM outbox")
-            lease = "lease_" + "f" * 32
-            core.store.execute(
-                "UPDATE outbox SET state='SENDING',lease_token=?,lease_until=?",
-                (lease, after(core.clock(), 60)),
-            )
-            check = {**reply_approval(window.plan, core), "lease_token": lease}
-            del check["evidence_sha256"]
-            assert (await client.post("/internal/v1/live-text/send-check", json=check)).json()[
-                "approved"
-            ]
+        async with native_recall(core, tmp_path) as value:
+            source = await value.capture()
+            assert await value.worker.run_once("source-bound-native-reply")
+            job = core.store.one("SELECT job_id FROM jobs WHERE event_id=?", (source["event_id"],))
+            client = value.entry.client
+            leased = await client.post("/internal/v1/deliveries/lease", json={
+                "worker_id": "memory-final-check", "authority": value.entry.runtime.authority})
+            assert leased.status_code == 200, leased.text
+            item = leased.json()["items"][0]
+            begun = await client.post(f"/internal/v1/deliveries/{item['message_id']}/begin-send",
+                                     json={"lease_token": item["lease_token"]})
+            assert begun.status_code == 200, begun.text
+            check = dict(authority=value.entry.runtime.authority, message_id=item["message_id"],
+                event_id=source["event_id"], lease_token=item["lease_token"],
+                content_sha256=digest(item["content"]), reply_revision=item["reply_revision"])
+            positive = await client.post("/internal/v1/owner-authority/send-check", json=check)
+            assert positive.status_code == 200 and positive.json()["approved"]
+            usage = core.store.rows("SELECT * FROM model_usage")
             if mutation == "source":
-                core.store.execute(
-                    "UPDATE memories SET content='变更事实' WHERE memory_id=?", (memory_id,)
-                )
+                core.store.execute("UPDATE memories SET content='变更事实' WHERE memory_id=?",
+                                   (value.memory_id,))
             elif mutation == "epoch":
                 advance_epoch(core.store)
-            elif mutation.endswith("snapshot"):
-                prefix = live_text.MEMORY if mutation.startswith("memory") else live_text.CONTEXT
-                core.store.execute("DELETE FROM runtime_meta WHERE key LIKE ?", (prefix + "%",))
             else:
-                prefix = live_text.CONTEXT if mutation == "chat_payload" else live_text.MEMORY
-                meta = core.store.one(
-                    "SELECT * FROM runtime_meta WHERE key LIKE ?", (prefix + "%",)
-                )
-                value = json.loads(meta["value"])
-                key = {
-                    "review_payload": "review_payload_sha256",
-                    "chat_payload": "payload_sha256",
-                }.get(mutation, "selected")
-                value[key] = "a" * 64 if key.endswith("sha256") else []
-                core.store.execute(
-                    "UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), meta["key"])
-                )
-            response = await client.post("/internal/v1/live-text/send-check", json=check)
-            assert response.status_code >= 400
-            assert len(calls) == 2 and sends == []
-            assert (
-                core.store.one("SELECT state FROM outbox WHERE message_id=?", (row["message_id"],))[
-                    "state"
-                ]
-                == "SENDING"
-            )
-
+                saved = core.store.one("SELECT * FROM agent_conversations WHERE job_id=?",
+                                       (job["job_id"],))
+                snapshots = json.loads(saved["snapshots_json"])
+                kind = "history" if mutation.startswith("history") else "memory"
+                if mutation.endswith("snapshot"):
+                    snapshots = [entry for entry in snapshots if entry["kind"] != kind]
+                else:
+                    proof = next(entry["proof"] for entry in snapshots if entry["kind"] == kind)
+                    if mutation == "memory_rows":
+                        proof["rows"] = []
+                    elif mutation == "memory_proof":
+                        proof["rows"][0]["content"] = "变更工具结果"
+                    else:
+                        proof.append({"event_id": value.source["event_id"],
+                                      "source_sha256": "a" * 64})
+                core.store.execute("UPDATE agent_conversations SET snapshots_json=? WHERE job_id=?",
+                                   (encode(snapshots), job["job_id"]))
+            rejected = await client.post("/internal/v1/owner-authority/send-check", json=check)
+            assert rejected.status_code in {403, 409}, rejected.text
+            assert len(value.calls) == 2 and not value.sends
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
+                                 (item["message_id"],)) == {"state": "SENDING"}
     run(scenario())
 
 
-def test_selected_approved_facts_survive_the_soft_bound(core, tmp_path, monkeypatch):
+
+def test_native_memory_result_survives_the_initial_context_soft_bound(core, tmp_path):
     async def scenario():
-        async with readonly_window(
-            core,
-            tmp_path,
-            query="项目代号" + "是" * 450,
-            core_options={"context_soft_tokens": 1000},
-        ) as (
-            _,
-            _,
-            capture,
-            send,
-            calls,
-            _,
-            _,
-            memory_id,
-            _,
-        ):
-            monkeypatch.setattr(
-                core.memory.index,
-                "scores",
-                lambda query, rows: {row["memory_id"]: 1.0 for row in rows},
-            )
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 2
-            assert len(calls[-1]["messages"]) == 3
-            assert "青竹七号" in encode(calls[-1]["messages"])
-            context = json.loads(
-                core.store.one(
-                    "SELECT value FROM runtime_meta WHERE key LIKE ?", (live_text.CONTEXT + "%",)
-                )["value"]
-            )
-            assert [row["memory_id"] for row in context["memory_sources"]] == [memory_id]
-            await send()
-
+        async with native_recall(core, tmp_path, query="项目代号" + "是" * 450,
+                                 tool_query="项目验收代号",
+                                 core_options={"context_soft_tokens": 1000}) as value:
+            await value.capture()
+            assert await value.worker.run_once("bounded-sdk-memory-result")
+            assert len(value.calls) == 2
+            result = json.loads(returned(value.calls[-1])[0]["content"])
+            assert [row["memory_id"] for row in result["facts"]] == [value.memory_id]
+            assert "青竹七号" in encode(value.calls[-1]["messages"])
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
     run(scenario())
+
 
 
 @pytest.mark.parametrize("change", ["expired", "unconfirmed", "conflict", "approval_drift"])
@@ -656,40 +526,43 @@ def test_source_eligibility_cannot_be_replaced_with_an_approval_hash(core, tmp_p
     run(scenario())
 
 
-@pytest.mark.parametrize(
-    "result", ['{"relevant":["unapproved"]}', '{"relevant":["m0","m0"]}', "invalid"]
-)
-def test_invalid_settled_review_never_falls_back_to_chat(core, tmp_path, result):
-    def respond(request, payload, number):
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": result}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
-        )
+@pytest.mark.parametrize("result", [
+    '{"relevant":["unapproved"]}', '{"relevant":["m0","m0"]}', "invalid",
+])
+def test_invalid_memory_tool_arguments_stop_without_facts_or_fallback(core, tmp_path, result):
+    def provider(request, payload, number):
+        requested = call("invalid-recall", "memory_recall", {})
+        requested["function"]["arguments"] = result
+        return httpx.Response(200, json=answer(calls=[requested]))
 
     async def scenario():
-        async with readonly_window(core, tmp_path, respond=respond) as (
-            _,
-            _,
-            capture,
-            _,
-            calls,
-            sends,
-            _,
-            _,
-            _,
-        ):
-            await capture()
-            assert await core.run_once()
-            assert len(calls) == 1 and sends == []
-            assert core.store.one("SELECT scenario,state FROM model_usage") == {
-                "scenario": "memory_review",
-                "state": "SETTLED",
-            }
-            assert core.store.rows("SELECT * FROM outbox") == []
+        async with native_recall(core, tmp_path, respond=provider) as value:
+            await value.capture()
+            assert await value.worker.run_once("invalid-sdk-memory-arguments")
+            assert len(value.calls) == 2 and not value.sends
+            assert_settled_calls(core, 2)
+            assert not core.store.rows("SELECT * FROM agent_tool_calls")
+            assert not core.store.rows("SELECT * FROM outbox")
+            assert "青竹七号" not in encode(value.calls)
+            assert not await value.worker.run_once("no-invalid-tool-replay")
+    run(scenario())
 
+
+
+def test_historical_approved_scope_does_not_repair_or_vectorize_unapproved_facts(core, tmp_path):
+    async def scenario():
+        async with readonly_window(core, tmp_path) as values:
+            _, _, _, _, calls, sends, scores, memory_id, outsider = values
+            before = epoch(core.store)
+            rows = await core.memory.search_async("项目验收代号", memory_ids=[memory_id],
+                                                   now=core.clock())
+            assert [row["memory_id"] for row in rows] == [memory_id]
+            assert scores and all(ids == [memory_id] for ids in scores)
+            assert core.store.one("SELECT status,confidence FROM memories WHERE memory_id=?",
+                                  (outsider,)) == {"status": "CONFIRMED", "confidence": 1.0}
+            assert not core.store.one("SELECT 1 FROM memory_vectors WHERE memory_id=?", (outsider,))
+            assert calls == sends == [] and epoch(core.store) == before
+            assert not core.store.rows("SELECT * FROM model_usage")
     run(scenario())
 
 

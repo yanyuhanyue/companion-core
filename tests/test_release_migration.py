@@ -21,6 +21,7 @@ from companion.privacy import ErasureLedger
 from companion.store import Store, encode, migrate
 from companion.transport import digest
 from tests.conftest import Clock
+from tests.test_test_fixtures import historical_database
 
 REVISION_CHAIN = (
     "0001_m0",
@@ -55,6 +56,18 @@ REVISION_CHAIN = (
     "0031_voice_nodes",
     "0032_bili_video",
     "0033_model_usage_job_index",
+    "0034_voice_retention_v2",
+    "0035_token_measurement",
+    "0036_social_plan_jobs",
+    "0037_life_topics",
+    "0038_life_goal_binding",
+    "0039_evaluation",
+    "0040_owner_authority",
+    "0041_agent_conversations",
+    "0042_rem",
+    "0043_reader_authority",
+    "0044_voice_owner_authority",
+    "0045_goal_read_plan",
 )
 LEGACY_TABLES = (
     "principals",
@@ -326,14 +339,37 @@ def test_alembic_has_one_real_head_and_expected_legacy_upgrade_chain():
         "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
     )
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == ["0033_model_usage_job_index"]
+    assert scripts.get_heads() == [REVISION_CHAIN[-1]]
     assert scripts.get_bases() == ["0001_m0"]
-    revisions, current = [], scripts.get_revision("0033_model_usage_job_index")
+    revisions, current = [], scripts.get_revision(REVISION_CHAIN[-1])
     while current:
         revisions.append(current.revision)
         assert current.down_revision is None or isinstance(current.down_revision, str)
         current = scripts.get_revision(current.down_revision) if current.down_revision else None
     assert tuple(reversed(revisions)) == REVISION_CHAIN
+
+
+@pytest.mark.parametrize("revision,code", [
+    ("0040_owner_authority", "OWNER_AUTHORITY_DOWNGRADE"),
+    ("0043_reader_authority", "OWNER_AUTHORITY_DOWNGRADE"),
+    ("0044_voice_owner_authority", "VOICE_AUTHORITY_DOWNGRADE"),
+    ("0045_goal_read_plan", "GOAL_PLAN_DOWNGRADE"),
+])
+def test_authority_downgrade_keeps_custody_and_accounting_unchanged(core, tmp_path, revision, code):
+    tables = ("runtime_meta", "voice_jobs", "voice_node_state", "model_usage", "outbox")
+    path = historical_database(core.store, tmp_path / "authority-custody.db", revision)
+    with closing(Store(path)) as original:
+        before = table_snapshot(original, tables)
+    config = Config()
+    config.set_main_option(
+        "script_location", str(Path(__file__).resolve().parents[1] / "migrations")
+    )
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + path.as_posix())
+    with pytest.raises(RuntimeError, match=code + "_REQUIRES_EXPLICIT_CUSTODY_RECONCILIATION"):
+        command.downgrade(config, "0033_model_usage_job_index")
+    with closing(Store(path)) as original:
+        assert table_snapshot(original, tables) == before
+        assert original.one("SELECT version_num FROM alembic_version")["version_num"] == revision
 
 
 @pytest.mark.parametrize("revision", ["0003_memory_index", "0004_diary"])
@@ -350,6 +386,13 @@ def test_populated_historical_upgrade_preserves_every_old_column_and_repeats(tmp
         first_upgrade = table_snapshot(store, before)
     migrate(str(database), "head")
     with closing(Store(str(database))) as store:
+        incarnation = store.one("SELECT * FROM runtime_meta WHERE key='voice_incarnation'")
+        assert incarnation and re.fullmatch(r"[a-f0-9]{32}", incarnation["value"])
+        first_upgrade["runtime_meta"]["rows"].append(incarnation)
+        first_upgrade["runtime_meta"]["rows"].extend([
+            {"key": "owner_authority_restore_generation", "value": "initial"},
+            {"key": "owner_authority_mode", "value": "OFF"},
+        ])
         assert_old_columns_unchanged(store, first_upgrade)
         for row in store.rows("SELECT * FROM outbox"):
             assert {key: row[key] for key in SEGMENT_DEFAULTS} == SEGMENT_DEFAULTS
@@ -390,8 +433,16 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
         )
         assert restore_block == {"key": "cloud_budget_restore_required", "value": "1"}
         assert restored.rows("SELECT version_num FROM alembic_version") == [
-            {"version_num": "0033_model_usage_job_index"}
+            {"version_num": REVISION_CHAIN[-1]}
         ]
+        voice_incarnation = restored.one(
+            "SELECT * FROM runtime_meta WHERE key='voice_incarnation'"
+        )
+        assert voice_incarnation and re.fullmatch(r"[a-f0-9]{32}", voice_incarnation["value"])
+        voice_restore = restored.one(
+            "SELECT * FROM runtime_meta WHERE key='voice_restore_required'"
+        )
+        assert voice_restore == {"key": "voice_restore_required", "value": "1"}
         assert restored.schema_capabilities()
         assert_indexes_and_integrity(restored, ("keep",) if forget_one else ("erase", "keep"))
         for table in ("memories", "memory_evidence", "memory_revisions", "memory_vectors"):
@@ -427,6 +478,7 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
                 expected = {
                     **old, **SEGMENT_DEFAULTS,
                     "delivery_lane": "owner_private", "native_ack_json": None,
+                    "authority_json": "{}",
                 }
                 if active:
                     expected.update(
@@ -455,9 +507,13 @@ def test_encrypted_0003_backup_restores_with_newest_ledger_and_preserves_indepen
             }
             unchanged["runtime_meta"] = {
                 **before["runtime_meta"],
-                "rows": before["runtime_meta"]["rows"] + [generation, restore_block] + [
+                "rows": before["runtime_meta"]["rows"] + [voice_incarnation] + [
                     restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
-                    for name in ("social_autonomy_restore_required", "bili_video_restore_required")
+                    for name in ("owner_authority_restore_generation", "owner_authority_mode")
+                ] + [generation, restore_block] + [
+                    restored.one("SELECT * FROM runtime_meta WHERE key=?", (name,))
+                    for name in ("social_autonomy_restore_required", "voice_restore_required",
+                                 "bili_video_restore_required")
                 ],
             }
             assert_old_columns_unchanged(restored, unchanged)
@@ -526,8 +582,10 @@ def test_0018_preserves_populated_goals_without_guessing_reflection_origins(tmp_
             "goals", "goal_evidence", "reflection_runs", "reflection_suggestions",
             "events", "memories", "model_usage", "outbox", "runtime_meta",
         ))
-    migrate(str(database))
-    migrate(str(database))
+    # Exercise this historical migration's own downgrade guard, before later
+    # irreversible custody migrations introduce their independent stop boundary.
+    migrate(str(database), "0018_reflection_goal_lineage")
+    migrate(str(database), "0018_reflection_goal_lineage")
     with closing(Store(str(database))) as store:
         assert_old_columns_unchanged(store, before)
         assert store.one("SELECT reflection_suggestion_id FROM goals") == {
@@ -576,8 +634,8 @@ def test_0021_retains_reflection_provenance_and_guards_pending_wait_downgrade(tm
             created_at=TIMES["keep"], updated_at=TIMES["keep"],
         )
         before = table_snapshot(store, tables)
-    migrate(str(database))
-    migrate(str(database))
+    migrate(str(database), "0021_reflection_admission_retry")
+    migrate(str(database), "0021_reflection_admission_retry")
     with closing(Store(str(database))) as store:
         assert_old_columns_unchanged(store, before)
         assert all(row["next_attempt_at"] is None

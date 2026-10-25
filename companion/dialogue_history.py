@@ -1,7 +1,7 @@
 """Recent delivered conversation turns and their local soft context bound.
 
-This byte-based bound is not a provider token count or paid admission. The budget
-engine still checks the complete final prompt under its own admission contract.
+Configured callers share full-request measurement with paid admission. Legacy callers
+without settings use the historical byte estimate. Neither grants source authority.
 """
 
 import json
@@ -172,7 +172,8 @@ def recent_context_sources(store, conversation_id, current_event_id, max_turns, 
     return sorted(sources, key=lambda row: order[row["event_id"]])[-max_turns:]
 
 
-def fit_context(rules, references, turns, current_input, soft_limit):
+def fit_context(rules, references, turns, current_input, soft_limit, *, settings=None,
+                scenario="chat"):
     """Drop optional references, then oldest whole turns; preserve rules/current input.
 
     Current input also includes its bounded shared-content reference, when present.
@@ -180,6 +181,13 @@ def fit_context(rules, references, turns, current_input, soft_limit):
     """
     groups = [[message] for message in references] + turns
     messages = [rules, *(message for group in groups for message in group), *current_input]
-    while groups and token_upper_bound(messages) > soft_limit:
+    def count():
+        if settings is None:
+            return token_upper_bound(messages)
+        from companion.token_measurement import measure_request
+
+        return measure_request(settings, messages, scenario).reserved_input_tokens
+
+    while groups and count() > soft_limit:
         del messages[1 : 1 + len(groups.pop(0))]
     return messages

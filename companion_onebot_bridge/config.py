@@ -47,12 +47,16 @@ class BridgeConfig:
     onebot_ws_url: str = "ws://snowluma:3001"
     data_dir: str = "/bridge-data"
     delivery_enabled: bool = False
+    astrbot_handoff_path: str | None = None
+    astrbot_handoff_sha256: str | None = None
+    ingress_after: int = 0
     max_frame_bytes: int = 65536
     max_voice_lease_bytes: int = 6000000
     max_pending: int = 1000
     max_disk_bytes: int = 67108864
     poll_seconds: float = 0.1
     capture_signing_key: str | None = None
+    owner_authority: dict | None = None
     rich_input_scope: str = "none"
     meme_directory: str | None = None
     meme_enabled: bool = False
@@ -71,6 +75,25 @@ class BridgeConfig:
     account_asset_max_dimension: int = 2048
 
     def __post_init__(self):
+        if self.owner_authority is not None:
+            from companion_delivery_protocol.authority import validate_authority_ref
+
+            object.__setattr__(self, "owner_authority", validate_authority_ref(
+                self.owner_authority))
+            if self.capture_signing_key is None:
+                raise ValueError("OWNER_CAPTURE_SIGNING_KEY_REQUIRED")
+        if type(self.ingress_after) is not int or not 0 <= self.ingress_after <= 4102444800:
+            raise ValueError("INVALID_INGRESS_BOUNDARY")
+        if self.astrbot_handoff_path is not None:
+            if (not isinstance(self.astrbot_handoff_path, str)
+                or not Path(self.astrbot_handoff_path).is_absolute()
+                or ".." in Path(self.astrbot_handoff_path).parts
+                or not isinstance(self.astrbot_handoff_sha256, str)
+                or not re.fullmatch(r"[a-f0-9]{64}", self.astrbot_handoff_sha256)
+                or self.ingress_after == 0):
+                raise ValueError("INVALID_ASTRBOT_HANDOFF")
+        elif self.astrbot_handoff_sha256 is not None or self.ingress_after:
+            raise ValueError("ASTRBOT_HANDOFF_REQUIRED")
         if (self.account_asset_directory is None) != (self.account_asset_policy_sha256 is None):
             raise ValueError("ACCOUNT_ASSET_REVIEW_POLICY_REQUIRED")
         if self.account_asset_directory is not None and (

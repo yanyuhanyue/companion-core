@@ -393,22 +393,38 @@ def wav_info(data, *, max_bytes=MAX_AUDIO_BYTES, max_seconds=120):
             "audio_sha256": hashlib.sha256(data).hexdigest()}
 
 
-def prepare_delivery(item, config, *, plan_sha256, voice_policy_sha256, now):
+def prepare_delivery(item, config, *, voice_policy_sha256, now, authority=None, plan_sha256=None):
     """Freeze one native record send. Final delivery validation uses ``prepared.check``."""
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise ValueError("VOICE_TIMESTAMP_INVALID")
+    if (authority is None) == (plan_sha256 is None):
+        raise ValueError("VOICE_SCOPE_REQUIRED")
+    native = authority is not None
+    if native:
+        from companion_delivery_protocol.authority import validate_authority_ref
+
+        scope = {"authority": validate_authority_ref(authority)}
+        if ("window_sha256" in item
+            or validate_authority_ref(item.get("authority")) != scope["authority"]):
+            raise ValueError("VOICE_DELIVERY_CHANGED")
+    else:
+        scope = {"window_sha256": _sha(plan_sha256)}
     envelope = item.get("voice")
     _fields(envelope, {"binding", "binding_sha256", "audio"})
     binding, audio = envelope["binding"], envelope["audio"]
-    hashes = {"window_sha256", "source_sha256", "identity_sha256", "manifest_sha256",
+    hashes = {"source_sha256", "identity_sha256", "manifest_sha256",
               "node_config_sha256", "voice_policy_sha256", "content_sha256", "reply_sha256",
               "result_sha256", "audio_sha256"}
-    _fields(binding, hashes | {"schema_version", "job_id", "generation", "message_id",
-        "delivery_key", "event_id", "privacy_epoch", "reply_revision", "node_id",
-        "audio_bytes", "expires_at"})
+    _fields(binding, hashes | scope.keys() | {"schema_version", "job_id", "generation",
+        "message_id", "delivery_key", "event_id", "privacy_epoch", "reply_revision", "node_id",
+        "audio_bytes", "expires_at", "retirement_token"})
     for key in hashes:
         _sha(binding[key])
-    for key, low, high in (("schema_version", 1, 1), ("generation", 1, 2**63 - 1),
+    if not isinstance(binding["retirement_token"], str) or not re.fullmatch(
+        r"[a-zA-Z0-9_-]{32,256}", binding["retirement_token"]):
+        raise ValueError("VOICE_BINDING_INVALID")
+    version = 3 if native else 2
+    for key, low, high in (("schema_version", version, version), ("generation", 1, 2**63 - 1),
                            ("privacy_epoch", 0, 2**63 - 1), ("reply_revision", 0, 2**63 - 1),
                            ("audio_bytes", 44, 4_000_000)):
         _integer(binding[key], low, high)
@@ -430,7 +446,7 @@ def prepare_delivery(item, config, *, plan_sha256, voice_policy_sha256, now):
         or binding["message_id"] != item.get("message_id")
         or binding["delivery_key"] != item.get("delivery_key")
         or binding["event_id"] != delivery_event_id(item)
-        or binding["window_sha256"] != _sha(plan_sha256)
+        or any(binding[key] != value for key, value in scope.items())
         or binding["voice_policy_sha256"] != _sha(voice_policy_sha256)
         or binding["identity_sha256"] != digest([config.owner_qq_id, config.bot_qq_id])
         or binding["content_sha256"] != digest(item["content"])
@@ -570,7 +586,8 @@ def _asr_source(event, original):
                                   original.index, original.source_sha256)
 
 
-async def prepare_asr(downloaded, event, *, plan_sha256, capture_signing_key, check, work_dir,
+async def prepare_asr(downloaded, event, *, capture_signing_key, check, work_dir,
+                      plan_sha256=None, authority=None,
                       limits=DEFAULT_LIMITS, cancel_event=None):
     """Produce a signed upload from an admitted event or AuthenticatedASRSource.
 
@@ -583,7 +600,16 @@ async def prepare_asr(downloaded, event, *, plan_sha256, capture_signing_key, ch
         or not callable(check) or not isinstance(capture_signing_key, str)
         or not re.fullmatch(r"[a-f0-9]{64}", capture_signing_key)):
         raise ValueError("VOICE_ASR_SOURCE_INVALID")
-    _sha(plan_sha256)
+    if (authority is None) == (plan_sha256 is None):
+        raise ValueError("VOICE_SCOPE_REQUIRED")
+    if authority is not None:
+        from companion_delivery_protocol.authority import validate_authority_ref
+
+        scope = {"authority": validate_authority_ref(authority)}
+        domain = b"companion-core/onebot-owner-voice/v2\x00"
+    else:
+        scope = {"plan_sha256": _sha(plan_sha256)}
+        domain = UPLOAD_DOMAIN
     source = _asr_source(event, downloaded.original)
     if len(downloaded.body) > limits.max_source_bytes:
         raise ValueError("VOICE_SOURCE_TOO_LARGE")
@@ -623,14 +649,14 @@ async def prepare_asr(downloaded, event, *, plan_sha256, capture_signing_key, ch
                     raise ValueError("VOICE_DECODE_RESPONSE_INVALID")
     except TimeoutError:
         raise ValueError("VOICE_DECODE_TIMEOUT") from None
-    unsigned = {"plan_sha256": plan_sha256, "event_id": source.event_id,
+    unsigned = {**scope, "event_id": source.event_id,
                 "source_event_id": source.source_event_id,
                 "source_input_sha256": source.source_input_sha256,
                 "source_segment_index": source.source_segment_index,
                 "audio_sha256": actual["audio_sha256"], "audio_bytes": len(data),
                 "source_partial": result["source_partial"]}
     signature = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(capture_signing_key)).sign(
-        UPLOAD_DOMAIN + canonical(unsigned),
+        domain + canonical(unsigned),
     ).hex()
     proof = canonical({**unsigned, "signature": signature})
     prepared = PreparedVoiceInput(

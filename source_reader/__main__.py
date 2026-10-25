@@ -33,7 +33,7 @@ def core_address(value):
         or url.path not in {"", "/"}
     ):
         raise ValueError("Core needs a fixed HTTP(S) origin")
-    if url.scheme == "http" and url.hostname != "localhost":
+    if url.scheme == "http" and url.hostname not in {"localhost", "companion-api"}:
         address = ipaddress.ip_address(url.hostname)
         if not (address.is_private or address in ipaddress.ip_network("100.64.0.0/10")):
             raise ValueError("Plain HTTP Core must be private")
@@ -68,7 +68,8 @@ async def main(args):
             source = await stack.enter_async_context(NativeHeyboxSource(args.account_file))
         reader = (
             None if args.source == "web"
-            else HeyboxReader(public, source)
+            else HeyboxReader(public, source,
+                              public_discovery=getattr(args, "public_discovery", False))
             if args.source == "heybox"
             else BilibiliToolReader(public, args.search_keyword, discussion=args.discussion)
             if args.bili_tools
@@ -130,6 +131,8 @@ if __name__ == "__main__":
                         help="Optional web host restriction; can only narrow the Core lease")
     parser.add_argument("--source-url", help="Explicit two-GET Heybox service origin")
     parser.add_argument("--heybox-native", action="store_true", help="Enable pinned two-GET source")
+    parser.add_argument("--public-discovery", action="store_true",
+                        help="Allow bounded Heybox public title discovery without an account")
     parser.add_argument("--discussion", action="store_true",
                         help="Read bounded Bilibili comments/danmaku")
     parser.add_argument("--bili-tools", action="store_true", help="Enable bounded Bilibili tools")
@@ -147,6 +150,9 @@ if __name__ == "__main__":
         args = parser.parse_args()
         if args.source_url and args.source != "heybox":
             parser.error("--source-url requires --source heybox")
+        if args.public_discovery and (args.source != "heybox" or args.source_url
+                                      or args.heybox_native):
+            parser.error("--public-discovery requires Heybox without a configured source")
         if args.source == "web" and args.protocol != "reading-v1":
             parser.error("--source web requires --protocol reading-v1")
         if args.probe and args.protocol != "legacy":

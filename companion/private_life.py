@@ -72,8 +72,11 @@ def ensure_active(store, settings, clock):
 
 
 def owner_waiting(store, settings, now):
+    from companion import owner_authority
     from companion.budget import chat_pending
 
+    if owner_authority.required(store, settings):
+        return owner_authority.owner_waiting(store, settings, now)
     return chat_pending(store, now) or bool(
         store.one(
             "SELECT 1 FROM runtime_meta r LEFT JOIN events e "
@@ -161,6 +164,10 @@ def check_job(store, settings, approval, job):
     from companion.reply_revision import check_job as check_reply_job
 
     check_reply_job(store, job)
+    if job["kind"] == "social_plan":
+        from companion.social_plan_jobs import validate_binding
+
+        return validate_binding(store, settings, job)
     if job["kind"] == "meme_caption":
         from companion.meme_core import check_caption_job
 
@@ -200,6 +207,11 @@ def admit_model(store, settings, clock, job_id, scenario):
     from companion import live_text, notices
 
     approval, _, attempts = live_text.guard(store, settings, clock)
+    job = store.one("SELECT j.*,e.body_json FROM jobs j JOIN events e USING(event_id) "
+                    "WHERE job_id=?", (job_id,)) if job_id else None
+    life_shadow = scenario == "activity" and notices.shadow(job)
+    if life_shadow:
+        notices.validate(store, settings, job, clock())
     feature = ("goals" if scenario == "activity" and notices.required(store, job_id)
                else SCENARIOS.get(scenario))
     allowed_feature = (
@@ -207,7 +219,7 @@ def admit_model(store, settings, clock, job_id, scenario):
         settings.social_autonomy.enabled if scenario == "social_autonomy" else
         feature is not None and getattr(settings, feature + "_enabled")
     )
-    if not allowed_feature:
+    if not allowed_feature and not life_shadow:
         raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     if attempts >= approval.max_model_attempts:
         raise CoreError("LIVE_TEXT_MODEL_ATTEMPT_CAP", 429)
@@ -222,6 +234,7 @@ def admit_model(store, settings, clock, job_id, scenario):
             "activity": {"activity", "memory_review"},
             "meme_caption": {"meme_caption"},
             "poke": {"qq_poke"},
+            "social_plan": {"social_autonomy"},
         }
         if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)

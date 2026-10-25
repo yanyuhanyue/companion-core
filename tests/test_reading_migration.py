@@ -6,7 +6,6 @@ from contextlib import closing
 
 import pytest
 from alembic import command
-from alembic.script import ScriptDirectory
 from cryptography.fernet import Fernet
 
 from companion.backup import backup, restore
@@ -36,13 +35,12 @@ PREVIOUS = "0023_meme_discovery_reservations"
 
 def test_empty_reading_migration_is_reversible_and_repeated_upgrade_is_safe(tmp_path):
     database = tmp_path / "empty.db"
-    head = ScriptDirectory.from_config(config_for(database)).get_current_head()
-    migrate(str(database))
-    migrate(str(database))
+    migrate(str(database), READING_REVISION)
+    migrate(str(database), READING_REVISION)
     with closing(Store(str(database))) as store:
-        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == head
+        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+            READING_REVISION)
         assert store.rows("SELECT * FROM reading_attempts") == []
-        assert store.schema_capabilities()
         assert store.one("PRAGMA integrity_check")["integrity_check"] == "ok"
         assert store.rows("PRAGMA foreign_key_check") == []
     command.downgrade(config_for(database), PREVIOUS)
@@ -51,6 +49,7 @@ def test_empty_reading_migration_is_reversible_and_repeated_upgrade_is_safe(tmp_
     migrate(str(database))
     with closing(Store(str(database))) as store:
         assert store.rows("SELECT * FROM reading_attempts") == []
+        assert store.schema_capabilities()
 
 
 def test_reading_upgrade_preserves_legacy_reservations_and_blocks_lossy_downgrade(tmp_path):
@@ -68,8 +67,8 @@ def test_reading_upgrade_preserves_legacy_reservations_and_blocks_lossy_downgrad
         )
         store.insert("exploration_evidence", request_id="read_legacy", event_id="evt_keep")
         before = table_snapshot(store, tables)
-    migrate(str(database))
-    migrate(str(database))
+    migrate(str(database), READING_REVISION)
+    migrate(str(database), READING_REVISION)
     with closing(Store(str(database))) as store:
         assert_old_columns_unchanged(store, before)
         # A legacy lease must not acquire the new protocol's authority implicitly.

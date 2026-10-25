@@ -1,23 +1,103 @@
-"""Bridge poke admission and native dispatch against the real Core HTTP contract."""
+"""Native owner poke intake and delivery; only provider HTTP is synthetic."""
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
 
 import httpx
 import pytest
 
-from companion import paid_budget
+from companion import cumulative, paid_budget
 from companion.model import ModelClient
+from companion.owner_authority_protocol import OwnerGrantPolicy
 from companion.poke_protocol import PokePolicy, canonical_notice, canonical_source
-from companion_onebot_bridge import continuous, pokes
+from companion_onebot_bridge import continuous, owner_pokes, pokes
+from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.native_actions import content_hash
-from companion_onebot_bridge.outbound import deliver_tick
-from companion_onebot_bridge.window import WindowOneBot
+from companion_onebot_bridge.network import private_http_client
+from companion_onebot_bridge.owner_send import OwnerSendGuard
 from tests.conftest import run
-from tests.test_onebot_capture import source_window
+from tests.native_continuous_support import Host
+from tests.poke_authority_fixture import environment as native_environment
+from tests.support.onebot import provider
+from tests.test_cumulative_budget import policy as quota_policy
+from tests.test_cumulative_budget import view
+from tests.test_onebot_capture import real_core_http, source_window
 from tests.test_onebot_direct import raw_event
+from tests.test_owner_authority import activate
 from tests.test_poke import native_frame
 from tests.test_private_companion import companion_options
+from tests.test_social_owner_authority import stop
+
+
+@asynccontextmanager
+async def poke_host(core, tmp_path, *, decision="poke", protocol_reply=None, quota=None):
+    core.clock.now = datetime.now(UTC).replace(microsecond=0)
+    env = native_environment(core, tmp_path)
+    core.settings.poke_policy = PokePolicy(enabled=True, allow_native=True, coalesce_seconds=0)
+    if quota is not None:
+        quota_policy(core, account=quota)
+        with core.store.transaction():
+            cumulative.activate(core.store, core.settings, core.clock())
+    grant = OwnerGrantPolicy.model_validate({**env.approval.policy.model_dump(),
+        "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
+        "capability_policies": {"poke": paid_budget.sha(core.settings.poke_policy.model_dump())}})
+    authority = activate(core, grant, revision=env.approval.authority.revision,
+                         operation="native-poke-fixture")[0]["authority"]
+    cfg = replace(env.config, owner_authority=authority,
+        capture_signing_key=env.key.private_bytes_raw().hex(), data_dir=str(tmp_path / "bridge"),
+        onebot_http_url="http://127.0.0.1:3000", onebot_ws_url="ws://127.0.0.1:3001")
+    sends, calls = [], []
+
+    async def native(request):
+        result = protocol_reply(request) if protocol_reply else None
+        if hasattr(result, "__await__"):
+            result = await result
+        return result if result is not None else provider(request, sends)
+
+    def model(request):
+        calls.append(request)
+        choice = {"kind": decision, **({"text": "怎么啦"} if decision == "text" else {})}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(choice)}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
+
+    async with real_core_http(core) as port:
+        cfg = replace(cfg, core_url=f"http://127.0.0.1:{port}")
+        async with private_http_client(cfg.core_url, cfg.bridge_token) as client, (
+            private_http_client(cfg.onebot_http_url, cfg.onebot_token,
+                                transport=httpx.MockTransport(native))
+        ) as protocol, httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
+            original = core.model
+            core.model = ModelClient(core.settings, model_http)
+            active = Host(core, cfg, client, protocol)
+            try:
+                yield active, sends, calls
+            finally:
+                active.spool.close()
+                core.model = original
+
+
+async def capture_poke(active, *, flush=True):
+    raw = json.dumps(native_frame(int(active.core.clock.now.timestamp())))
+    assert await owner_pokes.put(active.runtime, active.client, raw, active.core.clock.now,
+                                 ("127.0.0.1", 9000))
+    receipt = json.loads(active.db.execute(
+        "SELECT capture_json FROM window_inputs ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+    if flush:
+        assert await active.runtime.flush_one(active.client)
+    return receipt
+
+
+def capture_owner(active):
+    raw = json.dumps(raw_event(2, text="等等，先说这件事",
+                              time=int(active.core.clock.now.timestamp())))
+    event = normalize(raw, active.config, now=active.core.clock.now.timestamp())
+    active.runtime.persist_capture(event, raw, received_at=active.core.clock.now,
+                                   peer=("127.0.0.1", 9000))
+    return event["event_id"]
+
 
 
 def options(core):
@@ -29,6 +109,15 @@ def options(core):
     return value
 
 
+async def admit(window, client):
+    source, observed = queue(window)
+    assert isinstance(observed, pokes.ObservedPoke)
+    await continuous.capture_observed(window, client, None, observed)
+    source.consume(observed)
+    return observed
+
+
+
 async def silent(ws):
     await ws.wait_closed()
 
@@ -38,14 +127,6 @@ def queue(window):
     frame = native_frame(int(window.clock().timestamp()))
     pokes.put(source, json.dumps(frame), window.clock(), ("127.0.0.1", 9000))
     return source, source.first()
-
-
-async def admit(window, client):
-    source, observed = queue(window)
-    assert isinstance(observed, pokes.ObservedPoke)
-    await continuous.capture_observed(window, client, None, observed)
-    source.consume(observed)
-    return observed
 
 
 def test_native_notice_canonicalization_agrees_with_http_contract():
@@ -72,58 +153,6 @@ def test_poke_intake_is_closed_without_explicit_window_scope(core, tmp_path):
     run(scenario())
 
 
-def test_signed_poke_tampering_cannot_be_recovered_as_an_authenticated_notice(core, tmp_path):
-    async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-                                 scope_options=options(core)) as (window, _, _, _, _):
-            _, observed = queue(window)
-            for value in ({"signature": "0" * 128}, {"window_sha256": "0" * 64},
-                          {"source_event_id": observed.receipt["source_event_id"] + "-changed"},
-                          {"notice": observed.receipt["notice"] | {"suffix": "changed"}}):
-                with pytest.raises(ValueError, match="AUTHENTICATED_POKE_REQUIRED"):
-                    pokes.verify(window, observed.receipt | value)
-
-    run(scenario())
-
-
-def test_poke_uses_existing_cumulative_input_ledger_and_duplicate_does_not_spend_again(
-    core, tmp_path,
-):
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    from companion_onebot_bridge import cumulative
-    from companion_onebot_bridge.spool import Spool
-    from companion_onebot_bridge.window import TestWindow
-    from tests.test_cumulative_budget import view
-    from tests.test_cumulative_window import bind_policy
-    from tests.test_live_text_window import live_clients, live_fixture
-
-    key = Ed25519PrivateKey.generate().private_bytes_raw().hex()
-    cfg, plan = live_fixture(core, tmp_path, bridge_options={"capture_signing_key": key},
-                             **options(core))
-    plan = bind_policy(core, plan, account={"owner_inputs": 1, "send_attempts": 1})
-
-    async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, _, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                observed = await admit(window, client)
-                source, repeated = queue(window)
-                assert repeated is None and source.first() is None
-                await pokes.receive(window, client, observed)
-                assert len(cumulative.inspect(window)["items"]) == 1
-                assert len(view(core)["operations"]) == 1
-                core.clock.advance(1)
-                _, second = queue(window)
-                with pytest.raises(ValueError, match="CUMULATIVE_ACCOUNT_OWNER_INPUTS_CAP"):
-                    await continuous.capture_observed(window, client, protocol, second)
-                assert window.count("window_inputs") == 1 and sends == []
-                assert core.store.one("SELECT COUNT(*) AS n FROM events")["n"] == 1
-
-    run(scenario())
-
-
 @pytest.mark.parametrize("change", [
     {"group_id": 90001}, {"sender_id": 10003}, {"user_id": 10003}, {"target_id": 10001},
     {"self_id": 10003}, {"sender_id": True}, {"time": True}, {"action": "x" * 81},
@@ -136,86 +165,120 @@ def test_unsupported_notices_cannot_become_owner_pokes(change):
         pokes.notice(native_frame() | change, config())
 
 
+def test_signed_poke_tampering_cannot_be_recovered_as_an_authenticated_notice(core, tmp_path):
+    async def scenario():
+        async with poke_host(core, tmp_path) as (active, _, _):
+            receipt = await capture_poke(active, flush=False)
+            for value in ({"signature": "0" * 128},
+                          {"authority": receipt["authority"] | {"revision": 99}},
+                          {"source_event_id": receipt["source_event_id"] + "-changed"},
+                          {"notice": receipt["notice"] | {"suffix": "changed"}}):
+                response = await active.client.post("/internal/v1/pokes", json=receipt | value)
+                assert response.status_code in {403, 409}, response.text
+                assert not core.store.rows("SELECT * FROM events")
+            active.runtime.verify()
+    run(scenario())
+
+
+def test_poke_uses_existing_cumulative_input_ledger_and_duplicate_does_not_spend_again(
+    core, tmp_path,
+):
+    async def scenario():
+        async with poke_host(core, tmp_path, quota={"owner_inputs": 1, "send_attempts": 1}) as (
+            active, sends, _,
+        ):
+            receipt = await capture_poke(active)
+            assert len(view(core)["operations"]) == 1
+            assert await owner_pokes.put(active.runtime, active.client,
+                json.dumps(native_frame(int(core.clock.now.timestamp()))), core.clock.now,
+                ("127.0.0.1", 9000))
+            assert not await active.runtime.flush_one(active.client)
+            repeated = await active.client.post("/internal/v1/pokes", json=receipt)
+            assert repeated.status_code == 200 and repeated.json()["duplicate"]
+            assert len(view(core)["operations"]) == 1
+            core.clock.advance(1)
+            await capture_poke(active, flush=False)
+
+            async def read_error(response):
+                if response.status_code == 429:
+                    await response.aread()
+
+            active.client.event_hooks["response"].append(read_error)
+            with pytest.raises(httpx.HTTPStatusError) as error:
+                await active.runtime.flush_one(active.client)
+            assert error.value.response.json()["error"] == "CUMULATIVE_LIMIT_EXHAUSTED"
+            assert len(view(core)["operations"]) == 1 and sends == []
+            assert core.store.one("SELECT COUNT(*) n FROM events")["n"] == 1
+            assert active.db.execute(
+                "SELECT COUNT(*) FROM inbox WHERE state='accepted'").fetchone()[0] == 1
+    run(scenario())
+
+
 def test_poke_buffer_deduplicates_without_interrupting_owner_turn(core, tmp_path):
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-                                 scope_options=options(core)) as (window, client, _, _, _):
-            source, observed = queue(window)
-            source2, duplicate = queue(window)
-            assert duplicate.event_id == observed.event_id
-            assert continuous.pending_input(window, "evt_current") is None
-            assert window.db.execute("SELECT COUNT(*) FROM automatic_received").fetchone()[0] == 1
-            raw = json.dumps(raw_event(1))
-            event_id = continuous.capture.input_event(window, raw, window.clock())[1]["event_id"]
-            source.put(raw, window.clock(), ("127.0.0.1", 9000), event_id)
-            assert continuous.pending_input(window, observed.event_id) == event_id
-            response = await continuous.capture_observed(window, client, None, observed)
-            source2.consume(observed)
-            assert response == {"poke_received": observed.event_id}
-            row = window.db.execute("SELECT * FROM window_inputs").fetchone()
-            assert row["state"] == "ACK" and pokes.admitted(window, observed.event_id)
-            assert "拍了拍" not in row["capture_json"]
+        async with poke_host(core, tmp_path) as (active, _, _):
+            receipt = await capture_poke(active, flush=False)
+            assert await capture_poke(active, flush=False) == receipt
+            assert active.captures() == 1
+            guard = OwnerSendGuard(active.runtime, active.client)
+            guard.current_item = {"delivery_key": "poke-response:synthetic",
+                                  "authority": active.runtime.authority,
+                                  "origin_event_id": receipt["event_id"]}
+            assert guard.pending_input() is None
+            owner_id = capture_owner(active)
+            assert guard.pending_input() == owner_id
+            assert await active.runtime.flush_one(active.client)
+            assert active.db.execute("SELECT state FROM inbox WHERE key=?",
+                                     (receipt["event_id"],)).fetchone()[0] == "accepted"
             assert core.store.one("SELECT event_type FROM events")["event_type"] == "notice.poke"
-            window.verify()
-
+            assert core.store.one("SELECT reply_revision FROM conversations")["reply_revision"] == 0
+            active.runtime.verify()
     run(scenario())
 
 
 def test_lost_poke_ack_recovers_after_stop_without_new_job(core, tmp_path):
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-                                 scope_options=options(core)) as (window, client, _, _, _):
-            _, observed = queue(window)
+        async with poke_host(core, tmp_path) as (active, _, _):
+            receipt = await capture_poke(active, flush=False)
 
             async def lost(response):
-                if response.request.url.path.endswith("/live-text/pokes"):
+                if response.request.url.path == "/internal/v1/pokes":
                     raise httpx.ReadError("lost synthetic ACK")
 
-            client.event_hooks["response"].append(lost)
+            active.client.event_hooks["response"].append(lost)
             with pytest.raises(httpx.ReadError):
-                await continuous.capture_observed(window, client, None, observed)
-            assert window.count("window_inputs", "state='POKE_PENDING'") == 1
-            client.event_hooks["response"].remove(lost)
-            await window.stop_live(client, "OWNER_STOP")
-            jobs = core.store.one("SELECT COUNT(*) AS n FROM jobs")["n"]
-            assert await pokes.flush(window, client)
-            assert core.store.one("SELECT COUNT(*) AS n FROM jobs")["n"] == jobs
-            assert window.count("window_inputs", "state='ACK'") == 1
-            assert not window.db.execute("SELECT 1 FROM automatic_received").fetchone()
-            window.verify(active=False)
-
+                await active.runtime.flush_one(active.client)
+            assert active.db.execute("SELECT state FROM inbox").fetchone()[0] == "pending"
+            active.client.event_hooks["response"].remove(lost)
+            stop(core, active.runtime.authority)
+            active.runtime.stop()
+            jobs = core.store.rows("SELECT * FROM jobs")
+            # Recovery admits no work and uses the original receipt after STOP.
+            await owner_pokes.flush(active.runtime, active.client, receipt)
+            assert core.store.rows("SELECT * FROM jobs") == jobs
+            assert active.db.execute("SELECT state FROM inbox").fetchone()[0] == "accepted"
+            active.runtime.verify(active=False)
     run(scenario())
 
 
 @pytest.mark.parametrize("decision", ["poke", "text", "none"])
 def test_poke_model_result_dispatch_uses_real_receipt(core, tmp_path, decision):
-    native, requests = [], []
+    native = []
 
     def protocol_reply(request):
         if request.url.path == "/friend_poke":
             native.append(request)
             return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": None})
 
-    def respond(request):
-        requests.append(request)
-        result = {"kind": decision} | ({"text": "怎么啦"} if decision == "text" else {})
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(result)}}],
-                                       "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
-
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-                                 scope_options=options(core), protocol_reply=protocol_reply) as (
-            window, client, protocol, _, sends,
-        ), httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
-            core.model = ModelClient(core.settings, model)
-            observed = await admit(window, client)
+        async with poke_host(core, tmp_path, decision=decision, protocol_reply=protocol_reply) as (
+            active, sends, requests,
+        ):
+            receipt = await capture_poke(active)
             assert await core.run_once("poke-synthetic")
             assert len(requests) == 1
-            operation = continuous.AutomaticSend(window, client)
-            async with window.core_http(client) as scoped:
-                changed = await deliver_tick(scoped, WindowOneBot(operation, protocol),
-                                             window.spool, guard=operation)
-            assert changed == (decision != "none")
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert await active.pump() == (decision != "none")
             assert len(native) == int(decision == "poke")
             assert len(sends) == int(decision == "text")
             if decision == "poke":
@@ -223,11 +286,11 @@ def test_poke_model_result_dispatch_uses_real_receipt(core, tmp_path, decision):
                 assert result["state"] == "SENT" and result["provider_message_id"] is None
                 assert json.loads(result["native_ack_json"])["response_sha256"] == content_hash(
                     {"status": "ok", "retcode": 0, "data": None})
-            assert window.count("window_inputs", "state='ACK'") == 1
+            assert active.db.execute("SELECT state FROM inbox").fetchone()[0] == "accepted"
             assert core.store.one("SELECT reply_revision FROM events WHERE event_id=?",
-                                  (observed.event_id,))["reply_revision"] == 0
-            window.verify()
-
+                                  (receipt["event_id"],))["reply_revision"] == 0
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            active.runtime.verify()
     run(scenario())
 
 
@@ -245,29 +308,23 @@ def test_dispatched_poke_without_positive_ack_stays_unknown_and_is_not_retried(
             return httpx.Response(200, json={"status": "failed", "retcode": 1, "data": None})
 
     async def scenario():
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-                                 scope_options=options(core), protocol_reply=protocol_reply) as (
-            window, client, protocol, _, sends,
-        ), httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
-            "choices": [{"message": {"content": '{"kind":"poke"}'}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        }))) as model:
-            core.model = ModelClient(core.settings, model)
-            await admit(window, client)
+        async with poke_host(core, tmp_path, protocol_reply=protocol_reply) as (active, sends, _):
+            await capture_poke(active)
             assert await core.run_once("poke-synthetic")
-            operation = continuous.AutomaticSend(window, client)
-            async with window.core_http(client) as scoped:
-                assert await deliver_tick(scoped, WindowOneBot(operation, protocol),
-                                          window.spool, guard=operation)
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert await active.pump()
             assert len(native) == 1 and sends == []
-            assert window.row()["state"] == "STOPPED"
-            assert window.count("window_attempts", "state='UNKNOWN'") == 1
+            assert active.runtime.row()["state"] == "STOPPED"
+            assert active.attempts() == {"UNKNOWN": 1}
             assert core.store.one("SELECT state FROM outbox")["state"] == "DELIVERY_UNCERTAIN"
-            assert (await continuous.run(window, client, protocol))["state"] == "STOPPED"
+            active.restart()
+            with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                await active.pump()
             assert len(native) == 1
-            result = json.loads(window.db.execute("SELECT body FROM results").fetchone()[0])
+            result = json.loads(active.db.execute("SELECT body FROM results").fetchone()[0])
             assert "native_ack" not in result and "provider_message_id" not in result
-
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            active.runtime.verify(active=False)
     run(scenario())
 
 
@@ -284,44 +341,30 @@ def test_new_owner_input_at_final_native_boundary_has_core_not_sent_proof(
             return httpx.Response(200, json={"status": "ok", "retcode": 0, "data": None})
 
     async def scenario():
-        payload = {"kind": decision} | ({"text": "怎么啦"} if decision == "text" else {})
-        async with source_window(core, tmp_path, silent, live=True, approved=True,
-                                 scope_options=options(core), protocol_reply=protocol_reply) as (
-            window, client, protocol, _, sends,
-        ), httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
-            "choices": [{"message": {"content": json.dumps(payload)}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        }))) as model:
-            core.model = ModelClient(core.settings, model)
-            await admit(window, client)
+        async with poke_host(core, tmp_path, decision=decision, protocol_reply=protocol_reply) as (
+            active, sends, _,
+        ):
+            await capture_poke(active)
             assert await core.run_once("poke-synthetic")
-            receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
-
-            def queue_owner():
-                frame = json.dumps(raw_event(2, text="等等，先说这件事"))
-                event = continuous.capture.input_event(window, frame, window.clock())[1]
-                receiver.put(frame, window.clock(), ("127.0.0.1", 9000), event["event_id"])
+            usage = core.store.rows("SELECT * FROM model_usage")
 
             async def before(request):
                 if phase == "request" and request.url.path in {"/friend_poke", "/send_private_msg"}:
-                    queue_owner()
+                    capture_owner(active)
 
             async def approved(response):
                 if phase == "core_approved" and response.request.url.path.endswith("/send-check"):
-                    queue_owner()
+                    capture_owner(active)
 
-            protocol.event_hooks["request"].append(before)
-            client.event_hooks["response"].append(approved)
-            operation = continuous.AutomaticSend(window, client)
-            async with window.core_http(client) as scoped:
-                assert await deliver_tick(scoped, WindowOneBot(operation, protocol),
-                                          window.spool, guard=operation)
-            assert not operation.dispatched and attempted == sends == []
-            assert window.row()["state"] == "OPEN"
-            assert window.count("window_attempts", "state='NOT_SENT'") == 1
+            active.protocol.event_hooks["request"].append(before)
+            active.client.event_hooks["response"].append(approved)
+            assert await active.pump()
+            assert attempted == sends == []
+            assert active.runtime.row()["state"] == "ACTIVE"
+            assert active.attempts() == {"NOT_SENT": 1}
             assert core.store.one("SELECT state FROM outbox")["state"] == "CANCELLED"
-            result = json.loads(window.db.execute("SELECT body FROM results").fetchone()[0])
+            result = json.loads(active.db.execute("SELECT body FROM results").fetchone()[0])
             assert result["result"] == "NOT_SENT" and result["core_receipt"]["cancelled"] is True
-            window.verify()
-
+            assert core.store.rows("SELECT * FROM model_usage") == usage
+            active.runtime.verify()
     run(scenario())

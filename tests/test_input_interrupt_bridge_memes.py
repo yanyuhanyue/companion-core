@@ -3,22 +3,23 @@
 import asyncio
 import base64
 import json
+from contextlib import asynccontextmanager
+from datetime import datetime
 
 import httpx
 import pytest
 
 from companion.core import Core
 from companion.model import ModelClient
-from companion_onebot_bridge import capture, continuous
+from companion_onebot_bridge import app, owner_notices
+from companion_onebot_bridge.event_normalizer import normalize
+from companion_onebot_bridge.owner_memes import MemePump
+from companion_onebot_bridge.profile_probe import ProfilePump
 from tests.conftest import run
-from tests.test_continuous_private_replies import worker
+from tests.native_continuous_support import frame, host, recall_frame, until
 from tests.test_input_interrupt_bridge import model_response
+from tests.test_meme_runtime import RULE
 from tests.test_next_memes_catalog import metadata, png
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
-from tests.test_owner_recall_bridge import recall_frame
-from tests.test_owner_recall_bridge_media import advance_clock
 from tests.test_private_companion import companion_options
 
 
@@ -31,6 +32,16 @@ def options(core, *, discovery=False):
     return value
 
 
+@asynccontextmanager
+async def meme_host(core, tmp_path, source, *, discovery=False, **kwargs):
+    async with host(core, tmp_path, source,
+        purposes=("chat", "meme", "expression"),
+        core_options=options(core, discovery=discovery)["core_options"],
+        bridge_options={"meme_enabled": True, "meme_discovery_enabled": discovery,
+                        "meme_trusted_sources": (RULE,)}, **kwargs) as values:
+        yield values
+
+
 @pytest.mark.parametrize("outcome", ["sent", "missing", "unknown"])
 def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
     core, tmp_path, monkeypatch, outcome,
@@ -38,11 +49,10 @@ def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
     from companion import api
 
     calls, invoked, instances = [], [], []
-    runtime = None
-    candidate = None
+    runtime = candidate = None
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="太棒了，成功了")))
+        await ws.send(frame(1, text="太棒了，成功了"))
         await ws.wait_closed()
 
     def construct(*args, **kwargs):
@@ -65,67 +75,64 @@ def test_selected_catalog_bytes_use_real_api_independent_worker_and_receipts(
     async def scenario():
         nonlocal runtime, candidate
         monkeypatch.setattr(api, "Core", construct)
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True,
-            scope_options=options(core), bridge_options={"meme_enabled": True},
-            independent_api=True, protocol_reply=protocol_reply,
-        ) as (window, client, protocol, _, sends), httpx.AsyncClient(
+        async with meme_host(core, tmp_path, source, independent_api=True,
+            protocol_reply=protocol_reply) as (window, _, sends, _), httpx.AsyncClient(
             transport=httpx.MockTransport(answer),
         ) as model_http:
-            runtime = window.memes
-            candidate = runtime.catalog.add(png(), metadata(), check=lambda: None)
-            independent = Core(core.settings, model=ModelClient(core.settings, model_http),
-                               clock=core.clock)
-            stop, pause = asyncio.Event(), asyncio.Event()
-
-            def emitted(kind, **values):
-                if kind == "automatic_input_delivered":
-                    pause.set()
-
-            monkeypatch.setattr(continuous, "emit", emitted)
-            task = asyncio.create_task(worker(independent, stop))
-            clock = asyncio.create_task(advance_clock(core, stop))
-            try:
-                result = await asyncio.wait_for(
-                    continuous.run(window, client, protocol, pause=pause), 20,
-                )
-                assert len(calls) == len(invoked) == 1
-                assert candidate in json.dumps(calls[0], ensure_ascii=False)
+            runtime = window.runtime.memes
+            candidate = runtime.catalog.add(png(), metadata(), check=window.runtime.verify)
+            await window.capture()
+            await window.flush()
+            with Core(core.settings, model=ModelClient(core.settings, model_http),
+                      clock=core.clock) as independent:
+                assert await independent.run_once()
                 assert instances[0] is not independent
                 assert instances[0].store is not independent.store
-                pin = runtime.db.execute("SELECT state,sent_at FROM meme_pins").fetchone()
-                if outcome == "unknown":
-                    assert result["state"] == "STOPPED" and pin[0] == "UNKNOWN"
-                    assert sends == [] and pin[1] is None
-                    assert (await continuous.run(window, client, protocol))["state"] == "STOPPED"
-                    assert len(invoked) == 1
+            assert await window.pump()
+            assert len(calls) == len(invoked) == 1
+            assert candidate in json.dumps(calls[0], ensure_ascii=False)
+            pin = runtime.db.execute("SELECT state,sent_at FROM meme_pins").fetchone()
+            if outcome == "unknown":
+                assert window.runtime.row()["state"] == "STOPPED" and pin[0] == "UNKNOWN"
+                assert sends == [] and pin[1] is None
+                with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                    window.runtime.verify()
+                before = core.store.rows("SELECT * FROM model_usage")
+                deliveries = core.store.rows("SELECT * FROM outbox")
+                with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+                    await window.pump()
+                assert len(invoked) == 1
+                assert core.store.rows("SELECT * FROM model_usage") == before
+                assert core.store.rows("SELECT * FROM outbox") == deliveries
+                assert deliveries[0]["state"] == "DELIVERY_UNCERTAIN"
+            else:
+                assert window.runtime.row()["state"] == "ACTIVE" and len(sends) == 1
+                parts = sends[0]["message"]
+                assert parts[0] == {"type": "text", "data": {"text": "完成啦！"}}
+                if outcome == "sent":
+                    assert len(parts) == 2 and pin[0] == "SENT" and pin[1] is not None
+                    assert parts[1]["data"]["file"] == "base64://" + base64.b64encode(
+                        png()).decode("ascii")
                 else:
-                    assert result["state"] == "OPEN" and len(sends) == 1
-                    parts = sends[0]["message"]
-                    assert parts[0] == {"type": "text", "data": {"text": "完成啦！"}}
-                    if outcome == "sent":
-                        assert len(parts) == 2 and pin[0] == "SENT" and pin[1] is not None
-                        assert parts[1]["data"]["file"] == "base64://" + base64.b64encode(
-                            png()).decode("ascii")
-                    else:
-                        assert len(parts) == 1 and pin[0] == "CANCELLED"
-                assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")[
-                    "n"] == 1
-            finally:
-                stop.set()
-                await asyncio.gather(task, clock)
-                independent.close()
-
+                    assert len(parts) == 1 and pin[0] == "CANCELLED"
+            assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")[
+                "n"] == 1
     run(scenario())
 
 
 @pytest.mark.parametrize("control", ["recall", "new_input", "duplicate"])
 def test_received_control_fences_prepared_meme_before_dispatch(core, tmp_path, control):
-    runtime = receiver = None
     invoked = []
+    number = 0
+    original = None
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="太棒了，成功了")))
+        nonlocal number, original
+        number += 1
+        if number == 1:
+            original = frame(1, text="太棒了，成功了")
+        await ws.send(original if number == 1 or control == "duplicate"
+                      else frame(2, text="换个话题"))
         await ws.wait_closed()
 
     def remote(request):
@@ -133,49 +140,47 @@ def test_received_control_fences_prepared_meme_before_dispatch(core, tmp_path, c
             invoked.append(request)
 
     async def scenario():
-        nonlocal runtime, receiver
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=options(core),
-                                 bridge_options={"meme_enabled": True}, protocol_reply=remote) as (
-            window, client, protocol, _, sends,
+        async with meme_host(core, tmp_path, source, protocol_reply=remote) as (
+            window, _, sends, _,
         ):
-            runtime = window.memes
-            candidate = runtime.catalog.add(png(), metadata(), check=lambda: None)
+            runtime = window.runtime.memes
+            candidate = runtime.catalog.add(png(), metadata(), check=window.runtime.verify)
             async with httpx.AsyncClient(transport=httpx.MockTransport(
                 lambda request: model_response("完成啦！⬡" + candidate + "⬡"),
             )) as model_http:
                 core.model = ModelClient(core.settings, model_http)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                await window.capture()
+                await window.flush()
                 assert await core.run_once()
-                receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
 
                 async def before(request):
                     if request.url.path == "/send_private_msg":
                         assert runtime.db.execute("SELECT state FROM meme_pins").fetchone()[0] == (
                             "PREPARED")
                         if control == "recall":
-                            receiver.put_recall(recall_frame(), core.clock.now,
-                                                ("127.0.0.1", 12345))
+                            owner_notices.put(window.runtime, recall_frame(), core.clock.now,
+                                              ("127.0.0.1", 12345))
+                        elif control == "new_input":
+                            await window.capture(2)
                         else:
-                            frame = json.dumps(raw_event(
-                                2 if control == "new_input" else 1,
-                                text="换个话题" if control == "new_input" else "太棒了，成功了",
-                            ))
-                            _, event = capture.input_event(window, frame, core.clock.now)
-                            receiver.put(frame, core.clock.now, ("127.0.0.1", 12345),
-                                         event["event_id"])
+                            # Replay the exact previously authenticated frame and original receipt.
+                            capture = json.loads(window.db.execute(
+                                "SELECT capture_json FROM window_inputs").fetchone()[0])
+                            assert not window.runtime.persist_capture(
+                                normalize(original, window.config), original,
+                                received_at=datetime.fromisoformat(capture["received_at"]),
+                                peer=("127.0.0.1", 12345))
 
-                protocol.event_hooks["request"].append(before)
-                result = await window.send_once(client, protocol, reply_approval(window.plan, core))
-                assert result["state"] == "OPEN"
+                window.protocol.event_hooks["request"].append(before)
+                assert await window.pump()
+                assert window.runtime.row()["state"] == "ACTIVE"
                 if control == "duplicate":
-                    assert result["attempt_states"] == {"ACK": 1}
+                    assert window.attempts() == {"ACK": 1}
                     assert len(sends) == len(invoked) == 1
                     assert runtime.db.execute("SELECT state FROM meme_pins").fetchone()[0] == "SENT"
-                    assert receiver.first() is None
+                    assert window.spool.pending_count == 0
                 else:
-                    assert result["attempt_states"] == {"NOT_SENT": 1}
+                    assert window.attempts() == {"NOT_SENT": 1}
                     assert sends == invoked == []
                     assert runtime.db.execute("SELECT state FROM meme_pins").fetchone()[0] == (
                         "CANCELLED")
@@ -183,8 +188,7 @@ def test_received_control_fences_prepared_meme_before_dispatch(core, tmp_path, c
                     if control == "new_input":
                         assert core.store.one("SELECT reply_revision FROM conversations")[
                             "reply_revision"] == 1
-                        assert receiver.first() is not None
-
+                        assert window.spool.pending_count == 1
     run(scenario())
 
 
@@ -193,16 +197,16 @@ def test_idle_discovery_yields_to_new_input_without_stopping_chat(core, tmp_path
     public_calls, model_calls = [], []
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="太棒了，成功了")))
-        await started.wait()
-        await ws.send(json.dumps(raw_event(2, text="换个话题，聊聊阅读")))
+        await ws.send(frame(1, text="太棒了，成功了"))
+        await asyncio.wait_for(started.wait(), 20)
+        await ws.send(frame(2, text="换个话题，聊聊阅读"))
         await ws.wait_closed()
 
     async def public(request):
         public_calls.append(request)
         started.set()
         try:
-            await asyncio.Future()
+            await asyncio.Event().wait()
         finally:
             cancelled.set()
 
@@ -214,64 +218,48 @@ def test_idle_discovery_yields_to_new_input_without_stopping_chat(core, tmp_path
         return model_response("好，我们聊聊。")
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=options(core, discovery=True), bridge_options={
-                                     "meme_enabled": True, "meme_discovery_enabled": True,
-                                 }) as (window, client, protocol, _, sends), httpx.AsyncClient(
-            transport=httpx.MockTransport(answer),
-        ) as model_http:
-            window.memes.transport = httpx.MockTransport(public)
-            window.memes.resolver = resolver
-            core.model = ModelClient(core.settings, model_http)
-            stop, pause = asyncio.Event(), asyncio.Event()
-
-            def emitted(kind, **values):
-                if kind == "automatic_input_delivered" and len(sends) == 2:
-                    pause.set()
-
-            monkeypatch.setattr(continuous, "emit", emitted)
-            task = asyncio.create_task(worker(core, stop))
-            clock = asyncio.create_task(advance_clock(core, stop))
+        async with meme_host(core, tmp_path, source, discovery=True, model_reply=answer) as (
+            window, _, sends, _,
+        ):
+            window.runtime.memes.transport = httpx.MockTransport(public)
+            window.runtime.memes.resolver = resolver
+            pump = MemePump(window.runtime, window.client)
+            profile = ProfilePump(window.runtime, window.client, window.protocol)
+            window.start()
+            task = asyncio.create_task(app.discover_memes(pump, window.stop, profile))
             try:
-                result = await asyncio.wait_for(
-                    continuous.run(window, client, protocol, pause=pause), 20,
-                )
-                assert result["state"] == "OPEN" and result["attempt_states"] == {"ACK": 2}
-                assert cancelled.is_set() and len(public_calls) == 1
-                assert len(model_calls) == 2
+                await until(lambda: cancelled.is_set() and window.attempts() == {"ACK": 2},
+                    tasks=[task, *window.tasks], deadline_seconds=20)
+                assert window.runtime.row()["state"] == "ACTIVE"
+                assert len(sends) == 2 and len(public_calls) == 1 and len(model_calls) == 2
                 assert core.store.one("SELECT state FROM meme_discovery_reservations")[
                     "state"] == "UNKNOWN"
                 assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")[
                     "n"] == 2
             finally:
-                stop.set()
-                await asyncio.gather(task, clock)
-
+                started.set()
+                await window.pause()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await pump.close()
     run(scenario())
 
 
 def test_capture_replays_frozen_offer_after_lost_core_approval_ack(core, tmp_path):
     requests = []
+    number = 0
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="太棒了，成功了")))
+        nonlocal number
+        number += 1
+        await ws.send(frame(number, text="太棒了，成功了" if number == 1 else "换个话题"))
         await ws.wait_closed()
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=options(core),
-                                 bridge_options={"meme_enabled": True}) as (
-            window, client, protocol, _, sends,
-        ):
-            runtime = window.memes
-            original = runtime.catalog.add(png(), metadata(), check=lambda: None)
-            await window.capture_once(client, protocol)
-            approval = capture_approval(window)
-            row = window.db.execute("SELECT * FROM window_inputs").fetchone()
-            event = json.loads(window.db.execute("SELECT body FROM inbox").fetchone()[0])
-            receipt = json.loads(row["capture_json"])
-            first = {key: value for key, value in approval.items() if key != "capture_sha256"}
-            first.update(capture=receipt, meme_offer=runtime.prepare_offer(event, receipt))
+        async with meme_host(core, tmp_path, source) as (window, _, sends, _):
+            runtime = window.runtime.memes
+            original = runtime.catalog.add(png(), metadata(), check=window.runtime.verify)
+            await window.capture()
 
             async def lost_ack(response):
                 if response.request.url.path.endswith("/inputs/approve"):
@@ -280,22 +268,20 @@ def test_capture_replays_frozen_offer_after_lost_core_approval_ack(core, tmp_pat
                     if len(requests) == 1:
                         raise httpx.ReadTimeout("synthetic accepted approval ACK lost")
 
-            client.event_hooks["response"].append(lost_ack)
+            window.client.event_hooks["response"].append(lost_ack)
             with pytest.raises(httpx.ReadTimeout):
-                await window.core_post(client, "/internal/v1/live-text/inputs/approve", first)
-            assert window.db.execute("SELECT state FROM window_inputs").fetchone()[0] == "CAPTURED"
+                await window.runtime.flush_one(window.client)
+            assert window.spool.pending_count == 1
             runtime.catalog.remove(original)
-            later = runtime.catalog.add(png("red"), metadata(), check=lambda: None)
-            receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
-            frame = json.dumps(raw_event(2, text="换个话题"))
-            _, pending = capture.input_event(window, frame, core.clock.now)
-            receiver.put(frame, core.clock.now, ("127.0.0.1", 12345), pending["event_id"])
-            result = await window.approve_captured(client, approval)
-            assert result["state"] == "OPEN" and sends == []
+            later = runtime.catalog.add(png("red"), metadata(), check=window.runtime.verify)
+            await window.capture(2)
+            assert await window.runtime.flush_one(window.client)
+            assert window.runtime.row()["state"] == "ACTIVE" and sends == []
             assert len(requests) == 2 and requests[0] == requests[1]
             candidates = requests[1]["meme_offer"]["candidates"]
             assert [item["candidate_id"] for item in candidates] == [original]
             assert later not in {item["candidate_id"] for item in candidates}
-            assert window.db.execute("SELECT state FROM window_inputs").fetchone()[0] == "APPROVED"
-
+            assert window.spool.pending_count == 1
+            assert [row[0] for row in window.db.execute(
+                "SELECT state FROM inbox ORDER BY rowid")] == ["accepted", "pending"]
     run(scenario())

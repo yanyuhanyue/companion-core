@@ -13,6 +13,7 @@ from companion import budget, cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelClient, ModelResponse
 from companion.store import uid
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
@@ -50,16 +51,18 @@ def policy(core, **changes):
     return scope
 
 
-def enable(core, tmp_path, **changes):
+def enable(core, tmp_path, *, lease_seconds=None, **changes):
     approved_live(core, tmp_path)
     scope = policy(core, **changes)
     with core.store.transaction():
         cumulative.activate(core.store, core.settings, core.clock())
+    authorized_job(core, lease_seconds=lease_seconds)
     return scope
 
 
 def reserve(core, **kwargs):
-    return budget.reserve(core.store, core.settings, None, "chat", MESSAGES, core.clock(),
+    return budget.reserve(core.store, core.settings, authorized_job(core),
+                          "chat", MESSAGES, core.clock(),
                           clock=core.clock, **kwargs)
 
 
@@ -83,7 +86,8 @@ def test_all_model_limits_apply_before_reservation(core, tmp_path, period, dimen
 @pytest.mark.parametrize("boundary", ["2026-10-19T15:59:59+00:00", "2026-10-31T15:59:59+00:00"])
 def test_local_midnight_changes_period_but_preserves_account(core, tmp_path, boundary):
     core.clock.now = datetime.fromisoformat(boundary)
-    enable(core, tmp_path, day={"model_attempts": 1}, account={"model_attempts": 2})
+    enable(core, tmp_path, lease_seconds=2 * 86400,
+           day={"model_attempts": 1}, account={"model_attempts": 2})
     first = reserve(core)
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 30, 2))
     with pytest.raises(CoreError, match="CUMULATIVE_LIMIT_EXHAUSTED"):
@@ -101,12 +105,14 @@ def test_rotation_and_new_window_do_not_reset_prior_account_calls(core, tmp_path
     enable(core, tmp_path, account={"model_attempts": 1})
     first = reserve(core)
     budget.settle(core.store, core.settings, first, ModelResponse("ok", 30, 2))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (authorized_job(core),))
     cumulative.pause(core.store, core.settings.paid_model, core.clock())
     core.settings.model_key = SecretStr("synthetic-rotated-key")
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "second"})
     policy(core, account={"model_attempts": 1}, key_ownership_sha256="1" * 64)
     with core.store.transaction():
         cumulative.activate(core.store, core.settings, core.clock())
+    authorized_job(core, renew=True)
     with pytest.raises(CoreError, match="CUMULATIVE_LIMIT_EXHAUSTED"):
         reserve(core)
     assert len(view(core)["models"]) == 1
@@ -172,10 +178,12 @@ def test_legacy_costs_require_exact_inventory_and_are_not_reset(core, tmp_path):
     approved_live(core, tmp_path)
     request = reserve(core)
     budget.settle(core.store, core.settings, request, ModelResponse("ok", 30, 2))
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (authorized_job(core),))
     core.settings.paid_model = core.settings.paid_model.model_copy(update={"window_id": "new"})
     policy(core, account={"model_attempts": 1})
     with core.store.transaction():
         cumulative.activate(core.store, core.settings, core.clock())
+    authorized_job(core, renew=True)
     with pytest.raises(CoreError, match="CUMULATIVE_LIMIT_EXHAUSTED"):
         reserve(core)
     assert view(core)["models"][request]["micro_usd"] == 34
@@ -230,7 +238,7 @@ def test_two_processes_share_account_cap(core, tmp_path):
     config = core.settings.model_dump(mode="json")
     config["model_key"] = core.settings.model_key.get_secret_value()
     command = [sys.executable, str(script), core.settings.database,
-               json.dumps(config), core.clock()]
+               json.dumps(config), core.clock(), authorized_job(core)]
     processes = [subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True) for _ in range(2)]
     results = [process.communicate(timeout=40) for process in processes]
@@ -306,7 +314,8 @@ def test_old_database_and_latest_or_missing_journal_never_replenish(core, tmp_pa
     restored = Store(str(old))
     try:
         with pytest.raises(CoreError, match="RECONCILIATION"):
-            budget.reserve(restored, core.settings, None, "chat", MESSAGES, core.clock())
+            budget.reserve(restored, core.settings, authorized_job(core),
+                           "chat", MESSAGES, core.clock())
     finally:
         restored.close()
     assert core.model.calls == []
@@ -453,5 +462,8 @@ def test_final_http_hook_cannot_remove_enrolled_cumulative_authority(core, tmp_p
     asyncio.run(exercise())
     assert calls == []
     state = paid_budget.journal(core.store, approval, allow_settlement=True)["cumulative"]
-    assert state["models"][request]["state"] == "UNKNOWN"
-    assert state["paused"]
+    assert state["models"][request]["state"] == "SETTLED"
+    assert state["models"][request]["micro_usd"] == 0
+    assert core.store.one("SELECT 1 FROM audit_log WHERE action='model.not_dispatched'")
+    with pytest.raises(CoreError, match="CUMULATIVE_SCOPE_REQUIRED"):
+        reserve(core)

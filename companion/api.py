@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hmac
+import json
 import re
 from contextlib import asynccontextmanager, nullcontext
 from datetime import date
@@ -11,6 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from httpx import AsyncClient
+from pydantic import Field
 
 from companion import (
     __version__,
@@ -20,6 +22,9 @@ from companion import (
     live_text,
     meme_core,
     meme_service,
+    owner_authority,
+    owner_delivery,
+    owner_input,
     poke,
     qq_images,
     qq_rich,
@@ -35,10 +40,12 @@ from companion.contracts import (
     LeaseToken,
     MemoryDecision,
     SearchRequest,
+    StrictModel,
 )
 from companion.core import Core
 from companion.diary import DiaryCorrection, DiaryMode
 from companion.exploration import METERED_READS_SQL
+from companion.life_protocol import LifeConsumeRequest, TopicClosure
 from companion.media_api import register_media_routes
 from companion.memory_control import (
     MemoryControlGrant,
@@ -47,11 +54,26 @@ from companion.memory_control import (
     stopped_workers,
 )
 from companion.model import ModelClient
-from companion.poke_protocol import PokeCapture
+from companion.owner_authority_protocol import (
+    AuthorityReference,
+    OwnerAuthorityCheck,
+    OwnerCapture,
+    OwnerRecall,
+    OwnerSendCheck,
+)
+from companion.poke_protocol import OwnerPokeCapture, PokeCapture
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
 from companion.voice_node_api import register_voice_node_routes
 from companion.voice_protocol import MAX_RESULT_BODY_BYTES
+
+
+class AffectResetRequest(StrictModel):
+    request_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+class OwnerInputApproval(OwnerCapture):
+    meme_offer: meme_core.MemeOffer | None = None
 
 
 class BodyLimit:
@@ -77,7 +99,7 @@ class BodyLimit:
             else self.meme_limit
             if scope["path"] == "/internal/v1/memes/captions"
             else self.voice_limit
-            if re.fullmatch(r"/internal/v1/voice-node/jobs/voice_[a-f0-9]{32}/result",
+            if re.fullmatch(r"/internal/v2/voice-node/jobs/voice_[a-f0-9]{32}/result",
                             scope["path"])
             else self.voice_input_limit
             if re.fullmatch(r"/internal/v1/voice-inputs/[^/]+", scope["path"])
@@ -265,7 +287,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     from companion.executive_protocol import ToolDecision, ToolRequest
     from companion.exploration import ReadResult
-    from companion.goals import CommitmentRequest, GoalDecision, GoalProposal
+    from companion.goals import (
+        CommitmentRequest,
+        GoalContinuationDecision,
+        GoalDecision,
+        GoalProposal,
+    )
     from companion.observation import ObservationEvent
     from companion.policy import ConsentRequest
     from companion.privacy import epoch
@@ -280,6 +307,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     )
 
     control_auth = [Depends(control_admin)]
+    from companion.cognition_api import register_cognition_routes
+    from companion.memory_projection_api import register_memory_projection_routes
+    from companion.owner_authority_api import register_owner_authority_routes
+
+    register_owner_authority_routes(app, control_auth)
+    register_memory_projection_routes(app, control_auth)
+    register_cognition_routes(app, control_auth)
     adapter_auth = [Depends(observation_adapter)]
     register_media_routes(app, control_auth)
 
@@ -397,6 +431,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def affect_snapshot():
         return app.state.core.affect.snapshot()
 
+    @app.post("/internal/v2/affect/reset", dependencies=control_auth)
+    async def affect_reset(body: AffectResetRequest, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return core.affect.reset(core.settings.owner_qq_id, body.request_id, core.ledger)
+
     @app.get("/internal/v2/expression-learning", dependencies=control_auth)
     async def expression_learning(response: Response):
         response.headers["Cache-Control"] = "no-store"
@@ -420,6 +460,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def decide_goal(goal_id: str, body: GoalDecision):
         engine = app.state.core.goals
         return engine.accept(goal_id) if body.decision == "ACCEPT" else engine.cancel(goal_id)
+
+    @app.post("/internal/v2/goals/{goal_id}/continuation", dependencies=control_auth)
+    async def continue_goal(goal_id: str, body: GoalContinuationDecision):
+        return app.state.core.goals.continue_plan(goal_id, body)
 
     @app.post("/internal/v2/commitments", dependencies=control_auth, status_code=202)
     async def accept_commitment(body: CommitmentRequest):
@@ -459,6 +503,23 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         response.headers["Cache-Control"] = "no-store"
         core = app.state.core
         return {"draft": core.social.preview(event_id, core.settings.owner_qq_id)}
+
+    @app.get("/internal/v2/life/topics", dependencies=control_auth)
+    async def life_topics(response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return core.life_topics.preview(core.settings.owner_qq_id)
+
+    @app.post("/internal/v2/life/results/{job_id}/consume", dependencies=control_auth)
+    async def consume_life_draft(job_id: str, body: LifeConsumeRequest, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return core.life_topics.consume(job_id, body, diary=core.diary)
+
+    @app.post("/internal/v2/life/topics/{topic_id}/close", dependencies=control_auth)
+    async def close_life_topic(topic_id: str, body: TopicClosure, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return app.state.core.life_topics.close(topic_id, body.source_event_id)
 
     @app.get("/internal/v2/consolidation", dependencies=control_auth)
     async def consolidation_status():
@@ -510,6 +571,24 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def grant_consent(body: ConsentRequest):
         return app.state.core.observations.consents.grant(body)
 
+    from companion import evaluation
+    from companion.evaluation import Manifest, Submission
+
+    @app.post("/internal/v2/evaluations/preview", dependencies=control_auth)
+    async def evaluation_preview(body: Manifest):
+        core = app.state.core
+        return evaluation.preview(core.store, settings, core.clock, body)
+
+    @app.post("/internal/v2/evaluations", dependencies=control_auth, status_code=202)
+    async def evaluation_submit(body: Submission):
+        return evaluation.submit(app.state.core, body)
+
+    @app.get("/internal/v2/evaluations/{evaluation_id}", dependencies=control_auth)
+    async def evaluation_results(evaluation_id: str, response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        core = app.state.core
+        return evaluation.results(core.store, settings, core.clock, evaluation_id)
+
     @app.post("/internal/v2/consents/{consent_id}/revoke", dependencies=control_auth)
     async def revoke_consent(consent_id: str):
         return app.state.core.observations.consents.revoke(consent_id)
@@ -554,6 +633,57 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
         return app.state.core.ingest(event, x_idempotency_key)
 
+    @app.post(prefix + "/owner-authority/inputs/approve", dependencies=auth)
+    async def owner_input_approve(body: OwnerInputApproval, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        capture = OwnerCapture.model_validate(body.model_dump(exclude={"meme_offer"}))
+        return owner_input.approve(core.store, settings, core.clock, capture,
+                                   meme_offer=body.meme_offer)
+
+    @app.post(prefix + "/owner-authority/check", dependencies=auth)
+    async def owner_authority_check(body: OwnerAuthorityCheck, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        view = owner_authority.current(core.store, settings, core.clock,
+                                       authority=body.authority, purpose=body.purpose)
+        return {"approved": True, "authority": view.authority.as_dict(),
+                "purpose": body.purpose,
+                "capability_policies": dict(view.policy.capability_policies),
+                "budget_journal_id": view.journal_id,
+                "capture": (view.policy.capture.model_dump(mode="json")
+                            if view.policy.capture else None),
+                "expires_at": (view.policy.expires_at.isoformat()
+                               if view.policy.expires_at else None)}
+
+    @app.post(prefix + "/owner-authority/inputs/state", dependencies=auth)
+    async def owner_input_state(body: OwnerCapture | OwnerPokeCapture, response: Response):
+        from companion import owner_input_state
+
+        response.headers["Cache-Control"] = "no-store"
+        return owner_input_state.read(app.state.core.store, settings, body)
+
+    @app.post(prefix + "/owner-authority/stop-receipt", dependencies=auth)
+    async def owner_stop_receipt(body: AuthorityReference, response: Response):
+        from companion import owner_stop_receipt
+
+        response.headers["Cache-Control"] = "no-store"
+        return owner_stop_receipt.read(app.state.core.store, settings, body.authority)
+
+    @app.post(prefix + "/owner-authority/send-check", dependencies=auth)
+    async def owner_send_check(body: OwnerSendCheck, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return owner_delivery.send_check(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/owner-authority/inputs/recall", dependencies=auth)
+    async def owner_input_recall(body: OwnerRecall, response: Response):
+        from companion import owner_recall
+
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return owner_recall.receive(core.store, settings, core.ledger, core.clock, body)
+
     @app.post(prefix + "/live-text/open", dependencies=auth)
     async def live_text_open(body: live_text.OpenWindow):
         core = app.state.core
@@ -593,6 +723,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         core = app.state.core
         return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
 
+    @app.post(prefix + "/owner-authority/cancel-before-send", dependencies=auth)
+    async def owner_not_sent(body: input_protocol.OwnerCancelBeforeSend, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return input_protocol.cancel_before_send(core.store, settings, core.clock, body)
+
     @app.post(prefix + "/live-text/send-check", dependencies=auth)
     async def live_text_send(body: live_text.SendCheck):
         core = app.state.core
@@ -601,6 +737,12 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/live-text/pokes", dependencies=auth)
     async def receive_poke(body: PokeCapture):
         core = app.state.core
+        return poke.receive(core.store, settings, core.clock, body)
+
+    @app.post(prefix + "/pokes", dependencies=auth)
+    async def receive_owner_poke(body: OwnerPokeCapture, response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
         return poke.receive(core.store, settings, core.clock, body)
 
     @app.post(prefix + "/voice-inputs/{event_id}", dependencies=auth)
@@ -729,13 +871,18 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         return account_actions.record_profiles(core.store, settings, core.clock, body)
 
     @app.get(prefix + "/account-actions/profile-baselines/state", dependencies=auth)
-    async def account_profile_probe_state(window_sha256: str, authorization_sha256: str):
-        if not all(re.fullmatch(r"[a-f0-9]{64}", value)
-                   for value in (window_sha256, authorization_sha256)):
+    async def account_profile_probe_state(authority: str, authorization_sha256: str):
+        if len(authority) > 1024:
+            raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400)
+        try:
+            reference = account_actions.AuthorityBody(authority=json.loads(authority)).authority
+        except (ValueError, TypeError):
+            raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400) from None
+        if not re.fullmatch(r"[a-f0-9]{64}", authorization_sha256):
             raise CoreError("INVALID_ACCOUNT_PROFILE_SCOPE", 400)
         core = app.state.core
         return account_actions.profile_probe_state(
-            core.store, settings, core.clock, window_sha256, authorization_sha256)
+            core.store, settings, core.clock, reference, authorization_sha256)
 
     @app.post(prefix + "/account-actions/cancel-before-send", dependencies=auth)
     async def account_cancel_before_send(body: account_actions.CancelBeforeSend):
@@ -756,19 +903,27 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/memories/search", dependencies=auth)
     async def search(body: SearchRequest):
-        if live_text.active(app.state.core.store, settings):
-            raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
+        def check_scope():
+            core = app.state.core
+            if owner_authority.required(core.store, settings):
+                owner_authority.current(core.store, settings, core.clock, purpose="memory")
+            elif live_text.active(core.store, settings):
+                raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
+
+        check_scope()
         return {
-            "items": app.state.core.memory.search(
+            "items": await app.state.core.memory.search_async(
                 body.query, body.requester_actor_id, body.subject_filter, body.limit,
-                now=app.state.core.clock(),
+                now=app.state.core.clock(), source_check=check_scope, clock=app.state.core.clock,
             )
         }
 
     @app.post(prefix + "/memories/{memory_id}/decisions", dependencies=auth)
     async def decide(memory_id: str, body: MemoryDecision):
         core = app.state.core
-        if live_text.active(core.store, settings):
+        if owner_authority.required(core.store, settings):
+            owner_authority.current(core.store, settings, core.clock, purpose="memory")
+        elif live_text.active(core.store, settings):
             raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
         return core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content)
 

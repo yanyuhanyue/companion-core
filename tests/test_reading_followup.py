@@ -7,33 +7,36 @@ import ssl
 import zlib
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import httpcore
 import httpx
 import pytest
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from companion import live_text
+from companion import owner_authority, paid_budget
 from companion.backup import backup, restore
 from companion.config import ObservationAdapterConfig
 from companion.core import Core
 from companion.model import ModelClient
+from companion.owner_authority_protocol import AuthorityStop, OwnerGrantPolicy
 from companion.privacy import advance_epoch
 from companion.reading import FOLLOWUP, followup_item
 from companion.retrieval import SemanticIndex
-from companion.store import encode
+from companion.store import after, encode
+from companion_delivery_protocol.authority import capture_signing_payload
+from companion_onebot_bridge.config import BridgeConfig
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.rich_input import input_digest
 from source_reader import worker_v1
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP
-from tests import test_onebot_window as window_fixtures
 from tests.conftest import run
 from tests.test_exploration import URL
-from tests.test_input_protocol import notice, sign
-from tests.test_onebot_capture import pinned_plan, real_core_http
+from tests.test_onebot_capture import real_core_http
 from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
+from tests.test_owner_authority import activate, prepare
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import TOKEN
 from tests.test_source_reader import META, PLAYER, SUBTITLE, Responses, response
@@ -44,35 +47,42 @@ READER_AUTH = {"Authorization": "Bearer " + TOKEN}
 
 @asynccontextmanager
 async def window(core, tmp_path, monkeypatch, *, context_soft_tokens=None):
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(microsecond=0)
     core.clock.now = now
     # This Reader fixture has no memory rows; it does not need an embedding model download.
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    monkeypatch.setattr(window_fixtures, "raw_event", lambda: raw_event(time=int(now.timestamp())))
-    options = companion_options(core)
+    policy = prepare(core, tmp_path)
     if context_soft_tokens is not None:
-        options["core_options"]["context_soft_tokens"] = context_soft_tokens
-    options["link_scope"] = "owner_links_v1"
-    options["core_options"].update(
-        content_enabled=True, observation_enabled=True,
-        observation_adapters={"bili": ObservationAdapterConfig(
-            source="bilibili", token=TOKEN, reader_max_requests=6,
-        )}, exploration_daily_requests=12, exploration_monthly_requests=24,
-        exploration_daily_bytes=8388608,
-    )
-    config, plan = pinned_plan(
-        core, tmp_path, 3001, live=True, approved=True, rich_input_scope="references_v1",
-        scope_options=options,
-    )
+        core.settings.context_soft_tokens = context_soft_tokens
+    core.settings.content_enabled = True
+    core.settings.rich_input_scope = "references_v1"
+    core.settings.observation_enabled = True
+    core.settings.exploration_enabled = True
+    core.settings.observation_adapters = {"bili": ObservationAdapterConfig(
+        source="bilibili", token=TOKEN, reader_max_requests=6)}
+    core.settings.exploration_daily_requests = 12
+    core.settings.exploration_monthly_requests = 24
+    core.settings.exploration_daily_bytes = 8388608
+    key = Ed25519PrivateKey.generate()
+    config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
+        bot_qq_id=core.settings.bot_qq_id,
+        bridge_token=core.settings.bridge_token.get_secret_value(),
+        onebot_token="s" * 32, protocol_epoch="sdk-reader-epoch")
+    policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
+        "purposes": ["chat", "content", "history", "exploration"],
+        "capture": {"public_key": key.public_key().public_bytes_raw().hex(),
+            "identity_sha256": paid_budget.sha([config.owner_qq_id, config.bot_qq_id]),
+            "protocol_epoch": config.protocol_epoch},
+        "history": {"scope": "owner_private", "not_before": after(core.clock(), -3600),
+            "max_turns": 16, "max_utf8_bytes": 64000}})
+    activation, _ = activate(core, policy)
+    plan = SimpleNamespace(authority=activation["authority"], key=key, policy=policy)
     with Core(core.settings, clock=core.clock) as http_core:
         assert http_core.store is not core.store
         async with real_core_http(http_core) as port, httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}", trust_env=False,
             headers={"Authorization": "Bearer " + config.bridge_token},
         ) as client:
-            opened = await client.post("/internal/v1/live-text/open",
-                                       json={"window_sha256": plan.sha256})
-            assert opened.status_code == 200, opened.text
             yield client, config, plan
 
 
@@ -88,25 +98,39 @@ async def admit(client, core, config, plan, number, text="", *, card=None, refer
         if reference is not None:
             raw["message"].append({"type": "reply", "data": {"id": str(reference)}})
     event = normalize(encode(raw), config, now=now.timestamp(), rich_input_scope="references_v1")
-    capture = sign(config, {
-        "kind": "authenticated_onebot_ws", "window_sha256": plan.sha256,
+    capture = {
+        "kind": "authenticated_onebot_ws", "authority": plan.authority,
         "event_id": event["event_id"], "source_event_id": event["source_event_id"],
         "input_sha256": input_digest(event["payload"]),
         "frame_sha256": hashlib.sha256(encode(raw).encode()).hexdigest(),
-        "evidence_sha256": "e" * 64, "identity_sha256": plan.value["identity_sha256"],
-        "config_sha256": plan.value["config_sha256"], "protocol_epoch": config.protocol_epoch,
+        "evidence_sha256": "e" * 64, "identity_sha256": plan.policy.capture.identity_sha256,
+        "protocol_epoch": config.protocol_epoch,
         "received_at": now.isoformat(), "occurred_at": event["occurred_at"],
-    }, live_text.CAPTURE_SIGNATURE_DOMAIN)
-    approved = await client.post("/internal/v1/live-text/inputs/approve", json={
-        "window_sha256": plan.sha256, "event_id": event["event_id"],
-        "input_sha256": capture["input_sha256"], "evidence_sha256": "f" * 64,
-        "capture": capture,
-    })
+    }
+    capture["signature"] = plan.key.sign(capture_signing_payload(capture)).hex()
+    approved = await client.post("/internal/v1/owner-authority/inputs/approve", json=capture)
     assert approved.status_code == 200, approved.text
     accepted = await client.post("/internal/v1/inbox/events", json=event,
                                 headers={"X-Idempotency-Key": event["event_id"]})
     assert accepted.status_code == 202, accepted.text
     return event, accepted.json()
+
+
+def notice(config, plan, now, *, number):
+    from companion.input_recall import canonical_source
+    from companion_delivery_protocol.authority import recall_signing_payload
+
+    source = canonical_source(bot_qq_id=config.bot_qq_id, owner_qq_id=config.owner_qq_id,
+        protocol_epoch=config.protocol_epoch, provider_message_id=number)["source_event_id"]
+    stamp = now.astimezone(UTC).isoformat()
+    value = dict(authority=plan.authority, kind="authenticated_onebot_friend_recall",
+        recall_id="recall_" + hashlib.sha256((source + stamp).encode()).hexdigest(),
+        target_source_event_id=source, target_event_id="evt_" + hashlib.sha256(
+            source.encode()).hexdigest(), protocol_epoch=config.protocol_epoch,
+        identity_sha256=plan.policy.capture.identity_sha256, occurred_at=stamp,
+        received_at=stamp, frame_sha256="f" * 64, evidence_sha256="a" * 64)
+    value["signature"] = plan.key.sign(recall_signing_payload(value)).hex()
+    return value
 
 
 async def lease(client):
@@ -136,6 +160,17 @@ async def finish(client, core, item, *, status="SUCCESS"):
     return result.json(), body
 
 
+async def select_read(core, url=URL):
+    """A synthetic model selects the SDK tool; ingestion itself does not read."""
+    from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+
+    provider = Provider(answer(calls=(call("select_read", "read_content", {"url": url}),)),
+                        answer("按读取回执说明当前状态。"))
+    async with worker_for(core, provider) as worker:
+        assert await worker.run_once("select-original-read")
+    return provider
+
+
 @pytest.mark.parametrize("context_soft_tokens", [3200, 16000])
 def test_signed_shortlink_read_continues_into_latest_reply_once(
     core, tmp_path, monkeypatch, context_soft_tokens,
@@ -144,6 +179,7 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(
         async with window(core, tmp_path, monkeypatch,
                           context_soft_tokens=context_soft_tokens) as (client, config, plan):
             first, old = await admit(client, core, config, plan, 1, card=SHORT)
+            await select_read(core, SHORT)
             entered, release = asyncio.Event(), asyncio.Event()
             metadata = {**META, "data": {**META["data"], "aid": 1701, "duration": 12}}
             comments = {"code": 0, "data": {"page": {"count": 1}, "replies": [{
@@ -192,13 +228,14 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(
                         client, core, config, plan, 2, "你试试应该可以看了",
                     )
                     assert accepted["reply_revision"] == old["reply_revision"] + 1
+                    await select_read(core, SHORT)
                     with Core(core.settings, ModelClient(core.settings, model_http),
                               core.clock) as worker:
                         assert worker.store is not core.store
                         assert worker.claim_job("wait-for-original-reader") is None
                         assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?",
                                               (accepted["job_id"],)) == {
-                            "state": "QUEUED", "attempts": 0,
+                            "state": "RETRY_WAIT", "attempts": 0,
                         }
                         release.set()
                         assert await asyncio.wait_for(task, 10)
@@ -233,7 +270,7 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(
             assert len(calls) == 1
             prompt = encode(calls[0])
             assert all(value in prompt for value in (
-                "恒星的颜色与温度有关", "你试试应该可以看了", "shared_content", "FETCHED",
+                "恒星的颜色与温度有关", "你试试应该可以看了", "request_id", "FETCHED",
             ))
             if context_soft_tokens == 16000:
                 assert "评论层观点" in prompt and "current_pool_sample" in prompt
@@ -245,7 +282,7 @@ def test_signed_shortlink_read_continues_into_latest_reply_once(
             }
             assert core.store.rows("SELECT scenario,state FROM model_usage") == [
                 {"scenario": "chat", "state": "SETTLED"},
-            ]
+            ] * 3
             sources = {row["event_id"] for row in core.store.rows(
                 "SELECT event_id FROM job_sources WHERE job_id=?", (accepted["job_id"],),
             )}
@@ -260,6 +297,7 @@ def test_followup_reuses_existing_state_without_requeue(core, tmp_path, monkeypa
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             first, _ = await admit(client, core, config, plan, 1, card=URL)
+            await select_read(core)
             if stage != "queued":
                 item = await lease(client)
                 result, _ = await finish(client, core, item,
@@ -267,7 +305,9 @@ def test_followup_reuses_existing_state_without_requeue(core, tmp_path, monkeypa
                 assert result["state"] == ("DONE" if stage == "done" else stage)
             before = core.store.rows("SELECT * FROM exploration_requests")
             latest, accepted = await admit(client, core, config, plan, 2, "继续读一下")
-            inherited = followup_item(core.store, core.settings, latest["event_id"])
+            await select_read(core)
+            inherited = followup_item(
+                core.store, core.settings, latest["event_id"], clock=core.clock)
             assert inherited["owner_event_id"] == first["event_id"]
             assert core.store.rows("SELECT * FROM exploration_requests") == before
             if stage == "queued":
@@ -286,8 +326,10 @@ def test_followup_reuses_existing_state_without_requeue(core, tmp_path, monkeypa
                     assert "text" not in row
                 assert not core.content.status(latest["event_id"])["pending"]
             assert core.store.one("SELECT attempts FROM jobs WHERE job_id=?",
-                                  (accepted["job_id"],))["attempts"] == 0
-            assert not core.store.one("SELECT 1 FROM model_usage")
+                                  (accepted["job_id"],))["attempts"] == (
+                0 if stage == "queued" else 1)
+            assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == (
+                2 if stage == "queued" else 3)
     run(scenario())
 
 
@@ -302,9 +344,13 @@ def test_followup_is_explicit_and_locally_bound(
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             first, _ = await admit(client, core, config, plan, 1, card=URL)
+            await select_read(core)
             item = await lease(client)
             latest, _ = await admit(client, core, config, plan, 2, text, reference=reference)
-            selected = followup_item(core.store, core.settings, latest["event_id"])
+            if inherits:
+                await select_read(core)
+            selected = followup_item(
+                core.store, core.settings, latest["event_id"], clock=core.clock)
             assert bool(selected) is inherits, {
                 "source_ids": core.store.rows("SELECT source_event_id FROM events "
                                               "WHERE source='qq.onebot'"),
@@ -312,7 +358,7 @@ def test_followup_is_explicit_and_locally_bound(
                                                (FOLLOWUP + "%",)),
             }
             checked = await validate(client, item)
-            assert checked.status_code == (200 if inherits else 409)
+            assert checked.status_code == 200  # A superseded reply does not recall its source.
             if inherits:
                 assert selected["owner_event_id"] == first["event_id"]
     run(scenario())
@@ -324,11 +370,14 @@ def test_followup_never_overrides_revocation(core, tmp_path, monkeypatch, change
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             first, _ = await admit(client, core, config, plan, 1, card=URL)
+            await select_read(core)
             item = await lease(client)
             latest, _ = await admit(client, core, config, plan, 2, "你再试试看")
+            await select_read(core)
             assert (await validate(client, item)).status_code == 200
             if change.endswith("recall"):
-                response = await client.post("/internal/v1/live-text/inputs/recall", json=notice(
+                response = await client.post(
+                    "/internal/v1/owner-authority/inputs/recall", json=notice(
                     config, plan, core.clock.now, number=1 if change == "original_recall" else 2,
                 ))
                 assert response.status_code == 200, response.text
@@ -340,14 +389,17 @@ def test_followup_never_overrides_revocation(core, tmp_path, monkeypatch, change
             elif change == "expired":
                 core.clock.advance(31)
             else:
-                core.settings.live_text_window = core.settings.live_text_window.model_copy(
-                    update={"companion_scope": "none"},
-                )
+                owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                    operation_id="stop-native-reader", authority=plan.authority))
             checked = await validate(client, item)
-            assert checked.status_code != 200
+            # A new reply revision preserves the read. Explicit recall still
+            # advances the original Reader privacy epoch and fences its lease.
+            source_retained = change == "new_turn"
+            assert (checked.status_code == 200) is source_retained
             result, _ = await finish(client, core, item)
-            assert result["state"] == "CANCELLED" and result["event_ids"] == []
-            assert not core.store.one("SELECT 1 FROM observations")
+            assert result["state"] == ("DONE" if source_retained else "CANCELLED")
+            assert bool(result["event_ids"]) is source_retained
+            assert bool(core.store.one("SELECT 1 FROM observations")) is source_retained
             assert core.store.one("SELECT used_requests,used_bytes FROM exploration_requests") == {
                 "used_requests": 1, "used_bytes": 200,
             }
@@ -365,19 +417,23 @@ def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
     async def scenario():
         async with window(core, tmp_path, monkeypatch) as (client, config, plan):
             first, _ = await admit(client, core, config, plan, 1, card=URL)
+            await select_read(core)
             await lease(client)
             latest, _ = await admit(client, core, config, plan, 2, "继续看看")
+            await select_read(core)
             archive, destination = tmp_path / "followup.enc", tmp_path / "restored.db"
             key = Fernet.generate_key()
             backup(core.settings.database, archive, key)
-            response = await client.post("/internal/v1/live-text/inputs/recall", json=notice(
+            response = await client.post(
+                    "/internal/v1/owner-authority/inputs/recall", json=notice(
                 config, plan, core.clock.now, number=1,
             ))
             assert response.status_code == 200, response.text
             restore(archive, destination, key, core.settings.erasure_ledger)
             with Core(core.settings.model_copy(update={"database": str(destination)}),
                       clock=core.clock) as restored:
-                assert followup_item(restored.store, restored.settings, latest["event_id"]) is None
+                assert followup_item(restored.store, restored.settings, latest["event_id"],
+                                     clock=restored.clock) is None
                 assert not restored.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
                                               (FOLLOWUP + latest["event_id"],))
                 assert restored.store.one("SELECT redacted FROM events WHERE event_id=?",
@@ -388,4 +444,10 @@ def test_erasure_replay_removes_followup_authority_without_erasing_new_input(
                     "context_json": "{}",
                 }
                 assert not restored.store.one("SELECT 1 FROM observations")
+                assert all(row["phase"] == "STOPPED" and row["conversation_json"] is None
+                           and row["snapshots_json"] == "[]" for row in restored.store.rows(
+                               "SELECT * FROM agent_conversations"))
+                assert not restored.store.one("SELECT 1 FROM agent_tool_calls "
+                                               "WHERE metadata_json IS NOT NULL "
+                                               "OR result_json IS NOT NULL")
     run(scenario())

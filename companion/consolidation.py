@@ -1,15 +1,17 @@
 """One recoverable coordinator per local day, reusing Memory and Diary state machines."""
 
 import json
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from companion import private_life
+from companion import owner_authority, private_life
 from companion.contracts import CoreError
-from companion.diary import day_bounds, source_hash
+from companion.diary import source_hash
 from companion.privacy import epoch
 from companion.reflection import retryable_admission
 from companion.store import after, encode, uid
+from companion.worker_schedule import UnitResult
 
 CONFIG_VERSION = "v05-1"
 
@@ -34,14 +36,18 @@ def erase_consolidation(store, event_ids):
 
 
 class NightlyConsolidator:
-    def __init__(self, store, settings, diary, reflections, goals, extract_once, clock):
+    def __init__(self, store, settings, diary, reflections, goals, extract_step, clock):
         self.store, self.settings, self.clock = store, settings, clock
         self.diary, self.reflections, self.goals = diary, reflections, goals
-        self.extract_once = extract_once
+        self.extract_step = extract_step
 
     def enabled(self):
         try:
-            private_life.ensure_active(self.store, self.settings, self.clock)
+            if owner_authority.required(self.store, self.settings):
+                owner_authority.current(self.store, self.settings, self.clock,
+                                        purpose="consolidation")
+            else:
+                private_life.ensure_active(self.store, self.settings, self.clock)
         except CoreError:
             return False
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
@@ -66,7 +72,7 @@ class NightlyConsolidator:
                     and steps.get("reflection") in {"FAILED", "RETRY_WAIT", "CANCELLED"}
                     and retryable_admission(reflection, self.clock())
                     and existing["source_set_sha256"] == reflection["source_set_sha256"]
-                    == source_hash(self.diary.repo.sources(day))
+                    == source_hash(self.diary.repo.sources(day, purpose="consolidation"))
                 ):
                     steps["reflection"] = "WAITING"
                     steps.pop("goals", None)
@@ -81,6 +87,11 @@ class NightlyConsolidator:
                     )
                 return existing["run_id"]
             run_id, now = uid("nightly"), self.clock()
+            steps = {}
+            if owner_authority.required(self.store, self.settings):
+                steps["authority"] = owner_authority.current(
+                    self.store, self.settings, self.clock, purpose="consolidation",
+                ).authority.as_dict()
             self.store.insert(
                 "consolidation_runs",
                 run_id=run_id,
@@ -89,7 +100,7 @@ class NightlyConsolidator:
                 timezone=self.settings.timezone,
                 config_version=CONFIG_VERSION,
                 state="SCHEDULED",
-                steps_json="{}",
+                steps_json=encode(steps),
                 captured_privacy_epoch=epoch(self.store),
                 created_at=now,
                 updated_at=now,
@@ -140,7 +151,17 @@ class NightlyConsolidator:
             )
             if not row:
                 return None
-            sources = self.diary.repo.sources(date.fromisoformat(row["local_date"]))
+            steps = json.loads(row["steps_json"])
+            if owner_authority.required(s, self.settings):
+                view = owner_authority.current(s, self.settings, self.clock,
+                                                purpose="consolidation")
+                if steps.get("authority") != view.authority.as_dict():
+                    s.execute("UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
+                              "steps_json='{}',last_error_code='OWNER_AUTHORITY_REVISION_CHANGED' "
+                              "WHERE run_id=?", (row["run_id"],))
+                    return None
+            sources = self.diary.repo.sources(date.fromisoformat(row["local_date"]),
+                                              purpose="consolidation")
             # Erasure cancels leased/partial coordinators in the same DB transaction.
             # Benign Memory writes may advance the epoch before a crashed coordinator
             # checkpoints. Resume against fresh state only when its sources are unchanged;
@@ -148,7 +169,8 @@ class NightlyConsolidator:
             if row["state"] != "SCHEDULED" and row["source_set_sha256"] != source_hash(sources):
                 s.execute(
                     "UPDATE consolidation_runs SET state='CANCELLED',lease_token=NULL,"
-                    "last_error_code='CONSOLIDATION_SOURCES_CHANGED' WHERE run_id=?",
+                    "steps_json='{}',last_error_code='CONSOLIDATION_SOURCES_CHANGED' "
+                    "WHERE run_id=?",
                     (row["run_id"],),
                 )
                 return None
@@ -175,7 +197,7 @@ class NightlyConsolidator:
                 "lease_token": token,
                 "captured_privacy_epoch": epoch(s),
                 "sources": sources,
-                "steps": json.loads(row["steps_json"]),
+                "steps": steps,
                 "erasure_version": s.one(
                     "SELECT COALESCE(MAX(restore_min_replay_version),0) AS n "
                     "FROM privacy_erasure_ledger"
@@ -185,7 +207,7 @@ class NightlyConsolidator:
     def after_memory_commit(self, run):
         # Memory.add advances the context epoch. Accept our own successful write only
         # if no erasure intervened and the exact collected source set is still intact.
-        with self.store.transaction():
+        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
             current = self.store.one(
                 "SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],)
             )
@@ -202,7 +224,8 @@ class NightlyConsolidator:
                 raise CoreError("CONSOLIDATION_STALE_LEASE", 409)
             if erasure_version != run["erasure_version"] or source_hash(
                 run["sources"]
-            ) != source_hash(self.diary.repo.sources(date.fromisoformat(run["local_date"]))):
+            ) != source_hash(self.diary.repo.sources(date.fromisoformat(run["local_date"]),
+                                                     purpose="consolidation")):
                 raise CoreError("PRIVACY_CHANGED", 409)
             run["captured_privacy_epoch"] = epoch(self.store)
             self.store.execute(
@@ -212,7 +235,10 @@ class NightlyConsolidator:
 
     def checkpoint(self, run, state="LEASED", code=None, waiting=False, next_attempt_at=None):
         s, now = self.store, self.clock()
-        with s.transaction():
+        if owner_authority.required(s, self.settings):
+            owner_authority.current(s, self.settings, self.clock, purpose="consolidation",
+                                    authority=run["steps"].get("authority"))
+        with nullcontext() if s.db.in_transaction else s.transaction():
             current = s.one("SELECT * FROM consolidation_runs WHERE run_id=?", (run["run_id"],))
             if (
                 not current
@@ -238,131 +264,22 @@ class NightlyConsolidator:
                 ),
             )
 
-    async def run_once(self, worker_id="life-worker"):
-        run = self.claim()
-        if not run:
-            return False
-        day, steps = date.fromisoformat(run["local_date"]), run["steps"]
-        try:
-            if not run["sources"]:
-                self.checkpoint(run, "SKIPPED", "NO_SOURCES")
-                return True
-            if steps.get("memory") not in {"COMPLETE", "SKIPPED"}:
-                steps["memory"] = "RUNNING"
-                self.checkpoint(run)
-                worked = (
-                    await self.extract_once(day) if self.settings.memory_enabled else False
-                )
-                if worked:
-                    self.after_memory_commit(run)
-                start, end = day_bounds(day, self.settings.timezone)
-                now = self.clock()
-                remaining = self.store.one(
-                    "SELECT COUNT(*) AS n FROM events e JOIN jobs j USING(event_id) WHERE "
-                    "e.actor_id='owner' AND e.source='qq.onebot' AND e.redacted=0 AND "
-                    "e.memory_processed=0 AND j.kind='chat' AND (j.state='SUCCEEDED' OR "
-                    "(j.state='CANCELLED' AND j.last_error_code='REPLY_SUPERSEDED')) "
-                    "AND NOT EXISTS (SELECT 1 FROM runtime_meta "
-                    "WHERE key='erased_event:'||e.event_id) "
-                    "AND e.ingested_at>=? AND e.ingested_at<=? AND e.occurred_at<=? "
-                    "AND e.occurred_at>=? AND "
-                    "e.occurred_at<?",
-                    (after(now, -86400 * self.settings.raw_event_retention_days),
-                     after(now, -self.settings.extraction_idle_seconds), now, start, end),
-                )["n"]
-                steps["memory"] = (
-                    "WAITING"
-                    if self.settings.memory_enabled
-                    and remaining >= self.settings.extraction_min_events
-                    else "COMPLETE"
-                    if worked
-                    else "SKIPPED"
-                )
-                if steps["memory"] == "WAITING":
-                    self.checkpoint(run, "PARTIAL", "MEMORY_PENDING", waiting=True)
-                    return True
-                self.checkpoint(run)
-            if steps.get("diary") not in {"COMMITTED", "SKIPPED", "FAILED", "CANCELLED"}:
-                steps["diary"] = "RUNNING"
-                self.checkpoint(run)
-                diary_id = self.diary.schedule_day(day)
-                if not diary_id:
-                    steps["diary"] = "SKIPPED"
-                else:
-                    row = self.store.one("SELECT * FROM diary_runs WHERE run_id=?", (diary_id,))
-                    if row["state"] in {"PENDING", "RETRY_WAIT"} or (
-                        row["state"] == "RUNNING" and row["lease_until"] <= self.clock()
-                    ):
-                        await self.diary.generate_once(worker_id)
-                        row = self.store.one("SELECT * FROM diary_runs WHERE run_id=?", (diary_id,))
-                    steps["diary"] = row["state"]
-                    if row["state"] in {"PENDING", "RUNNING", "RETRY_WAIT"}:
-                        self.checkpoint(run, "PARTIAL", "DIARY_PENDING", waiting=True)
-                        return True
-                self.checkpoint(run)
-            if steps.get("reflection") not in {"COMMITTED", "SKIPPED", "FAILED", "CANCELLED"}:
-                self.checkpoint(run)
-                result = (
-                    await self.reflections.run_day(day)
-                    if self.settings.reflection_enabled
-                    else None
-                )
-                steps["reflection"] = result["state"] if result else "SKIPPED"
-                if steps["reflection"] in {"RUNNING", "RETRY_WAIT"}:
-                    self.checkpoint(run, "PARTIAL", "REFLECTION_PENDING", waiting=True,
-                                    next_attempt_at=result.get("next_attempt_at"))
-                    return True
-            failed = any(value in {"FAILED", "CANCELLED"} for value in steps.values())
-            if self.settings.goals_enabled and steps.get("goals") != "COMPLETE":
-                from companion.goals import GoalProposal
+    async def run_step(self, worker_id="life-worker") -> UnitResult:
+        from companion.nightly_stages import run_step
 
-                proposals = self.store.rows(
-                    "SELECT s.suggestion_id,s.content,r.run_id FROM reflection_suggestions s JOIN "
-                    "reflection_runs r USING(run_id) WHERE r.local_date=? AND r.timezone=? AND "
-                    "r.state='COMMITTED' AND s.kind='next_question' AND s.state IN ('PENDING',"
-                    "'ACCEPT_AS_HYPOTHESIS')",
-                    (day.isoformat(), self.settings.timezone),
-                )
-                for proposal in proposals:
-                    source_ids = [
-                        row["event_id"]
-                        for row in self.store.rows(
-                            "SELECT DISTINCT event_id FROM reflection_evidence WHERE run_id=?",
-                            (proposal["run_id"],),
-                        )
-                    ]
-                    try:
-                        self.goals.propose(
-                            GoalProposal(
-                                topic=proposal["content"][:300], source_event_ids=source_ids
-                            ), reflection_suggestion_id=proposal["suggestion_id"],
-                        )
-                    except CoreError as error:
-                        if error.code != "GOAL_CAPACITY_REACHED":
-                            raise
-                        steps["goals"] = "WAITING"
-                        self.checkpoint(run, "PARTIAL", "GOAL_CAPACITY_REACHED", waiting=True)
-                        return True
-                steps["goals"] = "COMPLETE"
-            state = (
-                "PARTIAL"
-                if failed
-                else "SKIPPED"
-                if all(value == "SKIPPED" for value in steps.values())
-                else "COMPLETE"
-            )
-            self.checkpoint(run, state, "STEP_FAILED" if failed else None)
-        except Exception as error:
-            code = error.code if isinstance(error, CoreError) else "CONSOLIDATION_INTERNAL_ERROR"
-            self.store.execute(
-                "UPDATE consolidation_runs SET state=?,lease_token=NULL,last_error_code=?,"
-                "updated_at=? WHERE run_id=? AND state='LEASED' AND lease_token=?",
-                (
-                    "CANCELLED" if code == "PRIVACY_CHANGED" else "FAILED",
-                    code,
-                    self.clock(),
-                    run["run_id"],
-                    run["lease_token"],
-                ),
-            )
-        return True
+        return await run_step(self, worker_id)
+
+    async def run_once(self, worker_id="life-worker"):
+        """Batch convenience over the same durable steps; selectors use run_step.
+
+        No separate implementation, leases or checkpoint authority are retained.
+        A future native wait stops this drain; it never sleeps inside a work unit.
+        """
+        progressed = False
+        for _ in range(256):
+            result = await self.run_step(worker_id)
+            progressed = progressed or result.progressed
+            if not result.progressed or (result.next_deadline is not None
+                and result.next_deadline > datetime.fromisoformat(self.clock())):
+                break
+        return progressed

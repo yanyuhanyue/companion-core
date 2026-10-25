@@ -1,6 +1,6 @@
 # Companion Core
 
-面向单一主人 QQ 私聊的虚拟朋友核心。Python 模块化单体，AstrBot 只负责消息传输；记忆和表达风格来自有证据的互动，初始人格为空。
+面向单一主人 QQ 私聊的虚拟朋友核心。Python 模块化单体，原生 OneBot Bridge 负责消息传输；记忆和表达风格来自有证据的互动，初始人格为空。
 
 当前交付 **v0.5 + M2 内容理解**：在 M0/M1 与私人日记基础上，新增可追溯观察、短期表达状态、夜间整合与反思、持久目标、有限探索、表情表达、受限工具和短时媒体会话。主人分享的链接、QQ 卡片和图片可经配置后读取并进入对话。新增能力默认关闭，真实 QQ、平台账号、日记样本及物理设备启用门禁见 [实现与启用记录](docs/design-v0.5/status.md)。
 
@@ -13,7 +13,7 @@
 - M1：批量记忆候选、逐字证据核验、语义冲突核对、确认/纠正/忘记、中文 FTS5 与本地语义混合检索、相关性筛选、空白起步的自我观察。
 - 加密热备份；恢复前强制回放独立遗忘日志；隐私变更期间的旧模型结果被丢弃。
 - M1.5：独立日记 Worker、自然日调度、真实来源核验、私人保存、主人查看/修订/删除、专用预算和完整遗忘回放。
-- QQ 协议端继续通过 AstrBot OneBot v11；切换批次隔离消息 ID，保留 Core 数据和会话身份，回滚禁止复用旧批次。
+- QQ 协议端通过原生 OneBot v11 Bridge；批次隔离消息 ID，回滚禁止复用旧批次。旧 AstrBot 入口已退休，配置、状态核对与会话迁移边界见部署文档。
 
 M0/M1 普通聊天不进入工具执行循环。v0.5 的 DSH、Windows 与媒体会话使用独立身份、额度和明确授权；公开空间与评论没有执行入口。内容理解仅将外部文字作为不可信证据，不能改变权限或人格，也不会把标题或封面当作已观看完整视频。
 
@@ -34,8 +34,8 @@ uv run python -m companion init
 uv run python -m companion serve
 # 第二个终端：设置同样的环境变量后
 uv run python -m companion worker
-# 第三个终端：同样的配置；日记默认关闭，完成门禁后再开启
-uv run python -m companion diary-worker
+# 第三个终端：同样的配置；日记、生活与自主活动由统一 Life Worker 执行，默认关闭，完成门禁后再开启
+uv run python -m companion life-worker
 ```
 
 演示可设 `COMPANION_MODE=demo`，无需模型密钥；回复明确标记为演示。`.env` 仅由 Docker Compose 读取，本地命令需通过环境变量注入。不要提交真实配置、密钥或数据库。
@@ -77,7 +77,7 @@ uv run python -m companion diary-worker
 - [P11 核心体验前置交付与后续验收](docs/qq-beta/p11-unattended-delivery.md)、[私人 Beta 观测与反馈](docs/qq-beta/p11-beta-observation.md)
 - [72 小时私人连续运行](docs/qq-beta/continuous-private-beta.md)
 - [停止窗口的交接恢复](docs/qq-beta/handoff-recovery.md)
-- [VPS / AstrBot 部署](docs/deployment.md)
+- [VPS / Bridge 部署](docs/deployment.md)
 - [主人控制台、配置版本与统一云预算](docs/owner-console.md)
 - [模块边界与设计取舍](docs/architecture.md)
 - [验收结果与限制](docs/validation.md)、[回放数据](docs/replay-report.json)

@@ -54,12 +54,21 @@ def restore(source, destination, key, ledger_path):
             ledger.replay(store)
             # A snapshot cannot authorize a device session that existed before restoration.
             with store.transaction():
+                from companion.owner_authority import restore as restore_owner_authority
+
+                restore_owner_authority(store)
                 store.execute(
                     "UPDATE outbox SET state='DELIVERY_UNCERTAIN',lease_token=NULL,"
                     "last_error_code='RESTORED_DELIVERY_REQUIRES_RECONCILIATION' "
                     "WHERE state IN ('PENDING','LEASED','SENDING','RETRY_WAIT')"
                 )
                 store.execute("UPDATE model_usage SET state='UNKNOWN' WHERE state='RESERVED'")
+                store.execute(
+                    "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
+                    "updated_at=?,last_error_code='RESTORED_EVALUATION_REQUIRES_REVIEW' "
+                    "WHERE kind='evaluation' AND state IN ('QUEUED','RUNNING','RETRY_WAIT')",
+                    (utcnow(),),
+                )
                 store.execute(
                     "UPDATE jobs SET state='CANCELLED',lease_token=NULL,lease_until=NULL,"
                     "updated_at=?,last_error_code='RESTORED_POKE_REQUIRES_RECONCILIATION' "

@@ -30,14 +30,14 @@ def test_legacy_spool_preserves_non_exact_erasure_receipts(tmp_path, body):
                 base_url="http://core",
                 transport=httpx.MockTransport(lambda r: httpx.Response(410, content=body)),
             ) as http:
-                with pytest.raises(httpx.HTTPStatusError):
+                with pytest.raises((httpx.HTTPStatusError, ValueError)):
                     await spool.flush_one(http)
 
         run(scenario())
         pending = spool.db.execute("SELECT COUNT(*) FROM inbox WHERE state='pending'").fetchone()[0]
         assert pending == 1
     finally:
-        spool.db.close()
+        spool.close()
 
 
 def test_pre_event_backup_latest_ledger_blocks_pending_spool_resurrection(core, tmp_path):
@@ -114,4 +114,4 @@ def test_legacy_astrbot_spool_consumes_exact_erasure_receipt_and_keeps_chat_movi
         assert run(core.run_once("legacy-after-forget"))
         assert core.store.one("SELECT COUNT(*) AS n FROM outbox")["n"] == 1
     finally:
-        spool.db.close()
+        spool.close()

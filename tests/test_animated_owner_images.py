@@ -7,6 +7,7 @@ import io
 import json
 import time
 from datetime import timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -15,17 +16,16 @@ from PIL import Image
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.image_input import ImageInputPolicy, text_and_estimate
-from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
-from companion_onebot_bridge import continuous, pending_media
+from companion_onebot_bridge import app, images
 from companion_onebot_bridge.event_normalizer import normalize
+from companion_onebot_bridge.pending_media import MediaPump
 from tests.conftest import run
+from tests.native_continuous_support import host, until
 from tests.test_image_connect_recovery import ConnectThenGet
 from tests.test_live_image_input import options as image_options
-from tests.test_onebot_capture import source_window
 from tests.test_onebot_direct import config, raw_event
 from tests.test_onebot_images import image_segment
-from tests.test_private_companion import companion_options
 
 
 class AdvancingClock:
@@ -132,7 +132,6 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
     from companion import __main__, api
     from companion import core as core_module
 
-    core.clock = AdvancingClock(core.clock.now)
     original = animation(format, size=(3, 2))
     first_reply = "收到啦。\n它在动呢，几帧连着看很有意思。\n你想表达这个吗？"
     second_reply = "我在。\n接着聊。"
@@ -166,8 +165,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
     def respond(request):
         messages = json.loads(request.content)["messages"]
         calls.append(messages)
-        text = ("几帧从红色变成绿色、蓝色。" if isinstance(messages[0]["content"], list)
-                else first_reply if len(calls) == 2 else second_reply)
+        text = first_reply if len(calls) == 1 else second_reply
         return httpx.Response(200, json={
             "choices": [{"message": {"content": text}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 20},
@@ -180,7 +178,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
     async def resolve(*_):
         return ["1.1.1.1", "8.8.8.8"]
 
-    fetch = pending_media.fetch_image
+    fetch = images.fetch_image
     connection_attempts = []
 
     async def mocked_cdn(image, maximum, **kwargs):
@@ -190,59 +188,62 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
     async def scenario():
         monkeypatch.setattr(api, "Core", construct)
         monkeypatch.setattr(core_module, "Core", construct)
-        monkeypatch.setattr(pending_media, "fetch_image", mocked_cdn)
-        monkeypatch.setattr(api, "AsyncClient", lambda **kwargs: httpx.AsyncClient(
-            **kwargs, transport=httpx.MockTransport(respond)), raising=False)
-        options, image = companion_options(core), image_options()
-        options.update(image_scope=image["image_scope"],
-                       image_approval_sha256=image["image_approval_sha256"])
+        monkeypatch.setattr(images, "fetch_image", mocked_cdn)
+        monkeypatch.setattr(__main__, "httpx", SimpleNamespace(AsyncClient=lambda **kwargs:
+            httpx.AsyncClient(**kwargs, transport=httpx.MockTransport(respond))))
+        image = image_options()
         segmentation = SegmentedReplyConfig(mode="semantic", max_segments="unlimited",
                                             interval_ms=0)
-        options.update(segmented_reply=segmentation, max_send_attempts=20)
-        options["window_options"].update(max_attempts=20, max_visible_replies=20)
-        options["core_options"].update(image["core_options"], segmented_reply=segmentation)
-        options["paid_options"]["image_input"] = image["paid_options"]["image_input"]
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model:
-            monkeypatch.setattr(__main__, "ModelClient", lambda settings, _: ModelClient(
-                settings, model))
-            async with source_window(
-                core, tmp_path, source, live=True, approved=True, scope_options=options,
-                rich_input_scope="references_v1", independent_api=True,
-            ) as (window, client, protocol, _, sends):
-                pause = asyncio.Event()
-
-                def emitted(kind, **values):
-                    if kind == "automatic_input_delivered":
-                        if len(sends) == 3:
-                            next_input.set()
-                        else:
-                            pause.set()
-
-                monkeypatch.setattr(continuous, "emit", emitted)
-                task = asyncio.create_task(__main__.worker(core.settings))
-                try:
-                    result = await asyncio.wait_for(
-                        continuous.run(window, client, protocol, pause=pause), 30,
-                    )
-                    assert result["state"] == "OPEN"
-                    assert result["new_inputs"] == 2 and result["attempt_states"] == {"ACK": 5}
-                finally:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+        async with host(core, tmp_path, source, policy=segmentation,
+            core_options={**image["core_options"], "rich_input_scope": "references_v1"},
+            paid_options=image["paid_options"], purposes=("chat", "image", "history", "content"),
+            bridge_options={"rich_input_scope": "references_v1"}, model_reply=respond,
+            independent_api=True,
+        ) as (active, _, sends, _):
+            task = asyncio.create_task(__main__.worker(core.settings))
+            active.start(worker=False)
+            media = MediaPump(active.runtime, active.client, protocol=active.onebot)
+            active.tasks.append(asyncio.create_task(app.transfer_media(media, active.stop)))
+            try:
+                await until(lambda: active.attempts() == {"ACK": 3},
+                            tasks=[task, *active.tasks], deadline_seconds=30)
+                assert len(calls) == 1
+                next_input.set()
+                await until(lambda: active.attempts() == {"ACK": 5},
+                            tasks=[task, *active.tasks], deadline_seconds=30)
+                assert active.captures() == 2
+            except TimeoutError as error:
+                raise AssertionError({"events": active.events,
+                    "jobs": core.store.rows("SELECT kind,state,last_error_code FROM jobs"),
+                    "content": core.store.rows("SELECT state FROM content_items"),
+                    "attempts": active.attempts(), "calls": len(calls),
+                    "downloads": len(downloads), "sends": len(sends)}) from error
+            finally:
+                await active.pause()
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         assert len(instances) == 2 and instances[0].store is not instances[1].store
-        assert len(calls) == 3 and len(downloads) == 1
+        assert len(calls) == 2 and len(downloads) == 1
         assert connection_attempts == ["1.1.1.1", "8.8.8.8"]
         assert [part["message"][0]["data"]["text"] for part in sends] == (
             first_reply.splitlines() + second_reply.splitlines()
         )
-        assert calls[0][0]["content"][1] == calls[1][-1]["content"][1]
-        assert "抽样" in calls[0][0]["content"][0]["text"]
-        assert "抽样" in json.dumps(calls[1], ensure_ascii=False)
-        assert {"role": "assistant", "content": first_reply} in calls[2]
-        assert "自然语义停顿" in calls[2][0]["content"]
+        image_parts = [part for message in calls[0] if isinstance(message["content"], list)
+                       for part in message["content"] if part["type"] == "image_url"]
+        assert len(image_parts) == 1
+        sheet = base64.b64decode(image_parts[0]["image_url"]["url"].split(",", 1)[1])
+        with Image.open(io.BytesIO(sheet)) as prepared:
+            assert prepared.n_frames == 1 and prepared.size == (9, 2)
+        assert "抽样" in json.dumps(calls[0], ensure_ascii=False)
+        assert {"role": "assistant", "content": first_reply} in calls[1]
+        assert "自然语义停顿" in calls[1][0]["content"]
         content = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
         assert content["state"] == "SUCCEEDED"
         assert content["media_sha256"] == hashlib.sha256(original).hexdigest()
-        assert core.store.one("SELECT COUNT(*) n FROM model_usage WHERE state='SETTLED'")["n"] == 3
+        assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
+            {"scenario": "chat", "state": "SETTLED"},
+            {"scenario": "chat", "state": "SETTLED"}]
+        assert core.store.one("SELECT COUNT(*) n FROM captured_images")["n"] == 1
+        assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 2
 
     run(scenario())

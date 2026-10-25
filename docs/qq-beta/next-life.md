@@ -63,7 +63,7 @@ run_id = diary.recompute_day(day, requester)
 `POST /internal/v1/diary/{day}/recompute`。HTTP 返回 `local_date`、`run_id` 和实际队列
 `state`；未安排时为 `run_id=null`、`state=NOT_SCHEDULED`。命令按实际 PENDING、RUNNING
 或 RETRY_WAIT 状态说明排队、整理或等待重试。日期未闭合、用量未确认和尝试耗尽都有
-对应说明，排队成功不代表新日记已经生成。消费队列的服务是原 `companion.diary_worker`。
+对应说明，排队成功不代表新日记已经生成。消费队列的服务是统一 `companion.life_worker` 内的原生 Diary lane。
 新普通输入可取代命令的回复气泡，已经接受的重算仍保留；来源撤回继续阻止派生结果提交。
 
 此入口仅为因来源失效而成为 REDACTED 的已存在日记重新排队；正常日记和主人修订
@@ -105,7 +105,7 @@ UNKNOWN/RESERVED 或丢失的 usage 凭证拒绝重算。原尝试额度耗尽�
 既有 Diary admission、P12/P13、Goals 和 Consolidation 回归继续验证复用路径。
 
 阶段二新增 `tests/test_next_life_integration.py`：命令与 HTTP 状态/认证的合成检查，
-以及 loopback HTTP → 已认证输入/撤回 → 重算入口 → 独立 `diary_worker` 的三条场景。
+以及 loopback HTTP → 已认证输入/撤回 → 重算入口 → 独立 `life_worker` 的三条场景。
 模型传输使用 mock，实际 private-companion feature/config/paid gate 保持开启并验证；
 通过事件等待 worker 完成，不替换其调度、预算或提交逻辑。分别核对 API 重算、命令回复
 被取代后的重算保留，以及调用中撤回后的迟到结果拒绝。最终集成检查由集成负责人统一运行。

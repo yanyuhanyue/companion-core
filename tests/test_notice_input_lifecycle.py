@@ -1,6 +1,5 @@
 """Combined notice/reply lifecycle through authenticated capture and independent workers."""
 
-import asyncio
 import json
 from datetime import timedelta
 
@@ -10,13 +9,10 @@ import pytest
 from companion.core import Core
 from companion.goals import CommitmentRequest, GoalProposal, GoalScope
 from companion.model import ModelClient
-from companion_onebot_bridge import continuous
+from companion_onebot_bridge import owner_notices
 from tests.conftest import run
+from tests.native_continuous_support import frame, host, recall_frame
 from tests.test_input_interrupt_bridge import model_response
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
-from tests.test_owner_recall_bridge import recall_frame
 from tests.test_private_companion import companion_options
 
 
@@ -25,14 +21,15 @@ def test_required_notice_tracks_actual_sources_and_drains_recalled_work(
     core, tmp_path, recall_at,
 ):
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="请帮我稍后阅读这条资料")))
+        await ws.send(frame(1, text="请帮我稍后阅读这条资料"))
         await ws.wait_closed()
 
     async def scenario():
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=companion_options(core)) as (
-            window, client, protocol, _, sends,
-        ):
+        async with host(core, tmp_path, source,
+            purposes=("chat", "history", "memory", "goals", "proactive", "content", "exploration"),
+            core_options=companion_options(core)["core_options"],
+            paid_options={"per_request_calls": 3}) as (window, _, sends, _):
+            client = window.client
             provider_calls = []
 
             def notice_request(request):
@@ -40,10 +37,10 @@ def test_required_notice_tracks_actual_sources_and_drains_recalled_work(
                     "content"]
 
             async def recall():
-                receiver = continuous.OwnerSource(window, protocol, asyncio.Event())
-                receiver.put_recall(recall_frame(1, time=int(core.clock.now.timestamp())),
+                owner_notices.put(window.runtime,
+                    recall_frame(1, time=int(core.clock.now.timestamp())),
                                     core.clock.now, ("127.0.0.1", 12345))
-                await continuous.flush_recalls(window, client)
+                assert await owner_notices.flush_one(window.runtime, client)
 
             async def before(request):
                 if notice_request(request) and recall_at == "before_dispatch":
@@ -60,10 +57,10 @@ def test_required_notice_tracks_actual_sources_and_drains_recalled_work(
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider),
                                          event_hooks={"request": [before]}) as model_http:
                 core.model = ModelClient(core.settings, model_http)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                await window.capture()
+                await window.flush()
                 assert await core.run_once()
-                await window.send_once(client, protocol, reply_approval(window.plan, core))
+                assert await window.pump()
                 owner_id = core.store.one("SELECT event_id FROM events WHERE actor_id='owner'")[
                     "event_id"]
                 core.goals.accept_commitment(CommitmentRequest(
@@ -78,7 +75,7 @@ def test_required_notice_tracks_actual_sources_and_drains_recalled_work(
                 assert notice_job and notice_job["state"] == "QUEUED"
                 with Core(core.settings, core.model, core.clock) as worker:
                     assert worker.store is not core.store
-                    assert await worker.run_once("notice-integration")
+                    assert await worker.run_once("notice-integration", job_id=notice_job["job_id"])
                 job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (notice_job["job_id"],))
                 assert job["context_tracked"] == 1
                 assert {row["event_id"] for row in core.store.rows(
@@ -96,10 +93,10 @@ def test_required_notice_tracks_actual_sources_and_drains_recalled_work(
                     assert (usage["billed_micro_usd"] == 0) is (recall_at == "before_dispatch")
                 else:
                     assert job["state"] == "SUCCEEDED", job
-                    await continuous.pump_private(window, client, protocol)
+                    assert await window.pump()
                     assert len(sends) == 2 and provider_calls == ["notice"]
                     assert core.store.one("SELECT state FROM commitments")["state"] == (
                         "EXPLAINED_FAILURE")
-                assert window.status()["state"] == "OPEN"
+                assert window.runtime.row()["state"] == "ACTIVE"
 
     run(scenario())

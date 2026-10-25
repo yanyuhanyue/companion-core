@@ -9,6 +9,7 @@ from companion.social_autonomy_protocol import ProfileBaseline
 from companion.social_autonomy_runtime import run_once
 from companion.store import after
 from tests.conftest import ingest, run
+from tests.social_profile_support import confirmed_profile_material
 from tests.test_reading_protocol import envelope
 from tests.test_social_autonomy import (
     MockPlanner,
@@ -97,6 +98,7 @@ def test_skip_is_not_repaid_when_same_public_content_is_fetched_again(core):
 
 
 def test_new_receipt_for_same_profile_value_does_not_restart_a_skip(core):
+    confirmed_profile_material(core)
     module, _, _ = background(core, qzone_enabled=False, nickname_enabled=True)
     probe(module)
     module.model.proposal = {"kind": "skip", "reason_code": "KEEP_CURRENT_PROFILE"}
@@ -108,6 +110,7 @@ def test_new_receipt_for_same_profile_value_does_not_restart_a_skip(core):
 
 
 def test_missing_and_stale_profile_fields_are_excluded_from_model_choices(core):
+    confirmed_profile_material(core)
     module, _, _ = background(core, qzone_enabled=False, nickname_enabled=True,
                                signature_enabled=True, avatar_enabled=True,
                                asset_policy_sha256="e" * 64, profile_baseline_seconds=3)
@@ -118,8 +121,8 @@ def test_missing_and_stale_profile_fields_are_excluded_from_model_choices(core):
     assert tick(module) is True
     payload = module.model.calls[0]
     assert payload["allowed_proposals"] == ["skip", "nickname"]
-    assert payload["current_profile"] == [{"field": "nickname", "value": "观星者"}]
-    assert payload["avatar_candidates"] == []
+    assert "current_profile" not in payload and "avatar_candidates" not in payload
+    assert payload["owner_confirmed_material"]
     assert core.store.one("SELECT action_type FROM outbox")["action_type"] == "qq.profile.nickname"
 
 
@@ -211,6 +214,7 @@ def test_unknown_model_is_durable_and_new_evidence_cannot_trigger_repayment(core
     assert usage["state"] == "UNKNOWN" and usage["billed_micro_usd"] > 0
     core.clock.advance(1)
     extra_public(core)
+    confirmed_profile_material(core)
     next_module = service(core, nickname_enabled=True, decision_interval_seconds=0)
     next_module.model = module.model
     probe(next_module)

@@ -17,6 +17,7 @@ from companion.privacy import ErasureLedger
 from companion.runtime import Runtime
 from companion.store import Store
 from tests.conftest import ingest, run
+from tests.test_test_fixtures import assert_schema_metadata
 
 
 def settings(tmp_path):
@@ -53,7 +54,7 @@ def test_uninitialized_migrated_database_is_reported_without_bootstrap(
     assert Path(cfg.database).read_bytes() == before
     assert not Path(cfg.erasure_ledger).exists()
     with sqlite3.connect(cfg.database) as db:
-        assert db.execute("SELECT COUNT(*) FROM runtime_meta").fetchone()[0] == 0
+        assert_schema_metadata(db)
 
 
 def test_snapshot_sees_committed_wal_and_preserves_unknown_and_private_content(core, monkeypatch):

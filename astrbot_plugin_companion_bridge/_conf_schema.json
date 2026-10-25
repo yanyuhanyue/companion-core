@@ -21,7 +21,7 @@
     "default": ""
   },
   "protocol_backend": {
-    "description": "QQ 协议后端（切换前停止旧端并排空桥接队列）",
+    "description": "旧 spool 协议后端，核对期间须与原部署一致",
     "type": "string",
     "options": [
       "napcat",
@@ -30,72 +30,13 @@
     "default": "napcat"
   },
   "protocol_epoch": {
-    "description": "每次切换或回滚使用新的 8–64 位接入批次号；保留原 NapCat 接入可留空",
+    "description": "旧接入批次号，核对期间保持原值",
     "type": "string",
     "default": ""
   },
-  "bilibili_reader_enabled": {
-    "description": "bilibili 公开内容只读适配器",
+  "drain_existing": {
     "type": "bool",
+    "description": "仅核对旧队列和已有投递回执；新主人消息由原生 Bridge 接收",
     "default": false
-  },
-  "bilibili_reader_id": {
-    "description": "bilibili Core 观察来源 ID",
-    "type": "string",
-    "default": ""
-  },
-  "bilibili_reader_token": {
-    "secret": true,
-    "description": "bilibili 独立观察来源令牌",
-    "type": "string",
-    "default": ""
-  },
-  "heybox_reader_enabled": {
-    "description": "heybox 公开内容只读适配器",
-    "type": "bool",
-    "default": false
-  },
-  "heybox_reader_id": {
-    "description": "heybox Core 观察来源 ID",
-    "type": "string",
-    "default": ""
-  },
-  "heybox_reader_token": {
-    "secret": true,
-    "description": "heybox 独立观察来源令牌",
-    "type": "string",
-    "default": ""
-  },
-  "heybox_api_url": {
-    "type": "string",
-    "default": "",
-    "description": "可选小黑盒只读来源 HTTP 地址（GET feeds/post detail 兼容接口）"
-  },
-  "heybox_api_token": {
-    "default": "",
-    "type": "string",
-    "secret": true,
-    "description": "小黑盒来源服务独立访问令牌"
-  },
-  "expression_enabled": {
-    "type": "bool",
-    "description": "在文字回复中按意图选择本地表情",
-    "default": false
-  },
-  "content_enabled": {
-    "type": "bool",
-    "description": "解析主人分享链接和截图（需同时启用 Core 内容能力）",
-    "default": false
-  },
-  "expression_meme_categories": {
-    "type": "list",
-    "description": "表情分类允许列表",
-    "default": [
-      "happy",
-      "like",
-      "surprised",
-      "morning",
-      "sleep"
-    ]
   }
 }

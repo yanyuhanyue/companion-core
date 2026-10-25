@@ -18,10 +18,10 @@ from companion.api import create_app
 from companion.config import ObservationAdapterConfig
 from companion.core import Core
 from tests.conftest import event, run
+from tests.sdk_reader_fixture import Provider, answer, call, worker_for
+from tests.support.native_consumer_entry import environment
 from tests.test_next_reading import HTML, WEB
-from tests.test_onebot_capture import capture_approval, real_core_http, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
+from tests.test_onebot_capture import real_core_http
 from tests.test_reading_protocol import envelope
 from tests.test_reading_service import TOKEN, configure
 from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE
@@ -129,35 +129,31 @@ runpy.run_module('source_reader', run_name='__main__')
 
 
 def test_signed_private_plaintext_web_read_late_result_cannot_cross_stop(core, tmp_path):
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(text="请阅读 " + WEB)))
-        await ws.wait_closed()
-
     async def scenario():
-        options = companion_options(core)
-        options["link_scope"] = "owner_links_v1"
-        options["core_options"].update(
+        options = dict(
             content_enabled=True, observation_enabled=True, web_reading_enabled=True,
+            exploration_enabled=True,
             observation_adapters={"web": ObservationAdapterConfig(
                 source="web", token=TOKEN, allowed_hosts=("articles.example",),
             )}, exploration_daily_requests=8, exploration_monthly_requests=16,
             exploration_daily_bytes=4194304,
         )
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True,
-            rich_input_scope="references_v1", scope_options=options,
-        ) as (window, client, protocol, _, sends):
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+        async with environment(core, tmp_path, purposes=("chat", "content", "exploration"),
+                               core_options=options) as (entry, sends):
+            client = entry.client
+            await entry.admit(1, "请阅读 " + WEB)
+            provider = Provider(answer(calls=[call("read-page", "read_content", {"url": WEB})]))
+            async with worker_for(core, provider) as worker:
+                assert await worker.run_once("native-shared-link-read")
+            assert len(provider.requests) == 1
+            usage = core.store.rows("SELECT * FROM model_usage")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
             auth = {"Authorization": "Bearer " + TOKEN}
             leased = await client.post("/internal/v3/readers/web/lease", json={}, headers=auth)
             assert leased.status_code == 200, leased.text
             item = leased.json()["item"]
             assert item and item["url"] == WEB
-            stopped = await client.post("/internal/v1/live-text/stop", json={
-                "window_sha256": window.plan.sha256,
-            })
-            assert stopped.status_code == 200, stopped.text
+            await entry.stop()
             prefix = "/internal/v3/readers/web/" + item["request_id"]
             check = await client.post(prefix + "/validate", headers=auth,
                                       json={"lease_token": item["lease_token"]})
@@ -172,7 +168,7 @@ def test_signed_private_plaintext_web_read_late_result_cannot_cross_stop(core, t
             assert completed.json()["state"] == "CANCELLED"
             assert not completed.json()["event_ids"]
             assert not core.store.one("SELECT 1 FROM observations")
-            assert not core.store.one("SELECT 1 FROM model_usage")
+            assert core.store.rows("SELECT * FROM model_usage") == usage
             assert not sends
 
     run(scenario())

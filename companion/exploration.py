@@ -84,7 +84,17 @@ class ExplorationService:
 
     def _read_scope(self, row, *, current_request=None):
         """Recheck the current signed card before bounded Reader work can proceed."""
-        from companion import live_text, qq_source
+        from companion import live_text, owner_authority, qq_source
+
+        if owner_authority.required(self.store, self.settings):
+            ref = json.loads(row["authority_json"])
+            owner_authority.current(self.store, self.settings, self.clock,
+                purpose="content" if row["operation"] == "read" else "exploration",
+                authority=ref)
+            step = json.loads(row["goal_step_json"])
+            if step:
+                self.goals.validate_authority(self.goals.get(step["goal_id"]))
+            return
 
         if not live_text.active(self.store, self.settings):
             return
@@ -170,6 +180,31 @@ class ExplorationService:
         previous = s.one("SELECT request_id FROM exploration_requests WHERE request_key=?", (key,))
         if previous:
             return previous["request_id"]
+        sources = self.goals.step_source_ids(step["step_id"]) if step else source_event_ids or []
+        self.goals.validate_sources(sources)
+        from companion import owner_authority
+
+        authority = {}
+        if owner_authority.required(s, self.settings):
+            purpose = "content" if operation == "read" else "exploration"
+            if step:
+                goal = self.goals.get(step["goal_id"])
+                self.goals.validate_authority(goal)
+                authority = json.loads(goal["authority_json"])
+            else:
+                # Owner input carries the original admission; never upgrade an old turn.
+                for source_id in sources:
+                    job = s.one("SELECT * FROM jobs WHERE event_id=? AND kind='chat'",
+                                (source_id,))
+                    if job:
+                        view = owner_authority.check_job(s, self.settings, self.clock, job,
+                                                         purpose=purpose)
+                        if authority and authority != view.authority.as_dict():
+                            raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
+                        authority = view.authority.as_dict()
+            view = owner_authority.current(s, self.settings, self.clock, purpose=purpose,
+                                            authority=authority or None)
+            authority = view.authority.as_dict()
         request_id = uid("read")
         s.insert(
             "exploration_requests",
@@ -183,9 +218,8 @@ class ExplorationService:
             captured_privacy_epoch=epoch(s),
             created_at=now,
             updated_at=now,
+            authority_json=encode(authority),
         )
-        sources = self.goals.source_ids(step["goal_id"]) if step else source_event_ids or []
-        self.goals.validate_sources(sources)
         for source_id in set(sources):
             s.insert("exploration_evidence", request_id=request_id, event_id=source_id)
         return request_id
@@ -269,7 +303,7 @@ class ExplorationService:
                 self.goals.fail(
                     step,
                     "READ_TIMEOUT" if was_started else "READER_UNAVAILABLE",
-                    retryable=was_started,
+                    execution_uncertain=was_started,
                     resource=not was_started,
                 )
 
@@ -647,7 +681,8 @@ class ExplorationService:
                 ),
             )
         if failed_step and not reading:
-            self.goals.fail(failed_step, result.error_code or "READ_FAILED", retryable=True)
+            self.goals.fail(failed_step, result.error_code or "READ_FAILED",
+                            execution_uncertain=state == "UNKNOWN")
         if step and step["kind"] == "self" and not reading:
             for event_id in result_ids:
                 self.social.consider(event_id)

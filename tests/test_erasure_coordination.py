@@ -15,6 +15,27 @@ from tests.conftest import ingest
 from tests.test_observations import enable_observations, observation
 
 
+def test_replay_contract_discovery_does_not_hold_database_write_lock(core, monkeypatch):
+    from companion import erasure
+
+    original = erasure.contract_signature
+    ledger = core.ledger.path.read_bytes()
+    with closing(Store(core.settings.database)) as other:
+        other.execute("PRAGMA busy_timeout=0")
+
+        def discover():
+            signature = original()
+            with other.transaction():
+                other.execute("INSERT INTO runtime_meta VALUES ('synthetic-concurrent-boot','1')")
+            return signature
+
+        monkeypatch.setattr(erasure, "contract_signature", discover)
+        core.ledger.replay(core.store)
+    assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                          (erasure.CONTRACT_KEY,))["value"] == original()
+    assert core.ledger.path.read_bytes() == ledger
+
+
 def legacy_complete_with_stale_affect(core):
     core.settings.affect_enabled = True
     ingest(core, 1, "简短一点")

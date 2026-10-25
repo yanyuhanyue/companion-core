@@ -6,6 +6,9 @@ import os
 import ssl
 import subprocess
 import sys
+import time
+from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,18 +20,18 @@ from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from companion.store import encode
 from companion.voice_config import VoiceNode, VoiceReplyPolicy
-from companion.voice_protocol import VoiceControlRequest, VoiceProtocolError, digest
-from companion_onebot_bridge import continuous
-from companion_onebot_bridge.network import private_http_client
+from companion.voice_protocol import (
+    VoiceControlRequest,
+    VoiceProtocolError,
+    VoiceStopRequest,
+    digest,
+)
 from companion_voice_node.state import NodeState
 from companion_voice_node.supervisor import ProcessSupervisor, process_has_exited
 from companion_voice_node.worker import VoiceNodeConfig, VoiceNodeWorker, local_manifest
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, real_core_http, source_window
-from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
 from tests.test_voice_jobs import voice_config
-from tests.test_voice_node_api import independent_node, tls_core
+from tests.test_voice_node_api import independent_node, node_wall_clock, tls_core
 from tests.test_voice_node_worker import FakeCore, FixtureSupervisor, child_receipts
 from tests.test_voice_node_worker import node as node  # noqa: F401 -- pytest fixture
 
@@ -49,22 +52,22 @@ class CancelCore(FakeCore):
                 if self.claimed == self.cancel_at:
                     self.controls.append(body)
                     return httpx.Response(200, json={"action": "CANCEL"})
-            if body.phase == "CANCELLED":
-                self.terminal_controls.append(body)
-                for child in self.children:
-                    assert process_has_exited(child.process.pid, child.identity) or (
-                        self.allow_running and body.resource_state == "QUARANTINED")
-                if self.terminal_continue:
-                    return httpx.Response(200, json={"action": "CONTINUE",
-                        "renewed_lease": self.lease(body.ref.manifest_sha256)})
-                if self.loss == "before":
-                    self.loss = None
-                    raise httpx.ReadError("synthetic lost control request")
-                response = super().__call__(request)
-                if self.loss == "after":
-                    self.loss = None
-                    raise httpx.ReadError("synthetic lost control acknowledgment")
-                return response
+        if request.url.path.endswith("/stop"):
+            body = VoiceStopRequest.model_validate_json(request.content)
+            self.terminal_controls.append(body)
+            for child in self.children:
+                assert process_has_exited(child.process.pid, child.identity) or (
+                    self.allow_running and body.resource_state == "QUARANTINED")
+            if self.terminal_continue:
+                return httpx.Response(200, json={"action": "CONTINUE"})
+            if self.loss == "before":
+                self.loss = None
+                raise httpx.ReadError("synthetic lost stop request")
+            response = super().__call__(request)
+            if self.loss == "after":
+                self.loss = None
+                raise httpx.ReadError("synthetic lost stop acknowledgment")
+            return response
         return super().__call__(request)
 
     def supervisor(self, workspace, temporary, *, counter):
@@ -117,7 +120,7 @@ def test_cancel_control_continue_is_not_a_terminal_acknowledgment(node):
     async def scenario():
         worker = VoiceNodeWorker(config, transport=httpx.MockTransport(remote),
             supervisor_factory=lambda *_: pytest.fail("cancelled claim cannot start a child"))
-        with pytest.raises(VoiceProtocolError, match="VOICE_CANCEL_ACK_REQUIRED"):
+        with pytest.raises(VoiceProtocolError, match="VOICE_CORE_RESPONSE_INVALID"):
             await worker.run(once=True)
         with NodeState(config.state_directory) as state:
             assert state.active_job()["phase"] == "CANCELLED"
@@ -170,14 +173,15 @@ def test_unconfirmed_child_stop_cannot_release_slot_until_operator_confirms_exit
     run(scenario())
 
 
-async def launch_node(config, certificate, counter, tmp_path, timestamp, *, gate, loss):
+async def launch_node(config, certificate, counter, tmp_path, timestamp, *, monotonic_start,
+                      gate, loss):
     config_file = tmp_path / "cancel-node-config.json"
     config_file.write_text(encode(config.model_dump(mode="json") | {
         "credential": config.credential.get_secret_value()}), encoding="utf-8")
     return await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
         "tests.test_voice_node_cancellation_handshake", "--cancel-node", str(config_file),
         str(certificate), str(counter), "gate" if gate else "resume", loss or "none",
-        str(timestamp),
+        str(timestamp), str(monotonic_start),
         cwd=str(config.workspace), stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -191,6 +195,24 @@ async def node_finished(process):
     return value["outcome"]
 
 
+@asynccontextmanager
+async def advancing_clock(core):
+    initial, start = core.clock.now, time.monotonic()
+    stop = asyncio.Event()
+
+    async def advance():
+        while not stop.is_set():
+            core.clock.now = initial + timedelta(seconds=time.monotonic() - start)
+            await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(advance())
+    try:
+        yield initial.timestamp(), start
+    finally:
+        stop.set()
+        await task
+
+
 @pytest.mark.parametrize("loss", [None, "before", "after"])
 def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
     core, node, tmp_path, monkeypatch, loss,
@@ -202,16 +224,10 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
     voice = voice_config(signing_private_key=signing_key.private_bytes_raw().hex(),
         reply=VoiceReplyPolicy(mode="auto"), nodes={"local": VoiceNode(token=config.credential,
             manifest_sha256=digest(local_manifest(config)))})
-    scope = companion_options(core)
-    scope["core_options"]["voice"] = voice
-    scope.update(voice_scope="owner_voice_v1", voice_policy_sha256=voice.authority_sha256())
-    incoming, calls = [], []
+    from tests.voice_owner_fixtures import capture_voice_event, native_voice
 
-    async def source(ws):
-        incoming.append(True)
-        await ws.send(encode(raw_event(len(incoming), time=int(core.clock.now.timestamp()),
-                                       text="请回答第" + str(len(incoming)) + "个问题")))
-        await ws.wait_closed()
+    capture, capture_key, _ = native_voice(core, tmp_path, record=False, config=voice)
+    calls = []
 
     def model(request):
         calls.append(request)
@@ -220,25 +236,21 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
 
     async def scenario():
         processes = []
-        async with real_core_http(core) as port, source_window(core, tmp_path, source,
-            live=True, approved=True, scope_options=scope,
-            bridge_options={"core_url": f"http://127.0.0.1:{port}"}) as (
-            window, _, protocol, handshakes, sends,
-        ), private_http_client(window.plan.config.core_url,
-            window.plan.config.bridge_token) as client, httpx.AsyncClient(
+        async with advancing_clock(core) as (timestamp, monotonic_start), httpx.AsyncClient(
             transport=httpx.MockTransport(model)) as external:
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
             with Core(core.settings, ModelClient(core.settings, external), core.clock) as worker:
                 assert worker.store is not core.store
                 assert await worker.run_once("first-native-voice-chat")
-                await continuous.pump_private(window, client, protocol)
+                with worker.store.transaction():
+                    reply = worker.store.one(
+                        "SELECT message_id FROM outbox ORDER BY rowid DESC LIMIT 1")
+                    worker.voice.prepare_reply(reply["message_id"])
                 first = core.store.one("SELECT * FROM voice_jobs")
                 assert first["state"] == "QUEUED"
                 async with tls_core(core, tmp_path) as (origin, certificate):
                     node_config = config.model_copy(update={"core_origin": origin})
                     process = await launch_node(node_config, certificate, counter, tmp_path,
-                        core.clock.now.timestamp(), gate=True, loss=loss)
+                        timestamp, monotonic_start=monotonic_start, gate=True, loss=loss)
                     processes.append(process)
                     try:
                         line = await asyncio.wait_for(process.stdout.readline(), 15)
@@ -250,17 +262,13 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                         assert child_receipts(counter) == []
                         assert core.store.one("SELECT state FROM voice_jobs")["state"] == (
                             "RUNNING")
-                        async with continuous.OwnerSource(
-                            window, protocol, asyncio.Event(),
-                        ) as owner:
-                            observed = await asyncio.wait_for(owner.next(), 10)
-                            await continuous.capture_observed(window, client, protocol, observed)
-                            owner.consume(observed)
-                            row = window.db.execute("SELECT * FROM window_inputs WHERE event_id=?",
-                                                    (observed.event_id,)).fetchone()
-                            await continuous.approve_row(window, client, row)
+                        capture_voice_event(core, capture_key, capture.authority,
+                                            number=124, record=False)
                         assert await worker.run_once("second-native-voice-chat")
-                        await continuous.pump_private(window, client, protocol)
+                        with worker.store.transaction():
+                            reply = worker.store.one(
+                                "SELECT message_id FROM outbox ORDER BY rowid DESC LIMIT 1")
+                            worker.voice.prepare_reply(reply["message_id"])
                         following = core.store.one("SELECT * FROM voice_jobs WHERE job_id<>?",
                                                    (first["job_id"],))
                         assert following["state"] == "QUEUED"
@@ -279,7 +287,8 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                             # A distinct node process replays the terminal handshake;
                             # it cannot consume the next queued job in the same cycle.
                             resumed = await launch_node(node_config, certificate, counter,
-                                tmp_path, core.clock.now.timestamp(), gate=False, loss=None)
+                                tmp_path, timestamp, monotonic_start=monotonic_start,
+                                gate=False, loss=None)
                             processes.append(resumed)
                             assert await node_finished(resumed) == "DISCARDED"
                         assert core.store.one("SELECT active_job_id FROM voice_node_state")[
@@ -288,7 +297,7 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                                                   "WHERE job_id=?", (first["job_id"],))
                         assert retained["state"] == "UNKNOWN" and retained["started_at"]
                         await independent_node(node_config, certificate, counter, tmp_path,
-                                               core.clock.now.timestamp())
+                                               timestamp, monotonic_start=monotonic_start)
                     finally:
                         for current in processes:
                             if current.returncode is None:
@@ -297,10 +306,10 @@ def test_real_tls_cancel_frees_old_slot_after_new_owner_input_and_next_job_runs(
                 assert core.store.one("SELECT state FROM voice_jobs WHERE job_id=?",
                                       (following["job_id"],))["state"] == "READY"
                 assert len(child_receipts(counter)) == 1 and len(calls) == 2
-                assert len(handshakes) == 2 and not sends
+                assert core.store.one("SELECT COUNT(*) n FROM runtime_meta "
+                    "WHERE key LIKE 'owner_input:%'")["n"] == 2
                 assert core.store.one("SELECT active_job_id FROM voice_node_state")[
                     "active_job_id"] is None
-                window.verify()
 
     run(scenario())
 
@@ -323,8 +332,8 @@ async def independent_cancel_node():
     class LostControl(httpx.AsyncHTTPTransport):
         async def handle_async_request(self, request):
             nonlocal loss
-            cancel = (request.url.path.endswith("/control")
-                      and json.loads(request.content).get("phase") == "CANCELLED")
+            cancel = (request.url.path.endswith("/stop")
+                      and json.loads(request.content).get("outcome") == "CANCELLED")
             if cancel and loss == "before":
                 loss = "none"
                 raise httpx.ReadError("synthetic cancel request lost", request=request)
@@ -336,9 +345,9 @@ async def independent_cancel_node():
                 raise httpx.ReadError("synthetic cancel ACK lost", request=request)
             return response
 
-    # Share the existing native window fixture's wall clock. Signature, source,
-    # lease and monotonic request budgets still use their actual implementations.
-    with patch("companion_voice_node.worker.time.time", return_value=float(sys.argv[7])):
+    # Both processes advance from the same anchor, including startup and imports.
+    clock = node_wall_clock(float(sys.argv[7]), float(sys.argv[8]))
+    with patch("companion_voice_node.worker.time.time", side_effect=clock):
         try:
             outcome = await VoiceNodeWorker(config, transport=LostControl(verify=trust),
                 supervisor_factory=lambda workspace, temporary: GatedSupervisor(

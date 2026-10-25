@@ -1,20 +1,21 @@
 """Bridge evidence failure must not prevent authenticated Core revocation."""
 
-import json
-from functools import partial
+from pathlib import Path
 
 import httpx
 import pytest
 
-from companion import api, budget, live_text
+from companion import budget, live_text, paid_budget
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.core import Core
 from companion.model import ModelClient, ModelResponse
+from companion.store import after, encode, uid
 from companion_onebot_bridge import continuous
+from companion_onebot_bridge.network import private_http_client
 from tests.conftest import run
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import raw_event
+from tests.historical_input_retirement import historical_input
+from tests.test_onebot_capture import source_window
 from tests.test_private_companion import companion_options
 
 
@@ -28,23 +29,58 @@ def damage(window, fault):
         window.plan.journal.write_bytes(b"{broken-json\n")
 
 
+def pending_history(core, job):
+    """Original queued liabilities; no retired worker or admission writer is executed."""
+    now = core.clock()
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED',last_error_code=NULL WHERE job_id=?",
+                       (job["job_id"],))
+    core.store.insert("outbox", message_id=uid("msg"), origin_event_id=job["event_id"],
+        conversation_id=job["conversation_id"], action_type="qq.private.reply",
+        content_json=encode({"text": "保留的待发回复"}),
+        content_sha256=paid_budget.sha({"text": "保留的待发回复"}), delivery_key="archived-reply",
+        state="PENDING", created_at=now, updated_at=now)
+    requests = []
+    for state in ("RUNNING", "QUEUED"):
+        request = uid("read")
+        core.store.insert("exploration_requests", request_id=request, request_key=request,
+            adapter_id="bili", operation="discover", url="",
+            lease_token=uid("read_lease") if state == "RUNNING" else None,
+            lease_until=after(now, 60) if state == "RUNNING" else None,
+            started_at=now if state == "RUNNING" else None,
+            state=state, captured_privacy_epoch=0, created_at=now, updated_at=now,
+            reserved_bytes=100, used_bytes=0)
+        requests.append(request)
+    request = uid("model")
+    snapshot = paid_budget.snapshot(core.settings)
+    approval = core.settings.paid_model
+    contract = paid_budget.sha(snapshot)
+    core.store.insert("model_budget_windows", window_id=approval.window_id,
+                      contract_sha256=contract)
+    core.store.insert("model_usage", usage_id=uid("usage"), request_id=request, job_id=None,
+        scenario="memory_extract", provider=core.settings.provider, model=core.settings.model_name,
+        input_tokens=100, output_tokens=0, billed_micro_usd=200, is_estimate=1, pricing_known=1,
+        state="RESERVED", occurred_at=now)
+    core.store.insert("model_admissions", request_id=request, logical_request_id=request,
+        attempt_id=uid("attempt"), attempt_number=1, window_id=approval.window_id,
+        contract_sha256=contract, payload_sha256=paid_budget.sha({"historical_request": request}),
+        snapshot_json=encode(snapshot), reserved_micro_usd=200, input_bound=100, output_bound=20,
+        journal_path=str(Path(approval.journal_path).resolve()),
+        journal_id=core.settings.live_text_window.budget_journal_id,
+        lease_token=uid("model_lease"), lease_until=after(now, 60))
+    paid_budget.journal(core.store, approval, dict(kind="reserve", request_id=request,
+        state="RESERVED", minimum_micro_usd=200, contract_sha256=contract))
+    return *requests, request
+
+
 @pytest.mark.parametrize("fault", ["broken", "missing", "head"])
-def test_journal_failure_revokes_through_api_lifespan_and_independent_worker(
-    core, tmp_path, monkeypatch, fault,
+def test_journal_failure_revokes_historical_custody_through_api_and_independent_worker(
+    core, tmp_path, fault,
 ):
-    monkeypatch.setattr(api, "Core", partial(Core, clock=core.clock))
     calls = []
 
-    async def source(ws):
-        await ws.send(json.dumps(raw_event(1)))
-        await ws.wait_closed()
-
-    def provider(request):
+    def forbidden(request):
         calls.append(request)
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": "合成回复"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
+        pytest.fail("Historical recovery must not invoke an external provider")
 
     async def scenario():
         options = companion_options(core)
@@ -57,23 +93,17 @@ def test_journal_failure_revokes_through_api_lifespan_and_independent_worker(
                 source="bilibili", token="synthetic-reader-token-12345",
             )},
         )
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, independent_api=True,
-            scope_options=options, rich_input_scope="references_v1",
-        ) as (window, client, protocol, _, sends):
-            await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
-            async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as model:
+        async with historical_input(core, tmp_path, failure="cancelled", stopped=False,
+                                    scope_options=options, rich_input_scope="references_v1") as (
+            window, client, job,
+        ):
+            running, queued, reserved = pending_history(core, job)
+            async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as model, (
+                private_http_client(window.plan.config.onebot_http_url,
+                    window.plan.config.onebot_token, transport=httpx.MockTransport(forbidden))
+            ) as protocol:
                 with Core(core.settings, ModelClient(core.settings, model), core.clock) as worker:
                     assert worker.store is not core.store
-                    assert await worker.run_once("stop-recovery-worker")
-                    running = worker.exploration.create("bili", "discover", "running")
-                    queued = worker.exploration.create("bili", "discover", "queued")
-                    assert worker.exploration.lease("bili")["request_id"] == running
-                    messages = [{"role": "user", "content": "synthetic background extraction"}]
-                    reserved = budget.reserve(worker.store, worker.settings, None,
-                                              "memory_extract", messages, worker.clock(),
-                                              clock=worker.clock)
                     damage(window, fault)
                     before = (window.plan.journal.read_bytes()
                               if window.plan.journal.exists() else None)
@@ -95,14 +125,15 @@ def test_journal_failure_revokes_through_api_lifespan_and_independent_worker(
                     assert not await worker.run_once("after-stop")
                     with pytest.raises(CoreError):
                         budget.reserve(worker.store, worker.settings, None, "memory_extract",
-                                       messages, worker.clock(), clock=worker.clock)
-                    # Revocation keeps existing custody and permits late known settlement.
+                            [{"role": "user", "content": "synthetic denied work"}],
+                            worker.clock(), clock=worker.clock)
+                    # A supplied late known receipt settles the retained reservation.
                     budget.settle(worker.store, worker.settings, reserved,
                                   ModelResponse("", 10, 1, 0))
                     assert worker.store.one(
                         "SELECT state FROM model_usage WHERE request_id=?", (reserved,),
                     )["state"] == "SETTLED"
-                    assert len(calls) == 1 and sends == []
+                    assert calls == []
 
     run(scenario())
 

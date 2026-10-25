@@ -9,6 +9,7 @@ import pytest
 from companion import budget, paid_budget
 from companion.contracts import CoreError
 from companion.model import ModelResponse
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 MESSAGES = [{"role": "user", "content": "hello"}]
@@ -16,7 +17,7 @@ MESSAGES = [{"role": "user", "content": "hello"}]
 
 def reserve(core):
     request = budget.reserve(
-        core.store, core.settings, None, "chat", MESSAGES, core.clock(),
+        core.store, core.settings, authorized_job(core), "chat", MESSAGES, core.clock(),
     )
     return request, core.store.one("SELECT * FROM model_admissions WHERE request_id=?", (request,))
 
@@ -120,14 +121,20 @@ def test_returned_response_without_usage_stops_even_when_concurrency_remains(cor
         reserve(core)
 
 
-def test_transport_unknown_keeps_reservation_and_bounded_retry_without_fake_usage(core, tmp_path):
+def test_transport_unknown_keeps_liability_and_limits_new_native_work(core, tmp_path):
     approved_live(core, tmp_path, concurrency=2)
     request, _ = reserve(core)
     budget.settle(core.store, core.settings, request)
     assert diagnostic(core, request)["code"] == "TRANSPORT_USAGE_UNKNOWN"
-    assert reserve(core)[0] != request
-    with pytest.raises(CoreError, match="CONCURRENCY"):
+    original = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,))
+    with pytest.raises(CoreError, match="CLOUD_TASK_USAGE_UNCERTAIN"):
         reserve(core)
+    job = authorized_job(core, number=2)
+    second = budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
+    assert second != request
+    with pytest.raises(CoreError, match="CONCURRENCY"):
+        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
+    assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (request,)) == original
     summary = budget.usage_diagnostics(core.store.db)
     assert summary["calibrated_calls"] == summary["input_actual_tokens"] == 0
     assert summary["currency"] is None

@@ -240,13 +240,18 @@ def sync_reference(store, reference_type, reference_id):
     # records a timestamp, but that alone does not prove an attempt was made.
     dispatched = (row["dispatched_at"] if reference_type == "tool" and not row["legacy"]
                   else row["dispatched_at"] or native["dispatched_at"])
+    day = _day(dispatched or row["occurred_at"], snapshot["timezone"])
+    reconciled = receipt or row["reconciliation_sha256"]
+    if (amount, converted, state, reconciled, dispatched, day) == (
+        row["accounted_micro_usd"], row["amount_micro_cny"], row["state"],
+        row["reconciliation_sha256"], row["dispatched_at"], row["local_day"],
+    ):
+        return
     store.execute(
         "UPDATE cloud_cost_snapshots SET accounted_micro_usd=?,amount_micro_cny=?,state=?,"
         "reconciliation_sha256=COALESCE(?,reconciliation_sha256),dispatched_at=?,local_day=? "
         "WHERE reference_type=? AND reference_id=?",
-        (amount, converted, state, receipt, dispatched,
-         _day(dispatched or row["occurred_at"], snapshot["timezone"]),
-         reference_type, reference_id),
+        (amount, converted, state, receipt, dispatched, day, reference_type, reference_id),
     )
     if receipt:
         store.audit("cloud_budget.native_settled", reference_id, "cloud-budget", utcnow(),
@@ -255,15 +260,24 @@ def sync_reference(store, reference_type, reference_id):
 
 def _sync(store, settings, now):
     current = _policy(store, settings, now)
+    # Tool UNKNOWN is sticky; CANCELLED needs the same native completion proof
+    # as _native(). A cancellation alone is neither a new charge nor settlement.
     changed = store.rows(
         "SELECT c.reference_type,c.reference_id FROM cloud_cost_snapshots c "
         "JOIN model_usage m ON c.reference_type='model' AND c.reference_id=m.request_id "
         "WHERE m.billed_micro_usd<>c.accounted_micro_usd OR m.state<>c.state "
         "UNION SELECT c.reference_type,c.reference_id FROM cloud_cost_snapshots c "
         "JOIN tool_tasks t ON c.reference_type='tool' AND c.reference_id=t.task_id "
-        "WHERE t.state='CANCELLED' OR t.billed_micro_usd<>c.accounted_micro_usd OR "
-        "(CASE WHEN t.state='UNKNOWN' THEN 'UNKNOWN' WHEN t.state IN ('LEASED','RUNNING') "
-        "THEN 'RESERVED' ELSE 'SETTLED' END)<>c.state",
+        "WHERE t.billed_micro_usd<>c.accounted_micro_usd OR "
+        "(c.state='UNKNOWN' AND t.reserved_micro_usd>c.accounted_micro_usd) OR "
+        "(c.legacy=1 AND c.dispatched_at IS NULL AND t.dispatched_at IS NOT NULL) OR "
+        "(c.state<>'UNKNOWN' AND "
+        "(CASE WHEN t.state='UNKNOWN' OR (t.state='CANCELLED' AND NOT EXISTS "
+        "(SELECT 1 FROM audit_log a WHERE a.entity_id=t.task_id AND "
+        "(a.action='tool.cancelled_before_dispatch' OR (a.action='tool.finished' AND "
+        "json_extract(a.safe_detail_json,'$.status') IN ('SUCCEEDED','FAILED'))))) "
+        "THEN 'UNKNOWN' WHEN t.state IN ('LEASED','RUNNING') "
+        "THEN 'RESERVED' ELSE 'SETTLED' END)<>c.state)",
     )
     for row in changed:
         sync_reference(store, row["reference_type"], row["reference_id"])

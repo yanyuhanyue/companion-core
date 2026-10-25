@@ -7,7 +7,7 @@ receipts, proactive messages and phone confirmation remain `NOT_RUN`.
 
 ## Native pipeline and repaired boundaries
 
-DiaryService, diary_worker, NightlyConsolidator and ReflectionService remain the
+DiaryService, the Life worker, NightlyConsolidator and ReflectionService remain the
 only daily pipeline. The new integration regression runs a synthetic closed day
 through consolidation and private diary, owner correction, next-day continuity
 from the original received events, deletion, and restoration of an older encrypted

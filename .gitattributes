@@ -1,3 +1,7 @@
 * text=auto eol=lf
 *.zip binary
 *.whl binary
+companion/token_artifacts/deepseek_v41/* -text
+companion/token_artifacts/deepseek_v41/tokenizer.json.gz binary
+companion/token_artifacts/deepseek_v41/LICENSE binary
+companion/token_artifacts/deepseek_v41/manifest.json text eol=lf

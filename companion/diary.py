@@ -9,9 +9,10 @@ from zoneinfo import ZoneInfo
 
 from pydantic import ConfigDict, Field, ValidationError
 
-from companion import budget, private_life
+from companion import budget, owner_authority, private_life
 from companion.commands import command_parts, is_memory_command
 from companion.contracts import CoreError, StrictModel
+from companion.memory_authority import source_allowed
 from companion.observation import expired_sources
 from companion.privacy import advance_epoch, diary_copies, epoch, redact, sensitive
 from companion.store import after, encode, uid, utcnow
@@ -93,7 +94,7 @@ def erase_diary_projections(store, record, *, conservative=True):
             row["entry_id"]
             for row in store.rows(
                 "SELECT d.entry_id FROM diary_entries d WHERE status='COMMITTED' AND "
-                "(generator_version<>'diary-1' OR NOT EXISTS "
+                "(generator_version NOT IN ('diary-1','life-expression-1') OR NOT EXISTS "
                 "(SELECT 1 FROM diary_evidence e WHERE e.entry_id=d.entry_id))"
             )
         )
@@ -258,7 +259,10 @@ class DiaryRepository:
 
     def enabled(self):
         try:
-            private_life.ensure_active(self.store, self.settings, self.clock)
+            if owner_authority.required(self.store, self.settings):
+                owner_authority.current(self.store, self.settings, self.clock, purpose="diary")
+            else:
+                private_life.ensure_active(self.store, self.settings, self.clock)
         except CoreError:
             return False
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='diary_paused'")
@@ -277,7 +281,7 @@ class DiaryRepository:
             (code, self.clock()),
         )
 
-    def sources(self, day):
+    def sources(self, day, *, purpose="diary"):
         start, end = day_bounds(day, self.settings.timezone)
         rows = self.store.execute(
             "SELECT e.* FROM events e JOIN conversations c USING(conversation_id) "
@@ -294,7 +298,8 @@ class DiaryRepository:
             body = json.loads(row["body_json"])
             text = body.get("text", "").strip()
             if (
-                not text
+                not source_allowed(self.store, self.settings, self.clock, row["event_id"], purpose)
+                or not text
                 or body.get("diary_command")
                 or body.get("control_command")
                 or is_management_command(text)
@@ -364,7 +369,9 @@ class DiaryRepository:
                 body = json.loads(row["body_json"])
                 text = body.get("text", "").strip()
                 if (
-                    not text
+                    not source_allowed(self.store, self.settings, self.clock,
+                                       row["event_id"], purpose)
+                    or not text
                     or body.get("diary_command")
                     or body.get("control_command")
                     or is_management_command(text)
@@ -455,7 +462,7 @@ class DiaryRepository:
             )
             return run_id
 
-    def claim(self, worker_id):
+    def claim(self, worker_id, *, run_id=None):
         s, now = self.store, self.clock()
         with s.transaction():
             if not self.enabled():
@@ -495,8 +502,8 @@ class DiaryRepository:
             row = s.one(
                 "SELECT * FROM diary_runs WHERE state IN ('PENDING','RETRY_WAIT') "
                 "AND (next_attempt_at IS NULL OR next_attempt_at<=?) "
-                "AND timezone=? ORDER BY local_date,created_at LIMIT 1",
-                (now, self.settings.timezone),
+                "AND timezone=? AND (? IS NULL OR run_id=?) ORDER BY local_date,created_at LIMIT 1",
+                (now, self.settings.timezone, run_id, run_id),
             )
             if not row:
                 return None
@@ -537,6 +544,13 @@ class DiaryRepository:
             raise CoreError("DIARY_STALE_LEASE", 409)
         if not self.enabled():
             raise CoreError("DIARY_DISABLED", 409)
+        if owner_authority.required(self.store, self.settings):
+            admission = self.store.one(
+                "SELECT authority_json FROM model_admissions WHERE request_id=?",
+                (current["model_request_id"],),
+            )
+            owner_authority.current(self.store, self.settings, self.clock, purpose="diary",
+                authority=json.loads(admission["authority_json"]) if admission else None)
         if epoch(self.store) != run["captured_privacy_epoch"]:
             raise CoreError("PRIVACY_CHANGED", 409)
         if (
@@ -615,6 +629,12 @@ class DiaryService:
         self.clock = clock
         self.repo = DiaryRepository(store, settings, clock)
 
+    def save_life_expression(self, job_id, *, expected_content_sha256, authority):
+        from companion.diary_life import save
+
+        return save(self, job_id, expected_content_sha256=expected_content_sha256,
+                    authority=authority)
+
     def schedule_day(self, day):
         return self.repo.schedule(day)
 
@@ -673,10 +693,16 @@ class DiaryService:
                 scheduled.append(result)
         return scheduled
 
-    async def generate_once(self, worker_id):
-        if not private_life.ready(self.store, self.settings, self.clock):
+    async def generate_once(self, worker_id, *, run_id=None):
+        if owner_authority.required(self.store, self.settings):
+            ready = self.repo.enabled() and not (
+                private_life.busy(self.store, self.clock())
+                or budget.chat_pending(self.store, self.clock()))
+        else:
+            ready = private_life.ready(self.store, self.settings, self.clock)
+        if not ready:
             return False
-        run = self.repo.claim(worker_id)
+        run = self.repo.claim(worker_id, run_id=run_id)
         if run is None:
             return False
         request_id = None
@@ -734,8 +760,13 @@ class DiaryService:
                 budget.settle(self.store, self.settings, request_id)
                 raise
             response = await budget.complete(
-                self.model, self.store, self.settings, request_id, messages, "diary", self.clock
+                self.model, self.store, self.settings, request_id, messages, "diary", self.clock,
+                source_check=lambda: self.repo.validate_run(run),
             )
+            usage = self.store.one("SELECT state FROM model_usage WHERE request_id=?",
+                                   (request_id,))
+            if not usage or usage["state"] != "SETTLED":
+                raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
             draft = DiaryDraft.model_validate_json(response.text)
             body = render_draft(draft, run["sources"], run["local_date"], self.settings)
             self.repo.finish(
@@ -778,7 +809,9 @@ class DiaryService:
                 "DIARY_SOURCES_CHANGED",
             }:
                 state = "CANCELLED"
-            elif not unknown and (code in {"MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE"}
+            elif not unknown and (code in {
+                "MODEL_RETRYABLE", "MODEL_INVALID_RESPONSE", "MODEL_EMPTY_RESPONSE",
+            }
                                   or isinstance(error, ValidationError)):
                 state = "RETRY_WAIT" if run["attempts"] < run["max_attempts"] else "FAILED"
             self.repo.finish(run, state, code, retry_at=retry_at)
@@ -812,6 +845,29 @@ class DiaryService:
             "ORDER BY local_date DESC LIMIT ?",
             (self.settings.timezone, limit),
         )
+
+    def context_proof(self, entry):
+        """Bind a returned entry to its native version and original evidence."""
+        current = self._get_day(date.fromisoformat(entry["local_date"]))
+        if current is None or current != entry:
+            raise CoreError("PRIVACY_CHANGED", 409)
+        sources = [row["event_id"] for row in self.store.rows(
+            "SELECT DISTINCT event_id FROM diary_evidence WHERE entry_id=? ORDER BY event_id",
+            (entry["entry_id"],),
+        )]
+        if not sources or expired_sources(
+            self.store, sources,
+            after(self.clock(), -86400 * self.settings.raw_event_retention_days),
+        ):
+            raise CoreError("PRIVACY_CHANGED", 409)
+        return {"local_date": entry["local_date"], "timezone": self.settings.timezone,
+                "entry_sha256": hashlib.sha256(encode(entry).encode()).hexdigest(),
+                "source_event_ids": sources}
+
+    def revalidate_context(self, proof):
+        entry = self.get_day(date.fromisoformat(proof["local_date"]), self.settings.owner_qq_id)
+        if entry is None or self.context_proof(entry) != proof:
+            raise CoreError("PRIVACY_CHANGED", 409)
 
     def status(self, requester):
         self.authorize(requester)

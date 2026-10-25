@@ -3,8 +3,78 @@
 import json
 import re
 from contextlib import nullcontext
+from datetime import UTC, datetime
 
-from companion.store import after, encode
+from companion.contracts import CoreError
+from companion.store import after, encode, uid
+
+RESET_TARGET = "affect_reset"
+RESET_KEY = "owner_feedback_reset_at"
+
+
+def feedback_reset_at(store):
+    row = store.one("SELECT value FROM runtime_meta WHERE key=?", (RESET_KEY,))
+    if row is None:
+        return None
+    try:
+        stamp = datetime.fromisoformat(row["value"])
+        if stamp.utcoffset() is None:
+            raise ValueError("reset timestamp needs timezone")
+        return stamp.astimezone(UTC).isoformat(timespec="microseconds")
+    except (TypeError, ValueError) as error:
+        raise CoreError("AFFECT_RESET_INVALID", 503) from error
+
+
+def reset_target(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request_id):
+        raise CoreError("AFFECT_RESET_ID_REQUIRED", 400)
+    return RESET_TARGET + ":" + request_id
+
+
+def reset_record(sequence, request_id, now):
+    """Native Ledger record payload; the Ledger owns append/fsync/replay."""
+    stamp = datetime.fromisoformat(now)
+    if stamp.utcoffset() is None:
+        raise CoreError("AFFECT_RESET_INVALID", 400)
+    return {"seq": sequence, "erasure_id": uid("erase"),
+            "memory_id": reset_target(request_id), "memory_ids": [], "event_ids": [],
+            "at": stamp.astimezone(UTC).isoformat(timespec="microseconds"),
+            "target_type": RESET_TARGET}
+
+
+def validate_reset_record(record):
+    if (record.get("target_type") != RESET_TARGET or record.get("event_ids") != []
+        or record.get("memory_ids") != []
+        or not isinstance(record.get("memory_id"), str)
+        or not record["memory_id"].startswith(RESET_TARGET + ":")):
+        raise ValueError("invalid feedback reset scope")
+    try:
+        reset_target(record["memory_id"][len(RESET_TARGET) + 1:])
+        if datetime.fromisoformat(record["at"]).utcoffset() is None:
+            raise ValueError("reset timestamp needs timezone")
+    except (CoreError, KeyError, TypeError) as error:
+        raise ValueError("invalid feedback reset record") from error
+
+
+def apply_feedback_reset(store, record):
+    """Idempotent, monotonic projection; no event/fact/trait/autonomy deletion."""
+    from companion.privacy import advance_epoch
+
+    if not store.db.in_transaction:
+        raise RuntimeError("AFFECT_RESET_REQUIRES_TRANSACTION")
+    validate_reset_record(record)
+    stamp = datetime.fromisoformat(record["at"]).astimezone(UTC).isoformat(timespec="microseconds")
+    previous = feedback_reset_at(store)
+    cutoff = max(stamp, previous or stamp)
+    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (RESET_KEY, cutoff))
+    removed = store.execute(
+        "DELETE FROM affect_evidence WHERE identity_id='companion' AND created_at<=?",
+        (cutoff,),
+    ).rowcount
+    if cutoff != previous or removed:
+        store.execute("DELETE FROM affect_states WHERE identity_id='companion'")
+        advance_epoch(store)
+    return {"state": "RESET", "reset_at": cutoff}
 
 NEUTRAL = {
     "interaction_tone": "neutral",
@@ -58,6 +128,11 @@ def owner_feedback(store, settings, event_id, now):
         and event["occurred_at"] <= now
     ):
         return None
+    cutoff = feedback_reset_at(store)
+    if cutoff is not None and datetime.fromisoformat(event["ingested_at"]) <= (
+        datetime.fromisoformat(cutoff)
+    ):
+        return None
     try:
         body = json.loads(event["body_json"])
     except ValueError:
@@ -97,6 +172,20 @@ def erase_affect(store, event_ids):
 class AffectEngine:
     def __init__(self, store, settings, clock):
         self.store, self.settings, self.clock = store, settings, clock
+
+    def reset(self, requester, request_id, ledger):
+        if requester != self.settings.owner_qq_id:
+            raise CoreError("OWNER_REQUIRED", 403)
+        reset_target(request_id)
+        if not callable(getattr(ledger, "reset_affect", None)):
+            raise CoreError("AFFECT_RESET_NOT_INTEGRATED", 503)
+        # Also available while Affect is disabled; reset cannot enable a feature.
+        with nullcontext() if self.store.db.in_transaction else self.store.transaction():
+            return ledger.reset_affect(self.store, request_id, self.clock())
+
+    def revalidate(self, snapshot):
+        if encode(snapshot) != encode(self.snapshot()):
+            raise CoreError("PRIVACY_CHANGED", 409)
 
     def snapshot(self):
         result = {"state": dict(NEUTRAL), "confidence": 0.0, "evidence": [], "expires_at": None}

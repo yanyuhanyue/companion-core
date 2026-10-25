@@ -3,7 +3,11 @@
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from companion import owner_authority
+from companion.contracts import CoreError
 from companion.store import after, encode, uid
+
+WAKE_PURPOSES = ("wake", "goals", "exploration")
 
 
 class WakePlanner:
@@ -20,6 +24,16 @@ class WakePlanner:
         cfg, s, now = self.settings, self.store, self.clock()
         if not cfg.wake_enabled or not cfg.goals_enabled:
             return []
+        if cfg.life_loop.mode != "OFF" and cfg.life_loop.read_goals_enabled:
+            return []  # Life decisions select new self goals; accepted native steps still run.
+        view = None
+        if owner_authority.required(s, cfg):
+            try:
+                view = owner_authority.current(s, cfg, self.clock, purpose="wake")
+            except CoreError:
+                return []
+            if not set(WAKE_PURPOSES) <= set(view.policy.purposes):
+                return []
         self.goals.expire_sources()
         local = datetime.fromisoformat(now).astimezone(ZoneInfo(cfg.timezone))
         slot = int(local.timestamp()) // (cfg.wake_min_interval_minutes * 60)
@@ -54,7 +68,8 @@ class WakePlanner:
                 reason = "PAUSED"
             elif quiet:
                 reason = "QUIET_HOURS"
-            elif self.affect.snapshot()["state"]["engagement"] == "pause":
+            elif (cfg.affect_enabled and (view is None or "affect" in view.policy.purposes)
+                  and self.affect.snapshot()["state"]["engagement"] == "pause"):
                 reason = "OWNER_REQUESTED_PAUSE"
             elif not cfg.pricing_known or not cfg.exploration_enabled:
                 reason = "RESOURCE_UNAVAILABLE"

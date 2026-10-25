@@ -135,3 +135,117 @@ HTTP 查询的原有限额继续由入口校验。后台提取保留仍有效的
 其 consolidation 剩余计数由集成方同步验证。已发生调用保留 SETTLED/UNKNOWN 的原责任。
 
 状态：Core 接线与局部合成验收；组合完整 CI、部署、真实 QQ 与真实跨天效果由集成方继续验收。
+
+## P2：温度与经历状态只读投影
+
+`MemoryProjections(memory).snapshot(now, memory_ids=(), episode_ids=(),
+current_event_ids=(), used_memory_ids=(), event_ids=None, actor="owner")`
+是本片的集成接口，实现在 `companion/memory_projections.py`。每个 ID 集合最多 100 项，
+输出顺序稳定、重复 ID 去重。调用方提供已经授权的选中记忆与情景；空选择返回空视图。
+`event_ids` 是可选来源 allowlist，必须覆盖整个情景和关联目标，实际完成回执也须在范围内。
+本片不修改 Core、API、配置、worker、迁移或 UI；集成负责人可在原记忆读取/控制台入口调用，
+不能把投影当作新的提示授权。跨 await 使用仍须沿用原 `pin/revalidate`，不得缓存投影替代来源检查。
+
+- Hot：来源在当前上下文、事实确实被调用方用于本次上下文，或有原生活跃目标、执行不确定性、
+  尚未闭合的主人承诺。关注关系采用原 `goal_evidence` 的精确关联，不猜测主题相似关系。
+- Warm：没有以上关注条件、但有效来源发生在最近 7 天，复用已有情景接续时间窗。
+- Cold：更早的有效证据。温度只用于展示/上下文选择，不改变事实确认、重要性、FTS5+BGE 排序、
+  保留期或删除规则；较早的假设仍带 HYPOTHESIS 标签，不会自动成为已确认事实。
+
+经历保留 `discussed`，其每个目标单独投影 `planned/running/done/failed/UNKNOWN/closed`，
+避免将多个目标压成一个虚假的完成状态。CANDIDATE 只是讨论，原生取消才投影 closed。
+done 同时要求原 Goal/step 完成、完全一致的结果 ID、成功 FETCHED/WATCHED 回执和有效来源闭包；
+模拟来源、缺失/不匹配回执、EXECUTION_UNCERTAIN 都不能证明真实完成。目标 `told/closed`
+分别表示承诺反馈实际 SENT、以及原承诺终态和执行结果已对应；普通 SENT 回复仅证明那条回复送达，
+不能证明目标完成。DELIVERY_UNCERTAIN 和草稿均不算 told。最多读取 20 个关联目标及 20 条回复，
+超过时显式标记 truncated，消费者不得把有界结果说成全部历史。
+
+目标来源与事实来源使用不同的原生边界：Memory 事实仍要求 owner 证据；Goal 可以同时引用
+owner 输入和真实 observation，后者仍保留 companion 身份，逐项核验私有来源闭包、TTL、撤回和
+显式 allowlist。不会将观察伪装成主人发言。执行视图还按原 `goal_step_json` 中的 goal/step ID
+读取关联 Reader request 与 reading_attempt 状态，返回 `executions` 中的原 request/step ID。
+最多展示 20 项，UNKNOWN 优先且单独标记截断；请求来源也须满足同样的授权及有效性检查。
+任何仍可见的 UNKNOWN 执行保持投影 UNKNOWN，即使原目标已因重试耗尽变成 FAILED；
+`native_state` 保留真实目标状态。投影不结算、释放或重试这些原生责任。
+
+每次查询复用 `MemorySources`、来源有效期和 Ledger custody/epoch 复核，从同一 Core DB 重建。
+没有持久投影或第二事实源，因此没有新增表、擦除 handler 或后台任务；原生删除和擦除重放后重新查询
+不能复活记忆。按调用方实际使用传 `used_memory_ids`，不要把“候选被检索到”冒充“已经使用”。
+
+实施前对照与复用依据：
+
+- 对照 `codex/next-memory` 的 `3df9da6`：当前冻结基线已经保有情景编码、旧纠正来源校验、媒体批次
+  和 MemoryContext 成果；保留新基线的 async recall，不回退覆盖旧分支。
+- 实际检查本机 DSH `dsh-session-persistence/lib/index.js` 的 `validateStoredEvents`
+  （SHA256 `cc0b6d3a224133af611b428d5a49020e300f86c3b4ba28037aeb219029bde3eb`）：
+  读取时校验已知事件类型并拒绝无法解释的日志。沿用此严格解释原则，Core 继续以自身原生状态与
+  来源校验为准，不导入 DSH 的存储或执行器。
+- [KI-CO recall gate 固定源码](https://github.com/Kisera001/KI-CO/blob/fe1672bc25e45506018d57fdead51d7ce6d3cc72/src/utils/memoryRecallGate.ts)
+  提供有界关注条件的比较；本片使用明确的原生来源/目标关联，不复制词法阈值。
+- [YuriOS DreamConsolidator 固定源码](https://github.com/yuri-os/YuriOS/blob/cd4d1f16ae095f0f694dbbe7b1aac8e33db25367/yurios/mind/dream.py)
+  区分已结束日及原始经历。本片保留证据发生时间；夜间阶段见下节，虚构 REM 仍属于后续片。
+
+`tests/test_memory_projections.py` 验证冷记忆仍可召回、只读无状态写入、重复选择/重新打开 DB 等价、
+原 Goal 状态转换、投递不确定性与 SENT 闭合、模拟/缺失执行证据、来源过期/撤回/上游失效和备份擦除重放。
+该接口尚未接入产品页面；完整 HTTP + 独立 worker 合成验收在共享入口接线后由集成负责人执行。
+
+## N1–N3 与实际温记忆接续
+
+夜间阶段使用同一批原事件和已有 Episode，不建立温记忆副本。
+N2 只编码尚未被完整有效情景覆盖的来源，保留原摘要；N2 先发生时不更改
+`memory_processed`，后续提取复用已覆盖来源并只为新增来源创建情景。
+这些情景立即由原 `MemoryContext.continuation` 提供给有权限的上下文接续。
+N3 经提取和冲突复核提交的事实仍走原 FTS5+BGE，温度不屏蔽较早的有效事实。
+持久单步、共享检查点、预算与擦除合同见 [夜间整合](../design-v0.5/consolidation.md)。
+
+### 实际 Hot/Warm 上下文选择
+
+`continuation` 接受 `current_event_ids`、`used_memory_ids` 和逐来源 `source_check`。
+调用方只传本次选中并保留的事实 ID；Cold 事实的有效来源可以使关联情景在本次选择中成为 Hot，
+不写入永久热度。当前来源、原生未结目标/承诺/UNKNOWN、最近七天情景分别有最多 20 项候选，
+避免近期大量聊天挤掉旧目标。候选 SQL 仅做预选，实际温度继续复用同一投影来源和目标校验。
+结果最多 3 个情景，每个最多 3 段、每段 200 字；超出候选或结果上限显式截断。
+整段情景必须通过 allowlist 和可选来源校验，任一来源撤回都不能局部复活该情景。
+
+共享 Core 接线还须对新选出的历史来源执行当前 history 授权（含原签名旧记录读取器），
+将已使用历史和情景一并计入条数及 UTF-8 字节上限，沿用 pin、实际 job_sources 和最终上下文复核。
+如果最终预算裁剪移除了用于激活的事实，调用方也须移除依赖该事实的接续。
+本片定向测试见 `tests/test_memory_temperature_context.py`；真实入口与独立 worker 验收待 R1 接线。
+
+## 后台用途与原始证据读取
+
+Memory 提取/复核、Diary、Reflection、Consolidation 分别检查当前原生 OwnerAuthority 的独立用途。
+夜间协调器不借 consolidation 授权自动启用 memory、diary、reflection 或 goals；缺少用途的子阶段跳过。
+整合的 `steps_json` 和已有提取检查点保存原授权引用，版本变化后终止旧工作，保留已发生的费用责任。
+Diary/Reflection 完成写入时重新核对原 model admission 的授权引用，不能提交授权已变更后的结果。
+
+`memory_authority.source_allowed` 只路由原始证据读取，复用 R1 的 `owner_input.source` 和
+`legacy_owner_input.source`。当前 v2 原文按执行域 purpose 检查；跨 v2 版本读取还需要显式 history
+范围。合法 v1 原文供 memory 使用时走旧证据读取器的 memory 范围，原 job 凭据不升级。
+签名、原始 job 绑定、保留期、撤回与历史范围仍由原校验器负责。这个过滤器不用于长期事实检索；
+合法保留的 Memory 继续使用自身的证据及擦除合同，不因原文读取为空而被丢弃。
+主人控制台的查看/删除不被后台模型授权开关取代。
+
+SDK 读取既有 Diary 时使用 `context_proof(entry)` / `revalidate_context(proof)`：固定原 entry
+版本、内容摘要和证据 ID，提交模型上下文前后复验当前性。该读取不创建 Diary，也不调用生成器。
+
+验证覆盖用途缺失、检查点换版、旧签名证据只读、原文撤回、长期事实保留，以及真实签名 TCP
+入口、原生 chat 结算、独立 Life worker 提取/复核/日记/反思和进程恢复。所有外部模型传输为 MockTransport。
+
+## 已结算私人 Life 表达保存为日记
+
+`DiaryService.save_life_expression(job_id, expected_content_sha256=..., authority=...)`
+只接收原任务、正文摘要与原授权引用。正文由 `LifeTopics.retained_result` 从原生已结算的
+`PRIVATE_DIARY` 结果取得，重新检查 life/diary 用途、原来源、有效期、模式和暂停状态。
+保存不生成新文本、不调用模型，也不写入 Outbox 或 Memory。REM fiction 不属于该结果类型。
+
+新随记复用 Diary run/entry/evidence；同一天已有正文时追加独立随记段，原文（包括主人编辑）
+保持不变，原生 revision 的修改者记录为 companion。运行中的日记或未结算请求不能被覆盖。
+`runtime_meta` 的 `diary_life:<job_id>` 只保留原任务、entry、日期和版本等幂等元数据，不存正文。
+该回执与正文、证据在原 `Store.transaction` 内一起提交，重试返回原 entry，不能重复追加。
+删除和来源撤回仍由原 Diary/外部 ErasureLedger 处理；删除日期的 tombstone 可回放到保存前备份。
+
+实施对照：检查过 [DSH jobs-local 的 start/settle](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/jobs/jobs-local/src/index.ts)
+对 owner 和首个终态的约束；这里复用已存在的 Life 结算事实，没有额外执行器。
+并复用项目已有的 `BEGIN IMMEDIATE` 写事务，使消费回执与 Diary 变更串行、原子提交，见
+[SQLite 事务文档](https://www.sqlite.org/lang_transaction.html)。

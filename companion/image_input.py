@@ -105,19 +105,28 @@ def _validate_image(policy, image, Image):
 
 
 def messages_and_estimate(policy, messages):
-    """Allow approved references plus one final current-owner original-image message."""
+    """Validate originals on their actual user turns, with one request-wide image cap."""
     if not isinstance(messages, list) or not messages:
         raise CoreError("MODEL_IMAGE_INPUT_INVALID", 503)
-    for message in messages[:-1]:
+    result, estimate, count = [], 0, 0
+    for message in messages:
         if (
             not isinstance(message, dict)
             or set(message) != {"role", "content"}
             or message["role"] not in {"system", "user", "assistant"}
-            or not isinstance(message["content"], str)
         ):
             raise CoreError("MODEL_IMAGE_INPUT_INVALID", 503)
-    text, estimate = text_and_estimate(policy, [messages[-1]])
-    return [*messages[:-1], {"role": "user", "content": text}], estimate
+        if isinstance(message["content"], str):
+            result.append(dict(message))
+            continue
+        text, tokens = text_and_estimate(policy, [message])
+        count += len(message["content"]) - 1
+        estimate += tokens
+        result.append({"role": "user", "content": text})
+    if (not count or policy is None
+        or policy.max_images_per_request != "unlimited" and count > policy.max_images_per_request):
+        raise CoreError("MODEL_IMAGE_INPUT_INVALID", 503)
+    return result, estimate
 
 
 def contract(settings, job_id, logical_request_id):
@@ -128,10 +137,12 @@ def contract(settings, job_id, logical_request_id):
         or not settings.paid_model.image_input
     ):
         raise CoreError("PAID_IMAGE_APPROVAL_REQUIRED", 503)
-    if not settings.content.use_chat_model_for_vision:
-        raise CoreError("PAID_IMAGE_SEPARATE_PROVIDER_UNSUPPORTED", 503)
     if not job_id or logical_request_id != job_id:
         raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
+    if settings.owner_runtime.mode == "ENABLED":
+        return  # Ordinary SDK chat owns the original per-request attempt and global budgets.
+    if not settings.content.use_chat_model_for_vision:
+        raise CoreError("PAID_IMAGE_SEPARATE_PROVIDER_UNSUPPORTED", 503)
     approval = settings.live_text_window
     calls = 3 if approval and approval.memory_scope != "none" else 2
     if settings.paid_model.video_input:

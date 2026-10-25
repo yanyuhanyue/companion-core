@@ -4,21 +4,24 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from companion import cumulative
 from companion.trial_limits import TrialLimits
-from companion_onebot_bridge.capture import capacity
-from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow, WindowPlan
+from companion_onebot_bridge.window import WindowPlan
 from scripts.trial_limits import load_limits
 from tests.conftest import run
-from tests.test_live_continuity import continuity_window
-from tests.test_live_text_window import live_clients, live_fixture
-from tests.test_onebot_window import plan_fixture, stage
+from tests.test_cumulative_budget import policy as quota_policy
+from tests.test_cumulative_budget import view
+from tests.test_live_continuity import native_continuity
+from tests.test_live_text_window import live_fixture
+from tests.test_onebot_window import plan_fixture
+from tests.test_paid_model_gate import approved_live
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,6 +38,35 @@ def configured(core, tmp_path, value, *, paid_options=None):
     return live_fixture(core, tmp_path, window_options=projected["bridge_plan"],
                         paid_options={**projected["paid_model"], **(paid_options or {})},
                         **projected["live_text_window"])
+
+
+
+def native_quota(core, tmp_path, *, account=None, window=None, paid=None):
+    # Real existing cumulative policy/journal; there is no fixture-side counter.
+    values = {"max_output_tokens": 4096, "per_attempt_micro_usd": 100000,
+        "per_request_micro_usd": 200000, "daily_calls": 100, "window_calls": 100, **(paid or {})}
+    approved_live(core, tmp_path, **values)
+    scope = quota_policy(core, **({"account": account} if account is not None else {}),
+                         **({"window": window} if window is not None else {}))
+    with core.store.transaction():
+        cumulative.activate(core.store, core.settings, core.clock())
+    return {**values, "cumulative": scope}
+
+
+@asynccontextmanager
+async def native_trial(core, tmp_path, value, *, paid=None, texts=None, respond=None, turns=0):
+    # TrialLimits' two numeric delivery ceilings become the single approved send dimension.
+    # Native authority has independent input, model and actual-send accounting.
+    paid_options = native_quota(core, tmp_path, paid=paid, account={
+        "owner_inputs": value.max_inputs, "model_attempts": value.max_model_attempts,
+        "send_attempts": min(value.max_send_attempts, value.max_visible_replies)})
+    async with native_continuity(core, tmp_path, turns=turns,
+        texts=texts or [f"第{n}个合成输入" for n in range(1, value.max_inputs + 2)],
+        respond=respond, paid_options=paid_options,
+        grant_options={"max_input_chars": value.max_input_chars,
+                       "max_reply_chars": value.max_reply_chars},
+    ) as result:
+        yield result
 
 
 def test_profile_projects_independent_limits_without_creating_authority(tmp_path):
@@ -78,24 +110,24 @@ def test_cli_uses_one_profile_and_does_not_echo_invalid_private_values(tmp_path)
 
 
 def test_sixteen_inputs_model_calls_and_sends_use_configured_caps(core, tmp_path):
-    cfg, plan = configured(core, tmp_path, limits(), paid_options={"daily_calls": 21})
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                for number in range(1, 17):
-                    capacity(window)
-                    reply = await stage(window, client, core, number)
-                    status = await window.send_once(client, protocol, reply)
-                    assert status["attempts_reserved"] == number
-                assert len(calls) == len(sends) == 16
-                assert status["state"] == "STOPPED"
-                with pytest.raises(ValueError):
-                    await stage(window, client, core, 17)
-                assert len(calls) == len(sends) == 16
-
+        async with native_trial(core, tmp_path, limits()) as (
+            active, _, calls, sends, capture, finish,
+        ):
+            for number in range(1, 17):
+                await capture()
+                assert await finish()
+                assert active.attempts() == {"ACK": number}
+            assert len(calls) == len(sends) == 16
+            with pytest.raises(httpx.HTTPStatusError) as error:
+                await capture()
+            assert error.value.response.status_code == 429
+            assert len(calls) == len(sends) == 16
+            operations = view(core)["operations"]
+            assert sum(k.startswith("input:") for k in operations) == 16
+            assert sum(k.startswith("send:") for k in operations) == 16
+            assert len(view(core)["models"]) == 16
+            assert active.runtime.row()["state"] == "ACTIVE"
     run(scenario())
 
 
@@ -106,20 +138,36 @@ def test_sixteen_inputs_model_calls_and_sends_use_configured_caps(core, tmp_path
     {"max_inputs": 6, "max_model_attempts": 6, "max_send_attempts": 6, "max_visible_replies": 2},
 ])
 def test_each_quota_stops_additional_io_independently(core, tmp_path, caps):
-    cfg, plan = configured(core, tmp_path, TrialLimits(**caps))
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                for number in (1, 2):
-                    reply = await stage(window, client, core, number)
-                    await window.send_once(client, protocol, reply)
-                with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                    await stage(window, client, core, 3)
-                assert len(calls) == len(sends) == 2
-
+        async with native_trial(core, tmp_path, TrialLimits(**caps)) as (
+            active, _, calls, sends, capture, finish,
+        ):
+            for _ in (1, 2):
+                await capture()
+                assert await finish()
+            if caps["max_inputs"] == 2:
+                with pytest.raises(httpx.HTTPStatusError) as error:
+                    await capture()
+                assert error.value.response.status_code == 429
+                assert len(calls) == 2
+            else:
+                await capture()
+                assert await core.run_once("independent-native-limits")
+                if caps["max_model_attempts"] == 2:
+                    assert len(calls) == 2
+                    assert not await active.pump()
+                else:
+                    # Exhausted send quota never invents a coupling to model quota.
+                    assert len(calls) == 3
+                    assert await active.pump()
+                    assert active.runtime.row()["state"] == "STOPPED"
+                    assert active.attempts() == {"ACK": 2, "UNKNOWN": 1}
+            assert len(sends) == 2
+            operations = view(core)["operations"]
+            assert sum(k.startswith("input:") for k in operations) == (
+                2 if caps["max_inputs"] == 2 else 3)
+            assert sum(k.startswith("send:") for k in operations) == 2
+            assert len(view(core)["models"]) == len(calls)
     run(scenario())
 
 
@@ -132,75 +180,63 @@ def test_core_and_bridge_reject_divergent_send_caps(core, tmp_path):
 
 
 def test_large_trial_profile_does_not_override_daily_budget(core, tmp_path):
-    cfg, plan = configured(core, tmp_path, limits(), paid_options={"daily_calls": 1})
-
     async def scenario():
-        async with live_clients(core, cfg) as (client, protocol, calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                reply = await stage(window, client, core, 1)
-                await window.send_once(client, protocol, reply)
-                with pytest.raises((ValueError, httpx.HTTPStatusError)):
-                    reply = await stage(window, client, core, 2)
-                    await window.send_once(client, protocol, reply)
-                assert len(calls) == len(sends) == 1
-
+        async with native_trial(core, tmp_path, limits(), paid={"daily_calls": 1}) as (
+            active, _, calls, sends, capture, finish,
+        ):
+            await capture()
+            assert await finish()
+            await capture()
+            assert await core.run_once("daily-cap-before-provider")
+            assert not await active.pump()
+            assert len(calls) == len(sends) == 1
+            assert len(view(core)["models"]) == 1
     run(scenario())
 
 
 def test_text_limits_above_old_trial_cap_work_through_core_and_bridge(core, tmp_path):
-    cfg, plan = configured(core, tmp_path, limits(max_input_chars=1000, max_reply_chars=1000))
-    text = "合成输入" * 150
-    reply = "合成回答" * 150
+    text, reply = "合成输入" * 150, "合成回答" * 150
 
     def respond(request):
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": reply}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
+        return httpx.Response(200, json={"choices": [{"message": {"content": reply}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
     async def scenario():
-        async with live_clients(core, cfg, respond=respond) as (client, protocol, calls, sends):
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
-                approval = await stage(window, client, core, 1, text=text)
-                await window.send_once(client, protocol, approval)
-                assert len(calls) == len(sends) == 1
-                assert sends[0]["message"][0]["data"]["text"] == reply
-
+        async with native_trial(core, tmp_path, limits(max_input_chars=1000, max_reply_chars=1000),
+            texts=[text], respond=respond,
+        ) as (_, _, calls, sends, capture, finish):
+            await capture()
+            assert await finish()
+            assert len(calls) == len(sends) == 1
+            assert sends[0]["message"][0]["data"]["text"] == reply
     run(scenario())
 
 
 @pytest.mark.parametrize("turns", [5, 15])
 def test_history_capacity_matches_existing_recent_message_configuration(core, tmp_path, turns):
-    async def scenario():
-        async with continuity_window(core, tmp_path, turns=turns) as values:
-            window, *_ = values
-            assert core.settings.max_recent_messages == turns * 2
-            assert window.plan.value["live_text"]["max_history_turns"] == turns
-
-    run(scenario())
+    # Historical numeric schema inspection grants no execution authority.
+    cfg, plan = live_fixture(core, tmp_path, core_options={"max_recent_messages": turns * 2},
+        bridge_options={"capture_signing_key": "c" * 64},
+        history_scope="approved_window", max_history_turns=turns, max_history_utf8_bytes=16000)
+    assert core.settings.max_recent_messages == turns * 2
+    assert plan.value["live_text"]["max_history_turns"] == turns
+    assert not core.store.rows("SELECT * FROM model_usage")
 
 
 def test_sixth_captured_reply_can_use_five_complete_history_turns(core, tmp_path):
-    profile = TrialLimits(max_inputs=6, max_model_attempts=6, max_send_attempts=6,
-                          max_visible_replies=6).project()
+    value = TrialLimits(max_inputs=6, max_model_attempts=6, max_send_attempts=6,
+                        max_visible_replies=6)
     texts = [f"第{index}个已批准的合成输入" for index in range(1, 7)]
 
     async def scenario():
-        async with continuity_window(core, tmp_path, turns=5, texts=texts, scope_options={
-            "window_options": profile["bridge_plan"], "paid_options": profile["paid_model"],
-            **profile["live_text_window"],
-        }) as values:
-            _, _, calls, sends, capture, finish = values
+        async with native_trial(core, tmp_path, value, turns=5, texts=texts) as (
+            _, _, calls, sends, capture, finish,
+        ):
             for _ in texts:
                 await capture()
-                await finish()
+                assert await finish()
             assert len(calls) == len(sends) == 6
             final = calls[-1]["messages"]
             assert len(final) == 12
             assert [message["content"] for message in final if message["role"] == "user"] == texts
-
     run(scenario())

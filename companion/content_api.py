@@ -7,7 +7,7 @@ import json
 from fastapi import Header, Request
 from pydantic import Field
 
-from companion import content_files
+from companion import agent_images, content_files, owner_authority
 from companion.contracts import CoreError, StrictModel
 from companion.store import encode
 
@@ -73,10 +73,17 @@ def register_content_routes(app, bridge_dependencies):
 
     @app.post(prefix + "/image/claim", dependencies=bridge_dependencies)
     async def claim_image(event_id: str, body: ImageClaim):
+        core = app.state.core
+        if owner_authority.required(core.store, core.settings):
+            return agent_images.claim(core.content, event_id, body.request_key, body.source_sha256)
         return app.state.core.content.claim_upload(event_id, body.request_key, body.source_sha256)
 
     @app.post(prefix + "/image/check", dependencies=bridge_dependencies)
     async def check_image(event_id: str, body: ImageCheck):
+        core = app.state.core
+        if owner_authority.required(core.store, core.settings):
+            return agent_images.check_upload(core.content, event_id, body.lease_token,
+                                             body.source_sha256)
         return app.state.core.content.check_upload(event_id, body.lease_token, body.source_sha256)
 
     @app.post(prefix + "/image", dependencies=bridge_dependencies)
@@ -98,6 +105,10 @@ def register_content_routes(app, bridge_dependencies):
                     raise ValueError()
             except (ValueError, TypeError):
                 raise CoreError("LIVE_IMAGE_UPLOAD_SIGNATURE_REQUIRED", 403) from None
-        return await app.state.core.content.analyze_image(
+        core = app.state.core
+        if owner_authority.required(core.store, core.settings):
+            return agent_images.stage(core.content, event_id, x_content_key,
+                await request.body(), content_type, x_content_lease, proof)
+        return await core.content.analyze_image(
             event_id, x_content_key, await request.body(), content_type, x_content_lease, proof
         )

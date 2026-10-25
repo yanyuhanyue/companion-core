@@ -1,12 +1,9 @@
 import json
 from contextlib import closing
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import httpx
 import pytest
-from alembic import command
-from alembic.config import Config
 from cryptography.fernet import Fernet
 from pydantic import SecretStr, ValidationError
 
@@ -28,6 +25,7 @@ from tests.test_exploration import configure
 from tests.test_heybox_reader import URL, mock_pool
 from tests.test_observations import observation
 from tests.test_plugin_readonly import NOW_DT, grant
+from tests.test_test_fixtures import historical_database
 
 GRANT_ID = "grant_" + "1" * 32
 
@@ -424,19 +422,17 @@ def test_metadata_excludes_cookie_fingerprint_and_late_local_change_discards_ite
     assert "PRIVATE_LATE_BODY" not in json.dumps(result)
 
 
-def test_legacy_migration_inventory_preserves_unknown_records_without_invented_attribution(core):
+def test_legacy_migration_inventory_preserves_unknown_records_without_invented_attribution(
+    core, tmp_path,
+):
     configure(core)
     event = observation(core, source="heybox")
     event.payload.url = URL
     core.observations.append("heybox", event)
     before = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,))
-    core.store.close()
-    cfg = Config()
-    cfg.set_main_option("script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
-    command.downgrade(cfg, "0015_article_images")
-    migrate(core.settings.database)
-    with closing(Store(core.settings.database)) as store:
+    database = historical_database(core.store, tmp_path / "grants.db", "0015_article_images")
+    migrate(database, "0016_source_grants")
+    with closing(Store(database)) as store:
         assert (
             store.one("SELECT body_json FROM events WHERE event_id=?", (event.event_id,)) == before
         )

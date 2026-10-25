@@ -84,6 +84,31 @@ Observation。备份恢复必须调用 `restore_executive`：审批全部撤销�
 另含真实 Windows 目录联接替换、持有目录期间的重命名/写入拒绝，以及工具 Worker 独立实例锁回归。
 DSH 任务测试使用 SDK 替身。目标 VPS 已实际构建镜像，并以 UID 10002、无网络、只读根文件系统初始化和关闭真实 SDK；没有发起模型任务或付费请求。CI 同样运行 `scripts/smoke_executor.py`。目标 Tailscale 联调及供应商价格/凭据仍需启用前在专用环境验收。
 
+### Executor dependency lock
+
+`deploy/executor.in` retains the executor's direct dependency versions. Its generated
+`deploy/executor.lock` pins the complete Python dependency closure and distribution SHA-256
+hashes. The image installs it with `pip --require-hashes --only-binary=:all:`; source builds
+and unlisted dependencies fail installation. Regenerate from the repository root with:
+
+```sh
+uv pip compile --generate-hashes --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --only-binary :all: --output-file deploy/executor.lock deploy/executor.in
+```
+
+This reuses the existing Bridge requirements-lock mechanism and the official
+[uv compile](https://docs.astral.sh/uv/pip/compile/) and
+[pip secure-install](https://pip.pypa.io/en/stable/topics/secure-installs/) mechanisms.
+The inspected `deepseek-harness-sdk==0.2.1rc2` wheel metadata requires the exact same-version
+`deepseek-harness-runtime-bin`; its `HarnessClient` resolves the bundled runtime through
+`deepseek_harness_runtime.resolve_bundled_launch_args`. Both distributions are therefore
+locked; the executor does not fetch a separate runtime during initialization. SDK packaging
+is documented in its [published release](https://pypi.org/project/deepseek-harness-sdk/0.2.1rc2/).
+
+For lock updates, retain the existing CI image import and network-disabled UID 10002 SDK
+initialization checks. Hash verification establishes artifact identity, not Linux runtime
+compatibility. The base image digest and Debian package installation remain separate from
+this Python dependency lock.
+
 协议依据：官方 [Python SDK](https://github.com/deepseek-ai/deepseek-harness/tree/master/python/sdk)
 与 [sdk-minimal 组成](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/bundle/sdk-minimal)。
 现有 [dsh-Agentlink](https://github.com/hootandy321/dsh-Agentlink) 的 Web Host 协议提供会话

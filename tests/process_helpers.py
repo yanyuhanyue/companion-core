@@ -67,7 +67,7 @@ def window_child():
         raise SystemExit(24) from None
 
 
-def reservation_process(database, settings_json, now):
+def reservation_process(database, settings_json, now, job_id):
     """Use an independent SQLite connection and exit without releasing its reservation."""
     from companion import budget
     from companion.config import Settings
@@ -85,7 +85,7 @@ def reservation_process(database, settings_json, now):
                     "model_key": "synthetic-key",
                 }
             ),
-            None,
+            job_id,
             "chat",
             [{"role": "user", "content": "hello"}],
             now,

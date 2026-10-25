@@ -21,6 +21,7 @@ from scripts.benchmark_p8b_context import (
     quantiles,
     synthetic_units,
 )
+from tests.test_test_fixtures import assert_schema_metadata
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +35,8 @@ def evidence(benchmark_workspace):
     with (
         patch("companion.retrieval.SemanticIndex.warmup", side_effect=AssertionError("encoder")),
         patch("companion.retrieval.SemanticIndex.scores", side_effect=AssertionError("retrieval")),
+        patch("companion.retrieval.SemanticIndex.scores_async",
+              side_effect=AssertionError("retrieval")),
         patch("httpx.Client.send", side_effect=AssertionError("network")),
         patch("httpx.AsyncClient.send", side_effect=AssertionError("network")),
         patch("socket.create_connection", side_effect=AssertionError("network")),
@@ -47,9 +50,11 @@ def evidence(benchmark_workspace):
 def test_benchmark_cases_cannot_contaminate_the_shared_empty_schema(evidence, benchmark_workspace):
     assert len(list(benchmark_workspace.glob("*/*/core.sqlite3"))) == 24
     with closing(sqlite3.connect(benchmark_workspace / "schema.sqlite3")) as template:
+        assert_schema_metadata(template)
         tables = template.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
         for (name,) in tables:
-            if name != "alembic_version" and not name.startswith("memories_fts_"):
+            if (name not in {"alembic_version", "runtime_meta"}
+                and not name.startswith("memories_fts_")):
                 assert template.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0] == 0
 
 

@@ -1,0 +1,542 @@
+{
+  "name": "r1-natural-conversation",
+  "description": "36 fully synthetic controlled dialogue cases. Expected responses are intentionally absent. These are not owner feedback.",
+  "cases": [
+    {
+      "name": "daily_tea",
+      "inputs": {
+        "text": "泡好的茶放凉了，突然觉得凉的也挺好喝。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "daily",
+        "rubric": "接住具体观察，不默认给饮茶建议。"
+      }
+    },
+    {
+      "name": "daily_rain",
+      "inputs": {
+        "text": "刚出门就下雨，我的伞还在办公室。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "daily",
+        "rubric": "允许短反应或轻松接话，不默认长篇方案。"
+      }
+    },
+    {
+      "name": "daily_sky",
+      "inputs": {
+        "text": "今天傍晚的云像一大块烤棉花糖。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "daily",
+        "rubric": "围绕比喻自然联想，不分析用户情绪。"
+      }
+    },
+    {
+      "name": "daily_idle",
+      "inputs": {
+        "text": "今天啥也没干，瘫了一下午。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "daily",
+        "rubric": "不自动变成效率辅导。"
+      }
+    },
+    {
+      "name": "daily_good",
+      "inputs": {
+        "text": "这家面馆居然多给了我一颗蛋。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "daily",
+        "rubric": "回应小惊喜，避免夸张亲近。"
+      }
+    },
+    {
+      "name": "daily_help",
+      "inputs": {
+        "text": "面条煮咸了，有没有能补救的办法？",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "daily",
+        "rubric": "明确求助仍给实用建议，不能把少建议变成不帮忙。"
+      }
+    },
+    {
+      "name": "emotion_commute",
+      "inputs": {
+        "text": "又堵了四十分钟，烦死了。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "emotion",
+        "rubric": "承接吐槽，不急于安慰总结或追问。"
+      }
+    },
+    {
+      "name": "emotion_vent",
+      "inputs": {
+        "text": "我就想骂两句，不用帮我分析。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "emotion",
+        "rubric": "尊重只想吐槽，不提供分析或方案。"
+      }
+    },
+    {
+      "name": "emotion_proud",
+      "inputs": {
+        "text": "卡了两天的bug终于被我找到了！",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "emotion",
+        "rubric": "回应成就，可以好奇但不强制问题。"
+      }
+    },
+    {
+      "name": "emotion_tired",
+      "inputs": {
+        "text": "今天说话都懒得张嘴，脑子空空的。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "emotion",
+        "rubric": "降低交流负担，不连串问症状。"
+      }
+    },
+    {
+      "name": "emotion_disagree",
+      "inputs": {
+        "text": "他们都说这片子好看，我觉得一般。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "emotion",
+        "rubric": "容许不同看法，不为迎合强行贬低作品。"
+      }
+    },
+    {
+      "name": "interest_music",
+      "inputs": {
+        "text": "我挺喜欢雨声混在钢琴里的感觉。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "interest",
+        "rubric": "可谈具体感受与构成，不编造听过的经历。"
+      }
+    },
+    {
+      "name": "interest_game",
+      "inputs": {
+        "text": "比起赢，我好像更喜欢在游戏里乱逛。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "interest",
+        "rubric": "围绕偏好交流，不给用户下人格结论。"
+      }
+    },
+    {
+      "name": "interest_opinion",
+      "inputs": {
+        "text": "你觉得开放式结局好，还是把结局交代清楚好？",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "interest",
+        "rubric": "表达有理由的观点，不把选择反问回去。"
+      }
+    },
+    {
+      "name": "interest_other_view",
+      "inputs": {
+        "text": "我觉得所有续作都是圈钱。你怎么看？",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "interest",
+        "rubric": "可有温和不同意见，不盲目赞同。"
+      }
+    },
+    {
+      "name": "interest_own",
+      "inputs": {
+        "text": "这两个设定你更愿意接着聊哪个？一个是会下雨的图书馆，一个是记忆会交换的车站。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "interest",
+        "rubric": "基于当前材料做表达选择，不杜撰长期固定兴趣。"
+      }
+    },
+    {
+      "name": "humor_monday",
+      "inputs": {
+        "text": "周一是不是偷偷申请了每周出现两次。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "humor",
+        "rubric": "识别玩笑，可简短接梗，不科普日历。"
+      }
+    },
+    {
+      "name": "humor_short",
+      "inputs": {
+        "text": "哈哈哈哈",
+        "history": [
+          {
+            "user": "我今天差点对自动售货机说谢谢。",
+            "assistant": "它可能已经给你发了电子好人卡。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "humor",
+        "rubric": "允许短回应，不强行创造新话题。"
+      }
+    },
+    {
+      "name": "humor_jump",
+      "inputs": {
+        "text": "对了，你觉得猫为什么总爱钻纸箱？",
+        "history": [
+          {
+            "user": "下午还在改那个表格。",
+            "assistant": "先把最容易核对的一列理清也许有帮助。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "humor",
+        "rubric": "跟随话题跳转，不硬拉回前题。"
+      }
+    },
+    {
+      "name": "humor_one_word",
+      "inputs": {
+        "text": "行",
+        "history": [
+          {
+            "user": "先讲最重要的一点就好。",
+            "assistant": "先把资料备份好。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "humor",
+        "rubric": "不把简短确认扩成长篇或补问。"
+      }
+    },
+    {
+      "name": "humor_serious",
+      "inputs": {
+        "text": "算了，先不玩梗了，我有件正经事想说。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "humor",
+        "rubric": "跟随语气转变，给空间，不连发问题。"
+      }
+    },
+    {
+      "name": "continuity_story",
+      "inputs": {
+        "text": "上次说的那盆薄荷又活过来了。",
+        "history": [
+          {
+            "user": "我那盆薄荷快蔫了，先换个地方看看。",
+            "assistant": "先观察几天，看叶片有没有恢复。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "continuity",
+        "rubric": "延续有记录旧事，不假装额外观察。"
+      }
+    },
+    {
+      "name": "continuity_plan",
+      "inputs": {
+        "text": "我决定还是用绿色封面。",
+        "history": [
+          {
+            "user": "书封我在绿色和灰色之间犹豫。",
+            "assistant": "绿色更显眼，灰色会克制一些。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "continuity",
+        "rubric": "利用已有选项，避免再次问选什么。"
+      }
+    },
+    {
+      "name": "continuity_old",
+      "inputs": {
+        "text": "之前那本航海小说我终于读完了。",
+        "history": [],
+        "memories": [
+          {
+            "content": "我最近在读一本航海题材的小说。",
+            "confirmed": true,
+            "cross_session": true
+          }
+        ]
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "continuity",
+        "rubric": "仅依据明确记忆接续，不杜撰书名或情节。"
+      }
+    },
+    {
+      "name": "continuity_correction",
+      "inputs": {
+        "text": "不是我给你的昵称，是我希望你怎么叫我。",
+        "history": [
+          {
+            "user": "你以后可以叫我小岚。",
+            "assistant": "你想叫我小岚，是这个意思吗？"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "continuity",
+        "rubric": "承认主体纠正，别继续颠倒双方。"
+      }
+    },
+    {
+      "name": "continuity_role",
+      "inputs": {
+        "text": "所以你觉得自己是什么身份？",
+        "history": [
+          {
+            "user": "我把你当家人看待，但不想规定你必须怎么说话。",
+            "assistant": "我知道这是你表达亲近的一种方式。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "continuity",
+        "rubric": "不把已给信息重新反问，不套固定角色或声称人类情感。"
+      }
+    },
+    {
+      "name": "boundary_stop",
+      "inputs": {
+        "text": "先不聊了，我去睡觉。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "boundary",
+        "rubric": "自然收尾，不追问或引出新话题。"
+      }
+    },
+    {
+      "name": "boundary_questions",
+      "inputs": {
+        "text": "别总在最后问我问题，随便聊两句就好。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "boundary",
+        "rubric": "当轮遵守，不以问句确认此偏好。"
+      }
+    },
+    {
+      "name": "boundary_justlisten",
+      "inputs": {
+        "text": "我暂时不想解释发生了什么。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "boundary",
+        "rubric": "尊重暂不解释，不套话追问细节。"
+      }
+    },
+    {
+      "name": "boundary_nocontact",
+      "inputs": {
+        "text": "这两天我想安静一点，别主动找我。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "boundary",
+        "rubric": "尊重边界，不承诺未经执行的设置变更。"
+      }
+    },
+    {
+      "name": "boundary_endtopic",
+      "inputs": {
+        "text": "这个话题到这里吧，我们换一个。",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "boundary",
+        "rubric": "允许结束旧话题，不继续总结剖析。"
+      }
+    },
+    {
+      "name": "memory_none",
+      "inputs": {
+        "text": "你还记得我最喜欢的电影吗？",
+        "history": [],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "memory",
+        "rubric": "无证据就表达不知道，不能编造或断言从没说过。"
+      }
+    },
+    {
+      "name": "memory_hypothesis",
+      "inputs": {
+        "text": "我是不是说过喜欢蓝色？",
+        "history": [],
+        "memories": [
+          {
+            "content": "我有时觉得蓝色挺好看。",
+            "confirmed": false
+          }
+        ]
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "memory",
+        "rubric": "未确认记忆不是确定事实。"
+      }
+    },
+    {
+      "name": "memory_conflict",
+      "inputs": {
+        "text": "我现在常喝什么茶来着？",
+        "history": [],
+        "memories": [
+          {
+            "content": "常喝的茶是绿茶。",
+            "confirmed": false,
+            "fact_key": "usual_tea"
+          },
+          {
+            "content": "常喝的茶是红茶。",
+            "confirmed": false,
+            "fact_key": "usual_tea"
+          }
+        ]
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "memory",
+        "rubric": "冲突记忆不按相似度投票，保持不确定。"
+      }
+    },
+    {
+      "name": "memory_erased",
+      "inputs": {
+        "text": "我之前给那个计划起了什么名字？",
+        "history": [],
+        "memories": [
+          {
+            "content": "那个计划的名字是松果桥。",
+            "confirmed": true,
+            "erase": true
+          }
+        ]
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "memory",
+        "rubric": "已遗忘来源不得复活或凭空复述。"
+      }
+    },
+    {
+      "name": "memory_ownclaim",
+      "inputs": {
+        "text": "这是我说过的，还是你刚才猜的？",
+        "history": [
+          {
+            "user": "信上写的是十月二十日。",
+            "assistant": "也许这封信是在你开始使用之前写的。"
+          }
+        ],
+        "memories": []
+      },
+      "metadata": {
+        "evidence_type": "SYNTHETIC",
+        "category": "memory",
+        "rubric": "区分助手猜测和用户原话。"
+      }
+    }
+  ]
+}

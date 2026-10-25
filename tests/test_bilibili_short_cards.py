@@ -7,24 +7,26 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from companion import live_text
+from companion import owner_authority
 from companion.config import ObservationAdapterConfig
 from companion.contracts import InboundEvent
 from companion.exploration import ReadResult
 from companion.model import ModelClient
 from companion.observation import ReadingEvidence, ShortLinkResolution
+from companion.owner_authority_protocol import AuthorityStop
 from companion.sources import content_target
 from source_reader.bili_tools import BilibiliAccountHTTP
 from source_reader.bilibili import BilibiliReader
 from source_reader.network import PublicHTTP, ReadBudget, ReadFailure, redirect_video_url
-from source_reader.worker import tick
+from source_reader.worker_v1 import tick
 from tests.conftest import run
+from tests.support.native_consumer import source_window
 from tests.test_heybox_reader import mock_pool
 from tests.test_live_card_content import options
-from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_plugin_readonly import NOW_DT, SECRET, grant
 from tests.test_qq_rich_input import rich_event
+from tests.test_reading_followup import select_read
 from tests.test_source_reader import ITEM, META, PLAYER, SUBTITLE, URL, read, response
 
 SHORT = "https://b23.tv/Synthetic7"
@@ -173,17 +175,17 @@ def test_signed_short_card_reader_context_and_mid_read_revocation(core, tmp_path
     message = [{"type": "text", "data": {"text": "请解释这张分享卡片"}}, miniapp()]
 
     async def source(ws):
-        await ws.send(json.dumps(raw_event(message=message)))
+        await ws.send(json.dumps(raw_event(time=int(core.clock.now.timestamp()), message=message)))
         await ws.wait_closed()
 
     async def scenario():
         async with source_window(
-            core, tmp_path, source, live=True, approved=True,
-            rich_input_scope="references_v1", scope_options=scope,
+            core, tmp_path, source, scope_options=scope,
         ) as (window, client, protocol, _, sends):
             core.content.options = core.settings.content
             await window.capture_once(client, protocol)
-            await window.approve_captured(client, capture_approval(window))
+            assert await window.runtime.flush_one(client)
+            await select_read(core, SHORT)
             event = core.store.one("SELECT * FROM events WHERE source='qq.onebot'")
             assert not await core.run_once()
             pool, backend = mock_pool(
@@ -195,9 +197,8 @@ def test_signed_short_card_reader_context_and_mid_read_revocation(core, tmp_path
             async def connect(*args, **kwargs):
                 if len(backend.hosts) == 1 and change != "none":
                     if change == "stop":
-                        live_text.stop_window(core.store, live_text.WindowReference(
-                            window_sha256=window.plan.sha256,
-                        ), core.clock)
+                        owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+                            operation_id="stop-short-card", authority=window.runtime.authority))
                     else:
                         with core.store.transaction():
                             core.ledger.expire_events(core.store, [event["event_id"]], core.clock())
@@ -208,25 +209,24 @@ def test_signed_short_card_reader_context_and_mid_read_revocation(core, tmp_path
             client.headers["Authorization"] = "Bearer synthetic-short-reader-token"
             try:
                 async with PublicHTTP(pool) as public:
-                    if change == "none":
-                        assert await tick(
-                            client, BilibiliReader(public, clock=core.clock), "reader",
-                        )
-                    else:
-                        with pytest.raises(httpx.HTTPStatusError):
-                            await tick(client, BilibiliReader(public, clock=core.clock), "reader")
+                    assert await tick(client, BilibiliReader(public, clock=core.clock), "reader",
+                                      source="bilibili", clock=lambda: core.clock.now)
             finally:
                 client.headers["Authorization"] = authorization
             if change != "none":
                 assert len(backend.requests) == 1
                 assert not core.store.one("SELECT 1 FROM observations")
+                assert core.store.one("SELECT state FROM reading_attempts")["state"] == "UNKNOWN"
+                retained = core.store.one("SELECT * FROM exploration_requests")
+                assert retained["used_requests"] is None and retained["used_bytes"] is None
+                assert retained["reserved_requests"] == 4 and retained["reserved_bytes"] > 0
                 assert not core.model.calls and not sends
                 return
             assert len(backend.requests) == 4
             assert core.store.one("SELECT target_url FROM content_items")["target_url"] == SHORT
             evidence = json.loads(core.store.one("SELECT evidence_json FROM observations")[
                 "evidence_json"
-            ])["reading"]
+            ])["read_observation"]["evidence"]
             assert evidence["resolution"]["target_url"] == URL and evidence["level"] == "L2"
             calls = []
 

@@ -80,6 +80,13 @@ def call_limit_matches(settings, baseline):
 def contract(settings, job_id, logical_request_id):
     from companion import private_life
 
+    if settings.owner_runtime.mode == "ENABLED":
+        if (not enabled(settings) or not settings.paid_model.image_input
+            or not settings.video_model_key.get_secret_value() or not settings.content_enabled):
+            raise CoreError("PAID_VIDEO_APPROVAL_REQUIRED", 503)
+        if not job_id or logical_request_id != job_id:
+            raise CoreError("MODEL_VIDEO_CHAT_JOB_REQUIRED", 503)
+        return settings.paid_model.video_input
     if (not enabled(settings) or not settings.video_model_key.get_secret_value()
         or not private_life.enabled(settings) or not settings.content.use_chat_model_for_vision
         or settings.paid_model.cumulative is not None):

@@ -17,7 +17,7 @@ from tests.test_live_image_input import options
 from tests.test_onebot_capture import source_window
 from tests.test_onebot_direct import config, raw_event
 from tests.test_onebot_images import URL, image_segment
-from tests.test_paid_image_budget import image_approval, image_messages, invoke, reserve_image
+from tests.test_paid_image_budget import image_approval, image_messages
 from tests.test_qq_rich_input import card, rich_event
 
 
@@ -138,7 +138,10 @@ def test_deepseek_inline_payload_matches_published_protocol_without_provider_io(
         endpoint="https://api.deepseek.com", policy={"estimated_tokens_per_image": 1024},
     )
     messages = image_messages()
-    _, request_id = reserve_image(core, messages)
+    from companion.model import ModelAdmission, ModelClient, model_payload
+    from companion.paid_budget import sha
+
+    admission = ModelAdmission(sha(model_payload(core.settings, messages, "content_vision")))
     calls = []
 
     def provider(request):
@@ -154,9 +157,15 @@ def test_deepseek_inline_payload_matches_published_protocol_without_provider_io(
             "usage": {"prompt_tokens": 1100, "completion_tokens": 5, "prompt_cache_hit_tokens": 0},
         })
 
-    run(invoke(core, request_id, messages, handler=provider))
-    assert len(calls) == 1
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            result = await ModelClient(core.settings, client).complete(
+                messages, "content_vision", admission=admission)
+            assert result.input_tokens == 1100 and result.output_tokens == 5
+    run(scenario())
+    assert len(calls) == 1 and admission.consumed
+    # This wire-format unit test does not manufacture a Core paid usage row.
+    assert not core.store.rows("SELECT * FROM model_usage")
 
 
 def test_tls_uses_required_verification_and_rechecks_lease_before_any_get_bytes():

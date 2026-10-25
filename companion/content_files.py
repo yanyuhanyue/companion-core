@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import threading
 from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -27,14 +28,24 @@ def _transaction(store):
 
 
 def _guard(service, config, event_id, *, upload=False, item_id=None):
-    from companion import live_text
+    from companion import live_text, owner_authority, owner_input, reply_revision
 
     if not config.enabled:
         raise CoreError("PRIVATE_FILES_DISABLED", 403)
-    approval, _, _ = live_text.guard(service.store, service.settings, service.clock)
-    event, body, files, job = qq_files.source(
-        service.store, service.settings, approval, event_id, item_id=item_id,
-    )
+    if owner_authority.required(service.store, service.settings):
+        approval = owner_authority.current(service.store, service.settings, service.clock,
+                                           purpose="file")
+        event, body, job = owner_input.source(service.store, service.settings, approval,
+                                             event_id, service.clock())
+        files = qq_files.manifest(body)
+        if (not service.settings.content_enabled or not service.settings.observation_enabled
+            or not files or not reply_revision.source_active(service.store, event_id)):
+            raise CoreError("PRIVATE_FILE_SOURCE_REQUIRED", 403)
+    else:
+        approval, _, _ = live_text.guard(service.store, service.settings, service.clock)
+        event, body, files, job = qq_files.source(
+            service.store, service.settings, approval, event_id, item_id=item_id,
+        )
     if upload and after(event["ingested_at"], config.upload_window_seconds) <= service.clock():
         raise CoreError("PRIVATE_FILE_UPLOAD_EXPIRED", 410)
     return event, body, files, job, approval
@@ -319,6 +330,45 @@ async def run_file_once(service, *, config=None, parse=None):
                   "updated_at=? WHERE item_id=?", (token, min(row["deadline"],
                   after(now, config.worker_lease_seconds)), now, row["item_id"]))
     result, error = None, None
+    loop, cancelled = asyncio.get_running_loop(), threading.Event()
+
+    async def check_dispatch():
+        # SQLite and authority checks stay on the owning event loop, not parser threads.
+        with _transaction(s):
+            current = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
+            if (cancelled.is_set() or not current or current["state"] != "RUNNING"
+                or current["lease_token"] != token or current["redacted"]
+                or current["captured_privacy_epoch"] != epoch(s)
+                or current["lease_until"] <= service.clock()
+                or current["deadline"] <= service.clock()
+                or current["attachment_json"] != encode(snapshot)
+                or current["fingerprint"] != row["fingerprint"]
+                or current["media_sha256"] != row["media_sha256"]):
+                raise CoreError("PRIVATE_FILE_LEASE_FENCED", 409)
+            _, _, files, _, approval = _guard(service, config, row["owner_event_id"],
+                                             item_id=row["item_id"])
+            original = _original(files, current)
+            _snapshot(current, original, config)
+            stored, stored_mime = image_spool.get(s, current, service.clock(),
+                                                 snapshot["max_bytes"])
+            staged = s.one("SELECT value FROM runtime_meta WHERE key=?",
+                           (qq_files.STAGED + row["item_id"],))
+            if (stored != data or stored_mime != mime or not staged
+                or json.loads(staged["value"]) != proof):
+                raise CoreError("PRIVATE_FILE_ORIGINAL_CHANGED", 409)
+            qq_files.upload_proof(approval, row["owner_event_id"], original,
+                                  proof.get("lease_token"), row["media_sha256"], mime,
+                                  len(data), proof)
+
+    def effect_check():
+        if cancelled.is_set():
+            raise CoreError("PRIVATE_FILE_PROCESSOR_CANCELLED", 409)
+        pending = asyncio.run_coroutine_threadsafe(check_dispatch(), loop)
+        try:
+            pending.result(timeout=10)
+        finally:
+            pending.cancel()
+
     try:
         parser = parse or (file_parser_client.parse_via_socket if snapshot["parser_socket"]
                            else file_parser.parse_isolated)
@@ -328,6 +378,7 @@ async def run_file_once(service, *, config=None, parse=None):
             parser, data, snapshot["filename"], mime,
             image=snapshot["parser_image"], **transport,
             limits=file_parser.Limits(**snapshot["parser_limits"]),
+            effect_check=effect_check,
         )
         file_parser._validate_result(
             {**result, "isolation": "not_asserted"},
@@ -335,6 +386,7 @@ async def run_file_once(service, *, config=None, parse=None):
             file_parser.Limits(**snapshot["parser_limits"]),
         )
     except asyncio.CancelledError:
+        cancelled.set()
         with _transaction(s):
             current = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
             if current and current["lease_token"] == token:
@@ -342,6 +394,8 @@ async def run_file_once(service, *, config=None, parse=None):
         raise
     except Exception:
         error = "PRIVATE_FILE_PROCESSOR_FAILED"
+    finally:
+        cancelled.set()
     with _transaction(s):
         current = s.one("SELECT * FROM content_items WHERE item_id=?", (row["item_id"],))
         if (not current or current["state"] != "RUNNING" or current["lease_token"] != token

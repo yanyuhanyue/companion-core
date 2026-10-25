@@ -22,9 +22,9 @@ from companion.model import ModelClient
 from companion.retrieval import SemanticIndex
 from companion.store import after
 from companion_meme_protocol import CaptionOutcome, digest
-from tests import test_input_protocol
+from tests import meme_authority_fixture
 from tests.conftest import run
-from tests.test_input_protocol import admit, notice
+from tests.meme_authority_fixture import admit, notice, stop
 from tests.test_meme_service import claim, discovery_environment, reservation, result, submit
 
 CAPTION = {
@@ -45,31 +45,13 @@ CAPTION = {
 
 @asynccontextmanager
 async def caption_environment(core, tmp_path, monkeypatch):
-    original = test_input_protocol.companion_options
-    # No memory retrieval occurs in these caption-only scenarios. The meme query
-    # encoder has its own local-only contract and is exercised separately.
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-
-    def options(core):
-        value = original(core)
-        value["core_options"].update(
-            meme_semantics_enabled=True,
-            meme_caption_daily_micro_usd=50000,
-        )
-        value["paid_options"].update(
-            max_output_tokens=4096,
-            meme_input=ImageInputPolicy(
-                approval_sha256="e" * 64,
-                estimated_tokens_per_image=100,
-                max_bytes_per_image=4000000,
-                max_pixels_per_image=16000000,
-                max_images_per_request=5,
-            ),
-        )
-        return value
-
-    monkeypatch.setattr(test_input_protocol, "companion_options", options)
-    async with discovery_environment(core, tmp_path, monkeypatch) as values:
+    async with discovery_environment(core, tmp_path, monkeypatch,
+        meme_semantics_enabled=True, meme_caption_daily_micro_usd=50000,
+        paid={"max_output_tokens": 4096, "meme_input": ImageInputPolicy(
+            approval_sha256="e" * 64, estimated_tokens_per_image=100,
+            max_bytes_per_image=4000000, max_pixels_per_image=16000000,
+            max_images_per_request=5)}) as values:
         event, accepted, (client, config, plan, now) = values
         created = submit(core, event)
         item = claim(core)
@@ -247,12 +229,10 @@ def test_late_caption_keeps_usage_but_never_commits_after_source_change(
             async def interrupt():
                 if interruption == "recall":
                     response = await client.post(
-                        "/internal/v1/live-text/inputs/recall", json=notice(config, plan, now)
+                        "/internal/v1/owner-authority/inputs/recall", json=notice(config, plan, now)
                     )
                 elif interruption == "stop":
-                    response = await client.post(
-                        "/internal/v1/live-text/stop", json={"window_sha256": plan.sha256}
-                    )
+                    response = await stop(client, plan)
                 else:
                     _, response = await admit(client, config, plan, now, 2)
                 assert response.status_code in {200, 202}, response.text
@@ -354,9 +334,9 @@ def test_offer_wait_expires_without_bridge_response(core, tmp_path, monkeypatch)
 
 
 def test_new_source_cache_binding_keeps_original_erasure_lineage(core, tmp_path, monkeypatch):
-    raw_event = test_input_protocol.raw_event
+    raw_event = meme_authority_fixture.raw_event
     monkeypatch.setattr(
-        test_input_protocol,
+        meme_authority_fixture,
         "raw_event",
         lambda *args, **kwargs: raw_event(*args, **{**kwargs, "text": "我想要抱抱"}),
     )
@@ -448,7 +428,7 @@ def test_new_source_cache_binding_keeps_original_erasure_lineage(core, tmp_path,
                 current["event_id"],
             }
             recalled = await client.post(
-                "/internal/v1/live-text/inputs/recall", json=notice(config, plan, now, 1)
+                "/internal/v1/owner-authority/inputs/recall", json=notice(config, plan, now, 1)
             )
             assert recalled.status_code == 200, recalled.text
             assert not core.store.one(
@@ -513,9 +493,9 @@ def test_local_query_embedding_cannot_block_new_input_or_publish_stale_offer(
     tmp_path,
     monkeypatch,
 ):
-    raw_event = test_input_protocol.raw_event
+    raw_event = meme_authority_fixture.raw_event
     monkeypatch.setattr(
-        test_input_protocol,
+        meme_authority_fixture,
         "raw_event",
         lambda *args, **kwargs: raw_event(*args, **{**kwargs, "text": "我想要抱抱"}),
     )

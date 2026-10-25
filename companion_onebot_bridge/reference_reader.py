@@ -6,14 +6,22 @@ the original event's untrusted rich input and therefore its erasure boundary.
 """
 
 import asyncio
+import hashlib
 import json
 import re
 import time
 from copy import deepcopy
+from dataclasses import replace
 
 import httpx
 
-from .rich_input import MAX_RICH_BYTES
+from .rich_input import (
+    MAX_RICH_BYTES,
+    assign_reference_slots,
+    media_segments,
+    project,
+    shared_media,
+)
 from .spool import encode
 
 MAX_FETCHES = 4
@@ -48,12 +56,64 @@ def _message(data):
 
 
 class _Reader:
-    def __init__(self, onebot, redact):
+    def __init__(self, onebot, redact, *, image_scope=False, file_scope=False, originals=None):
         self.onebot, self.redact = onebot, redact
         self.deadline = time.monotonic() + TIMEOUT_SECONDS
         self.exhausted = False
         self.fetches = self.count = self.chars = self.visited = 0
         self.cache = {}
+        self.image_scope, self.file_scope = image_scope, file_scope
+        self.originals = originals if originals is not None else []
+        self.image_slot = self.file_slot = 0
+        self.root_index = 0
+        self.media_count = self.record_count = 0
+
+    def media(self, segment, body, path, origin):
+        """Reuse the existing bounded media decoders, carrying the captured reference path."""
+        from .files import original_files
+        from .images import original_images
+
+        kind = segment["type"]
+        full_path = [self.root_index, *path]
+        if len(full_path) > 8 or self.media_count >= 64:
+            body["issues"].add("DEPTH_LIMIT" if len(full_path) > 8 else "NODE_LIMIT")
+            return
+        try:
+            if kind in {"image", "face"} and self.image_scope:
+                images = original_images([segment])
+                if images:
+                    if self.image_slot + self.file_slot + self.record_count >= 64:
+                        raise ValueError("MEDIA_LIMIT")
+                    original = replace(images[0], index=self.root_index, slot=self.image_slot,
+                                       path=tuple(full_path), origin=origin)
+                    self.image_slot += 1
+                    value = original.projection()
+                elif kind == "face":
+                    value = project([segment], self.redact)[1]["segments"][0]
+                else:
+                    raise ValueError("UNSUPPORTED_MEDIA")
+            elif kind == "file" and self.file_scope:
+                if self.image_slot + self.file_slot + self.record_count >= 64:
+                    raise ValueError("MEDIA_LIMIT")
+                original = replace(original_files([segment])[0], index=self.root_index,
+                                   slot=self.file_slot, path=tuple(full_path), origin=origin)
+                self.file_slot += 1
+                value = original.projection()
+            elif kind in {"json", "face"}:
+                value = project([segment], self.redact)[1]["segments"][0]
+            else:
+                raise ValueError("UNSUPPORTED_MEDIA")
+            value.update(index=self.root_index, path=full_path, origin=origin)
+            value["source_sha256"] = hashlib.sha256(encode(segment).encode()).hexdigest()
+            body.setdefault("media", []).append(value)
+            body["media_version"] = "captured_v1"
+            self.media_count += 1
+            if value["coverage"] == "UNREAD":
+                body["issues"].add("MEDIA_PENDING")
+                self.originals.append({"path": full_path, "origin": origin,
+                                       "segment": deepcopy(segment)})
+        except (ValueError, IndexError, KeyError):
+            body["issues"].add("UNSUPPORTED_MEDIA")
 
     def add(self, body, text, nickname, path):
         if not isinstance(text, str) or "\x00" in text:
@@ -152,26 +212,30 @@ class _Reader:
         if key in ancestors:
             body["issues"].add("CYCLE")
             return
-        start = len(body["nodes"])
+        start = len(body["nodes"]) + len(body.get("media", []))
+        origin = {"kind": kind, "reference": reference,
+                  "capture_sha256": hashlib.sha256(encode(data).encode()).hexdigest()}
         if kind == "forward" and isinstance(data.get("messages"), list):
-            await self.nodes(data["messages"], body, path, depth, ancestors | {key})
+            await self.nodes(data["messages"], body, path, depth, ancestors | {key}, origin)
         elif _message(data) is not None:
             await self.chain(
                 _message(data), body, path, depth, ancestors | {key},
-                self.nickname(data) or nickname,
+                self.nickname(data) or nickname, origin,
             )
-        if len(body["nodes"]) > start:
+        if len(body["nodes"]) + len(body.get("media", [])) > start:
             return
         result = await self.fetch(kind, reference, body, ancestors)
         if result is None:
             return
         # A placeholder in the push chain is not a failure if the original was recovered.
         body["issues"].discard("PLACEHOLDER")
+        origin["capture_sha256"] = hashlib.sha256(encode(result).encode()).hexdigest()
         if kind == "forward":
-            await self.nodes(result.get("messages"), body, path, depth, ancestors | {key})
+            await self.nodes(result.get("messages"), body, path, depth, ancestors | {key}, origin)
         else:
             await self.chain(
-                _message(result), body, path, depth, ancestors | {key}, self.nickname(result)
+                _message(result), body, path, depth, ancestors | {key},
+                self.nickname(result), origin,
             )
 
     def nickname(self, value):
@@ -182,7 +246,7 @@ class _Reader:
                 return candidate
         return ""
 
-    async def nodes(self, nodes, body, path, depth, ancestors):
+    async def nodes(self, nodes, body, path, depth, ancestors, origin):
         if not isinstance(nodes, list):
             body["issues"].add("MALFORMED")
             return
@@ -199,12 +263,12 @@ class _Reader:
                     body["issues"].add("MALFORMED")
                     continue
             await self.chain(
-                _message(node), body, path + [index], depth, ancestors, self.nickname(node)
+                _message(node), body, path + [index], depth, ancestors, self.nickname(node), origin,
             )
         if len(nodes) > 64:
             body["issues"].add("NODE_LIMIT")
 
-    async def chain(self, message, body, path, depth, ancestors, nickname=""):
+    async def chain(self, message, body, path, depth, ancestors, nickname="", origin=None):
         if depth > MAX_DEPTH:
             body["issues"].add("DEPTH_LIMIT")
             return
@@ -247,10 +311,10 @@ class _Reader:
             elif kind == "node":
                 await self.chain(
                     _message(data), body, path + [index], depth + 1, ancestors,
-                    self.nickname(data),
+                    self.nickname(data), origin,
                 )
             else:
-                body["issues"].add("UNSUPPORTED_MEDIA")
+                self.media(segment, body, path + [index], origin)
         if text:
             self.add(body, "".join(text), nickname, path + [start])
         if len(message) > 64:
@@ -259,31 +323,41 @@ class _Reader:
 
 def _finish(body):
     issues = body["issues"]
+    available = bool(body["nodes"] or body.get("media"))
     body["status"] = (
         "TRUNCATED" if issues & LIMITS else
-        "PARTIAL" if body["nodes"] and issues else
-        "READ" if body["nodes"] else
+        "PARTIAL" if available and issues else
+        "READ" if available else
         "UNSUPPORTED" if "UNSUPPORTED_MEDIA" in issues else "MISSING"
     )
-    if not body["nodes"] and not issues:
+    if not available and not issues:
         issues.add("NO_TEXT")
     body["issues"] = sorted(issues)
 
 
-async def enrich(event, message, onebot, redact):
+async def enrich(event, message, onebot, redact, *, image_scope=False, file_scope=False,
+                 originals=None):
     """Enrich an already authenticated normalized event before its input hash is signed."""
     rich = event["payload"].get("rich")
     if not rich or not isinstance(message, list):
         return event
-    reader = _Reader(onebot, redact)
+    reader = _Reader(onebot, redact, image_scope=image_scope, file_scope=file_scope,
+                     originals=originals)
+    shared = event["payload"].get("shared_content", [])
+    reader.image_slot = sum(item["kind"] == "image" for item in shared)
+    reader.file_slot = sum(item["kind"] == "file" for item in shared)
+    reader.record_count = sum(item.get("type") == "record" for item in message)
     for segment in rich["segments"]:
         if segment["type"] not in {"reply", "forward", "node"}:
             continue
         original = message[segment["index"]]
+        reader.root_index = segment["index"]
         body = {"source": "INLINE", "nodes": [], "issues": set()}
         data = original["data"]
         if segment["type"] == "node":
-            await reader.chain(_message(data), body, [], 0, set(), reader.nickname(data))
+            origin = {"kind": "inline", "reference": "",
+                      "capture_sha256": hashlib.sha256(encode(original).encode()).hexdigest()}
+            await reader.chain(_message(data), body, [], 0, set(), reader.nickname(data), origin)
         else:
             await reader.reference(segment["type"], data, body, [], 0, set())
         _finish(body)
@@ -296,11 +370,63 @@ async def enrich(event, message, onebot, redact):
                 body["nodes"].pop()
             body["status"] = "TRUNCATED"
             body["issues"] = sorted(set(body["issues"]) | {"SIZE_LIMIT"})
+        while len(encode(rich).encode()) > MAX_RICH_BYTES and body.get("media"):
+            body["media"].pop()
+            body["status"] = "TRUNCATED"
+            body["issues"] = sorted(set(body["issues"]) | {"SIZE_LIMIT"})
+        if "media" in body and not body["media"]:
+            del body["media"], body["media_version"]
         if len(encode(rich).encode()) > MAX_RICH_BYTES:
             # The fixed reference coverage still states missing/unsupported when
             # even the smallest body status would exceed the original envelope.
             del segment["body"]
+    assign_reference_slots(event)
+    kept = {(tuple(item["path"]), item["source_sha256"]) for item in media_segments(rich)
+            if item.get("path") and item["coverage"] == "UNREAD"}
+    reader.originals[:] = [item for item in reader.originals if (
+        tuple(item["path"]), hashlib.sha256(encode(item["segment"]).encode()).hexdigest()) in kept]
     return event
+
+
+def captured_media(event, message, references=()):
+    """Rebuild only the media sealed into this capture, without fetching mutable references."""
+    from .files import original_files
+    from .images import original_images
+
+    shared = event["payload"].get("shared_content", [])
+    images = original_images(message) if any(item["kind"] == "image" for item in shared) else []
+    files = original_files(message) if any(item["kind"] == "file" for item in shared) else []
+    projections = {tuple(item["path"]): item
+                   for item in media_segments(event["payload"].get("rich"))
+                   if item.get("path") and item["coverage"] == "UNREAD"}
+    seen = set()
+    for reference in references:
+        if not isinstance(reference, dict) or set(reference) != {"path", "origin", "segment"}:
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        path = tuple(reference["path"])
+        projection = projections.get(path)
+        if path in seen or projection is None or reference["origin"] != projection["origin"]:
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        segment = reference["segment"]
+        if hashlib.sha256(encode(segment).encode()).hexdigest() != projection["source_sha256"]:
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        if projection["type"] in {"image", "face"}:
+            original = original_images([segment])[0]
+            target = images
+        elif projection["type"] == "file":
+            original = original_files([segment])[0]
+            target = files
+        else:
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        original = replace(original, index=projection["index"], slot=projection["slot"],
+                           path=path, origin=reference["origin"])
+        if original.projection() != projection:
+            raise ValueError("CAPTURE_MEDIA_CHANGED")
+        target.append(original)
+        seen.add(path)
+    if seen != set(projections):
+        raise ValueError("CAPTURE_MEDIA_CHANGED")
+    return images, files
 
 
 def restore(event, projection):
@@ -318,4 +444,4 @@ def restore(event, projection):
     if stripped != baseline or len(encode(projection).encode()) > MAX_RICH_BYTES:
         raise ValueError("CAPTURE_INPUT_CHANGED")
     event["payload"]["rich"] = deepcopy(projection)
-    return event
+    return shared_media(event)

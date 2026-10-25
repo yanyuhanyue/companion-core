@@ -9,17 +9,16 @@ import httpx
 import pytest
 from PIL import Image
 
-from companion import budget, image_spool, live_text, paid_budget, qq_images
-from companion.contracts import CoreError
+from companion import image_spool, live_text, paid_budget
 from companion.model import ModelClient
 from companion.store import Store, encode
 from tests.conftest import run
+from tests.support.native_image_memory import native_image_memory
 from tests.test_live_image_input import options
 from tests.test_memory_commands import fact
 from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_onebot_images import image_segment
-from tests.test_onebot_window import reply_approval
 
 PREFERENCE = "我挑选耳机优先考虑轻便和隔音。"
 CUES = "图片1：红色轻便头戴耳机；图片2：蓝色头戴耳机。检索主题：耳机、轻便、隔音。"
@@ -53,15 +52,15 @@ async def image_memory_window(
         stream = io.BytesIO()
         Image.new("RGB", (3, 2), color).save(stream, format="PNG")
         originals.append(stream.getvalue())
-    original_scores = core.memory.index.scores
+    original_scores = core.memory.index.scores_async
 
-    def scores(query, rows):
+    async def scores(query, rows, **kwargs):
         queries.append((query, [row["memory_id"] for row in rows]))
         if no_candidates:
             return {row["memory_id"]: -1 for row in rows}
-        return original_scores(query, rows)
+        return await original_scores(query, rows, **kwargs)
 
-    core.memory.index.scores = scores
+    core.memory.index.scores_async = scores
 
     number = 0
 
@@ -144,7 +143,7 @@ async def image_memory_window(
             window, client, protocol, sends, calls, downloads, queries, originals,
             memory_id, outsider, job,
         )
-    core.memory.index.scores = original_scores
+    core.memory.index.scores_async = original_scores
 
 
 @pytest.mark.parametrize("no_candidates", [False, True])
@@ -152,121 +151,111 @@ def test_originals_and_image_topic_retrieval_share_paid_job_and_verified_reply(
     core, tmp_path, no_candidates,
 ):
     async def scenario():
-        async with image_memory_window(core, tmp_path, no_candidates=no_candidates) as values:
-            (window, client, protocol, sends, calls, downloads, queries, originals,
-             memory_id, _, job) = values
-            assert len(calls) == 1 and len(downloads) == 2
+        async with native_image_memory(core, tmp_path, no_candidates=no_candidates) as value:
+            assert not value.calls and len(value.downloads) == 2
             reopened = Store(core.store.path)
             try:
-                parts = qq_images.original_parts(reopened, core.settings, core.clock, job)
-                assert [base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
-                        for part in parts] == originals
+                rows = reopened.rows("SELECT * FROM content_items WHERE kind='qq_image' "
+                                     "ORDER BY slot")
+                assert [image_spool.get(reopened, row, core.clock(), 50000)[0]
+                        for row in rows] == value.originals
             finally:
                 reopened.close()
-            assert await core.run_once()
-            assert len(calls) == (2 if no_candidates else 3), core.store.one(
-                "SELECT last_error_code FROM jobs WHERE job_id=?", (job["job_id"],),
-            )
-            assert queries and all(CUES in query and ids == [memory_id] for query, ids in queries)
-            assert "秘密偏好" not in encode(calls)
-            final = calls[-1]["messages"]
-            assert final[-1]["content"][0]["text"] == QUESTION
+            assert await value.worker.run_once("native-image-memory")
+            assert len(value.calls) == 2, core.store.one(
+                "SELECT last_error_code FROM jobs WHERE job_id=?", (value.job["job_id"],))
+            final = value.calls[-1]["messages"]
+            images = [part for message in final if isinstance(message["content"], list)
+                      for part in message["content"] if part["type"] == "image_url"]
             assert [base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
-                    for part in final[-1]["content"][1:]] == originals
+                    for part in images] == value.originals
+            assert QUESTION in encode(final)
+            returned = json.loads(next(message["content"] for message in final
+                                      if message["role"] == "tool"))
+            assert [row["memory_id"] for row in returned["facts"]] == (
+                [] if no_candidates else [value.memory_id])
+            requested = next(message["tool_calls"] for message in final
+                             if message.get("tool_calls"))[0]
+            assert json.loads(requested["function"]["arguments"])["query"] == CUES
+            assert "过期秘密偏好" not in encode(value.calls)
             assert (PREFERENCE in encode(final)) == (not no_candidates)
-            if not no_candidates:
-                review = json.loads(calls[1]["messages"][-1]["content"])
-                assert review["image_observations"] == CUES and review["query"] == QUESTION
-            scenarios = ["content_vision", *([] if no_candidates else ["memory_review"]), "chat"]
             assert core.store.rows("SELECT scenario,state FROM model_usage ORDER BY rowid") == [
-                {"scenario": scenario, "state": "SETTLED"} for scenario in scenarios
-            ]
+                {"scenario": "chat", "state": "SETTLED"}] * 2
             admissions = core.store.rows("SELECT * FROM model_admissions ORDER BY rowid")
-            assert {row["logical_request_id"] for row in admissions} == {job["job_id"]}
+            assert {row["logical_request_id"] for row in admissions} == {value.job["job_id"]}
             assert [row["input_bound"] for row in admissions] == [
-                paid_budget.estimate_input_tokens(core.settings.paid_model, call["messages"], stage)
-                for call, stage in zip(calls, scenarios, strict=True)
-            ]
-            assert list(image_spool.directory(core.store).glob("*.raw")) == []
-            # Delivery still verifies hashes and paid sources after originals have been deleted.
-            await window.send_once(client, protocol, reply_approval(window.plan, core))
-            assert len(sends) == 1
+                paid_budget.estimate_input_tokens(core.settings.paid_model, call["messages"],
+                    "chat", tools=call.get("tools", ())) for call in value.calls]
+            # Original bytes stay available for the final native evidence check until expiry.
+            assert len(list(image_spool.directory(core.store).glob("*.raw"))) == 2
+            assert (await value.entry.send(value.entry.client, value.entry.protocol))["worked"]
+            assert len(value.sends) == 1
             assert len(core.store.rows("SELECT * FROM memories")) == 2
             durable = encode(core.store.rows("SELECT body_json FROM events")) + encode(
-                core.store.rows("SELECT value FROM runtime_meta"),
-            )
-            assert all(base64.b64encode(raw).decode() not in durable for raw in originals)
-
+                core.store.rows("SELECT value FROM runtime_meta")) + encode(core.store.rows(
+                    "SELECT conversation_json FROM agent_conversations"))
+            assert all(base64.b64encode(raw).decode() not in durable for raw in value.originals)
+            core.clock.advance(image_spool.RETENTION_SECONDS + 1)
+            image_spool.cleanup(core.store, core.clock(), retain_completed=True)
+            assert not list(image_spool.directory(core.store).glob("*.raw"))
     run(scenario())
 
 
-@pytest.mark.parametrize("limit", [14, 15])
+@pytest.mark.parametrize("limit", [9, 10])
 def test_five_image_memory_inputs_obey_the_explicit_model_attempt_cap(core, tmp_path, limit):
-    async def resolve(host, port):
-        return ["1.1.1.1"]
-
     async def scenario():
-        async with image_memory_window(core, tmp_path, model_attempts=limit) as values:
-            window, client, protocol, sends, calls, _, _, originals, _, _, _ = values
-
-            async def read_response(response):
-                await response.aread()
-
-            client.event_hooks["response"].append(read_response)
-
-            def cdn(request):
-                data = originals[0 if request.url.path.endswith("red.png") else 1]
-                return httpx.Response(200, content=data, headers={"Content-Type": "image/png"})
-
+        async with native_image_memory(core, tmp_path, limit=limit) as value:
             for number in range(1, 6):
-                if number > 1:
-                    await window.capture_once(client, protocol)
-                    if number == 5 and limit == 14:
-                        with pytest.raises(httpx.HTTPStatusError) as error:
-                            await window.approve_captured(
-                                client, capture_approval(window), image_resolver=resolve,
-                                image_transport=httpx.MockTransport(cdn),
-                            )
-                        assert error.value.response.status_code == 429
-                        assert "LIVE_IMAGE_TWO_CALLS_REQUIRED" in error.value.response.text
-                        assert len(calls) == 12
-                        break
-                    await window.approve_captured(
-                        client, capture_approval(window), image_resolver=resolve,
-                        image_transport=httpx.MockTransport(cdn),
-                    )
-                assert await core.run_once()
-                assert len(calls) == min(number * 3, limit)
-                if number == 5:
-                    job = core.store.one("SELECT * FROM jobs ORDER BY rowid DESC LIMIT 1")
-                    with pytest.raises(CoreError, match="LIVE_TEXT_MODEL_ATTEMPT_CAP"):
-                        budget.reserve(core.store, core.settings, job["job_id"], "chat",
-                                       [{"role": "user", "content": "sixteenth attempt"}],
-                                       core.clock(), clock=core.clock)
-                    assert len(calls) == limit
-                    assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == limit
-                await window.send_once(client, protocol, reply_approval(window.plan, core))
-            assert len(sends) == (5 if limit == 15 else 4)
-            assert window.status()["model_attempts"] == (15 if limit == 15 else 12)
-            assert window.db.execute("SELECT COUNT(*) FROM window_inputs").fetchone()[0] == 5
-
+                job = value.job if number == 1 else await value.admit_image(number)
+                assert await value.worker.run_once("bounded-native-image-memory")
+                assert len(value.calls) == min(number * 2, limit)
+                current = core.store.one("SELECT state,last_error_code FROM jobs WHERE job_id=?",
+                                         (job["job_id"],))
+                if number * 2 > limit:
+                    assert current["state"] == "FAILED", current
+                    assert current["last_error_code"] == "MODEL_DAILY_BUDGET_EXHAUSTED", current
+                    assert not core.store.one("SELECT 1 FROM outbox WHERE origin_event_id=?",
+                                               (job["event_id"],))
+                else:
+                    assert current["state"] == "SUCCEEDED", current
+                    assert (await value.entry.send(value.entry.client,
+                                                   value.entry.protocol))["worked"]
+            assert len(value.sends) == (5 if limit == 10 else 4)
+            assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == limit
+            assert core.store.one("SELECT COUNT(DISTINCT owner_event_id) n FROM content_items "
+                                  "WHERE kind='qq_image'")["n"] == 5
+            if limit == 10:
+                event = await value.entry.admit(6, "预算已满后的新输入")
+                assert await value.worker.run_once("no-eleventh-model-call")
+                refused = core.store.one("SELECT state,last_error_code FROM jobs WHERE event_id=?",
+                                         (event["event_id"],))
+                assert refused["state"] == "FAILED", refused
+                assert refused["last_error_code"] == "MODEL_DAILY_BUDGET_EXHAUSTED", refused
+                assert len(value.calls) == limit
+                assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == limit
     run(scenario())
 
 
-@pytest.mark.parametrize("mutation", ["raw_hash", "expired", "erased_current", "unknown_review"])
+@pytest.mark.parametrize("mutation", [
+    "raw_hash", "expired", "erased_current", "unknown_tool_request",
+])
 def test_joint_image_memory_flow_stops_before_final_io_on_lost_evidence(core, tmp_path, mutation):
     async def scenario():
-        async with image_memory_window(core, tmp_path, mutation=mutation) as values:
-            _, _, _, sends, calls, _, _, _, _, _, job = values
-            if mutation == "expired":
-                core.clock.advance(image_spool.RETENTION_SECONDS + 1)
-            assert await core.run_once()
-            assert len(calls) <= 2
-            assert not sends and not core.store.one("SELECT 1 FROM outbox")
-            assert core.store.one(
-                "SELECT state FROM jobs WHERE job_id=?", (job["job_id"],),
-            )["state"] == ("CANCELLED" if mutation == "erased_current" else "FAILED")
-            assert list(image_spool.directory(core.store).glob("*.raw")) == []
-            assert not await core.run_once()
-
+        async with native_image_memory(core, tmp_path, mutation=mutation) as value:
+            assert await value.worker.run_once("native-image-source-fence")
+            assert len(value.calls) <= 1
+            assert not value.sends and not core.store.one("SELECT 1 FROM outbox")
+            assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                (value.job["job_id"],))["state"] == (
+                    "CANCELLED" if mutation == "erased_current" else "FAILED")
+            usage = core.store.rows("SELECT * FROM model_usage")
+            if mutation == "unknown_tool_request":
+                assert len(usage) == 1 and usage[0]["state"] == "UNKNOWN"
+                reserved = core.store.one("SELECT reserved_micro_usd FROM model_admissions")
+                assert usage[0]["billed_micro_usd"] == reserved["reserved_micro_usd"] > 0
+            assert not await value.worker.run_once("no-image-replay")
+            core.clock.advance(image_spool.RETENTION_SECONDS + 1)
+            image_spool.cleanup(core.store, core.clock(), retain_completed=True)
+            assert not list(image_spool.directory(core.store).glob("*.raw"))
+            assert core.store.rows("SELECT * FROM model_usage") == usage
     run(scenario())

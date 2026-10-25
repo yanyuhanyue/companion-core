@@ -6,31 +6,29 @@ from datetime import timedelta
 import httpx
 import pytest
 
+from companion import notices, owner_delivery
 from companion.config import ObservationAdapterConfig
 from companion.core import Core
 from companion.goals import CommitmentRequest, GoalProposal, GoalScope
 from companion.model import ModelClient
 from companion.reply_segments import SegmentedReplyConfig
-from companion_onebot_bridge import continuous
 from companion_onebot_bridge.outbound import validate_item
 from tests.conftest import run
+from tests.native_continuous_support import frame, host
 from tests.test_exploration import URL
-from tests.test_onebot_capture import capture_approval, source_window
-from tests.test_onebot_direct import config, raw_event
+from tests.test_onebot_direct import config
 from tests.test_private_companion import companion_options
 
 
 @pytest.mark.parametrize("outcome", ["FULFILLED", "EXPLAINED_FAILURE"])
 def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_path, outcome):
     async def source(ws):
-        await ws.send(json.dumps(raw_event(1, text="请稍后帮我阅读这条资料")))
+        await ws.send(frame(1, text="请稍后帮我阅读这条资料"))
         await ws.wait_closed()
 
     async def scenario():
         options = companion_options(core)
         policy = SegmentedReplyConfig(max_segments="unlimited", interval_ms=0)
-        options.update(segmented_reply=policy, max_send_attempts=20, link_scope="owner_links_v1")
-        options["window_options"].update(max_attempts=20, max_visible_replies=20)
         options["core_options"].update(
             segmented_reply=policy, content_enabled=True, observation_enabled=True,
             observation_adapters={"bili": ObservationAdapterConfig(
@@ -38,10 +36,11 @@ def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_
             exploration_daily_requests=8, exploration_monthly_requests=30,
             exploration_daily_bytes=4_194_304,
         )
-        async with source_window(core, tmp_path, source, live=True, approved=True,
-                                 scope_options=options, rich_input_scope="references_v1") as (
-            window, client, protocol, _, sends,
-        ):
+        async with host(core, tmp_path, source, policy=policy,
+            purposes=("chat", "history", "memory", "goals", "proactive", "content", "exploration"),
+            core_options=options["core_options"], paid_options={"per_request_calls": 3},
+            bridge_options={"rich_input_scope": "references_v1"}) as (window, _, sends, _):
+            client = window.client
             calls, leased = [], []
 
             async def remember_lease(response):
@@ -66,10 +65,10 @@ def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_
 
             async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as model_http:
                 core.model = ModelClient(core.settings, model_http)
-                await window.capture_once(client, protocol)
-                await window.approve_captured(client, capture_approval(window))
+                await window.capture()
+                await window.flush()
                 assert await core.run_once()
-                await continuous.pump_private(window, client, protocol)
+                await window.pump()
                 owner = core.store.one("SELECT event_id FROM events WHERE actor_id='owner'")[
                     "event_id"]
                 goal = core.goals.accept_commitment(CommitmentRequest(
@@ -98,22 +97,27 @@ def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_
                 core.goals.pause_autonomy(True)
                 with Core(core.settings, core.model, core.clock) as worker:
                     assert worker.store is not core.store
-                    assert await worker.run_once("required-notice")
+                    assert await worker.run_once("required-notice", job_id=core.store.one(
+                        "SELECT job_id FROM jobs WHERE kind='activity'")["job_id"])
                 assert calls == ["chat", "notice"]
                 assert core.store.one("SELECT state FROM jobs WHERE kind='activity'") == {
                     "state": "SUCCEEDED"}
                 assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
-                await continuous.pump_private(window, client, protocol)
+                await window.pump()
                 if outcome == "FULFILLED":
                     assert len(sends) == 2
                     assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
-                    await continuous.pump_private(window, client, protocol)
+                    await window.pump()
                     assert sends[-1]["message"] == [{"type": "text", "data": {"text": URL}}]
                 assert len(sends) == (3 if outcome == "FULFILLED" else 2)
                 assert core.store.one("SELECT state FROM commitments")["state"] == outcome
-                assert "window_notice" not in leased[0]
-                assert all(item["window_notice"] == "commitment" for item in leased[1:])
-                assert window.status()["state"] == "OPEN"
+                for index, item in enumerate(leased):
+                    assert item["authority"] == window.runtime.authority
+                    material = json.loads(core.store.one(
+                        "SELECT value FROM runtime_meta WHERE key=?",
+                        (owner_delivery.DELIVERY + item["message_id"],))["value"])
+                    assert notices.required(core.store, material["job_id"]) is (index > 0)
+                assert window.runtime.row()["state"] == "ACTIVE"
 
     run(scenario())
 

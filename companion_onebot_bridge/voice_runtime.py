@@ -15,15 +15,20 @@ STATES = {"QUEUED", "LEASED", "RUNNING", "TRANSCRIBED", "CANCELLED", "EXPIRED", 
 
 
 def enabled(window):
+    if hasattr(window, "authority"):
+        return bool(window.config.capture_public_key)
     scope = window.plan.value.get("live_text", {})
     return bool(scope.get("voice_scope") == "owner_voice_v1"
         and scope.get("companion_scope") == "owner_private_v1"
         and scope.get("voice_policy_sha256") and window.plan.config.capture_public_key)
 
 
-def prepare_delivery(window, item):
+def prepare_delivery(window, item, *, voice_policy_sha256=None):
     if not enabled(window):
         raise ValueError("VOICE_SCOPE_REQUIRED")
+    if hasattr(window, "authority"):
+        return voice_media.prepare_delivery(item, window.config, authority=window.authority,
+            voice_policy_sha256=voice_policy_sha256, now=window.clock())
     return voice_media.prepare_delivery(item, window.plan.config,
         plan_sha256=window.plan.sha256,
         voice_policy_sha256=window.plan.value["live_text"]["voice_policy_sha256"],
@@ -36,8 +41,10 @@ def source(window, event_id, original):
     window.verify()
     if not enabled(window):
         raise ValueError("VOICE_SCOPE_REQUIRED")
-    row = window.db.execute("SELECT * FROM automatic_media WHERE event_id=?",
+    row = pending_media._execute(window, "SELECT * FROM automatic_media WHERE event_id=?",
                             (event_id,)).fetchone()
+    if row and row["state"] in pending_media.TERMINAL and hasattr(window, "authority"):
+        raise pending_media.SourceCancelled()
     if not row or row["state"] in pending_media.TERMINAL:
         raise ValueError("VOICE_SOURCE_CHANGED")
     if original not in pending_media.manifest(window, row):
@@ -53,7 +60,18 @@ def _local(window, bound, original):
 
     if source(window, bound.event_id, original) != bound:
         raise ValueError("VOICE_SOURCE_CHANGED")
-    if pending := pending_input(window, bound.event_id):
+    if hasattr(window, "authority"):
+        row = window.db.execute(
+            "SELECT i.key FROM inbox i JOIN window_inputs w ON w.event_id=i.key "
+            "WHERE i.state='pending' AND w.plan_hash=? AND w.rowid>"
+            "(SELECT rowid FROM window_inputs WHERE event_id=?) "
+            "AND json_extract(w.capture_json,'$.kind')='authenticated_onebot_ws' "
+            "ORDER BY w.rowid LIMIT 1", (voice_media.digest(window.authority),
+                                        bound.event_id)).fetchone()
+        pending = row[0] if row else None
+    else:
+        pending = pending_input(window, bound.event_id)
+    if pending:
         cancel(window, bound.event_id, {"reason": "OWNER_INPUT_PENDING", "event_id": pending})
         raise SourceCancelled()
 
@@ -61,20 +79,32 @@ def _local(window, bound, original):
 async def status(window, client, bound, original, check):
     _local(window, bound, original)
     await check()
-    value = await window.core_get(client, f"/internal/v1/voice-inputs/{bound.event_id}/state")
+    native = hasattr(window, "authority")
+    if native:
+        from .images import owner_media_request
+
+        permission = await window.check(client, purpose="voice")
+        value = await owner_media_request(window, client,
+            f"/internal/v1/voice-inputs/{bound.event_id}/state", purpose="voice", method="GET")
+        binding = {"authority": window.authority}
+        end = (datetime.fromisoformat(permission["expires_at"])
+               if permission["expires_at"] is not None else None)
+    else:
+        value = await window.core_get(client, f"/internal/v1/voice-inputs/{bound.event_id}/state")
+        binding, end = {"window_sha256": window.plan.sha256}, window.plan.end
     _local(window, bound, original)
     try:
         if (not isinstance(value, dict) or set(value) != {"event_id", "input_sha256",
-            "window_sha256", "reply_revision", "state", "wait_until", "records"}
+            "reply_revision", "state", "wait_until", "records", *binding}
             or value["event_id"] != bound.event_id
             or value["input_sha256"] != bound.source_input_sha256
-            or value["window_sha256"] != window.plan.sha256
+            or any(value[key] != item for key, item in binding.items())
             or type(value["reply_revision"]) is not int or value["reply_revision"] < 0
             or value["state"] not in {"WAITING", "READY", "FALLBACK"}
             or not isinstance(value["records"], list) or not 1 <= len(value["records"]) <= 64):
             raise ValueError()
         until = datetime.fromisoformat(value["wait_until"])
-        if until.tzinfo is None or until > window.plan.end:
+        if until.tzinfo is None or end is not None and until > end:
             raise ValueError()
         indices = []
         for item in value["records"]:
@@ -123,6 +153,8 @@ async def recover(window, client, row, original, check):
 async def upload(window, client, event_id, original, *, check, progress, protocol=None,
                  voice_transport=None, voice_resolver=None, set_phase=lambda phase: None):
     bound = source(window, event_id, original)
+    native = hasattr(window, "authority")
+    config = window.config if native else window.plan.config
     current, item = await status(window, client, bound, original, check)
     if item is None or not item["upload_allowed"]:
         if item is not None and item["state"] != "MISSING":
@@ -143,16 +175,18 @@ async def upload(window, client, event_id, original, *, check, progress, protoco
     options = {"resolver": voice_resolver} if voice_resolver is not None else {}
     try:
         async with (nullcontext(protocol) if protocol is not None else private_http_client(
-            window.plan.config.onebot_http_url, window.plan.config.onebot_token,
-        )) as native:
+            config.onebot_http_url, config.onebot_token,
+        )) as transport:
             downloaded = await voice_media.fetch_record(original,
-                onebot=OneBotClient(window.plan.config, native), check=guard,
+                onebot=transport if isinstance(transport, OneBotClient) else
+                    OneBotClient(config, transport), check=guard,
                 transport=voice_transport,
-                synthetic=window.plan.value["execution"] == "local_synthetic", **options)
+                synthetic=False if native else
+                    window.plan.value["execution"] == "local_synthetic", **options)
         set_phase("voice_decode")
         prepared = await voice_media.prepare_asr(downloaded, bound,
-            plan_sha256=window.plan.sha256,
-            capture_signing_key=window.plan.config.capture_signing_key, check=guard,
+            **({"authority": window.authority} if native else {"plan_sha256": window.plan.sha256}),
+            capture_signing_key=config.capture_signing_key, check=guard,
             work_dir=window.spool.directory / "voice-work")
     except ValueError as error:
         code = error.args[0] if error.args else ""
@@ -172,6 +206,19 @@ async def upload(window, client, event_id, original, *, check, progress, protoco
     await progress("UPLOADING", proof)
     set_phase("voice_upload")
     path = f"/internal/v1/voice-inputs/{event_id}"
+
+    if native:
+        from .images import owner_media_request
+
+        result = await owner_media_request(window, client, path, prepared.body,
+            {"Content-Type": prepared.mime_type, "X-Voice-Proof": prepared.proof_header},
+            purpose="voice", before=guard)
+        _, item = await status(window, client, bound, original, check)
+        if (not accepted(proof, item) or result.get("job_id") != item["job_id"]
+            or result.get("event_id") != event_id or result.get("operation") != "asr"
+            or result.get("source_segment_index") != original.index):
+            raise ValueError("VOICE_UPLOAD_RECEIPT_INVALID")
+        return {"kind": "voice_upload_accepted", **item}
 
     async def boundary(request):
         await guard()

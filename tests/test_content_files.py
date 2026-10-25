@@ -339,8 +339,8 @@ def test_file_migration_preserves_old_content_and_refuses_lossy_downgrade(tmp_pa
                      reserved_bytes=1000, deadline=TIMES["keep"], created_at=TIMES["keep"],
                      updated_at=TIMES["keep"], media_sha256="b" * 64)
         old = table_snapshot(store, ("events", "content_items"))
-    migrate(str(database))
-    migrate(str(database))
+    migrate(str(database), "0028_private_files")
+    migrate(str(database), "0028_private_files")
     with closing(Store(str(database))) as store:
         row = store.one("SELECT * FROM content_items")
         assert row.pop("attachment_json") == "{}"

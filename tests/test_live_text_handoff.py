@@ -398,8 +398,21 @@ def test_old_approved_inputs_do_not_consume_or_authorize_successor_inputs(core, 
                 evidence_sha256="e" * 64,
             ),
         )
-        core.ingest(inbound, inbound.event_id)
-        core.store.execute("UPDATE jobs SET state='FAILED'")
+        # Frozen pre-cutover event/job rows: retain the old approval and custody
+        # without invoking the retired live inbox under current native authority.
+        if number == 0:
+            core.store.insert("conversations", conversation_id="conv_archived_handoff",
+                platform=inbound.source,
+                platform_session_key=inbound.conversation.platform_session_key,
+                scope="private", owner_actor_id="owner", created_at=core.clock())
+        core.store.insert("events", event_id=inbound.event_id, schema_version=1,
+            source=inbound.source, source_event_id=inbound.source_event_id,
+            conversation_id="conv_archived_handoff", actor_id="owner",
+            event_type=inbound.event_type, occurred_at=inbound.occurred_at.isoformat(),
+            ingested_at=core.clock(), privacy_scope="private",
+            body_json=encode(inbound.payload.model_dump(mode="json")), trace_id=inbound.trace_id)
+        job_id = core.new_job(inbound.event_id, "chat", inbound.event_id, core.clock())
+        core.store.execute("UPDATE jobs SET state='FAILED' WHERE job_id=?", (job_id,))
         prior.append(inbound)
     _, new = stop_and_successor(core, tmp_path)
     prepared = live_text.prepare_handoff(core.store, core.settings, core.clock, reference(new))

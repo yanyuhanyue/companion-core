@@ -4,14 +4,15 @@ import hashlib
 import hmac
 import json
 import secrets
+import uuid
 from contextlib import nullcontext
-from datetime import UTC, datetime
+from datetime import datetime
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import Field
+from pydantic import Field, field_validator
 
-from companion import live_text, paid_budget, private_life, qq_source, reply_revision
+from companion import paid_budget, private_life, reply_revision, voice_authority
 from companion.contracts import CoreError
 from companion.privacy import epoch
 from companion.qq_rich import input_digest
@@ -24,14 +25,17 @@ from companion.voice_protocol import (
     VoiceDTO,
     VoiceLease,
     VoiceResultReceipt,
+    VoiceSession,
+    VoiceStopResponse,
     VoiceTranscriptResult,
     canonical_bytes,
     digest,
     sign_voice_lease,
 )
+from companion_delivery_protocol.authority import validate_authority_ref
 from companion_voice_node.providers import LocalVoiceError, WAVLimits, validate_wav
 
-UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v1\x00"
+UPLOAD_DOMAIN = b"companion-core/onebot-owner-voice/v2\x00"
 ACTIVE = {"QUEUED", "LEASED", "RUNNING"}
 COMPLETED = {"READY", "TRANSCRIBED"}
 REPLY_RECEIPT = "voice_reply:"
@@ -41,7 +45,13 @@ INPUT_RECEIPT = "voice_input:"
 class VoiceASRProof(VoiceDTO):
     """Capture-key attestation binding one native record segment to uploaded WAV bytes."""
 
-    plan_sha256: Digest
+    authority: dict
+
+    @field_validator("authority")
+    @classmethod
+    def authority_ref(cls, value):
+        return validate_authority_ref(value)
+
     event_id: str = Field(min_length=1, max_length=128)
     source_event_id: str = Field(min_length=1, max_length=256)
     source_input_sha256: Digest
@@ -53,7 +63,7 @@ class VoiceASRProof(VoiceDTO):
 
 
 def sign_asr_proof(private_key, **material):
-    """For the authenticated capture adapter; canonical encoding is protocol v1 JSON."""
+    """Capture adapter signature over the existing canonical JSON and v2 owner reference."""
     unsigned = VoiceASRProof(**material, signature="0" * 128).model_dump(
         mode="json", exclude={"signature"}
     )
@@ -65,6 +75,33 @@ def sign_asr_proof(private_key, **material):
 def _transaction_required(store):
     if not store.db.in_transaction:
         raise RuntimeError("VOICE_TRANSACTION_REQUIRED")
+
+
+def incarnation(store):
+    row = store.one("SELECT value FROM runtime_meta WHERE key='voice_incarnation'")
+    if not row:
+        raise CoreError("VOICE_UPGRADE_REQUIRED", 503)
+    return row["value"]
+
+
+def _retire_content(store, row):
+    """Keep only random-capability stop custody; never grant input/result authority."""
+    store.execute(
+        "UPDATE voice_jobs SET input_blob=NULL,result_blob=NULL,input_sha256=NULL,"
+        "result_sha256=NULL,source_sha256=NULL,source_input_sha256=NULL,source_proof_sha256=NULL,"
+        "outbox_content_sha256=NULL,identity_sha256=NULL,window_sha256=NULL,manifest_sha256=NULL,"
+        "config_sha256=NULL,config_json='{}',authority_json='{}',input_bytes=NULL,input_duration_seconds=NULL,"
+        "result_bytes=NULL,lease_json=NULL,lease_token_sha256=NULL,content_retired=1,"
+        "cleanup_epoch=?,cleanup_state=CASE WHEN stop_token_sha256 IS NULL "
+        "OR cleanup_state='CONFIRMED' THEN 'CONFIRMED' ELSE 'PENDING' END WHERE job_id=?",
+        (epoch(store), row["job_id"]),
+    )
+    store.execute("UPDATE voice_node_state SET claim_request_sha256=NULL,"
+                  "claim_response_json=NULL,claim_expires_at=NULL,claim_job_id=NULL "
+                  "WHERE claim_job_id=?", (row["job_id"],))
+    store.execute("UPDATE audit_log SET safe_detail_json=json_remove(safe_detail_json,"
+                  "'$.input_sha256','$.result_sha256') WHERE entity_id=? "
+                  "AND action IN ('voice.created','voice.committed')", (row["job_id"],))
 
 
 def _fence(store, row, reason, now, *, expired=False):
@@ -93,11 +130,38 @@ def _fence(store, row, reason, now, *, expired=False):
             reason=reason,
             node_id=row["node_id"],
         )
+    _retire_content(store, row)
     if not row["started_at"]:
         store.execute(
             "UPDATE voice_node_state SET active_job_id=NULL WHERE active_job_id=?",
             (row["job_id"],),
         )
+    # Preserve content-free WAITING/TEXT choice state so an unattempted reply
+    # can still take its existing text fallback. Frozen audio loses its content.
+    reply = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                      (REPLY_RECEIPT + str(row["message_id"]),))
+    try:
+        value = json.loads(reply["value"]) if reply else {}
+        has_binding = isinstance(value, dict) and (value.get("binding") or value.get("retired"))
+    except (ValueError, TypeError):
+        has_binding = True
+    if has_binding:
+        _invalidate_receipts(store, "key=?", (REPLY_RECEIPT + str(row["message_id"]),), reason)
+    _invalidate_receipts(store, "key=?", (INPUT_RECEIPT + row["event_id"],), reason)
+
+
+def expire_voice_jobs(store, now):
+    """Existing Core recovery can retire expired content without authorizing execution."""
+    _transaction_required(store)
+    rows = store.rows("SELECT * FROM voice_jobs WHERE content_retired=0 AND "
+        "(deadline_at<=? OR result_expires_at<=? OR "
+        "(state IN ('LEASED','RUNNING') AND lease_until<=?)) ORDER BY deadline_at LIMIT 1000",
+        (now, now, now))
+    for row in rows:
+        _fence(store, row, "VOICE_EXPIRED", now, expired=True)
+    store.execute("UPDATE voice_node_state SET claim_response_json=NULL,claim_request_sha256=NULL,"
+                  "claim_job_id=NULL,claim_expires_at=NULL WHERE claim_expires_at<=?", (now,))
+    return len(rows)
 
 
 def erase_voice_jobs(store, event_ids):
@@ -130,30 +194,77 @@ def _invalidate_flow(store, row, reason):
                          reason)
 
 
+def retired_delivery_binding(binding, *, legacy_signature=None):
+    """A prior-message verifier only; this can never construct a send envelope."""
+    token = binding.get("retirement_token")
+    if legacy_signature is None and not token:
+        raise CoreError("VOICE_LEGACY_PROOF_REQUIRED", 409)
+    verifier = hashlib.sha256(bytes.fromhex(legacy_signature) if legacy_signature
+                              else token.encode()).hexdigest()
+    scope = {"authority": binding["authority"]} if "authority" in binding else {
+        "window_sha256": binding["window_sha256"]}
+    return {"kind": "legacy_signature" if legacy_signature else "capability", **scope,
+            "verifier": verifier, **{key: binding[key] for key in (
+                "job_id", "generation", "message_id", "event_id", "delivery_key",
+                "voice_policy_sha256", "reply_revision")}}
+
+
 def _invalidate_receipts(store, where, parameters, reason):
-    # Keep only validated, content-free delivery authority for later owner resolution.
-    # Input transcripts, audio bytes, and arbitrary/corrupt receipt fields are erased.
-    from companion.voice_protocol import VoiceDeliveryBinding
+    from companion.voice_protocol import (
+        LegacyVoiceDeliveryBinding,
+        VoiceDeliveryBinding,
+        VoiceRetiredBinding,
+    )
 
     for row in store.rows("SELECT key,value FROM runtime_meta WHERE " + where, parameters):
         value = {"state": "FENCED", "reason": reason}
         if row["key"].startswith(REPLY_RECEIPT):
             try:
                 previous = json.loads(row["value"])
-                binding = VoiceDeliveryBinding.model_validate(previous.get("binding"))
-                if (previous.get("state") in {"AUDIO", "FENCED"}
-                    and previous.get("binding_sha256") == digest(binding)
-                    and previous.get("job_id") == binding.job_id
-                    and row["key"] == REPLY_RECEIPT + binding.message_id):
-                    value.update(job_id=binding.job_id, binding=binding.model_dump(mode="json"),
-                                 binding_sha256=previous["binding_sha256"])
-            except (ValueError, TypeError, AttributeError):
-                pass
+                if not isinstance(previous, dict):
+                    previous = {}
+            except (ValueError, TypeError):
+                previous = {}
+            if previous.get("retired"):
+                try:
+                    proof = VoiceRetiredBinding.model_validate(previous["retired"])
+                    original = store.one(
+                        "SELECT v.generation,v.event_id,v.message_id,o.delivery_key "
+                        "FROM voice_jobs v JOIN outbox o USING(message_id) WHERE v.job_id=?",
+                        (proof.job_id,))
+                    if (original and previous.get("job_id") == proof.job_id
+                        and row["key"] == REPLY_RECEIPT + proof.message_id
+                        and all(original[k] == getattr(proof, k) for k in (
+                            "generation", "event_id", "message_id", "delivery_key"))):
+                        value.update(job_id=proof.job_id, retired=proof.model_dump(mode="json"))
+                except (ValueError, TypeError):
+                    pass
+            else:
+                try:
+                    raw = previous.get("binding")
+                    codec = (LegacyVoiceDeliveryBinding if isinstance(raw, dict)
+                             and raw.get("schema_version") == 2 else VoiceDeliveryBinding)
+                    binding = codec.model_validate(raw)
+                    if (previous.get("state") in {"AUDIO", "FENCED"}
+                        and previous.get("binding_sha256") == digest(binding)
+                        and previous.get("job_id") == binding.job_id
+                        and row["key"] == REPLY_RECEIPT + binding.message_id):
+                        value.update(job_id=binding.job_id,
+                                     retired=retired_delivery_binding(binding.model_dump(mode="json")))
+                except (ValueError, TypeError, AttributeError):
+                    pass
         store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(value), row["key"]))
 
 
 def restore_voice_jobs(store):
     _transaction_required(store)
+    store.execute(
+        "UPDATE runtime_meta SET value=? WHERE key='voice_incarnation'", (uuid.uuid4().hex,)
+    )
+    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('voice_restore_required','1')")
+    store.execute("UPDATE voice_node_state SET recovery_required=1,resource_state='QUARANTINED',"
+                  "last_claim_seq=0,claim_request_sha256=NULL,claim_response_json=NULL,"
+                  "claim_expires_at=NULL,claim_job_id=NULL,recovered_incarnation=NULL")
     for row in store.rows("SELECT * FROM voice_jobs"):
         _fence(store, row, "VOICE_RESTORE_FENCED", utcnow())
     _invalidate_receipts(store,
@@ -190,14 +301,7 @@ class VoiceJobs:
 
     def _node(self, node_id=None, operation=None):
         config = self.settings.voice
-        if not config.enabled or not private_life.enabled(self.settings):
-            raise CoreError("VOICE_DISABLED", 403)
-        approval = self.settings.live_text_window
-        if (
-            approval.voice_scope != "owner_voice_v1"
-            or approval.voice_policy_sha256 != config.authority_sha256()
-        ):
-            raise CoreError("VOICE_SCOPE_REQUIRED", 403)
+        voice_authority.current(self.store, self.settings, self.clock)
         if node_id is None:
             node_id = next(
                 (
@@ -213,7 +317,7 @@ class VoiceJobs:
         return node_id, node
 
     def _tts_source(self, message_id, text=None, *, delivery_token=None, retained_ready=False):
-        row = private_life.check_delivery(self.store, self.settings, self.clock, message_id)
+        row = voice_authority.delivery(self.store, self.settings, self.clock, message_id)
         reply_revision.check_delivery(self.store, message_id)
         content = json.loads(row["content_json"])
         valid_stage = row["state"] == "PENDING" and row["attempt_count"] == 0
@@ -239,20 +343,13 @@ class VoiceJobs:
         if not event or not reply_revision.source_active(self.store, event["event_id"]):
             raise CoreError("VOICE_SOURCE_CHANGED", 403)
         if event["source"] == "qq.onebot":
-            qq_source.source(
-                self.store,
-                self.settings,
-                self.settings.live_text_window,
-                event["event_id"],
-                allow_commands=True,
-            )
+            voice_authority.source(self.store, self.settings, self.clock, event["event_id"],
+                                   allow_commands=True)
         return event, row
 
     def _asr_source(self, event_id, segment_index):
-        approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
-        if approval.rich_input_scope != "references_v1":
-            raise CoreError("VOICE_ASR_SCOPE_REQUIRED", 403)
-        event, body, job = qq_source.source(self.store, self.settings, approval, event_id)
+        _, event, body, job = voice_authority.source(
+            self.store, self.settings, self.clock, event_id)
         reply_revision.require_current(self.store, event_id)
         reply_revision.check_job(self.store, job)
         segment = next(
@@ -285,12 +382,8 @@ class VoiceJobs:
             or event["privacy_scope"] != "private"
         ):
             raise CoreError("VOICE_PRIVATE_SOURCE_REQUIRED", 403)
-        deadline = min(
-            after(now, config.job_ttl_seconds),
-            self.settings.live_text_window.ends_at.astimezone(UTC).isoformat(
-                timespec="microseconds"
-            ),
-        )
+        view = voice_authority.current(self.store, self.settings, self.clock)
+        deadline = voice_authority.deadline(view, after(now, config.job_ttl_seconds))
         return dict(
             job_id=uid("voice"),
             operation=operation,
@@ -299,7 +392,8 @@ class VoiceJobs:
             conversation_id=event["conversation_id"],
             source_sha256=private_life.event_digest(event),
             identity_sha256=paid_budget.sha([self.settings.owner_qq_id, self.settings.bot_qq_id]),
-            window_sha256=self.settings.live_text_window.plan_sha256,
+            window_sha256=None,
+            authority_json=encode(view.authority.as_dict()),
             captured_privacy_epoch=epoch(self.store),
             captured_reply_revision=revision["reply_revision"],
             node_id=node_id,
@@ -307,6 +401,8 @@ class VoiceJobs:
             config_sha256=config.node_fingerprint(node_id),
             config_json=encode(config.node_snapshot(node_id)),
             state="QUEUED",
+            incarnation=incarnation(self.store),
+            cleanup_epoch=epoch(self.store),
             generation=1,
             input_mime=mime,
             input_sha256=hashlib.sha256(data).hexdigest(),
@@ -334,6 +430,8 @@ class VoiceJobs:
         _transaction_required(self.store)
         existing = self.store.one("SELECT * FROM voice_jobs WHERE message_id=?", (message_id,))
         if existing:
+            if existing["content_retired"]:
+                return self.status(existing["job_id"])
             if (
                 not isinstance(text, str)
                 or hashlib.sha256(text.encode()).hexdigest() != (existing["input_sha256"])
@@ -398,7 +496,8 @@ class VoiceJobs:
             )
             proof = VoiceASRProof.model_validate(upload_proof)
             expected = dict(
-                plan_sha256=self.settings.live_text_window.plan_sha256,
+                authority=voice_authority.current(
+                    self.store, self.settings, self.clock).authority.as_dict(),
                 event_id=owner_event_id,
                 source_event_id=event["source_event_id"],
                 source_input_sha256=input_digest(body),
@@ -410,7 +509,8 @@ class VoiceJobs:
             if proof.model_dump(mode="json", exclude={"signature"}) != expected:
                 raise ValueError()
             Ed25519PublicKey.from_public_bytes(
-                bytes.fromhex(self.settings.live_text_window.capture_public_key)
+                bytes.fromhex(voice_authority.current(
+                    self.store, self.settings, self.clock).policy.capture.public_key)
             ).verify(bytes.fromhex(proof.signature), UPLOAD_DOMAIN + canonical_bytes(expected))
         except (ValueError, TypeError, InvalidSignature, LocalVoiceError):
             raise CoreError("VOICE_ASR_UPLOAD_PROOF_REQUIRED", 403) from None
@@ -419,6 +519,8 @@ class VoiceJobs:
             (owner_event_id, source_segment_index),
         )
         if existing:
+            if existing["content_retired"]:
+                raise CoreError("VOICE_JOB_RETIRED", 410)
             if (existing["input_sha256"], existing["source_proof_sha256"], existing["node_id"]) != (
                 audio.sha256,
                 digest(proof),
@@ -469,7 +571,7 @@ class VoiceJobs:
                 "content_sha256": row["outbox_content_sha256"],
                 "delivery_key": row["outbox_delivery_key"],
                 "source_sha256": row["source_sha256"],
-                "window_sha256": row["window_sha256"],
+                "authority": voice_authority.saved(row),
                 "identity_sha256": row["identity_sha256"],
                 "privacy_epoch": row["captured_privacy_epoch"],
                 "reply_revision": row["captured_reply_revision"],
@@ -494,10 +596,10 @@ class VoiceJobs:
 
     def _authority(self, row, *, delivery_token=None):
         node_id, _ = self._node(row["node_id"], row["operation"])
-        approval = self.settings.live_text_window
+        voice_authority.current(self.store, self.settings, self.clock,
+                                authority=voice_authority.saved(row))
         if (
             row["config_sha256"] != self.settings.voice.node_fingerprint(node_id)
-            or row["window_sha256"] != approval.plan_sha256
             or row["captured_privacy_epoch"] != epoch(self.store)
             or row["identity_sha256"]
             != paid_budget.sha([self.settings.owner_qq_id, self.settings.bot_qq_id])
@@ -580,6 +682,7 @@ class VoiceJobs:
                 "deadline_at",
                 "result_expires_at",
                 "last_error_code",
+                "content_retired", "cleanup_state", "cleanup_epoch",
             )
         } | {"execution": "local", "billed_micro_usd": 0}
 
@@ -641,6 +744,8 @@ class VoiceJobs:
 
     def _ref(self, node_id, ref):
         row = self._get(ref.job_id)
+        if row["content_retired"] or row["incarnation"] != incarnation(self.store):
+            raise CoreError("VOICE_LEASE_RETIRED", 410)
         if (
             row["node_id"] != node_id
             or row["generation"] != ref.generation
@@ -653,6 +758,107 @@ class VoiceJobs:
         ):
             raise CoreError("VOICE_LEASE_MISMATCH", 409)
         return row
+
+    def session(self, node_id):
+        if node_id not in self.settings.voice.nodes:
+            raise CoreError("VOICE_NODE_SCOPE_REQUIRED", 403)
+        row = self.store.one("SELECT * FROM voice_node_state WHERE node_id=?", (node_id,))
+        current = incarnation(self.store)
+        if row and row["claim_response_json"] and row["claim_expires_at"] <= self.clock():
+            with self._transaction():
+                self.store.execute(
+                    "UPDATE voice_node_state SET claim_response_json=NULL,"
+                    "claim_request_sha256=NULL,claim_expires_at=NULL,claim_job_id=NULL "
+                    "WHERE node_id=? AND claim_expires_at<=?",
+                    (node_id, self.clock()),
+                )
+            row = self.store.one("SELECT * FROM voice_node_state WHERE node_id=?", (node_id,))
+        restored = self.store.one("SELECT 1 FROM runtime_meta WHERE key='voice_restore_required'")
+        return VoiceSession(incarnation=current, last_sequence=row["last_claim_seq"] if row else 0,
+            replay_available=bool(row and row["claim_response_json"]
+                                  and row["claim_expires_at"] > self.clock()),
+            recovery_required=bool(row and row["recovery_required"] or restored
+                and (not row or row["recovered_incarnation"] != current)))
+
+    def recover_node(self, node_id, request):
+        """Owner-control-only confirmation of stopped execution, never a new dispatch."""
+        with self._transaction():
+            if request.incarnation != incarnation(self.store):
+                raise CoreError("VOICE_CLAIM_EPOCH_RETIRED", 410)
+            if not request.operator.strip() or not request.service_instance.strip():
+                raise CoreError("VOICE_RECOVERY_CONFIRMATION_REQUIRED", 400)
+            self.session(node_id)
+            now = self.clock()
+            for row in self.store.rows(
+                "SELECT * FROM voice_jobs WHERE node_id=? "
+                "AND state IN ('QUEUED','LEASED','RUNNING','UNKNOWN')",
+                (node_id,),
+            ):
+                _fence(self.store, row, "VOICE_OWNER_CONFIRMED_STOPPED", now)
+            self.store.execute("INSERT INTO voice_node_state(node_id,resource_state,last_seen_at,"
+                "recovered_incarnation) VALUES (?,'READY',?,?) ON CONFLICT(node_id) DO UPDATE SET "
+                "active_job_id=NULL,resource_state='READY',recovery_required=0,recovered_incarnation=?,"
+                "claim_response_json=NULL,claim_request_sha256=NULL,claim_expires_at=NULL,claim_job_id=NULL",
+                (node_id, now, request.incarnation, request.incarnation))
+            self.store.audit("voice.owner_recovered", node_id, node_id, now,
+                operator=request.operator, service_instance=request.service_instance,
+                incarnation=request.incarnation, confirmation=request.confirmation)
+            return self.session(node_id)
+
+    def stop(self, node_id, request):
+        with self._transaction():
+            row = self._get(request.ref.job_id)
+            if (
+                row["node_id"] != node_id
+                or row["generation"] != request.ref.generation
+                or not row["stop_token_sha256"]
+                or not hmac.compare_digest(
+                    row["stop_token_sha256"],
+                    hashlib.sha256(request.ref.stop_token.encode()).hexdigest(),
+                )
+            ):
+                raise CoreError("VOICE_STOP_SCOPE_MISMATCH", 403)
+            if row["state"] in ACTIVE:
+                reason = ("VOICE_RESULT_UNCONFIRMED" if request.outcome == "COMMITTED"
+                          else "VOICE_NODE_" + request.outcome)
+                _fence(self.store, row, reason, self.clock())
+                row = self._get(row["job_id"])
+            if request.resource_state == "READY":
+                self.store.execute(
+                    "UPDATE voice_node_state SET active_job_id=NULL,resource_state='READY' "
+                    "WHERE node_id=? AND active_job_id=?",
+                    (node_id, row["job_id"]),
+                )
+            else:
+                self.store.execute(
+                    "UPDATE voice_node_state SET resource_state=? "
+                    "WHERE node_id=? AND active_job_id=?",
+                    (request.resource_state, node_id, row["job_id"]),
+                )
+            # Retire the replay payload even when a completed native result still awaits delivery.
+            self.store.execute(
+                "UPDATE voice_node_state SET claim_response_json=NULL,"
+                "claim_request_sha256=NULL,claim_expires_at=NULL,claim_job_id=NULL "
+                "WHERE claim_job_id=?",
+                (row["job_id"],),
+            )
+            closed = not self.store.one(
+                "SELECT 1 FROM voice_node_state WHERE node_id=? AND active_job_id=?",
+                (node_id, row["job_id"]),
+            )
+            confirmed = request.cleanup.complete() and request.cleanup_epoch == row["cleanup_epoch"]
+            if confirmed:
+                self.store.execute(
+                    "UPDATE voice_jobs SET cleanup_state='CONFIRMED',cleanup_confirmed_at=? "
+                    "WHERE job_id=?",
+                    (self.clock(), row["job_id"]),
+                )
+            elif row["cleanup_state"] != "CONFIRMED":
+                self.store.execute(
+                    "UPDATE voice_jobs SET cleanup_state='PENDING' WHERE job_id=?", (row["job_id"],)
+                )
+            return VoiceStopResponse(custody_closed=closed, cleanup_confirmed=confirmed,
+                                     cleanup_epoch=row["cleanup_epoch"])
 
     def claim(self, node_id, request):
         error, response = None, None
@@ -678,17 +884,30 @@ class VoiceJobs:
             ):
                 self._reconcile(row)
             _, node = self._node(node_id)
-            previous = self.store.one(
-                "SELECT * FROM voice_claims WHERE node_id=? AND request_id=?",
-                (node_id, request.request_id),
-            )
-            if previous:
-                if previous["request_sha256"] != digest(request):
+            now = self.clock()
+            session = self.session(node_id)
+            if request.incarnation != session.incarnation:
+                raise CoreError("VOICE_CLAIM_EPOCH_RETIRED", 410)
+            if session.recovery_required:
+                raise CoreError("VOICE_NODE_RECOVERY_REQUIRED", 409)
+            state = self.store.one("SELECT * FROM voice_node_state WHERE node_id=?", (node_id,))
+            last = state["last_claim_seq"] if state else 0
+            if request.sequence < last:
+                raise CoreError("VOICE_CLAIM_RETIRED", 410)
+            if request.sequence == last:
+                if not state["claim_response_json"] or state["claim_expires_at"] <= now:
+                    if state["claim_response_json"]:
+                        self.store.execute("UPDATE voice_node_state SET claim_response_json=NULL,"
+                            "claim_request_sha256=NULL,claim_expires_at=NULL,claim_job_id=NULL "
+                            "WHERE node_id=?", (node_id,))
+                    raise CoreError("VOICE_CLAIM_RETIRED", 410)
+                if state["claim_request_sha256"] != digest(request):
                     raise CoreError("VOICE_IDEMPOTENCY_CONFLICT", 409)
-                return VoiceClaimResponse.model_validate_json(previous["response_json"])
+                return VoiceClaimResponse.model_validate_json(state["claim_response_json"])
+            if request.sequence != last + 1:
+                raise CoreError("VOICE_CLAIM_SEQUENCE_GAP", 409)
             if request.manifest_sha256 != node.manifest_sha256:
                 raise CoreError("VOICE_MANIFEST_CHANGED", 409)
-            now = self.clock()
             self.store.execute(
                 "INSERT INTO voice_node_state(node_id,resource_state,last_seen_at) VALUES (?,?,?) "
                 "ON CONFLICT(node_id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
@@ -709,6 +928,10 @@ class VoiceJobs:
                     )
                     if row:
                         lease = VoiceLease(
+                            incarnation=session.incarnation,
+                            claim_sequence=request.sequence,
+                            stop_token=secrets.token_urlsafe(32),
+                            privacy_epoch=row["cleanup_epoch"],
                             job_id=row["job_id"],
                             generation=row["generation"],
                             node_id=node_id,
@@ -730,10 +953,12 @@ class VoiceJobs:
                         signed = sign_voice_lease(lease, self.settings.voice.private_key())
                         self.store.execute(
                             "UPDATE voice_jobs SET state='LEASED',lease_token_sha256=?,"
+                            "stop_token_sha256=?,"
                             "lease_json=?,lease_issued_at=?,lease_until=?,updated_at=? "
                             "WHERE job_id=?",
                             (
                                 hashlib.sha256(lease.lease_token.encode()).hexdigest(),
+                                hashlib.sha256(lease.stop_token.encode()).hexdigest(),
                                 canonical_bytes(signed).decode(),
                                 now,
                                 lease.lease_expires_at.isoformat(timespec="microseconds"),
@@ -754,14 +979,13 @@ class VoiceJobs:
                             node_id=node_id,
                         )
                         response = VoiceClaimResponse(lease=signed)
-            self.store.insert(
-                "voice_claims",
-                node_id=node_id,
-                request_id=request.request_id,
-                request_sha256=digest(request),
-                response_json=canonical_bytes(response).decode(),
-                job_id=response.lease.job_id if response.lease else None,
-                created_at=now,
+            self.store.execute(
+                "UPDATE voice_node_state SET last_claim_seq=?,claim_request_sha256=?,"
+                "claim_response_json=?,claim_job_id=?,claim_expires_at=? WHERE node_id=?",
+                (request.sequence, digest(request), canonical_bytes(response).decode(),
+                 response.lease.job_id if response.lease else None,
+                 response.lease.job_deadline_at.isoformat(timespec="microseconds")
+                 if response.lease else after(now, self.settings.voice.job_ttl_seconds), node_id),
             )
             return response
 

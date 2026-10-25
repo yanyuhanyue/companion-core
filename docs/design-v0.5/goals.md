@@ -15,3 +15,27 @@
 新增 QQ 指令：`/目标列表`、`/承诺列表`、`/接受目标 ID`、`/取消目标 ID`、`/反思列表`、`/当前交互状态`、`/为什么形成偏好`、`/暂停自主活动`、`/恢复自主活动`。这些管理往返不重新进入记忆抽取或日记素材。HTTP v2 管理入口要求独立 control token，Bridge token 无管理权限。
 
 `goals_enabled`、`wake_enabled` 和内容探索默认关闭。纯目标/唤醒决策不调用 LLM；实际读取另有请求、字节和次数配额。当前通过可控观察回放验证目标与发送协议，实际内容读取在后续增量中接入。
+
+## 有限多步阅读
+
+self Goal 可使用 `scope={"operation":"read_plan","urls":[...1–3 个准确 HTTPS URL...]}`。
+每个 URL 对应原 `goal_steps` 一行；最初只排队第一步，其余为 WAITING_DECISION。
+Reader 仍使用原单次 read_content 传输合同，每步绑定原授权、准确 URL 和完整来源闭包。
+旧 read_content/investigate 的序列化与既有承诺 scope/hash 不改变；承诺暂不接受 read_plan。
+
+一步的真实 FETCHED/WATCHED 回执只完成该步。还有步骤时，父 Goal 进入 WAITING_INPUT；
+只有全部步骤都有符合目标、原请求和来源关系的回执，父 Goal 才是 DONE。
+经历与 cognition 视图读取所有有界步骤；后续步骤 UNKNOWN 时不因较早一步成功而显示全部完成。
+
+`GoalEngine.plan()` 返回原版本、步骤和可用续行动作。
+`continue_plan()` 以 `expected_version` 做并发校验：CONTINUE 必须给出全部未开始步骤的
+`step_order`；可调整其顺序但不能改变 URL 或 step_id。WAIT 的 `wait_until` 最多七天，
+期限前不能继续。ABANDON 取消未来步骤，已完成的原回执保留。
+SQLite 重排在同一事务中使用位置 4–6 暂存，再回填 1–3；任何错误都回滚，不能留下半张计划。
+
+原 Reader 的 UNKNOWN 和派发后进程退出保留责任，阻止整条计划继续或创建新请求重放。
+原有限重试只适用于明确未派发的尝试。停止或取消未来意图不会释放已发生的费用、请求和字节责任。
+每一步来源参与原擦除与旧备份重放；任何必要的前步结果撤回会使后续计划失效。
+
+实现、字段合同和原生复用研究见 [有限 read-goal 合同](../plans/2026-10-25-native-read-goal-plan.md)。
+合成模型与独立 Reader 进程验证执行合同；计划质量、长期自主选择和真实自然日效果另行验收。

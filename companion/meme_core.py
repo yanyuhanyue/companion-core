@@ -14,12 +14,19 @@ from urllib.parse import quote, unquote, urlsplit
 
 from pydantic import Field
 
-from companion import budget, live_text, meme_service, private_life, qq_source, reply_revision
+from companion import (
+    budget,
+    meme_service,
+    owner_authority,
+    owner_input,
+    private_life,
+    reply_revision,
+)
 from companion.contracts import CoreError, StrictModel
 from companion.expression import SERIOUS, MemeOffer
 from companion.privacy import epoch
 from companion.retrieval import INDEX_VERSION, encoder
-from companion.store import after, encode, uid
+from companion.store import after, encode, uid, utcnow
 from companion_meme_protocol import (
     CAPTION_INSTRUCTIONS,
     CaptionAsset,
@@ -81,14 +88,14 @@ def identity(settings):
 
 
 def scope(store, settings, clock, *, current_request=None):
-    if not settings.meme_semantics_enabled or not private_life.enabled(settings):
+    if not settings.meme_semantics_enabled:
         raise CoreError("MEME_SEMANTICS_DISABLED", 403)
-    return live_text.guard(store, settings, clock, current_request=current_request)[0]
+    return owner_authority.current(store, settings, clock, purpose="meme")
 
 
-def current_source(store, settings, approval, event_id, revision):
+def current_source(store, settings, approval, event_id, revision, clock):
     reply_revision.require_current(store, event_id, revision)
-    return qq_source.source(store, settings, approval, event_id)
+    return owner_input.source(store, settings, approval, event_id, clock(), purpose="meme")
 
 
 def _public_url(value):
@@ -278,7 +285,7 @@ def _proof(value, asset_sha, source_sha):
         raise CoreError("MEME_SOURCE_EVIDENCE_INVALID", 403) from error
 
 
-def _parent(store, context, plan):
+def _parent(store, settings, clock, context):
     parent = store.one(
         "SELECT * FROM jobs WHERE job_id=? AND kind='meme_discovery'", (context.discovery_job_id,)
     )
@@ -292,20 +299,20 @@ def _parent(store, context, plan):
         or not reservation
         or reservation["state"] != "SETTLED"
         or reservation["attempt_key"] != context.attempt_key
-        or value["plan_sha256"] != plan
         or value["event_id"] != context.event_id
         or value["reply_revision"] != context.reply_revision
     ):
         raise CoreError("MEME_CAPTION_DISCOVERY_REQUIRED", 403)
+    owner_authority.check_job(store, settings, clock, parent, purpose="meme")
 
 
-def check_caption_job(store, settings, approval, job):
+def check_caption_job(store, settings, approval, job, *, clock=utcnow):
+    owner_authority.check_job(store, settings, clock, job, purpose="meme")
     row = store.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
     if (
         not row
         or job["kind"] != "meme_caption"
         or not row["asset_data"]
-        or row["plan_sha256"] != approval.plan_sha256
         or row["privacy_epoch"] != epoch(store)
         or parse(CaptionIdentity, row["identity_json"]) != identity(settings)
         or row["cache_key"] != caption_cache_key(row["asset_sha256"], identity(settings))
@@ -313,11 +320,11 @@ def check_caption_job(store, settings, approval, job):
         raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
     context = parse(CaptionContext, row["context_json"])
     event, _, _ = current_source(
-        store, settings, approval, context.event_id, context.reply_revision
+        store, settings, approval, context.event_id, context.reply_revision, clock
     )
     if job["event_id"] != context.event_id:
         raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
-    _parent(store, context, approval.plan_sha256)
+    _parent(store, settings, clock, context)
     _proof(strict_json(row["source_json"]), row["asset_sha256"], row["source_sha256"])
     if hashlib.sha256(row["asset_data"]).hexdigest() != row["asset_sha256"]:
         raise CoreError("MEME_CAPTION_SOURCE_CHANGED", 403)
@@ -402,9 +409,10 @@ class MemeCaptionService:
         )
         with s.transaction():
             current_source(
-                s, self.settings, approval, body.context.event_id, body.context.reply_revision
+                s, self.settings, approval, body.context.event_id, body.context.reply_revision,
+                self.clock,
             )
-            _parent(s, body.context, approval.plan_sha256)
+            _parent(s, self.settings, self.clock, body.context)
             prior = s.one(
                 "SELECT job_id FROM meme_captions WHERE request_sha256=?", (request.sha256,)
             )
@@ -436,6 +444,7 @@ class MemeCaptionService:
                             self.settings,
                             approval,
                             s.one("SELECT * FROM jobs WHERE job_id=?", (candidate["job_id"],)),
+                            clock=self.clock,
                         )
                     except CoreError:
                         continue
@@ -447,13 +456,14 @@ class MemeCaptionService:
                 job_id=job_id,
                 event_id=body.context.event_id,
                 kind="meme_caption",
-                state="SUCCEEDED" if prior and prior["result_json"] else "QUEUED",
+                state="QUEUED",
                 idempotency_key="meme_caption:" + request.sha256,
                 max_attempts=1,
                 context_tracked=1,
                 created_at=now,
                 updated_at=now,
             )
+            owner_authority.bind_job(s, self.settings, self.clock, job_id, purpose="meme")
             s.insert("job_sources", job_id=job_id, event_id=body.context.event_id)
             s.insert(
                 "meme_captions",
@@ -472,11 +482,13 @@ class MemeCaptionService:
                 result_json=prior["result_json"] if prior else None,
                 usage_request_id=prior["usage_request_id"] if prior else None,
                 reuse_job_id=prior["job_id"] if prior else None,
-                plan_sha256=approval.plan_sha256,
+                plan_sha256="",
                 privacy_epoch=epoch(s),
                 created_at=now,
                 updated_at=now,
             )
+            if prior and prior["result_json"]:
+                s.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (job_id,))
             return self.outcome(job_id)
 
     def outcome(self, job_id):
@@ -527,7 +539,7 @@ class MemeCaptionService:
 
     def _check(self, job, request_id=None):
         approval = scope(self.store, self.settings, self.clock, current_request=request_id)
-        check_caption_job(self.store, self.settings, approval, job)
+        check_caption_job(self.store, self.settings, approval, job, clock=self.clock)
         actual = self.store.one("SELECT * FROM jobs WHERE job_id=?", (job["job_id"],))
         if (
             actual["state"] != "RUNNING"
@@ -570,7 +582,7 @@ class MemeCaptionService:
                 return False
             try:
                 approval = scope(s, self.settings, self.clock)
-                check_caption_job(s, self.settings, approval, job)
+                check_caption_job(s, self.settings, approval, job, clock=self.clock)
             except CoreError as error:
                 s.execute(
                     "UPDATE jobs SET state='CANCELLED',last_error_code=?,updated_at=? "
@@ -709,13 +721,15 @@ class MemeCaptionService:
 
     async def embed(self, body):
         approval = scope(self.store, self.settings, self.clock)
-        current_source(self.store, self.settings, approval, body.event_id, body.reply_revision)
+        current_source(self.store, self.settings, approval, body.event_id, body.reply_revision,
+                       self.clock)
         row = self._usable(body.job_id)
         result = await asyncio.to_thread(
             self._embedding, caption_text(parse(CaptionResult, row["result_json"]))
         )
         approval = scope(self.store, self.settings, self.clock)
-        current_source(self.store, self.settings, approval, body.event_id, body.reply_revision)
+        current_source(self.store, self.settings, approval, body.event_id, body.reply_revision,
+                       self.clock)
         self._usable(body.job_id)
         return result.model_dump(mode="json")
 
@@ -742,7 +756,7 @@ class MemeCaptionService:
         s = self.store
         approval = scope(s, self.settings, self.clock)
         event, value, job = current_source(
-            s, self.settings, approval, body.event_id, body.reply_revision
+            s, self.settings, approval, body.event_id, body.reply_revision, self.clock
         )
         if job["state"] not in {"QUEUED", "RETRY_WAIT"}:
             raise CoreError("MEME_OFFER_TOO_LATE", 409)
@@ -788,7 +802,7 @@ class MemeCaptionService:
         with s.transaction():
             approval = scope(s, self.settings, self.clock)
             _, _, current = current_source(
-                s, self.settings, approval, body.event_id, body.reply_revision
+                s, self.settings, approval, body.event_id, body.reply_revision, self.clock
             )
             if current["state"] not in {"QUEUED", "RETRY_WAIT"}:
                 raise CoreError("MEME_OFFER_TOO_LATE", 409)
@@ -803,7 +817,7 @@ class MemeCaptionService:
         with s.transaction():
             approval = scope(s, self.settings, self.clock)
             _, _, job = current_source(
-                s, self.settings, approval, body.event_id, body.reply_revision
+                s, self.settings, approval, body.event_id, body.reply_revision, self.clock
             )
             saved = s.one("SELECT value FROM runtime_meta WHERE key=?", (QUERY + body.event_id,))
             query = json.loads(saved["value"]) if saved else {}
@@ -856,8 +870,11 @@ class MemeCaptionService:
         if (
             not self.settings.meme_semantics_enabled
             or job["kind"] != "chat"
-            or not private_life.enabled(self.settings)
         ):
+            return False
+        try:
+            owner_authority.check_job(self.store, self.settings, lambda: now, job, purpose="meme")
+        except CoreError:
             return False
         body = json.loads(job["body_json"])
         if body.get("control_command") or body.get("diary_command") or not body.get("text"):

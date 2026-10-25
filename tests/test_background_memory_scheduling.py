@@ -8,6 +8,7 @@ import pytest
 from companion import __main__, budget, life_worker
 from companion import core as core_module
 from companion.store import Store, after
+from companion.worker_schedule import UnitResult
 from tests.conftest import ingest, run
 
 
@@ -24,10 +25,10 @@ def use_core(core, monkeypatch):
 
     monkeypatch.setattr(__main__.httpx, "AsyncClient", lambda **_: NoNetworkClient())
 
-    async def stop(_seconds):
+    async def stop(*_args, **_kwargs):
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(asyncio, "sleep", stop)
+    monkeypatch.setattr(__main__.Wakeup, "wait", stop)
 
 
 def test_chat_worker_never_runs_background_extraction(core, monkeypatch):
@@ -46,7 +47,7 @@ def test_chat_worker_never_runs_background_extraction(core, monkeypatch):
     monkeypatch.setattr(core, "extract_once", extract)
     with pytest.raises(asyncio.CancelledError):
         run(__main__.worker(core.settings))
-    assert calls == ["chat"]
+    assert calls and set(calls) == {"chat"}
 
 
 def test_chat_restart_does_not_reclassify_another_workers_reserved_request(core, monkeypatch):
@@ -70,12 +71,12 @@ def test_chat_restart_does_not_reclassify_another_workers_reserved_request(core,
 
 
 @pytest.mark.parametrize("state,delay,expected", [
-    (None, None, ["nightly", "extract"]),
+    (None, None, ["extract"]),
     ("QUEUED", None, []),
     ("RUNNING", None, []),
     ("RETRY_WAIT", -1, []),
-    ("RETRY_WAIT", 60, ["nightly", "extract"]),
-    ("SUCCEEDED", None, ["nightly", "extract"]),
+    ("RETRY_WAIT", 60, ["extract"]),
+    ("SUCCEEDED", None, ["extract"]),
 ])
 def test_life_worker_extracts_without_nightly_enabled_and_yields_to_chat(
     core, monkeypatch, state, delay, expected,
@@ -92,33 +93,34 @@ def test_life_worker_extracts_without_nightly_enabled_and_yields_to_chat(
 
     async def nightly(_worker):
         calls.append("nightly")
-        return False
+        return UnitResult(False)
 
     async def extract():
         calls.append("extract")
-        return False
+        return UnitResult(False)
 
-    monkeypatch.setattr(core.consolidation, "run_once", nightly)
-    monkeypatch.setattr(core, "extract_once", extract)
+    monkeypatch.setattr(core.consolidation, "run_step", nightly)
+    monkeypatch.setattr(core, "extract_step", extract)
     with pytest.raises(asyncio.CancelledError):
         run(life_worker.life_worker(core.settings))
     assert calls == expected
 
 
 def test_chat_arriving_during_nightly_work_defers_the_following_extraction(core, monkeypatch):
+    core.settings.consolidation_enabled = True
     use_core(core, monkeypatch)
     calls = []
 
     async def nightly(_worker):
         ingest(core)
-        return False
+        return UnitResult(False)
 
     async def extract():
         calls.append("extract")
-        return False
+        return UnitResult(False)
 
-    monkeypatch.setattr(core.consolidation, "run_once", nightly)
-    monkeypatch.setattr(core, "extract_once", extract)
+    monkeypatch.setattr(core.consolidation, "run_step", nightly)
+    monkeypatch.setattr(core, "extract_step", extract)
     with pytest.raises(asyncio.CancelledError):
         run(life_worker.life_worker(core.settings))
     assert calls == []

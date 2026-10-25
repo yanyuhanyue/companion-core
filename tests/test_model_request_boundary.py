@@ -11,6 +11,7 @@ from companion import budget
 from companion.contracts import CoreError
 from companion.model import ModelClient, model_payload
 from tests.conftest import run
+from tests.owner_model_fixtures import authorized_job
 from tests.test_paid_model_gate import approved_live
 
 
@@ -25,7 +26,8 @@ def test_only_admitted_content_reaches_actual_receive(core, tmp_path, mutation):
     approved_live(core, tmp_path)
     messages = [{"role": "user", "content": "SYNTHETIC_APPROVED"}]
     expected = model_payload(core.settings, messages, "chat")
-    request_id = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", messages, core.clock())
     received = []
 
     async def receiver(scope, receive, send):
@@ -81,7 +83,8 @@ def test_only_admitted_content_reaches_actual_receive(core, tmp_path, mutation):
 def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutation):
     approved_live(core, tmp_path)
     messages = [{"role": "user", "content": "SYNTHETIC_APPROVED"}]
-    request_id = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", messages, core.clock())
     received = []
 
     async def mutate(request):
@@ -121,7 +124,8 @@ def test_every_paid_request_rechecks_after_all_user_hooks(core, tmp_path, mutati
 
     run(scenario())
     assert received == []
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "SETTLED", "billed_micro_usd": 0}
 
 
 def test_scoped_clients_do_not_close_the_callers_transport_or_accumulate_hooks(core, tmp_path):
@@ -148,7 +152,8 @@ def test_scoped_clients_do_not_close_the_callers_transport_or_accumulate_hooks(c
             transport=transport, event_hooks={"request": [hook]},
         ) as client:
             for _ in range(2):
-                request_id = budget.reserve(core.store, core.settings, None, "chat", messages,
+                request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+                    "chat", messages,
                                             core.clock())
                 response = await budget.complete(ModelClient(core.settings, client), core.store,
                                                  core.settings, request_id, messages, "chat",
@@ -170,7 +175,10 @@ def test_final_sample_rechecks_paid_expiry_as_well_as_the_admission_lease(
     changes = {"expires_at": core.clock.now + timedelta(seconds=5)} if boundary == "paid" else {}
     approval = approved_live(core, tmp_path, **changes)
     messages = [{"role": "user", "content": "synthetic final clock"}]
-    request_id = budget.reserve(core.store, core.settings, None, "chat", messages, core.clock())
+    # Isolate the admission boundary from the separate native job deadline.
+    job_id = authorized_job(core, lease_seconds=core.settings.lease_seconds * 2)
+    request_id = budget.reserve(core.store, core.settings, job_id,
+        "chat", messages, core.clock())
     lease = datetime.fromisoformat(core.store.one("SELECT lease_until FROM model_admissions")[
         "lease_until"
     ])
@@ -195,7 +203,7 @@ def test_final_sample_rechecks_paid_expiry_as_well_as_the_admission_lease(
             transport=httpx.MockTransport(lambda request: dispatched.append(request)),
             event_hooks={"request": [hook]},
         ) as client:
-            code = "PAID_APPROVAL_EXPIRED" if boundary == "paid" else "ADMISSION_LEASE_EXPIRED"
+            code = "PAID_APPROVAL_EXPIRED" if boundary == "paid" else "JOB_LEASE_LOST"
             with pytest.raises(CoreError, match=code):
                 await budget.complete(ModelClient(core.settings, client), core.store, core.settings,
                                       request_id, messages, "chat", core.clock)
@@ -203,4 +211,8 @@ def test_final_sample_rechecks_paid_expiry_as_well_as_the_admission_lease(
 
     run(scenario())
     assert len(checks) == 2 and dispatched == []
-    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    if boundary == "lease":
+        assert core.store.one("SELECT lease_until FROM jobs WHERE job_id=?",
+                              (job_id,))["lease_until"] > core.clock()
+    assert core.store.one("SELECT state,billed_micro_usd FROM model_usage") == {
+        "state": "SETTLED", "billed_micro_usd": 0}

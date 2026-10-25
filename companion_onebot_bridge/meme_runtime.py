@@ -16,15 +16,18 @@ from urllib.parse import unquote, urlsplit
 
 import httpx
 
+from . import journal
 from .images import resolve_public
-from .meme_caption import CaptionContext
+from .meme_caption import CaptionContext, CaptionOutcome, parse
 from .meme_catalog import INTENTS, MOCKERY, MemeCatalog, Metadata, key_hash
 from .meme_discovery import BraveImages, DiscoveryLimits, ReviewApproval, Usage, run_discovery
 from .meme_library import CATEGORY, MemeLibrary
 from .meme_packs import CommunityPacks, relative_path
-from .meme_semantic import SemanticLibrary, installed, profile
-from .meme_semantic_http import CaptionEmbeddingHTTP, CaptionHTTP, SemanticHTTP
+from .meme_semantic import SemanticLibrary, installed, profile, retain_usage
+from .meme_semantic_http import CaptionEmbeddingHTTP, CaptionHTTP, SemanticHTTP, core_request
+from .onebot_client import bounded_post
 from .reply_segments import event_id as delivery_event_id
+from .rich_input import input_digest
 from .spool import encode
 
 BASE = "/internal/v1/memes/discovery"
@@ -245,7 +248,9 @@ class MemeRuntime:
         self.window, self.spool, self.db = window, window.spool, window.spool.db
         if self.db.in_transaction:
             raise RuntimeError("MEME_RUNTIME_REQUIRES_TRANSACTION_BOUNDARY")
-        self.config = window.plan.config
+        self.config = window.config
+        self.authority = dict(window.authority)
+        self.authority_sha256 = journal.digest(self.authority)
         self.semantics_enabled = getattr(self.config, "meme_semantics_enabled", False)
         self.semantics = None
         self._profile_lock = asyncio.Lock()
@@ -297,24 +302,19 @@ class MemeRuntime:
                 )
         self.running = False
 
-    def _window_check(self):
+    def _owner_check(self):
         if not self.library.enabled:
             raise ValueError("MEME_RUNTIME_DISABLED")
-        scope = self.window.plan.value.get("live_text", {})
-        if (
-            self.window.plan.mode != "live_text"
-            or scope.get("automatic_reply") is not True
-            or scope.get("companion_scope") != "owner_private_v1"
-        ):
-            raise ValueError("MEME_OWNER_PRIVATE_SCOPE_REQUIRED")
-        self.window.verify(active=False, dispatch=True)
-        if self.window.row()["state"] == "STOPPED":
-            raise ValueError("WINDOW_STOPPED")
-        if not self.window.plan.start <= self.window.clock() < self.window.plan.end:
-            raise ValueError("WINDOW_OUTSIDE_INTERVAL")
+        self.window.verify()
+        if self.window.authority != self.authority:
+            raise ValueError("OWNER_AUTHORITY_BINDING_CHANGED")
+
+    async def _core_post(self, client, path, body, *, check=None):
+        return await core_request(self.window, client, path, body,
+                                  check=check or self._owner_check)
 
     def _event_check(self, event_id, *, allow_missing=False):
-        self._window_check()
+        self._owner_check()
         if not isinstance(event_id, str) or not EVENT.fullmatch(event_id):
             raise ValueError("MEME_INPUT_INVALID")
         row = self.db.execute(
@@ -324,29 +324,20 @@ class MemeRuntime:
             (not row and not allow_missing)
             or row
             and (
-                row[2] != self.window.plan.sha256
+                row[2] != self.authority_sha256
                 or row[1] in {"CANCELLED", "SUPERSEDED", "RECALLED"}
                 or self.db.execute(
                     "SELECT 1 FROM window_inputs WHERE plan_hash=? AND rowid>? LIMIT 1",
-                    (self.window.plan.sha256, row[0]),
+                    (self.authority_sha256, row[0]),
                 ).fetchone()
             )
         ):
             raise ValueError("MEME_INPUT_CANCELLED")
-        for table, clause, values in (
-            ("automatic_recalls", "target_event_id=?", (event_id,)),
-            ("automatic_received", "event_id<>?", (event_id,)),
-        ):
-            if (
-                self.db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-                ).fetchone()
-                and self.db.execute(
-                    f"SELECT 1 FROM {table} WHERE window_sha256=? AND {clause} LIMIT 1",
-                    (self.window.plan.sha256, *values),
-                ).fetchone()
-            ):
-                raise ValueError("MEME_INPUT_CANCELLED")
+        if (self.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='automatic_recalls'").fetchone()
+            and self.db.execute("SELECT 1 FROM automatic_recalls WHERE target_event_id=? LIMIT 1",
+                                (event_id,)).fetchone()):
+            raise ValueError("MEME_INPUT_CANCELLED")
 
     def prepare_offer(self, event, capture=None):
         if not self.library.enabled or self.semantics_enabled:
@@ -365,14 +356,24 @@ class MemeRuntime:
             and (
                 capture.get("event_id") != event_id
                 or capture.get("source_event_id") != source
-                or capture.get("window_sha256") != self.window.plan.sha256
+                or capture.get("authority") != self.authority
+                or capture.get("kind") != "authenticated_onebot_ws"
+                or capture.get("input_sha256") != input_digest(event.get("payload", {}))
             )
         ):
+            raise ValueError("MEME_INPUT_INVALID")
+        retained = self.db.execute(
+            "SELECT input_hash,capture_json,plan_hash FROM window_inputs WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        if (retained is None or retained[0] != input_digest(event.get("payload", {}))
+            or retained[2] != self.authority_sha256
+            or capture is not None and encode(capture) != encode(json.loads(retained[1]))):
             raise ValueError("MEME_INPUT_INVALID")
         event_sha256 = hashlib.sha256(encode(event).encode()).hexdigest()
 
         def check():
-            self._event_check(event_id, allow_missing=capture is not None)
+            self._event_check(event_id)
 
         # Replaying an already approved capture must preserve its exact body even
         # after supersession. Preparation and dispatch enforce current ownership.
@@ -382,7 +383,7 @@ class MemeRuntime:
             (event_id,),
         ).fetchone()
         if frozen:
-            if tuple(frozen[:2]) != (event_sha256, self.window.plan.sha256):
+            if tuple(frozen[:2]) != (event_sha256, self.authority_sha256):
                 raise ValueError("MEME_OFFER_CONFLICT")
             return json.loads(frozen[2])
         self.spool.capacity(8192)
@@ -393,10 +394,13 @@ class MemeRuntime:
                 if self.db.execute("SELECT COUNT(*) FROM meme_runtime_offers").fetchone()[0] >= (
                     self.catalog.max_bindings
                 ):
-                    raise ValueError("MEME_BINDING_LIMIT")
+                    # Capacity is monotonic within this frozen window: no receipt
+                    # pruning or configuration changes can make a later replay
+                    # select an offer. Optional media must not stop owner text.
+                    return None
                 self.db.execute(
                     "INSERT INTO meme_runtime_offers VALUES (?,?,?,?)",
-                    (event_id, event_sha256, self.window.plan.sha256, encode(offer)),
+                    (event_id, event_sha256, self.authority_sha256, encode(offer)),
                 )
             return offer
 
@@ -411,7 +415,9 @@ class MemeRuntime:
             return freeze(offer, check)
         except ValueError as error:
             if error.args == ("MEME_INPUT_CANCELLED",):
-                return freeze(None, self._window_check)
+                return freeze(None, self._owner_check)
+            if error.args == ("MEME_BINDING_LIMIT",):
+                return freeze(None, check)
             raise
 
     def missing_offer(self, event_id):
@@ -421,7 +427,7 @@ class MemeRuntime:
         row = self.db.execute(
             f"SELECT offer_json FROM {table} WHERE event_id=? AND window_sha256=?"
             + (" AND state='ACCEPTED'" if self.semantics_enabled else ""),
-            (event_id, self.window.plan.sha256),
+            (event_id, self.authority_sha256),
         ).fetchone()
         offer = json.loads(row[0]) if row else None
         return offer if offer is not None and not offer["candidates"] else None
@@ -468,7 +474,7 @@ class MemeRuntime:
                 raise ValueError("MEME_BINDING_LIMIT")
             self.db.execute(
                 "INSERT INTO meme_runtime_semantic_offers VALUES (?,?,?,NULL,NULL,'REQUESTING')",
-                (event_id, self.window.plan.sha256, reply_revision),
+                (event_id, self.authority_sha256, reply_revision),
             )
         try:
             semantics = await self._ensure_semantics(client, check)
@@ -507,8 +513,37 @@ class MemeRuntime:
                 )
             raise
 
+    async def _caption_receipt(self, client):
+        """Close original accounting only; no profile, asset fetch or semantic commit."""
+        self.window.verify(active=False)
+        if not installed(self.db):
+            return None
+        row = self.db.execute(
+            "SELECT request_sha,job_id FROM meme_caption_bindings WHERE job_id IS NOT NULL "
+            "AND (usage_json IS NULL OR json_extract(usage_json,'$.state')='RESERVED') "
+            "AND json_extract(outcome_json,'$.state') IN ('QUEUED','RUNNING') "
+            "AND state IN ('QUEUED','RUNNING','UNKNOWN','FAILED') ORDER BY rowid LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        http = SemanticHTTP(self.window, client, check=self._owner_check)
+        value = await CaptionHTTP(http, self.catalog).get(row[1])
+        retain_usage(self.catalog, row[0], value)
+        outcome = parse(CaptionOutcome, value)
+        if outcome.state in {"QUEUED", "RUNNING"}:
+            return None
+        with self.catalog.atomic():
+            self.db.execute(
+                "UPDATE meme_caption_bindings SET state=?,outcome_json=CASE WHEN ? "
+                "THEN ? ELSE outcome_json END WHERE request_sha=?",
+                (outcome.state if outcome.state != "SUCCEEDED" else "FAILED",
+                 outcome.state != "SUCCEEDED", outcome.model_dump_json(), row[0]))
+            self.db.execute("UPDATE meme_semantic_assets SET state='QUARANTINED' "
+                            "WHERE binding_request=?", (row[0],))
+        return {"status": "CAPTION_QUARANTINED"}
+
     async def _semantic_once(self, client):
-        semantics = await self._ensure_semantics(client, self._window_check)
+        semantics = await self._ensure_semantics(client, self._owner_check)
         rows = self.db.execute(
             "SELECT s.sha,s.attempt_key,s.claim_json,r.state FROM meme_runtime_sources s "
             "JOIN meme_runtime_results r ON r.attempt_key=s.attempt_key "
@@ -543,6 +578,8 @@ class MemeRuntime:
                     raise ValueError("MEME_DISCOVERY_UNSETTLED")
 
             async def check():
+                fence()
+                await self.window.check(client, purpose="meme")
                 fence()
 
             http = SemanticHTTP(self.window, client, check=fence)
@@ -584,6 +621,7 @@ class MemeRuntime:
             or not isinstance(image["category"], str)
             or not CATEGORY.fullmatch(image["category"])
             or not isinstance(item.get("delivery_key"), str)
+            or item.get("authority") != self.authority
         ):
             raise ValueError("MEME_DELIVERY_BINDING_INVALID")
         key_hash(item["delivery_key"])
@@ -597,7 +635,7 @@ class MemeRuntime:
             event_id,
             image["candidate_id"],
             image["category"],
-            self.window.plan.sha256,
+            self.authority_sha256,
         )
         row = self.db.execute(
             "SELECT * FROM meme_runtime_bindings WHERE delivery_key=? OR offer_key=?", expected[:2]
@@ -647,6 +685,11 @@ class MemeRuntime:
         self.catalog.receipt(image["offer_key"], outcome)
 
     def confirm_not_sent(self, item, operation, core_receipt):
+        self.window.verify(active=False)
+        attempt = self.db.execute(
+            "SELECT state,item_hash,plan_hash,event_id FROM window_attempts WHERE message_id=?",
+            (item["message_id"],),
+        ).fetchone()
         expected = {
             "cancelled": True,
             "message_id": item["message_id"],
@@ -654,11 +697,13 @@ class MemeRuntime:
             "send_attempt_retained": True,
         }
         if (
-            getattr(operation, "window", None) is not self.window
+            getattr(operation, "runtime", None) is not self.window
             or getattr(operation, "current_item", None) is not item
             or getattr(operation, "dispatched", None) is not False
-            or not getattr(operation, "current", None)
-            or operation.current[0] != item["message_id"]
+            or getattr(operation, "authority", None) != self.authority
+            or getattr(operation, "item_hash", None) != journal.digest(item)
+            or attempt is None or tuple(attempt) != (
+                "NOT_SENT", journal.digest(item), self.authority_sha256, delivery_event_id(item))
             or encode(core_receipt) != encode(expected)
         ):
             raise ValueError("MEME_NOT_SENT_PROOF_REQUIRED")
@@ -699,7 +744,8 @@ class MemeRuntime:
             "provider": provider,
         }
         try:
-            result = await self.window.core_post(client, BASE + "/submit", body)
+            result = await self._core_post(client, BASE + "/submit", body,
+                                           check=lambda: self._event_check(event_id))
         except httpx.HTTPStatusError as error:
             if error.response.status_code in {403, 409, 429, 503}:
                 return {"status": "DEFERRED", "code": "MEME_DISCOVERY_NOT_ADMITTED"}
@@ -746,7 +792,7 @@ class MemeRuntime:
         ):
             raise ValueError("MEME_LEASE_INVALID")
         until = datetime.fromisoformat(value["lease_until"])
-        if until.utcoffset() is None or not self.window.clock() < until <= self.window.plan.end:
+        if until.utcoffset() is None or not self.window.clock() < until:
             raise ValueError("MEME_LEASE_EXPIRED")
         return value
 
@@ -756,8 +802,10 @@ class MemeRuntime:
             raise ValueError("MEME_LEASE_EXPIRED")
 
     async def _flush_result(self, client, row):
+        # Original incurred liability can settle after STOP; never authorize new I/O here.
+        self.window.verify(active=False)
         body = json.loads(row[2])
-        response = await self.window.core_post(client, BASE + "/" + row[1] + "/result", body)
+        response = await bounded_post(client, BASE + "/" + row[1] + "/result", body)
         if (
             set(response) != {"job_id", "attempt_key", "state"}
             or response["job_id"] != row[1]
@@ -786,14 +834,22 @@ class MemeRuntime:
                 return {"status": "RESULT_RECONCILED", "state": state}
             if not self.library.enabled:
                 return {"status": "DISABLED"}
-            self._window_check()
+            self._owner_check()
             if self.semantics_enabled:
                 semantic = await self._semantic_once(client)
                 if semantic:
                     return semantic
             if not getattr(self.config, "meme_discovery_enabled", False):
                 return {"status": "DISABLED"}
-            response = await self.window.core_post(
+            # The original result must have room before claiming/reserving any
+            # new work. Existing PENDING results above always reconcile first.
+            tables = ["meme_runtime_results"]
+            if self.semantics_enabled:
+                tables.append("meme_runtime_sources")
+            if any(self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                   >= self.catalog.max_bindings for table in tables):
+                return {"status": "DEFERRED", "code": "MEME_BINDING_LIMIT"}
+            response = await self._core_post(
                 client,
                 BASE + "/lease",
                 {
@@ -860,6 +916,20 @@ class MemeRuntime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            code = error.args[0] if isinstance(error, ValueError) and len(error.args) == 1 else None
+            refused = (
+                isinstance(error, httpx.HTTPStatusError)
+                and error.response.status_code in {403, 409, 429, 503}
+            ) or (isinstance(code, str) and code in {
+                "OWNER_RUNTIME_STOPPED", "OWNER_AUTHORITY_EXPIRED",
+                "OWNER_AUTHORITY_BINDING_CHANGED", "MEME_INPUT_CANCELLED"})
+            if self.semantics_enabled and refused:
+                try:
+                    receipt = await self._caption_receipt(client)
+                except (ValueError, httpx.HTTPError):
+                    receipt = None
+                if receipt is not None:
+                    return receipt
             pending = self.db.execute(
                 "SELECT 1 FROM meme_runtime_results WHERE state='PENDING' LIMIT 1"
             ).fetchone()
@@ -874,12 +944,12 @@ class MemeRuntime:
                 503,
             }:
                 return {"status": "DEFERRED", "code": "MEME_DISCOVERY_NOT_ADMITTED"}
-            code = error.args[0] if isinstance(error, ValueError) and len(error.args) == 1 else None
             if isinstance(code, str) and code in {
                 "MEME_INPUT_CANCELLED",
                 "MEME_LEASE_EXPIRED",
-                "WINDOW_STOPPED",
-                "WINDOW_OUTSIDE_INTERVAL",
+                "OWNER_RUNTIME_STOPPED",
+                "OWNER_AUTHORITY_EXPIRED",
+                "OWNER_AUTHORITY_BINDING_CHANGED",
                 "MEME_RUNTIME_DISABLED",
             }:
                 return {"status": "CANCELLED", "code": code}
@@ -903,10 +973,11 @@ class _Budget:
         self.runtime._claim_check(self.claim)
         body = {**self.witness, "limits": asdict(limits)}
         self.state = "RESERVING"
-        result = await self.runtime.window.core_post(
+        result = await self.runtime._core_post(
             self.client,
             BASE + "/" + self.claim["job_id"] + "/reserve",
             body,
+            check=lambda: self.runtime._claim_check(self.claim),
         )
         if encode(result) != encode(
             {
@@ -922,10 +993,11 @@ class _Budget:
         return self
 
     async def check(self):
-        result = await self.runtime.window.core_post(
+        result = await self.runtime._core_post(
             self.client,
             BASE + "/" + self.claim["job_id"] + "/check",
             self.witness,
+            check=lambda: self.runtime._claim_check(self.claim),
         )
         if encode(result) != encode(
             {

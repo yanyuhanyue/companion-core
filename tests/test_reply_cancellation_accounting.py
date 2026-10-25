@@ -6,11 +6,12 @@ from pathlib import Path
 
 import httpx
 
-from companion import budget, live_text
+from companion import budget, owner_authority
 from companion.core import Core
 from companion.model import ModelClient
+from companion.owner_authority_protocol import AuthorityStop
 from tests.conftest import run
-from tests.test_input_protocol import admit, environment
+from tests.native_input_protocol_fixture import admit, environment
 
 
 def test_supersession_in_last_http_hook_never_calls_old_provider_or_freezes_budget(
@@ -48,9 +49,13 @@ def test_supersession_in_last_http_hook_never_calls_old_provider_or_freezes_budg
                     assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 1
                     assert core.store.one("SELECT 1 FROM audit_log "
                                           "WHERE action='model.not_dispatched'")
-                    assert not live_text.stopped(core.store, plan.sha256)
+                    assert owner_authority.status(
+                        core.store, core.settings, core.clock)["state"] == "ACTIVE"
+                    assert worker.clock() >= core.store.one(
+                        "SELECT MAX(ingested_at) AS latest FROM events")["latest"]
                     assert await worker.run_once("latest-input")
-            assert len(calls) == 1
+            assert len(calls) == 1, core.store.rows(
+                "SELECT kind,state,last_error_code FROM jobs")
             assert core.store.one("SELECT state FROM jobs WHERE event_id=?",
                                   (first["event_id"],))["state"] == "CANCELLED"
             assert core.store.one("SELECT COUNT(*) AS n FROM model_admissions")["n"] == 2
@@ -86,7 +91,8 @@ def test_cancelled_worker_loss_expires_reservation_through_independent_journal(
                 last = [row for row in records if row.get("request_id") == request_id][-1]
                 assert last["state"] == "UNKNOWN"
                 assert last["minimum_micro_usd"] == usage["billed_micro_usd"]
-                stopped = live_text.stop_window(worker.store,
-                    live_text.WindowReference(window_sha256=plan.sha256), worker.clock)
-                assert stopped == {"stopped": True}
+                stopped = owner_authority.stop(worker.store, worker.settings, worker.clock,
+                    AuthorityStop(operation_id="stop-abandoned-request", authority=plan.authority))
+                assert stopped["state"] == "STOPPED" and stopped["admission_fenced"]
+                assert not stopped["quiescence_proven"]
     run(scenario())

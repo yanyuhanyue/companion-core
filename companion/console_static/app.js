@@ -125,14 +125,80 @@ function displayTitle(item) {
 }
 const CAPABILITIES = {
   "memory.manage": "记忆管理", "memory.recall": "记忆检索", diary: "日记整理",
-  consolidation: "记忆整理", reflection: "反思", growth: "成长", goals: "目标与承诺", wake: "自主活动调度",
-  "reading.bilibili": "B站内容读取", "reading.web": "网页阅读", "reading.zhihu": "知乎内容读取",
-  "reading.xiaohongshu": "小红书内容读取", exploration: "内容发现", "bilibili.video": "B站画面分析",
+  consolidation: "记忆整理", reflection: "反思", goals: "目标与承诺", wake: "自主活动调度",
+  affect: "互动状态", expression: "表情回应", expression_learning: "表达习惯学习",
+  proactive: "主动私聊", social: "内容分享判断",
+  "reading.bilibili": "B站内容读取", "reading.web": "网页阅读", "reading.heybox": "小黑盒内容读取",
+  exploration: "内容发现", "bilibili.video": "B站画面分析", "model.understand_video": "本轮视频理解",
+  "qq.files": "私人文件", "qq.voice.asr": "语音转写", "qq.voice.tts": "语音回复",
+  "qq.poke": "拍一拍回应", "qq.poke.native": "回拍一下",
+  "qq.account.qzone_publish": "QQ 空间发布", "qq.account.nickname": "改昵称",
+  "qq.account.signature": "改签名", "qq.account.avatar": "改头像", "qq.profile.observe": "资料观测",
   "qq.images": "私聊图片理解", "qq.animation": "私聊动图理解", "qq.face_names": "QQ 表情名称",
   "qq.face_images": "QQ 表情图像", "unicode.emoji": "Unicode 表情", "memes.semantic": "表情语义理解",
-  "memes.community": "社区表情获取", "memes.brave": "表情搜索", executive: "执行任务",
-  "media.voice": "语音", "media.image": "图片输出", "media.video": "视频输出",
+  "memes.catalog": "表情目录", "memes.community_import": "社区表情获取", "memes.search": "表情搜索",
+  executive: "执行任务", "media.voice": "网页语音会话", "media.camera": "摄像头", "media.android": "安卓观察",
 };
+// Release removal point: this flag disables all implementation notes. These are
+// reviewed backend execution coverage, separate from UI gaps and runtime authorization.
+const SHOW_IMPLEMENTATION_STATUS = true;
+const CAPABILITY_IMPLEMENTATION = {
+  "memory.manage": ["已实现", "可查询、确认、纠正和忘记记忆。"],
+  "memory.recall": ["已实现", "已有来源约束的检索；控制台尚无原话摘录和召回解释。"],
+  diary: ["已实现", "已有日记读取、纠正、忘记与暂停；不包含未来睡眠阶段或梦境。"],
+  consolidation: ["已实现", "已有夜间整理；尚无 N1/N2/N3 阶段观察。"],
+  reflection: ["已实现", "已有来源支持的反思；控制台尚不能接受或拒绝建议。"],
+  goals: ["已实现", "已有目标与承诺；控制台目前只读，尚无逐步执行视图。"],
+  wake: ["已实现", "已有受限调度与暂停；尚未接入完整自主决策观察。"],
+  affect: ["已实现", "已有反馈与衰减；控制台尚无来源、重置和撤销视图。"],
+  expression: ["已实现", "已有受限表情选择及投递流程；实际表达效果仍需体验验证。"],
+  expression_learning: ["已实现", "已有有来源的表达偏好；尚无跨日变化与证据详情。"],
+  proactive: ["已实现", "已有主动私聊和暂停；尚无逐轮发送或跳过的决策视图。"],
+  social: ["已实现", "已有来源支持的分享候选；尚无统一表达意图视图。"],
+  "reading.web": ["已实现", "已有授权网站读取；控制台只读任务，授权由部署保管。"],
+  "reading.bilibili": ["已实现", "已有 B站读取回执；控制台尚无读取授权管理。"],
+  "reading.heybox": ["已实现", "已有小黑盒读取回执；控制台尚无读取授权管理。"],
+  exploration: ["已实现", "已有内容发现；控制台尚无逐步探索与来源授权操作。"],
+  "bilibili.video": ["已实现", "已有受限视频分析；控制台尚无采样范围详情。"],
+  "model.understand_video": ["已实现", "仅本轮实际开放工具时可调用；控制台尚无工具回执详情。"],
+  "qq.files": ["已实现", "已有私人文件解析和任务记录；尚无页级证据详情。"],
+  "qq.images": ["已实现", "已有认证图片理解；控制台尚无图像来源详情。"],
+  "qq.animation": ["已实现", "已有受限动图理解；控制台尚无帧级证据详情。"],
+  "qq.voice.asr": ["已实现", "已有语音转写与节点状态；控制台不提供字幕或音频回放。"],
+  "qq.voice.tts": ["已实现", "已有语音合成及原投递回执；控制台不提供音频回放。"],
+  "qq.poke": ["已实现", "已有受限拍一拍回应；控制台尚无批次详情。"],
+  "qq.poke.native": ["已实现", "已有独立许可与原生回拍回执；控制台尚无操作详情。"],
+  "qq.account.qzone_publish": ["已实现", "已有独立授权发布与回执；控制台尚不能审核草稿。"],
+  "qq.account.nickname": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
+  "qq.account.signature": ["已实现", "已有独立许可与回执；控制台尚不能允许或拒绝计划。"],
+  "qq.account.avatar": ["已实现", "已有审核素材与回执；控制台尚无头像预览或计划决定。"],
+  "qq.profile.observe": ["已实现", "已有资料观测；缓存观测不能证明网络刷新或修改成功。"],
+  "unicode.emoji": ["已实现", "保留输入中的 Unicode 表情原文。"],
+  "qq.face_names": ["已实现", "在富媒体输入范围内识别 QQ 原生表情名称。"],
+  "qq.face_images": ["已实现", "在图片许可内接收认证表情图；是否看过以本轮回执为准。"],
+  "memes.catalog": ["已实现", "已有审核素材目录；控制台尚无编辑、上传或隔离操作。"],
+  "memes.community_import": ["已实现", "已有受限素材导入；控制台尚无素材审核操作。"],
+  "memes.search": ["已实现", "已有配置搜索服务的发现路径；控制台尚无搜索操作。"],
+  "memes.semantic": ["已实现", "已有带来源的理解任务；控制台目前只读任务记录。"],
+  "media.voice": ["已实现", "已有独立媒体会话；控制台尚无启动和关闭入口。"],
+  "media.camera": ["已实现", "已有受限摄像头观察；控制台尚无会话控制。"],
+  "media.android": ["已实现", "已有受限设备观察；不代表已实现设备操作。"],
+  executive: ["已实现", "已有独立审批执行器；控制台尚无任务提交、审批和撤销入口。"],
+  // P1–P4 registration points: displayed only if a future backend publishes the
+  // same capability ID. Update this map with that slice's source/test receipt.
+  "conversation.evaluation": ["待实现", "自然度对照与有界评价尚未集成到当前版本。"],
+  "memory.tiers": ["待实现", "热温冷逻辑分层尚未集成到当前版本。"],
+  "consolidation.stages": ["待实现", "N1/N2/N3 阶段尚未集成到当前版本。"],
+  "life.decisions": ["待实现", "完整自主候选和执行反馈尚未集成到当前版本。"],
+  "dream.rem": ["待实现", "默认关闭的虚构梦境尚未集成到当前版本。"],
+  "social.intent": ["待实现", "统一表达意图尚未集成到当前版本。"],
+};
+function implementationNote(id) {
+  const entry = CAPABILITY_IMPLEMENTATION[id];
+  return SHOW_IMPLEMENTATION_STATUS && entry
+    ? el("small", { class: "panel-note", "data-implementation": id, title: entry[1] }, " · 后端：" + entry[0])
+    : null;
+}
 const GROUPS = {
   model: "模型与服务", content: "阅读与文件", expression: "表达与表情",
   autonomy: "自主行为", memory: "记忆与日记", system: "运行与域名",
@@ -532,7 +598,9 @@ function renderOverview(data) {
   const worker = runtime.worker || {};
   const ready = runtime.state === "READY";
   const statusText = runtime.state ? (ready ? "当前运行状态正常" : "有些状态需要留意") : "尚未取得运行状态";
-  const workerText = worker.state === "RECORDED" ? "最近有运行记录" : STATUS[worker.state] || "尚无工作进程记录";
+  const workerText = ["WAITING_AFTER_POLL", "WAITING_AFTER_MAINTENANCE"].includes(worker.stage)
+    ? "上次完成后进入等待（当前存活未验证）"
+    : worker.state === "RECORDED" ? "最近有运行记录" : STATUS[worker.state] || "尚无工作进程记录";
   const focus = el("section", { class: "focus-card" }, el("span", { class: "focus-symbol" }, icon(ready ? "pulse" : "clock")),
     el("div", { class: "focus-copy" }, el("span", { class: "eyebrow" }, "当前状态"), el("h2", {}, statusText),
       el("p", {}, workerText + "。" + (runtime.mode === "live" ? "当前使用正式运行模式。" : runtime.mode === "demo" ? "当前使用演示运行模式。" : "运行模式尚未记录。"))),
@@ -549,8 +617,10 @@ function renderOverview(data) {
   const visibleCapabilities = state.expandedCapabilities ? capabilities : capabilities.slice(0, 6);
   const capabilitiesBody = visibleCapabilities.length ? el("div", { class: "panel-body" },
     visibleCapabilities.map(cap => el("div", { class: "key-value" },
-      el("span", { title: typeof cap.summary === "string" ? cap.summary : "" }, CAPABILITIES[cap.id] || cap.label || cap.id), pill(cap.state))),
-    el("p", { class: "panel-note" }, "可用表示可接纳任务，不代表已经执行或远端在线。"))
+      el("span", { title: typeof cap.summary === "string" ? cap.summary : "" }, CAPABILITIES[cap.id] || cap.label || cap.id,
+        implementationNote(cap.id)), pill(cap.state))),
+    el("p", { class: "panel-note" }, "可用表示可接纳任务，不代表已经执行或远端在线。",
+      SHOW_IMPLEMENTATION_STATUS ? " 后端标记说明代码接入范围；授权、当前可用状态和真人验收分别核对。停留在标记上可查看范围与界面缺口。" : null))
     : empty("尚无能力状态", "能力状态会随服务接入和运行配置更新。", { symbol: "pulse" });
   const problems = Array.isArray(data.diagnostics?.items)
     ? data.diagnostics.items.filter(item => ["danger", "pending"].includes(tone(item.status))) : [];

@@ -148,6 +148,10 @@ def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="no
         or raw.get("sub_type") != "friend"
     ):
         return None
+    if config.ingress_after:
+        stamp = raw.get("time")
+        if type(stamp) is not int or stamp <= config.ingress_after:
+            return None
     sender = raw.get("sender")
     if not isinstance(sender, dict) or "group_id" in raw or "group_id" in sender:
         return None

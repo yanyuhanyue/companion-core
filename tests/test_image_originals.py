@@ -41,9 +41,13 @@ def test_image_estimates_count_each_original_in_both_stages(count):
     flattened, final_estimate = messages_and_estimate(policy, [*references, *messages])
     assert flattened == [*references, {"role": "user", "content": text}]
     assert final_estimate == estimate
-    # Historical or quoted image parts cannot spend the current-original allowance.
+    # Count every authorized original across turns; Core authenticates its source.
+    current = {"role": "user", "content": "当前问题"}
+    history, historical_estimate = messages_and_estimate(policy, [*messages, current])
+    assert history == [{"role": "user", "content": text}, current]
+    assert historical_estimate == estimate
     with pytest.raises(CoreError, match="IMAGE_INPUT_INVALID"):
-        messages_and_estimate(policy, [*messages, {"role": "user", "content": "当前问题"}])
+        messages_and_estimate(policy, [*messages, *messages])
 
 
 def staged_original(core):

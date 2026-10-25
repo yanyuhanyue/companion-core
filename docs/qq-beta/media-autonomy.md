@@ -37,6 +37,12 @@ Core 与 Bridge 通过 HTTP 交换原生回执；`companion_delivery_protocol` �
 `get_private_file_url`，按当前文件租约下载、校验字节和 SHA256，再提交签名原件。
 Core 先持久化暂存；独立 `content-worker` 执行解析。不能把聊天里的 URL、路径或模型参数
 当作文件下载授权。混合图片/文件使用原持久队列；已提交项目重启时先核对原状态。
+队列仍在 `DOWNLOADING` 时，可在原图片／文件租约和签名来源仍有效的条件下重新读取，
+不重新 claim 或延长期限；语音重新读取前须确认原 ASR 上传仍被允许且没有已存在任务。
+持久化 `UPLOADING` 后仅核对原接收结果，不能重复上传或启动第二次 ASR。
+完成任务的引用在读取其结果前释放，异常仍向调用者报告。读取恢复依据
+[HTTP 幂等语义](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2)，
+保留原队列阶段、来源检查、费用和不确定效果责任。
 
 支持 `.txt`、`.md`、`.docx`、有文字层的 `.pdf` 和经 LibreOffice 转换的 `.doc`。
 无文字层页面不做 OCR；转换、截断和局部结果保留 `PARTIAL` 及原因。
@@ -191,6 +197,8 @@ Bridge 仅处理当前原始 record 段，`get_record` 的返回须与原来源�
 TTS 绑定原 outbox 的 message ID、delivery key、文本、窗口和音频摘要。
 发声使用原发送责任，不另建文字尝试；QQ 发送 UNKNOWN 不自动补发文字。
 节点失联、取消、源撤回、租约或资源隔离失败时停止，原资源/回执不确定性按节点协议保留。
+Core、节点和 Bridge 须同步升级语音 v2；递增领取序号、恢复、离线清理和 Core 清理确认
+的操作见[语音清理与恢复](../voice-cleanup-operations.md)。本地清理成功不代表 Core 已确认。
 
 ## QQ 账号动作、素材和基线
 
@@ -275,7 +283,7 @@ UNKNOWN。擦除后的来源只保留核对所需摘要，不能从决定、旧�
 当前请求排除、前台回复保留和未知费用处理沿用原规则。
 
 语音投递绑定与音频 envelope 属于无存储职责的 `voice_protocol`；Core 的发送前检查和
-停机核对复用独立投递协议的六字段校验。非法 `voice` 仍返回 `400 INVALID_CONTRACT`，
+停机核对复用独立投递协议的绑定校验。非法 `voice` 仍返回 `400 INVALID_CONTRACT`，
 字段位置统一为 `body.voice`，不回显提交值；有效形状但绑定或租约失效仍返回语义错误。
 
 ## 验证范围

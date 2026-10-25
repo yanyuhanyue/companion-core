@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from companion import owner_authority
 from companion.contracts import CoreError
 from companion.observation import expired_sources
 from companion.privacy import epoch, redact, sensitive
@@ -29,9 +30,23 @@ def proactive_allowed(store, settings, now):
         return True
     if not settings.proactive_enabled or quiet_hours(settings, now):
         return False
+    return not feedback_paused(store, settings, now)
+
+
+def feedback_paused(store, settings, now):
+    """Feedback can regulate autonomy only under its independent current purpose."""
+    if not settings.affect_enabled:
+        return False
+    if owner_authority.required(store, settings):
+        try:
+            view = owner_authority.current(store, settings, lambda: now)
+        except CoreError:
+            return True
+        if "affect" not in view.policy.purposes:
+            return False
     from companion.affect import AffectEngine
 
-    return AffectEngine(store, settings, lambda: now).snapshot()["state"]["engagement"] != "pause"
+    return AffectEngine(store, settings, lambda: now).snapshot()["state"]["engagement"] == "pause"
 
 
 def proactive_counts(store, settings, now):
@@ -43,28 +58,25 @@ def proactive_counts(store, settings, now):
         .isoformat(timespec="microseconds")
     )
     recent = after(now, -settings.proactive_interval_seconds)
-    # Activity jobs reserve a send slot before generation; social candidates reserve at queue.
+    # Ordinary activity reserves before wording. Life SHADOW choices reserve no
+    # send: count their actual native Outbox group once at its enqueue time.
     row = store.one(
-        "SELECT COUNT(*) AS n,MAX(created_at)>? AS recent FROM ("
+        "WITH reservations(created_at) AS ("
         "SELECT j.created_at FROM jobs j JOIN events e USING(event_id) "
         "WHERE j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
-        "<>'commitment' AND j.created_at>=? UNION ALL "
-        "SELECT updated_at AS created_at FROM social_candidates WHERE message_id IS NOT NULL "
-        "AND updated_at>=? AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j "
-        "ON j.event_id=o.origin_event_id WHERE o.message_id=social_candidates.message_id "
-        "AND j.kind='activity'))",
-        (recent, min(day, recent), min(day, recent)),
-    )
-    daily = store.one(
-        "SELECT (SELECT COUNT(*) FROM jobs j JOIN events e USING(event_id) WHERE "
-        "j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
-        "<>'commitment' AND j.created_at>=?) + "
-        "(SELECT COUNT(*) FROM social_candidates WHERE message_id IS NOT NULL AND updated_at>=? "
+        "NOT IN ('commitment','life') UNION ALL "
+        "SELECT updated_at FROM social_candidates WHERE message_id IS NOT NULL "
         "AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
-        "WHERE o.message_id=social_candidates.message_id AND j.kind='activity')) n",
-        (day, day),
-    )["n"]
-    return daily, bool(row["recent"])
+        "WHERE o.message_id=social_candidates.message_id AND j.kind='activity') UNION ALL "
+        "SELECT MIN(o.created_at) FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
+        "JOIN events e ON e.event_id=j.event_id WHERE j.kind='activity' "
+        "AND json_extract(e.body_json,'$.notice.kind')='life' "
+        "AND o.action_type='qq.private.proactive' GROUP BY o.origin_event_id) "
+        "SELECT COALESCE(SUM(created_at>=?),0) n,MAX(created_at)>? recent "
+        "FROM reservations WHERE created_at>=?", (day, recent, min(day, recent)),
+    )
+    return row["n"], bool(row["recent"])
+
 
 
 def text_key(text):
@@ -249,7 +261,7 @@ class SocialPlanner:
         }
 
     def consider(self, event_id):
-        if not self.settings.social_enabled:
+        if not self.settings.social_enabled or self.settings.life_loop.mode != "OFF":
             return None
         s, now, captured = self.store, self.clock(), epoch(self.store)
         if expired_sources(
@@ -330,7 +342,7 @@ class SocialPlanner:
 
     def flush(self):
         cfg, s, now = self.settings, self.store, self.clock()
-        if not cfg.social_enabled or not cfg.pricing_known:
+        if not cfg.social_enabled or not cfg.pricing_known or cfg.life_loop.mode != "OFF":
             return False
         with s.transaction():
             if not proactive_allowed(s, cfg, now):

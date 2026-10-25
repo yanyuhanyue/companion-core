@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 
 from companion.commands import command_parts
 from companion.contracts import CoreError
-from companion.memory_context import MemorySources, check_version, read_version
+from companion.memory_context import MemoryContext, MemorySources, check_version, read_version
 from companion.privacy import advance_epoch, redact, sensitive
 from companion.retrieval import SemanticIndex, fuse
 from companion.store import encode, uid
@@ -71,12 +71,50 @@ class Memory:
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
     def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None):
+        version, sources, rows, lexical = self._prepare_search(
+            query, actor, subjects, limit, memory_ids=memory_ids, now=now,
+        )
+        similarities = self.index.scores(query, rows) if query != "*" and rows else {}
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+
+    async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
+                           memory_ids=None, now=None, source_check=None, clock=None):
+        if source_check:
+            source_check()
+        version, sources, rows, lexical = self._prepare_search(
+            query, actor, subjects, limit, memory_ids=memory_ids, now=now,
+        )
+        similarities = {}
+        if query != "*" and rows:
+            context = MemoryContext(self)
+            proof = context.pin(now, rows=[
+                {**row, "evidence_ids": [e["event_id"] for e in sources.evidence(row["memory_id"])]}
+                for row in rows
+            ])
+
+            def revalidate():
+                if source_check:
+                    source_check()
+                check_version(self, version)
+                context.revalidate(proof, clock() if clock else now)
+                for row in rows:
+                    if self.store.one("SELECT * FROM memories WHERE memory_id=?",
+                                      (row["memory_id"],)) != row:
+                        raise CoreError("PRIVACY_CHANGED", 409)
+
+            similarities = await self.index.scores_async(query, rows, revalidate=revalidate)
+        if clock:
+            sources = MemorySources(self, clock())
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+
+    def _prepare_search(self, query, actor="owner", subjects=(), limit=6, *,
+                        memory_ids=None, now=None):
         self.require_owner(actor)
         s = self.store
         version = read_version(self)
         sources = MemorySources(self, now)
         if memory_ids is not None and not memory_ids:
-            return []
+            return version, sources, [], []
         allowed_sql = ""
         if memory_ids is not None:
             allowed_sql = " AND memory_id IN (" + ",".join("?" for _ in memory_ids) + ")"
@@ -105,6 +143,14 @@ class Memory:
         base += "ORDER BY m.needs_review,m.status='CONFIRMED' DESC,m.updated_at DESC"
         rows = [row for row in s.rows(base, params)
                 if sources.current(row) and sources.evidence(row["memory_id"])]
+        from companion.memory_enrichment import refresh_importance
+
+        for row in rows:
+            row["importance"] = refresh_importance(self, row, now)
+        if query == "*":
+            rows.sort(key=lambda row: (not row["needs_review"], row["status"] == "CONFIRMED",
+                                      row["importance"], row["updated_at"]), reverse=True)
+        lexical = []
         if query != "*" and rows:
             allowed = {row["memory_id"] for row in rows}
             if len(query) < 3:
@@ -134,7 +180,11 @@ class Memory:
                     if match
                     else []
                 )
-            similarities = self.index.scores(query, rows)
+        return version, sources, rows, lexical
+
+    def _finish_search(self, query, rows, lexical, similarities, limit, version, sources):
+        s = self.store
+        if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
             # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
             lexical = [
@@ -158,6 +208,7 @@ class Memory:
                     query in row["content"],
                     scores[row["memory_id"]],
                     similarities[row["memory_id"]],
+                    row["importance"],
                 ),
                 reverse=True,
             )
@@ -345,6 +396,71 @@ class Memory:
             ),
         )
 
+    def decide_from_console(self, memory_id, decision, now, corrected=None, *, operation_id,
+                            origin, owner_check):
+        """Called only by the owner Console; receipt and native decision commit together."""
+        s = self.store
+        with nullcontext() if s.db.in_transaction else s.transaction():
+            # Reuse the same session/control credential/CSRF/origin check inside the write
+            # transaction. The bridge-token memory API never calls this entry point.
+            owner_check()
+            if not self.settings.console.enabled or origin != self.settings.console.public_origin:
+                raise CoreError("CONSOLE_ORIGIN_REQUIRED", 403)
+            if decision != "correct" and corrected is not None:
+                raise CoreError("CORRECTION_NOT_APPLICABLE", 400)
+            request_hash = hashlib.sha256(encode([
+                "POST", "/v1/console/memories/" + memory_id + "/decision",
+                {"decision": decision, "corrected_content": corrected},
+            ]).encode()).hexdigest()
+            operation = s.one("SELECT * FROM console_operations WHERE request_id=?",
+                              (operation_id,))
+            if (not operation or operation["state"] != "STARTED"
+                or operation["request_sha256"] != request_hash):
+                raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
+            before = s.one("SELECT * FROM memories WHERE memory_id=?", (memory_id,))
+            if not before:
+                raise CoreError("MEMORY_NOT_FOUND", 404)
+            roots = {e["event_id"] for e in s.rows(
+                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (memory_id,),
+            )}
+            result = self.decide(memory_id, decision, now, corrected)
+            if decision == "forget":
+                return result
+            current = s.one("SELECT * FROM memories WHERE memory_id=?", (result["memory_id"],))
+            roots.update(e["event_id"] for e in s.rows(
+                "SELECT event_id FROM memory_evidence WHERE memory_id=?", (result["memory_id"],),
+            ))
+            evidence = s.one("SELECT * FROM events WHERE event_id IN "
+                             "(SELECT value FROM json_each(?)) ORDER BY event_id LIMIT 1",
+                             (encode(sorted(roots)),))
+            if not evidence:
+                raise CoreError("MISSING_MEMORY_EVIDENCE", 409)
+            event_id = uid("evt")
+            body = {
+                "text": current["content"], "channel": "owner_console", "origin": origin,
+                "operation_id": operation_id, "request_sha256": request_hash,
+                "memory_id": memory_id, "result_memory_id": current["memory_id"],
+                "decision": decision,
+                "before_sha256": hashlib.sha256(encode(before).encode()).hexdigest(),
+                "after_sha256": hashlib.sha256(encode(current).encode()).hexdigest(),
+                "content_sha256": hashlib.sha256(current["content"].encode()).hexdigest(),
+                "source_event_ids": sorted(roots),
+            }
+            s.insert("events", event_id=event_id, schema_version=1, source="owner.decision",
+                     source_event_id="console-memory:" + operation_id,
+                     conversation_id=evidence["conversation_id"], actor_id="owner",
+                     event_type="memory.console_decided", occurred_at=now, ingested_at=now,
+                     privacy_scope="private", body_json=encode(body), trace_id=event_id,
+                     memory_processed=1)
+            s.insert("memory_evidence", memory_id=current["memory_id"], event_id=event_id,
+                     polarity=1, created_at=now)
+            for source_id in sorted(roots):
+                s.insert("event_dependencies", event_id=event_id, source_event_id=source_id)
+            s.audit("memory.owner_decision", memory_id, event_id, now, decision=decision,
+                    source_event_id=event_id, channel="owner_console",
+                    receipt_sha256=hashlib.sha256(encode(body).encode()).hexdigest())
+            return result
+
     def decide(self, memory_id, decision, now, corrected=None, *, evidence_event_id=None):
         self.require_owner("owner")
         s = self.store
@@ -433,7 +549,7 @@ class Memory:
                 status="CONFIRMED",
                 origin="user_confirmed",
                 confidence=1.0,
-                importance=old["importance"],
+                importance=0.5,
                 privacy_scope="private",
                 supersedes_memory_id=memory_id,
                 created_at=now,
@@ -493,13 +609,47 @@ class Memory:
             advance_epoch(s)
             return {"memory_id": new_id, "state": "CONFIRMED", "supersedes": memory_id}
 
-    def episodes(self, events, now):
+    def episodes(self, events, now, *, mark_processed=True):
         """Encode one bounded extraction batch atomically and idempotently."""
         s = self.store
         with nullcontext() if s.db.in_transaction else s.transaction():
-            return self._encode_episode(events, now)
+            return self._encode_episode(events, now, mark_processed=mark_processed)
 
-    def _encode_episode(self, events, now):
+    def episode_summary(self, episode_id, source_event_ids, now):
+        from companion.memory_enrichment import summary
+
+        return summary(self, episode_id, source_event_ids, now)
+
+    def episode_coverage(self, event_ids, now):
+        """Reuse only complete, still-private native episodes; never trust old summary text."""
+        version = read_version(self)
+        if not 1 <= len(event_ids) <= 20:
+            raise CoreError("INVALID_EPISODE_SOURCES", 400)
+        rows = self.store.rows(
+            "SELECT DISTINCT ep.episode_id,ep.conversation_id FROM episodes ep "
+            "JOIN episode_events ee USING(episode_id) WHERE ep.status='ACTIVE' "
+            "AND ep.privacy_scope='private' AND ee.event_id IN "
+            "(SELECT value FROM json_each(?)) ORDER BY ep.episode_id LIMIT 101",
+            (encode(sorted(set(event_ids))),),
+        )
+        if len(rows) > 100:
+            raise CoreError("EPISODE_COVERAGE_LIMIT", 409)
+        sources, result = MemorySources(self, now), []
+        for row in rows:
+            ids = [link["event_id"] for link in self.store.rows(
+                "SELECT event_id FROM episode_events WHERE episode_id=? ORDER BY event_id LIMIT 21",
+                (row["episode_id"],),
+            )]
+            if not 1 <= len(ids) <= 20:
+                continue
+            evidence = [sources.event(key, require_text=False) for key in ids]
+            if all(event is not None and event["conversation_id"] == row["conversation_id"]
+                   for event in evidence):
+                result.append({"episode_id": row["episode_id"], "source_event_ids": ids})
+        check_version(self, version)
+        return result
+
+    def _encode_episode(self, events, now, *, mark_processed=True):
         s = self.store
         version = read_version(self)
         if not 1 <= len(events) <= 20 or len({e["event_id"] for e in events}) != len(events):
@@ -525,8 +675,10 @@ class Memory:
         # An authentic image/voice/file with no owner text has no extractive summary.
         # Complete it in the same batch transaction; it must not roll back sibling facts
         # or become a permanently retried extraction job. It is not positive text evidence.
-        for event in events:
-            s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?", (event["event_id"],))
+        if mark_processed:
+            for event in events:
+                s.execute("UPDATE events SET memory_processed=1 WHERE event_id=?",
+                          (event["event_id"],))
         events = [event for event in events if json.loads(event["body_json"])["text"].strip()]
         if not events:
             check_version(self, version)
@@ -537,6 +689,19 @@ class Memory:
         if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
             check_version(self, version)
             return episode_id
+        covered = {key for row in self.episode_coverage([e["event_id"] for e in events], now)
+                   for key in row["source_event_ids"]}
+        if covered:
+            events = [event for event in events if event["event_id"] not in covered]
+            if not events:
+                check_version(self, version)
+                return None
+            episode_id = "episode_" + hashlib.sha256(encode(
+                sorted(e["event_id"] for e in events),
+            ).encode()).hexdigest()[:32]
+            if s.one("SELECT 1 FROM episodes WHERE episode_id=?", (episode_id,)):
+                check_version(self, version)
+                return episode_id
         excerpts = [json.loads(e["body_json"]).get("text", "")[:100] for e in events]
         summary = "资料摘录（不可信观察）：\n" + "\n".join(excerpts)
         s.insert(

@@ -55,7 +55,6 @@ def main():
             for args in (
                 ["serve", "--port", str(port)],
                 ["worker"],
-                ["diary-worker"],
                 ["life-worker"],
                 ["executive-worker"],
                 ["content-worker"],
@@ -155,7 +154,7 @@ def main():
                         break
                     time.sleep(0.1)
                 else:
-                    raise RuntimeError("Independent diary worker did not process empty days")
+                    raise RuntimeError("Life worker did not process empty diary days")
                 assert client.get("/internal/v1/diary").status_code == 401
                 for _ in range(100):
                     nightly = client.get(

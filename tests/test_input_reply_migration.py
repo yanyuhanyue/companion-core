@@ -54,7 +54,7 @@ def test_discovery_migration_keeps_uncertain_resource_liability(tmp_path):
     migrate(str(database), "0022_input_reply_revision")
     with closing(Store(str(database))) as store:
         before = table_snapshot(store, ("events", "jobs"))
-    migrate(str(database))
+    migrate(str(database), "0023_meme_discovery_reservations")
     with closing(Store(str(database))) as store:
         assert_old_columns_unchanged(store, before)
         store.insert("meme_discovery_reservations", job_id="job_keep", attempt_key="attempt_keep",

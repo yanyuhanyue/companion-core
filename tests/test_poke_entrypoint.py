@@ -3,6 +3,7 @@
 import hashlib
 import json
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import httpx
@@ -17,9 +18,10 @@ from companion.poke_protocol import PokePolicy, canonical_notice, canonical_sour
 from companion.retrieval import SemanticIndex
 from companion.store import encode
 from tests.conftest import run
-from tests.test_onebot_capture import pinned_plan, real_core_http
+from tests.poke_authority_fixture import environment as native_environment
+from tests.poke_authority_fixture import refresh
+from tests.test_onebot_capture import real_core_http
 from tests.test_poke import native_frame
-from tests.test_private_companion import companion_options
 
 
 @pytest.fixture(autouse=True)
@@ -33,11 +35,11 @@ def capture(core, cfg, plan, *, second=0):
     notice = canonical_notice(frame, owner_qq_id=cfg.owner_qq_id, bot_qq_id=cfg.bot_qq_id)
     identity = canonical_source(notice)
     value = {
-        "kind": "authenticated_onebot_poke", "window_sha256": plan.sha256,
+        "kind": "authenticated_onebot_poke", "authority": plan.authority.as_dict(),
         "event_id": identity["event_id"], "source_event_id": identity["source_event_id"],
         "notice": notice, "protocol_epoch": cfg.protocol_epoch,
-        "identity_sha256": plan.value["identity_sha256"],
-        "config_sha256": plan.value["config_sha256"],
+        "identity_sha256": plan.policy.capture.identity_sha256,
+        "config_sha256": "c" * 64,
         "frame_sha256": hashlib.sha256(encode(frame).encode()).hexdigest(),
         "evidence_sha256": "e" * 64,
         "occurred_at": datetime.fromtimestamp(frame["time"], UTC).isoformat(),
@@ -50,31 +52,28 @@ def capture(core, cfg, plan, *, second=0):
 
 @asynccontextmanager
 async def environment(core, tmp_path, model, *, daily_budget=20_000_000):
-    policy = PokePolicy(enabled=True, allow_native=True, coalesce_seconds=0)
-    options = companion_options(core)
-    options.update(poke_scope="owner_poke_v1",
-                   poke_policy_sha256=paid_budget.sha(policy.model_dump()))
-    options["core_options"].update(
-        poke_policy=policy, cloud_budget=CloudBudgetConfig(daily_micro_cny=daily_budget),
-    )
+    core.clock.now = datetime.now(UTC).replace(microsecond=0)
+    core.settings.cloud_budget = CloudBudgetConfig(daily_micro_cny=daily_budget)
+    env = native_environment(core, tmp_path)
+    core.settings.poke_policy = PokePolicy(enabled=True, allow_native=True, coalesce_seconds=0)
+    refresh(env)
     async with real_core_http(core) as port:
-        cfg, plan = pinned_plan(core, tmp_path, 3001, core_port=port, live=True, approved=True,
-                                scope_options=options)
+        cfg = replace(env.config, core_url=f"http://127.0.0.1:{port}",
+                      capture_signing_key=env.key.private_bytes_raw().hex(),
+                      owner_authority=env.approval.authority.as_dict())
         async with httpx.AsyncClient(base_url=cfg.core_url, trust_env=False,
             headers={"Authorization": "Bearer " + cfg.bridge_token}) as client, (
             httpx.AsyncClient(transport=httpx.MockTransport(model))
         ) as model_http:
-            opened = await client.post("/internal/v1/live-text/open",
-                                       json={"window_sha256": plan.sha256})
-            assert opened.status_code == 200, opened.text
             with Core(core.settings, ModelClient(core.settings, model_http), core.clock) as worker:
                 assert worker.store is not core.store
-                yield client, worker, cfg, plan
+                yield client, worker, cfg, env.approval
 
 
-async def lease_and_begin(client):
+async def lease_and_begin(client, authority):
     leased = await client.post("/internal/v1/deliveries/lease",
-                               json={"worker_id": "synthetic-bridge", "limit": 1})
+                               json={"worker_id": "synthetic-bridge", "limit": 1,
+                                     "authority": authority})
     assert leased.status_code == 200, leased.text
     item = leased.json()["items"][0]
     begun = await client.post("/internal/v1/deliveries/" + item["message_id"] + "/begin-send",
@@ -100,7 +99,7 @@ def test_signed_poke_uses_real_http_worker_budget_and_original_outbox(core, tmp_
     async def scenario():
         async with environment(core, tmp_path, model) as (client, worker, cfg, plan):
             body = capture(core, cfg, plan)
-            accepted = await client.post("/internal/v1/live-text/pokes", json=body)
+            accepted = await client.post("/internal/v1/pokes", json=body)
             assert accepted.status_code == 200, accepted.text
             job_id = accepted.json()["job_id"]
             assert accepted.json()["state"] == "QUEUED"
@@ -118,14 +117,13 @@ def test_signed_poke_uses_real_http_worker_budget_and_original_outbox(core, tmp_
             if kind == "none":
                 assert not core.store.rows("SELECT * FROM outbox")
             else:
-                item = await lease_and_begin(client)
-                assert item["window_origin_event_id"] == body["event_id"]
+                item = await lease_and_begin(client, cfg.owner_authority)
+                assert item["origin_event_id"] == body["event_id"]
                 assert "reply_revision" not in item
-                check = {"window_sha256": plan.sha256, "event_id": body["event_id"],
+                check = {"authority": plan.authority.as_dict(), "event_id": body["event_id"],
                          "message_id": item["message_id"], "lease_token": item["lease_token"]}
-                check["content_sha256" if kind == "poke" else "reply_sha256"] = paid_budget.sha(
-                    item["content"] if kind == "poke" else item["content"]["text"])
-                validated = await client.post("/internal/v1/live-text/send-check", json=check)
+                check["content_sha256"] = paid_budget.sha(item["content"])
+                validated = await client.post("/internal/v1/owner-authority/send-check", json=check)
                 assert validated.status_code == 200, validated.text
                 receipt = {"lease_token": item["lease_token"], "result": "SENT"}
                 if kind == "poke":
@@ -142,7 +140,7 @@ def test_signed_poke_uses_real_http_worker_budget_and_original_outbox(core, tmp_
                 saved = core.store.one("SELECT * FROM outbox")
                 assert saved["provider_message_id"] == (None if kind == "poke" else "12345")
                 assert bool(saved["native_ack_json"]) is (kind == "poke")
-            repeated = await client.post("/internal/v1/live-text/pokes", json=body)
+            repeated = await client.post("/internal/v1/pokes", json=body)
             assert repeated.status_code == 200 and repeated.json()["duplicate"]
             assert not await worker.run_once("receipt-replay")
             assert len(calls) == 1
@@ -162,7 +160,7 @@ def test_poke_cannot_repeat_uncertain_or_unfunded_model_call(core, tmp_path, fai
         async with environment(core, tmp_path, model,
             daily_budget=0 if failure == "daily_budget" else 20_000_000,
         ) as (client, worker, cfg, plan):
-            accepted = await client.post("/internal/v1/live-text/pokes",
+            accepted = await client.post("/internal/v1/pokes",
                                          json=capture(core, cfg, plan))
             assert accepted.status_code == 200, accepted.text
             assert await worker.run_once("one-attempt")

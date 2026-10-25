@@ -3,6 +3,7 @@
 import pytest
 
 from companion import private_life
+from companion.contracts import CoreError
 from companion.voice_protocol import VoiceLeaseRef
 from tests.test_voice_jobs import (
     claim,
@@ -81,7 +82,8 @@ def test_claim_expires_completed_results_before_replaying_old_request(
     control(jobs, ref, "RESULT_READY", "READY", result_sha256=value.result_sha256)
     jobs.submit("local", value)
     core.clock.advance(6)
-    assert jobs.claim("local", request) == leased
+    with pytest.raises(CoreError, match="VOICE_CLAIM_RETIRED"):
+        jobs.claim("local", request)
     assert core.store.one("SELECT state,input_blob,result_blob FROM voice_jobs WHERE job_id=?",
                           (job["job_id"],)) == {
         "state": "EXPIRED", "input_blob": None, "result_blob": None,

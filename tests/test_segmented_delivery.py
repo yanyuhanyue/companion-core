@@ -24,6 +24,7 @@ from companion.transport import (
     reply_group,
 )
 from tests.conftest import ingest, run
+from tests.test_test_fixtures import historical_database
 
 PARTS = ["今天先把手头的事情做好。", "然后我们再慢慢聊你的计划。", "剩下的事情可以明天继续。"]
 
@@ -87,31 +88,45 @@ def test_group_is_atomic_idempotent_and_content_is_not_duplicated(core, monkeypa
     assert core.store.rows("PRAGMA foreign_key_check") == []
 
 
-def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(core):
+def test_capacity_upgrade_preserves_existing_groups_indexes_and_foreign_keys(core, tmp_path):
+    def index_definitions(store):
+        # Batch recreation can reformat DDL without changing index semantics.
+        return {row["name"]: "".join(row["sql"].split()) if row["sql"] else None
+                for row in store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
+                                      "AND tbl_name='outbox'")}
+
     _, ids = freeze(core)
-    before = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
-    indexes = core.store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
-                              "AND tbl_name='outbox' ORDER BY name")
+    database = historical_database(core.store, tmp_path / "capacity.db", "0019_segmented_replies")
+    with closing(Store(database)) as store:
+        before = store.rows("SELECT * FROM outbox ORDER BY rowid")
+        indexes = index_definitions(store)
+    migrate(database, "0020_reply_segment_capacity")
     migration = Config()
     migration.set_main_option("script_location", str(Path("migrations").resolve()))
-    migration.set_main_option(
-        "sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
+    migration.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
+    with closing(Store(database)) as store:
+        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+        assert index_definitions(store) == indexes
+        assert store.rows("PRAGMA foreign_key_check") == []
+        assert reply_group(store, ids[0])["text"] == "".join(PARTS)
     command.downgrade(migration, "0019_segmented_replies")
-    migrate(core.settings.database)
-    assert core.store.rows("SELECT * FROM outbox ORDER BY rowid") == before
-    assert core.store.rows("SELECT name,sql FROM sqlite_master WHERE type='index' "
-                           "AND tbl_name='outbox' ORDER BY name") == indexes
-    assert core.store.rows("PRAGMA foreign_key_check") == []
-    assert reply_group(core.store, ids[0])["text"] == "".join(PARTS)
+    with closing(Store(database)) as store:
+        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
     ingest(core, 2)
     job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
                          "WHERE j.event_id='evt_test_2'")
     expanded = enqueue_reply_parts(core.store, job, PARTS + PARTS[:2], 0, core.clock())
     assert len(expanded) == 5
-    with pytest.raises(RuntimeError, match="REPLY_CAPACITY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW"
-                       ):
+    expanded_database = historical_database(
+        core.store, tmp_path / "expanded.db", "0020_reply_segment_capacity")
+    migration.set_main_option("sqlalchemy.url", "sqlite:///" + expanded_database.as_posix())
+    with pytest.raises(
+        RuntimeError, match="REPLY_CAPACITY_DOWNGRADE_REQUIRES_EXPLICIT_DATA_REVIEW",
+    ):
         command.downgrade(migration, "0019_segmented_replies")
-    assert reply_group(core.store, expanded[0])["text"] == "".join(PARTS + PARTS[:2])
+    with closing(Store(expanded_database)) as store:
+        assert reply_group(store, expanded[0])["text"] == "".join(PARTS + PARTS[:2])
+        assert store.rows("PRAGMA foreign_key_check") == []
 
 
 def test_two_workers_cannot_lease_later_parts_and_ack_starts_the_gap(core):
@@ -290,25 +305,20 @@ def test_all_parts_are_erased_and_old_encrypted_backup_cannot_restore_them(core,
     assert all(part.encode() not in restored_path.read_bytes() for part in PARTS)
 
 
-def test_downgrade_refuses_to_discard_existing_segment_group(core):
+def test_downgrade_refuses_to_discard_existing_segment_group(core, tmp_path):
     _, ids = freeze(core)
-    before = core.store.rows("SELECT * FROM outbox ORDER BY rowid")
-    removed_defaults = {"delivery_lane": "owner_private", "native_ack_json": None}
-    assert all(
-        {key: row[key] for key in removed_defaults} == removed_defaults for row in before
-    )
+    database = historical_database(core.store, tmp_path / "segments.db", "0019_segmented_replies")
     config = Config()
     config.set_main_option(
-        "script_location", str(Path(__file__).resolve().parents[1] / "migrations"),
-    )
-    config.set_main_option("sqlalchemy.url", "sqlite:///" + Path(core.settings.database).as_posix())
+        "script_location", str(Path(__file__).resolve().parents[1] / "migrations"))
+    config.set_main_option("sqlalchemy.url", "sqlite:///" + database.as_posix())
+    with closing(Store(database)) as store:
+        before = store.rows("SELECT * FROM outbox ORDER BY rowid")
     with pytest.raises(RuntimeError, match="SEGMENTED_REPLIES_DOWNGRADE_REQUIRES_EXPLICIT_REVIEW"):
         command.downgrade(config, "0018_reflection_goal_lineage")
-    assert core.store.rows("SELECT * FROM outbox ORDER BY rowid") == [
-        {key: value for key, value in row.items() if key not in removed_defaults} for row in before
-    ]
-    assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-        "0019_segmented_replies"
-    )
-    assert reply_group(core.store, ids[0])["text"] == "".join(PARTS)
-    assert not core.store.rows("PRAGMA foreign_key_check")
+    with closing(Store(database)) as store:
+        assert store.rows("SELECT * FROM outbox ORDER BY rowid") == before
+        assert store.one("SELECT version_num FROM alembic_version")["version_num"] == (
+            "0019_segmented_replies")
+        assert reply_group(store, ids[0])["text"] == "".join(PARTS)
+        assert not store.rows("PRAGMA foreign_key_check")

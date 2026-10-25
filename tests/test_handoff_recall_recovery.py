@@ -20,7 +20,6 @@ from tests.test_input_protocol import environment, notice, sign
 from tests.test_live_text_handoff import initial, journal_bytes, reference, stop_and_successor
 from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
-from tests.test_paid_model_gate import approved_live
 
 HANDOFF = "/internal/v1/live-text/handoff"
 ABORT = HANDOFF + "/abort"
@@ -342,12 +341,26 @@ def test_abort_fsync_survives_failed_database_receipt_and_cannot_be_blindly_retr
 
 
 def test_abort_refuses_a_successor_with_real_settled_model_admission(core, tmp_path):
-    approved_live(core, tmp_path, window_id="win_" + "2" * 32)
-    request = budget.reserve(core.store, core.settings, None, "chat",
-                             [{"role": "user", "content": "synthetic admission"}], core.clock())
-    budget.settle(core.store, core.settings, request, ModelResponse("done", 100, 20))
+    from companion import owner_authority
+    from companion.owner_authority_protocol import (
+        AuthorityStop,
+        OwnerGrantPolicy,
+        OwnerRuntimeConfig,
+    )
+    from tests.test_owner_authority import activate
+
     initial(core, tmp_path)
     _, new = stop_and_successor(core, tmp_path)
+    core.settings.owner_runtime = OwnerRuntimeConfig(mode="ENABLED")
+    activated, _ = activate(core, OwnerGrantPolicy(
+        owner_qq_id=core.settings.owner_qq_id, purposes=["memory"], memory_scope="owner_private",
+        authorization_sha256="d" * 64,
+        paid_contract_sha256=paid_budget.sha(paid_budget.snapshot(core.settings))))
+    request = budget.reserve(core.store, core.settings, None, "memory_review",
+                             [{"role": "user", "content": "synthetic admission"}], core.clock())
+    budget.settle(core.store, core.settings, request, ModelResponse("done", 100, 20))
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="stop-settled-handoff-evidence", authority=activated["authority"]))
     assert core.store.one("SELECT window_id FROM model_admissions")["window_id"] == new.window_id
 
     async def scenario():
@@ -355,6 +368,7 @@ def test_abort_refuses_a_successor_with_real_settled_model_admission(core, tmp_p
             before = snapshot(core)
             result = await client.post(ABORT, json=abort_body(new))
             assert result.status_code in {403, 409, 503}, result.text
+            assert result.json()["error"] == "LIVE_TEXT_HANDOFF_ABORT_UNPROVEN"
             assert snapshot(core) == before
     run(scenario())
     assert core.model.calls == []

@@ -19,6 +19,12 @@ from companion.store import after, encode
 from companion.transport import cancel_proactive_work, reconcile_delivery
 
 COOKIE = "companion_owner_session"
+# These native Memory failures leave no committed change after its transaction rolls back.
+# Keep allowlists at each caller: a generic CoreError is not proof of no effect.
+MEMORY_REJECTIONS = frozenset({
+    "MEMORY_NOT_FOUND", "MEMORY_NOT_ACTIVE", "CORRECTION_REQUIRED", "CREDENTIAL_MEMORY_DENIED",
+    "CORRECTION_NOT_APPLICABLE",
+})
 
 
 class Login(StrictModel):
@@ -52,7 +58,7 @@ def _credential(settings):
     return digest("companion/session/v1:" + settings.control_token.get_secret_value())
 
 
-def _operation(core, request, key, body, apply, *, recover=None):
+def _operation(core, request, key, body, apply, *, recover=None, rejected_errors=frozenset()):
     if not key or len(key) > 128 or not key.isascii():
         raise CoreError("IDEMPOTENCY_KEY_REQUIRED", 400)
     s, now = core.store, core.clock()
@@ -63,6 +69,12 @@ def _operation(core, request, key, body, apply, *, recover=None):
         if row:
             if row["request_sha256"] != fingerprint:
                 raise CoreError("IDEMPOTENCY_CONFLICT", 409)
+            if row["state"] == "REJECTED":
+                failure = json.loads(row["result_json"])
+                if (set(failure) != {"error", "status"} or failure["error"] not in rejected_errors
+                    or type(failure["status"]) is not int or not 400 <= failure["status"] < 500):
+                    raise CoreError("CONSOLE_OPERATION_RECONCILIATION_REQUIRED", 409)
+                raise CoreError(failure["error"], failure["status"])
             if row["state"] != "COMPLETE":
                 result = recover(key, fingerprint) if recover is not None else None
                 if result is None:
@@ -75,7 +87,18 @@ def _operation(core, request, key, body, apply, *, recover=None):
     # Native services own their transactions and erasure replay. A process death
     # between native commit and this receipt never blindly repeats the operation.
     if result is None:
-        result = apply()
+        try:
+            result = apply()
+        except CoreError as error:
+            if error.code in rejected_errors and not s.db.in_transaction:
+                with s.transaction():
+                    s.execute("UPDATE console_operations SET state='REJECTED',result_json=?,"
+                              "updated_at=? WHERE request_id=? AND state='STARTED'",
+                              (encode({"error": error.code, "status": error.status}),
+                               core.clock(), key))
+                    s.audit("console.operation_rejected", key, "console", core.clock(),
+                            code=error.code, status=error.status)
+            raise
     safe = {name: result[name] for name in (
         "memory_id", "state", "supersedes", "entry_id", "version", "enabled", "target",
     ) if name in result}
@@ -98,7 +121,7 @@ def register_console_routes(app, settings):
         if not settings.control_token.get_secret_value():
             raise CoreError("CONSOLE_OWNER_CREDENTIAL_REQUIRED", 503)
 
-    async def owner(request: Request):
+    def check_owner(request: Request):
         enabled()
         core = app.state.core
         token = request.cookies.get(COOKIE, "")
@@ -112,6 +135,9 @@ def register_console_routes(app, settings):
             if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), row["csrf_token"]):
                 raise CoreError("CONSOLE_CSRF_REQUIRED", 403)
         return row
+
+    async def owner(request: Request):
+        return check_owner(request)
 
     @app.middleware("http")
     async def private_headers(request, call_next):
@@ -213,7 +239,11 @@ def register_console_routes(app, settings):
                               idempotency_key: str = Header(default="")):
         core = app.state.core
         return _operation(core, request, idempotency_key, body.model_dump(), lambda:
-            core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content))
+            core.memory.decide_from_console(
+                memory_id, body.decision, core.clock(), body.corrected_content,
+                operation_id=idempotency_key, origin=request.headers.get("origin", ""),
+                owner_check=lambda: check_owner(request),
+            ), rejected_errors=MEMORY_REJECTIONS)
 
     @app.get(prefix + "/life", dependencies=auth)
     async def life():
@@ -281,7 +311,8 @@ def register_console_routes(app, settings):
                          idempotency_key: str = Header(default="")):
         core = app.state.core
         return _operation(core, request, idempotency_key, body.model_dump(), lambda:
-                          core.diary.correct(day, body.text, settings.owner_qq_id))
+                          core.diary.correct(day, body.text, settings.owner_qq_id),
+                          rejected_errors={"INVALID_DIARY_CORRECTION"})
 
     @app.post(prefix + "/diary/{day}/forget", dependencies=auth)
     async def forget(day: date, request: Request, idempotency_key: str = Header(default="")):
@@ -309,7 +340,10 @@ def register_console_routes(app, settings):
                     cancel_proactive_work(core.store, core.clock())
             return {"target": body.target, "enabled": body.enabled}
 
-        return _operation(core, request, idempotency_key, body.model_dump(), apply)
+        # Both failures occur before their setters start a native transaction.
+        return _operation(core, request, idempotency_key, body.model_dump(), apply,
+                          rejected_errors={"DIARY_DISABLED_IN_CONFIG",
+                                           "PROACTIVE_DISABLED_IN_CONFIG"})
 
     @app.get(prefix + "/configuration", dependencies=auth)
     async def configuration():

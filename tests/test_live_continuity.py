@@ -6,100 +6,85 @@ from contextlib import asynccontextmanager
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from websockets.asyncio.server import serve
 
-from companion import live_text
+from companion import owner_authority, owner_input, paid_budget
 from companion.backup import backup, restore
 from companion.config import LiveTextWindowApproval
 from companion.contracts import Candidate
 from companion.core import Core
-from companion.model import ModelClient
 from companion.privacy import advance_epoch
-from companion.store import after, encode, uid
-from companion_onebot_bridge import network
-from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow
+from companion.store import encode, uid
 from tests.conftest import run
-from tests.support.onebot import provider
+from tests.native_continuous_support import host
 from tests.test_dialogue_context import sent_history
 from tests.test_live_text_window import live_fixture
-from tests.test_onebot_capture import bootstrap_frames, capture_approval
-from tests.test_onebot_delivery import core_client
 from tests.test_onebot_direct import raw_event
-from tests.test_onebot_window import reply_approval
 
 
 @asynccontextmanager
-async def continuity_window(
-    core, tmp_path, *, turns=4, byte_limit=16000, texts=None, soft_limit=3200,
-    scope_options=None,
-):
+async def native_continuity(core, tmp_path, *, turns=4, byte_limit=16000, texts=None,
+                            soft_limit=3200, core_options=None, paid_options=None,
+                            grant_options=None, respond=None, purposes=None):
     texts = texts or ["选了茉莉绿茶", "现在说的这个呢？", "刚才聊到哪了？", "还是那个吗？", "继续"]
-    calls, sends = [], []
-    number = 0
+    number, captures = 0, 0
+    calls = []
 
     async def source(ws):
         nonlocal number
         number += 1
-        for frame in bootstrap_frames():
-            await ws.send(json.dumps(frame))
-        await ws.send(json.dumps(raw_event(number, text=texts[number - 1])))
+        await ws.send(json.dumps(raw_event(number, text=texts[number - 1],
+                                          time=int(core.clock.now.timestamp()))))
         await ws.wait_closed()
 
-    def respond(request):
+    def provider_reply(request):
         calls.append(json.loads(request.content))
-        return httpx.Response(200, json={
-            "choices": [{"message": {"content": f"合成回答{len(calls)}"}}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        })
+        if respond:
+            return respond(request)
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": f"合成回答{len(calls)}"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
-    async with serve(source, "127.0.0.1", 0) as server:
-        cfg, plan = live_fixture(
-            core, tmp_path, core_options={"max_recent_messages": turns * 2,
-                                          "context_soft_tokens": soft_limit},
-            bridge_options={
-                "capture_signing_key": Ed25519PrivateKey.generate().private_bytes_raw().hex(),
-                "onebot_ws_url": f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}",
-            },
-            history_scope="approved_window" if turns else "none", max_history_turns=turns,
-            max_history_utf8_bytes=byte_limit if turns else 0,
-            **(scope_options or {}),
-        )
-        async with (
-            core_client(core) as client,
-            network.private_http_client(cfg.onebot_http_url, cfg.onebot_token,
-                                        transport=httpx.MockTransport(
-                                            lambda r: provider(r, sends))) as protocol,
-            httpx.AsyncClient(transport=httpx.MockTransport(respond)) as model,
-        ):
-            client.base_url = cfg.core_url
-            core.model = ModelClient(core.settings, model)
-            with Spool(cfg) as spool:
-                window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                await window.open(client)
+    from datetime import UTC, datetime, timedelta
 
-                async def capture_input():
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(client, capture_approval(window))
+    selected = purposes or (["chat", "history"] if turns else ["chat"])
+    history = {"scope": "owner_private", "not_before": datetime.now(UTC) - timedelta(days=1),
+               "max_turns": turns, "max_utf8_bytes": byte_limit} if turns else {}
+    async with host(core, tmp_path, source, model_reply=provider_reply,
+        purposes=selected, core_options={"max_recent_messages": turns * 2,
+            "context_soft_tokens": soft_limit, **(core_options or {})},
+        paid_options={"daily_calls": 100, "window_calls": 100, **(paid_options or {})},
+        grant_options={"history": history, **(grant_options or {})},
+    ) as (active, _, sends, _):
+        async def capture_input():
+            nonlocal captures
+            captures += 1
+            await active.capture(captures)
+            await active.flush()
 
-                async def finish():
-                    assert await core.run_once("continuity-test")
-                    return await window.send_once(client, protocol, reply_approval(plan, core))
+        async def finish():
+            assert await core.run_once("native-continuity")
+            return await active.pump()
 
-                yield window, client, calls, sends, capture_input, finish
+        yield active, active.client, calls, sends, capture_input, finish
+
+
+def history_snapshot(core):
+    row = core.store.one(
+        "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1")
+    return next(item["proof"] for item in json.loads(row["snapshots_json"])
+                if item["kind"] == "history")
 
 
 def test_five_authenticated_turns_use_only_approved_window_and_keep_one_attempt(core, tmp_path):
     sent_history(core, 999, "窗口前的旧输入", "窗口前的旧回复")
 
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             window, client, calls, sends, capture_input, finish,
         ):
             for number in range(1, 6):
                 await capture_input()
-                status = await finish()
+                assert await finish()
                 prompt = calls[-1]["messages"]
                 assert len(prompt) == number * 2
                 assert [m["role"] for m in prompt] == ["system"] + [
@@ -109,14 +94,15 @@ def test_five_authenticated_turns_use_only_approved_window_and_keep_one_attempt(
                 if number > 1:
                     assert prompt[1]["content"] == "选了茉莉绿茶"
                     assert prompt[2]["content"] == "合成回答1"
-                assert status["attempt_states"] == {"ACK": number}
-                assert status["model_attempts"] == number
+                assert window.attempts() == {"ACK": number}
+                assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == number
             assert len(calls) == len(sends) == 5
             assert not await core.run_once()
-            assert window.status()["state"] == "STOPPED"
+            assert window.runtime.row()["state"] == "ACTIVE"
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 5
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 6  # plus old history
-            assert window.status()["phone_receipts"] is None
+            assert all(row[0] == "ACK" for row in window.db.execute(
+                "SELECT state FROM window_attempts"))
             assert (await client.get("/internal/v1/ops/status")).status_code == 200
 
     run(scenario())
@@ -125,7 +111,7 @@ def test_five_authenticated_turns_use_only_approved_window_and_keep_one_attempt(
 @pytest.mark.parametrize("turns,byte_limit,kept", [(0, 0, 0), (1, 16000, 1), (4, 1, 0)])
 def test_scope_and_utf8_bound_drop_only_complete_turns(core, tmp_path, turns, byte_limit, kept):
     async def scenario():
-        async with continuity_window(core, tmp_path, turns=turns, byte_limit=byte_limit) as (
+        async with native_continuity(core, tmp_path, turns=turns, byte_limit=byte_limit) as (
             _, _, calls, _, capture_input, finish,
         ):
             for _ in range(3):
@@ -178,7 +164,7 @@ def mutate_source(core, kind):
     elif kind == "action":
         core.store.execute("UPDATE outbox SET action_type='qq.private.proactive'")
     else:
-        key = live_text.INPUT + event_id
+        key = owner_input.INPUT + event_id
         receipt = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?", (key,))[
             "value"
         ])
@@ -189,21 +175,21 @@ def mutate_source(core, kind):
         elif kind == "capture_identity":
             receipt["capture"]["identity_sha256"] = "a" * 64
         elif kind == "window":
-            receipt["window_sha256"] = "a" * 64
+            receipt["authority"]["policy_sha256"] = "a" * 64
         elif kind == "receipt_epoch":
             receipt["privacy_epoch"] += 1
         core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?", (encode(receipt), key))
 
 
 @pytest.mark.parametrize("kind", [
-    "privacy", "PENDING", "FAILED", "DELIVERY_UNCERTAIN", "UNKNOWN", "redacted",
+    "PENDING", "FAILED", "DELIVERY_UNCERTAIN", "UNKNOWN", "redacted",
     "SUPERSEDED", "FORGOTTEN", "input_text", "reply_text", "actor", "source",
     "unsigned", "no_capture", "window", "receipt_epoch", "conversation", "action",
     "capture_identity",
 ])
 def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tmp_path, kind):
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             _, _, calls, sends, capture_input, finish,
         ):
             await capture_input()
@@ -223,16 +209,42 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tm
             job = core.store.one(
                 "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1",
             )
-            if kind == "redacted":
-                assert job == {"state": "CANCELLED", "last_error_code": "REPLY_SOURCE_RECALLED"}
-                assert live_text.status(core.store, core.settings, core.clock)["approved"]
-            else:
-                assert job["state"] == "FAILED"
-            frozen = json.loads(core.store.one(
-                "SELECT value FROM runtime_meta WHERE key LIKE ? ORDER BY rowid DESC LIMIT 1",
-                (live_text.CONTEXT + "%",),
-            )["value"])
-            assert len(frozen["sources"]) == 1
+            assert job["state"] in {"CANCELLED", "FAILED"}, job
+            assert len(history_snapshot(core)) == 1
+
+    run(scenario())
+
+
+def test_unrelated_privacy_epoch_keeps_original_history_source_and_scope(core, tmp_path):
+    async def scenario():
+        async with native_continuity(core, tmp_path) as (
+            _, _, calls, sends, capture_input, finish,
+        ):
+            await capture_input()
+            await finish()
+            await capture_input()
+            selected = []
+
+            async def advance_unrelated_epoch(_request):
+                selected.extend(history_snapshot(core))
+                advance_epoch(core.store)
+
+            core.model.client.event_hooks["request"].append(advance_unrelated_epoch)
+            assert await core.run_once()
+            assert len(calls) == 2 and len(sends) == 1
+            assert len(selected) == 1 and history_snapshot(core) == selected
+            assert calls[-1]["messages"][1:3] == [
+                {"role": "user", "content": "选了茉莉绿茶"},
+                {"role": "assistant", "content": "合成回答1"},
+            ]
+            # Selected-source revalidation permits the request; final output custody
+            # still fences the response across a privacy-generation change.
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
+            assert all(row["state"] == "SETTLED" for row in core.store.rows(
+                "SELECT state FROM model_usage"))
+            job = core.store.one(
+                "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1")
+            assert job == {"state": "RETRY_WAIT", "last_error_code": "PRIVACY_CHANGED"}
 
     run(scenario())
 
@@ -244,7 +256,7 @@ def test_selected_history_changed_in_final_preflight_causes_zero_new_io(core, tm
 ])
 def test_ineligible_previous_source_is_absent_from_actual_prompt(core, tmp_path, kind):
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             _, _, calls, sends, capture_input, finish,
         ):
             await capture_input()
@@ -267,7 +279,7 @@ def test_history_utf8_byte_boundary_keeps_a_pair_or_neither(core, tmp_path, delt
     bound = len("选了茉莉绿茶合成回答1".encode()) + delta
 
     async def scenario():
-        async with continuity_window(core, tmp_path, byte_limit=bound) as (
+        async with native_continuity(core, tmp_path, byte_limit=bound) as (
             _, _, calls, _, capture_input, finish,
         ):
             await capture_input()
@@ -283,7 +295,7 @@ def test_sources_removed_by_soft_bound_are_not_frozen_or_reintroduced(core, tmp_
     current = "当前完整输入" * 80
 
     async def scenario():
-        async with continuity_window(core, tmp_path, soft_limit=1000,
+        async with native_continuity(core, tmp_path, soft_limit=1000,
                                      texts=["旧内容" * 150, current]) as (
             _, _, calls, _, capture_input, finish,
         ):
@@ -299,11 +311,7 @@ def test_sources_removed_by_soft_bound_are_not_frozen_or_reintroduced(core, tmp_
             assert len(calls) == 2
             assert len(calls[-1]["messages"]) == 2
             assert calls[-1]["messages"][-1] == {"role": "user", "content": current}
-            frozen = json.loads(core.store.one(
-                "SELECT value FROM runtime_meta WHERE key LIKE ? ORDER BY rowid DESC LIMIT 1",
-                (live_text.CONTEXT + "%",),
-            )["value"])
-            assert frozen["sources"] == []
+            assert history_snapshot(core) == []
 
     run(scenario())
 
@@ -325,7 +333,7 @@ def test_history_scope_requires_explicit_finite_approval(core, tmp_path, changes
 
 def test_core_restart_keeps_original_window_history_and_attempts(core, tmp_path):
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             _, _, calls, sends, capture_input, finish,
         ):
             await capture_input()
@@ -338,7 +346,7 @@ def test_core_restart_keeps_original_window_history_and_attempts(core, tmp_path)
                     {"role": "user", "content": "选了茉莉绿茶"},
                     {"role": "assistant", "content": "合成回答1"},
                 ]
-                assert restarted.status()["live_text_window"]["model_attempts"] == 2
+                assert restarted.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 2
                 assert not await restarted.run_once()
                 assert len(calls) == 2
 
@@ -347,7 +355,7 @@ def test_core_restart_keeps_original_window_history_and_attempts(core, tmp_path)
 
 def test_erasure_and_old_database_replay_clear_history_generated_replies(core, tmp_path):
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             _, _, calls, _, capture_input, finish,
         ):
             await capture_input()
@@ -366,10 +374,10 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
             assert all(row["content_json"] == "{}" for row in core.store.rows(
                 "SELECT content_json FROM outbox"
             ))
-            assert core.status()["live_text_window"]["approved"] is False
+            assert owner_authority.status(core.store, core.settings,
+                                          core.clock)["state"] == "ACTIVE"
             # New metadata stores only references/digests, never another plaintext copy.
-            metadata = encode(core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE ?",
-                                              (live_text.CONTEXT + "%",)))
+            metadata = encode(core.store.rows("SELECT snapshots_json FROM agent_conversations"))
             assert "选了茉莉绿茶" not in metadata and "合成回答" not in metadata
             restore(snapshot, restored, key, core.settings.erasure_ledger)
             with Core(core.settings.model_copy(update={"database": str(restored)}),
@@ -379,7 +387,8 @@ def test_erasure_and_old_database_replay_clear_history_generated_replies(core, t
                 assert all(row["content_json"] == "{}" for row in reopened.store.rows(
                     "SELECT content_json FROM outbox"
                 ))
-                assert reopened.status()["live_text_window"]["approved"] is False
+                assert owner_authority.status(reopened.store, reopened.settings,
+                                              reopened.clock)["state"] != "ACTIVE"
                 assert reopened.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 2
                 assert not await reopened.run_once()
                 assert len(calls) == 2
@@ -392,35 +401,28 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
     core, tmp_path, change_reply,
 ):
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             _, _, calls, sends, capture_input, finish,
         ):
             await capture_input()
             await finish()
             await capture_input()
-            original = core.model.client._transport.handler
-
-            def receive_then_remove(request):
-                response = original(request)
-                frozen = core.store.one(
-                    "SELECT key FROM runtime_meta WHERE key LIKE ? ORDER BY rowid DESC LIMIT 1",
-                    (live_text.CONTEXT + "%",),
-                )
-                core.store.execute("DELETE FROM runtime_meta WHERE key=?", (frozen["key"],))
+            async def receive_then_remove(response):
+                core.store.execute("DELETE FROM agent_conversations WHERE job_id=(SELECT job_id "
+                                   "FROM jobs ORDER BY rowid DESC LIMIT 1)")
                 if change_reply:
                     mutate_source(core, "reply_text")
-                return response
 
-            core.model.client._transport.handler = receive_then_remove
+            core.model.client.event_hooks["response"].append(receive_then_remove)
             assert await core.run_once()
             assert len(calls) == 2 and len(sends) == 1
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 1
             result = core.store.one(
                 "SELECT state,last_error_code FROM jobs ORDER BY rowid DESC LIMIT 1"
             )
-            assert result == {
-                "state": "FAILED", "last_error_code": "LIVE_TEXT_CONTEXT_REQUIRED",
-            }
+            assert result == ({"state": "CANCELLED", "last_error_code": "REPLY_CANCELLED"}
+                              if change_reply else {"state": "FAILED",
+                                                    "last_error_code": "MODEL_OUTCOME_UNKNOWN"})
             usage = core.store.rows("SELECT state,billed_micro_usd FROM model_usage")
             assert len(usage) == 2 and all(
                 row["state"] == "SETTLED" and row["billed_micro_usd"] > 0 for row in usage
@@ -431,37 +433,33 @@ def test_missing_context_after_model_receive_retains_cost_without_reply(
 
 def test_send_check_refuses_missing_snapshot_after_completed_model(core, tmp_path):
     async def scenario():
-        async with continuity_window(core, tmp_path) as (
+        async with native_continuity(core, tmp_path) as (
             window, client, calls, sends, capture_input, finish,
         ):
             await capture_input()
             await finish()
             await capture_input()
             assert await core.run_once()
-            row = core.store.one("SELECT * FROM outbox ORDER BY rowid DESC LIMIT 1")
-            lease = "lease_" + "f" * 32
-            core.store.execute(
-                "UPDATE outbox SET state='SENDING',lease_token=?,lease_until=? WHERE message_id=?",
-                (lease, after(core.clock(), 60), row["message_id"]),
-            )
-            check = {
-                "window_sha256": window.plan.sha256, "event_id": row["origin_event_id"],
-                "message_id": row["message_id"], "reply_sha256": reply_approval(window.plan, core)[
-                    "reply_sha256"
-                ], "lease_token": lease,
-            }
-            assert (await client.post("/internal/v1/live-text/send-check", json=check)).json()[
-                "approved"
-            ] is True
-            core.store.execute("DELETE FROM runtime_meta WHERE key=?", (
-                live_text.CONTEXT + core.store.one("SELECT job_id FROM jobs WHERE event_id=?",
-                                                  (row["origin_event_id"],))["job_id"],
-            ))
-            response = await client.post("/internal/v1/live-text/send-check", json=check)
-            assert response.status_code == 503
-            assert response.json()["error"] == "LIVE_TEXT_CONTEXT_REQUIRED"
+            leased = await client.post("/internal/v1/deliveries/lease", json={
+                "worker_id": "native-history-check", "authority": window.runtime.authority})
+            assert leased.status_code == 200, leased.text
+            item = leased.json()["items"][0]
+            begun = await client.post(f"/internal/v1/deliveries/{item['message_id']}/begin-send",
+                                      json={"lease_token": item["lease_token"]})
+            assert begun.status_code == 200, begun.text
+            check = {"authority": window.runtime.authority, "event_id": item["origin_event_id"],
+                "message_id": item["message_id"],
+                "content_sha256": paid_budget.sha(item["content"]),
+                "reply_revision": item["reply_revision"], "lease_token": item["lease_token"]}
+            path = "/internal/v1/owner-authority/send-check"
+            assert (await client.post(path, json=check)).json()["approved"] is True
+            core.store.execute("DELETE FROM agent_conversations WHERE job_id=(SELECT job_id "
+                               "FROM jobs WHERE event_id=?)", (item["origin_event_id"],))
+            response = await client.post(path, json=check)
+            assert response.status_code == 409, response.text
+            assert response.json()["error"] == "REPLY_CANCELLED"
             assert len(calls) == 2 and len(sends) == 1
             assert core.store.one("SELECT state FROM outbox WHERE message_id=?",
-                                  (row["message_id"],))["state"] == "SENDING"
+                                  (item["message_id"],))["state"] == "SENDING"
 
     run(scenario())

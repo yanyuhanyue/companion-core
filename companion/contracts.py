@@ -75,19 +75,25 @@ class LeaseRequest(StrictModel):
     worker_id: str = Field(min_length=1, max_length=128)
     limit: int = Field(default=5, ge=1, le=20)
     delivery_lane: Literal["owner_private", "qq_account"] = "owner_private"
-    window_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    authority: dict | None = None
     account_actions_authorization_sha256: str | None = Field(
         default=None, pattern=r"^[a-f0-9]{64}$",
     )
 
+    @field_validator("authority")
+    @classmethod
+    def owner_reference(cls, value):
+        from companion_delivery_protocol.authority import validate_authority_ref
+
+        return validate_authority_ref(value) if value is not None else None
+
     @model_validator(mode="after")
     def account_authority(self):
-        if (self.delivery_lane == "qq_account") != bool(
-            self.window_sha256 and self.account_actions_authorization_sha256
-        ) or (self.delivery_lane == "owner_private" and (
-            self.window_sha256 or self.account_actions_authorization_sha256
-        )):
-            raise ValueError("account delivery requires its explicit window and authority")
+        if (self.delivery_lane == "qq_account" and (
+            self.authority is None or not self.account_actions_authorization_sha256
+        )) or (self.delivery_lane == "owner_private"
+               and self.account_actions_authorization_sha256 is not None):
+            raise ValueError("account delivery requires its owner reference and action authority")
         return self
 
 
@@ -155,10 +161,18 @@ class Candidate(StrictModel):
     content: str = Field(min_length=1, max_length=500)
     evidence_event_id: str
     evidence_quote: str = Field(min_length=2, max_length=500)
+    salience: int | None = Field(default=None, ge=1, le=10, strict=True)
+
+
+class EpisodeSummary(StrictModel):
+    title: str = Field(min_length=1, max_length=80)
+    summary: str = Field(min_length=1, max_length=600)
+    source_event_ids: list[str] = Field(min_length=1, max_length=20)
 
 
 class Extraction(StrictModel):
     memories: list[Candidate] = Field(default_factory=list, max_length=20)
+    episode_summaries: list[EpisodeSummary] = Field(default_factory=list, max_length=4)
 
 
 class MemoryRelation(StrictModel):

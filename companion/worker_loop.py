@@ -12,7 +12,8 @@ from companion.store import encode, utcnow
 KEY = "worker_loop"
 WRITE_INTERVAL_SECONDS = 2
 MAX_AGE_SECONDS = 10
-STAGES = frozenset({"POLL_COMPLETED", "POLL_AND_MAINTENANCE_COMPLETED"})
+WAITING_STAGES = frozenset({"WAITING_AFTER_POLL", "WAITING_AFTER_MAINTENANCE"})
+STAGES = frozenset({"POLL_COMPLETED", "POLL_AND_MAINTENANCE_COMPLETED"}) | WAITING_STAGES
 
 
 class Recorder:
@@ -21,22 +22,29 @@ class Recorder:
         self.session = uuid.uuid4().hex
         self.sequence = 0
         self.last_write = None
+        self.last_waiting = None
 
-    def completed(self, *, maintenance=False):
+    def completed(self, *, maintenance=False, waiting=False):
         self.sequence += 1
         if self.sequence >= 2**63:
             raise ValueError("WORKER_LOOP_SEQUENCE_EXHAUSTED")
         now = monotonic()
-        if self.last_write is not None and now - self.last_write < WRITE_INTERVAL_SECONDS:
+        if self.last_write is not None and self.last_waiting == waiting and (
+            waiting and not maintenance or now - self.last_write < WRITE_INTERVAL_SECONDS
+        ):
             return
+        stage = (
+            "WAITING_AFTER_MAINTENANCE" if maintenance else "WAITING_AFTER_POLL"
+        ) if waiting else (
+            "POLL_AND_MAINTENANCE_COMPLETED" if maintenance else "POLL_COMPLETED"
+        )
         record = {"session": self.session, "sequence": self.sequence,
-                  "completed_at": utcnow(), "stage": (
-                      "POLL_AND_MAINTENANCE_COMPLETED" if maintenance else "POLL_COMPLETED"
-                  )}
+                  "completed_at": utcnow(), "stage": stage}
         self.store.execute(
             "INSERT OR REPLACE INTO runtime_meta VALUES (?,?)", (KEY, encode(record)),
         )
         self.last_write = now
+        self.last_waiting = waiting
 
 
 def _project(record, now):
@@ -57,7 +65,8 @@ def _project(record, now):
     age = (now - completed).total_seconds()
     if age < -2:
         raise ValueError("WORKER_LOOP_RECORD_INVALID")
-    return {"state": "RECORDED" if age <= MAX_AGE_SECONDS else "STALE",
+    return {"state": ("WAITING" if record["stage"] in WAITING_STAGES else "RECORDED")
+            if age <= MAX_AGE_SECONDS else "STALE",
             "session": record["session"], "sequence": record["sequence"],
             "completed_at": completed.isoformat(timespec="microseconds"), "stage": record["stage"],
             "age_seconds": round(max(0, age), 6)}

@@ -1,30 +1,28 @@
 import hashlib
 import json
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
-from companion import live_text, paid_budget, poke, reply_revision
-from companion.contracts import CoreError
+from companion import owner_authority, paid_budget, poke, reply_revision
+from companion.contracts import CoreError, InboundEvent
+from companion.owner_authority_protocol import AuthorityStop, OwnerRuntimeConfig
 from companion.poke_protocol import (
     ACTION,
-    PokeCapture,
     PokePolicy,
     canonical_notice,
     canonical_source,
     decide,
-    signed_payload,
 )
 from companion.store import Store, encode, migrate
-from companion.transport import enqueue, enqueue_reply_parts
-from tests.conftest import ingest
+from companion.transport import enqueue_reply_parts
+from tests.poke_authority_fixture import environment as native_environment
+from tests.poke_authority_fixture import owner_turn, refresh, settle, signed
 
 
 def native_frame(now=1792382400, **changes):
@@ -34,51 +32,12 @@ def native_frame(now=1792382400, **changes):
 
 
 @pytest.fixture
-def environment(core, monkeypatch):
-    key = Ed25519PrivateKey.generate()
-    policy = PokePolicy(enabled=True, allow_native=True)
-    now = datetime.fromisoformat(core.clock())
-    approval = SimpleNamespace(
-        plan_sha256="a" * 64, capture_public_key=key.public_key().public_bytes_raw().hex(),
-        starts_at=now - timedelta(minutes=1), ends_at=now + timedelta(days=1),
-        companion_scope="owner_private_v1", poke_scope="owner_poke_v1",
-        poke_policy_sha256=paid_budget.sha(policy.model_dump()), max_inputs=1000,
-        max_history_turns=15, max_history_utf8_bytes=16000, handoff=None,
-    )
-    values = {name: getattr(core.settings, name) for name in type(core.settings).model_fields}
-    values.update(live_text_window=approval, poke_policy=policy)
-    settings = SimpleNamespace(**values)
-    # Only the pre-existing external/live-window authority is supplied here. All
-    # notice signatures, SQL, history, leases, source checks and decisions are real.
-    monkeypatch.setattr(live_text, "guard", lambda *args, **kwargs: (approval, {}, 0))
-    return SimpleNamespace(core=core, store=core.store, clock=core.clock,
-                           settings=settings, approval=approval, key=key)
-
-
-def signed(env, *, timestamp=None, **changes):
-    now = datetime.fromisoformat(env.clock())
-    timestamp = int(now.timestamp()) if timestamp is None else timestamp
-    notice = canonical_notice(native_frame(timestamp), owner_qq_id="10001", bot_qq_id="10002")
-    source = canonical_source(notice)
-    value = {"kind": "authenticated_onebot_poke", "window_sha256": env.approval.plan_sha256,
-             "event_id": source["event_id"], "source_event_id": source["source_event_id"],
-             "notice": notice, "protocol_epoch": "test_epoch_1",
-             "identity_sha256": paid_budget.sha(["10001", "10002"]),
-             "config_sha256": "c" * 64, "frame_sha256": "f" * 64,
-             "evidence_sha256": "e" * 64,
-             "occurred_at": datetime.fromtimestamp(timestamp, UTC).isoformat(),
-             "received_at": now.isoformat(), **changes}
-    value["signature"] = env.key.sign(signed_payload(value)).hex()
-    return PokeCapture.model_validate(value)
+def environment(core, tmp_path):
+    return native_environment(core, tmp_path)
 
 
 def receive(env, **changes):
     return poke.receive(env.store, env.settings, env.clock, signed(env, **changes))
-
-
-def bind_receipts(env):
-    env.store.insert("runtime_meta", key=live_text.BINDING,
-                     value=encode({"plan_sha256": env.approval.plan_sha256}))
 
 
 def claim(env):
@@ -86,19 +45,34 @@ def claim(env):
     return poke.claim_ready(env.store, env.settings, env.clock, "poke-worker")
 
 
-def owner_turn(env, number, text, *, delivered=True):
-    result = ingest(env.core, number, text, origin="onebot-direct:FriendMessage:10001")
-    with env.store.transaction():
-        event = env.store.one("SELECT * FROM events WHERE event_id=?", (result["event_id"],))
-        reply_revision.advance(env.store, event["conversation_id"], event["event_id"], env.clock())
-        if delivered:
-            message = enqueue(env.store, event["event_id"], event["conversation_id"],
-                              "收到：" + text, env.clock())
-            env.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE message_id=?",
-                              (env.clock(), message))
-            env.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
-                              (result["job_id"],))
-    return result
+def test_claim_aggregates_day_range_and_keeps_midnight_boundary(environment, monkeypatch):
+    env = environment
+    env.clock.now = datetime.fromisoformat("2026-10-19T15:59:57+00:00")
+    env.settings.timezone = "Asia/Shanghai"
+    env.settings.poke_policy = PokePolicy(enabled=True, cooldown_seconds=0, daily_limit=1)
+    refresh(env)
+    original_rows = env.store.rows
+
+    def no_history_materialization(sql, *args):
+        assert "SELECT claimed_at FROM poke_batches" not in sql
+        return original_rows(sql, *args)
+
+    monkeypatch.setattr(env.store, "rows", no_history_materialization)
+    receive(env)
+    first = claim(env)
+    assert first is not None  # 23:59:59 local.
+    poke.finish(env.store, env.settings, env.approval, first, {"kind": "none"}, env.clock())
+    env.clock.advance(1)
+    receive(env)
+    second = claim(env)
+    assert second is not None  # New local day, same UTC date.
+    poke.finish(env.store, env.settings, env.approval, second, {"kind": "none"}, env.clock())
+    env.clock.advance(20)
+    third = receive(env)
+    assert claim(env) is None
+    assert env.store.one("SELECT last_error_code FROM jobs WHERE job_id=?", (third["job_id"],)) == {
+        "last_error_code": "POKE_RATE_LIMIT",
+    }
 
 
 @pytest.mark.parametrize("changes", [
@@ -164,7 +138,7 @@ def test_model_choices_obey_independent_native_permission_and_strategy():
 
 @pytest.mark.parametrize("changes", [
     {"identity_sha256": "1" * 64}, {"event_id": "evt_" + "2" * 64},
-    {"window_sha256": "3" * 64}, {"source_event_id": "10002:fake:123"},
+    {"protocol_epoch": "different-epoch"}, {"source_event_id": "10002:fake:123"},
     {"occurred_at": "2026-10-19T04:00:01+00:00"},
 ])
 def test_valid_signature_cannot_override_notice_binding(environment, changes):
@@ -181,16 +155,20 @@ def test_capture_must_be_signed_even_in_synthetic_scope(environment):
         poke.receive(env.store, env.settings, env.clock, capture)
 
 
-@pytest.mark.parametrize("field,value", [
-    ("poke_scope", "none"), ("poke_policy_sha256", "0" * 64),
-    ("capture_public_key", None), ("companion_scope", "none"),
-])
-def test_scope_and_policy_authority_are_independent(environment, field, value):
+@pytest.mark.parametrize("change", ["disabled", "policy", "revoked"])
+def test_scope_and_policy_authority_are_independent(environment, change):
     env = environment
     capture = signed(env)
-    setattr(env.approval, field, value)
-    with pytest.raises(CoreError, match="PRIVATE_POKE_SCOPE_REQUIRED"):
+    if change == "disabled":
+        env.settings.owner_runtime = OwnerRuntimeConfig(mode="OFF")
+    elif change == "policy":
+        env.settings.poke_policy = PokePolicy(enabled=True, daily_limit=1)
+    else:
+        owner_authority.stop(env.store, env.settings, env.clock, AuthorityStop(
+            operation_id="stop-poke-scope", authority=capture.authority))
+    with pytest.raises(CoreError):
         poke.receive(env.store, env.settings, env.clock, capture)
+    assert not env.store.one("SELECT 1 FROM events")
 
 
 def test_receive_does_not_make_owner_text_or_advance_revision(environment):
@@ -208,13 +186,12 @@ def test_receive_does_not_make_owner_text_or_advance_revision(environment):
     assert claim(env) is None
 
 
-def test_identical_frame_replays_dedupe_across_receipt_epoch_and_connection_restart(environment):
+def test_identical_frame_replays_dedupe_across_receipt_time_and_connection_restart(environment):
     env = environment
-    bind_receipts(env)
     capture = signed(env)
     first = poke.receive(env.store, env.settings, env.clock, capture)
     env.clock.advance(3)
-    replay = signed(env, timestamp=capture.notice.time, protocol_epoch="new_epoch_2")
+    replay = signed(env, timestamp=capture.notice.time)
     restarted = Store(env.store.path)
     try:
         second = poke.receive(restarted, env.settings, env.clock, replay)
@@ -233,7 +210,8 @@ def test_bounded_coalescing_then_pending_suppression(environment):
     env.clock.advance(2)
     assert receive(env)["state"] == "SUPPRESSED"
     job = poke.claim_ready(env.store, env.settings, env.clock, "worker")
-    interaction = json.loads(poke.context(env.store, env.settings, job)[-1]["content"])
+    messages = poke.context(env.store, env.settings, job, clock=env.clock)
+    interaction = json.loads(messages[-1]["content"])
     assert interaction["count"] == 2
     assert env.store.one("SELECT attempts,max_attempts FROM jobs WHERE job_id=?",
                          (job["job_id"],)) == {"attempts": 1, "max_attempts": 1}
@@ -244,7 +222,7 @@ def test_claim_reads_latest_confirmed_context_after_notice_was_queued(environmen
     receive(env)
     later = owner_turn(env, 2, "刚才那篇文章讲的是树木")
     job = claim(env)
-    messages = poke.context(env.store, env.settings, job)
+    messages = poke.context(env.store, env.settings, job, clock=env.clock)
     assert {"role": "user", "content": "刚才那篇文章讲的是树木"} in messages
     assert {"role": "assistant", "content": "收到：刚才那篇文章讲的是树木"} in messages
     assert env.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
@@ -283,11 +261,12 @@ def test_one_decision_commits_at_most_one_native_outbox_entry(environment, kind)
     receive(env)
     job = claim(env)
     choice = {"kind": kind, **({"text": "怎么啦？"} if kind == "text" else {})}
+    settle(env, job, choice)
     result = poke.finish(env.store, env.settings, env.approval, job, choice, env.clock())
     assert poke.finish(env.store, env.settings, env.approval, job, choice, env.clock()) == result
     assert len(result) == (0 if kind == "none" else 1)
     if result:
-        row = poke.check_delivery(env.store, env.settings, env.approval, result[0])
+        row = poke.check_delivery(env.store, env.settings, env.approval, result[0], clock=env.clock)
         assert row["action_type"] == (ACTION if kind == "poke" else "qq.private.reply")
         assert row["provider_message_id"] is None
         if kind == "poke":
@@ -312,11 +291,12 @@ def test_new_owner_text_after_decision_blocks_send(environment):
     env = environment
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "poke"})
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "poke"}, env.clock())[0]
     owner_turn(env, 2, "先停一下", delivered=False)
     with pytest.raises(CoreError, match="POKE_CONTEXT_SUPERSEDED"):
-        poke.check_delivery(env.store, env.settings, env.approval, message)
+        poke.check_delivery(env.store, env.settings, env.approval, message, clock=env.clock)
 
 
 def test_changed_actual_assistant_prefix_cannot_enter_frozen_context(environment):
@@ -330,7 +310,7 @@ def test_changed_actual_assistant_prefix_cannot_enter_frozen_context(environment
     env.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
                       (encode(changed), paid_budget.sha(changed), row["message_id"]))
     with pytest.raises(CoreError, match="POKE_CONTEXT_CHANGED"):
-        poke.context(env.store, env.settings, job)
+        poke.context(env.store, env.settings, job, clock=env.clock)
 
 
 def test_erased_consumed_context_clears_poke_derivatives_but_retains_rate_charge(environment):
@@ -338,6 +318,7 @@ def test_erased_consumed_context_clears_poke_derivatives_but_retains_rate_charge
     turn = owner_turn(env, 1, "需要撤回的内容")
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "text", "text": "由此产生的回应"})
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "text", "text": "由此产生的回应"}, env.clock())[0]
     original = env.store.one("SELECT * FROM poke_batches")
@@ -352,13 +333,13 @@ def test_erased_consumed_context_clears_poke_derivatives_but_retains_rate_charge
     assert env.store.one("SELECT content_json,state FROM outbox WHERE message_id=?",
                          (message,)) == {"content_json": "{}", "state": "CANCELLED"}
     with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
-        poke.check_delivery(env.store, env.settings, env.approval, message)
+        poke.check_delivery(env.store, env.settings, env.approval, message, clock=env.clock)
 
 
 def test_no_response_still_uses_cooldown_and_daily_slot(environment):
     env = environment
     env.settings.poke_policy = PokePolicy(enabled=True, daily_limit=1)
-    env.approval.poke_policy_sha256 = paid_budget.sha(env.settings.poke_policy.model_dump())
+    refresh(env)
     receive(env)
     job = claim(env)
     poke.finish(env.store, env.settings, env.approval, job, {"kind": "none"}, env.clock())
@@ -397,6 +378,7 @@ def test_poke_migration_preserves_preceding_outbox_actions_and_foreign_keys(envi
     assert not env.store.rows("PRAGMA foreign_key_check")
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "poke"})
     poke.finish(env.store, env.settings, env.approval, job, {"kind": "poke"}, env.clock())
     with pytest.raises(sqlite3.IntegrityError):
         env.store.execute("UPDATE outbox SET action_type='qq.group.poke'")
@@ -406,18 +388,18 @@ def test_tampered_native_content_and_decision_are_not_delivery_authority(environ
     env = environment
     receive(env)
     job = claim(env)
+    settle(env, job, {"kind": "poke"})
     message = poke.finish(env.store, env.settings, env.approval, job,
                           {"kind": "poke"}, env.clock())[0]
     value = {"kind": "poke", "target_user_id": "10003"}
     env.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
                       (encode(value), hashlib.sha256(encode(value).encode()).hexdigest(), message))
     with pytest.raises(CoreError, match="PRIVATE_POKE_DELIVERY_CHANGED"):
-        poke.check_delivery(env.store, env.settings, env.approval, message)
+        poke.check_delivery(env.store, env.settings, env.approval, message, clock=env.clock)
 
 
 def test_pending_expiry_and_erased_notice_cannot_be_replayed(environment):
     env = environment
-    bind_receipts(env)
     capture = signed(env)
     result = poke.receive(env.store, env.settings, env.clock, capture)
     env.clock.advance(301)
@@ -430,17 +412,18 @@ def test_pending_expiry_and_erased_notice_cannot_be_replayed(environment):
         poke.receive(env.store, env.settings, env.clock, capture)
 
 
-def test_input_cap_shares_text_admissions_and_survives_notice_erasure(environment):
+def test_input_bound_survives_notice_erasure_without_recreating_content(environment):
     env = environment
-    env.approval.max_inputs = 2
-    env.store.insert("runtime_meta", key=live_text.INPUT + "existing_text",
-                     value=encode({"window_sha256": env.approval.plan_sha256}))
     first = receive(env)
     env.store.execute("UPDATE events SET redacted=1,body_json='{}' WHERE event_id=?",
                       (first["event_id"],))
-    assert poke.input_count(env.store, env.approval.plan_sha256) == 1
+    assert poke.input_count(env.store, env.approval.authority.as_dict()) == 1
+    with env.store.transaction():
+        for n in range(1999):
+            env.store.insert("runtime_meta", key=poke.INPUT + "retained-identity-" + str(n),
+                             value=encode({"authority": env.approval.authority.as_dict()}))
     env.clock.advance(1)
-    with pytest.raises(CoreError, match="LIVE_TEXT_INPUT_CAP"):
+    with pytest.raises(CoreError, match="PRIVATE_POKE_INPUT_CAP"):
         receive(env)
     assert env.store.one("SELECT COUNT(*) AS n FROM events")["n"] == 1
 
@@ -448,7 +431,7 @@ def test_input_cap_shares_text_admissions_and_survives_notice_erasure(environmen
 def test_max_coalesced_does_not_extend_deadline_or_add_response(environment):
     env = environment
     env.settings.poke_policy = PokePolicy(enabled=True, max_coalesced=1)
-    env.approval.poke_policy_sha256 = paid_budget.sha(env.settings.poke_policy.model_dump())
+    refresh(env)
     first = receive(env)
     deadline = env.store.one("SELECT coalesce_until FROM poke_batches")["coalesce_until"]
     env.clock.advance(1)
@@ -461,31 +444,24 @@ def test_max_coalesced_does_not_extend_deadline_or_add_response(environment):
 def test_pending_authenticated_text_capture_delays_poke_but_its_own_marker_does_not(environment):
     env = environment
     receive(env)
-    pending = live_text.INPUT + "evt_pending_owner_text"
-    env.store.insert("runtime_meta", key=pending, value=encode({
-        "window_sha256": env.approval.plan_sha256, "event_id": "evt_pending_owner_text",
-    }))
+    pending = owner_turn(env, 1, "已批准但尚未入箱", approve_only=True)
     assert claim(env) is None
-    env.store.execute("DELETE FROM runtime_meta WHERE key=?", (pending,))
+    env.core.ingest(InboundEvent.model_validate(pending), pending["event_id"])
+    env.store.execute("UPDATE jobs SET state='CANCELLED' WHERE kind='chat'")
     assert poke.claim_ready(env.store, env.settings, env.clock, "worker") is not None
 
 
-def test_stop_allows_only_authenticated_readback_of_prior_intake_ack(environment, monkeypatch):
+def test_stop_allows_only_authenticated_readback_of_prior_intake_ack(environment):
     env = environment
-    bind_receipts(env)
     capture = signed(env)
     first = poke.receive(env.store, env.settings, env.clock, capture)
+    owner_authority.stop(env.store, env.settings, env.clock, AuthorityStop(
+        operation_id="stop-poke-ack", authority=capture.authority))
+    state = env.store.one("SELECT state FROM jobs WHERE job_id=?", (first["job_id"],))["state"]
     before = env.store.db.total_changes
-
-    def stopped(*args, **kwargs):
-        raise CoreError("LIVE_WINDOW_STOPPED", 403)
-
-    monkeypatch.setattr(live_text, "guard", stopped)
-    env.settings.poke_policy = PokePolicy()
-    env.approval.poke_scope = "none"
     replay = poke.receive(env.store, env.settings, env.clock, capture)
     assert replay == {"event_id": first["event_id"], "job_id": first["job_id"],
-                      "duplicate": True, "state": "QUEUED"}
+                      "duplicate": True, "state": state}
     assert env.store.db.total_changes == before
     assert not env.store.one("SELECT 1 FROM model_usage")
     assert not env.store.one("SELECT 1 FROM outbox")
@@ -493,20 +469,18 @@ def test_stop_allows_only_authenticated_readback_of_prior_intake_ack(environment
         poke.receive(env.store, env.settings, env.clock,
                      capture.model_copy(update={"signature": "0" * 128}))
     env.clock.advance(1)
-    with pytest.raises(CoreError, match="LIVE_WINDOW_STOPPED"):
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_DISABLED"):
         receive(env)
 
 
-def test_stopped_receipt_readback_cannot_change_window_or_recreate_erased_event(
-    environment, monkeypatch,
-):
+def test_stopped_receipt_readback_cannot_change_authority_or_recreate_erased_event(environment):
     env = environment
-    bind_receipts(env)
     capture = signed(env)
     poke.receive(env.store, env.settings, env.clock, capture)
-    monkeypatch.setattr(live_text, "guard", lambda *args, **kwargs: pytest.fail("guard called"))
-    changed = signed(env, window_sha256="b" * 64)
-    with pytest.raises(CoreError, match="LIVE_TEXT_WINDOW_MISMATCH"):
+    owner_authority.stop(env.store, env.settings, env.clock, AuthorityStop(
+        operation_id="stop-poke-erase", authority=capture.authority))
+    changed = signed(env, authority={**capture.authority, "revision": 2})
+    with pytest.raises(CoreError, match="OWNER_AUTHORITY_EVIDENCE_REQUIRED"):
         poke.receive(env.store, env.settings, env.clock, changed)
     env.store.execute("INSERT INTO runtime_meta VALUES (?,?)",
                       ("erased_event:" + capture.event_id, "1"))
@@ -540,7 +514,7 @@ def test_upgrade_and_empty_downgrade_preserve_existing_profile_delivery(tmp_path
         before = store.one("SELECT * FROM outbox")
     finally:
         store.close()
-    migrate(path)
+    migrate(path, "0030_private_poke")
     store = Store(path)
     try:
         after = store.one("SELECT * FROM outbox")
@@ -559,7 +533,7 @@ def test_upgrade_and_empty_downgrade_preserve_existing_profile_delivery(tmp_path
 
 def test_downgrade_refuses_native_ack_on_existing_nonpoke_delivery(tmp_path):
     path = tmp_path / "ack.db"
-    migrate(path)
+    migrate(path, "0030_private_poke")
     store = Store(path)
     try:
         store.insert("principals", actor_id="owner", kind="owner", created_at="2026-10-19")

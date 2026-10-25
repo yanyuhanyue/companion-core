@@ -8,34 +8,30 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
-from companion import meme_core, private_life
+from companion import private_life
+from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient
-from companion.retrieval import SemanticIndex
-from companion_onebot_bridge import continuous
 from companion_onebot_bridge.meme_catalog import key_hash
-from tests import test_onebot_window as window_fixtures
+from companion_onebot_bridge.owner_memes import MemePump
 from tests.conftest import run
+from tests.support.native_meme_entry import native_entry
 from tests.test_meme_core import CAPTION
 from tests.test_meme_runtime import RULE, public_transport
 from tests.test_next_memes_catalog import png
 from tests.test_next_memes_discovery import resolver
-from tests.test_onebot_capture import capture_approval, source_window
 from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 
 @pytest.mark.parametrize("handoff", [False, True], ids=["ordinary", "cancelled-before-usage"])
 def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
-    core, tmp_path, monkeypatch, handoff,
+    core, tmp_path, handoff,
 ):
-    now = datetime.now(UTC)
+    now = datetime.now(UTC).replace(microsecond=0)
     core.clock.now = now
-    monkeypatch.setattr(window_fixtures, "raw_event", lambda: raw_event(time=int(now.timestamp())))
-    # All companion features remain enabled. This fixture has no retained memories.
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    public_calls, visual_calls, chat_calls, embeddings = [], [], [], []
+    public_calls, visual_calls, chat_calls = [], [], []
     selected = []
     number, text = 1, "太棒了，成功了"
     asset = png()
@@ -49,24 +45,6 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
         "use_when": ["庆祝成功"],
         "tags": ["庆祝", "成功", "开心"],
     }
-
-    class LocalEncoder:
-        """Deterministic vectors verify local wiring, not embedding quality."""
-
-        def query_embed(self, value):
-            embeddings.append(("query", value))
-            return [[1.0] + [0.0] * (meme_core.SPEC.dimensions - 1)]
-
-        def passage_embed(self, values):
-            embeddings.append(("passage", tuple(values)))
-            return [[1.0] + [0.0] * (meme_core.SPEC.dimensions - 1) for _ in values]
-
-    def local_encoder(cache_dir, *, local_only=False):
-        assert local_only is True
-        assert cache_dir
-        return LocalEncoder()
-
-    monkeypatch.setattr(meme_core, "encoder", local_encoder)
 
     async def source(ws):
         await ws.send(json.dumps(raw_event(number, text=text, time=int(now.timestamp()))))
@@ -100,7 +78,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 selected.append((offers[0]["offer_key"], candidate))
                 answer += "⬡" + candidate + "⬡"
         return httpx.Response(200, json={
-            "choices": [{"message": {"content": answer}}],
+            "choices": [{"finish_reason": "stop", "message": {"content": answer}}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 200, "total_tokens": 300},
         })
 
@@ -126,38 +104,32 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
 
     async def scenario():
         nonlocal number, text
-        async with source_window(
-            core, tmp_path, source, live=True, approved=True, independent_api=True,
-            scope_options=options,
-            bridge_options={
-                "meme_enabled": True,
-                "meme_discovery_enabled": True,
-                "meme_semantics_enabled": True,
-                "meme_trusted_sources": (RULE,),
-            },
+        async with native_entry(
+            core, tmp_path, source, options=options, rules=(RULE,),
+            public=public_transport(public_calls, semantic=False), resolver=resolver,
         ) as (window, client, protocol, handshakes, sends), httpx.AsyncClient(
             transport=httpx.MockTransport(model_reply),
         ) as provider:
-            api_core = client._transport.app.state.core
+            api_core = window.api_core
             assert api_core is not core and api_core.store is not core.store
             assert all(getattr(core.settings, feature + "_enabled")
                        for feature in private_life.FEATURES)
-            runtime = window.memes
-            runtime.transport, runtime.resolver = public_transport(
-                public_calls, semantic=False,
-            ), resolver
-            pump = continuous.MemePump(window, client)
+            runtime = window.runtime.memes
+            pump = MemePump(window.runtime, client)
 
             async def admit_current():
                 await window.capture_once(client, protocol)
-                approval = capture_approval(window)
-                await window.approve_captured(client, approval)
-                event_id = approval["event_id"]
+                try:
+                    assert await window.runtime.flush_one(client)
+                except httpx.HTTPStatusError as error:
+                    await error.response.aread()
+                    raise AssertionError(error.response.text) from error
+                event_id = pump.latest()[0]
                 row = window.db.execute(
-                    "SELECT * FROM window_inputs WHERE event_id=?", (event_id,),
+                    "SELECT state,capture_json FROM window_inputs WHERE event_id=?", (event_id,),
                 ).fetchone()
-                assert row["state"] != "ACK"
-                signed = json.loads(row["capture_json"])
+                assert row[0] == "CAPTURED"
+                signed = json.loads(row[1])
                 assert signed["kind"] == "authenticated_onebot_ws" and signed["signature"]
                 assert window.db.execute(
                     "SELECT state FROM inbox WHERE key=?", (event_id,),
@@ -172,23 +144,24 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     "SELECT state,offer_json FROM meme_runtime_semantic_offers WHERE event_id=?",
                     (event_id,),
                 ).fetchone()
-                assert offered["state"] == "ACCEPTED", dict(offered)
+                assert offered is not None and offered[0] == "ACCEPTED", offered
                 assert window.db.execute(
                     "SELECT state FROM window_inputs WHERE event_id=?", (event_id,),
-                ).fetchone()[0] != "ACK"
-                return event_id, json.loads(offered["offer_json"])
+                ).fetchone()[0] == "CAPTURED"
+                return event_id, json.loads(offered[1])
 
             try:
-                with Core(core.settings, ModelClient(core.settings, provider)) as worker:
+                with Core(core.settings, ModelClient(core.settings, provider),
+                          core.clock) as worker:
                     assert worker.store is not api_core.store and worker.store is not core.store
+                    caption_lane = next(lane for lane in native_selector(worker,
+                        "meme-integration").lanes if lane.name == "meme_caption")
                     first, offer = await admit_current()
                     assert offer["candidates"] == [] and public_calls == visual_calls == []
                     assert await worker.run_once("meme-integration-chat")
-                    await continuous.pump_private(window, client, protocol)
+                    assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == 1 and len(sends[0]["message"]) == 1
-                    assert window.db.execute(
-                        "SELECT state FROM window_inputs WHERE event_id=?", (first,),
-                    ).fetchone()[0] == "ACK"
+                    assert (await pump.state(pump.latest()))["terminal"]
 
                     submitted = await runtime.submit_missing(
                         client, first, runtime.missing_offer(first), reply_revision=1,
@@ -212,9 +185,9 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                         replacement, empty = await admit_current()
                         assert empty["candidates"] == []
                         assert await worker.run_once("meme-integration-replacement-chat")
-                        await continuous.pump_private(window, client, protocol)
+                        assert (await window.send(client, protocol))["worked"]
                         assert len(sends) == 2 and visual_calls == []
-                        assert await worker.run_once("meme-integration-cancel-unused-caption")
+                        assert (await caption_lane.run()).progressed
                         assert core.store.one(
                             "SELECT state FROM jobs WHERE job_id=?", (old_caption["job_id"],),
                         )["state"] == "CANCELLED"
@@ -231,23 +204,23 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                             "SELECT state,outcome_json,usage_json FROM meme_caption_bindings "
                             "WHERE job_id=?", (old_caption["job_id"],),
                         ).fetchone()
-                        assert old["state"] == "CANCELLED" and old["usage_json"] is None
-                        assert json.loads(old["outcome_json"])["usage"] is None
+                        assert old[0] == "CANCELLED" and old[2] is None
+                        assert json.loads(old[1])["usage"] is None
                         assert window.db.execute(
                             "SELECT COUNT(*) FROM meme_caption_bindings",
                         ).fetchone()[0] == 2
                         assert core.store.one(
                             "SELECT COUNT(*) n FROM model_usage WHERE scenario='meme_caption'",
                         )["n"] == 0
-                    assert await worker.run_once("meme-integration-caption")
+                    assert (await caption_lane.run()).progressed
                     assert len(visual_calls) == 1
                     assert (await runtime.run_once(client))["status"] == "CAPTION_READY"
                     assert (await runtime.run_once(client))["status"] == "SEMANTIC_READY"
                     stored = window.db.execute(
                         "SELECT data,metadata FROM meme_assets WHERE sha=?", (asset_sha,),
                     ).fetchone()
-                    assert stored["data"] == asset
-                    acquisition = json.loads(json.loads(stored["metadata"])["acquisition_json"])
+                    assert stored[0] == asset
+                    acquisition = json.loads(json.loads(stored[1])["acquisition_json"])
                     assert acquisition["archive_member"] == ""
                     assert set(acquisition["source_files"]) == {"manifest", "license", "listing"}
                     assert acquisition["fetch"]["body_sha256"] == asset_sha
@@ -281,7 +254,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert offer["candidates"][0]["candidate_id"] == asset_sha
                     assert await worker.run_once("meme-integration-selection")
                     assert selected == [("meme:" + second, asset_sha)]
-                    await continuous.pump_private(window, client, protocol)
+                    assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == 2 + handoff
                     image = sends[-1]["message"][1]
                     assert image["type"] == "image"
@@ -296,7 +269,7 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     _, absent = await admit_current()
                     assert absent is None
                     assert await worker.run_once("meme-integration-text-only")
-                    await continuous.pump_private(window, client, protocol)
+                    assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == len(chat_calls) == len(handshakes) == 3 + handoff
                     assert len(sends[-1]["message"]) == 1
                     assert len(visual_calls) == 1 and len(public_calls) == 5 * (1 + handoff)
@@ -306,9 +279,19 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert len(core.store.rows(
                         "SELECT * FROM model_usage WHERE scenario='meme_caption'",
                     )) == 1
-                    assert window.status()["attempt_states"] == {"ACK": 3 + handoff}
-                    assert len([call for call in embeddings if call[0] == "passage"]) == 1
-                    assert len([call for call in embeddings if call[0] == "query"]) == 2 + handoff
+                    assert window.db.execute(
+                        "SELECT state,count(*) FROM window_attempts GROUP BY state",
+                    ).fetchall() == [("ACK", 3 + handoff)]
+                    vector = json.loads(window.db.execute(
+                        "SELECT vector_json FROM meme_semantic_vectors").fetchone()[0])
+                    assert len(vector) == 512 and any(value != 0 for value in vector)
+                    queries = [json.loads(row["value"]) for row in core.store.rows(
+                        "SELECT value FROM runtime_meta WHERE key LIKE 'meme_query:%'")]
+                    assert len(queries) == 3 + handoff
+                    embedded = [query["embedding"] for query in queries if query["embedding"]]
+                    assert len(embedded) == 2 + handoff
+                    assert all(value["local"] is True and value["dimensions"] == 512
+                               for value in embedded)
             finally:
                 await pump.close()
 

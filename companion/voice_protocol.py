@@ -11,11 +11,13 @@ from typing import Annotated, Literal
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-PROTOCOL_VERSION = 1
-LEASE_DOMAIN = b"companion-core/voice-node-lease/v1\x00"
-ROUTE_PREFIX = "/internal/v1/voice-node"
+from companion_delivery_protocol.authority import validate_authority_ref
+
+PROTOCOL_VERSION = 2
+LEASE_DOMAIN = b"companion-core/voice-node-lease/v2\x00"
+ROUTE_PREFIX = "/internal/v2/voice-node"
 MAX_INPUT_BYTES = 8_000_000
 MAX_AUDIO_BYTES = 4_000_000
 MAX_AUDIO_BASE64 = 4 * ((MAX_AUDIO_BYTES + 2) // 3)
@@ -69,15 +71,71 @@ def digest(value: BaseModel | dict) -> str:
 
 
 class VoiceClaimRequest(VoiceDTO):
-    schema_version: Literal[1] = PROTOCOL_VERSION
+    schema_version: Literal[2] = PROTOCOL_VERSION
     node_id: NodeId
-    request_id: str = Field(pattern=r"^claim_[a-f0-9]{32}$")
+    incarnation: str = Field(pattern=r"^[a-f0-9]{32}$")
+    sequence: Generation
     manifest_sha256: Digest
     resource_state: Literal["READY", "QUARANTINED"]
 
+    @property
+    def request_id(self):
+        return f"voice-claim:{self.incarnation}:{self.sequence}"
+
+
+class VoiceSession(VoiceDTO):
+    incarnation: str = Field(pattern=r"^[a-f0-9]{32}$")
+    last_sequence: int = Field(ge=0, le=2**63-1, strict=True)
+    replay_available: bool = Field(strict=True)
+    recovery_required: bool = Field(strict=True)
+
+
+class VoiceStopRef(VoiceDTO):
+    job_id: JobId
+    generation: Generation
+    stop_token: LeaseToken
+
+    @classmethod
+    def from_lease(cls, lease):
+        return cls(job_id=lease.job_id, generation=lease.generation, stop_token=lease.stop_token)
+
+
+class VoiceCleanup(VoiceDTO):
+    cache_removed: bool = Field(strict=True)
+    journal_removed: bool = Field(strict=True)
+    temp_removed: bool = Field(strict=True)
+
+    def complete(self):
+        return self.cache_removed and self.journal_removed and self.temp_removed
+
+
+class VoiceStopRequest(VoiceDTO):
+    ref: VoiceStopRef
+    resource_state: ResourceState
+    outcome: Literal["COMMITTED", "CANCELLED", "FAILED", "UNKNOWN", "RESULT_LOST"]
+    cleanup: VoiceCleanup
+    cleanup_epoch: int = Field(ge=0, strict=True)
+
+
+class VoiceStopResponse(VoiceDTO):
+    custody_closed: bool = Field(strict=True)
+    cleanup_confirmed: bool = Field(strict=True)
+    cleanup_epoch: int = Field(ge=0, strict=True)
+
+
+class VoiceRecovery(VoiceDTO):
+    incarnation: str = Field(pattern=r"^[a-f0-9]{32}$")
+    operator: str = Field(min_length=1, max_length=128)
+    service_instance: str = Field(min_length=1, max_length=128)
+    confirmation: Literal["inflight-execution-stopped"]
+
 
 class VoiceLease(VoiceDTO):
-    schema_version: Literal[1] = PROTOCOL_VERSION
+    schema_version: Literal[2] = PROTOCOL_VERSION
+    incarnation: str = Field(pattern=r"^[a-f0-9]{32}$")
+    stop_token: LeaseToken
+    claim_sequence: Generation
+    privacy_epoch: int = Field(ge=0, strict=True)
     job_id: JobId
     generation: Generation
     node_id: NodeId
@@ -269,14 +327,13 @@ class VoiceAudioResult(VoiceDTO):
         return self
 
 
-class VoiceDeliveryBinding(VoiceDTO):
-    schema_version: Literal[1] = 1
+class _VoiceDeliveryMaterial(VoiceDTO):
+    retirement_token: LeaseToken
     job_id: JobId
     generation: Generation
     message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
     delivery_key: str = Field(min_length=1, max_length=512)
     event_id: str = Field(min_length=1, max_length=128)
-    window_sha256: Digest
     source_sha256: Digest
     identity_sha256: Digest
     privacy_epoch: int = Field(ge=0, strict=True)
@@ -291,6 +348,45 @@ class VoiceDeliveryBinding(VoiceDTO):
     audio_sha256: Digest
     audio_bytes: int = Field(ge=44, le=4_000_000, strict=True)
     expires_at: AwareDatetime
+
+
+class LegacyVoiceDeliveryBinding(_VoiceDeliveryMaterial):
+    """Read-only schema used to retire historical v2 delivery custody."""
+
+    schema_version: Literal[2] = 2
+    window_sha256: Digest
+
+
+class VoiceDeliveryBinding(_VoiceDeliveryMaterial):
+    schema_version: Literal[3] = 3
+    authority: dict
+
+    @field_validator("authority")
+    @classmethod
+    def original_authority(cls, value):
+        return validate_authority_ref(value)
+
+
+class VoiceRetiredBinding(VoiceDTO):
+    kind: Literal["capability", "legacy_signature"]
+    verifier: Digest
+    job_id: JobId
+    generation: Generation
+    message_id: str = Field(pattern=r"^msg_[a-f0-9]{32}$")
+    event_id: str = Field(min_length=1, max_length=128)
+    delivery_key: str = Field(min_length=1, max_length=512)
+    window_sha256: Digest | None = Field(default=None, exclude_if=lambda value: value is None)
+    authority: dict | None = Field(default=None, exclude_if=lambda value: value is None)
+    voice_policy_sha256: Digest
+    reply_revision: int = Field(ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def original_scope(self):
+        if (self.window_sha256 is None) == (self.authority is None):
+            raise ValueError("retirement requires exactly one original authority")
+        if self.authority is not None:
+            validate_authority_ref(self.authority)
+        return self
 
 
 class VoiceDeliveryEnvelope(VoiceDTO):

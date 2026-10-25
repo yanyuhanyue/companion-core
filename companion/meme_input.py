@@ -23,11 +23,9 @@ def text_and_estimate(policy, messages):
 
 def contract(settings, job_id, logical_request_id):
     approval = settings.paid_model
-    window = settings.live_text_window
     if (
         settings.mode != "live" or approval is None or not approval.live_approved
-        or window is None or window.companion_scope != "owner_private_v1"
-        or not window.live_approved or not settings.meme_semantics_enabled
+        or settings.owner_runtime.mode != "ENABLED" or not settings.meme_semantics_enabled
     ):
         raise CoreError("MODEL_MEME_SCOPE_REQUIRED", 503)
     _policy(approval.meme_input)

@@ -15,7 +15,6 @@ import companion_delivery_protocol as wire
 from companion import cumulative, paid_budget
 from companion.contracts import CoreError
 from companion.store import encode, utcnow
-from companion.voice_protocol import VoiceDeliveryBinding
 
 KIND = "quota_send_resolution"
 PREPARED = "delivery_quiescence:"
@@ -53,7 +52,7 @@ def _row(store, message_id):
 
 def _authority(store, message_id):
     values = [_meta(store, prefix + message_id) for prefix in (
-        "private_life_delivery:", "live_text_reply:", "account_action_delivery:",
+        "private_life_delivery:", "live_text_reply:", "account_action_delivery:", "owner_delivery:",
     )]
     present = [value for value in values if value is not None]
     if len(present) > 1:
@@ -65,6 +64,18 @@ def _custody(store, message_id):
     projection = _meta(store, cumulative.PROJECTION)
     if projection:
         return SimpleNamespace(journal_path=projection["journal_path"])
+    original = store.one("SELECT authority_json FROM outbox WHERE message_id=?", (message_id,))
+    if original and original["authority_json"] != "{}":
+        from companion_delivery_protocol.authority import AuthorityRef
+
+        ref = AuthorityRef.from_dict(json.loads(original["authority_json"]))
+        revision = store.one("SELECT * FROM owner_authority_revisions "
+                             "WHERE grant_id=? AND revision=?", (ref.grant_id, ref.revision))
+        from companion.owner_authority import reference
+
+        if revision is None or reference(revision) != ref:
+            raise ValueError("original owner delivery authority missing")
+        return SimpleNamespace(journal_path=revision["journal_path"])
     authority = _authority(store, message_id)
     history = _meta(store, "live_text_window:" + authority["plan_sha256"]) if authority else None
     if history:
@@ -95,6 +106,12 @@ def _frozen(store, proof):
 def _binding(store, proof, *, recorded=None):
     """Use retained authority hashes; erasure never requires reconstructing text."""
     wire.validate_quiescence(proof)
+    if proof["version"] == 2:
+        from companion import owner_delivery_reconciliation
+
+        row = _row(store, proof["message_id"])
+        return owner_delivery_reconciliation.binding(
+            store, proof, row, _authority(store, row["message_id"]), recorded)
     history = _frozen(store, proof)
     row = _row(store, proof["message_id"])
     authority = _authority(store, row["message_id"])
@@ -157,47 +174,18 @@ def _binding(store, proof, *, recorded=None):
 
 
 def _voice_binding(store, proof, history, row, content_hash):
-    value = _meta(store, "voice_reply:" + row["message_id"])
-    given = proof.get("voice_check")
-    if given is None:
-        if value and value.get("binding"):
-            raise ValueError("original voice send check missing")
-        return
-    given = wire.validate_voice_check(given)
-    if not value or value.get("state") not in {"AUDIO", "FENCED"}:
-        raise ValueError("original voice binding missing")
-    binding = VoiceDeliveryBinding.model_validate(value["binding"]).model_dump(mode="json")
-    job = store.one("SELECT * FROM voice_jobs WHERE job_id=?", (given["job_id"],))
-    approval = history["approval"]
-    if (not job or job["operation"] != "tts"
-        or job["state"] not in {"READY", "CANCELLED", "EXPIRED"}
-        or approval.get("voice_scope") != "owner_voice_v1"
-        or binding["voice_policy_sha256"] != approval.get("voice_policy_sha256")
-        or value.get("job_id") != job["job_id"]
-        or value.get("binding_sha256") != wire.digest(binding)
-        or given["binding_sha256"] != wire.digest(binding)
-        or any(given[k] != binding[k] for k in wire.VOICE_CHECK_FIELDS - {"binding_sha256"})
-        or any(binding[k] != v for k, v in {
-            "message_id": row["message_id"], "delivery_key": row["delivery_key"],
-            "event_id": proof["event_id"], "window_sha256": proof["plan_sha256"],
-            "content_sha256": content_hash, "reply_sha256": proof["payload_sha256"],
-            "reply_revision": proof["reply_revision"],
-        }.items())
-        or any(job[k] != v for k, v in {
-            "job_id": binding["job_id"], "message_id": row["message_id"],
-            "generation": binding["generation"], "result_sha256": binding["result_sha256"],
-            "outbox_content_sha256": content_hash, "outbox_delivery_key": row["delivery_key"],
-            "event_id": proof["event_id"], "window_sha256": proof["plan_sha256"],
-            "source_sha256": binding["source_sha256"],
-            "identity_sha256": binding["identity_sha256"],
-            "captured_privacy_epoch": binding["privacy_epoch"],
-            "captured_reply_revision": binding["reply_revision"],
-            "node_id": binding["node_id"], "manifest_sha256": binding["manifest_sha256"],
-            "config_sha256": binding["node_config_sha256"],
-        }.items())
-        or wire.timestamp(job["result_expires_at"]) != wire.timestamp(binding["expires_at"])):
-        raise ValueError("original voice delivery changed")
+    from companion.voice_original_proof import validate_original_voice_binding
 
+    given = proof.get("voice_check")
+    value = _meta(store, "voice_reply:" + row["message_id"])
+    job = (store.one("SELECT * FROM voice_jobs WHERE job_id=?", (given["job_id"],))
+           if given else None)
+    approval = history["approval"]
+    if given and approval.get("voice_scope") != "owner_voice_v1":
+        raise ValueError("original voice scope missing")
+    validate_original_voice_binding(receipt=value, job=job, proof=proof, outbox=row,
+        content_sha256=content_hash, original_scope={"window_sha256": proof["plan_sha256"]},
+        voice_policy_sha256=approval.get("voice_policy_sha256"))
 
 def _account_binding(store, proof, history, row, authority, recorded):
     reservation = store.one("SELECT * FROM social_autonomy_reservations WHERE message_id=?",
@@ -300,6 +288,27 @@ def _provider_receipt(row):
 def _input_hash(store, event, proof, account):
     if event["actor_id"] != "owner" or event["privacy_scope"] != "private":
         return None
+    if proof["version"] == 2:
+        if event["event_type"] == "notice.poke":
+            original = _meta(store, "poke_input:" + event["event_id"])
+            if (not original or original.get("authority") != proof["authority"]
+                or original.get("source_sha256") != event["fingerprint"]):
+                return None
+            admitted = account["operations"].get("input:" + wire.digest(event["event_id"]))
+            if account["policy"] and (not admitted or admitted["state"] != "ADMITTED"
+                or admitted.get("source_sha256") != event["fingerprint"]):
+                return None
+            return event["fingerprint"]
+        original = _meta(store, "owner_input:" + event["event_id"])
+        if (not original or original.get("authority") != proof["authority"]
+            or original.get("event_id") != event["event_id"]
+            or not wire.hash_value(original.get("input_sha256"))):
+            return None
+        admitted = account["operations"].get("input:" + wire.digest(event["event_id"]))
+        if account["policy"] and (not admitted or admitted["state"] != "ADMITTED"
+            or admitted.get("source_sha256") != wire.digest(original.get("capture"))):
+            return None
+        return original["input_sha256"]
     original = _meta(store, "live_text_input:" + event["event_id"])
     poke = _meta(store, "poke_input:" + event["event_id"])
     if (original and original.get("window_sha256") == proof["plan_sha256"]
@@ -385,13 +394,17 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
         "request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id=?) "
         "ORDER BY request_id LIMIT ?", (event_id, maximum + 1)))
     for table, identity, owner, states in (
-        ("voice_jobs", "job_id", "event_id", {"QUEUED", "LEASED", "RUNNING"}),
-        ("bili_video_items", "item_id", "owner_event_id", {"DECLARED", "PREPARED", "ANALYZED"}),
+        ("voice_jobs", "job_id", "event_id", {"QUEUED", "LEASED", "RUNNING", "UNKNOWN"}),
+        ("bili_video_items", "item_id", "owner_event_id",
+         {"DECLARED", "PREPARED", "ANALYZED", "UNKNOWN"}),
     ):
         if store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)):
-            extra = store.rows(f"SELECT {identity} AS id,state FROM {table} WHERE {owner}=? "
-                               f"ORDER BY {identity} LIMIT ?", (event_id, maximum + 1))
-            reads.extend({**item, "active": item["state"] in states} for item in extra)
+            cleanup = ",cleanup_state" if table == "voice_jobs" else ""
+            extra = store.rows(f"SELECT {identity} AS id,state{cleanup} FROM {table} "
+                               f"WHERE {owner}=? ORDER BY {identity} LIMIT ?",
+                               (event_id, maximum + 1))
+            reads.extend({**item, "active": item["state"] in states
+                          or item.get("cleanup_state") == "PENDING"} for item in extra)
     complete &= all(len(items) <= maximum for items in (models, global_unsettled, reads))
     primary = [job for job in jobs if job["kind"] == "chat" and job["event_id"] == event_id]
     if not primary:
@@ -401,7 +414,7 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
         "jobs": any(item["state"] not in wire.JOB_TERMINAL for item in jobs),
         "models": bool(global_unsettled) or any(item["state"] != "SETTLED" for item in models),
         "reads": any(item.get("active", item["state"] in {
-            "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED"}) for item in reads),
+            "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED", "UNKNOWN"}) for item in reads),
         "deliveries": any(item["state"] not in wire.DELIVERY_TERMINAL for item in deliveries),
     }
     input_hash = _input_hash(store, event, proof, account)
@@ -468,7 +481,8 @@ def fold_record(state, row):
             or row["prior_quota_state"] != prior["state"]
             or row["prior_liability_sha256"] != wire.digest(prior)
             or prior["source_sha256"] != row["source_sha256"]
-            or prior["window_id"] != row["quiescence"]["window_id"]
+            or row["quiescence"]["version"] == 1
+            and prior["window_id"] != row["quiescence"]["window_id"]
             or prior["logical_request_id"] != _logical_request(row["quiescence"])
             or cumulative.instant(row["at"]) != row["at"]
             or state["clock"] and row["at"] < state["clock"]):
@@ -483,10 +497,18 @@ def fold_record(state, row):
     state["send_resolutions"][message_id] = dict(row)
 
 
-def validate_journal_record(store, row, record_sha256, lifecycle, journal_id):
+def validate_journal_record(store, row, record_sha256, lifecycle, journal_id, authorities=()):
     _shape(row)
     proof = row["quiescence"]
-    if (row["journal_id"] != journal_id or not lifecycle or lifecycle["state"] != "STOPPED"
+    if proof["version"] == 2:
+        from companion import owner_delivery_reconciliation
+
+        if (row["journal_id"] != journal_id
+            or row["core_stop_sha256"] != proof["core_stop_record_sha256"]):
+            raise ValueError("original native journal required")
+        owner_delivery_reconciliation.stopped(
+            store, proof, authorities[-1] if authorities else None)
+    elif (row["journal_id"] != journal_id or not lifecycle or lifecycle["state"] != "STOPPED"
         or lifecycle["plan_sha256"] != proof["plan_sha256"]
         or lifecycle["window_id"] != proof["window_id"]
         or lifecycle["head_sha256"] != row["core_stop_sha256"]):
@@ -539,11 +561,16 @@ def _ready(store, custody, proof, now):
     view = paid_budget.journal(store, custody, allow_settlement=True, initialize=False)
     row, history, delivery = _binding(store, proof)
     lifecycle, account = view["lifecycle"], view["cumulative"]
-    if (not lifecycle or lifecycle["state"] != "STOPPED"
+    native = proof["version"] == 2
+    if native:
+        from companion import owner_delivery_reconciliation
+
+        owner_delivery_reconciliation.stopped(store, proof, view["owner_authority"], current=True)
+    if (not native and (not lifecycle or lifecycle["state"] != "STOPPED"
         or lifecycle["plan_sha256"] != proof["plan_sha256"]
         or lifecycle["window_id"] != proof["window_id"] or history["state"] != "STOPPED"
         or not store.one("SELECT 1 FROM runtime_meta WHERE key=? AND value='OWNER_STOP'",
-                         ("live_text_stopped:" + proof["plan_sha256"],))
+                         ("live_text_stopped:" + proof["plan_sha256"],)))
         or wire.timestamp(proof["quiesced_at"]) > wire.timestamp(now)
         or row["state"] not in {"SENDING", "DELIVERY_UNCERTAIN"}
         or row["state"] == "SENDING" and (
@@ -551,12 +578,13 @@ def _ready(store, custody, proof, now):
             or wire.timestamp(row["lease_until"]) > wire.timestamp(now))):
         raise CoreError("DELIVERY_RECONCILIATION_STOP_REQUIRED", 409)
     prior = account["operations"].get("send:" + wire.digest(proof["message_id"]))
-    frozen_policy = history["approval"].get("cumulative")
+    frozen_policy = None if native else history["approval"].get("cumulative")
     if account["policy"]:
-        if (not frozen_policy or wire.digest(frozen_policy) != account["policy_sha256"]
+        if (not native and (not frozen_policy
+                            or wire.digest(frozen_policy) != account["policy_sha256"])
             or not prior or prior["state"] not in {"RESERVED", "UNKNOWN", "DELIVERY_UNCERTAIN"}
             or prior["source_sha256"] != proof["send_check_sha256"]
-            or prior["window_id"] != proof["window_id"]
+            or not native and prior["window_id"] != proof["window_id"]
             or prior["logical_request_id"] != _logical_request(proof)):
             raise CoreError("DELIVERY_RECONCILIATION_ACCOUNT_CONFLICT", 409)
     elif frozen_policy or prior:
@@ -697,7 +725,8 @@ def resolve(store, settings, message_id, outcome, now, *, operation_id, operatio
                 "owner_operation_id": operation_id, "owner_operation_sha256": operation_sha256,
                 "outcome": outcome, "prior_liability_sha256": wire.digest(prior) if prior else None,
                 "prior_quota_state": prior["state"] if prior else None,
-                "core_stop_sha256": view["lifecycle"]["head_sha256"],
+                "core_stop_sha256": (view["owner_authority"]["record_sha256"]
+                    if proof["version"] == 2 else view["lifecycle"]["head_sha256"]),
                 "delivery": delivery, "quiescence": proof,
                 "input_closure": _input_closure(store, proof, delivery, outcome, account)}
             view = paid_budget.journal(store, custody, row, allow_settlement=True, initialize=False)

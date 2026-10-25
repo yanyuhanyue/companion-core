@@ -4,30 +4,20 @@ import json
 
 import httpx
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from websockets.asyncio.server import serve
 
-from companion import live_text, private_life, transport
+from companion import owner_delivery, transport, voice_authority
 from companion.contracts import CoreError, DeliveryResult, LeaseRequest
 from companion.core import Core
 from companion.model import ModelClient
 from companion.qq_rich import input_digest
-from companion.retrieval import SemanticIndex
 from companion.store import encode
 from companion.voice_config import VoiceASRPolicy, VoiceNode, VoiceReplyPolicy
 from companion.voice_flow import VoiceFlow
 from companion.voice_jobs import erase_voice_jobs, restore_voice_jobs, sign_asr_proof
 from companion.voice_protocol import VoiceDeliveryEnvelope, VoiceLeaseRef, canonical_bytes, digest
-from companion_onebot_bridge.network import private_http_client
-from companion_onebot_bridge.spool import Spool
-from companion_onebot_bridge.window import TestWindow
 from companion_voice_node.worker import local_manifest
 from tests.conftest import run
-from tests.support.onebot import provider
 from tests.test_local_voice_providers import wav_bytes
-from tests.test_onebot_capture import capture_approval, pinned_plan, real_core_http
-from tests.test_onebot_direct import raw_event
-from tests.test_private_companion import companion_options
 from tests.test_voice_jobs import TEXT, claim, control, prepared, result, voice_config
 from tests.test_voice_node_api import independent_node, tls_core
 from tests.test_voice_node_worker import child_receipts
@@ -60,7 +50,8 @@ def signed_input(core, event_id, key, *, index=0, partial=False):
     event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
     proof = sign_asr_proof(
         key,
-        plan_sha256=core.settings.live_text_window.plan_sha256,
+        authority=voice_authority.current(
+            core.store, core.settings, core.clock).authority.as_dict(),
         event_id=event_id,
         source_event_id=event["source_event_id"],
         source_input_sha256=input_digest(json.loads(event["body_json"])),
@@ -81,7 +72,9 @@ def upload(core, flow, event_id, key, *, index=0, partial=False):
 
 def leased(core, message_id):
     items = transport.lease_deliveries(
-        core.store, core.settings, LeaseRequest(worker_id="voice-flow-test"), core.clock()
+        core.store, core.settings, LeaseRequest(worker_id="voice-flow-test",
+            authority=voice_authority.current(
+            core.store, core.settings, core.clock).authority.as_dict()), core.clock()
     )["items"]
     assert len(items) == 1 and items[0]["message_id"] == message_id
     return items[0]
@@ -91,50 +84,8 @@ def delivery_check(envelope):
     binding = envelope.binding
     return {"binding_sha256": envelope.binding_sha256, "job_id": binding.job_id,
             "generation": binding.generation, "result_sha256": binding.result_sha256,
-            "audio_sha256": binding.audio_sha256, "audio_bytes": binding.audio_bytes}
-
-
-def source_records(core, event_id, capture_key, count):
-    event = core.store.one("SELECT * FROM events WHERE event_id=?", (event_id,))
-    body = json.loads(event["body_json"])
-    body["text"] = "普通文字问题" if count == 0 else ""
-    body["rich"] = (
-        {
-            "version": "references_v1",
-            "coverage": "PARTIAL",
-            "segment_count": count,
-            "owner_text_positions": [],
-            "segments": [
-                {"index": index, "type": "record", "actor": "UNVERIFIED", "coverage": "UNSUPPORTED"}
-                for index in range(count)
-            ],
-        }
-        if count
-        else None
-    )
-    core.store.execute("UPDATE events SET body_json=? WHERE event_id=?", (encode(body), event_id))
-    receipt = json.loads(
-        core.store.one(
-            "SELECT value FROM runtime_meta WHERE key=?", ("live_text_input:" + event_id,)
-        )["value"]
-    )
-    receipt["input_sha256"] = receipt["capture"]["input_sha256"] = input_digest(body)
-    receipt["capture"].pop("signature")
-    receipt["capture"]["signature"] = capture_key.sign(
-        live_text.CAPTURE_SIGNATURE_DOMAIN + encode(receipt["capture"]).encode()
-    ).hex()
-    core.store.execute(
-        "UPDATE runtime_meta SET value=? WHERE key=?",
-        (encode(receipt), "live_text_input:" + event_id),
-    )
-    for outbox in core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?", (event_id,)):
-        core.store.execute(
-            "UPDATE runtime_meta SET value=? WHERE key=?",
-            (
-                encode(private_life.delivery_material(core.store, core.settings, outbox)),
-                private_life.DELIVERY + outbox["message_id"],
-            ),
-        )
+            "audio_sha256": binding.audio_sha256, "audio_bytes": binding.audio_bytes,
+            "retirement_token": binding.retirement_token}
 
 
 def test_tts_single_outbox_receipt_binding_and_native_ack(core, monkeypatch):
@@ -173,7 +124,7 @@ def test_tts_single_outbox_receipt_binding_and_native_ack(core, monkeypatch):
     assert core.store.one("SELECT content_json,content_sha256,delivery_key FROM outbox") == original
     assert core.store.one("SELECT COUNT(*) AS count FROM outbox")["count"] == 1
     assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
-    assert core.store.rows("SELECT * FROM model_usage") == []
+    assert core.store.rows("SELECT state FROM model_usage") == [{"state": "SETTLED"}]
 
 
 @pytest.mark.parametrize(
@@ -255,7 +206,9 @@ def test_qq_uncertainty_never_switches_audio_to_text(core, monkeypatch):
         flow.prepare_reply(message_id)
     assert (
         transport.lease_deliveries(
-            core.store, core.settings, LeaseRequest(worker_id="no-replay"), core.clock()
+            core.store, core.settings, LeaseRequest(worker_id="no-replay",
+                authority=voice_authority.current(
+                core.store, core.settings, core.clock).authority.as_dict()), core.clock()
         )["items"]
         == []
     )
@@ -297,10 +250,15 @@ def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
     content = {**json.loads(original["content_json"]), "image": {"asset_id": "existing-meme"}}
     core.store.execute("UPDATE outbox SET content_json=?,content_sha256=? WHERE message_id=?",
                        (encode(content), transport.digest(content), message_id))
+    original = json.loads(core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+        (owner_delivery.DELIVERY + message_id,))["value"])
     updated = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
     core.store.execute("UPDATE runtime_meta SET value=? WHERE key=?",
-                       (encode(private_life.delivery_material(core.store, core.settings, updated)),
-                        private_life.DELIVERY + message_id))
+                       (encode(owner_delivery._material(core.store, updated,
+                            owner_delivery._job(core.store, original["job_id"]),
+                            voice_authority.current(core.store, core.settings, core.clock),
+                            original["request_ids"])),
+                        owner_delivery.DELIVERY + message_id))
     assert prepare(core, flow, message_id).state == "TEXT"
     assert not core.store.rows("SELECT * FROM voice_jobs")
     current = core.store.one("SELECT * FROM outbox WHERE message_id=?", (message_id,))
@@ -311,17 +269,15 @@ def test_voice_choice_preserves_existing_picture_expression(core, monkeypatch):
 @pytest.mark.parametrize("mode,expected", [("voice_input", "TEXT"), ("auto", "WAITING")])
 def test_default_voice_input_policy_and_explicit_auto_mode(core, monkeypatch, mode, expected):
     flow, _, message_id, event_id, key = flow_fixture(
-        core, monkeypatch, reply=VoiceReplyPolicy(mode=mode)
+        core, monkeypatch, record_count=0, reply=VoiceReplyPolicy(mode=mode)
     )
-    source_records(core, event_id, key, 0)
     assert prepare(core, flow, message_id).state == expected
 
 
 def test_asr_record_limit_marks_partial_without_accepting_extra_upload(core, monkeypatch):
     flow, jobs, _, event_id, key = flow_fixture(
-        core, monkeypatch, asr=VoiceASRPolicy(max_records=1)
+        core, monkeypatch, make_reply=False, record_count=2, asr=VoiceASRPolicy(max_records=1)
     )
-    source_records(core, event_id, key, 2)
     upload(core, flow, event_id, key, index=0)
     with pytest.raises(CoreError, match="VOICE_ASR_SOURCE_INVALID"):
         upload(core, flow, event_id, key, index=1)
@@ -335,7 +291,7 @@ def test_asr_record_limit_marks_partial_without_accepting_extra_upload(core, mon
 
 
 def test_asr_gate_context_and_no_memory_or_owner_text_upgrade(core, monkeypatch):
-    flow, jobs, _, event_id, key = flow_fixture(core, monkeypatch)
+    flow, jobs, _, event_id, key = flow_fixture(core, monkeypatch, make_reply=False)
     body = core.store.one("SELECT body_json FROM events WHERE event_id=?", (event_id,))
     assert flow.input_status(event_id).state == "WAITING"
     status, data, proof = upload(core, flow, event_id, key, partial=True)
@@ -373,7 +329,7 @@ def test_asr_timeout_waits_then_freezes_fallback_and_rejects_new_upload(
     core, monkeypatch, upload_first
 ):
     flow, jobs, _, event_id, key = flow_fixture(
-        core, monkeypatch, asr=VoiceASRPolicy(wait_seconds=2)
+        core, monkeypatch, make_reply=False, asr=VoiceASRPolicy(wait_seconds=2)
     )
     assert flow.input_status(event_id).state == "WAITING"
     if upload_first:
@@ -396,7 +352,7 @@ def test_asr_timeout_waits_then_freezes_fallback_and_rejects_new_upload(
 
 def test_asr_late_result_does_not_enter_context(core, monkeypatch):
     flow, jobs, _, event_id, key = flow_fixture(
-        core, monkeypatch, asr=VoiceASRPolicy(wait_seconds=2)
+        core, monkeypatch, make_reply=False, asr=VoiceASRPolicy(wait_seconds=2)
     )
     upload(core, flow, event_id, key)
     core.clock.advance(3)
@@ -407,7 +363,8 @@ def test_asr_late_result_does_not_enter_context(core, monkeypatch):
 
 def test_context_bound_and_result_expiry_cannot_change_existing_proof(core, monkeypatch):
     flow, jobs, _, event_id, key = flow_fixture(
-        core, monkeypatch, asr=VoiceASRPolicy(max_context_chars=128), result_ttl_seconds=5
+        core, monkeypatch, make_reply=False, asr=VoiceASRPolicy(max_context_chars=128),
+        result_ttl_seconds=5
     )
     upload(core, flow, event_id, key)
     finish_node(jobs, operation="asr", text="语音" * 200)
@@ -427,7 +384,8 @@ def test_restore_invalidates_flow_metadata_even_before_audio_upload(core, monkey
     prepare(core, flow, message_id)
     with core.store.transaction():
         restore_voice_jobs(core.store)
-    values = core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_%'")
+    values = core.store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'voice_input:%' "
+                             "OR key LIKE 'voice_reply:%'")
     assert values and all(json.loads(row["value"])["state"] == "FENCED" for row in values)
     with pytest.raises(CoreError, match="VOICE_FLOW_FENCED"):
         flow.input_status(event_id)
@@ -436,7 +394,8 @@ def test_restore_invalidates_flow_metadata_even_before_audio_upload(core, monkey
 
 
 def test_even_fallback_context_is_fenced_by_privacy_epoch(core, monkeypatch):
-    flow, _, _, event_id, _ = flow_fixture(core, monkeypatch, asr=VoiceASRPolicy(wait_seconds=1))
+    flow, _, _, event_id, _ = flow_fixture(core, monkeypatch, make_reply=False,
+        asr=VoiceASRPolicy(wait_seconds=1))
     core.clock.advance(2)
     assert flow.input_status(event_id).state == "FALLBACK"
     job = core.claim_job("fallback-proof")
@@ -447,247 +406,113 @@ def test_even_fallback_context_is_fenced_by_privacy_epoch(core, monkeypatch):
 
 
 def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
-    core,
-    tmp_path,
-    monkeypatch,
-    node,
+    core, tmp_path, node,
 ):
-    config, signing_key, counter = node
-    config = config.model_copy(
-        update={
-            "node_id": "local",
-            "request_timeout_seconds": 10.0,
-            "heartbeat_seconds": 0.5,
-            "execution_timeout_seconds": 20.0,
-        }
-    )
-    core_voice = voice_config(
-        signing_private_key=signing_key.private_bytes_raw().hex(),
-        nodes={
-            "local": VoiceNode(
-                token=config.credential, manifest_sha256=digest(local_manifest(config))
-            )
-        },
-    )
-    monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
-    sends, calls = [], []
+    import ssl
 
-    async def source(ws):
-        await ws.send(
-            encode(
-                raw_event(
-                    1,
-                    time=int(core.clock.now.timestamp()),
-                    message=[
-                        {"type": "text", "data": {"text": "请听我的语音"}},
-                        {"type": "record", "data": {"file": "native-record"}},
-                    ],
-                )
-            )
-        )
-        await ws.wait_closed()
+    from tests.voice_owner_fixtures import native_voice
+
+    config, signing_key, counter = node
+    config = config.model_copy(update={"node_id": "local", "request_timeout_seconds": 10.0,
+        "heartbeat_seconds": 0.5, "execution_timeout_seconds": 20.0})
+    core_voice = voice_config(signing_private_key=signing_key.private_bytes_raw().hex(),
+        nodes={"local": VoiceNode(token=config.credential,
+                                  manifest_sha256=digest(local_manifest(config)))})
+    capture, capture_key, _ = native_voice(core, tmp_path, config=core_voice)
+    event = core.store.one("SELECT * FROM events WHERE event_id=?", (capture.event_id,))
+    original_body = event["body_json"]
+    data, proof = signed_input(core, capture.event_id, capture_key, partial=True)
+    calls = []
 
     def model(request):
-        calls.append(json.loads(request.content)["messages"])
-        return httpx.Response(
-            200,
-            json={
-                "choices": [{"message": {"content": TEXT}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-            },
-        )
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": TEXT}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20}})
 
     async def scenario():
-        options = companion_options(core)
-        options["core_options"]["voice"] = core_voice
-        options.update(
-            voice_scope="owner_voice_v1", voice_policy_sha256=core_voice.authority_sha256()
-        )
-        async with real_core_http(core) as port, serve(source, "127.0.0.1", 0) as server:
-            cfg, plan = pinned_plan(
-                core,
-                tmp_path,
-                server.sockets[0].getsockname()[1],
-                core_port=port,
-                live=True,
-                approved=True,
-                rich_input_scope="references_v1",
-                scope_options=options,
-            )
-            async with (
-                private_http_client(cfg.core_url, cfg.bridge_token) as client,
-                (
-                    private_http_client(
-                        cfg.onebot_http_url,
-                        cfg.onebot_token,
-                        transport=httpx.MockTransport(lambda request: provider(request, sends)),
-                    )
-                ) as protocol,
-                httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http,
-            ):
-                with Spool(cfg) as spool:
-                    window = TestWindow(spool, plan, clock=lambda: core.clock.now)
-                    await window.open(client, protocol)
-                    await window.capture_once(client, protocol)
-                    await window.approve_captured(client, capture_approval(window))
-                    event = core.store.one("SELECT * FROM events WHERE source='qq.onebot'")
-                    original_body = event["body_json"]
-                    flow = VoiceFlow(core.store, core.settings, core.clock)
-                    with Core(
-                        core.settings, ModelClient(core.settings, model_http), core.clock
-                    ) as worker:
-                        assert worker.store is not core.store
-                        assert worker.claim_job("wait-for-transcript") is None
-                        assert not calls and core.store.rows("SELECT * FROM model_usage") == []
-                    capture_key = Ed25519PrivateKey.from_private_bytes(
-                        bytes.fromhex(cfg.capture_signing_key)
-                    )
-                    data, proof = signed_input(
-                        core, event["event_id"], capture_key, index=1, partial=True
-                    )
-                    upload_path = f"/internal/v1/voice-inputs/{event['event_id']}"
-                    before_state = core.store.db.total_changes
-                    initial_state = await client.get(upload_path + "/state")
-                    assert initial_state.status_code == 200, initial_state.text
-                    assert initial_state.json()["records"] == [{
-                        "index": 1, "state": "MISSING", "job_id": None,
-                        "input_sha256": None, "source_proof_sha256": None,
-                        "upload_allowed": True,
-                    }]
-                    assert initial_state.json()["input_sha256"] == proof.source_input_sha256
-                    assert core.store.db.total_changes == before_state
-                    unauthorized = await client.get(upload_path + "/state", headers={
-                        "Authorization": "Bearer wrong-token",
-                    })
-                    assert unauthorized.status_code == 401
-                    broken = proof.model_copy(update={"signature": "0" * 128})
-                    rejected = await client.post(
-                        upload_path,
-                        content=data,
-                        headers={
-                            "Content-Type": "audio/wav",
-                            "x-voice-proof": base64.urlsafe_b64encode(
-                                canonical_bytes(broken)
-                            ).decode(),
-                        },
-                    )
-                    assert rejected.status_code == 403
-                    assert core.store.rows("SELECT * FROM voice_jobs") == []
-                    uploaded = await client.post(
-                        upload_path,
-                        content=data,
-                        headers={
-                            "Content-Type": "audio/wav",
-                            "x-voice-proof": base64.urlsafe_b64encode(
-                                canonical_bytes(proof)
-                            ).decode(),
-                        },
-                    )
-                    assert uploaded.status_code == 200, uploaded.text
-                    before_state = core.store.db.total_changes
-                    recovered = await client.get(upload_path + "/state")
-                    assert recovered.status_code == 200, recovered.text
-                    assert recovered.json()["records"] == [{
-                        "index": 1, "state": "QUEUED", "job_id": uploaded.json()["job_id"],
-                        "input_sha256": proof.audio_sha256,
-                        "source_proof_sha256": digest(proof), "upload_allowed": False,
-                    }]
-                    assert core.store.db.total_changes == before_state
-                    assert "audio_base64" not in recovered.text
-                    assert "transcript" not in recovered.text
-                    assert flow.input_status(event["event_id"]).state == "WAITING"
-                    async with tls_core(core, tmp_path) as (origin, certificate):
-                        node_config = config.model_copy(update={"core_origin": origin})
-                        await independent_node(
-                            node_config, certificate, counter, tmp_path, core.clock.now.timestamp()
-                        )
-                        with Core(
-                            core.settings, ModelClient(core.settings, model_http), core.clock
-                        ) as worker:
-                            assert await worker.run_once("consume-voice-evidence")
-                        assert len(calls) == 1 and "untrusted_transcription" in encode(calls[0])
-                        assert "测试结果" in encode(calls[0])
-                        original = core.store.one("SELECT * FROM outbox")
-                        usage = core.store.rows(
-                            "SELECT request_id,state,billed_micro_usd FROM model_usage"
-                        )
-                        assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
-                        waiting = await client.post(
-                            "/internal/v1/deliveries/lease", json={"worker_id": "voice-http-bridge"}
-                        )
-                        assert waiting.status_code == 200 and waiting.json()["items"] == []
-                        await independent_node(
-                            node_config, certificate, counter, tmp_path, core.clock.now.timestamp()
-                        )
-                    leased_reply = await client.post(
-                        "/internal/v1/deliveries/lease", json={"worker_id": "voice-http-bridge"}
-                    )
-                    assert leased_reply.status_code == 200
-                    item = leased_reply.json()["items"][0]
-                    envelope = VoiceDeliveryEnvelope.model_validate(item["voice"])
-                    assert item["content"] == {"text": TEXT}
-                    assert item["delivery_key"] == original["delivery_key"]
-                    begun = await client.post(
-                        f"/internal/v1/deliveries/{item['message_id']}/begin-send",
-                        json={"lease_token": item["lease_token"]},
-                    )
-                    assert begun.status_code == 200
-                    check = {
-                        "window_sha256": plan.sha256,
-                        "event_id": event["event_id"],
-                        "message_id": item["message_id"],
-                        "reply_sha256": transport.digest(TEXT),
-                        "reply_revision": event["reply_revision"],
-                        "lease_token": item["lease_token"],
-                        "voice": delivery_check(envelope),
-                    }
-                    checked = await client.post("/internal/v1/live-text/send-check", json=check)
-                    assert checked.status_code == 200, checked.text
-                    for invalid in (
-                        {}, check["voice"] | {"generation": True},
-                        check["voice"] | {"audio_sha256": "private-invalid-digest"},
-                    ):
-                        rejected = await client.post("/internal/v1/live-text/send-check",
-                            json=check | {"voice": invalid})
-                        assert rejected.status_code == 400
-                        assert rejected.json() == {
-                            "error": "INVALID_CONTRACT", "fields": ["body.voice"],
-                        }
-                    for invalid in (None, check["voice"] | {"binding_sha256": "0" * 64}):
-                        rejected = await client.post("/internal/v1/live-text/send-check",
-                            json=check | {"voice": invalid})
-                        assert rejected.status_code == 409
-                        assert rejected.json() == {"error": "VOICE_DELIVERY_BINDING_CHANGED"}
-                    wrong = dict(check)
-                    wrong.pop("voice")
-                    denied = await client.post("/internal/v1/live-text/send-check", json=wrong)
-                    assert denied.status_code == 409
-                    ack = await client.post(
-                        f"/internal/v1/deliveries/{item['message_id']}/result",
-                        json={
-                            "lease_token": item["lease_token"],
-                            "result": "SENT",
-                            "provider_message_id": "synthetic-audio-ack-1",
-                        },
-                    )
-                    assert ack.status_code == 200
-                    assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
-                    assert core.store.one("SELECT COUNT(*) AS count FROM outbox")["count"] == 1
-                    assert (
-                        core.store.one("SELECT content_sha256 FROM outbox")["content_sha256"]
-                        == original["content_sha256"]
-                    )
-                    assert (
-                        core.store.rows("SELECT request_id,state,billed_micro_usd FROM model_usage")
-                        == usage
-                    )
-                    assert (
-                        core.store.one(
-                            "SELECT body_json FROM events WHERE event_id=?", (event["event_id"],)
-                        )["body_json"]
-                        == original_body
-                    )
-                    assert len(child_receipts(counter)) == 2 and not sends
-                    assert core.store.rows("SELECT * FROM memories") == []
+        async with tls_core(core, tmp_path) as (origin, certificate):
+            node_config = config.model_copy(update={"core_origin": origin})
+            async with httpx.AsyncClient(base_url=origin,
+                verify=ssl.create_default_context(cafile=str(certificate)), trust_env=False,
+                headers={"Authorization": "Bearer "
+                    + core.settings.bridge_token.get_secret_value()}) as client, \
+                    httpx.AsyncClient(transport=httpx.MockTransport(model)) as model_http:
+                path = "/internal/v1/voice-inputs/" + capture.event_id
+                missing = await client.get(path + "/state")
+                assert missing.status_code == 200 and missing.json()["state"] == "WAITING"
+                with Core(core.settings, ModelClient(core.settings, model_http),
+                          core.clock) as worker:
+                    assert not await worker.run_once("before-asr-ready")
+                assert not calls and not core.store.rows("SELECT * FROM model_usage")
+                uploaded = await client.post(path, content=data, headers={
+                    "Content-Type": "audio/wav",
+                    "x-voice-proof": base64.urlsafe_b64encode(canonical_bytes(proof)).decode()})
+                assert uploaded.status_code == 200, uploaded.text
+                before_state = core.store.db.total_changes
+                recovered = await client.get(path + "/state")
+                assert recovered.status_code == 200
+                assert recovered.json()["records"] == [{
+                    "index": 0, "state": "QUEUED", "job_id": uploaded.json()["job_id"],
+                    "input_sha256": proof.audio_sha256,
+                    "source_proof_sha256": digest(proof), "upload_allowed": False}]
+                assert core.store.db.total_changes == before_state
+                assert "audio_base64" not in recovered.text and "transcript" not in recovered.text
+                await independent_node(node_config, certificate, counter, tmp_path,
+                                       core.clock.now.timestamp())
+                with Core(core.settings, ModelClient(core.settings, model_http),
+                          core.clock) as worker:
+                    assert await worker.run_once("consume-voice-evidence")
+                assert len(calls) == 1 and "untrusted_transcription" in encode(calls[0])
+                original = core.store.one("SELECT * FROM outbox")
+                usage = core.store.rows("SELECT request_id,state,billed_micro_usd FROM model_usage")
+                assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+                lease_body = {"worker_id": "voice-http-bridge", "authority": capture.authority}
+                waiting = await client.post("/internal/v1/deliveries/lease", json=lease_body)
+                assert waiting.status_code == 200 and waiting.json()["items"] == []
+                await independent_node(node_config, certificate, counter, tmp_path,
+                                       core.clock.now.timestamp(), scenario="large-result")
+                leased_reply = await client.post("/internal/v1/deliveries/lease", json=lease_body)
+                assert leased_reply.status_code == 200, leased_reply.text
+                item = leased_reply.json()["items"][0]
+                envelope = VoiceDeliveryEnvelope.model_validate(item["voice"])
+                assert envelope.binding.authority == capture.authority
+                assert len(envelope.audio.audio_bytes()) > 131072
+                assert item["content"] == {"text": TEXT}
+                assert item["delivery_key"] == original["delivery_key"]
+                begun = await client.post(
+                    f"/internal/v1/deliveries/{item['message_id']}/begin-send",
+                    json={"lease_token": item["lease_token"]})
+                assert begun.status_code == 200, begun.text
+                check = {"authority": capture.authority, "event_id": capture.event_id,
+                    "message_id": item["message_id"], "content_sha256": item["content_sha256"],
+                    "reply_revision": item["reply_revision"], "lease_token": item["lease_token"],
+                    "voice": delivery_check(envelope)}
+                check_path = "/internal/v1/owner-authority/send-check"
+                checked = await client.post(check_path, json=check)
+                assert checked.status_code == 200, checked.text
+                for invalid in ({}, check["voice"] | {"generation": True},
+                                check["voice"] | {"audio_sha256": "private-invalid-digest"}):
+                    rejected = await client.post(check_path, json=check | {"voice": invalid})
+                    assert rejected.status_code == 400, rejected.text
+                for invalid in (None, check["voice"] | {"binding_sha256": "0" * 64}):
+                    rejected = await client.post(check_path, json=check | {"voice": invalid})
+                    assert rejected.status_code == 409, rejected.text
+                missing_voice = {k: v for k, v in check.items() if k != "voice"}
+                rejected = await client.post(check_path, json=missing_voice)
+                assert rejected.status_code == 409, rejected.text
+                ack = await client.post(f"/internal/v1/deliveries/{item['message_id']}/result",
+                    json={"lease_token": item["lease_token"], "result": "SENT",
+                          "provider_message_id": "synthetic-audio-ack-1"})
+                assert ack.status_code == 200, ack.text
+                assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
+                assert core.store.one("SELECT COUNT(*) AS count FROM outbox")["count"] == 1
+                assert core.store.one("SELECT content_sha256 FROM outbox")["content_sha256"] == (
+                    original["content_sha256"])
+                assert core.store.rows(
+                    "SELECT request_id,state,billed_micro_usd FROM model_usage") == usage
+                assert core.store.one("SELECT body_json FROM events WHERE event_id=?",
+                    (capture.event_id,))["body_json"] == original_body
+                assert len(child_receipts(counter)) == 2
+                assert core.store.rows("SELECT * FROM memories") == []
 
     run(scenario())
