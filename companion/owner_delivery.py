@@ -193,7 +193,7 @@ def _record_replies(store, settings, clock, job, message_ids, *, executing):
 
 def check_delivery(store, settings, clock, message_id, *, check=None):
     from companion.social import proactive_allowed
-    from companion.transport import check_segment_ready
+    from companion.transport import check_segment_ready, reply_group
 
     row = store.one("SELECT o.*,c.scope,c.owner_actor_id FROM outbox o "
                     "JOIN conversations c USING(conversation_id) WHERE message_id=?", (message_id,))
@@ -219,7 +219,20 @@ def check_delivery(store, settings, clock, message_id, *, check=None):
     ):
         raise CoreError("PROACTIVE_SEND_PAUSED", 409)
     if row["reply_group_id"]:
-        check_segment_ready(store, message_id, clock())
+        now = clock()
+        check_segment_ready(store, message_id, now)
+        state = cumulative.check(store, settings, now)
+        if state["policy"]:
+            group = reply_group(store, message_id)
+            remaining = sum(part["state"] in {"PENDING", "RETRY_WAIT", "LEASED", "SENDING"}
+                and "send:" + cumulative.digest(part["message_id"]) not in state["operations"]
+                for part in group["rows"])
+            # Read-only allowance for the whole remaining group. Actual attempts are
+            # recorded individually by send_check; an ACK prefix is already accounted.
+            projected = cumulative.liability(now, settings.paid_model.window_id,
+                row["origin_event_id"], "RESERVED", send_attempts=remaining)
+            if remaining and cumulative.violations(state, projected):
+                raise CoreError("CUMULATIVE_LIMIT_EXHAUSTED", 429)
     if check is not None:
         if (check.authority != view.authority.as_dict()
             or check.event_id != row["origin_event_id"]
