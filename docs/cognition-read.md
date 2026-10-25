@@ -1,5 +1,62 @@
 # Cognition metadata projection
 
+## Activity SHADOW inspection
+
+`POST /internal/v2/cognition/activity` uses the same owner control dependencies and
+`Cache-Control: no-store`. Its strict selection is
+`{"conversation_id":"existing-private-owner-conversation","limit":20,"memory_ids":[],"episode_ids":[]}`.
+The conversation must already exist and belong to the private owner. `limit` is an
+integer from 1 to 20 over one combined native job/goal/commitment/read candidate set;
+UNKNOWN records and unclosed commitments precede ordinary records. Selection of
+memory and episode IDs is explicit and limited to 20 in total. Client-supplied
+activity, current/used bindings, scene IDs and permissions are rejected.
+
+This is an on-demand, content-free projection. It creates no work, leases,
+commitments, model/embedding requests, network reads, sends or persistent state.
+It does not enter a prompt or change the native selector. Goal completion reuses
+the existing cognition/Memory step and Observation validators. Native labels,
+verified execution, results, lease validity and commitment feedback are separate;
+only original Outbox SENT means told. A live or expired lease never proves worker
+presence, current playback, completion or permission to retry. WATCHED is labelled
+MEDIA_ANALYSIS_COVERAGE; presence remains UNKNOWN without a trusted scene source.
+Progress/interruptibility not recorded by the original domain remain NOT_RECORDED.
+
+Source roots are never shortened to fit the limit: at most 100 per original source
+set, at most three goal steps, and the existing 20-receipt/step bound. Attention
+uses existing Hot/Warm/Cold rules and compact goal references, without claiming
+actual request use. Native observations can be stored in the internal observation
+conversation, but their complete owner ancestry must bind them to the selected
+conversation. Foreign owner conversations do not supply evidence. Lists are bounded;
+truncated also marks withheld or excessive candidates. No withdrawn IDs, raw text,
+URL queries, credentials, lease tokens or private reasoning are returned. Feedback
+and interest clues remain NOT_RECORDED with an empty list in this first slice.
+Capability readiness is a bounded native read-only projection, not an execution
+grant or proof of upstream reachability.
+
+Native rows are assembled in one deferred SQLite read transaction. The existing
+privacy epoch and latest ErasureLedger custody are checked before it and again
+after it ends, so a concurrent writer cannot be hidden by rereading an old epoch
+inside the pinned snapshot. Existing caller transactions are rejected. No expiry,
+recovery, scheduling or `goals.recent()` maintenance is invoked. STOP does not hide
+still-valid historical inspection; read revocation, natural expiry and processing
+withdrawal retain their existing separate meanings. Backup restore must replay the
+latest independent ErasureLedger before reconstruction. Closing/removing this
+read entry requires no data migration or accounting reset.
+
+Implementation scope is D-ACTIVITY-01 C2a only. Request-time prompt use (C2b), new
+experience/interest state (S3), client sessions (S4), and device presence (S5) have
+separate contracts. Synthetic signed HTTP plus independent Core/Reader processes
+use mocked upstream transport; they do not establish real-device or naturalness
+acceptance.
+
+The read transaction follows [SQLite transaction semantics](https://sqlite.org/lang_transaction.html):
+an active read sees a historical snapshot until that transaction ends. The
+observation/consumption separation follows the previously reviewed
+[DSH jobs-local implementation](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts#L292).
+Core keeps its original persistence, custody, UNKNOWN and budget authority.
+
+## Historical record inspection
+
 `companion.cognition_api.register_cognition_routes(app, control_auth)` provides
 `POST /internal/v2/cognition`. The composition root must pass its existing owner
 control dependencies. STOP and disabled runtime features do not prevent an
