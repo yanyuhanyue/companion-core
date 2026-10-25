@@ -371,12 +371,14 @@ async def upload(window, client, event_id, images, *, files=(), records=(), star
         for image in images[start_slot:]:
             await guard()
             options = {"resolver": image_resolver} if image_resolver is not None else {}
-            async with checked_http_client(client, check_request) as scoped:
-                result = await upload_original(window, scoped, event_id, image,
-                    resume_claim=resume_claim if image.slot == start_slot else None,
-                    progress=lambda state, receipt, slot=image.slot:
-                        image_progress(state, receipt, slot),
-                    transport=image_transport, **options)
+            # The native transfer checks authority at Core dispatch and the signed
+            # source/lease before CDN dispatch and upload. Wrapping its own checks
+            # in queue status checks multiplies roundtrips inside the finite lease.
+            result = await upload_original(window, client, event_id, image,
+                resume_claim=resume_claim if image.slot == start_slot else None,
+                progress=lambda state, receipt, slot=image.slot:
+                    image_progress(state, receipt, slot),
+                transport=image_transport, **options)
             await guard()
             await progress("DONE" if image.slot + 1 == len(images) + len(files) + len(records)
                            else "PENDING", image.slot + 1, result)
