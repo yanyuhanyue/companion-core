@@ -264,3 +264,48 @@ def test_legacy_empty_measurement_keeps_original_journal_contract(core, tmp_path
     assert core.store.one("SELECT state FROM model_usage")["state"] == "SETTLED"
     with core.store.transaction():
         paid_budget.journal(core.store, approval)
+
+
+@pytest.mark.parametrize("failure", ["missing", "incompatible"])
+def test_unexpected_encoder_load_failure_is_a_clean_refusal(core, tmp_path, monkeypatch, failure):
+    import sys
+    import types
+
+    configure(core, tmp_path)
+    tm._local_encoder.cache_clear()
+    if failure == "missing":
+        monkeypatch.setitem(sys.modules, "tokenizers", None)  # import raises ImportError
+    else:
+        class Tokenizer:
+            @staticmethod
+            def from_str(_):
+                raise RuntimeError("synthetic incompatible tokenizer format")
+
+        monkeypatch.setitem(sys.modules, "tokenizers", types.SimpleNamespace(Tokenizer=Tokenizer))
+    try:
+        with pytest.raises(CoreError, match="MODEL_TOKEN_ARTIFACT_INVALID"):
+            budget.reserve(core.store, core.settings, authorized_job(core),
+                "chat", MESSAGES, core.clock())
+        assert core.store.rows("SELECT * FROM model_usage") == []
+    finally:
+        tm._local_encoder.cache_clear()
+
+
+@pytest.mark.parametrize("policy", ["prefer_exact", "exact_required"])
+@pytest.mark.parametrize("failure", [NotImplementedError, IndexError, AttributeError])
+def test_any_renderer_failure_falls_back_or_refuses(core, tmp_path, monkeypatch, policy, failure):
+    configure(core, tmp_path, policy)
+    _, tokenizer = tm._local_encoder()
+
+    class Broken:
+        def encode_messages(self, *_, **__):
+            raise failure("synthetic renderer failure")
+
+    monkeypatch.setattr(tm, "_local_encoder", lambda: (Broken(), tokenizer))
+    if policy == "exact_required":
+        with pytest.raises(CoreError, match="MODEL_TOKEN_COUNT_UNSUPPORTED"):
+            tm.measure_request(core.settings, MESSAGES)
+        return
+    counted = tm.measure_request(core.settings, MESSAGES)
+    assert counted.count_kind == "estimate" and counted.reason == "renderer_rejected_input"
+    assert counted.input_tokens > 0

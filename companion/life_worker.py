@@ -40,7 +40,8 @@ async def life_worker(settings):
                     elif not selected.more:
                         await wake.wait(
                             scan, UnitResult(False, deadline),
-                            None if selected.blocked else selector.next_maintenance,
+                            selector.next_blocked_maintenance if selected.blocked
+                            else selector.next_maintenance,
                         )
                         selector.resume()
                         scan, deadline = wake.before_scan(), None
