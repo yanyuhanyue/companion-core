@@ -28,6 +28,7 @@ def client(core, monkeypatch):
     with TestClient(app, base_url=ORIGIN) as http:
         app.state.core.clock = core.clock
         app.state.core.goals.clock = core.clock
+        app.state.core.executive.clock = core.clock
         yield http
 
 
@@ -135,3 +136,108 @@ def test_goal_console_keeps_history_without_continuation_authority(client, core,
     item = client.get("/v1/console/goals").json()["items"][0]
     assert item["goal_id"] == goal and item["steps"]
     assert item["allowed_actions"] == []
+
+
+def test_tool_list_shows_the_exact_scope_an_approval_releases(client, core):
+    from tests.test_executive import configured, proposal
+
+    executive = configured(core, allow_changes=True)
+    task = executive.submit(proposal(2, "windows.write_text", text="明天的购物清单"))
+    headers = login(client)
+    value = client.get("/v1/console/tools").json()
+    item = next(row for row in value["items"] if row["task_id"] == task["task_id"])
+    assert value["enabled"] is True and "scope_json" not in item
+    scope = item["scope"]
+    assert scope["state"] == "RECORDED" and scope["capability"] == "windows.write_text"
+    assert scope["path"]["value"] == "result.txt"
+    assert scope["text"]["value"] == "明天的购物清单"
+    assert scope["sources_live"] and scope["source_count"] == 1
+    assert "127.0.0.1" not in json.dumps(value) and "executor-test-token" not in json.dumps(value)
+    url = f"/v1/console/tools/{task['task_id']}/decision"
+    body = {"decision": "APPROVE", "scope_sha256": item["scope_sha256"]}
+    response = client.post(url, json=body, headers={**headers, "Idempotency-Key": "approve-1"})
+    assert response.status_code == 200, response.text
+    assert core.store.one("SELECT state FROM tool_tasks WHERE task_id=?",
+                          (task["task_id"],))["state"] == "QUEUED"
+
+
+def test_tool_scope_that_no_longer_matches_its_digest_is_not_shown(client, core):
+    from tests.test_executive import configured, proposal
+
+    executive = configured(core, allow_changes=True)
+    task = executive.submit(proposal(3, "windows.write_text", text="原始内容"))
+    scope = json.loads(task["scope_json"])
+    scope["arguments"]["text"] = "被改过的内容"
+    core.store.execute("UPDATE tool_tasks SET scope_json=? WHERE task_id=?",
+                       (json.dumps(scope, ensure_ascii=False), task["task_id"]))
+    login(client)
+    item = next(row for row in client.get("/v1/console/tools").json()["items"]
+                if row["task_id"] == task["task_id"])
+    assert item["scope"] == {"state": "MISMATCH"}
+
+
+@pytest.mark.parametrize("source_state", ["expired", "missing_evidence", "redacted"])
+def test_tool_scope_hides_arguments_when_owner_sources_are_unavailable(client, core, source_state):
+    from tests.test_executive import configured, proposal
+
+    executive = configured(core, allow_changes=True)
+    text = "synthetic-private-tool-content"
+    task = executive.submit(proposal(4, "windows.write_text", text=text))
+    login(client)
+    if source_state == "expired":
+        cutoff = after(core.clock(), -86400 * core.settings.raw_event_retention_days - 1)
+        core.store.execute("UPDATE events SET ingested_at=? WHERE event_id='evt_test_1'", (cutoff,))
+    elif source_state == "missing_evidence":
+        core.store.execute("DELETE FROM tool_evidence WHERE task_id=?", (task["task_id"],))
+    else:
+        core.store.execute("UPDATE events SET redacted=1 WHERE event_id='evt_test_1'")
+    response = client.get("/v1/console/tools")
+    assert response.status_code == 200, response.text
+    item = next(row for row in response.json()["items"] if row["task_id"] == task["task_id"])
+    assert item["scope"] == {"state": "UNAVAILABLE", "sources_live": False,
+                             "source_count": 0 if source_state == "missing_evidence" else 1}
+    assert text not in response.text and "result.txt" not in response.text
+    assert item["state"] == "WAITING_APPROVAL"
+    assert executive.get(task["task_id"])["scope_json"] == task["scope_json"]
+    assert not core.store.rows("SELECT * FROM tool_approvals")
+
+
+@pytest.mark.parametrize("change", ["epoch", "erasure"])
+def test_tool_scope_privacy_change_during_http_read_fails_closed(client, core, monkeypatch, change):
+    from companion import console_cognition
+    from companion.privacy import advance_epoch
+    from tests.test_executive import configured, proposal
+
+    executive = configured(core, allow_changes=True)
+    text = "synthetic-private-tool-content"
+    task = executive.submit(proposal(5, "windows.write_text", text=text))
+    login(client)
+    project = console_cognition.tool_scope
+
+    def changed(view_core, row):
+        result = project(view_core, row)
+        assert result["text"]["value"] == text
+        if change == "epoch":
+            advance_epoch(core.store)
+        else:
+            with core.store.transaction():
+                core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
+        return result
+
+    monkeypatch.setattr(console_cognition, "tool_scope", changed)
+    response = client.get("/v1/console/tools")
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == "PRIVACY_CHANGED"
+    assert text not in response.text and "result.txt" not in response.text
+    assert not core.store.rows("SELECT * FROM tool_approvals")
+    if change == "erasure":
+        assert executive.get(task["task_id"])["redacted"] == 1
+        assert executive.sources(task["task_id"]) == []
+
+
+def test_affect_view_distinguishes_disabled_from_neutral(client, core):
+    login(client)
+    core.settings.affect_enabled = False
+    value = client.get("/v1/console/affect").json()
+    assert value["enabled"] is False and value["reset_at"] is None
+    assert value["state"]["engagement"] == "neutral"

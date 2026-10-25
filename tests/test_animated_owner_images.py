@@ -60,16 +60,18 @@ def policy(**changes):
                             max_bytes_per_image=50000, max_pixels_per_image=10000, **changes)
 
 
-@pytest.mark.parametrize("subtype", [0, 11])
+@pytest.mark.parametrize("subtype", [0, 1, 11])
 def test_normal_gif_and_qq_animated_emoji_keep_original_source_proof(subtype):
     segment = image_segment("https://gchat.qpic.cn/animated.gif")
-    segment["data"].update(sub_type=subtype, file="synthetic.gif")
+    segment["data"].update(sub_type=subtype, file="synthetic.gif",
+                           summary="synthetic-summary-not-visual-evidence")
     event = normalize(json.dumps(raw_event(message=[segment])), config(),
                       now=raw_event()["time"], rich_input_scope="references_v1",
                       image_scope="owner_image_v1")
     assert event["payload"]["shared_content"] == [{"kind": "image", "slot": 0}]
     assert event["payload"]["rich"]["segments"][0]["coverage"] == "UNREAD"
     assert "gchat.qpic.cn" not in json.dumps(event)
+    assert "synthetic-summary-not-visual-evidence" not in json.dumps(event)
 
 
 @pytest.mark.parametrize("format,mime", [("GIF", "image/gif"), ("WEBP", "image/webp"),
@@ -124,15 +126,19 @@ def test_apng_poster_is_not_an_animation_frame_and_sampling_includes_the_last_fr
     assert "共10帧" in sampled.note and "第1,3,5,6,8,10帧" in sampled.note
 
 
-@pytest.mark.parametrize("format,mime", [("GIF", "image/gif"), ("WEBP", "image/webp"),
-                                         ("PNG", "image/apng")])
+@pytest.mark.parametrize("format,mime,count,subtype", [
+    ("GIF", "image/gif", 3, 11), ("WEBP", "image/webp", 3, 11),
+    ("PNG", "image/apng", 3, 11), ("GIF", "image/gif", 3, 1),
+    ("WEBP", "image/webp", 3, 1), ("PNG", "image/apng", 3, 1),
+    ("PNG", "image/png", 1, 1),
+])
 def test_real_api_and_independent_worker_reply_to_animation_then_continue_semantic_chat(
-    core, tmp_path, monkeypatch, format, mime,
+    core, tmp_path, monkeypatch, format, mime, count, subtype,
 ):
     from companion import __main__, api
     from companion import core as core_module
 
-    original = animation(format, size=(3, 2))
+    original = animation(format, count=count, size=(3, 2))
     first_reply = "收到啦。\n它在动呢，几帧连着看很有意思。\n你想表达这个吗？"
     second_reply = "我在。\n接着聊。"
     calls, instances, downloads = [], [], []
@@ -140,7 +146,8 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
 
     async def source(ws):
         segment = image_segment("https://gchat.qpic.cn/animation")
-        segment["data"].update(sub_type=11, file="owner-animation")
+        segment["data"].update(sub_type=subtype, file="owner-animation",
+                               summary="synthetic-summary-not-visual-evidence")
         await ws.send(json.dumps(raw_event(1, time=int(core.clock.now.timestamp()),
                                           message=[segment])))
         closed = asyncio.create_task(ws.wait_closed())
@@ -200,6 +207,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
             bridge_options={"rich_input_scope": "references_v1"}, model_reply=respond,
             independent_api=True,
         ) as (active, _, sends, _):
+            assert active.runtime.authority == active.runtime.config.owner_authority
             task = asyncio.create_task(__main__.worker(core.settings))
             active.start(worker=False)
             media = MediaPump(active.runtime, active.client, protocol=active.onebot)
@@ -233,8 +241,9 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
         assert len(image_parts) == 1
         sheet = base64.b64decode(image_parts[0]["image_url"]["url"].split(",", 1)[1])
         with Image.open(io.BytesIO(sheet)) as prepared:
-            assert prepared.n_frames == 1 and prepared.size == (9, 2)
-        assert "抽样" in json.dumps(calls[0], ensure_ascii=False)
+            assert prepared.n_frames == 1 and prepared.size == (3 * count, 2)
+        assert ("抽样" in json.dumps(calls[0], ensure_ascii=False)) == (count > 1)
+        assert "synthetic-summary-not-visual-evidence" not in json.dumps(calls)
         assert {"role": "assistant", "content": first_reply} in calls[1]
         assert "自然语义停顿" in calls[1][0]["content"]
         content = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
@@ -244,6 +253,9 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
             {"scenario": "chat", "state": "SETTLED"},
             {"scenario": "chat", "state": "SETTLED"}]
         assert core.store.one("SELECT COUNT(*) n FROM captured_images")["n"] == 1
+        proof = json.loads(core.store.one("SELECT proof_json FROM captured_images")["proof_json"])
+        assert proof["authority"] == active.runtime.authority
+        assert proof["media_sha256"] == hashlib.sha256(original).hexdigest()
         assert core.store.one("SELECT COUNT(*) n FROM model_admissions")["n"] == 2
 
     run(scenario())

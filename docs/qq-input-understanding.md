@@ -1,6 +1,6 @@
 # QQ 引用、卡片和多图理解
 
-本页适用于原生 `companion_onebot_bridge` 链路；多图原图与批准记忆的联合理解通过签名受控窗口启用。Bridge 将主人当前文字与引用资料分别传入 Core。引用、转发节点、卡片、识图结果及记忆都有各自的来源；其中只有主人当前文字可以触发命令或作为新的主人事实证据。
+本页适用于原生 `companion_onebot_bridge` 链路；常驻入站通过 [OwnerAuthority](owner-authority.md) 授权当前主人消息、媒体与记忆用途，原图沿已有签名领取、下载检查和上传链处理。Bridge 将主人当前文字与引用资料分别传入 Core。引用、转发节点、卡片、识图结果及记忆都有各自的来源；其中只有主人当前文字可以触发命令或作为新的主人事实证据。
 
 ## 已实现的路径
 
@@ -9,7 +9,7 @@
 | 引用消息 | 优先读取消息链中的正文；缺失时按消息 ID 调用 `get_msg`。 |
 | 合并转发 | 按原顺序展开文字节点，保留显示昵称和节点路径，支持有限层数的嵌套。 |
 | QQ JSON 卡片 | 提取支持的标题、摘要和链接字段；Bilibili 视频与小黑盒帖子链接交给已有 Reader。 |
-| 多张图片 | 按顶层普通图片顺序独立编号、领取、下载和校验，批量识图一次；数量可配置或设为 `"unlimited"`。 |
+| 多张图片 | 按顶层支持图片的顺序独立编号、领取、下载和校验；支持普通图片及收藏/自定义表情 `sub_type=1`、动图表情 `sub_type=11`，数量可配置或设为 `"unlimited"`。 |
 | 图片与记忆 | 识图线索参与限定范围的记忆检索；核对候选后，将原图、确认记忆及当前问题一起交给视觉模型回答。 |
 
 例如两张耳机图片配合“结合我以前的需求选哪个”，最终请求同时包含两张原图和与耳机有关的获准记忆。回答规则要求区分图片可见细节、以前明确确认的需求与推测。图中文字不会被自动记成主人偏好。
@@ -30,7 +30,7 @@ Bridge 收到 Core 的成功接收或事件已删除回执后，会清除对应�
 
 ## 多图与联合记忆的配置
 
-多图在原受控窗口中沿用 `image_scope = "owner_image_v1"`、独立图片准入和签名上传；该范围不是常驻 Bridge 的顶层配置项。Core 同时启用 Content、Observation、`content.use_chat_model_for_vision = true`，并配置 `source = "qq_image"`、`media_analysis = true` 的图片 adapter。调整现有配置时应同时核对：
+常驻多图沿用 OwnerAuthority 的图片用途检查、独立图片准入与签名上传；`image_scope = "owner_image_v1"` 是内部规范化范围，不是常驻 Bridge 的顶层配置项。旧受控窗口中的同名范围仍属于其窗口计划。Core 同时启用 Content、Observation、`content.use_chat_model_for_vision = true`，并配置 `source = "qq_image"`、`media_analysis = true` 的图片 adapter。调整现有配置时应同时核对：
 
 - `content.max_images_per_event` 与 `paid_model.image_input.max_images_per_request`，均可设正整数或 `"unlimited"`；每张重复图片也占一个位置。取消数量配置上限后，仍受原消息最多 64 个协议段及整体富消息字节限制。
 - 每图字节、像素及固定输入 token 估值，以及累计输入、单次、单作业、每日和窗口费用限制。两次视觉请求都按实际图片数量估算；收到 usage 后按原账本结算。
@@ -40,7 +40,7 @@ Bridge 收到 Core 的成功接收或事件已删除回执后，会清除对应�
 
 联合理解的顺序为：批量识图提取线索 → 在批准事实中检索并用 `memory_review` 核对候选 → 将原图、选中的确认记忆和当前问题交给 `chat`。没有检索候选时跳过核对调用；图片线索本身不作为长期记忆证据。
 
-原图仅通过内嵌 base64 传给同一个获准视觉模型。支持单帧 PNG、JPEG、WebP。API 与聊天 worker 之间的原图暂存在数据库旁的私有目录，有效期为上传后 300 秒；事件正文、数据库和账本只保留必要的来源、摘要与状态，不存原图字节或 QQ 签名 URL。最终调用前重新核对原图哈希、隐私版本和到期时间。成功、失败、取消、停止窗口和删除来源会移除暂存文件；启动及 worker 运行时清理到期文件，删除回放也处理旧备份旁残留的原图。
+原图仅通过内嵌 base64 传给同一个获准视觉模型。支持单帧 PNG、JPEG、WebP；GIF、动态 WebP 和 APNG 经已有帧数、像素与字节限制校验后，生成有序抽样拼图并标明抽样范围。图片子类型和 `summary` 不替代实际字节的格式校验，也不成为视觉证据。API 与聊天 worker 之间的原图暂存在数据库旁的私有目录，有效期为上传后 300 秒；事件正文、数据库和账本只保留必要的来源、摘要与状态，不存原图字节或 QQ 签名 URL。最终调用前重新核对原图哈希、隐私版本和到期时间。成功、失败、取消、停止窗口和删除来源会移除暂存文件；启动及 worker 运行时清理到期文件，删除回放也处理旧备份旁残留的原图。
 
 常规聊天启用后台记忆提取时，应同时运行 `life` profile，由现有 `companion-life-worker` 执行提取。原批准事实范围只读取批准事实；私人陪伴范围可从主人原始文字自动提取记忆。图片参与检索不会使图中文字成为主人事实证据。
 
@@ -49,5 +49,9 @@ Bridge 收到 Core 的成功接收或事件已删除回执后，会清除对应�
 协议操作参考 [OneBot v11 官方接口](https://github.com/botuniverse/onebot-11/blob/master/api/public.md)，正文解析顺序参考 [AstrBot 固定版本的引用解析器](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/utils/quoted_message/extractor.py)及其[测试](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/tests/test_quoted_message_parser.py)。多图请求采用 [DeepSeek 官方视觉接口](https://api-docs.deepseek.com/guides/vision/)支持的有序文字与 `image_url` 输入。
 
 固定 SnowLuma 的 [`get_msg` 实现](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/actions/message.ts)会刷新消息中的媒体 URL；[`get_forward_msg` 的底层转换](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/modules/message-actions.ts)也会解析节点媒体地址。Bridge 不下载或保留这些附带 URL；Bridge 的次数和时间限制不能约束协议端内部刷新的全部成本。
+
+2026-10-25 核对同一固定 SnowLuma 版本的 [image 消息转换](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/onebot/src/event-converter/element-codecs.ts)：普通图片投影为 `url/file/sub_type/summary`，闪照另带 `type`；[收藏表情测试](https://github.com/SnowLuma/SnowLuma/blob/db142db9e6398c779283eab9afc3552da1e2c361/packages/protocol/tests/highway/image-sticker.test.ts)明确使用 `subType=1`。Bridge 只扩展整数允许集到 `0/1/11`，仍限制字段和 QQ CDN 主机、固定解析到公网 IP 的 HTTPS 请求、禁止重定向、体积和格式。原始段摘要仍绑定完整来源，未支持图片不会获取下载租约。
+
+故障隔离参考 DSH QQ 固定 `c8b9158` 的[逐附件下载](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/attachment.ts)与[正文和附件装配](https://github.com/tencent-connect/dsh-qqbot/blob/c8b9158b37817b0dbc1e514e62e16204ad47a6ce/src/transport/inbound.ts)：单个附件不支持时仍保留当前正文及附件缺失标记。本项目复用既有 `UNSUPPORTED` 投影与 OwnerAuthority 签名队列，下载约束继续由自己的来源、公网地址和签名边界负责。
 
 本轮验证使用合成消息、认证本地 HTTP/WebSocket、真实数据库与文件、模拟模型和网络传输，覆盖幂等、费用、来源漂移、删除回放及停止窗口。未调用真实 QQ 或付费模型；实际正文可取得率和视觉回答质量仍需在已配置运行环境验证。

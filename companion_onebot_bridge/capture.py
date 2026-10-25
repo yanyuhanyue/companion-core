@@ -143,7 +143,7 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
         or raw["message_id"] in (0, "0")):
         raise ValueError("OWNER_CAPTURE_TIME_CHANGED")
     permission = await runtime.check(core_client, purpose="chat")
-    images = original_images(raw["message"]) if rich else []
+    images = original_images(raw["message"], skip_unsupported=True) if rich else []
     files = original_files(raw["message"]) if rich else []
     records = (original_records(raw["message"]) if rich
                and "voice" in permission["capability_policies"] else [])
@@ -153,7 +153,8 @@ async def prepare_owner_input(runtime, core_client, onebot, frame, received_at, 
         await runtime.check(core_client, purpose=purpose)
     event = normalize(frame, config, now=received_at.timestamp(),
                       image_scope="owner_image_v1" if images else "none",
-                      file_scope="owner_file_v1" if files else "none")
+                      file_scope="owner_file_v1" if files else "none",
+                      skip_unsupported_images=True)
     references = []
     try:
         await enrich(event, raw["message"],

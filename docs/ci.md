@@ -36,7 +36,8 @@ a final UI-only commit cannot hide backend changes from earlier commits in that 
 
 Console-only validation always type-checks the owner Console and runs
 `test_console_static.py`, `test_owner_console.py`, `test_console_cognition.py` and the real
-TLS/browser interactions in `test_console_browser.py`. It builds and verifies the release
+TLS/browser interactions in `test_console_browser.py` and `test_console_supplement_browser.py`.
+It builds and verifies the release
 archives, including the three Console resources. It does not schedule full backend shards,
 backend replay/smoke, reader browser tests or unchanged container/native-plugin checks.
 The existing backend-only selection and all full validation keep their previous coverage.

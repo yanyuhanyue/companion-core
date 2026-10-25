@@ -227,6 +227,13 @@ def project(message, redact):
     elif isinstance(message, list) and 1 <= len(message) <= 64:
         texts, segments, positions = [], [], []
         for index, segment in enumerate(message):
+            if isinstance(segment, dict) and segment.get("type") == "image":
+                # The envelope still binds the original bytes. A malformed image
+                # descriptor grants no download and must not discard sibling text.
+                # Only the separate image decoder can upgrade this to UNREAD.
+                segments.append({"index": index, "type": "image", "actor": "UNVERIFIED",
+                                 "coverage": "UNSUPPORTED"})
+                continue
             if (
                 not isinstance(segment, dict)
                 or set(segment) != {"type", "data"}

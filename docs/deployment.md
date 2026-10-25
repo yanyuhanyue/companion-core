@@ -39,10 +39,14 @@ docker network connect companion-internal <你的AstrBot容器名>
 
 ## 主人入口与旧 AstrBot 数据迁移
 
-新入站统一由 `companion_onebot_bridge` 接收。基础文字使用原生 `daemon`；图片、引用、文件、
-语音及连续交互使用已有签名捕获和受控 `window-run` 入口，配置和授权见
+新入站统一由 `companion_onebot_bridge` 的 OwnerAuthority `daemon` 接收，文字、图片、引用、
+文件及语音均沿用原签名捕获、用途校验和持久队列，配置和授权见
 [QQ 输入理解](qq-input-understanding.md) 与 [媒体运行配置](qq-beta/media-autonomy.md)。
-迁移不会创建媒体签名密钥、授权、预算或发送窗口；仅运行 `daemon` 不会因此获得媒体理解能力。
+`daemon` 要求绑定当前 OwnerAuthority；启动进程本身不会创建媒体用途授权、签名密钥或预算。
+未知图片类型、畸形描述符或不允许的原图地址只使该图片保持 `UNSUPPORTED`，原文及其他有效
+图片继续处理；纯不可用图片通过原生聊天回复说明本次无法读取。原始帧摘要、消息身份和签名
+仍保留，授权、签名或来源完整性错误仍拒绝。下载和上传开始后的原租约、UNKNOWN 及费用责任
+继续沿用既有恢复规则。
 
 AstrBot 插件 v0.6.0 删除 ImageQueue、旧图片下载/上传以及宿主新发送入口。
 主人事件仍 `stop_event()`，阻止旧宿主默认 Agent 回答，但不写入新 inbox。

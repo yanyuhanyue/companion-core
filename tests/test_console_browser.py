@@ -202,3 +202,86 @@ def test_console_cognition_times_row_states_and_read_failures(core, tmp_path):
             assert await page.get_by_text("同步失败", exact=True).count() == 1
 
     asyncio.run(scenario())
+
+
+def test_console_cognition_locates_original_record_and_loads_older_page(core, tmp_path):
+    core.clock.now = datetime.now(UTC)
+    goals = []
+    for number in range(1, 33):
+        goals.append(setup_goal(core, number=number, topic=f"分页目标 {number:02}"))
+        core.goals.cancel(goals[-1])
+        core.clock.advance(1)
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await navigate(page, "思考与决策")
+            records = page.locator(".dk-list > li > button")
+            assert await records.count() == 30
+            await page.get_by_label("记录类型", exact=True).select_option("goal")
+            await page.get_by_label("记录编号", exact=True).fill(goals[0])
+            async with page.expect_response(lambda r: "record_id=" + goals[0] in r.url):
+                await page.get_by_role("button", name="查找", exact=True).click()
+            await page.locator("#page[aria-busy=false]").wait_for()
+            assert await page.locator(f'button[data-record-id="{goals[0]}"]').get_attribute(
+                "class") == "sel"
+            await page.get_by_label("记录编号", exact=True).fill(goals[2])
+            await page.get_by_role("button", name="查找", exact=True).click()
+            await page.locator("#page[aria-busy=false]").wait_for()
+            await page.locator(f'button.sel[data-record-id="{goals[2]}"]').wait_for()
+            await navigate(page, "日记与成长")
+            await navigate(page, "思考与决策")
+            async with page.expect_response(lambda r: "&before=" in r.url):
+                await page.get_by_role("button", name="更早的目标", exact=True).click()
+            await page.locator(f'button[data-record-id="{goals[0]}"]').wait_for()
+            assert await records.count() == 32
+            assert await page.get_by_role("button", name="更早的目标", exact=True).count() == 0
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("refresh_during_read", [False, True])
+def test_console_cognition_pagination_does_not_restore_erased_snapshot(
+    core, tmp_path, refresh_during_read,
+):
+    core.clock.now = datetime.now(UTC)
+    for number in range(1, 33):
+        goal = setup_goal(core, number=number, topic=f"分页隐私 {number:02}")
+        core.goals.cancel(goal)
+        core.clock.advance(1)
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await navigate(page, "思考与决策")
+            held, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+            async def old_page(route):
+                if refresh_during_read:
+                    response = await route.fetch()
+                    held.set()
+                    await release.wait()
+                    try:
+                        await route.fulfill(response=response)
+                    finally:
+                        finished.set()
+                else:
+                    # The next native page is fresh but the already loaded page is erased.
+                    with core.store.transaction():
+                        core.ledger.expire_events(core.store, ["evt_test_32"], core.clock())
+                    await route.continue_()
+
+            await page.route("**/v1/console/cognition?kind=goal&limit=30&before=*", old_page)
+            await page.get_by_role("button", name="更早的目标", exact=True).click()
+            if refresh_during_read:
+                await asyncio.wait_for(held.wait(), timeout=10)
+                with core.store.transaction():
+                    core.ledger.expire_events(core.store, ["evt_test_32"], core.clock())
+                await page.get_by_role("button", name="刷新当前页面").click()
+                await page.locator("#page[aria-busy=false]").wait_for()
+                release.set()
+                await asyncio.wait_for(finished.wait(), timeout=10)
+            await page.locator(f'button[data-record-id="{goal}"]').wait_for(state="detached")
+            # The native cursor scans 30 rows, then omits the one erased source.
+            assert await page.locator(".dk-list > li > button").count() == 29
+            assert await page.get_by_role("button", name="更早的目标", exact=True).is_enabled()
+
+    run(scenario())

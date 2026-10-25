@@ -139,7 +139,7 @@ def text_only(message):
 
 
 def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="none",
-              file_scope="none"):
+              file_scope="none", skip_unsupported_images=False):
     scope = config.rich_input_scope if rich_input_scope is None else rich_input_scope
     raw = decode(frame, config.max_frame_bytes, max_depth=20 if scope == "references_v1" else 8)
     if (
@@ -200,7 +200,7 @@ def normalize(frame, config, *, now=None, rich_input_scope=None, image_scope="no
             raise ValueError("INVALID_IMAGE_SCOPE")
         from .images import original_images
 
-        images = original_images(raw.get("message"))
+        images = original_images(raw.get("message"), skip_unsupported=skip_unsupported_images)
         if images:
             projections = {image.index: image.projection() for image in images}
             rich["segments"] = [

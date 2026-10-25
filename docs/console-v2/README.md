@@ -11,11 +11,14 @@
 | 今天 | `overview`、`activity`、`diagnostics`、`configuration` | `mode` |
 | 活动时间线 | `activity`（分页） | 无 |
 | 记忆 | `memories`（`q`、`review`） | `memories/{id}/decision` |
-| 日记与成长 | `life`、`diary/{day}`、`goals`、`reflections` | 日记修订与遗忘、`mode`、目标决定与续行、反思决定 |
-| 阅读与文件、表情素材、语音与节点、QQ 资料行为 | `content`、`memes`、`voice`、`account-actions` | 无 |
+| 日记与成长 | `life`、`diary/{day}`、`goals`、`reflections`、`life/topics` | `diary/{day}/correction`、`diary/{day}/forget`、`mode`、目标决定与续行、反思决定、`life/topics/{id}/close` |
+| 情绪与偏好 | `affect`、`interests`、`expression-learning` | `affect/reset` |
+| 阅读与文件（含来源授权标签） | `content`、`source-grants` | `source-grants/{id}`（撤回或遗忘） |
+| 表情素材、语音与节点、QQ 资料行为 | `memes`、`voice`、`account-actions` | 无 |
+| 执行任务 | `tools` | `tools/{id}/decision`、`tools/{id}/revoke` |
 | 能力与开关 | `overview` 的能力快照、`configuration`、`autonomy` | `configuration`、`mode`、授权与调整决定 |
 | 运行诊断 | `diagnostics` | `deliveries/{id}/reconcile` |
-| 思考与决策 | `cognition?kind=...&limit=30` | 无 |
+| 思考与决策 | `cognition`（`kind`、`before` 分页、`record_id` 定位） | 无 |
 | 配置 | `configuration` | `configuration`、`cloud-budget` |
 
 “今天”的时间带由当天的审计记录按动作前缀分行；超过一次读取上限时提示去时间线查看。时间线按日期筛选时会继续向前翻页，最多读取 20 页。
@@ -37,6 +40,12 @@
 策略兼容；`tests/test_console_static.py` 检查这些约束。
 
 `app.js` 是不需要编译的原生 JavaScript，文件开头的 `// @ts-check` 和 JSDoc 类型由 CI 用 `npm exec --yes --package=typescript@5.9.3 -- tsc -p tsconfig.console.json` 检查，不生成任何文件。`tests/test_console_browser.py` 在现有 browser-reader CI 中通过真实 HTTPS、主人会话和隔离数据库验证目标、反思、授权及认知页面；外部模型使用合成传输。
+
+执行任务的列表带 `scope` 投影：只有保存的执行内容仍与 `scope_sha256` 一致、依据的私聊消息仍有效时，才显示工作区、路径、写入内容或任务说明和各项上限，文字再经过一次脱敏检查；执行端地址和凭据不出现。批准时提交同一个 `scope_sha256`，内容变化后原批准失效。
+
+思考与决策可以用 `#thinking/<类型>:<编号>` 打开单条记录，不在第一页时按 `record_id` 单独读取。每种记录可以按 `next_cursor` 继续读更早的一页。首次同步或刷新中的任一读取失败沿用整页错误处理；翻页失败保留已加载记录，显示失败原因。刷新会丢弃旧翻页结果，隐私版本变化会重新读取，避免拼接旧来源。目标记录显示每一步的状态、尝试次数和读取回执，结果不明的步骤单独提示。
+
+表达习惯学习没有单独保存逐日历史：页面显示的是按保留期内原话重新计算的当前结果和支持它的日期；出现相反反馈或重置情绪观察后从头累计。稳定偏好在相关能力开启、当前授权有效时可用作真实回复参考；快照的 `SHADOW` 不表示运行时禁止使用。
 
 ## 设计稿中尚未实现的部分
 

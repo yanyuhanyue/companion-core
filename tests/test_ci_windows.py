@@ -178,6 +178,7 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
     assert len(browsers) == 2
     scoped = next(step for step in browsers if step["if"] == console)
     assert "tests/test_console_browser.py" in scoped["run"]
+    assert "tests/test_console_supplement_browser.py" in scoped["run"]
     assert "test_source_browser.py" not in scoped["run"]
     assert next(step for step in browsers if step is not scoped)["if"] == product
     for name in ("container", "plugin-native"):
