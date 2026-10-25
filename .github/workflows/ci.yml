@@ -106,8 +106,9 @@ jobs:
       - name: Run a complete, disjoint suite shard
         if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
         run: >-
-          uv run --extra onebot python -m pytest -p scripts.ci_shards
-          --ci-shard=${{ matrix.shard }} -q --durations=15
+          uv run --extra onebot python -B -m scripts.test_feedback --workers 2 --
+          -p scripts.ci_shards
+          --ci-shard=${{ matrix.shard }} --durations=15
           --basetemp=.local/test-temp --junitxml=.local/test-results/pytest.xml
       - name: Validate console assets and owner API contracts
         if: ${{ !fromJSON(needs.preflight.outputs.windows).product }}
