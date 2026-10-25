@@ -779,7 +779,8 @@ PAGES.life = data => {
       "aria-label": `${mo}月${d}日${has ? "，有日记" : ""}`, onclick: () => { state.diaryDay = key; rerender(); } }, String(d)));
   }
   const shift = n => { const dt = new Date(Date.UTC(y, mo - 1 + n, 1)); state.diaryDay = dt.toISOString().slice(0, 10); rerender(); };
-  const goals = items.filter(i => i.kind === "goal"), reflections = items.filter(i => i.kind === "reflection");
+  const goals = items.filter(i => i.kind === "goal").map(g => ({ goal_id: g.id, title: g.title, state: g.status, status: g.status, occurred_at: g.occurred_at, detail: g.detail, steps: {} }));
+  const reflections = items.filter(i => i.kind === "reflection").map(r => ({ suggestion_id: r.id, content: r.title, state: r.status, created_at: r.occurred_at, evidence: [] }));
   const paper = el("article", { class: "paper", id: "diary-paper", "aria-live": "polite" }, el("p", { class: "note" }, "正在读取日记…"));
   queueMicrotask(() => loadDiary(state.diaryDay, paper));
   return el("div", {}, head("日记与成长", "日记由独立进程在自然日结束后整理,只根据核验过的真实互动书写。", btn("暂停或恢复写日记", openModeDialog, { symbol: "pause" })),
@@ -790,20 +791,9 @@ PAGES.life = data => {
           el("button", { type: "button", class: "icon-btn", "aria-label": "下个月", onclick: () => shift(1) }, icon("right"))),
           el("div", { class: "cal-grid" }, WEEK.map(w => el("span", { class: "wd" }, w)), cells),
           el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看"))),
-        sheet("目标与承诺", goals.length ? goals.map(g => el("div", { class: "goal" },
-          el("div", {}, el("b", {}, g.title), tag(g.status),
-            el("p", {}, g.detail?.commitment_state ? "承诺：" + statusOf(g.detail.commitment_state)[0] : "更新于 " + fmtDate(g.occurred_at))),
-          el("div", { class: "goal-acts" },
-            g.status === "PENDING" ? btn("接受", () => goalAction(g.id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
-            g.status === "PENDING" ? btn("取消", () => goalAction(g.id, "CANCEL"), { cls: "sm", symbol: "close" }) : null,
-            g.status === "ACCEPTED" ? btn("续行", () => goalContinuation(g.id), { cls: "sm", symbol: "next" }) : null))) : el("p", { class: "note" }, "还没有目标。"))),
+        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, goals.map(g => goalCard(g))) : el("p", { class: "note" }, "还没有目标。"))),
       el("div", { class: "stack" }, paper,
-        sheet("最近的反思", reflections.length ? el("ul", { class: "rows" }, reflections.map(r => el("li", { class: "block" },
-          el("div", {}, el("b", {}, r.title),
-            el("span", { class: "meta-line" }, tag(r.status), el("span", { class: "note" }, fmtDate(r.occurred_at)))),
-          r.status === "PENDING" ? el("div", { class: "acts" },
-            btn("批准", () => reflectionAction(r.id, "ACCEPT"), { cls: "sm primary", symbol: "check" }),
-            btn("拒绝", () => reflectionAction(r.id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null))) : el("p", { class: "note" }, "还没有反思记录。")))));
+        sheet("最近的反思", reflections.length ? el("div", { class: "stack" }, reflections.map(r => reflectionCard(r))) : el("p", { class: "note" }, "还没有反思记录。")))));
 };
 async function loadDiary(day, paper) {
   const epoch = state.epoch;
@@ -867,7 +857,7 @@ function goalAction(goalId, decision) {
   form.addEventListener("submit", e => {
     e.preventDefault();
     perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goalId) + "/decision", { decision }, "POST",
-      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      r => typeof r.state === "string"),
       async () => { closeDialog(); toast(decision === "ACCEPT" ? "已接受" : "已取消"); await loadRoute({ reset: true }); });
   });
   openDialog(titles[decision], form);
@@ -883,7 +873,7 @@ function goalContinuation(goalId) {
     e.preventDefault();
     if (!choice.value) { formError(form, "请选择续行方式。"); return; }
     perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goalId) + "/continuation", { decision: choice.value }, "POST",
-      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      r => typeof r.state === "string"),
       async () => { closeDialog(); toast("已保存"); await loadRoute({ reset: true }); });
   });
   openDialog("目标续行", form);
@@ -896,7 +886,7 @@ function reflectionAction(suggestionId, decision) {
   form.addEventListener("submit", e => {
     e.preventDefault();
     perform(form, submit, () => api.write("/reflections/" + encodeURIComponent(suggestionId) + "/decision", { decision }, "POST",
-      r => typeof r.suggestion_id === "string" && typeof r.state === "string"),
+      r => typeof r.state === "string"),
       async () => { closeDialog(); toast(decision === "ACCEPT" ? "已批准" : "已拒绝"); await loadRoute({ reset: true }); });
   });
   openDialog(titles[decision], form);
@@ -2071,8 +2061,8 @@ function goalCard(g) {
       remaining.length ? el("ul", {}, remaining.map(s => el("li", {}, s))) : null,
       lastResult ? el("p", { class: "note" }, "上一步：" + lastResult.step + "（" + statusOf(lastResult.outcome)[0] + "）") : null) : null,
     el("div", { class: "goal-acts" },
-      g.state === "PROPOSED" ? btn("接受", () => goalDecision(g.goal_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
-      ["PROPOSED", "ACTIVE"].includes(g.state) ? btn("取消", () => goalDecision(g.goal_id, "CANCEL"), { cls: "sm danger", symbol: "close" }) : null,
+      g.state === "CANDIDATE" ? btn("接受", () => goalDecision(g.goal_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
+      ["CANDIDATE", "ACTIVE"].includes(g.state) ? btn("取消", () => goalDecision(g.goal_id, "CANCEL"), { cls: "sm danger", symbol: "close" }) : null,
       g.state === "ACTIVE" && remaining.length ? btn("续行", () => goalContinue(g), { cls: "sm", symbol: "play" }) : null));
 }
 
@@ -2084,7 +2074,7 @@ function goalDecision(goal_id, decision) {
   form.addEventListener("submit", e => {
     e.preventDefault();
     perform(form, submit, () => api.write("/goals/" + encodeURIComponent(goal_id) + "/decision", { decision }, "POST",
-      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      r => typeof r.state === "string"),
       async r => { closeDialog(); toast((decision === "ACCEPT" ? "已接受" : "已取消") + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
   });
   openDialog(titles[decision], form);
@@ -2128,7 +2118,7 @@ function goalContinue(g) {
       body.wait_until = new Date(until).toISOString();
     }
     perform(form, submit, () => api.write("/goals/" + encodeURIComponent(g.goal_id) + "/continuation", body, "POST",
-      r => typeof r.goal_id === "string" && typeof r.state === "string"),
+      r => typeof r.state === "string"),
       async r => { closeDialog(); toast({ CONTINUE: "已继续执行", WAIT: "已等待到期", ABANDON: "已放弃目标" }[action] + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
   });
   openDialog("续行目标：" + g.title, form, { wide: true });
@@ -2140,24 +2130,42 @@ function reflectionCard(r) {
     el("div", { class: "refl-head" }, el("h3", {}, r.content), tag(r.state)),
     el("p", { class: "meta" }, fmtDate(r.occurred_at)),
     evidence.length ? el("details", { class: "refl-evidence" }, el("summary", {}, "证据（" + evidence.length + " 条原话）"),
-      el("ul", {}, evidence.map(e => el("li", {}, """ + e.exact_quote + """)))
+      el("ul", {}, evidence.map(e => el("li", {}, "\"" + e.exact_quote + "\"")))
     ) : null,
     r.state === "PROPOSED" ? el("div", { class: "refl-acts" },
-      btn("接受", () => reflectionDecision(r.suggestion_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }),
+      btn("作为假设接受", () => reflectionDecision(r.suggestion_id, "ACCEPT_AS_HYPOTHESIS"), { cls: "sm primary", symbol: "check" }),
       btn("拒绝", () => reflectionDecision(r.suggestion_id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null);
 }
 
 function reflectionDecision(suggestion_id, decision) {
-  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT" ? "接受后这条建议会进入下一步执行。" : "拒绝后不会再提示，但证据仍会保留在对话记录里。"));
-  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT" ? "primary" : "danger") }, decision === "ACCEPT" ? "接受" : "拒绝");
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "ACCEPT_AS_HYPOTHESIS" ? "接受后这条建议会进入下一步执行。" : "拒绝后不会再提示，但证据仍会保留在对话记录里。"));
+  const submit = el("button", { type: "submit", class: "btn " + (decision === "ACCEPT_AS_HYPOTHESIS" ? "primary" : "danger") }, decision === "ACCEPT_AS_HYPOTHESIS" ? "接受" : "拒绝");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
     perform(form, submit, () => api.write("/reflections/" + encodeURIComponent(suggestion_id) + "/decision", { decision }, "POST",
-      r => typeof r.suggestion_id === "string" && typeof r.state === "string"),
-      async r => { closeDialog(); toast((decision === "ACCEPT" ? "已接受" : "已拒绝") + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
+      r => typeof r.state === "string"),
+      async r => { closeDialog(); toast((decision === "ACCEPT_AS_HYPOTHESIS" ? "已接受" : "已拒绝") + "（" + statusOf(r.state)[0] + "）"); await loadRoute({ reset: true }); });
   });
-  openDialog(decision === "ACCEPT" ? "接受这条反思建议" : "拒绝这条反思建议？", form);
+  openDialog(decision === "ACCEPT_AS_HYPOTHESIS" ? "接受这条反思建议" : "拒绝这条反思建议？", form);
+}
+
+function goalCard(goal) {
+  return el("div", { class: "goal" },
+    el("div", {}, el("b", {}, goal.title), tag(goal.state),
+      el("p", {}, goal.detail?.commitment_state ? "承诺：" + statusOf(goal.detail.commitment_state)[0] : "更新于 " + fmtDate(goal.occurred_at))),
+    el("div", { class: "goal-acts" },
+      goal.state === "PENDING" ? btn("接受", () => goalAction(goal.goal_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }) : null,
+      goal.state === "PENDING" ? btn("取消", () => goalAction(goal.goal_id, "CANCEL"), { cls: "sm", symbol: "close" }) : null,
+      goal.state === "ACCEPTED" ? btn("续行", () => goalContinuation(goal.goal_id), { cls: "sm", symbol: "next" }) : null));
+}
+function reflectionCard(reflection) {
+  return el("div", { class: "block" },
+    el("div", {}, el("b", {}, reflection.content),
+      el("span", { class: "meta-line" }, tag(reflection.state), el("span", { class: "note" }, fmtDate(reflection.created_at)))),
+    reflection.state === "PENDING" ? el("div", { class: "acts" },
+      btn("批准", () => reflectionAction(reflection.suggestion_id, "ACCEPT"), { cls: "sm primary", symbol: "check" }),
+      btn("拒绝", () => reflectionAction(reflection.suggestion_id, "REJECT"), { cls: "sm danger", symbol: "close" })) : null);
 }
 
 function topicCard(t) {
