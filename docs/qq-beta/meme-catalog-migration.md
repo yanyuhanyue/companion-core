@@ -107,5 +107,78 @@ before replay and needs no change. Tests are in
 [migration checks](../../tests/test_meme_asset_migration.py) and
 [erasure coordination](../../tests/test_erasure_coordination.py).
 The B0 baseline's 84 targeted tests remain evidence for unchanged portions.
-Final CI and ownership cutover are pending; SHADOW, production migration, real QQ
-delivery and human acceptance remain separate acceptance stages.
+B1a's [final main validation](https://github.com/yanyuhanyue/companion-core/actions/runs/40224533506/job/121263068243)
+reuses the verified identical-tree full PR checks. Ownership cutover, SHADOW,
+production migration, real QQ delivery and human acceptance remain separate stages.
+
+## B3a: read-only historical retirement preflight
+
+Run `python -m companion_onebot_bridge.meme_retirement --config <private.toml>`
+only against the stopped native Bridge store. The report diagnoses local blockers;
+it never authorizes a cutover, clears content, changes a pin, settles fees or changes
+the independent Core Ledger. Exit 0 means only that these local checks found no
+blocker. Exit 2 means a local blocker. Both report `state=BLOCKED` and
+`cutover_authorized=false`: latest independent Core Ledger/live reconciliation,
+explicit managed-copy retirement and backup revalidation remain external gates.
+No arbitrary JSON report or old hash substitutes for those current checks.
+
+The CLI reuses the export's component-by-component regular-file/reparse refusal,
+the original nonempty instance lock and read-only native owner verifier. The
+`existing_only` lock option opens that same file without creating, initializing or
+chmodding it; default callers retain their original behavior. The original OS lock
+is held throughout. Reading can update filesystem access times, which is distinct
+from product or custody writes.
+
+SQLite [read-only WAL access](https://www.sqlite.org/wal.html#read_only_databases)
+can still create sidecars. This preflight therefore refuses any nonempty `-wal` or
+`-journal`, or residual nonempty `-shm` with unproven recovery state, as
+`WAL_RECOVERY_REQUIRED`, without checkpointing, repairing, removing
+files or copying the database. Only a known clean, stopped baseline is opened with
+standard [mode=ro and immutable=1](https://www.sqlite.org/uri.html#uriimmutable)
+and `query_only` in one transaction. Immutable skips SQLite's own locking/change
+detection; it is limited to this offline tool under the original OS lock. The
+database, all known sidecars, owner journal, STOP marker and lock are fingerprinted
+before and after, including absence, SHA256, size, modification and change times.
+Any observed change rejects the report. This is not a running-reader strategy.
+
+The report contains counts, known schema fingerprints, fixed reasons and necessary
+custody hashes. It emits no caption, image bytes, URL, query, private path, credential
+or raw authority. Unknown/missing table shapes, unverified source/receipt links,
+unsettled caption/discovery usage and unfinished original handoff custody block.
+`PREPARED`, `SENDING` and `UNKNOWN` pins block independently even if an owner
+resolution exists: that existing resolution does not project the meme pin. No
+timeout or elapsed cooldown releases such a pin.
+
+Historical `SENT` pins need their original binding, ACK and trustworthy timestamps.
+The original journal does not bind the historical cooldown value to each pin;
+current config, a default, maximum, image or ACK time alone does not supply that
+missing policy. These rows report `ORIGINAL_COOLDOWN_UNVERIFIED`; `wait_until` stays
+null. Neither an old timestamp nor a shorter new config grants release.
+
+For the next cleanup slice, the following content and responsibility columns must
+be reviewed separately. This inventory grants no cleanup permission:
+
+| Existing Bridge table | Content to consider retiring | Responsibility to preserve |
+| --- | --- | --- |
+| `meme_assets` | `data`, `metadata` | physical `sha`; source verification |
+| `meme_offers` | `intent`, `category`, `ids` | original offer key |
+| `meme_runtime_offers` | `offer_json` | original event/window hashes |
+| `meme_runtime_semantic_offers` | `query_binding`, `offer_json` | event/window/revision/state |
+| `meme_runtime_sources` | `claim_json` | original SHA/attempt and settlement relation |
+| `meme_caption_cache` | `identity_json`, `result_json` | original `usage_json` and cache/asset keys |
+| `meme_caption_bindings` | `context_json`, `outcome_json` | original request/source/job/usage/state |
+| `meme_semantic_vectors` | `vector_json` | asset/source/cache/caption/model identity |
+| `meme_semantic_offers` | `proof_json` | original key/query/profile hashes |
+| `meme_pins`, `meme_runtime_bindings` | no cleanup in B3a | original immutable delivery identity/state/time |
+| `meme_runtime_results` | no cleanup in B3a | original retry body, state and incurred usage |
+| owner journal, attempts, results and resolutions | no cleanup in B3a | original ACK/UNKNOWN/NOT_SENT and fee evidence |
+
+`meme_catalog.remove()` clears original bytes and vectors but leaves other content
+listed above. It does not establish full retirement. The B1a manifest itself also
+contains private bytes/metadata. Enumerate each managed artifact explicitly with
+`--managed-copy <file>` (maximum 32 files, 100 MiB each); only its path hash, content
+hash and size are reported. The CLI neither discovers nor traverses an operator's
+`meme_directory`. Old Bridge backups/binaries have no automatic anti-resurrection
+guarantee: restoration must repeat current STOP/authority validation, latest Core
+Ledger/reconcile and the reviewed retirement procedure. B3b cleanup, compaction,
+pin receipt projection and production acceptance are separate work.
