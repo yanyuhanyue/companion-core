@@ -95,6 +95,9 @@ class PaidModelApproval(BaseModel):
     usage_anomaly_min_tokens: int = Field(default=256, strict=True, ge=64, le=1000000)
     max_input_tokens: int = Field(strict=True, gt=0, le=1000000)
     max_output_tokens: int = Field(strict=True, gt=0, le=8192)
+    max_context_tokens: int | None = Field(
+        default=None, strict=True, gt=0, le=1000000, exclude_if=lambda value: value is None,
+    )
     per_attempt_micro_usd: int = Field(strict=True, gt=0)
     per_request_micro_usd: int = Field(strict=True, gt=0)
     per_request_calls: int = Field(strict=True, gt=0, le=10)
