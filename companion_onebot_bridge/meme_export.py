@@ -22,9 +22,21 @@ from .owner_runtime import OwnerRuntime
 MAX_ROWS, MAX_BYTES, MAX_MANIFEST = 4096, 64 * 1024 * 1024, 100 * 1024 * 1024
 
 
+def _linked(path):
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    if os.name == "nt":
+        try:
+            return bool(info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except AttributeError as error:
+            raise ValueError("MEME_EXPORT_PATH_INVALID") from error
+    return False
+
+
 def _file(path):
     path = Path(path).absolute()
-    if (any(p.is_symlink() or p.is_junction() for p in (path, *path.parents))
+    if (any(_linked(p) for p in (path, *path.parents))
         or not stat.S_ISREG(path.stat().st_mode)):
         raise ValueError("MEME_EXPORT_PATH_INVALID")
     return path
@@ -49,7 +61,7 @@ def export(config, output):
     lock_path = _file(directory / "instance.lock")
     output = Path(output).absolute()
     if (output.is_relative_to(directory) or output.exists()
-        or any(p.is_symlink() or p.is_junction() for p in (output.parent, *output.parents))
+        or any(_linked(p) for p in output.parents)
         or lock_path.stat().st_size < 1 or config.owner_authority is None):
         raise ValueError("MEME_EXPORT_PATH_INVALID")
     for suffix in ("-wal", "-shm"):

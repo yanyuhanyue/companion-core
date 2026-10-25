@@ -4,6 +4,7 @@ import argparse
 import base64
 import binascii
 import json
+import os
 import re
 import sqlite3
 import stat
@@ -25,9 +26,21 @@ MAX_ROWS, MAX_BYTES, MAX_MANIFEST = 4096, 64 * 1024 * 1024, 100 * 1024 * 1024
 SHA = re.compile(r"[a-f0-9]{64}")
 
 
+def _linked(path):
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    if os.name == "nt":
+        try:
+            return bool(info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except AttributeError as error:
+            raise ValueError("MEME_MIGRATION_FILE_INVALID") from error
+    return False
+
+
 def regular_file(path, maximum=None):
     path = Path(path).absolute()
-    if (any(p.is_symlink() or p.is_junction() for p in (path, *path.parents))
+    if (any(_linked(p) for p in (path, *path.parents))
         or not stat.S_ISREG(path.stat().st_mode)
         or maximum is not None and path.stat().st_size > maximum):
         raise ValueError("MEME_MIGRATION_FILE_INVALID")

@@ -89,6 +89,13 @@ Coherent rehearsal copies use the existing
 [SQLite backup API](https://www.sqlite.org/backup.html) and transactional writes use
 [SQLite transactions](https://www.sqlite.org/lang_transaction.html). Read-only file
 connections use SQLite's existing [URI mode=ro](https://www.sqlite.org/uri.html).
+Path checks use `lstat()` for every component, reject symbolic links, and on Windows
+reject every `FILE_ATTRIBUTE_REPARSE_POINT`, including directory junctions. Missing
+Windows file attributes or filesystem errors refuse the operation. This follows the
+existing raw-stat approach in voice-node state custody and uses the
+[Python 3.11 file attributes](https://docs.python.org/3.11/library/os.html#os.stat_result.st_file_attributes)
+and [stat constants](https://docs.python.org/3.11/library/stat.html#stat.FILE_ATTRIBUTE_REPARSE_POINT),
+preserving the project's Python 3.11 minimum without `Path.is_junction()`.
 
 ## Verification status
 
