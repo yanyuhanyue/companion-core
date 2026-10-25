@@ -9,10 +9,10 @@ import hashlib
 import json
 import re
 import time
-from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
 from .meme_library import CATEGORY
+from .meme_transport import PinCustody
 
 INTENTS = {
     "celebrate": ("celebrate", "congratulations", "happy", "开心", "庆祝", "成功"),
@@ -98,21 +98,11 @@ class MemeCatalog:
             "CREATE INDEX IF NOT EXISTS meme_pins_sha ON meme_pins(sha)",
         ):
             self.db.execute(sql)
+        self.pins = PinCustody(db, clock=lambda: self.clock(), max_bindings=max_bindings,
+                              cooldown=cooldown)
 
-    @contextmanager
     def atomic(self, check=None):
-        # Serialize the check+write across independent SQLite workers as well as restarts.
-        if self.db.in_transaction:
-            raise RuntimeError("MEME_CALL_REQUIRES_TRANSACTION_BOUNDARY")
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-            if check:
-                check()
-            self.db.commit()
-        except BaseException:
-            self.db.rollback()
-            raise
+        return self.pins.atomic(check)
 
     def add(self, data, metadata, *, check):
         image = self.library.validate_bytes(data)
@@ -152,11 +142,7 @@ class MemeCatalog:
         return Metadata(**value)
 
     def _blocked(self, sha, key):
-        return self.db.execute(
-            "SELECT 1 FROM meme_pins WHERE sha=? AND key<>? AND "
-            "(state IN ('PREPARED','SENDING','UNKNOWN') OR (state='SENT' AND sent_at>=?))",
-            (sha, key, self.clock() - self.cooldown),
-        ).fetchone() is not None
+        return self.pins.blocked(sha, key)
 
     def candidates(self, delivery_key, intent, *, category=None, limit=8, check):
         key = key_hash(delivery_key)
@@ -272,35 +258,13 @@ class MemeCatalog:
                 raise ValueError("MEME_SEND_FENCED")
 
     def receipt(self, delivery_key, outcome):
-        if outcome not in {"SENT", "UNKNOWN", "NOT_SENT"}:
-            raise ValueError("MEME_RECEIPT_INVALID")
-        with self.atomic():
-            key = key_hash(delivery_key)
-            row = self.db.execute("SELECT state FROM meme_pins WHERE key=?", (key,)).fetchone()
-            if row is None:
-                raise ValueError("MEME_PIN_MISSING")
-            target = "CANCELLED" if outcome == "NOT_SENT" else outcome
-            if row[0] == target:
-                return  # An ACK replay does not extend the success cooldown.
-            allowed = {"PREPARED"} if outcome == "NOT_SENT" else {"SENDING", "UNKNOWN"}
-            if row[0] not in allowed:
-                raise ValueError("MEME_RECEIPT_CONFLICT")
-            self.db.execute("UPDATE meme_pins SET state=?,sent_at=? WHERE key=?",
-                            (target, self.clock() if outcome == "SENT" else None, key))
+        self.pins.receipt(delivery_key, outcome)
 
     def cancel(self, delivery_key):
         with self.atomic():
             key = key_hash(delivery_key)
-            if self.db.execute("SELECT COUNT(*) FROM meme_pins").fetchone()[0] >= (
-                self.max_bindings
-            ) and not self.db.execute("SELECT 1 FROM meme_pins WHERE key=?", (key,)).fetchone():
-                raise ValueError("MEME_BINDING_LIMIT")
-            self.db.execute("INSERT OR IGNORE INTO meme_pins VALUES (?,NULL,'CANCELLED',NULL)",
-                            (key,))
+            self.pins.cancel_in_transaction(key)
             self.db.execute("UPDATE meme_offers SET ids='[]' WHERE key=?", (key,))
-            self.db.execute("UPDATE meme_pins SET state=CASE WHEN state='PREPARED' THEN "
-                            "'CANCELLED' WHEN state='SENDING' THEN 'UNKNOWN' ELSE state END "
-                            "WHERE key=?", (key,))
 
     def remove(self, sha):
         with self.atomic():

@@ -137,10 +137,15 @@ class OwnerRuntime:
 
     @property
     def memes(self):
-        from .meme_runtime import MemeRuntime
-
         if not hasattr(self, "_memes"):
-            self._memes = MemeRuntime(self)
+            if self.config.meme_catalog_owner == "core":
+                from .meme_transport import CoreMemeTransport
+
+                self._memes = CoreMemeTransport(self)
+            else:
+                from .meme_runtime import MemeRuntime
+
+                self._memes = MemeRuntime(self)
         return self._memes
 
     def verify(self, *, active=True):

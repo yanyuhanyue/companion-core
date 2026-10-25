@@ -6,7 +6,7 @@ import hashlib
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -66,7 +66,8 @@ def grant(core, cfg, text, *, operation="remember", target=None, **changes):
         stopped_state_sha256=stopped_state(core.store),
         identity_sha256=paid_budget.sha([core.settings.owner_qq_id, core.settings.bot_qq_id]),
         core_config_sha256=live_text.config_sha256(core.settings),
-        core_code_sha256=live_text.code_sha256(), bridge_config_sha256=paid_budget.sha(asdict(cfg)),
+        core_code_sha256=live_text.code_sha256(),
+        bridge_config_sha256=paid_budget.sha(cfg.snapshot()),
         bridge_code_sha256=bridge_code_sha256(), capture_public_key=cfg.capture_public_key,
         protocol_epoch=cfg.protocol_epoch, command_sha256=input_digest({"text": text}),
         target_memory_id=target,

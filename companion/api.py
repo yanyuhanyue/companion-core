@@ -776,6 +776,15 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def meme_profile():
         return app.state.core.memes.profile()
 
+    from companion import meme_delivery
+
+    @app.post(prefix + "/memes/deliveries/{message_id}/asset", dependencies=auth)
+    async def meme_delivery_asset(message_id: str, body: meme_delivery.AssetRequest,
+                                  response: Response):
+        core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
+        return meme_delivery.read_asset(core.store, settings, core.clock, message_id, body)
+
     @app.post(prefix + "/memes/captions", dependencies=auth)
     async def meme_caption(body: meme_core.CaptionBody):
         return app.state.core.memes.submit(body)

@@ -90,7 +90,7 @@ def pinned_plan(
     else:
         cfg, value, inventory, now = plan_fixture(tmp_path)
         cfg = replace(cfg, **options)
-        value["config_sha256"] = inventory["config_sha256"] = digest(asdict(cfg))
+        value["config_sha256"] = inventory["config_sha256"] = digest(cfg.snapshot())
         value["runtime_attestation_sha256"] = digest(inventory)
         core.clock.now = now
         core.settings.bridge_token = SecretStr(cfg.bridge_token)

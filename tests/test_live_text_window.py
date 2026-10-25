@@ -2,7 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -158,7 +158,7 @@ def live_fixture(
     cfg, value, inventory, now = plan_fixture(tmp_path, **(window_options or {}))
     if bridge_options:
         cfg = replace(cfg, **bridge_options)
-        inventory["config_sha256"] = digest(asdict(cfg))
+        inventory["config_sha256"] = digest(cfg.snapshot())
         value.update(config_sha256=inventory["config_sha256"],
                      runtime_attestation_sha256=digest(inventory))
     core.clock.now = now

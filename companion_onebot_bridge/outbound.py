@@ -125,6 +125,18 @@ async def deliver_tick(client, onebot, spool, *, metrics=None, guard=None,
 
 async def deliver_item(client, onebot, spool, item, *, metrics=None, guard=None,
                        delivery_lane="owner_private"):
+    """Release operation-local prepared media on every exit, including cancellation."""
+    try:
+        return await _deliver_item(client, onebot, spool, item, metrics=metrics, guard=guard,
+                                   delivery_lane=delivery_lane)
+    finally:
+        release = getattr(onebot, "release_prepared", None)
+        if release is not None:
+            release()
+
+
+async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None,
+                        delivery_lane="owner_private"):
     """The single leased-item dispatch lifecycle for all transport drivers."""
     if "authority" in item:
         expected = validate_authority_ref(item["authority"])

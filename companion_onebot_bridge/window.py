@@ -13,7 +13,7 @@ import re
 import sqlite3
 import stat
 from contextlib import closing
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,7 +45,7 @@ def digest(value):
 
 
 def config_matches(config, expected):
-    value = asdict(config)
+    value = config.snapshot()
     if digest(value) == expected:
         return True
     # Historical v1 evidence predates the optional native authority field.
