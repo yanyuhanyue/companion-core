@@ -10,9 +10,9 @@ from typing import Literal
 
 from fastapi import Depends, Header, Request, Response
 from fastapi.responses import FileResponse
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, StrictFloat, StrictInt
 
-from companion import cloud_budget, console_read, operator_config
+from companion import cloud_budget, console_read, delegation, operator_config
 from companion.contracts import CoreError, StrictModel
 from companion.diary import DiaryCorrection
 from companion.store import after, encode
@@ -43,6 +43,17 @@ class MemoryChange(StrictModel):
 
 class DeliveryReconciliation(StrictModel):
     outcome: Literal["SENT", "CANCELLED"]
+
+
+class Delegation(StrictModel):
+    mode: Literal["owner", "propose", "self"]
+    allow_pause: bool = Field(strict=True)
+    ranges: dict[str, dict[str, StrictInt | StrictFloat]] = Field(
+        default_factory=dict, max_length=4)
+
+
+class AdjustmentDecision(StrictModel):
+    decision: Literal["approve", "reject", "revert"]
 
 
 def digest(value):
@@ -245,6 +256,14 @@ def register_console_routes(app, settings):
                 owner_check=lambda: check_owner(request),
             ), rejected_errors=MEMORY_REJECTIONS)
 
+    from companion.console_cognition import register_console_cognition_routes
+
+    register_console_cognition_routes(app, prefix, auth, _operation)
+
+    @app.get(prefix + "/thinking", dependencies=auth)
+    async def thinking():
+        return console_read.decisions(app.state.core)
+
     @app.get(prefix + "/life", dependencies=auth)
     async def life():
         return console_read.life(app.state.core)
@@ -344,6 +363,44 @@ def register_console_routes(app, settings):
         return _operation(core, request, idempotency_key, body.model_dump(), apply,
                           rejected_errors={"DIARY_DISABLED_IN_CONFIG",
                                            "PROACTIVE_DISABLED_IN_CONFIG"})
+
+    @app.get(prefix + "/autonomy", dependencies=auth)
+    async def autonomy():
+        core = app.state.core
+        with core.store.transaction():
+            return delegation.view(core.store, settings, core.clock())
+
+    @app.put(prefix + "/autonomy/{capability}", dependencies=auth)
+    async def change_autonomy(capability: str, body: Delegation, request: Request,
+                              idempotency_key: str = Header(default="")):
+        core = app.state.core
+        if capability not in delegation.DELEGABLE:
+            raise CoreError("DELEGATION_INVALID", 404)
+        # Validate before taking an operation receipt so a rejected range never needs repair.
+        delegation.validate_ranges(settings, capability, body.ranges)
+
+        def apply():
+            with core.store.transaction():
+                delegation.set_delegation(core.store, settings, capability, body.mode,
+                                          body.allow_pause, body.ranges, core.clock())
+            return {"state": "COMPLETE"}
+
+        return _operation(core, request, idempotency_key, body.model_dump(), apply)
+
+    @app.post(prefix + "/autonomy/adjustments/{override_id}/decision", dependencies=auth)
+    async def decide_adjustment(override_id: str, body: AdjustmentDecision, request: Request,
+                                idempotency_key: str = Header(default="")):
+        core = app.state.core
+        if not core.store.one("SELECT 1 FROM console_operations WHERE request_id=?",
+                              (idempotency_key,)):
+            delegation.check_decision(core.store, settings, override_id, body.decision)
+
+        def apply():
+            with core.store.transaction():
+                return delegation.decide(core.store, settings, override_id, body.decision,
+                                         core.clock())
+
+        return _operation(core, request, idempotency_key, body.model_dump(), apply)
 
     @app.get(prefix + "/configuration", dependencies=auth)
     async def configuration():

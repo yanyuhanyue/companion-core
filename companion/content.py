@@ -312,7 +312,8 @@ class ContentService:
                             name
                             for name, adapter in self.settings.observation_adapters.items()
                             if adapter.source == source and (
-                                source != "web" or urlsplit(url).hostname in adapter.allowed_hosts)
+                                source != "web"
+                                or urlsplit(url).hostname in self.settings.web_reading_hosts)
                         ),
                         None,
                     )

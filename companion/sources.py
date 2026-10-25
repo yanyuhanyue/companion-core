@@ -68,8 +68,7 @@ def _url(value):
 def web_hosts(settings):
     if not settings.web_reading_enabled:
         return frozenset()
-    return frozenset(host for adapter in settings.observation_adapters.values()
-                     if adapter.source == "web" for host in adapter.allowed_hosts)
+    return frozenset(settings.web_reading_hosts)
 
 
 def content_target(value, *, web_hosts=()):

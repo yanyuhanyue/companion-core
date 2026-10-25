@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from companion import owner_authority
+from companion import delegation, owner_authority
 from companion.contracts import CoreError
 from companion.store import after, encode, uid
 
@@ -36,7 +36,10 @@ class WakePlanner:
                 return []
         self.goals.expire_sources()
         local = datetime.fromisoformat(now).astimezone(ZoneInfo(cfg.timezone))
-        slot = int(local.timestamp()) // (cfg.wake_min_interval_minutes * 60)
+        # A delegated companion adjustment can only lengthen the interval or lower the count.
+        interval = delegation.effective(s, cfg, "wake", "wake_min_interval_minutes", now)
+        max_runs = delegation.effective(s, cfg, "wake", "wake_max_daily_runs", now)
+        slot = int(local.timestamp()) // (interval * 60)
         key = "event:" + trigger_event_id if trigger_event_id else "slot:" + str(slot)
         with s.transaction():
             existing = s.one("SELECT * FROM wake_decisions WHERE idempotency_key=?", (key,))
@@ -55,7 +58,7 @@ class WakePlanner:
             )["n"]
             recent = s.one(
                 "SELECT 1 FROM wake_decisions WHERE decision<>'SKIP' AND created_at>?",
-                (after(now, -cfg.wake_min_interval_minutes * 60),),
+                (after(now, -interval * 60),),
             )
             quiet = cfg.quiet_start != cfg.quiet_end and (
                 cfg.quiet_start <= local.hour < cfg.quiet_end
@@ -66,6 +69,8 @@ class WakePlanner:
             reason, candidate = "NO_CANDIDATE", None
             if paused and paused["value"] == "1":
                 reason = "PAUSED"
+            elif delegation.paused(s, "wake", now):
+                reason = "COMPANION_PAUSED"
             elif quiet:
                 reason = "QUIET_HOURS"
             elif (cfg.affect_enabled and (view is None or "affect" in view.policy.purposes)
@@ -73,7 +78,7 @@ class WakePlanner:
                 reason = "OWNER_REQUESTED_PAUSE"
             elif not cfg.pricing_known or not cfg.exploration_enabled:
                 reason = "RESOURCE_UNAVAILABLE"
-            elif count >= cfg.wake_max_daily_runs:
+            elif count >= max_runs:
                 reason = "DAILY_LIMIT"
             elif recent:
                 reason = "COOLDOWN"
@@ -101,7 +106,7 @@ class WakePlanner:
                 goal_id=goal_id,
                 decision=decision,
                 reason_code=reason,
-                budget_snapshot=encode({"daily_runs": count, "limit": cfg.wake_max_daily_runs}),
+                budget_snapshot=encode({"daily_runs": count, "limit": max_runs}),
                 created_at=now,
             )
             return (

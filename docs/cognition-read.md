@@ -49,6 +49,12 @@ numeric input, reservation margin and output allowance. Missing measurements are
 `NOT_RECORDED`. This view does not attest that an unbound usage row has source
 evidence; it labels such evidence `NOT_RECORDED`.
 
+Each item includes `occurred_at` from its original native `created_at`, or the
+model-usage row's existing `occurred_at`. It is independent of the response's
+`as_of` read time and opaque record ID. Pagination still follows native append
+order; the console may sort the loaded records by their real timestamps and
+labels its counts as covering only those loaded records.
+
 ## Reused sources
 
 - DSH schedule `delivery-history.ts`, revision

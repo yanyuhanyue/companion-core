@@ -148,7 +148,7 @@ class ReadingService:
                         (item["request_id"],))
             context = self._context(row, policy.source)
             self._sources(row, context)
-            hosts = list(policy.allowed_hosts) if policy.source == "web" else []
+            hosts = list(self.settings.web_reading_hosts) if policy.source == "web" else []
             if row["operation"] == "read":
                 source, canonical = content_target(row["url"], web_hosts=hosts)
                 if source != policy.source or canonical != row["url"]:
@@ -203,7 +203,7 @@ class ReadingService:
         policy = self.exploration.adapter(attempt["adapter_id"])
         if policy.source != context.source or (
             policy.source == "web" and not set(json.loads(attempt["allowed_hosts_json"]))
-            <= set(policy.allowed_hosts)
+            <= set(self.settings.web_reading_hosts)
         ):
             raise CoreError("READER_SCOPE_CHANGED", 409)
         return row, context

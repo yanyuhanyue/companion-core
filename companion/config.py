@@ -46,22 +46,29 @@ class ObservationAdapterConfig(BaseModel):
     media_analysis: bool = False
     reader_max_requests: int = Field(default=1, ge=1, le=8)
     source_grant_required: bool = False
-    allowed_hosts: tuple[str, ...] = Field(default=(), max_length=32,
-                                          exclude_if=lambda value: not value)
 
-    @model_validator(mode="after")
-    def explicit_web_hosts(self):
-        if self.allowed_hosts and self.source != "web":
-            raise ValueError("Explicit web hosts require a web adapter")
-        if len(set(self.allowed_hosts)) != len(self.allowed_hosts) or any(
-            len(host) > 253 or not re.fullmatch(
-                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
-                r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", host,
-            ) or host.endswith((".localhost", ".local", ".internal"))
-            for host in self.allowed_hosts
-        ):
-            raise ValueError("Web hosts must be unique exact public DNS names")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def hosts_moved_to_owner_configuration(cls, data):
+        # The host scope is owner configuration; adapter config keeps only credentials.
+        if isinstance(data, dict) and "allowed_hosts" in data:
+            raise ValueError("allowed_hosts moved to web_reading_hosts")
+        return data
+
+
+WEB_HOST = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+)
+
+
+def exact_web_hosts(hosts):
+    if len(set(hosts)) != len(hosts) or any(
+        len(host) > 253 or not WEB_HOST.fullmatch(host)
+        or host.endswith((".localhost", ".local", ".internal"))
+        for host in hosts
+    ):
+        raise ValueError("Web hosts must be unique exact public DNS names")
+    return tuple(hosts)
 
 
 class PaidModelApproval(BaseModel):
@@ -429,6 +436,8 @@ class Settings(BaseModel):
     media: MediaConfig = Field(default_factory=MediaConfig)
     content_enabled: bool = False
     web_reading_enabled: bool = False
+    # Exact public hosts the web reader may fetch, including every redirect hop.
+    web_reading_hosts: tuple[str, ...] = Field(default=(), max_length=32)
     content: ContentConfig = Field(default_factory=ContentConfig)
     private_files: PrivateFilesConfig = Field(default_factory=PrivateFilesConfig)
     poke_policy: PokePolicy = Field(default_factory=PokePolicy)
@@ -514,6 +523,7 @@ class Settings(BaseModel):
     @model_validator(mode="after")
     def validate_settings(self):
         ZoneInfo(self.timezone)
+        exact_web_hosts(self.web_reading_hosts)
         if self.mode not in {"demo", "live"}:
             raise ValueError("mode must be demo or live")
         if len(self.bridge_token.get_secret_value()) < 24:
@@ -611,7 +621,7 @@ class Settings(BaseModel):
                     data[field] = TypeAdapter(dict[str, ObservationAdapterConfig]).validate_json(
                         value
                     )
-                elif field == "expression_meme_categories":
+                elif field in {"expression_meme_categories", "web_reading_hosts"}:
                     data[field] = TypeAdapter(list[str]).validate_json(value)
                 elif field == "executive":
                     data[field] = ExecutiveConfig.model_validate_json(value)

@@ -68,6 +68,7 @@ REVISION_CHAIN = (
     "0043_reader_authority",
     "0044_voice_owner_authority",
     "0045_goal_read_plan",
+    "0046_capability_delegation",
 )
 LEGACY_TABLES = (
     "principals",

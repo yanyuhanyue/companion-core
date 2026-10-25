@@ -23,7 +23,7 @@ from tests.test_observations import enable_observations, observation
 def fetched(core, goal):
     enable_observations(core, "web")
     core.settings.web_reading_enabled = True
-    core.settings.observation_adapters["reader"].allowed_hosts = ["example.org"]
+    core.settings.web_reading_hosts = ("example.org",)
     item = observation(core, source="web", source_event_ids=core.goals.source_ids(goal))
     core.observations.append("reader", item, reading=True)
     return item.event_id
@@ -251,7 +251,7 @@ def timed_out_reads(core):
     eid = episode(core, 1)
     enable_observations(core, "web")
     core.settings.web_reading_enabled = True
-    core.settings.observation_adapters["reader"].allowed_hosts = ["example.org"]
+    core.settings.web_reading_hosts = ("example.org",)
     core.settings.exploration_daily_requests = core.settings.exploration_monthly_requests = 100
     core.settings.exploration_daily_deep_reads = 100
     core.settings.exploration_daily_bytes = 100 * core.settings.exploration_max_response_bytes

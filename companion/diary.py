@@ -267,9 +267,12 @@ class DiaryRepository:
             return False
         paused = self.store.one("SELECT value FROM runtime_meta WHERE key='diary_paused'")
         owner = self.store.one("SELECT value FROM runtime_meta WHERE key='owner_qq_id'")
+        from companion import delegation
+
         return bool(
             self.settings.diary_enabled
             and not (paused and paused["value"] == "1")
+            and not delegation.paused(self.store, "diary", self.clock())
             and owner
             and owner["value"] == self.settings.owner_qq_id
         )

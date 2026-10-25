@@ -32,7 +32,7 @@ def retained_plan(core):
 def finish_record(core, step, number):
     enable_observations(core, "web")
     core.settings.web_reading_enabled = True
-    core.settings.observation_adapters["reader"].allowed_hosts = ["example.org"]
+    core.settings.web_reading_hosts = ("example.org",)
     roots = [r["event_id"] for r in core.store.rows(
         "SELECT event_id FROM goal_step_evidence WHERE step_id=?", (step,))]
     item = observation(core, number, source="web", source_event_ids=roots,

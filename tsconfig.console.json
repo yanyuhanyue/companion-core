@@ -1,0 +1,13 @@
+{
+  "//": "Type-check the owner console without a build step: app.js stays plain JavaScript.",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "strict": false,
+    "skipLibCheck": true
+  },
+  "files": ["companion/console_static/app.js"]
+}

@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from companion import (
     cloud_budget,
     cumulative,
+    delegation,
     live_text,
     owner_authority,
     paid_budget,
@@ -243,7 +244,7 @@ def public_source_readiness(store, settings, clock, adapter_id, *, integration=N
             settings.content_enabled or settings.exploration_enabled
         ):
             unavailable.append("READING_DISABLED")
-        if source == "web" and (not settings.web_reading_enabled or not policy.allowed_hosts):
+        if source == "web" and (not settings.web_reading_enabled or not settings.web_reading_hosts):
             unavailable.append("WEB_HOST_SCOPE_REQUIRED")
         if policy.source_grant_required:
             grants = store.rows(
@@ -596,16 +597,18 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
                                else ["SCENARIO_BUDGET_DISABLED"]),
         limits={"daily_micro_usd": cfg.memory_daily_micro_usd})
     for name, summary, extra, limits in (
-        ("diary", "按已有对话来源整理日记。", ["DIARY_PAUSED"]
-         if _meta(store, "diary_paused") == "1" else [],
+        ("diary", "按已有对话来源整理日记。", (["DIARY_PAUSED"]
+         if _meta(store, "diary_paused") == "1" else [])
+         + (["COMPANION_PAUSED"] if delegation.paused(store, "diary", now) else []),
          {"daily_micro_usd": cfg.diary_daily_micro_usd}),
         ("consolidation", "整理已有记忆和日常记录。", life_pause, {}),
         ("reflection", "基于已有来源提出反思建议。", life_pause,
          {"daily_micro_usd": cfg.reflection_daily_micro_usd,
           "monthly_micro_usd": cfg.reflection_monthly_micro_usd,
           "max_daily_calls": cfg.reflection_max_daily_calls}),
-        ("wake", "在已有目标和限额内调度自主活动。", life_pause,
-         {"max_daily_runs": cfg.wake_max_daily_runs}),
+        ("wake", "在已有目标和限额内调度自主活动。", life_pause
+         + (["COMPANION_PAUSED"] if delegation.paused(store, "wake", now) else []),
+         {"max_daily_runs": delegation.effective(store, cfg, "wake", "wake_max_daily_runs", now)}),
     ):
         paused = model_blocks + extra
         if limits and any(value <= 0 for value in limits.values()):

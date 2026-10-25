@@ -31,9 +31,8 @@ TOKEN = "native-core-web-reader-token-" * 3
 def configure(core):
     configure_legacy(core)
     core.settings.content_enabled = core.settings.web_reading_enabled = True
-    core.settings.observation_adapters["web"] = ObservationAdapterConfig(
-        source="web", token=TOKEN, allowed_hosts=("articles.example",),
-    )
+    core.settings.web_reading_hosts = ("articles.example",)
+    core.settings.observation_adapters["web"] = ObservationAdapterConfig(source="web", token=TOKEN)
 
 
 def queued(core, source="web", *, owner=True):
@@ -147,7 +146,7 @@ def test_late_success_settles_usage_without_committing_revoked_content(core, cha
     elif change == "expired":
         core.clock.advance(31)
     elif change == "hosts":
-        core.settings.observation_adapters[adapter].allowed_hosts = ("other.example",)
+        core.settings.web_reading_hosts = ("other.example",)
     else:
         core.settings.web_reading_enabled = False
     with pytest.raises(CoreError):
@@ -260,3 +259,16 @@ def test_accepted_goal_read_survives_new_turn_but_source_erasure_revokes_it(core
     result = core.reading.complete("web", item["request_id"], receipt)
     assert result == {"state": "UNKNOWN", "event_ids": [], "duplicate": False}
     assert not core.store.one("SELECT 1 FROM observations WHERE redacted=0")
+
+
+def test_web_hosts_are_owner_configuration_not_adapter_credentials(core):
+    from pydantic import ValidationError
+
+    from companion.config import Settings
+
+    with pytest.raises(ValidationError, match="web_reading_hosts"):
+        ObservationAdapterConfig(source="web", token=TOKEN, allowed_hosts=("articles.example",))
+    for hosts in (("*.example.com",), ("192.168.1.1",), ("nas.local",), ("a.example", "a.example")):
+        with pytest.raises(ValidationError):
+            Settings.model_validate({**core.settings.model_dump(mode="python"),
+                                     "web_reading_hosts": hosts})

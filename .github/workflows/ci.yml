@@ -62,6 +62,12 @@ jobs:
         run: python scripts/ci_reuse.py validate
       - if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
         run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
+      - name: Type-check the owner console
+        if: ${{ needs.preflight.outputs.profile == 'full' }}
+        # Explicit package selection: https://docs.npmjs.com/cli/v11/commands/npm-exec/
+        env:
+          npm_config_cache: ${{ github.workspace }}/.local/npm-cache
+        run: npm exec --yes --package=typescript@5.9.3 -- tsc -p tsconfig.console.json
       - name: Validate documentation privacy, references and evidence
         if: ${{ needs.preflight.outputs.profile == 'docs' }}
         run: uv run --extra onebot python scripts/ci_policy.py docs
@@ -228,7 +234,8 @@ jobs:
       - run: uv run --group reader python -m playwright install chromium --only-shell
       - run: >-
           uv run --group reader python -m pytest -q tests/test_source_browser.py
-          tests/test_next_reading_browser.py --basetemp=.local/test-temp
+          tests/test_next_reading_browser.py tests/test_console_browser.py
+          tests/test_console_supplement_browser.py --basetemp=.local/test-temp
   plugin-native:
     needs: preflight
     if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}

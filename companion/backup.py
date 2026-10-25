@@ -107,6 +107,9 @@ def restore(source, destination, key, ledger_path):
                 from companion.voice_jobs import restore_voice_jobs
 
                 restore_social_autonomy(store, utcnow())
+                from companion.delegation import discard_after_restore
+
+                discard_after_restore(store, utcnow())
                 restore_voice_jobs(store)
                 restore_bili_video(store, utcnow())
                 store.execute(

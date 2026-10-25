@@ -432,7 +432,10 @@ def test_real_native_asr_context_tts_outbox_send_check_and_counter_chain(
     async def scenario():
         async with tls_core(core, tmp_path) as (origin, certificate):
             node_config = config.model_copy(update={"core_origin": origin})
+            # Independent node/model work can outlast the fixture server's idle timeout.
+            # Each bridge operation gets a fresh TLS connection, with no request replay.
             async with httpx.AsyncClient(base_url=origin,
+                limits=httpx.Limits(max_keepalive_connections=0),
                 verify=ssl.create_default_context(cafile=str(certificate)), trust_env=False,
                 headers={"Authorization": "Bearer "
                     + core.settings.bridge_token.get_secret_value()}) as client, \
