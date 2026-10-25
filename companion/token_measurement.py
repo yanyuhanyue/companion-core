@@ -76,9 +76,9 @@ def count_contract(settings):
 @lru_cache(maxsize=1)
 def _local_encoder():
     """Load verified bytes once; no network, pickle, model weights or mutable external path."""
-    from tokenizers import Tokenizer
-
     try:
+        from tokenizers import Tokenizer
+
         files = {name: (ARTIFACT_DIRECTORY / name).read_bytes()
                  for name in ARTIFACTS if name != "tokenizer.json"}
         packed = (ARTIFACT_DIRECTORY / "tokenizer.json.gz").read_bytes()
@@ -95,7 +95,9 @@ def _local_encoder():
         tokenizer.no_truncation()
         tokenizer.no_padding()
         return renderer, tokenizer
-    except (OSError, ValueError, UnicodeError) as error:
+    except Exception as error:
+        # Any import, parse or renderer-module failure is the same refusal: never a
+        # raw crash and never a reservation from an unverified encoder.
         raise CoreError("MODEL_TOKEN_ARTIFACT_INVALID", 503) from error
 
 
@@ -194,7 +196,9 @@ def measure_payload(settings, payload, scenario, *, tools=()):
                     rendered_messages[0]["tools"] = deepcopy(payload["tools"])
                 rendered = renderer.encode_messages(rendered_messages, thinking_mode="chat")
                 tokens = len(tokenizer.encode(rendered, add_special_tokens=False).ids)
-            except (ValueError, AssertionError, TypeError, KeyError) as error:
+            except Exception as error:
+                # The pinned renderer is upstream code; any failure means this input
+                # has no exact count, so use the conservative estimate (or refuse).
                 reason = "renderer_rejected_input"
                 if config.policy == "exact_required":
                     raise CoreError("MODEL_TOKEN_COUNT_UNSUPPORTED", 503) from error

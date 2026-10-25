@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta
+from time import monotonic
 
 import pytest
 
@@ -252,8 +253,13 @@ def test_retired_diary_command_cannot_start_another_selector(monkeypatch):
 def test_owner_pending_blocks_all_autonomous_lanes_but_not_native_chat(core):
     ingest(core)
     selector = native_selector(core, "life-test")
-    selected = run(selector.step())
-    assert selected.blocked and selected.lane is None
+    maintenance = {lane.name for lane in selector.lanes if lane.maintenance}
+    assert maintenance == {"retention", "diary_schedule", "consolidation_schedule",
+                           "commitment_expiry"}
+    turns = [run(selector.step()) for _ in range(len(selector.lanes) + 1)]
+    assert all(turn.blocked for turn in turns)
+    # Only local bookkeeping ran while the owner was waiting; no autonomous model lane.
+    assert {turn.lane for turn in turns} - {None} == maintenance and turns[-1].lane is None
     assert not core.model.calls
     assert run(core.run_once("foreground"))
     assert core.store.one("SELECT state FROM jobs WHERE kind='chat'")["state"] == "SUCCEEDED"
@@ -289,11 +295,113 @@ def test_blocked_life_worker_does_not_spin_on_overdue_maintenance(core, monkeypa
     waited = []
 
     async def stop(self, scan, result, maintenance_at):
+        # Due bookkeeping already ran under foreground precedence; the blocked
+        # wait targets the next future maintenance, never an overdue instant.
         waited.append(maintenance_at)
-        assert maintenance_at is None
+        assert maintenance_at is not None and maintenance_at > monotonic()
         raise asyncio.CancelledError
 
     monkeypatch.setattr(life_worker.Wakeup, "wait", stop)
     with pytest.raises(asyncio.CancelledError):
         run(life_worker.life_worker(core.settings))
-    assert waited == [None]
+    assert len(waited) == 1
+
+
+def test_failing_lane_is_isolated_backs_off_and_later_lanes_still_run(monkeypatch):
+    from companion import autonomous_selector
+
+    clock, calls = [1000.0], []
+    monkeypatch.setattr(autonomous_selector, "monotonic", lambda: clock[0])
+
+    async def broken():
+        calls.append("social")
+        raise RuntimeError("synthetic domain failure")
+
+    async def diary():
+        calls.append("diary")
+        return UnitResult(False)
+
+    selector = RoundRobin((Lane("social", broken), Lane("diary", diary)), lambda: True)
+
+    async def scenario():
+        failed = await selector.step()
+        assert failed.lane == "social" and not failed.result.progressed and failed.more
+        assert (await selector.step()).lane == "diary"
+        selector.resume()
+        await drain(selector)
+        assert calls == ["social", "diary", "diary"]  # still backing off
+        clock[0] += autonomous_selector.FAILURE_BACKOFF_SECONDS
+        selector.resume()
+        await drain(selector)
+        assert calls[-2:] == ["social", "diary"]
+        assert selector.lanes[0].failures == 2
+        backoff = autonomous_selector.FAILURE_BACKOFF_SECONDS
+        assert selector.lanes[0].retry_at == clock[0] + 2 * backoff
+
+    run(scenario())
+
+
+def test_failing_maintenance_lane_does_not_report_an_overdue_wake(monkeypatch):
+    from companion import autonomous_selector
+
+    clock = [1000.0]
+    monkeypatch.setattr(autonomous_selector, "monotonic", lambda: clock[0])
+
+    async def broken():
+        raise RuntimeError("synthetic maintenance failure")
+
+    selector = RoundRobin((Lane("retention", broken, interval=60),), lambda: True)
+    run(selector.step())
+    assert selector.next_maintenance == clock[0] + autonomous_selector.FAILURE_BACKOFF_SECONDS
+
+
+def test_selector_failure_does_not_swallow_cancellation():
+    async def cancelled():
+        raise asyncio.CancelledError
+
+    selector = RoundRobin((Lane("diary", cancelled),), lambda: True)
+    with pytest.raises(asyncio.CancelledError):
+        run(selector.step())
+
+
+def test_life_worker_refuses_to_start_beside_an_orphaned_diary_worker(core, monkeypatch, capsys):
+    from companion.worker_lock import single_worker
+
+    started = []
+
+    async def never(settings):
+        started.append(settings)
+
+    monkeypatch.setattr("companion.life_worker.life_worker", never)
+    monkeypatch.setattr(__main__.Settings, "load", staticmethod(lambda: core.settings))
+    monkeypatch.setattr("sys.argv", ["companion", "life-worker"])
+    with single_worker(core.settings.database, "diary-worker"):
+        with pytest.raises(SystemExit) as error:
+            __main__.main()
+    assert error.value.code == 2 and started == []
+    assert "WORKER_ALREADY_RUNNING" in capsys.readouterr().err
+    __main__.main()  # the retired lock is free again, so the single Life worker starts
+    assert started == [core.settings]
+
+
+def test_foreground_precedence_pauses_model_lanes_but_not_local_bookkeeping():
+    calls = []
+
+    def lane(name, *, maintenance=False):
+        async def execute():
+            calls.append(name)
+            return UnitResult(maintenance)
+
+        return Lane(name, execute, interval=60 if maintenance else None, maintenance=maintenance)
+
+    selector = RoundRobin((lane("retention", maintenance=True), lane("diary"),
+                           lane("diary_schedule", maintenance=True)), lambda: False)
+
+    async def scenario():
+        turns = [await selector.step() for _ in range(4)]
+        assert [turn.lane for turn in turns] == ["retention", "diary_schedule", None, None]
+        assert all(turn.blocked and not turn.more for turn in turns)
+        assert calls == ["retention", "diary_schedule"]  # the model lane never ran
+        assert selector.next_blocked_maintenance > monotonic()
+
+    run(scenario())

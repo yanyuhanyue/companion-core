@@ -34,8 +34,8 @@ uv run python -m companion init
 uv run python -m companion serve
 # 第二个终端：设置同样的环境变量后
 uv run python -m companion worker
-# 第三个终端：同样的配置；日记默认关闭，完成门禁后再开启
-uv run python -m companion diary-worker
+# 第三个终端：同样的配置；日记、生活与自主活动由统一 Life Worker 执行，默认关闭，完成门禁后再开启
+uv run python -m companion life-worker
 ```
 
 演示可设 `COMPANION_MODE=demo`，无需模型密钥；回复明确标记为演示。`.env` 仅由 Docker Compose 读取，本地命令需通过环境变量注入。不要提交真实配置、密钥或数据库。

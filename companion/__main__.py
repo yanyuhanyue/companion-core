@@ -151,7 +151,11 @@ def main():
             from companion.life_worker import life_worker
 
             logging.getLogger("httpx").setLevel(logging.WARNING)
-            with single_worker(settings.database, "life-worker"):
+            # Life now owns diary generation. Also hold the retired diary-worker lock so
+            # an orphaned pre-upgrade diary container fails this start loudly instead of
+            # writing diaries in parallel.
+            with (single_worker(settings.database, "life-worker"),
+                  single_worker(settings.database, "diary-worker")):
                 asyncio.run(life_worker(settings))
         elif args.command == "executive-worker":
             from companion.executive_worker import executive_worker

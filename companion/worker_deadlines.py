@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo
 from companion import owner_authority
 from companion.contracts import CoreError
 
+CHAT_WAIT_RESCAN_SECONDS = 1
+
 JOBS = (
     ("jobs", "next_attempt_at", "state IN ('QUEUED','RETRY_WAIT')"),
     ("jobs", "lease_until", "state='RUNNING'"),
@@ -66,7 +68,16 @@ def _next(store, settings, scan_started_at, boundaries, *, local_hours=()):
 
 
 def chat(store, settings, scan_started_at):
-    return _next(store, settings, scan_started_at, JOBS + DELIVERIES)
+    deadline = _next(store, settings, scan_started_at, JOBS + DELIVERIES)
+    # A due chat job can stay unclaimed behind short waits whose expiry writes
+    # nothing (meme offer, voice ASR, image/content pending). Rescan on the former
+    # polling cadence while one is waiting, instead of the 60 s maintenance horizon.
+    if store.one(
+        "SELECT 1 FROM jobs WHERE kind='chat' AND state='QUEUED' AND (next_attempt_at IS NULL "
+        "OR julianday(next_attempt_at)<=julianday(?)) LIMIT 1", (scan_started_at.isoformat(),),
+    ):
+        deadline = min(deadline, scan_started_at + timedelta(seconds=CHAT_WAIT_RESCAN_SECONDS))
+    return deadline
 
 
 def content(store, settings, scan_started_at):

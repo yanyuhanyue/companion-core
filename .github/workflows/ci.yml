@@ -25,7 +25,7 @@ jobs:
       windows: ${{ steps.plan.outputs.windows }}
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - id: plan
@@ -41,8 +41,8 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         if: ${{ needs.preflight.outputs.profile != 'reuse' }}
         with:
           python-version: '3.12'
@@ -81,8 +81,8 @@ jobs:
       HF_HUB_DISABLE_XET: '1'
       HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -92,7 +92,7 @@ jobs:
           cache-dependency-glob: uv.lock
           cache-suffix: python-3.12
       - run: uv sync --frozen --extra onebot
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: data/embedding-cache
           key: bge-small-zh-${{ runner.os }}-46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59
@@ -109,7 +109,7 @@ jobs:
         run: uv build
       - if: ${{ matrix.shard == matrix.verify_shard }}
         run: uv run python scripts/verify_package.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.shard }}
@@ -122,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: python scripts/verify_onebot_compose.py
       # Reproduce public archive extraction with an owner-only migration directory.
       - run: chmod 700 migrations/versions
@@ -214,8 +214,8 @@ jobs:
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONIOENCODING: utf-8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -238,18 +238,18 @@ jobs:
       UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: 674537331/astrbot_plugin_xiaoheihe_adapter
           ref: 90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac
           path: .local/p3/upstream/heybox
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: c1overzz/dsh-bili-scroll
           ref: 9a3e0e67d82feedf755c763807c806c4d125a245
           path: .local/p3/upstream/bili
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -282,7 +282,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Require the selected validation to succeed
         env:
           CI_PROFILE: ${{ needs.preflight.outputs.profile }}
@@ -298,7 +298,7 @@ jobs:
           CI_PROFILE: ${{ needs.preflight.outputs.profile }}
           CI_WINDOWS: ${{ needs.preflight.outputs.windows }}
         run: python scripts/ci_reuse.py record
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ needs.preflight.outputs.profile == 'full' }}
         with:
           name: ci-full-${{ github.run_attempt }}
