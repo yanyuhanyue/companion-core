@@ -100,7 +100,8 @@ def main():
     correction.add_argument("--request-sha256", required=True)
     args = parser.parse_args()
     try:
-        settings = Settings.load(apply_operator_config=args.command not in {"backup", "restore"})
+        settings = (Settings.load(apply_operator_config=False)
+                    if args.command in {"backup", "restore"} else Settings.load())
         if args.command == "init":
             migrate(settings.database)
             with Runtime(settings):
