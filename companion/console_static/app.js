@@ -2535,7 +2535,7 @@ function cognitionExtra(sel) {
 }
 
 function modelMeasurementView(sel) {
-  const m = sel.measurement || {}, u = sel.usage || {}, cache = u.cache_usage || {};
+  const m = sel.measurement || {}, u = sel.usage || {};
   const kinds = { exact_local_render: "固定渲染器本地计数", provider_count: "服务商计数", estimate: "本地估算", unsupported: "计数格式不支持" };
   const number = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未记录";
   return el("section", { class: "steps-view" }, el("h4", {}, "本次请求计量"),
@@ -2544,7 +2544,7 @@ function modelMeasurementView(sel) {
     kv("输入计数", number(m.input_tokens)), kv("预留裕量", number(m.reservation_margin)),
     kv("输出预留", number(m.output_allowance)),
     kv("实际输入 / 输出", u.observed ? number(u.input_tokens) + " / " + number(u.output_tokens) : "未记录"),
-    kv("实际缓存输入", cache.state === "RECORDED" ? number(cache.cached_input_tokens) : "未记录"),
+    kv("实际缓存输入", u.observed ? number(u.cached_input_tokens) : "未记录"),
     kv("已计或预留费用", money(u.billed_micro_usd)),
     el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；费用按配置费率核算。"),
     el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
