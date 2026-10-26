@@ -222,13 +222,13 @@ def _live_record(row, digest, current, seen):
 
 
 def journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
-            resolution_replay=None):
+            resolution_replay=None, model_control_replay=None):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
-    from companion import cumulative, delivery_reconciliation, owner_authority
+    from companion import cumulative, delivery_reconciliation, model_carry, owner_authority
 
     path = Path(approval.journal_path)
     identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
@@ -257,6 +257,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         heads = set()
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
+        model_closures, model_carries, model_controls = {}, {}, {}
         for index, line in enumerate(lines):
             row = json.loads(line)
             digest = row.pop("sha256")
@@ -272,6 +273,11 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 ):
                     raise ValueError("journal identity")
             else:
+                if row.get("kind") in model_carry.KINDS:
+                    model_carry.fold(store, row, digest, identity["value"], authorities, latest,
+                                     blocked, model_closures, model_carries)
+                    model_controls[digest] = row
+                    continue
                 if row.get("kind") == owner_authority.RECORD_KIND:
                     owner_authority.fold(authorities, row, digest)
                     continue
@@ -310,6 +316,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                         raise ValueError("measurement journal evidence")
                     measurements[row["request_id"]] = proof["sha256"]
                 latest[row["request_id"]] = row
+        model_carry.validate_projection(store, model_controls, replay=model_control_replay)
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
         expected = cumulative.binding(account, path)
@@ -412,7 +419,12 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     lifecycle, identity["value"], authorities,
                 )
             if not authority_record:
-                cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
+                if record["kind"] in model_carry.KINDS:
+                    model_carry.fold(store, {k: v for k, v in row.items() if k != "sha256"},
+                        row["sha256"], identity["value"], authorities, latest, blocked,
+                        model_closures, model_carries)
+                else:
+                    cumulative.fold(account, {k: v for k, v in row.items() if k != "sha256"})
             next_lifecycle = _live_record(
                 {k: v for k, v in row.items() if k != "sha256"}, row["sha256"], lifecycle, seen
             )
@@ -423,6 +435,9 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             if record["kind"] == "video_rate_correction":
                 blocked.pop(record["request_id"])
             previous = row["sha256"]
+            if record["kind"] in model_carry.KINDS:
+                store.execute("INSERT INTO runtime_meta VALUES (?,?)",
+                              ("model_control:" + previous, previous))
             if record["kind"] in {"quota_pause", delivery_reconciliation.KIND}:
                 store.retain_budget_stop(identity["value"], previous)
             if authority_record and record["state"] == "STOPPED":
@@ -439,6 +454,9 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                                encode(cumulative.binding(account, path, previous))))
         return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account,
                 "blocked_request_ids": sorted(blocked), "send_resolutions": resolutions,
+                "model_closures": model_closures, "model_carries": model_carries,
+                "model_controls": model_controls,
+                "model_latest": latest,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error

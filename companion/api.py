@@ -56,6 +56,7 @@ from companion.memory_control import (
 from companion.model import ModelClient
 from companion.owner_authority_protocol import (
     AuthorityReference,
+    ModelCarryReference,
     OwnerAuthorityCheck,
     OwnerCapture,
     OwnerRecall,
@@ -669,6 +670,14 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
         response.headers["Cache-Control"] = "no-store"
         return owner_stop_receipt.read(app.state.core.store, settings, body.authority)
+
+    @app.post(prefix + "/owner-authority/model-carry-receipt", dependencies=auth)
+    async def owner_model_carry_receipt(body: ModelCarryReference, response: Response):
+        from companion import model_carry
+
+        response.headers["Cache-Control"] = "no-store"
+        return model_carry.read(app.state.core.store, settings, body.authority,
+                                body.carry_sha256, body.successor_policy_sha256)
 
     @app.post(prefix + "/owner-authority/send-check", dependencies=auth)
     async def owner_send_check(body: OwnerSendCheck, response: Response):

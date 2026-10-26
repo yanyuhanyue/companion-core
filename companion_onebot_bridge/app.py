@@ -283,6 +283,7 @@ def main():
             "owner-delivery-prepare",
             "owner-delivery-reconcile",
             "owner-handoff-prepare",
+            "owner-carry-handoff-prepare",
             "owner-handoff",
             "owner-cutover",
             "window-open",
@@ -308,6 +309,8 @@ def main():
     parser.add_argument("--approval", type=Path)
     parser.add_argument("--memory-control-sha256")
     parser.add_argument("--message-id")
+    parser.add_argument("--carry-sha256")
+    parser.add_argument("--successor-policy-sha256")
     args = parser.parse_args()
     try:
         config = BridgeConfig.load(args.config)
@@ -321,7 +324,8 @@ def main():
             from .owner_native_resolution import command
 
             print(json.dumps(asyncio.run(command(config, args))), flush=True)
-        elif args.command in {"owner-handoff-prepare", "owner-handoff"}:
+        elif args.command in {
+                "owner-handoff-prepare", "owner-carry-handoff-prepare", "owner-handoff"}:
             from .owner_handoff import command
 
             print(json.dumps(asyncio.run(command(config, args))), flush=True)
