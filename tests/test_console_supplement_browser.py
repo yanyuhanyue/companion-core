@@ -60,6 +60,39 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
     run(scenario())
 
 
+def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_path):
+    from tests.test_cache_usage_presence import ABSENT
+    from tests.test_cache_usage_presence import attempt as cache_attempt
+    from tests.test_paid_model_gate import approved_live
+
+    approved_live(core, tmp_path)
+    core.clock.now = datetime.now(UTC)
+    rows = [cache_attempt(core, cache=cache, number=n)[1]
+            for n, cache in enumerate([ABSENT, 0, 40], start=1)]
+    # The financial column keeps its settlement default; only cache_usage may show a value.
+    assert [row["cached_input_tokens"] for row in rows] == [0, 0, 40]
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            for row, expected in zip(rows, ["未记录", "0", "40"], strict=True):
+                await page.evaluate("id => { location.hash = 'thinking/model:' + id; }",
+                                    row["request_id"])
+                await page.locator("#page[aria-busy=false]").wait_for()
+                panel = page.locator(".steps-view").filter(has_text="本次请求计量")
+                cached = panel.locator(".kv").filter(has_text="缓存命中输入")
+                assert (await cached.locator("span").last.inner_text()) == expected
+                usage = panel.locator(".kv").filter(has_text="实际输入 / 输出")
+                assert "80 / 3" in await usage.inner_text()
+                fee = panel.locator(".kv").filter(has_text="已计或预留费用")
+                assert "未记录" not in await fee.inner_text()
+            overview = page.locator(".meter")
+            # 40 of the 160 inputs whose cache was recorded; the unknown request is excluded.
+            assert "缓存命中 25%" in await overview.inner_text()
+            assert await page.locator(".m-bar").count() == 3
+
+    run(scenario())
+
+
 def assert_receipts(core, states):
     receipts = core.store.rows("SELECT state,result_json FROM console_operations ORDER BY rowid")
     assert all(item["state"] == "COMPLETE" for item in receipts)

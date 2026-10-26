@@ -16,7 +16,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function el(tag, attributes = {}, ...children) {
-  const svg = ["svg", "path", "circle", "g", "line", "text"].includes(tag);
+  const svg = ["svg", "path", "circle", "g", "line", "text", "rect", "polyline"].includes(tag);
   const node = svg ? document.createElementNS("http://www.w3.org/2000/svg", tag) : document.createElement(tag);
   for (const [key, value] of Object.entries(attributes || {})) {
     if (value === undefined || value === null || value === false) continue;
@@ -260,6 +260,9 @@ function errorText(error) {
     CONSOLE_RESPONSE_INVALID: "服务器返回的数据不完整，请刷新核对。", CONSOLE_HTTPS_REQUIRED: "请通过 HTTPS 打开控制台后再操作。",
     CONSOLE_LOGIN_RATE_LIMIT: "密码错误次数过多，请 5 分钟后再试。", PROACTIVE_DISABLED_IN_CONFIG: "主动私聊在配置里是关闭的，先在配置里开启。",
     DIARY_NOT_FOUND: "这一天没有日记。", IDEMPOTENCY_CONFLICT: "同一个操作编号对应了不同内容，请刷新后重试。",
+    PRIVACY_CHANGED: "记录的隐私版本刚刚变化，请刷新后重新读取。", COGNITION_CURSOR_UNAVAILABLE: "翻页位置已失效，请刷新后从最新记录开始。",
+    INVALID_COGNITION_QUERY: "记录查询条件不正确。", INVALID_COGNITION_SELECTION: "记录查询条件不正确。",
+    CONSOLE_DISABLED: "控制台没有开启。", CONSOLE_OWNER_CREDENTIAL_REQUIRED: "控制台还没有配置主人凭据。",
   };
   let message = messages[error.code];
   if (!message && error.status === 401) message = "密码不对，或者会话已过期，请重新登录。";
@@ -458,9 +461,19 @@ const LOADERS = {
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
   thinking: async signal => {
-    const pages = await Promise.all(COG_LIST.map(k => cognitionPage(k, signal)));
-    const data = Object.fromEntries(COG_LIST.map((k, i) => [k, pages[i]]));
-    return locateCognition(data, signal);
+    // 隐私版本变化时整页重读一次，不把不同代次的记录拼在一起
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const pages = await Promise.all(COG_LIST.map(k => cognitionPage(k, signal)));
+        if (new Set(pages.map(p => p.privacy_epoch)).size > 1) throw new ApiError("PRIVACY_CHANGED", 409);
+        const data = Object.fromEntries(COG_LIST.map((k, i) => [k, pages[i]]));
+        const located = await locateCognition(data, signal);
+        if (located.locate?.epoch !== undefined && located.locate.epoch !== pages[0].privacy_epoch) throw new ApiError("PRIVACY_CHANGED", 409);
+        return located;
+      } catch (error) {
+        if (error.code !== "PRIVACY_CHANGED" || attempt > 0) throw error;
+      }
+    }
   },
   caps: async signal => {
     const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
@@ -506,7 +519,8 @@ function renderNav() {
   p.replaceChildren(el("span", { class: "orb", "aria-hidden": "true" }),
     el("strong", {}, o.mode === "demo" ? "演示模式" : o.ready === false ? "需要留意" : "正式运行"),
     el("span", {}, o.worker ? (statusOf(o.worker)[0] === "有运行记录" ? "工作进程有运行记录" : "工作进程：" + statusOf(o.worker)[0]) : "正在读取状态"),
-    o.note ? el("p", {}, o.note) : null);
+    // replaceChildren 会把 null 当成文字“null”，没有说明时不放这一段
+    ...(o.note ? [el("p", {}, o.note)] : []));
 }
 function updateNavFrom(overview) {
   if (!overview?.runtime) return;
@@ -2009,6 +2023,7 @@ PAGES.thinking = data => {
   return el("div", {},
     head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
     stats, coverage, filters,
+    state.cogKind === "model" ? meterOverview(data.model) : null,
     el("div", { class: "dk-wrap" },
       el("ul", { class: "dk-list" }, filtered.map(i => {
         const ik = COGNITION_KINDS[i._kind] || { name: "其他", ic: "spark" };
@@ -2451,8 +2466,8 @@ async function locateCognition(data, signal) {
   const page = data[kind] || { items: [] };
   if (!(page.items || []).some(i => String(i.id) === id)) {
     const one = await cognitionPage(kind, signal, "&record_id=" + encodeURIComponent(id));
-    if (!(one.items || []).length) data.locate = { kind, id, missing: true };
-    else data[kind] = { ...page, items: [...one.items, ...(page.items || [])] };
+    if (!(one.items || []).length) data.locate = { kind, id, missing: true, epoch: one.privacy_epoch };
+    else { data[kind] = { ...page, items: [...one.items, ...(page.items || [])] }; data.locate = { kind, id, found: true, epoch: one.privacy_epoch }; }
   }
   return data;
 }
@@ -2468,6 +2483,11 @@ async function moreCognition(kind) {
     const seen = new Set(page.items.map(i => String(i.id)));
     state.data[kind] = { ...next, items: [...page.items, ...(next.items || []).filter(i => !seen.has(String(i.id)))] };
   } catch (error) {
+    // 游标失效或隐私版本变化：丢弃已加载的分页，从首页重新读取
+    if (["COGNITION_CURSOR_UNAVAILABLE", "PRIVACY_CHANGED"].includes(error.code) && epoch === state.epoch && generation === state.generation) {
+      state.cogMore = null; await loadRoute({ reset: true });
+      notice(error.code === "PRIVACY_CHANGED" ? "记录的隐私版本变了，已按当前版本重新读取。" : "翻页位置已失效，已从最新记录重新读取。", false); return;
+    }
     if (error.name !== "AbortError" && epoch === state.epoch && generation === state.generation) {
       notice("更早的" + (COGNITION_KINDS[kind]?.name || "") + "记录没有读到。" + errorText(error), false);
     }
@@ -2491,7 +2511,7 @@ function cognitionFinder() {
     kind, id, btn("查找", () => {}, { cls: "sm", type: "submit", symbol: "search" }));
 }
 function locateNote(data) {
-  const l = data.locate; if (!l) return null;
+  const l = data.locate; if (!l || l.found) return null;
   return el("div", { class: "alert" + (l.error ? " bad" : "") }, icon("warn"),
     el("span", {}, (COGNITION_KINDS[l.kind]?.name || "记录") + " " + shortId(l.id) + (l.error ? " 暂时读不到。" + errorText(l.error) : " 没有找到，可能已被清除或来源已失效。")));
 }
@@ -2534,22 +2554,6 @@ function cognitionExtra(sel) {
     : sel._kind === "model" ? modelMeasurementView(sel) : null, cognitionLinks(sel)];
 }
 
-function modelMeasurementView(sel) {
-  const m = sel.measurement || {}, u = sel.usage || {};
-  const kinds = { exact_local_render: "固定渲染器本地计数", provider_count: "服务商计数", estimate: "本地估算", unsupported: "计数格式不支持" };
-  const number = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未记录";
-  return el("section", { class: "steps-view" }, el("h4", {}, "本次请求计量"),
-    kv("计量方式", m.state === "RECORDED" ? kinds[m.count_kind] || "未知"
-      : m.state === "INCONSISTENT" ? "记录损坏或超限" : "未记录"),
-    kv("输入计数", number(m.input_tokens)), kv("预留裕量", number(m.reservation_margin)),
-    kv("输出预留", number(m.output_allowance)),
-    kv("实际输入 / 输出", u.observed ? number(u.input_tokens) + " / " + number(u.output_tokens) : "未记录"),
-    kv("实际缓存输入", u.observed ? number(u.cached_input_tokens) : "未记录"),
-    kv("已计或预留费用", money(u.billed_micro_usd)),
-    el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；费用按配置费率核算。"),
-    el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
-}
-
 /* 原始推理：只说明有没有、为什么没有，不展示内部字段，也不根据最终结果补写推理 */
 const REASONING_NOTE = {
   wake: "自主活动调度按规则判断，这一步不调用模型，所以没有推理内容。",
@@ -2564,4 +2568,165 @@ function reasoningView(sel, page) {
     el("p", { class: "note" }, "这里只显示服务商实际返回并保存下来的推理字段。没有生成或没有采集时会明确写出来，不会根据最终回答补写推理过程。"),
     el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。"),
     sel.model_request_id ? el("div", { class: "row-gap mt" }, linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看这次模型调用的用量")) : null];
+}
+
+/* ================= 请求计量：模型调用总览与单次明细 =================
+   只消费 cognition?kind=model 的原投影：
+   - usage.observed 为真时，input/output 才是有效原回执的实际用量；否则只显示“未记录”，
+     input_tokens 此时可能是预留上界，不能当作实际值。
+   - 缓存只看 usage.cache_usage：RECORDED 且数值有效才显示（包括明确的 0）；
+     缺字段、NOT_RECORDED 或数值组合无效都按未记录，不用 usage.cached_input_tokens 推断。
+   - 费用 billed_micro_usd 始终显示，是已计或预留的责任金额，按配置费率估算。
+   - 耗时、上下文分区与裁剪原因没有保存，界面写明未记录，不做拆分。 */
+const METER_COLORS = { cached: "var(--m-cached)", fresh: "var(--m-fresh)", unknown: "var(--m-unknown)", output: "var(--m-output)" };
+const METER_NAMES = { cached: "缓存命中输入", fresh: "未命中缓存的输入", unknown: "缓存未记录的输入", output: "输出" };
+const COUNT_KINDS = { exact_local_render: "固定渲染器本地计数", provider_count: "服务商计数", estimate: "本地估算", unsupported: "计数格式不支持" };
+const isCount = v => Number.isSafeInteger(v) && v >= 0;
+/** 47512 → 47.5k；未知返回“未记录” */
+function tk(v) {
+  if (!isCount(v)) return "未记录";
+  if (v < 1000) return String(v);
+  if (v < 1e6) return (v / 1000).toFixed(v < 1e4 ? 2 : 1).replace(/\.?0+$/, "") + "k";
+  return (v / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
+}
+const pct = (part, whole) => whole > 0 ? (part / whole * 100) : 0;
+const pctText = (part, whole) => { if (!(whole > 0)) return "—"; const p = pct(part, whole); return p > 0 && p < 0.1 ? "<0.1%" : p.toFixed(p >= 1 || p === 0 ? 1 : 2).replace(/\.0+$/, "") + "%"; };
+/** 一次请求的可用数字：实际用量和缓存分别判定，互不推断 */
+function meterOf(item) {
+  const u = item.usage || {}, m = item.measurement || {};
+  const actual = u.observed === true && isCount(u.input_tokens) && isCount(u.output_tokens);
+  const c = u.cache_usage;
+  const cacheKnown = actual && c && c.state === "RECORDED" && isCount(c.cached_input_tokens) && c.cached_input_tokens <= u.input_tokens;
+  const cached = cacheKnown ? c.cached_input_tokens : null;
+  return {
+    actual, cacheKnown, cached,
+    input: actual ? u.input_tokens : null, output: actual ? u.output_tokens : null,
+    billed: isCount(u.billed_micro_usd) ? u.billed_micro_usd : null, estimate: u.is_estimate === 1 || u.is_estimate === true,
+    measured: m.state === "RECORDED" && isCount(m.input_tokens) ? m.input_tokens : null,
+    margin: m.state === "RECORDED" && isCount(m.reservation_margin) ? m.reservation_margin : null,
+    allowance: m.state === "RECORDED" && isCount(m.output_allowance) ? m.output_allowance : null,
+    countKind: m.state === "RECORDED" ? COUNT_KINDS[m.count_kind] || "未知方式" : m.state === "INCONSISTENT" ? "记录损坏或超限" : "未记录",
+  };
+}
+/** 一次请求的分段：缓存命中 / 未命中 / 缓存未记录 / 输出 */
+function meterParts(x) {
+  if (!x.actual) return [];
+  return x.cacheKnown
+    ? [["cached", x.cached], ["fresh", x.input - x.cached], ["output", x.output]]
+    : [["unknown", x.input], ["output", x.output]];
+}
+/** 同一任务里的第几次调用：按服务端顺序（新到旧）倒过来数，只在已加载记录里计算 */
+function jobSequence(items, sel) {
+  if (!sel.job_id) return null;
+  const same = items.filter(i => i.job_id === sel.job_id).reverse();
+  return { index: same.findIndex(i => i.id === sel.id) + 1, total: same.length };
+}
+
+function donut(parts, center, sub) {
+  const total = parts.reduce((s, [, v]) => s + v, 0), r = 42, c = 2 * Math.PI * r;
+  let offset = 0;
+  const arcs = total > 0 ? parts.filter(([, v]) => v > 0).map(([k, v]) => {
+    const len = v / total * c, arc = el("circle", { cx: "60", cy: "60", r: String(r), fill: "none", stroke: METER_COLORS[k], "stroke-width": "14",
+      "stroke-dasharray": len.toFixed(2) + " " + (c - len).toFixed(2), "stroke-dashoffset": (-offset).toFixed(2), transform: "rotate(-90 60 60)" });
+    offset += len; return arc;
+  }) : [el("circle", { cx: "60", cy: "60", r: String(r), fill: "none", stroke: "var(--line)", "stroke-width": "14" })];
+  return el("div", { class: "donut" }, el("svg", { viewBox: "0 0 120 120", role: "img", "aria-label": center + " " + sub }, arcs),
+    el("div", { class: "donut-c" }, el("b", { class: "num" }, center), el("span", {}, sub)));
+}
+function meterLegend(parts, total) {
+  return el("ul", { class: "m-legend" }, parts.map(([k, v]) => el("li", {},
+    el("i", { style: { background: METER_COLORS[k] } }), el("span", { class: "m-name" }, METER_NAMES[k]),
+    el("b", { class: "num" }, pctText(v, total)), el("small", { class: "num" }, "≈" + tk(v)))));
+}
+
+/** 本页已加载的模型调用总览，放在“模型调用”筛选的列表上方 */
+function meterOverview(page) {
+  const items = (page?.items || []).filter(Boolean);
+  if (!items.length) return null;
+  const rows = items.map(i => ({ item: i, x: meterOf(i) }));
+  const actual = rows.filter(r => r.x.actual), cacheRows = actual.filter(r => r.x.cacheKnown);
+  const sum = (list, f) => list.reduce((s, r) => s + (f(r.x) || 0), 0);
+  const parts = [["cached", sum(cacheRows, x => x.cached)], ["fresh", sum(cacheRows, x => x.input - x.cached)],
+    ["unknown", sum(actual.filter(r => !r.x.cacheKnown), x => x.input)], ["output", sum(actual, x => x.output)]].filter(([, v]) => v > 0);
+  const total = parts.reduce((s, [, v]) => s + v, 0);
+  const cacheIn = sum(cacheRows, x => x.input), hit = sum(cacheRows, x => x.cached);
+  const jobs = new Set(items.map(i => i.job_id).filter(Boolean)).size;
+  const unknown = items.filter(i => ["UNKNOWN", "RESERVED"].includes(i.state)).length;
+  const billed = sum(rows, x => x.billed);
+  const stat = (title, value, chips) => el("div", { class: "m-stat" }, el("div", { class: "m-stat-h" }, el("span", {}, title), el("b", { class: "num" }, value)),
+    chips.length ? el("div", { class: "m-chips" }, chips.map(([n, v, tone]) => el("span", { class: "m-chip" + (tone ? " " + tone : "") }, n, el("b", { class: "num" }, String(v))))) : null);
+  return el("section", { class: "meter" },
+    el("div", { class: "m-grid" },
+      el("div", { class: "sheet m-summary" }, el("div", { class: "sheet-head" }, el("h2", {}, "请求统计"), el("span", { class: "note" }, "本页已加载 " + items.length + " 次")),
+        el("div", { class: "sheet-body m-stats" },
+          stat("实际用量", actual.length + " / " + items.length, [["已记录", actual.length, "ok"], ["未记录", items.length - actual.length, items.length - actual.length ? "warn" : ""]]),
+          stat("缓存观察", cacheRows.length + " / " + actual.length, [["已记录", cacheRows.length, "ok"], ["未记录", actual.length - cacheRows.length, ""]]),
+          stat("任务", String(jobs), [["结果不明", unknown, unknown ? "bad" : ""]]),
+          stat("费用", usd(billed), [["按配置费率估算", rows.filter(r => r.x.estimate).length, ""]]))),
+      el("div", { class: "sheet m-tokens" }, el("div", { class: "sheet-head" }, el("h2", {}, "Token 统计"),
+          el("span", { class: "note" }, cacheIn > 0 ? "缓存命中 " + pctText(hit, cacheIn) : actual.length ? "缓存未记录" : "")),
+        el("div", { class: "sheet-body m-donut" }, donut(parts, tk(total), actual.length ? "实际总量" : "未记录"),
+          actual.length ? meterLegend(parts, total) : el("p", { class: "note" }, "本页没有有效的实际用量回执。")))),
+    meterChart(rows),
+    el("p", { class: "note mt" }, "统计只包含实际用量已记录的请求；缓存命中率只按缓存已记录的请求计算。费用是已计或预留的责任金额，按配置费率估算，不等于服务商账单。耗时、上下文分区与裁剪原因没有保存，这里不做拆分。"));
+}
+
+/** 逐次请求：柱子是实际输入（按缓存分段）与输出，折线是本地准入计数；未记录实际用量的只画虚线框 */
+function meterChart(rows) {
+  const list = rows.slice(0, 30).reverse();
+  const top = Math.max(1, ...list.map(r => r.x.actual ? r.x.input + r.x.output : 0), ...list.map(r => r.x.measured || 0), ...list.map(r => r.x.measured != null && r.x.margin != null ? r.x.measured + r.x.margin : 0));
+  const W = 640, H = 170, L = 44, R = 8, T = 10, B = 22, bw = Math.min(28, (W - L - R) / list.length * 0.62);
+  const xAt = i => L + (i + 0.5) * (W - L - R) / list.length, yAt = v => T + (H - T - B) * (1 - v / top);
+  const grid = [0, 0.5, 1].map(f => [el("line", { x1: String(L), x2: String(W - R), y1: yAt(top * f).toFixed(1), y2: yAt(top * f).toFixed(1), class: "m-grid-l" }),
+    el("text", { x: String(L - 6), y: (yAt(top * f) + 4).toFixed(1), "text-anchor": "end", class: "m-axis" }, tk(Math.round(top * f)))]);
+  const bars = list.map((r, i) => {
+    const x = xAt(i) - bw / 2, sel = state.cogSel === "model:" + r.item.id;
+    const go = () => { state.cogSel = "model:" + r.item.id; rerender(); };
+    let y = yAt(0);
+    const segs = r.x.actual ? meterParts(r.x).filter(([, v]) => v > 0).map(([k, v]) => {
+      const h = (H - T - B) * v / top; y -= h;
+      return el("rect", { x: x.toFixed(1), y: y.toFixed(1), width: bw.toFixed(1), height: Math.max(h, 0.5).toFixed(1), fill: METER_COLORS[k] });
+    }) : [el("rect", { x: x.toFixed(1), y: yAt(r.x.measured || 0).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * (r.x.measured || 0) / top, 2).toFixed(1), class: "m-bar-none" })];
+    return el("g", { class: "m-bar" + (sel ? " sel" : ""), tabindex: "0", role: "button", onclick: go, onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } },
+      "aria-label": "第 " + (i + 1) + " 次请求，" + (r.x.actual ? "实际输入 " + tk(r.x.input) + "，输出 " + tk(r.x.output) : "实际用量未记录") },
+      el("rect", { x: (x - 3).toFixed(1), y: String(T), width: (bw + 6).toFixed(1), height: String(H - T - B), class: "m-hit" }), segs,
+      el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, String(i + 1)));
+  });
+  const pts = list.map((r, i) => r.x.measured != null ? xAt(i).toFixed(1) + "," + yAt(r.x.measured).toFixed(1) : null);
+  const line = el("polyline", { points: pts.filter(Boolean).join(" "), class: "m-line" });
+  const dots = list.map((r, i) => r.x.measured != null ? el("circle", { cx: xAt(i).toFixed(1), cy: yAt(r.x.measured).toFixed(1), r: "2.6", class: "m-dot" }) : null);
+  return el("div", { class: "sheet m-chart" }, el("div", { class: "sheet-head" }, el("h2", {}, "逐次请求"), el("span", { class: "note" }, "从旧到新，点一根柱子查看明细")),
+    el("div", { class: "sheet-body" }, el("svg", { viewBox: `0 0 ${W} ${H}`, class: "m-svg", role: "group", "aria-label": "逐次请求的输入输出" }, grid, bars, line, dots),
+      el("div", { class: "m-keys" }, ["cached", "fresh", "unknown", "output"].map(k => el("span", {}, el("i", { style: { background: METER_COLORS[k] } }), METER_NAMES[k])),
+        el("span", {}, el("i", { class: "k-line" }), "本地准入计数"), el("span", {}, el("i", { class: "k-none" }), "实际用量未记录"))));
+}
+
+/** 单次请求明细，用在“模型调用”记录的决策记录标签里 */
+function modelMeasurementView(sel) {
+  const x = meterOf(sel), seq = jobSequence(state.data?.model?.items || [], sel);
+  const parts = meterParts(x), total = parts.reduce((s, [, v]) => s + v, 0);
+  const pending = ["UNKNOWN", "RESERVED"].includes(sel.state);
+  const chips = [["实际输入", x.actual ? tk(x.input) : "未记录"], ["输出", x.actual ? tk(x.output) : "未记录"],
+    ["缓存", x.cacheKnown ? pctText(x.cached, x.input) + "（" + tk(x.cached) + "）" : "未记录"], ["费用", x.billed != null ? usd(x.billed) + (x.estimate ? " 估算" : "") : "未记录"]];
+  const reserve = x.measured != null && x.margin != null ? x.measured + x.margin : null;
+  const scale = Math.max(1, reserve || 0, x.measured || 0, x.actual ? x.input : 0);
+  const compare = [["准入预留", reserve, "res"], ["本地输入计数", x.measured, "loc"], ["实际输入", x.actual ? x.input : null, "act"]];
+  return el("section", { class: "steps-view meter-one" },
+    el("div", { class: "m-one-h" }, el("h4", {}, "本次请求计量"),
+      el("span", { class: "note" }, seq && seq.total > 1 ? "同一任务第 " + seq.index + " 次调用（本页共 " + seq.total + " 次）" : "同一任务里只加载到这一次调用")),
+    pending ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "这次请求的结果不明或仍在预留：实际用量未记录，费用按预留责任保留，不代表实际账单。")) : null,
+    el("div", { class: "m-chips" }, chips.map(([n, v]) => el("span", { class: "m-chip strong" }, n, el("b", { class: "num" }, v)))),
+    parts.length ? [el("div", { class: "m-seg", role: "img", "aria-label": parts.map(([k, v]) => METER_NAMES[k] + " " + tk(v)).join("，") },
+        parts.filter(([, v]) => v > 0).map(([k, v]) => el("i", { style: { background: METER_COLORS[k], width: pct(v, total).toFixed(3) + "%" } }))),
+      meterLegend(parts, total)] : el("p", { class: "note" }, "没有有效的实际用量回执，不显示输入输出分布。"),
+    el("div", { class: "m-compare" }, el("p", { class: "m-sub" }, "本地计量与实际", el("span", { class: "note" }, x.countKind)),
+      compare.map(([n, v, k]) => el("div", { class: "m-cmp" }, el("span", {}, n),
+        el("div", { class: "m-track" }, v != null ? el("i", { class: k, style: { width: pct(v, scale).toFixed(2) + "%" } }) : null),
+        el("b", { class: "num" }, v != null ? tk(v) : "未记录"))),
+      x.allowance != null ? el("p", { class: "note" }, "输出预留 " + tk(x.allowance) + (x.actual ? "，实际输出 " + tk(x.output) : "")) : null),
+    el("div", { class: "m-kv" },
+      kv("计量方式", x.countKind), kv("实际输入 / 输出", x.actual ? x.input + " / " + x.output : "未记录"),
+      kv("缓存命中输入", x.cacheKnown ? String(x.cached) : "未记录"), kv("已计或预留费用", x.billed != null ? usd(x.billed) : "未记录")),
+    el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；缓存只在原回执明确返回时显示。费用按配置费率核算，不是服务商账单。"),
+    el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
 }
