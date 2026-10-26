@@ -11,6 +11,7 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 from companion import owner_authority, owner_input
@@ -127,15 +128,104 @@ def test_four_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_pat
         children = await asyncio.gather(*[
             start(core, tmp_path / role, role, duration=3, settle=0.4) for role in roles
         ])
-        rows = await asyncio.gather(*[finish(child) for child in children])
-        for row in rows:
-            assert row["total"]["scan_contexts"] > 0
-            assert row["total"]["native_units"] > 0
-            assert row["total"]["provider_calls"] == 0
-            assert row["watchers"] == row["closed_watchers"] == 1
-        receipt("shared-boundary-four-workers", rows)
+
+        async def checked(child, role, operation):
+            try:
+                return await operation(child)
+            except TimeoutError as error:
+                process, ready_path, report_path = child
+                error.add_note(json.dumps({"role": role, "pid": process.pid,
+                    "returncode": process.returncode, "ready": ready_path.exists(),
+                    "report": report_path.exists()}))
+                raise
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                for child, role in zip(children, roles, strict=True):
+                    group.create_task(checked(child, role, ready))
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(checked(child, role, finish))
+                         for child, role in zip(children, roles, strict=True)]
+            rows = [task.result() for task in tasks]
+            for row in rows:
+                assert row["total"]["scan_contexts"] > 0
+                assert row["total"]["native_units"] > 0
+                assert row["total"]["provider_calls"] == 0
+                assert row["watchers"] == row["closed_watchers"] == 1
+            receipt("shared-boundary-four-workers", rows)
+        finally:
+            await asyncio.gather(*[close_child(child) for child in children])
 
     run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["ready", "finish"])
+def test_four_native_workers_cancel_waiters_before_failure_cleanup(
+    core, tmp_path, monkeypatch, phase,
+):
+    children, active, entered, closed, drained = [], set(), set(), set(), set()
+    ready_calls, finish_calls = [], []
+    gate = asyncio.Event()
+    original_ready = ready
+
+    async def blocked(role):
+        active.add(role)
+        entered.add(role)
+        if len(entered) == 4:
+            gate.set()
+        try:
+            await gate.wait()
+            if role == "worker":
+                raise TimeoutError("SYNTHETIC_NATIVE_WORKER_WAIT")
+            await asyncio.Future()
+        finally:
+            active.remove(role)
+
+    class Process:
+        def __init__(self, role):
+            self.role, self.pid, self.returncode = role, 1000 + len(children), None
+
+        def kill(self):
+            assert not active, "All waiting tasks must finish cancellation before closing children"
+            self.returncode = -9
+            closed.add(self.role)
+
+        async def communicate(self):
+            if self.returncode is not None:
+                drained.add(self.role)
+                return b"", b""
+            finish_calls.append(self.role)
+            await blocked(self.role)
+
+    async def controlled_start(core, directory, role, **options):
+        directory.mkdir()
+        child = Process(role), directory / "ready", directory / "result.json"
+        children.append(child)
+        if phase == "finish":
+            child[1].write_text("ready", encoding="utf-8")
+        return child
+
+    async def controlled_ready(child):
+        ready_calls.append(child[0].role)
+        if phase == "ready":
+            await blocked(child[0].role)
+        else:
+            await original_ready(child)
+
+    monkeypatch.setattr(sys.modules[__name__], "start", controlled_start)
+    monkeypatch.setattr(sys.modules[__name__], "ready", controlled_ready)
+    with pytest.raises((TimeoutError, ExceptionGroup)) as caught:
+        test_four_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_path)
+    roles = {"worker", "content-worker", "executive-worker", "life-worker"}
+    assert closed == drained == set(ready_calls) == roles
+    assert not active
+    assert set(finish_calls) == (roles if phase == "finish" else set())
+    error = caught.value.exceptions[0] if isinstance(caught.value, ExceptionGroup) else caught.value
+    assert isinstance(error, TimeoutError)
+    assert json.loads(error.__notes__[0]) == {
+        "role": "worker", "pid": 1000, "returncode": None,
+        "ready": phase == "finish", "report": False,
+    }
 
 
 def test_real_http_enqueue_new_owner_and_independent_worker_latency(core, tmp_path):

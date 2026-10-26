@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import pickle
-import socket
 import sys
 from dataclasses import replace
 
@@ -53,7 +52,7 @@ async def marker(process, expected):
         assert line, b"".join(lines).decode(errors="replace")
         lines.append(line)
         if expected.encode() in line:
-            return
+            return line
 
 
 async def finished(process):
@@ -147,14 +146,12 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 old_policy.capability_policies["meme"]
                 == owner_authority.capability_hashes(core.settings)["meme"]
             )
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-        config = replace(config, core_url=f"http://127.0.0.1:{port}")
-        api = await child(tmp_path, "old-api", core, mode="api", port=port)
+        api = await child(tmp_path, "old-api", core, mode="api", port=0)
         workers = []
         try:
-            await marker(api, "API_READY")
+            port = int((await marker(api, "API_READY ")).split()[1])
+            assert 0 < port < 65536
+            config = replace(config, core_url=f"http://127.0.0.1:{port}")
             worker = await child(
                 tmp_path,
                 "old-worker",
@@ -253,8 +250,10 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 item["billed_micro_usd"] for item in original_usage if item["state"] == "UNKNOWN"
             )
             assert receipt["retained_micro_usd"] == 84
-            api = await child(tmp_path, "new-api", core, mode="api", port=port)
-            await marker(api, "API_READY")
+            api = await child(tmp_path, "new-api", core, mode="api", port=0)
+            port = int((await marker(api, "API_READY ")).split()[1])
+            assert 0 < port < 65536
+            config = replace(config, core_url=f"http://127.0.0.1:{port}")
 
             async def bridge(arguments, bridge_config):
                 process = await child(
