@@ -32,7 +32,9 @@ lazy factory 直接构造 CoreMemeTransport，只创建原 pin 和 delivery bind
 `meme_discovery` job。相同冻结 offer 不重复入队。前台不联网、不等待、不回填本轮候选。
 实际后台工作沿用 `MemeCaptionService.run_once` 和原 selector 的 meme_caption 调度入口，
 进展返回布尔值；数据库 job kind、租约、attempt、预算、来源检查仍为原 discovery 合同。
-有主人待处理、有效模型预留或待投递内容时让出执行。
+有主人待处理、有效模型预留时让出执行。原 Outbox 为 PENDING/LEASED/SENDING 时，
+在 native lease 原事务内、claim/reservation 之前让出，保留原 QUEUED job 和未消耗的
+attempt；ACK 完成后仍领取该原 job。已开始 I/O 后的 preempt 继续使用原结算路径。
 
 `companion_meme_sources` 的四个平铺文件是 stdlib-only 获取、解析和审核实现，Core 与
 Bridge 复用同一函数和类型。Core 仅接受原 repository FILE、固定 repo/revision 和本地

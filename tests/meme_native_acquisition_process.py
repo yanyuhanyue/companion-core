@@ -15,7 +15,8 @@ from tests.test_meme_core import CAPTION
 from tests.test_meme_pack_files import Upstream
 from tests.test_next_memes_discovery import resolver
 
-config, now, candidate, output = sys.argv[1:]
+config, now, candidate, output, *control = sys.argv[1:]
+assert control in ([], ["gate"])
 settings = Settings.model_validate_json(Path(config).read_text("utf-8"))
 SemanticIndex.warmup = lambda self: None  # Existing fixture: never download chat index weights.
 calls = []
@@ -41,6 +42,9 @@ async def main():
         with Core(settings, ModelClient(settings, client), lambda: now) as core:
             core.memes.discovery.transport = httpx.MockTransport(upstream.handle)
             core.memes.discovery.resolver = resolver
+            if control:
+                print("READY", flush=True)
+                assert await asyncio.to_thread(sys.stdin.readline) == "run\n"
             worked = await core.run_once("native-file-process")
             return {"worked": worked, "calls": calls, "requests": len(upstream.calls),
                     "download_bytes": sum(map(len, upstream.bodies)),

@@ -187,7 +187,12 @@ def submit_native(store, settings, clock, body, *, origin_job):
 def lease_native(store, settings, clock, body):
     recover(store, settings, clock())
     with store.transaction():
-        return _lease(store, settings, clock, body, _native_scope(store, settings, clock),
+        approval = _native_scope(store, settings, clock)
+        if store.one(
+            "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING') LIMIT 1"
+        ):
+            return {"item": None}
+        return _lease(store, settings, clock, body, approval,
                       providers=("community",))
 
 

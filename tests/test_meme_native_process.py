@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import sqlite3
+import threading
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from companion import meme_policy
 from companion.config import ImageInputPolicy
 from tests.conftest import run
 from tests.meme_authority_fixture import environment
+from tests.support import onebot
 from tests.support.onebot import onebot_http
 from tests.test_evaluation_process import process_config
 from tests.test_meme_core_process import process, until
@@ -40,12 +42,25 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
     async def scenario():
         async with environment(core, tmp_path, monkeypatch, paid=paid) as (client, cfg, grant, _):
             second, hold = asyncio.Event(), asyncio.Event()
+            ack_entered, ack_release = asyncio.Event(), threading.Event()
+            loop, provider = asyncio.get_running_loop(), onebot.provider
+
+            def paused_ack(request, sends, receipt=None):
+                response = provider(request, sends, receipt)
+                if request.url.path == "/send_private_msg" and len(sends) == 1:
+                    loop.call_soon_threadsafe(ack_entered.set)
+                    assert ack_release.wait(10), "Synthetic ACK gate was not released"
+                return response
+
+            monkeypatch.setattr(onebot, "provider", paused_ack)
 
             async def source(ws):
                 core.clock.now = datetime.now(UTC)
                 await ws.send(json.dumps(raw_event(1, text="太棒了，成功了",
                     time=int(core.clock.now.timestamp()))))
                 await second.wait()
+                if hold.is_set():
+                    return
                 core.clock.now = datetime.now(UTC)
                 await ws.send(json.dumps(raw_event(2, text="想要温暖的抱抱",
                     time=int(core.clock.now.timestamp()))))
@@ -55,18 +70,24 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                 if request.headers.get("Authorization") != "Bearer " + cfg.onebot_token:
                     return connection.respond(401, "synthetic auth required")
 
-            async def work(label, candidate="-"):
+            async def work(label, candidate="-", *, waiting=None):
                 config, output = tmp_path / (label + ".json"), tmp_path / (label + "-result.json")
-                process_config(core, config)
-                core.clock.now = datetime.now(UTC)
-                child = await process("tests.meme_native_acquisition_process", config,
-                                      core.clock(), candidate, output)
+                if waiting is None:
+                    process_config(core, config)
+                    core.clock.now = datetime.now(UTC)
+                    child = await process("tests.meme_native_acquisition_process", config,
+                                          core.clock(), candidate, output)
+                else:
+                    child = waiting
+                    child.stdin.write(b"run\n")
+                    await child.stdin.drain()
                 try:
                     async with asyncio.timeout(40):
                         _, error = await child.communicate()
                     assert child.returncode == 0, error.decode(errors="replace")
                     report = json.loads(output.read_text("utf-8"))
-                    assert report["worked"], report
+                    if waiting is None:
+                        assert report["worked"], report
                     reports.append(report)
                     return report
                 finally:
@@ -87,10 +108,50 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                     config_file.write_text(json.dumps(config.snapshot()), encoding="utf-8")
                     bridge = await process("tests.native_continuous_process", config_file,
                                            stdin=asyncio.subprocess.PIPE)
+                    waiting = None
                     try:
                         first = await until(lambda: core.store.one(
                             "SELECT * FROM jobs WHERE kind='chat' AND state='QUEUED'"))
+                        # Preload the independent idle worker before pausing the real HTTP ACK.
+                        waiting_config = tmp_path / "waiting.json"
+                        process_config(core, waiting_config)
+                        waiting = await process("tests.meme_native_acquisition_process",
+                            waiting_config, core.clock(), "-", tmp_path / "waiting-result.json",
+                            "gate", stdin=asyncio.subprocess.PIPE)
+                        async with asyncio.timeout(40):
+                            assert (await waiting.stdout.readline()).strip() == b"READY"
                         assert (await work("empty-chat"))["calls"] == ["chat"]
+                        async with asyncio.timeout(10):
+                            await ack_entered.wait()
+                        assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
+                            (first["job_id"],))["state"] == "SUCCEEDED"
+                        delivery_before = core.store.rows("SELECT * FROM outbox")
+                        assert delivery_before[0]["state"] == "SENDING"
+                        discovery_before = core.store.one(
+                            "SELECT * FROM jobs WHERE kind='meme_discovery'")
+                        metadata_before = core.store.one(
+                            "SELECT value FROM runtime_meta WHERE key=?",
+                            ("meme_discovery:" + discovery_before["job_id"],))
+                        accounting_before = {table: core.store.rows("SELECT * FROM " + table)
+                            for table in ("model_usage", "model_admissions")}
+                        paused = await work("waiting", waiting=waiting)
+                        assert paused["requests"] == 0 and paused["calls"] == []
+                        after_wait = core.store.one("SELECT * FROM jobs WHERE job_id=?",
+                            (discovery_before["job_id"],))
+                        assert after_wait == discovery_before, {
+                            "discovery": after_wait,
+                            "reservations": core.store.rows(
+                                "SELECT * FROM meme_discovery_reservations"),
+                            "worker": paused,
+                        }
+                        assert not paused["worked"]
+                        assert not core.store.rows("SELECT * FROM meme_discovery_reservations")
+                        assert core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                            ("meme_discovery:" + discovery_before["job_id"],)) == metadata_before
+                        assert core.store.rows("SELECT * FROM outbox") == delivery_before
+                        assert {table: core.store.rows("SELECT * FROM " + table)
+                            for table in accounting_before} == accounting_before
+                        ack_release.set()
                         await until(lambda: core.store.one(
                             "SELECT 1 FROM outbox WHERE state='SENT'"))
                         frozen = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
@@ -100,6 +161,11 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         acquired = await work("acquire")
                         assert acquired["calls"] == [] and acquired["requests"] == 5
                         reservation = core.store.one("SELECT * FROM meme_discovery_reservations")
+                        assert reservation["job_id"] == discovery_before["job_id"]
+                        assert len(core.store.rows(
+                            "SELECT * FROM jobs WHERE kind='meme_discovery'")) == 1
+                        assert core.store.one("SELECT attempts FROM jobs WHERE job_id=?",
+                            (discovery_before["job_id"],))["attempts"] == 1
                         asset = core.store.one("SELECT * FROM meme_assets")
                         assert reservation["state"] == "SETTLED"
                         assert reservation["download_bytes"] == acquired["download_bytes"]
@@ -146,7 +212,12 @@ def test_empty_turn_native_acquisition_caption_and_next_turn_exact_delivery(
                         assert json.loads(output.decode().strip().splitlines()[-1])["attempts"] == {
                             "ACK": 2}
                     finally:
+                        ack_release.set()
                         hold.set()
+                        second.set()
+                        if waiting is not None and waiting.returncode is None:
+                            waiting.kill()
+                            await waiting.wait()
                         if bridge.returncode is None:
                             bridge.kill()
                             await bridge.wait()
