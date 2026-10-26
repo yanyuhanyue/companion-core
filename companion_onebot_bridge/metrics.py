@@ -1,7 +1,14 @@
+import asyncio
 import json
+import os
 import re
 import time
 import uuid
+
+import httpx
+
+PROBE_STAGES = {"get_login_info": "t_onebot_probe_login", "get_status": "t_onebot_probe_status",
+                "get_version_info": "t_onebot_probe_version"}
 
 STAGES = {
     "t_onebot_received",
@@ -20,6 +27,37 @@ STAGES = {
     "media_unavailable",
     "t_bridge_send_ack",
 }
+
+
+def probe_finished(name, started_ns, error=None):
+    """Opt-in fixed probe spans; no request, response or exception text is exported."""
+    if os.environ.get("COMPANION_TELEMETRY") != "1":
+        return
+    if error is None:
+        error_class = "none"
+    elif isinstance(error, asyncio.CancelledError):
+        error_class = "cancelled"
+    elif isinstance(error, httpx.TimeoutException):
+        error_class = "timeout"
+    elif isinstance(error, httpx.HTTPStatusError):
+        error_class = "http_status"
+    elif isinstance(error, httpx.TransportError):
+        error_class = "transport"
+    elif isinstance(error, ValueError):
+        error_class = "validation"
+    else:
+        error_class = "unexpected"
+    evidence = os.environ.get("COMPANION_TELEMETRY_EVIDENCE", "LIVE_ONEBOT")
+    if evidence not in {"LIVE_ONEBOT", "OFFLINE_FIXTURE"}:
+        evidence = "LIVE_ONEBOT"
+    finished = time.perf_counter_ns()
+    record = {"schema_version": 1, "evidence_type": evidence, "stage": PROBE_STAGES[name],
+              "monotonic_ns": finished, "elapsed_ms": round(max(0, finished - started_ns) / 1e6, 4),
+              "error_class": error_class}
+    try:
+        print(json.dumps(record), flush=True)
+    except OSError:
+        pass  # Telemetry cannot change delivery state or request a retry.
 
 
 class Metrics:
