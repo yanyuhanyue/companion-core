@@ -1,0 +1,438 @@
+"""Native Compose merge contracts; pytest never starts containers or an engine."""
+
+import asyncio
+import base64
+import copy
+import json
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from scripts import smoke_dev_compose as smoke
+from scripts import verify_dev_compose as dev_compose
+from scripts.verify_dev_compose import (
+    ROOT,
+    SYNTHETIC_TOKEN,
+    compose_command,
+    environment,
+    render,
+    validate,
+    verify,
+)
+
+
+@pytest.fixture(scope="module")
+def native_config(tmp_path_factory):
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI required; native configuration coverage not performed")
+    env_file = tmp_path_factory.mktemp("dev-compose-env") / "dev.env"
+    env_file.write_text(f"COMPANION_DEV_BRIDGE_TOKEN={SYNTHETIC_TOKEN}\n", encoding="utf-8")
+    return render(ROOT, env_file, "companion-dev-test")
+
+
+def test_native_merge_rejects_host_and_root_pollution_and_separates_projects(native_config):
+    assert verify()["native_compose_config"] == "PASS"
+    assert len(validate(native_config, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 4
+
+
+@pytest.mark.parametrize("service", ["migrate", "companion-api", "companion-worker",
+    "companion-life-worker", "companion-executive-worker", "companion-content-worker"])
+def test_optional_services_cannot_inherit_live_environment(native_config, service):
+    changed = copy.deepcopy(native_config)
+    changed["services"][service]["environment"]["COMPANION_MODEL_KEY"] = "synthetic-live-key"
+    with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+        validate(changed, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("change", ["root-config", "writeable-source", "missing-source-created",
+    "extra-mount", "host-port", "external-network", "fixed-network-name", "external-volume",
+    "shared-volume-name", "automatic-migration", "root-user", "paid-mode", "extra-env"])
+def test_unsafe_rendered_configuration_is_rejected(native_config, change):
+    config = copy.deepcopy(native_config)
+    api = config["services"]["companion-api"]
+    mounts = {entry["target"]: entry for entry in api["volumes"]}
+    if change == "root-config":
+        mounts["/app/config.toml"]["source"] = str(ROOT / "config.toml")
+    elif change == "writeable-source":
+        mounts["/app/companion"]["read_only"] = False
+    elif change == "missing-source-created":
+        mounts["/app/companion"]["bind"]["create_host_path"] = True
+    elif change == "extra-mount":
+        api["volumes"].append({"type": "bind", "source": "/var/run/docker.sock",
+                               "target": "/var/run/docker.sock"})
+    elif change == "host-port":
+        api["ports"] = [{"target": 8765, "published": "8765"}]
+    elif change == "external-network":
+        config["networks"]["companion"]["external"] = True
+    elif change == "fixed-network-name":
+        config["networks"]["companion"]["name"] = "companion-internal"
+    elif change == "external-volume":
+        config["volumes"]["core-data"]["external"] = True
+    elif change == "shared-volume-name":
+        config["volumes"]["core-data"]["name"] = "production-data"
+    elif change == "automatic-migration":
+        api["depends_on"] = {"migrate": {"condition": "service_completed_successfully"}}
+    elif change == "root-user":
+        api["user"] = "0:0"
+    elif change == "paid-mode":
+        api["environment"]["COMPANION_MODE"] = "live"
+    else:
+        api["environment"]["COMPANION_CONTROL_TOKEN"] = "synthetic-host-poison"
+    with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+        validate(config, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+def replay_render(monkeypatch, config, version, *, failed_stage=None):
+    calls = []
+    synthetic_env = {"SYNTHETIC_ENV": "dedicated"}
+    command = compose_command(ROOT, ROOT / ".local/synthetic.env", "companion-dev-test",
+                              context="synthetic-local")
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert kwargs["cwd"] == ROOT and kwargs["env"] is synthetic_env
+        assert kwargs["capture_output"] and kwargs["text"]
+        assert args[:len(command)] == command
+        if args[len(command):] == ["--profile", "*", "config", "--format", "json"]:
+            stage, output = "config", json.dumps(config)
+        else:
+            assert args[len(command):] == ["version", "--short"]
+            stage, output = "version", version
+        return subprocess.CompletedProcess(args, int(stage == failed_stage), output,
+                                           "synthetic-private-stderr")
+
+    monkeypatch.setattr(dev_compose.subprocess, "run", run)
+    result = render(ROOT, ROOT / ".local/synthetic.env", "companion-dev-test",
+                    context="synthetic-local", env=synthetic_env)
+    assert len(calls) == 2
+    return result
+
+
+@pytest.mark.parametrize("version,legacy", [
+    ("2.30.0", True), ("v2.38.2", True), ("2.40.3", True),
+    ("2.29.9", False), ("2.40.4", False), ("2.40.3-custom", False),
+    ("5.0.0", False), ("5.5.0", False), ("6.0.0", False), ("unknown", False),
+])
+def test_render_missing_bind_false_uses_only_known_native_schema(
+    native_config, monkeypatch, version, legacy,
+):
+    config = copy.deepcopy(native_config)
+    for service in config["services"].values():
+        for mount in service["volumes"]:
+            if mount["type"] == "bind":
+                del mount["bind"]["create_host_path"]
+    rendered = replay_render(monkeypatch, config, version)
+    if legacy:
+        assert len(validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 4
+    else:
+        with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+            validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("version", ["2.40.3", "5.5.0"])
+@pytest.mark.parametrize("value", [False, True, None, 0, 1, "false", [], {}])
+def test_render_preserves_explicit_bind_values(native_config, monkeypatch, version, value):
+    config = copy.deepcopy(native_config)
+    mount = config["services"]["companion-api"]["volumes"][0]
+    mount["bind"]["create_host_path"] = value
+    rendered = replay_render(monkeypatch, config, version)
+    actual = rendered["services"]["companion-api"]["volumes"][0]["bind"]["create_host_path"]
+    assert type(actual) is type(value) and actual == value
+    if value is False:
+        validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+    else:
+        with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+            validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("version", ["2.40.3", "5.5.0"])
+@pytest.mark.parametrize("change", ["missing-bind", "source", "readonly"])
+def test_render_does_not_hide_other_bind_failures(native_config, monkeypatch, version, change):
+    config = copy.deepcopy(native_config)
+    mount = config["services"]["companion-api"]["volumes"][0]
+    if change == "missing-bind":
+        del mount["bind"]
+    elif change == "source":
+        mount["source"] = str(ROOT / "config.toml")
+    else:
+        mount["read_only"] = False
+    rendered = replay_render(monkeypatch, config, version)
+    with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+        validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("stage,code", [
+    ("config", "DEV_COMPOSE_RENDER_FAILED"), ("version", "DEV_COMPOSE_VERSION_FAILED"),
+])
+def test_render_rejects_failed_native_command(monkeypatch, stage, code):
+    with pytest.raises(RuntimeError, match=code):
+        replay_render(monkeypatch, {}, "2.40.3", failed_stage=stage)
+
+
+def test_smoke_marks_render_phase_before_render_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(smoke, "require_local_context", lambda context: None)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("DEV_COMPOSE_RENDER_FAILED")
+
+    monkeypatch.setattr(smoke, "render", fail)
+    proof = {}
+    with pytest.raises(RuntimeError, match="DEV_COMPOSE_RENDER_FAILED"):
+        smoke.smoke("synthetic-local", root=tmp_path, proof=proof)
+    assert proof["phase"] == "compose_render" and proof["checks"] == []
+
+
+@pytest.mark.parametrize("error,code", [
+    (RuntimeError("DEV_COMPOSE_RENDER_FAILED"), "DEV_COMPOSE_RENDER_FAILED"),
+    (RuntimeError("DEV_COMPOSE_VERSION_FAILED"), "DEV_COMPOSE_VERSION_FAILED"),
+    (subprocess.CalledProcessError(7, "DEV_SMOKE_COMMAND_FAILED",
+                                  "synthetic-private-output", "SQLITE_READONLY_TEXT"),
+     "DEV_SMOKE_COMMAND_FAILED"),
+    (subprocess.CalledProcessError(2, "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING",
+                                  "synthetic-private-output", "synthetic-private-stderr"),
+     "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING"),
+    (RuntimeError("synthetic-private-exception"), None),
+    (subprocess.CalledProcessError(7, ["synthetic-private-command"],
+                                  "synthetic-private-output", "synthetic-private-stderr"), None),
+])
+def test_smoke_report_exposes_only_fixed_error_codes(monkeypatch, tmp_path, capsys, error, code):
+    for name in ("compose.yaml", "deploy/compose.dev.yaml", "scripts/verify_dev_compose.py",
+                 "scripts/smoke_dev_compose.py", "tests/test_dev_compose.py",
+                 "docs/dev-environment.md", "Dockerfile", "uv.lock",
+                 "deploy/qq-beta-core.example.toml"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic fixture", encoding="utf-8")
+
+    def fail(context, *, image, proof):
+        proof["phase"] = "compose_render"
+        raise error
+
+    monkeypatch.setattr(smoke, "ROOT", tmp_path)
+    monkeypatch.setattr(smoke, "smoke", fail)
+    monkeypatch.setattr(smoke, "run", lambda command: "synthetic-source-identity")
+    monkeypatch.setattr(sys, "argv", ["smoke", "--context", "synthetic-local"])
+    with pytest.raises(SystemExit) as stopped:
+        smoke.main()
+    assert stopped.value.code == 2
+    text = (tmp_path / ".local/verification/dev-compose-smoke.json").read_text(encoding="utf-8")
+    proof = json.loads(text)
+    assert proof["phase"] == "compose_render" and proof["container_smoke"] == "FAIL"
+    assert proof.get("error_code") == code
+    if isinstance(error, subprocess.CalledProcessError) and code:
+        assert proof["command_exit_code"] == error.returncode
+        assert proof["stderr_kind"] in smoke._STDERR_KINDS
+    else:
+        assert "command_exit_code" not in proof and "stderr_kind" not in proof
+    captured = capsys.readouterr()
+    assert "synthetic-private" not in text + captured.out + captured.err
+
+
+@pytest.mark.parametrize("stderr,kind", [
+    ("sqlite3.OperationalError: attempt to write a readonly database", "SQLITE_READONLY_TEXT"),
+    ("sqlite3.OperationalError: unable to open database file", "SQLITE_CANTOPEN_TEXT"),
+    ("sqlite3.OperationalError: database is locked", "SQLITE_BUSY_TEXT"),
+    ("BACKUP_DESTINATION_EXISTS", "BACKUP_DESTINATION_EXISTS"),
+    ("BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS", "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS"),
+    ("AssertionError: synthetic-private-text", "PYTHON_ASSERTION"),
+    ("PermissionError: synthetic-private-path", "PYTHON_PERMISSION"),
+    ("synthetic-private-unrecognized", "UNCLASSIFIED"),
+    ("AssertionError\n" + "synthetic-private-text" * 1000, "UNCLASSIFIED"),
+])
+def test_command_failure_keeps_only_bounded_fixed_stderr_kind(monkeypatch, stderr, kind):
+    def fail(command, **kwargs):
+        return subprocess.CompletedProcess(command, 7, "synthetic-private-output", stderr)
+
+    monkeypatch.setattr(smoke.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError) as stopped:
+        smoke.run(["synthetic-private-command", "synthetic-private-token"])
+    error = stopped.value
+    assert error.returncode == 7 and error.cmd == "DEV_SMOKE_COMMAND_FAILED"
+    assert error.stderr == kind and error.output is None
+    assert "synthetic-private" not in str(error) + repr(vars(error))
+
+
+def test_expected_stderr_mismatch_has_its_own_fixed_error_code(monkeypatch):
+    monkeypatch.setattr(smoke.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 2, "synthetic-private-output", ""))
+    with pytest.raises(subprocess.CalledProcessError) as stopped:
+        smoke.run(["synthetic-private-command"], expected=2, contains="BACKUP_DESTINATION_EXISTS")
+    assert stopped.value.cmd == "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING"
+    assert stopped.value.returncode == 2 and stopped.value.stderr == "UNCLASSIFIED"
+
+
+@pytest.mark.parametrize("returncode,expected,contains,stderr", [
+    (0, 0, None, "synthetic-private-stderr"),
+    (2, 2, "BACKUP_DESTINATION_EXISTS", "BACKUP_DESTINATION_EXISTS"),
+])
+def test_command_success_keeps_expected_exit_and_output_contract(
+    monkeypatch, returncode, expected, contains, stderr,
+):
+    monkeypatch.setattr(smoke.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, returncode, " PASS\n", stderr))
+    assert smoke.run(["synthetic-command"], expected=expected, contains=contains) == "PASS"
+
+
+@pytest.mark.parametrize("project", ["companion", "production", "companion-dev-",
+                                     "companion-dev-../other", "companion-dev-X"])
+def test_commands_require_a_distinct_dev_project(project, tmp_path):
+    with pytest.raises(ValueError, match="DEV_PROJECT_NAME_REQUIRED"):
+        compose_command(ROOT, Path(tmp_path) / "dev.env", project)
+
+
+@pytest.mark.parametrize("endpoint", ["ssh://example.invalid", "tcp://127.0.0.1:2375",
+                                      "https://example.invalid"])
+def test_container_smoke_refuses_remote_context_before_engine_access(monkeypatch, endpoint):
+    calls = []
+
+    def inspect(command, **kwargs):
+        calls.append(command)
+        return json.dumps([{"Endpoints": {"docker": {"Host": endpoint}}}])
+
+    monkeypatch.setattr(smoke, "run", inspect)
+    with pytest.raises(smoke.PrerequisiteUnavailable, match="LOCAL_CONTEXT_REQUIRED"):
+        smoke.require_local_context("synthetic")
+    assert calls == [["docker", "context", "inspect", "synthetic"]]
+
+
+@pytest.mark.parametrize("endpoint,accepted", [
+    ("npipe:////./pipe/docker_engine", True),
+    ("npipe:////./pipe/dockerDesktopLinuxEngine", True),
+    ("unix:///var/run/docker.sock", True),
+    ("unix:///run/user/1000/docker.sock", True),
+    ("unix:///home/dev/.docker/desktop/docker.sock", True),
+    ("npipe:////remote-host/pipe/docker_engine", False),
+    ("npipe:////localhost/pipe/docker_engine", False),
+    ("npipe://remote-host/pipe/docker_engine", False),
+    (r"npipe://\\remote-host\pipe\docker_engine", False),
+    (r"\\remote-host\pipe\docker_engine", False),
+    ("npipe://./pipe/docker_engine", False),
+    ("npipe:////./pipe/", False),
+    ("npipe:////./pipe/docker_engine/extra", False),
+    ("npipe:////./pipe/docker_engine?target=remote", False),
+    ("npipe:////./pipe/docker_engine#fragment", False),
+    ("npipe:////./pipe/docker engine", False),
+    ("unix://remote-host/var/run/docker.sock", False),
+    ("unix:////remote-host/var/run/docker.sock", False),
+    ("unix://relative.sock", False),
+    ("unix:///var/run/docker.sock?target=remote", False),
+    ("unix:///var/run/docker.sock#fragment", False),
+    ("unix:///", False),
+    (None, False),
+])
+def test_container_smoke_queries_engine_only_for_canonical_local_endpoint(
+    monkeypatch, endpoint, accepted,
+):
+    calls = []
+
+    def inspect(command, **kwargs):
+        calls.append(command)
+        if len(calls) == 1:
+            return json.dumps([{"Endpoints": {"docker": {"Host": endpoint}}}])
+        return json.dumps({"OSType": "linux"})
+
+    monkeypatch.setattr(smoke, "run", inspect)
+    expected = [["docker", "context", "inspect", "synthetic"]]
+    if accepted:
+        smoke.require_local_context("synthetic")
+        expected.append(["docker", "--context", "synthetic", "info", "--format", "{{json .}}"])
+    else:
+        with pytest.raises(smoke.PrerequisiteUnavailable, match="LOCAL_CONTEXT_REQUIRED"):
+            smoke.require_local_context("synthetic")
+    assert calls == expected
+
+
+def test_native_one_off_options_parse_without_engine(native_config):
+    result = subprocess.run(
+        ["docker", "compose", "run", *smoke.RUN_OPTIONS, "--entrypoint", smoke.PYTHON, "--help"],
+        cwd=ROOT, env=environment(), capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, "DEV_COMPOSE_ONE_OFF_OPTIONS_REJECTED"
+
+
+def test_container_probe_contracts_through_native_api_and_independent_worker(tmp_path):
+    asyncio.run(native_probe_contracts(tmp_path))
+
+
+async def native_probe_contracts(tmp_path):
+    """Exercise the probe bodies natively; Docker mount/network evidence stays separate."""
+    database, ledger = tmp_path / "companion.sqlite3", tmp_path / "erasures.jsonl"
+    archive, recovered = tmp_path / "pre-init.enc", tmp_path / "recovered.sqlite3"
+    before_erasure = tmp_path / "recovered-before-erasure.sqlite3"
+    env = {**environment(), "COMPANION_CONFIG": str(tmp_path / "absent.toml"),
+           "COMPANION_MODE": "demo", "COMPANION_OWNER_QQ_ID": "10001",
+           "COMPANION_BOT_QQ_ID": "10002", "COMPANION_BRIDGE_TOKEN": secrets.token_urlsafe(32),
+           "COMPANION_DATABASE": str(database), "COMPANION_ERASURE_LEDGER": str(ledger),
+           "COMPANION_MEMORY_ENABLED": "false", "COMPANION_MODEL_KEY": "",
+           "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
+           "COMPANION_BACKUP_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}
+
+    async def start(*args):
+        return await asyncio.create_subprocess_exec(
+            sys.executable, "-B", *args, cwd=ROOT, env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def command(*args, expected=0):
+        process = await start(*args)
+        try:
+            output, error = await asyncio.wait_for(process.communicate(), 30)
+            assert process.returncode == expected, (output.decode(), error.decode())
+            return output.decode()
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.communicate()
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    await command("-m", "companion", "init")
+    children = []
+    try:
+        children.append(await start("-m", "companion", "serve", "--port", str(port)))
+        children.append(await start("-m", "companion", "worker"))
+        http_code = smoke.HTTP_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
+        http_code = http_code.replace("/data/companion.sqlite3", database.as_posix())
+        for number in (1, 2, 3):
+            result = json.loads(await command("-c", http_code, str(number)))
+            assert result["independent_worker"] == "PASS"
+        assert all(process.returncode is None for process in children)
+    finally:
+        for process in children:
+            if process.returncode is None:
+                process.terminate()
+            await asyncio.wait_for(process.communicate(), 15)
+    assert (await command("-c", smoke.SEED_RESERVATION)).strip() == "PASS"
+    await command("-m", "companion", "backup", str(archive), "--immutable-source")
+    await command("-m", "companion", "backup", str(archive), "--immutable-source", expected=2)
+    code = smoke.RESTORE_PROBE.replace("/data/pre-init.enc", archive.as_posix())
+    code = code.replace("/data/recovered-before-erasure.sqlite3", before_erasure.as_posix())
+    code = code.replace("/data/recovered.sqlite3", recovered.as_posix())
+    code = code.replace("/source/companion.sqlite3", database.as_posix())
+    code = code.replace("/privacy/erasures.jsonl", ledger.as_posix())
+    await command("-m", "companion", "restore", str(archive), str(before_erasure))
+    assert json.loads(await command("-c", code, "before"))["pending_state"] == "DELIVERY_UNCERTAIN"
+    assert (await command("-c", smoke.ERASE_AFTER_BACKUP)).strip() == "PASS"
+    await command("-m", "companion", "restore", str(archive), str(recovered))
+    assert json.loads(await command("-c", code, "after"))["latest_ledger_replay"] == "PASS"
+    await command("-m", "companion", "init")
+    children = []
+    try:
+        children.append(await start("-m", "companion", "serve", "--port", str(port)))
+        ready = smoke.HTTP_READY_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
+        assert (await command("-c", ready + "\nprint('PASS')")).strip() == "PASS"
+        children.append(await start("-m", "companion", "worker"))
+        result = json.loads(await command("-c", http_code, "4"))
+        assert result["event"] == 4 and result["duplicate_job_usage_delivery"] == "PASS"
+        assert all(process.returncode is None for process in children)
+    finally:
+        for process in children:
+            if process.returncode is None:
+                process.terminate()
+            await asyncio.wait_for(process.communicate(), 15)
