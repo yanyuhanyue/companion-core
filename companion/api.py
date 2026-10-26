@@ -793,6 +793,14 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def meme_caption_status(job_id: str):
         return app.state.core.memes.outcome(job_id)
 
+    from companion import meme_responsibility
+
+    @app.post(prefix + "/memes/captions/{job_id}/responsibility", dependencies=auth)
+    async def meme_caption_responsibility(job_id: str, body: meme_responsibility.EmptyBody,
+                                          response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return meme_responsibility.read(app.state.core.store, settings, job_id)
+
     @app.post(prefix + "/memes/embeddings", dependencies=auth)
     async def meme_embedding(body: meme_core.EmbedBody):
         return await app.state.core.memes.embed(body)
