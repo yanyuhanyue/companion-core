@@ -142,7 +142,9 @@ JSON、YAML 和 `--no-normalize` 均有这一编码差异。
 隔离条件保持严格校验。此版本区间来自上游 schema 边界；本轮实际 config-only 验证版本为
 Windows Compose 2.40.3 和本机 5.5.0，并不代表逐版执行或 Linux 容器通过。Linux 2.38.2 的
 完整容器门禁尚待独立 CI 验证。失败报告只增加 `compose_render` 阶段与两个固定错误码
-`DEV_COMPOSE_RENDER_FAILED`、`DEV_COMPOSE_VERSION_FAILED`，不写入异常正文或命令输出。
+`DEV_COMPOSE_RENDER_FAILED`、`DEV_COMPOSE_VERSION_FAILED`。备份阶段首条恢复结果前的五处调用另记录固定 step；
+子进程失败只记录整数退出码与白名单 stderr 类别，退出码不符和预期错误码缺失分别分类。分类器只检查
+stderr 最后 4096 个字符，未知内容记为 `UNCLASSIFIED`，不保留 stdout、stderr、异常或命令正文。
 
 真实容器检查需显式运行：
 

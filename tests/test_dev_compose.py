@@ -190,6 +190,12 @@ def test_smoke_marks_render_phase_before_render_failure(monkeypatch, tmp_path):
 @pytest.mark.parametrize("error,code", [
     (RuntimeError("DEV_COMPOSE_RENDER_FAILED"), "DEV_COMPOSE_RENDER_FAILED"),
     (RuntimeError("DEV_COMPOSE_VERSION_FAILED"), "DEV_COMPOSE_VERSION_FAILED"),
+    (subprocess.CalledProcessError(7, "DEV_SMOKE_COMMAND_FAILED",
+                                  "synthetic-private-output", "SQLITE_READONLY_TEXT"),
+     "DEV_SMOKE_COMMAND_FAILED"),
+    (subprocess.CalledProcessError(2, "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING",
+                                  "synthetic-private-output", "synthetic-private-stderr"),
+     "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING"),
     (RuntimeError("synthetic-private-exception"), None),
     (subprocess.CalledProcessError(7, ["synthetic-private-command"],
                                   "synthetic-private-output", "synthetic-private-stderr"), None),
@@ -218,8 +224,57 @@ def test_smoke_report_exposes_only_fixed_error_codes(monkeypatch, tmp_path, caps
     proof = json.loads(text)
     assert proof["phase"] == "compose_render" and proof["container_smoke"] == "FAIL"
     assert proof.get("error_code") == code
+    if isinstance(error, subprocess.CalledProcessError) and code:
+        assert proof["command_exit_code"] == error.returncode
+        assert proof["stderr_kind"] in smoke._STDERR_KINDS
+    else:
+        assert "command_exit_code" not in proof and "stderr_kind" not in proof
     captured = capsys.readouterr()
     assert "synthetic-private" not in text + captured.out + captured.err
+
+
+@pytest.mark.parametrize("stderr,kind", [
+    ("sqlite3.OperationalError: attempt to write a readonly database", "SQLITE_READONLY_TEXT"),
+    ("sqlite3.OperationalError: unable to open database file", "SQLITE_CANTOPEN_TEXT"),
+    ("sqlite3.OperationalError: database is locked", "SQLITE_BUSY_TEXT"),
+    ("BACKUP_DESTINATION_EXISTS", "BACKUP_DESTINATION_EXISTS"),
+    ("AssertionError: synthetic-private-text", "PYTHON_ASSERTION"),
+    ("PermissionError: synthetic-private-path", "PYTHON_PERMISSION"),
+    ("synthetic-private-unrecognized", "UNCLASSIFIED"),
+    ("AssertionError\n" + "synthetic-private-text" * 1000, "UNCLASSIFIED"),
+])
+def test_command_failure_keeps_only_bounded_fixed_stderr_kind(monkeypatch, stderr, kind):
+    def fail(command, **kwargs):
+        return subprocess.CompletedProcess(command, 7, "synthetic-private-output", stderr)
+
+    monkeypatch.setattr(smoke.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError) as stopped:
+        smoke.run(["synthetic-private-command", "synthetic-private-token"])
+    error = stopped.value
+    assert error.returncode == 7 and error.cmd == "DEV_SMOKE_COMMAND_FAILED"
+    assert error.stderr == kind and error.output is None
+    assert "synthetic-private" not in str(error) + repr(vars(error))
+
+
+def test_expected_stderr_mismatch_has_its_own_fixed_error_code(monkeypatch):
+    monkeypatch.setattr(smoke.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 2, "synthetic-private-output", ""))
+    with pytest.raises(subprocess.CalledProcessError) as stopped:
+        smoke.run(["synthetic-private-command"], expected=2, contains="BACKUP_DESTINATION_EXISTS")
+    assert stopped.value.cmd == "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING"
+    assert stopped.value.returncode == 2 and stopped.value.stderr == "UNCLASSIFIED"
+
+
+@pytest.mark.parametrize("returncode,expected,contains,stderr", [
+    (0, 0, None, "synthetic-private-stderr"),
+    (2, 2, "BACKUP_DESTINATION_EXISTS", "BACKUP_DESTINATION_EXISTS"),
+])
+def test_command_success_keeps_expected_exit_and_output_contract(
+    monkeypatch, returncode, expected, contains, stderr,
+):
+    monkeypatch.setattr(smoke.subprocess, "run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, returncode, " PASS\n", stderr))
+    assert smoke.run(["synthetic-command"], expected=expected, contains=contains) == "PASS"
 
 
 @pytest.mark.parametrize("project", ["companion", "production", "companion-dev-",

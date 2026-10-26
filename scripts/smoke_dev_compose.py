@@ -164,11 +164,51 @@ print(json.dumps({"encrypted_sha256": hashlib.sha256(archive).hexdigest(),
 '''
 
 
+_STDERR_LINES = {
+    "BACKUP_DESTINATION_EXISTS": "BACKUP_DESTINATION_EXISTS",
+    "RESTORE_REQUIRES_NEW_PATH": "RESTORE_REQUIRES_NEW_PATH",
+    "BACKUP_INTEGRITY_FAILED": "BACKUP_INTEGRITY_FAILED",
+    "BACKUP_FOREIGN_KEYS_FAILED": "BACKUP_FOREIGN_KEYS_FAILED",
+    "ERASURE_LEDGER_MISMATCH": "ERASURE_LEDGER_MISMATCH",
+    "Required environment variable missing.": "CLI_REQUIRED_ENV_MISSING",
+    "Command failed; no diagnostic details or private paths emitted.": "CLI_COMMAND_FAILED",
+    "sqlite3.OperationalError: attempt to write a readonly database": "SQLITE_READONLY_TEXT",
+    "sqlite3.OperationalError: unable to open database file": "SQLITE_CANTOPEN_TEXT",
+    "sqlite3.OperationalError: database is locked": "SQLITE_BUSY_TEXT",
+}
+_STDERR_PREFIXES = {
+    "AssertionError": "PYTHON_ASSERTION",
+    "sqlite3.OperationalError": "PYTHON_SQLITE_OPERATIONAL",
+    "sqlite3.DatabaseError": "PYTHON_SQLITE_DATABASE",
+    "PermissionError": "PYTHON_PERMISSION",
+    "FileNotFoundError": "PYTHON_FILE_MISSING",
+    "ValueError": "PYTHON_VALUE",
+    "RuntimeError": "PYTHON_RUNTIME",
+    "companion.contracts.CoreError": "CORE_ERROR_OTHER",
+}
+_STDERR_KINDS = {*_STDERR_LINES.values(), *_STDERR_PREFIXES.values(), "UNCLASSIFIED"}
+
+
+def _stderr_kind(stderr):
+    for line in reversed(stderr[-4096:].splitlines()):
+        line = line.strip()
+        if line in _STDERR_LINES:
+            return _STDERR_LINES[line]
+        for prefix, kind in _STDERR_PREFIXES.items():
+            if line == prefix or line.startswith(prefix + ":"):
+                return kind
+    return "UNCLASSIFIED"
+
+
 def run(command, *, cwd=ROOT, input_text=None, timeout=120, expected=0, contains=None):
     result = subprocess.run(command, cwd=cwd, env=environment(), input=input_text,
                             capture_output=True, text=True, timeout=timeout)
     if result.returncode != expected or (contains and contains not in result.stderr):
-        raise RuntimeError("DEV_SMOKE_COMMAND_FAILED")
+        code = ("DEV_SMOKE_COMMAND_FAILED" if result.returncode != expected
+                else "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING")
+        raise subprocess.CalledProcessError(
+            result.returncode, code, stderr=_stderr_kind(result.stderr),
+        )
     return result.stdout.strip()
 
 
@@ -297,16 +337,22 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
             command("stop", *WRITERS)
             assert not command("ps", "--status", "running", "-q")
             proof["phase"] = "backup_latest_ledger_restore"
+            proof["step"] = "seed_reservation"
             assert probe("migrate", SEED_RESERVATION, maintenance=True) == "PASS"
             backup_args = ("run", *RUN_OPTIONS,
                            "dev-backup")
+            proof["step"] = "backup_create"
             command(*backup_args, "backup", "/data/pre-init.enc")
+            proof["step"] = "backup_reject_existing"
             command(*backup_args, "backup", "/data/pre-init.enc", expected=2,
                     contains="BACKUP_DESTINATION_EXISTS")
+            proof["step"] = "restore_before_ledger"
             command(*backup_args, "restore", "/data/pre-init.enc",
                     "/data/recovered-before-erasure.sqlite3")
+            proof["step"] = "restore_probe_before_ledger"
             proof["checks"].append(json.loads(probe("dev-backup", RESTORE_PROBE, "before",
                                                     maintenance=True)))
+            proof.pop("step", None)
             assert probe("migrate", ERASE_AFTER_BACKUP, maintenance=True) == "PASS"
             ledger_code = ("import hashlib; from pathlib import Path; "
                            "print(hashlib.sha256(Path('/privacy/erasures.jsonl').read_bytes()).hexdigest())")
@@ -380,6 +426,14 @@ def main():
         proof["error_type"] = type(error).__name__
         if str(error) in {"DEV_COMPOSE_RENDER_FAILED", "DEV_COMPOSE_VERSION_FAILED"}:
             proof["error_code"] = str(error)
+        elif (isinstance(error, subprocess.CalledProcessError) and isinstance(error.cmd, str)
+              and error.cmd in {"DEV_SMOKE_COMMAND_FAILED",
+                                "DEV_SMOKE_EXPECTED_DIAGNOSTIC_MISSING"}):
+            proof["error_code"] = error.cmd
+            if type(error.returncode) is int:
+                proof["command_exit_code"] = error.returncode
+            proof["stderr_kind"] = (error.stderr if isinstance(error.stderr, str)
+                                    and error.stderr in _STDERR_KINDS else "UNCLASSIFIED")
         proof["container_smoke"] = "FAIL"
         raise SystemExit(2) from None
     finally:
