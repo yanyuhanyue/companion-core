@@ -59,7 +59,7 @@ def test_current_native_chat_without_optional_capability_stays_text(runtime_case
 @pytest.mark.parametrize("change", ["semantics", "expression", "mode", "epoch", "policy", "stop"])
 def test_even_frozen_null_offer_refuses_later_revocation(runtime_case, change):
     c = runtime_case
-    c.retrieval.prepare(c.job)
+    run(c.retrieval.prepare(c.job))
     assert c.retrieval.check(c.job)["offer"] is None
     if change == "semantics":
         c.core.settings.meme_semantics_enabled = False

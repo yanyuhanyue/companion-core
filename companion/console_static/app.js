@@ -16,7 +16,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function el(tag, attributes = {}, ...children) {
-  const svg = ["svg", "path", "circle", "g", "line", "text"].includes(tag);
+  const svg = ["svg", "path", "circle", "g", "line", "text", "rect", "polyline"].includes(tag);
   const node = svg ? document.createElementNS("http://www.w3.org/2000/svg", tag) : document.createElement(tag);
   for (const [key, value] of Object.entries(attributes || {})) {
     if (value === undefined || value === null || value === false) continue;
@@ -192,7 +192,7 @@ const state = {
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
   actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
-  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, contentTab: "items",
+  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, meterScale: "call", meterDrawn: null, contentTab: "items", expanded: new Set(),
 };
 
 class ApiError extends Error {
@@ -260,6 +260,9 @@ function errorText(error) {
     CONSOLE_RESPONSE_INVALID: "服务器返回的数据不完整，请刷新核对。", CONSOLE_HTTPS_REQUIRED: "请通过 HTTPS 打开控制台后再操作。",
     CONSOLE_LOGIN_RATE_LIMIT: "密码错误次数过多，请 5 分钟后再试。", PROACTIVE_DISABLED_IN_CONFIG: "主动私聊在配置里是关闭的，先在配置里开启。",
     DIARY_NOT_FOUND: "这一天没有日记。", IDEMPOTENCY_CONFLICT: "同一个操作编号对应了不同内容，请刷新后重试。",
+    PRIVACY_CHANGED: "记录的隐私版本刚刚变化，请刷新后重新读取。", COGNITION_CURSOR_UNAVAILABLE: "翻页位置已失效，请刷新后从最新记录开始。",
+    INVALID_COGNITION_QUERY: "记录查询条件不正确。", INVALID_COGNITION_SELECTION: "记录查询条件不正确。",
+    CONSOLE_DISABLED: "控制台没有开启。", CONSOLE_OWNER_CREDENTIAL_REQUIRED: "控制台还没有配置主人凭据。",
   };
   let message = messages[error.code];
   if (!message && error.status === 401) message = "密码不对，或者会话已过期，请重新登录。";
@@ -417,13 +420,42 @@ const DETAIL_LABELS = {
 };
 
 /* ================= 会话、导航与读取 ================= */
+const TODAY_MODEL_PAGES = 10;
+/**
+ * 今天的模型调用：按 next_cursor 往前读，直到一页里出现今天以前的记录或没有更早记录。
+ * 空页不代表没有调用（失效来源会被服务端滤掉），只要还有游标就继续读。
+ * 读到上限或无法确认今天的日期时 complete=false，界面写明统计不完整，不报零。
+ * 各页隐私版本不同、游标失效或隐私版本变化时，从第一页重读一次。
+ */
+async function todayModelCalls(signal, today) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const items = [], seen = new Set();
+      let page = null, cursor = null, epoch, complete = false;
+      for (let n = 0; n < TODAY_MODEL_PAGES; n++) {
+        page = await api.get("/cognition?kind=model&limit=50" + (cursor ? "&before=" + encodeURIComponent(cursor) : ""), signal);
+        if (n === 0) epoch = page.privacy_epoch;
+        else if (page.privacy_epoch !== epoch) throw new ApiError("PRIVACY_CHANGED", 409);
+        for (const i of page.items || []) if (i && !seen.has(String(i.id))) { seen.add(String(i.id)); items.push(i); }
+        const older = (page.items || []).some(i => valid(i?.occurred_at) && today && localDay(i.occurred_at) < today);
+        if (!page.next_cursor || older) { complete = !!today; break; }
+        cursor = page.next_cursor;
+      }
+      return { items, complete, privacy_epoch: epoch, as_of: page?.as_of };
+    } catch (error) {
+      if (!["PRIVACY_CHANGED", "COGNITION_CURSOR_UNAVAILABLE"].includes(error.code) || attempt > 0) throw error;
+    }
+  }
+}
 const LOADERS = {
   overview: async signal => {
-    const [o, a, d, c] = await Promise.allSettled([api.get("/overview", signal), api.get("/activity?limit=60", signal),
-      api.get("/diagnostics", signal), api.get("/configuration", signal)]);
+    const overview = api.get("/overview", signal);
+    const [o, a, d, c, m] = await Promise.allSettled([overview, api.get("/activity?limit=60", signal),
+      api.get("/diagnostics", signal), api.get("/configuration", signal),
+      overview.then(v => { if (v.budget?.timezone) state.tz = v.budget.timezone; return todayModelCalls(signal, v.budget?.local_day); })]);
     if (o.status !== "fulfilled") throw o.reason;
     return { ...o.value, recent: a.status === "fulfilled" ? a.value : null, diagnostics: d.status === "fulfilled" ? d.value : null,
-      configuration: c.status === "fulfilled" ? c.value : null };
+      configuration: c.status === "fulfilled" ? c.value : null, model: m.status === "fulfilled" ? m.value : null };
   },
   activity: async (signal, more) => {
     // 按日期筛选时继续往前翻页，直到越过开始日期（最多 20 页）。
@@ -458,9 +490,19 @@ const LOADERS = {
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
   thinking: async signal => {
-    const pages = await Promise.all(COG_LIST.map(k => cognitionPage(k, signal)));
-    const data = Object.fromEntries(COG_LIST.map((k, i) => [k, pages[i]]));
-    return locateCognition(data, signal);
+    // 隐私版本变化时整页重读一次，不把不同代次的记录拼在一起
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const pages = await Promise.all(COG_LIST.map(k => cognitionPage(k, signal)));
+        if (new Set(pages.map(p => p.privacy_epoch)).size > 1) throw new ApiError("PRIVACY_CHANGED", 409);
+        const data = Object.fromEntries(COG_LIST.map((k, i) => [k, pages[i]]));
+        const located = await locateCognition(data, signal);
+        if (located.locate?.epoch !== undefined && located.locate.epoch !== pages[0].privacy_epoch) throw new ApiError("PRIVACY_CHANGED", 409);
+        return located;
+      } catch (error) {
+        if (error.code !== "PRIVACY_CHANGED" || attempt > 0) throw error;
+      }
+    }
   },
   caps: async signal => {
     const [o, c, a] = await Promise.all([api.get("/overview", signal), api.get("/configuration", signal),
@@ -506,7 +548,8 @@ function renderNav() {
   p.replaceChildren(el("span", { class: "orb", "aria-hidden": "true" }),
     el("strong", {}, o.mode === "demo" ? "演示模式" : o.ready === false ? "需要留意" : "正式运行"),
     el("span", {}, o.worker ? (statusOf(o.worker)[0] === "有运行记录" ? "工作进程有运行记录" : "工作进程：" + statusOf(o.worker)[0]) : "正在读取状态"),
-    o.note ? el("p", {}, o.note) : null);
+    // replaceChildren 会把 null 当成文字“null”，没有说明时不放这一段
+    ...(o.note ? [el("p", {}, o.note)] : []));
 }
 function updateNavFrom(overview) {
   if (!overview?.runtime) return;
@@ -614,8 +657,37 @@ PAGES.overview = data => {
     dayStrip(items, nowMin, data), todoList(data),
     el("div", { class: "grid-2" },
       el("div", { class: "stack" }, budgetCard(data.budget, data.counts), recentCard(data.recent)),
-      el("div", { class: "stack" }, capsCard(data.capabilities?.capabilities || []))));
+      el("div", { class: "stack" }, capsCard(data.capabilities?.capabilities || []), tokenCard(data.model, today))));
 };
+/** 今日 Token 统计：只汇总今天、实际用量已记录的模型调用，分段规则与“请求计量”相同 */
+function tokenCard(page, today) {
+  const more = el("a", { class: "link", href: "#thinking", onclick: () => { state.cogKind = "model"; state.cogSel = null; } }, "查看明细", icon("arrow"));
+  if (!page) return sheet("今日 Token 统计", el("p", { class: "note" }, "模型调用记录暂时读不到，可以稍后刷新。"), more, "tok");
+  const items = (page.items || []).filter(i => i && valid(i.occurred_at) && localDay(i.occurred_at) === today);
+  // complete 由 todayModelCalls 判断：没读完时不把空结果当成“今天没有调用”，也不报零费用
+  const partial = page.complete !== true;
+  const xs = items.map(meterOf), actual = xs.filter(x => x.actual), cacheXs = actual.filter(x => x.cacheKnown);
+  const sum = (list, f) => list.reduce((s, x) => s + (f(x) || 0), 0);
+  const parts = [["cached", sum(cacheXs, x => x.cached)], ["fresh", sum(cacheXs, x => x.input - x.cached)],
+    ["unknown", sum(actual.filter(x => !x.cacheKnown), x => x.input)], ["output", sum(actual, x => x.output)]];
+  const shown = parts.filter(([k, v]) => v > 0 || (k === "output" && actual.length));
+  const total = parts.reduce((s, [, v]) => s + v, 0);
+  const cacheIn = sum(cacheXs, x => x.input), hit = sum(cacheXs, x => x.cached);
+  const unknown = items.filter(i => ["UNKNOWN", "RESERVED"].includes(i.state)).length;
+  const anim = state.tokenAnim !== state.updatedAt && motionOk();
+  const stat = (n, v, sub, count) => el("div", { class: "tok-stat" }, el("span", {}, n), el("b", { class: "num", "data-count": count ?? null }, v), sub ? el("small", {}, sub) : null);
+  return sheet("今日 Token 统计", [
+    partial ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "今天的调用没有全部读到，下面的数字不完整。")) : null,
+    el("div", { class: "m-donut" }, donut(shown, tk(total), actual.length ? (partial ? "已读到的总量" : "实际总量") : items.length ? "未记录" : partial ? "未读完" : "今天还没有", actual.length ? total : null),
+      actual.length ? meterLegend(shown, total, { cached: "缓存命中", fresh: "未命中缓存", unknown: "缓存未记录", output: "输出" })
+        : el("p", { class: "note" }, items.length ? "今天的调用都没有有效的实际用量回执。" : partial ? "还没读到今天的调用，不能确定今天有没有调用。" : "今天还没有模型调用。")),
+    el("div", { class: "tok-stats" },
+      stat("模型调用", partial ? (items.length ? "≥ " + items.length : "未读完") : String(items.length), actual.length < items.length ? "实际用量已记录 " + actual.length + " 次" : null),
+      stat("缓存命中", cacheIn > 0 ? pctText(hit, cacheIn) : "未记录", cacheXs.length && cacheXs.length < actual.length ? "按 " + cacheXs.length + " 次已记录的计算" : null),
+      stat("已计或预留", partial && !items.length ? "未读完" : (partial ? "≥ " : "") + usd(sum(xs, x => x.billed)), unknown ? unknown + " 次结果不明" : partial ? "只含已读到的调用" : "按配置费率估算")),
+    el("p", { class: "note mt" }, (partial ? "已读到 " + items.length + " 次今天的调用，更早的部分没有读完。" : "")
+      + "上下文分区（系统提示词、工具定义等）没有保存，这里不做拆分。")], more, "meter tok" + (anim ? " anim" : ""));
+}
 function dayStrip(items, nowMin, data) {
   const pct = m => (m / 1440 * 100).toFixed(3) + "%";
   const qs = cfgValue(data.configuration, "quiet_start"), qe = cfgValue(data.configuration, "quiet_end");
@@ -648,7 +720,8 @@ function dayStrip(items, nowMin, data) {
     !items.length ? el("p", { class: "note day-empty" }, data.recent ? "今天还没有记录。" : "活动记录暂时读不到。") : null,
     truncated ? el("p", { class: "note day-empty" }, "只显示了最近 60 条记录，更早的在活动时间线里。") : null);
 }
-PAGES.overview.after = () => { const day = $(".day"); const sc = $(".day-scroll");
+PAGES.overview.after = () => { const day = $(".day"); const sc = $(".day-scroll"), tok = $(".sheet.tok");
+  if (state.tokenAnim !== state.updatedAt) { state.tokenAnim = state.updatedAt; if (tok) countUp(tok); }
   if (sc && innerWidth <= 860 && sc.scrollWidth > sc.clientWidth) sc.scrollLeft = sc.scrollWidth * .7 - sc.clientWidth * .7;
   setTimeout(() => day?.classList.remove("enter"), 1600); };
 function todoList(data) {
@@ -811,11 +884,13 @@ PAGES.life = data => {
           el("button", { type: "button", class: "icon-btn", "aria-label": "上个月", onclick: () => shift(-1) }, icon("left")), el("b", {}, `${y} 年 ${mo} 月`),
           el("button", { type: "button", class: "icon-btn", "aria-label": "下个月", onclick: () => shift(1) }, icon("right"))),
           el("div", { class: "cal-grid" }, WEEK.map(w => el("span", { class: "wd" }, w)), cells),
-          el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看"))),
-        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, goals.map(g => goalCard(g))) : el("p", { class: "note" }, "还没有目标。")),
-        topicsSheet(data.topics)),
-      el("div", { class: "stack" }, paper,
-        sheet("最近的反思", reflections.length ? el("div", { class: "stack" }, reflections.map(r => reflectionCard(r))) : el("p", { class: "note" }, "还没有反思记录。")))));
+          el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看")))),
+      paper),
+    // 目标、反思、话题并排三列，宽度不够时依次换行，不留大块空白
+    el("div", { class: "life-grid" },
+      sheet("目标与承诺", goals.length ? el("div", { class: "life-list" }, capped("goals", byRank(goals, goalRank).map(g => goalCard(g)), 3, "div")) : el("p", { class: "note" }, "还没有目标。"), countNote(goals.length, 20)),
+      sheet("最近的反思", reflections.length ? el("div", { class: "life-list" }, capped("reflections", byRank(reflections, r => r.state === "PENDING" ? 0 : 1).map(r => reflectionCard(r)), 3, "div")) : el("p", { class: "note" }, "还没有反思记录。"), countNote(reflections.length, 20)),
+      topicsSheet(data.topics)));
 };
 async function loadDiary(day, paper) {
   const epoch = state.epoch;
@@ -853,20 +928,46 @@ function diaryAction(day, operation, current) {
   openDialog(input ? "修订 " + day + " 的日记" : "删除 " + day + " 的日记？", form, { wide: !!input });
 }
 function openModeDialog() {
-  const targets = [["proactive", "主动私聊", "不主动找你，也会取消还没发出的主动消息"], ["life", "自主活动", "不再自己安排阅读和整理，已接受的任务继续处理"], ["diary", "写日记", "暂停之后不再整理新的日记"]];
-  const form = el("form", { class: "dlg-form" }, el("p", { class: "muted" }, "只影响她主动做的事，你发来的消息始终会回复。改动立即生效，不需要重启。"));
-  const rows = targets.map(([key, name, sub]) => {
-    const sw = el("select", { class: "input sm-select", "aria-label": name }, el("option", { value: "" }, "保持不变"), el("option", { value: "true" }, "恢复"), el("option", { value: "false" }, "暂停"));
-    form.append(el("div", { class: "mode-row" }, el("div", {}, el("b", {}, name), el("span", {}, sub)), sw));
-    return [key, sw];
+  // 当前状态来自 overview.runtime.modes；旧后端没有这个字段时显示“状态未知”，开关仍可用
+  const modes = state.data?.runtime?.modes || null;
+  const targets = [
+    ["proactive", "主动私聊", "她会在合适的时候主动找你聊天", "暂停后会取消还没发出的主动消息"],
+    ["life", "自主活动", "她自己安排阅读、整理和生活话题", "暂停后不再安排新的活动，已接受的任务继续处理"],
+    ["diary", "写日记", "每天整理当天的日记", "暂停后不再整理新的日记，已有日记不受影响"]];
+  const form = el("form", { class: "dlg-form mode-form" }, el("p", { class: "muted" }, "只影响她主动做的事，你发来的消息始终会回复。改动保存后立即生效，不需要重启。"));
+  const submit = el("button", { type: "submit", class: "btn primary", disabled: true }, "保存");
+  const draft = new Map();
+  const rows = targets.map(([key, name, sub, pauseNote]) => {
+    // 配置文件没开启时，控制台不能恢复，开关锁定为关
+    const m = modes?.[key], known = m && typeof m.paused === "boolean", locked = m?.available === false;
+    const now = known ? !m.paused && !locked : null;
+    const status = el("span", { class: "mode-state" }), note = el("p", { class: "mode-note", hidden: true }, icon("warn"), el("span", {}, pauseNote));
+    const sw = el("button", { type: "button", class: "switch", role: "switch", "aria-label": name, disabled: !!locked });
+    const row = el("div", { class: "mode-row" }, el("div", { class: "mode-txt" }, el("b", {}, name), el("span", {}, sub)), status, sw);
+    const paint = () => {
+      const on = draft.has(key) ? draft.get(key) : now, changed = draft.has(key);
+      sw.setAttribute("aria-checked", String(on === true));
+      status.textContent = locked ? "配置文件里未开启" : changed ? (on ? "将恢复" : "将暂停") : now == null ? "状态未知" : now ? "进行中" : "已暂停";
+      status.className = "mode-state" + (changed ? " changed" : now === false ? " off" : "");
+      row.classList.toggle("changed", changed);
+      note.hidden = !(changed && on === false);
+      submit.disabled = draft.size === 0;
+    };
+    sw.addEventListener("click", () => {
+      const cur = draft.has(key) ? draft.get(key) : now, next = !(cur === true);
+      if (now != null && next === now) draft.delete(key); else draft.set(key, next);
+      paint();
+    });
+    paint();
+    form.append(el("div", { class: "mode-item" }, row, note));
+    return key;
   });
-  const submit = el("button", { type: "submit", class: "btn primary" }, "保存");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
-    const changes = rows.filter(([, sw]) => sw.value).map(([key, sw]) => ({ target: key, enabled: sw.value === "true" }));
-    if (!changes.length) { formError(form, "没有选择要改的项目。"); return; }
-    perform(form, submit, async () => { for (const c of changes) await api.write("/mode", c, "POST", r => typeof r.enabled === "boolean" || r.state === "COMPLETE"); },
+    const changes = rows.filter(k => draft.has(k)).map(k => ({ target: k, enabled: draft.get(k) }));
+    if (!changes.length) { formError(form, "没有改动。"); return; }
+    perform(form, submit, async () => { for (const c of changes) await api.write("/mode", c, "POST", r => typeof r.enabled === "boolean" || typeof r.state === "string"); },
       async () => { closeDialog(); toast("已保存，立即生效"); await loadRoute({ reset: true }); });
   });
   openDialog("管理主动行为", form);
@@ -1946,7 +2047,7 @@ PAGES.thinking = data => {
   for (const kind of Object.keys(COGNITION_KINDS)) {
     const kindData = data[kind];
     if (kindData && kindData.items) {
-      for (const item of kindData.items) {
+      for (const item of pageRecords(kindData)) {
         allItems.push({ ...item, _kind: kind, _title: cognitionTitle(item, kind), _summary: cognitionSummary(item, kind) });
       }
     }
@@ -2009,18 +2110,18 @@ PAGES.thinking = data => {
   return el("div", {},
     head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
     stats, coverage, filters,
+    ["all", "model"].includes(state.cogKind) ? meterOverview(data.model) : null,
     el("div", { class: "dk-wrap" },
-      el("ul", { class: "dk-list" }, filtered.map(i => {
+      el("ul", { class: "dk-list" + (state.cogKind === "model" ? " compact" : "") + (freshLoad() ? " anim" : ""), "data-keep-scroll": "cog-list" }, filtered.map((i, n) => {
         const ik = COGNITION_KINDS[i._kind] || { name: "其他", ic: "spark" };
         const iState = cognitionState(i) || "UNKNOWN";
         const tone = COGNITION_TONE[iState] || "ok";
-        return el("li", {},
+        const [title, sub] = i._kind === "model" ? modelRowText(i) : [i._title, fmtDate(i.occurred_at) + "，" + ik.name];
+        return el("li", { style: { "--i": String(Math.min(n, 16)) } },
           el("button", { type: "button", class: i === sel ? "sel" : "", "data-record-id": i.id,
             onclick: () => { state.cogSel = i._kind + ":" + i.id; rerender(); } },
             el("span", { class: "ic" }, icon(ik.ic)),
-            el("span", { class: "dk-l" },
-              el("b", {}, i._title),
-              el("small", {}, fmtDate(i.occurred_at) + "，" + ik.name)),
+            el("span", { class: "dk-l" }, el("b", {}, title), el("small", {}, sub)),
             el("span", { class: "tag " + tone }, cognitionStateName(i))));
       }), el("li", { class: "dk-more" }, cognitionMore())),
       el("section", { class: "dk-card" },
@@ -2040,7 +2141,7 @@ PAGES.thinking = data => {
 function goalCard(g) {
   const steps = g.steps || [], actions = g.allowed_actions || [];
   return el("div", { class: "goal" },
-    el("div", {}, el("b", {}, g.topic), tag(g.state),
+    el("div", {}, el("div", { class: "goal-h" }, el("b", {}, g.topic), tag(g.state)),
       el("p", {}, "更新于 " + fmtDate(g.updated_at)),
       g.commitment_state ? el("p", {}, "承诺：" + statusOf(g.commitment_state)[0]) : null,
       steps.length ? el("ul", { class: "goal-steps" }, steps.map(s =>
@@ -2116,9 +2217,8 @@ function goalContinue(g) {
 
 function reflectionCard(r) {
   const evidence = r.evidence || [];
-  return el("div", { class: "reflection-card stack" },
-    el("div", {}, el("b", {}, r.content), tag(r.state)),
-    el("p", { class: "meta" }, fmtDate(r.created_at)),
+  return el("div", { class: "reflection-card" },
+    el("div", { class: "rc-head" }, el("b", {}, r.content), tag(r.state), el("span", { class: "note" }, fmtDate(r.created_at))),
     evidence.length ? el("details", { class: "refl-evidence" }, el("summary", {}, "证据（" + evidence.length + " 条原话）"),
       el("ul", {}, evidence.map(e => el("li", {}, "\"" + e.exact_quote + "\"")))
     ) : null,
@@ -2316,7 +2416,7 @@ function topicsSheet(topics) {
   const items = topics.items || [], candidates = topics.candidate_sources || [];
   return sheet("生活话题", [
     topics.mode === "OFF" ? el("p", { class: "note mb" }, "生活循环没有开启，下面只显示已有记录。") : null,
-    items.length ? el("div", { class: "topics" }, items.map(topicCard)) : el("p", { class: "note" }, "还没有生活话题。"),
+    items.length ? el("div", { class: "topics" }, capped("topics", byRank(items, t => ["WAITING", "DUE"].includes(t.state) ? 0 : t.state === "CLOSED" ? 1 : 2).map(topicCard), 3, "div")) : el("p", { class: "note" }, "还没有生活话题。"),
     candidates.length ? el("p", { class: "note mt" }, "另有 " + candidates.length + " 条来源可以成为新话题，由她在下一轮决定。") : null]);
 }
 function topicCard(t) {
@@ -2324,21 +2424,21 @@ function topicCard(t) {
   const owner = sources.filter(s => s.kind === "owner_message"), open = ["WAITING", "DUE"].includes(t.state);
   const closeable = open || t.state === "CLOSED" && t.reason_code === "CONSUMED";
   return el("article", { class: "topic" },
-    el("div", { class: "topic-head" }, el("b", {}, TOPIC_KIND[t.kind] || "话题"), tag(t.state),
-      el("span", { class: "note" }, open ? (t.state === "DUE" ? "已到期，" : "到期于 " + fmtDate(t.due_at) + "，") + "有效期至 " + fmtDate(t.expires_at)
-        : t.reason_code ? reasonText(t.reason_code) : "")),
+    el("div", { class: "topic-head" }, el("b", {}, TOPIC_KIND[t.kind] || "话题"), tag(t.state)),
+    el("p", { class: "note" }, (open ? (t.state === "DUE" ? "已到期，" : "到期于 " + fmtDate(t.due_at) + "，") + "有效期至 " + fmtDate(t.expires_at)
+      : t.reason_code ? reasonText(t.reason_code) : "") + (sources.length ? "" : (t.state === "EXPIRED" ? "；来源已过期或被清除" : "；没有可以显示的来源"))),
     sources.length ? el("ul", { class: "topic-src" }, sources.slice(0, 4).map(s => el("li", {},
       el("span", { class: "chip" }, s.kind === "owner_message" ? "你说" : "她读到"), el("span", { class: "txt" }, s.text),
       safeUrl(s.url) ? el("a", { href: safeUrl(s.url), target: "_blank", rel: "noopener noreferrer" }, "原文") : null,
       el("small", { class: "note" }, fmtDate(s.occurred_at)))))
-      : el("p", { class: "note" }, t.state === "EXPIRED" ? "来源已过期或被清除，原文不再显示。" : "没有可以显示的来源。"),
+      : null,
     sources.length > 4 ? el("p", { class: "note" }, "还有 " + (sources.length - 4) + " 条来源") : null,
     results.length ? el("div", { class: "topic-res" }, results.map(r => el("div", { class: "topic-r" },
       el("div", { class: "row-gap" }, el("b", {}, LIFE_ACTION[r.action] || "其他决定"), el("span", { class: "chip" }, LIFE_DEST[r.destination] || "未记录去向"), tag(r.state)),
       r.reason ? el("p", {}, r.reason) : null, r.text ? el("blockquote", {}, r.text) : null,
       r.goal ? el("p", { class: "note" }, "关联目标：" + statusOf(r.goal.state)[0] + "，", linkTo("thinking/goal:" + r.goal.goal_id, "查看目标")) : null))) : null,
     closeable ? (owner.length ? el("div", { class: "row-gap mt" }, btn("关闭话题", () => topicClose(t, owner), { cls: "sm", symbol: "close" }))
-      : el("p", { class: "note mt" }, "这个话题里没有你的原话，不能在这里关闭；在私聊里说一句不想聊这个，她会自己收起。")) : null);
+      : el("p", { class: "note faint" }, "没有你的原话，不能在这里关闭；在私聊里说不想聊这个，她会自己收起。")) : null);
 }
 function topicClose(t, owner) {
   const sel = el("select", { class: "input", id: "topic-source", required: true },
@@ -2406,21 +2506,22 @@ function evidenceDates(list) {
 function preferenceSheet(p) {
   if (!p || p.error) return sheet("你的偏好", failNote("偏好档案", p?.error));
   const items = p["owner.preference"] || [];
-  return sheet("你的偏好", items.length ? el("ul", { class: "rows" }, items.map(m => el("li", { class: "block" }, el("b", {}, m.content),
-    el("span", { class: "meta-line" }, el("span", { class: "chip" }, "来自你的 " + (m.evidence || []).length + " 条原话"), el("span", { class: "note" }, evidenceDates(m.evidence))))))
-    : el("p", { class: "note" }, "还没有确认过的偏好。在记忆页确认一条偏好后会出现在这里。"));
+  return sheet("你的偏好", items.length ? el("ul", { class: "rows" }, capped("prefs", items.map(m => el("li", { class: "block" }, el("b", {}, m.content),
+    el("span", { class: "meta-line" }, el("span", { class: "chip" }, "来自你的 " + (m.evidence || []).length + " 条原话"), el("span", { class: "note" }, evidenceDates(m.evidence)))))
+    , 5)) : el("p", { class: "note" }, "还没有确认过的偏好。在记忆页确认一条偏好后会出现在这里。"), countNote(items.length, 40));
 }
 function interestSheet(p) {
   if (!p || p.error) return sheet("她的兴趣", failNote("兴趣档案", p?.error));
   const items = p["self.interest"] || [];
-  return sheet("她的兴趣", [items.length ? el("ul", { class: "rows" }, items.map(i => el("li", { class: "block" },
+  const rank = { STABLE: 0, EMERGING: 1, EXPLORING: 2, FADING: 3 };
+  return sheet("她的兴趣", [items.length ? el("ul", { class: "rows" }, capped("interests", byRank(items, i => rank[i.status] ?? 4).map(i => el("li", { class: "block" },
     el("div", { class: "row-gap" }, el("b", {}, i.topic), tag(i.status)),
     el("span", { class: "meta-line" }, el("span", { class: "note" }, "读完 " + count(i.independent_sessions) + " 篇，分布在 " + count(i.independent_days) + " 天，证据覆盖 " + Math.round((i.confidence || 0) * 100) + "%")),
     (i.evidence || []).length ? el("details", { class: "ev" }, el("summary", {}, "看读过的内容"), el("ul", {}, i.evidence.slice(0, 8).map(e => el("li", {},
       safeUrl(e.canonical_url) ? el("a", { href: safeUrl(e.canonical_url), target: "_blank", rel: "noopener noreferrer" }, new URL(safeUrl(e.canonical_url)).hostname) : el("span", {}, "来源"),
-      el("span", { class: "note" }, " " + fmtDate(e.occurred_at) + "，" + statusOf(String(e.evidence_level || "").replace(/^SIMULATED_/, ""))[0] + (String(e.evidence_level).startsWith("SIMULATED_") ? "（模拟）" : "")))))) : null)))
+      el("span", { class: "note" }, " " + fmtDate(e.occurred_at) + "，" + statusOf(String(e.evidence_level || "").replace(/^SIMULATED_/, ""))[0] + (String(e.evidence_level).startsWith("SIMULATED_") ? "（模拟）" : "")))))) : null)), 4))
     : el("p", { class: "note" }, "还没有兴趣记录。她完成自己的阅读目标后才会累计。"),
-    el("p", { class: "note mt" }, "兴趣只说明她自己读过什么，不会当成你的偏好，也不会授予任何权限。")]);
+    el("p", { class: "note mt" }, "兴趣只说明她自己读过什么，不会当成你的偏好，也不会授予任何权限。")], countNote(items.length, 40));
 }
 function expressionSheet(x) {
   if (!x || x.error) return sheet("表达习惯学习", failNote("表达习惯学习", x?.error));
@@ -2451,8 +2552,9 @@ async function locateCognition(data, signal) {
   const page = data[kind] || { items: [] };
   if (!(page.items || []).some(i => String(i.id) === id)) {
     const one = await cognitionPage(kind, signal, "&record_id=" + encodeURIComponent(id));
-    if (!(one.items || []).length) data.locate = { kind, id, missing: true };
-    else data[kind] = { ...page, items: [...one.items, ...(page.items || [])] };
+    if (!(one.items || []).length) data.locate = { kind, id, missing: true, epoch: one.privacy_epoch };
+    // 单独定位到的记录放在 located 里：items 保持服务端分页顺序，排序与序号按保存时间计算
+    else { data[kind] = { ...page, located: one.items }; data.locate = { kind, id, found: true, epoch: one.privacy_epoch }; }
   }
   return data;
 }
@@ -2466,8 +2568,13 @@ async function moreCognition(kind) {
     if (epoch !== state.epoch || generation !== state.generation || state.route !== "thinking" || !state.data) return;
     if (next.privacy_epoch !== page.privacy_epoch) { await loadRoute({ reset: true }); return; }
     const seen = new Set(page.items.map(i => String(i.id)));
-    state.data[kind] = { ...next, items: [...page.items, ...(next.items || []).filter(i => !seen.has(String(i.id)))] };
+    state.data[kind] = { ...next, located: page.located, items: [...page.items, ...(next.items || []).filter(i => !seen.has(String(i.id)))] };
   } catch (error) {
+    // 游标失效或隐私版本变化：丢弃已加载的分页，从首页重新读取
+    if (["COGNITION_CURSOR_UNAVAILABLE", "PRIVACY_CHANGED"].includes(error.code) && epoch === state.epoch && generation === state.generation) {
+      state.cogMore = null; await loadRoute({ reset: true });
+      notice(error.code === "PRIVACY_CHANGED" ? "记录的隐私版本变了，已按当前版本重新读取。" : "翻页位置已失效，已从最新记录重新读取。", false); return;
+    }
     if (error.name !== "AbortError" && epoch === state.epoch && generation === state.generation) {
       notice("更早的" + (COGNITION_KINDS[kind]?.name || "") + "记录没有读到。" + errorText(error), false);
     }
@@ -2491,7 +2598,7 @@ function cognitionFinder() {
     kind, id, btn("查找", () => {}, { cls: "sm", type: "submit", symbol: "search" }));
 }
 function locateNote(data) {
-  const l = data.locate; if (!l) return null;
+  const l = data.locate; if (!l || l.found) return null;
   return el("div", { class: "alert" + (l.error ? " bad" : "") }, icon("warn"),
     el("span", {}, (COGNITION_KINDS[l.kind]?.name || "记录") + " " + shortId(l.id) + (l.error ? " 暂时读不到。" + errorText(l.error) : " 没有找到，可能已被清除或来源已失效。")));
 }
@@ -2534,22 +2641,6 @@ function cognitionExtra(sel) {
     : sel._kind === "model" ? modelMeasurementView(sel) : null, cognitionLinks(sel)];
 }
 
-function modelMeasurementView(sel) {
-  const m = sel.measurement || {}, u = sel.usage || {};
-  const kinds = { exact_local_render: "固定渲染器本地计数", provider_count: "服务商计数", estimate: "本地估算", unsupported: "计数格式不支持" };
-  const number = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : "未记录";
-  return el("section", { class: "steps-view" }, el("h4", {}, "本次请求计量"),
-    kv("计量方式", m.state === "RECORDED" ? kinds[m.count_kind] || "未知"
-      : m.state === "INCONSISTENT" ? "记录损坏或超限" : "未记录"),
-    kv("输入计数", number(m.input_tokens)), kv("预留裕量", number(m.reservation_margin)),
-    kv("输出预留", number(m.output_allowance)),
-    kv("实际输入 / 输出", u.observed ? number(u.input_tokens) + " / " + number(u.output_tokens) : "未记录"),
-    kv("实际缓存输入", u.observed ? number(u.cached_input_tokens) : "未记录"),
-    kv("已计或预留费用", money(u.billed_micro_usd)),
-    el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；费用按配置费率核算。"),
-    el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
-}
-
 /* 原始推理：只说明有没有、为什么没有，不展示内部字段，也不根据最终结果补写推理 */
 const REASONING_NOTE = {
   wake: "自主活动调度按规则判断，这一步不调用模型，所以没有推理内容。",
@@ -2565,3 +2656,292 @@ function reasoningView(sel, page) {
     el("p", { class: "note mt" }, REASONING_NOTE[sel._kind] || "她的决定和理由在“决策记录”里，依据的来源在“上下文”里。"),
     sel.model_request_id ? el("div", { class: "row-gap mt" }, linkTo("thinking/model:" + encodeURIComponent(sel.model_request_id), "查看这次模型调用的用量")) : null];
 }
+
+/* ================= 请求计量：模型调用总览与单次明细 =================
+   只消费 cognition?kind=model 的原投影：
+   - usage.observed 为真时，input/output 才是有效原回执的实际用量；否则只显示“未记录”，
+     input_tokens 此时可能是预留上界，不能当作实际值。
+   - 缓存只看 usage.cache_usage：RECORDED 且数值有效才显示（包括明确的 0）；
+     缺字段、NOT_RECORDED 或数值组合无效都按未记录，不用 usage.cached_input_tokens 推断。
+   - 费用 billed_micro_usd 始终显示，是已计或预留的责任金额，按配置费率估算。
+   - 耗时、上下文分区与裁剪原因没有保存，界面写明未记录，不做拆分。 */
+const METER_COLORS = { cached: "var(--m-cached)", fresh: "var(--m-fresh)", unknown: "var(--m-unknown)", output: "var(--m-output)" };
+const METER_NAMES = { cached: "缓存命中输入", fresh: "未命中缓存的输入", unknown: "缓存未记录的输入", output: "输出" };
+const COUNT_KINDS = { exact_local_render: "固定渲染器本地计数", provider_count: "服务商计数", estimate: "本地估算", unsupported: "计数格式不支持" };
+const isCount = v => Number.isSafeInteger(v) && v >= 0;
+/** 47512 → 47.5k；未知返回“未记录” */
+function tk(v) {
+  if (!isCount(v)) return "未记录";
+  if (v < 1000) return String(v);
+  if (v < 1e6) return (v / 1000).toFixed(v < 1e4 ? 2 : 1).replace(/\.?0+$/, "") + "k";
+  return (v / 1e6).toFixed(2).replace(/\.?0+$/, "") + "M";
+}
+const pct = (part, whole) => whole > 0 ? (part / whole * 100) : 0;
+const pctText = (part, whole) => { if (!(whole > 0)) return "—"; const p = pct(part, whole); return p > 0 && p < 0.1 ? "<0.1%" : p.toFixed(p >= 1 || p === 0 ? 1 : 2).replace(/\.0+$/, "") + "%"; };
+/** 一次请求的可用数字：实际用量和缓存分别判定，互不推断 */
+function meterOf(item) {
+  const u = item.usage || {}, m = item.measurement || {};
+  const actual = u.observed === true && isCount(u.input_tokens) && isCount(u.output_tokens);
+  const c = u.cache_usage;
+  const cacheKnown = actual && c && c.state === "RECORDED" && isCount(c.cached_input_tokens) && c.cached_input_tokens <= u.input_tokens;
+  const cached = cacheKnown ? c.cached_input_tokens : null;
+  return {
+    actual, cacheKnown, cached,
+    input: actual ? u.input_tokens : null, output: actual ? u.output_tokens : null,
+    billed: isCount(u.billed_micro_usd) ? u.billed_micro_usd : null, estimate: u.is_estimate === 1 || u.is_estimate === true,
+    measured: m.state === "RECORDED" && isCount(m.input_tokens) ? m.input_tokens : null,
+    margin: m.state === "RECORDED" && isCount(m.reservation_margin) ? m.reservation_margin : null,
+    allowance: m.state === "RECORDED" && isCount(m.output_allowance) ? m.output_allowance : null,
+    countKind: m.state === "RECORDED" ? COUNT_KINDS[m.count_kind] || "未知方式" : m.state === "INCONSISTENT" ? "记录损坏或超限" : "未记录",
+  };
+}
+/** 一次请求的分段：缓存命中 / 未命中 / 缓存未记录 / 输出 */
+function meterParts(x) {
+  if (!x.actual) return [];
+  return x.cacheKnown
+    ? [["cached", x.cached], ["fresh", x.input - x.cached], ["output", x.output]]
+    : [["unknown", x.input], ["output", x.output]];
+}
+/** 分页记录加上单独定位的记录，按编号去重；分页里已有的以分页为准 */
+function pageRecords(page) {
+  const items = (page?.items || []).filter(Boolean), seen = new Set(items.map(i => String(i.id)));
+  return [...items, ...(page?.located || []).filter(i => i && !seen.has(String(i.id)))];
+}
+/** 已加载的模型调用按保存时间从旧到新；时间相同或无效时保持服务端顺序（新到旧）的倒序 */
+function modelTimeline(page) {
+  const list = pageRecords(page).map((item, n) => ({ item, n, t: Date.parse(item.occurred_at) }));
+  return list.sort((a, b) => (Number.isFinite(a.t) ? a.t : -Infinity) - (Number.isFinite(b.t) ? b.t : -Infinity) || b.n - a.n).map(r => r.item);
+}
+/** 同一任务里的第几次调用：按保存时间从旧到新数，只在已加载记录里计算 */
+function jobSequence(items, sel) {
+  if (!sel.job_id) return null;
+  const same = items.filter(i => i.job_id === sel.job_id);
+  return { index: same.findIndex(i => i.id === sel.id) + 1, total: same.length };
+}
+
+function donut(parts, center, sub, countTo) {
+  const total = parts.reduce((s, [, v]) => s + v, 0), r = 42, c = 2 * Math.PI * r;
+  let offset = 0;
+  const arcs = total > 0 ? parts.filter(([, v]) => v > 0).map(([k, v]) => {
+    const len = v / total * c, arc = el("circle", { cx: "60", cy: "60", r: String(r), fill: "none", stroke: METER_COLORS[k], "stroke-width": "14",
+      "stroke-dasharray": len.toFixed(2) + " " + (c - len).toFixed(2), "stroke-dashoffset": (-offset).toFixed(2), transform: "rotate(-90 60 60)" });
+    offset += len; arc.style.setProperty("--len", len.toFixed(2)); return arc;
+  }) : [el("circle", { cx: "60", cy: "60", r: String(r), fill: "none", stroke: "var(--line)", "stroke-width": "14" })];
+  return el("div", { class: "donut" }, el("svg", { viewBox: "0 0 120 120", role: "img", "aria-label": center + " " + sub }, arcs),
+    el("div", { class: "donut-c" }, el("b", { class: "num", "data-count": countTo ?? null }, center), el("span", {}, sub)));
+}
+function meterLegend(parts, total, names = METER_NAMES) {
+  return el("ul", { class: "m-legend" }, parts.map(([k, v]) => el("li", {},
+    el("i", { style: { background: METER_COLORS[k] } }), el("span", { class: "m-name", title: METER_NAMES[k] }, names[k]),
+    el("b", { class: "num" }, pctText(v, total)), el("small", { class: "num" }, "≈" + tk(v)))));
+}
+
+/** 本页已加载的模型调用总览，放在“模型调用”筛选的列表上方 */
+function meterOverview(page) {
+  // 新到旧，按保存时间排；单独定位的旧记录落在它自己的时间位置上
+  const items = modelTimeline(page).reverse();
+  if (!items.length) return null;
+  const rows = items.map(i => ({ item: i, x: meterOf(i) }));
+  const actual = rows.filter(r => r.x.actual), cacheRows = actual.filter(r => r.x.cacheKnown);
+  const sum = (list, f) => list.reduce((s, r) => s + (f(r.x) || 0), 0);
+  const parts = [["cached", sum(cacheRows, x => x.cached)], ["fresh", sum(cacheRows, x => x.input - x.cached)],
+    ["unknown", sum(actual.filter(r => !r.x.cacheKnown), x => x.input)], ["output", sum(actual, x => x.output)]].filter(([, v]) => v > 0);
+  const total = parts.reduce((s, [, v]) => s + v, 0);
+  const cacheIn = sum(cacheRows, x => x.input), hit = sum(cacheRows, x => x.cached);
+  const jobs = new Set(items.map(i => i.job_id).filter(Boolean)).size;
+  const unknown = items.filter(i => ["UNKNOWN", "RESERVED"].includes(i.state)).length;
+  const billed = sum(rows, x => x.billed);
+  const stat = (title, value, chips) => el("div", { class: "m-stat" }, el("div", { class: "m-stat-h" }, el("span", {}, title), el("b", { class: "num" }, value)),
+    chips.length ? el("div", { class: "m-chips" }, chips.map(([n, v, tone]) => el("span", { class: "m-chip" + (tone ? " " + tone : "") }, n, el("b", { class: "num" }, String(v))))) : null);
+  return el("section", { class: "meter" + (freshLoad() ? " anim" : "") },
+    el("div", { class: "m-grid" },
+      el("div", { class: "sheet m-summary" }, el("div", { class: "sheet-head" }, el("h2", {}, "请求统计"), el("span", { class: "note" }, "本页已加载 " + items.length + " 次")),
+        el("div", { class: "sheet-body m-stats" },
+          stat("实际用量", actual.length + " / " + items.length, [["已记录", actual.length, "ok"], ["未记录", items.length - actual.length, items.length - actual.length ? "warn" : ""]]),
+          stat("缓存观察", cacheRows.length + " / " + actual.length, [["已记录", cacheRows.length, "ok"], ["未记录", actual.length - cacheRows.length, ""]]),
+          stat("任务", String(jobs), [["结果不明", unknown, unknown ? "bad" : ""]]),
+          stat("费用", usd(billed), [["按配置费率估算", rows.filter(r => r.x.estimate).length, ""]]))),
+      el("div", { class: "sheet m-tokens" }, el("div", { class: "sheet-head" }, el("h2", {}, "Token 统计"),
+          el("span", { class: "note" }, cacheIn > 0 ? "缓存命中 " + pctText(hit, cacheIn) : actual.length ? "缓存未记录" : "")),
+        el("div", { class: "sheet-body m-donut" }, donut(parts, tk(total), actual.length ? "实际总量" : "未记录", actual.length ? total : null),
+          actual.length ? meterLegend(parts, total) : el("p", { class: "note" }, "本页没有有效的实际用量回执。")))),
+    meterChart(rows),
+    el("p", { class: "note mt" }, "统计只包含实际用量已记录的请求；缓存命中率只按缓存已记录的请求计算。费用是已计或预留的责任金额，按配置费率估算，不等于服务商账单。耗时、上下文分区与裁剪原因没有保存，这里不做拆分。"));
+}
+
+const METER_SCALES = [["call", "逐次"], ["day", "按天"], ["month", "按月"]];
+/** 已加载的请求按本地日期或月份归组；轴是连续的，到今天为止，最多 30 天或 12 个月 */
+function meterBuckets(rows, scale) {
+  const keyOf = r => scale === "day" ? localDay(r.item.occurred_at) : localDay(r.item.occurred_at).slice(0, 7);
+  const groups = new Map();
+  for (const r of rows) { if (!valid(r.item.occurred_at)) continue; const k = keyOf(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+  if (!groups.size) return { trimmed: false, buckets: [] };
+  // 窗口固定为截至今天的最近 30 天或 12 个月，再把已加载的记录填进去；更早的只计入 trimmed
+  const today = localDay(new Date().toISOString()), cap = scale === "day" ? 30 : 12;
+  const prev = k => {
+    if (scale === "day") { const d = new Date(k + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+    const [y, m] = k.split("-").map(Number); return m === 1 ? (y - 1) + "-12" : y + "-" + String(m - 1).padStart(2, "0");
+  };
+  const keys = [scale === "day" ? today : today.slice(0, 7)];
+  while (keys.length < cap) keys.unshift(prev(keys[0]));
+  const trimmed = [...groups.keys()].some(k => k < keys[0]);
+  return { trimmed, buckets: keys.map(key => {
+    const list = groups.get(key) || [], actual = list.filter(r => r.x.actual), sum = f => actual.reduce((s, r) => s + (f(r.x) || 0), 0);
+    return { key, list, actual: actual.length,
+      parts: [["cached", sum(x => x.cacheKnown ? x.cached : 0)], ["fresh", sum(x => x.cacheKnown ? x.input - x.cached : 0)],
+        ["unknown", sum(x => x.cacheKnown ? 0 : x.input)], ["output", sum(x => x.output)]] };
+  }) };
+}
+function bucketLabel(key, scale, i, prev) {
+  const [y, m, d] = key.split("-").map(Number);
+  if (scale === "month") return i === 0 || m === 1 ? String(y).slice(2) + "年" + m + "月" : m + "月";
+  return i === 0 || !prev || prev.slice(0, 7) !== key.slice(0, 7) ? m + "/" + d : String(d);
+}
+
+/** 逐次：柱子是实际输入（按缓存分段）与输出，折线是本地准入计数；按天/按月：同一时段的实际用量相加 */
+function meterChart(rows) {
+  const scale = state.meterScale || "call", page = state.data?.model;
+  const W = 640, H = 170, L = 44, R = 8, T = 10, B = 22;
+  let cols, top, trimmed = false;
+  if (scale === "call") {
+    const list = rows.slice(0, 30).reverse();
+    top = Math.max(1, ...list.map(r => r.x.actual ? r.x.input + r.x.output : 0), ...list.map(r => r.x.measured || 0), ...list.map(r => r.x.measured != null && r.x.margin != null ? r.x.measured + r.x.margin : 0));
+    cols = list.map((r, i) => ({ id: r.item.id, label: String(i + 1), parts: r.x.actual ? meterParts(r.x) : null, none: !r.x.actual, ghost: r.x.measured || 0, measured: r.x.measured,
+      aria: "第 " + (i + 1) + " 次请求，" + (r.x.actual ? "实际输入 " + tk(r.x.input) + "，输出 " + tk(r.x.output) : "实际用量未记录") }));
+  } else {
+    const grouped = meterBuckets(rows, scale), buckets = grouped.buckets; trimmed = grouped.trimmed;
+    top = Math.max(1, ...buckets.map(b => b.parts.reduce((s, [, v]) => s + v, 0)));
+    // 标签从最新一根往回每隔 every 根标一次；月份在第一个标签和跨月处写出
+    const step = Math.ceil(Math.max(1, buckets.length) / 16);
+    let shownKey = null;
+    const labels = buckets.map((b, i) => (buckets.length - 1 - i) % step === 0
+      ? (() => { const t = bucketLabel(b.key, scale, shownKey == null ? 0 : 1, shownKey); shownKey = b.key; return t; })() : "");
+    cols = buckets.map((b, i) => {
+      const total = b.parts.reduce((s, [, v]) => s + v, 0), when = scale === "day" ? b.key : b.key.replace("-", " 年 ") + " 月";
+      const ghost = b.list.reduce((t, r) => t + (r.x.measured || 0), 0);
+      return { id: b.list[0]?.item.id, label: labels[i], parts: b.actual ? b.parts : null, none: b.list.length > 0 && !b.actual, ghost,
+        aria: when + "，" + b.list.length + " 次请求" + (b.actual ? "，实际总量 " + tk(total) + (b.actual < b.list.length ? "，其中 " + (b.list.length - b.actual) + " 次未记录" : "") : b.list.length ? "，实际用量未记录" : "") };
+    });
+  }
+  const n = Math.max(1, cols.length), bw = Math.min(28, (W - L - R) / n * 0.62);
+  const xAt = i => L + (i + 0.5) * (W - L - R) / n, yAt = v => T + (H - T - B) * (1 - v / top);
+  const grid = [0, 0.5, 1].map(f => [el("line", { x1: String(L), x2: String(W - R), y1: yAt(top * f).toFixed(1), y2: yAt(top * f).toFixed(1), class: "m-grid-l" }),
+    el("text", { x: String(L - 6), y: (yAt(top * f) + 4).toFixed(1), "text-anchor": "end", class: "m-axis" }, tk(Math.round(top * f)))]);
+  const every = Math.ceil(n / 16);
+  const bars = cols.map((c, i) => {
+    const x = xAt(i) - bw / 2, sel = c.id != null && state.cogSel === "model:" + c.id;
+    const go = () => { if (c.id == null) return; state.cogSel = "model:" + c.id; rerender(); };
+    let y = yAt(0);
+    const segs = c.parts ? c.parts.filter(([, v]) => v > 0).map(([k, v]) => {
+      const h = (H - T - B) * v / top; y -= h;
+      return el("rect", { x: x.toFixed(1), y: y.toFixed(1), width: bw.toFixed(1), height: Math.max(h, 0.5).toFixed(1), fill: METER_COLORS[k] });
+    }) : c.none ? [el("rect", { x: x.toFixed(1), y: Math.min(yAt(c.ghost), yAt(0) - 12).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * c.ghost / top, 12).toFixed(1), class: "m-bar-none" })] : [];
+    const label = (n - 1 - i) % every === 0 && c.label ? el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, c.label) : null;
+    if (c.id == null) return el("g", { class: "m-bar empty", style: { "--i": String(i) }, role: "img", "aria-label": c.aria }, label);
+    return el("g", { class: "m-bar" + (sel ? " sel" : ""), style: { "--i": String(i) }, tabindex: "0", role: "button", onclick: go,
+      onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } }, "aria-label": c.aria + (scale === "call" ? "" : "，查看其中最近一次") },
+      el("rect", { x: (x - 3).toFixed(1), y: String(T), width: (bw + 6).toFixed(1), height: String(H - T - B), class: "m-hit" }), segs, label);
+  });
+  const pts = scale === "call" ? cols.map((c, i) => c.measured != null ? [xAt(i), yAt(c.measured)] : null).filter(Boolean) : [];
+  const line = pts.length ? el("polyline", { points: pts.map(([a, b]) => a.toFixed(1) + "," + b.toFixed(1)).join(" "), class: "m-line", pathLength: "1" }) : null;
+  const dots = pts.map(([a, b]) => el("circle", { cx: a.toFixed(1), cy: b.toFixed(1), r: "2.6", class: "m-dot" }));
+  const oldest = rows.map(r => r.item.occurred_at).filter(valid).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const hint = scale === "call" ? "从旧到新，点一根柱子查看明细" : "按已加载的 " + rows.length + " 次请求汇总" + (oldest && valid(oldest) ? "，最早 " + fmtDate(oldest) : "") + (trimmed ? "，图中只画最近 " + (scale === "day" ? "30 天" : "12 个月") : "") + "；点柱子看该时段最近一次";
+  // 切换粒度时只给柱子重播生长动画
+  const swap = state.meterDrawn != null && state.meterDrawn !== scale; state.meterDrawn = scale;
+  return el("div", { class: "sheet m-chart" + (swap && motionOk() ? " swap" : "") },
+    el("div", { class: "sheet-head" }, el("h2", {}, scale === "call" ? "逐次请求" : scale === "day" ? "每日用量" : "每月用量"),
+      el("div", { class: "seg sm", role: "group", "aria-label": "柱状图粒度" }, METER_SCALES.map(([k, t]) =>
+        el("button", { type: "button", "aria-pressed": String(scale === k), onclick: () => { state.meterScale = k; rerender(); } }, t)))),
+    el("div", { class: "sheet-body" },
+      el("p", { class: "note m-hint" }, hint, scale !== "call" && page?.next_cursor
+        ? el("button", { type: "button", class: "more-btn", disabled: state.cogMore === "model", onclick: () => moreCognition("model") }, state.cogMore === "model" ? "正在加载…" : "加载更早的记录") : null),
+      cols.length ? el("svg", { viewBox: `0 0 ${W} ${H}`, class: "m-svg", role: "group", "aria-label": scale === "call" ? "逐次请求的输入输出" : "按时段汇总的实际用量" }, grid, bars, line, dots)
+        : el("p", { class: "note" }, "已加载的记录里没有有效时间，无法按时段汇总。"),
+      el("div", { class: "m-keys" }, ["cached", "fresh", "unknown", "output"].map(k => el("span", {}, el("i", { style: { background: METER_COLORS[k] } }), METER_NAMES[k])),
+        scale === "call" ? el("span", {}, el("i", { class: "k-line" }), "本地准入计数") : null, el("span", {}, el("i", { class: "k-none" }), "实际用量未记录"))));
+}
+
+/** 单次请求明细，用在“模型调用”记录的决策记录标签里 */
+function modelMeasurementView(sel) {
+  const x = meterOf(sel), seq = jobSequence(modelTimeline(state.data?.model), sel);
+  const parts = meterParts(x), total = parts.reduce((s, [, v]) => s + v, 0);
+  const pending = ["UNKNOWN", "RESERVED"].includes(sel.state);
+  const chips = [["实际输入", x.actual ? tk(x.input) : "未记录"], ["输出", x.actual ? tk(x.output) : "未记录"],
+    ["缓存", x.cacheKnown ? pctText(x.cached, x.input) + "（" + tk(x.cached) + "）" : "未记录"], ["费用", x.billed != null ? usd(x.billed) + (x.estimate ? " 估算" : "") : "未记录"]];
+  const reserve = x.measured != null && x.margin != null ? x.measured + x.margin : null;
+  const scale = Math.max(1, reserve || 0, x.measured || 0, x.actual ? x.input : 0);
+  const compare = [["准入预留", reserve, "res"], ["本地输入计数", x.measured, "loc"], ["实际输入", x.actual ? x.input : null, "act"]];
+  const freshOne = state.meterOne !== sel.id; state.meterOne = sel.id;
+  return el("section", { class: "steps-view meter-one" + (freshOne ? " anim" : "") },
+    el("div", { class: "m-one-h" }, el("h4", {}, "本次请求计量"),
+      el("span", { class: "note" }, seq && seq.total > 1 ? "同一任务第 " + seq.index + " 次调用（本页共 " + seq.total + " 次）" : "同一任务里只加载到这一次调用")),
+    pending ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "这次请求的结果不明或仍在预留：实际用量未记录，费用按预留责任保留，不代表实际账单。")) : null,
+    el("div", { class: "m-chips" }, chips.map(([n, v]) => el("span", { class: "m-chip strong" }, n, el("b", { class: "num" }, v)))),
+    parts.length ? [el("div", { class: "m-seg", role: "img", "aria-label": parts.map(([k, v]) => METER_NAMES[k] + " " + tk(v)).join("，") },
+        parts.filter(([, v]) => v > 0).map(([k, v]) => el("i", { style: { background: METER_COLORS[k], width: pct(v, total).toFixed(3) + "%" } }))),
+      meterLegend(parts, total)] : el("p", { class: "note" }, "没有有效的实际用量回执，不显示输入输出分布。"),
+    el("div", { class: "m-compare" }, el("p", { class: "m-sub" }, "本地计量与实际", el("span", { class: "note" }, x.countKind)),
+      compare.map(([n, v, k]) => el("div", { class: "m-cmp" }, el("span", {}, n),
+        el("div", { class: "m-track" }, v != null ? el("i", { class: k, style: { width: pct(v, scale).toFixed(2) + "%" } }) : null),
+        el("b", { class: "num" }, v != null ? tk(v) : "未记录"))),
+      x.allowance != null ? el("p", { class: "note" }, "输出预留 " + tk(x.allowance) + (x.actual ? "，实际输出 " + tk(x.output) : "")) : null),
+    el("div", { class: "m-kv" },
+      kv("计量方式", x.countKind), kv("实际输入 / 输出", x.actual ? x.input + " / " + x.output : "未记录"),
+      kv("缓存命中输入", x.cacheKnown ? String(x.cached) : "未记录"), kv("已计或预留费用", x.billed != null ? usd(x.billed) : "未记录")),
+    el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；缓存只在原回执明确返回时显示。费用按配置费率核算，不是服务商账单。"),
+    el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
+}
+
+/* ---------- 列表与动画 ---------- */
+/** 模型调用的列表行写用量，不再重复“模型调用” */
+function modelRowText(i) {
+  const x = meterOf(i);
+  return [x.actual ? tk(x.input) + " 输入 · " + tk(x.output) + " 输出" : "实际用量未记录",
+    fmtDate(i.occurred_at) + (x.cacheKnown ? "，缓存 " + pctText(x.cached, x.input) : x.actual ? "，缓存未记录" : "")];
+}
+const motionOk = () => !globalThis.matchMedia || globalThis.matchMedia("(prefers-reduced-motion: no-preference)").matches;
+/** 每次读取到新数据只播放一次入场动画，切换选中不重播 */
+function freshLoad() { return state.meterAnim !== state.updatedAt; }
+/** 数字从 0 滚到目标值；只用于入场 */
+function countUp(root) {
+  if (!motionOk()) return;
+  for (const node of root.querySelectorAll("[data-count]")) {
+    const to = Number(node.dataset.count), fmt = node.dataset.fmt === "usd" ? usd : tk, t0 = performance.now();
+    if (!Number.isFinite(to) || to <= 0) continue;
+    const step = now => { const k = Math.min(1, (now - t0) / 700), e = 1 - Math.pow(1 - k, 3);
+      node.textContent = fmt(Math.round(to * e)); if (k < 1 && node.isConnected) requestAnimationFrame(step); };
+    node.textContent = fmt(0); requestAnimationFrame(step);
+  }
+}
+PAGES.thinking.after = () => {
+  const page = $("#page");
+  if (freshLoad()) { state.meterAnim = state.updatedAt; if (page) countUp(page); }
+  // 选中项不在列表可见范围时，只滚动列表，不移动整页
+  if (state.cogScrolled !== state.cogSel) {
+    state.cogScrolled = state.cogSel;
+    const list = $(".dk-list"), item = $(".dk-list button.sel");
+    if (list && item && list.scrollHeight > list.clientHeight) {
+      const top = item.offsetTop - list.offsetTop;
+      if (top < list.scrollTop || top + item.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = Math.max(0, top - list.clientHeight / 3);
+    }
+  }
+};
+
+/* ---------- 长列表 ---------- */
+/** 先显示前几条，其余点“展开”查看；展开状态在本次登录里保留 */
+function capped(key, nodes, limit, tagName = "li") {
+  const open = state.expanded.has(key), rest = nodes.length - limit;
+  if (rest <= 0) return nodes;
+  return [...(open ? nodes : nodes.slice(0, limit)), el(tagName, { class: "more-row" }, el("button", { type: "button", class: "more-btn", "aria-expanded": String(open),
+    onclick: () => { open ? state.expanded.delete(key) : state.expanded.add(key); rerender(); } }, open ? "收起" : "展开其余 " + rest + " 条"))];
+}
+/** 需要你处理的排在前面，同一级保持服务端原顺序（新的在前） */
+function byRank(items, rank) { return items.map((x, i) => [rank(x), i, x]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(r => r[2]); }
+function goalRank(g) {
+  if (g.state === "CANDIDATE") return 0;
+  if ((g.allowed_actions || []).length) return 1;
+  return ["DONE", "CANCELLED", "FAILED"].includes(g.state) ? 3 : 2;
+}
+/** 标题旁的条数；到达服务端上限时说明只读了最近的这么多条 */
+const countNote = (n, cap) => n ? el("span", { class: "note" }, n >= cap ? "最近 " + n + " 条" : n + " 条") : null;

@@ -28,6 +28,7 @@ from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
 from tests.test_meme_core import body, caption_environment, worker
+from tests.test_test_fixtures import historical_database
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -290,12 +291,12 @@ def test_erasure_before_import_and_old_backup_restore_reimport_cannot_revive(bun
     # An actual pre-catalog schema copy proves restore's existing migrate-before-
     # replay order is sufficient; do not add a new restore mechanism.
     legacy = tmp_path / "pre-catalog-0046.db"
-    with (closing(migration.readonly(bundle.core.settings.database)) as source,
-          closing(sqlite3.connect(legacy)) as destination):
-        source.backup(destination)
-        destination.execute("DROP TABLE meme_asset_sources")
-        destination.execute("DROP TABLE meme_assets")
-        destination.execute("UPDATE alembic_version SET version_num='0046_capability_delegation'")
+    historical_database(bundle.core.store, str(legacy), "0046_capability_delegation")
+    with closing(sqlite3.connect(legacy)) as destination:
+        assert destination.execute("SELECT version_num FROM alembic_version").fetchone() == (
+            "0046_capability_delegation",)
+        assert not destination.execute("SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name IN ('meme_assets','meme_asset_sources','meme_vectors')").fetchall()
         destination.execute("DELETE FROM runtime_meta WHERE key='derived_erasure_contract'")
         destination.commit()
     backup(legacy, archive, key)

@@ -124,36 +124,49 @@ def _animation(data, mime, policy):
 
 
 def preview(data, mime, policy):
-    """Only a first-frame preview reaches the chat model; preserve original aspect ratio."""
+    """Reuse the ordered frame sheet within the original one-image, 512-edge preview."""
+    from companion.image_frames import SAMPLE_FRAMES, prepare
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             image, count, start = _animation(data, mime, policy)
             with image:
                 if count - start <= 1:
-                    from companion.image_frames import prepare
-
                     return prepare(data, mime, policy), False
-                duration = 0
+                # Match prepare's existing sample positions; retain fractional APNG times.
+                frames = count - start
+                selected = sorted({start + round(i * (frames - 1) / max(
+                    1, min(frames, SAMPLE_FRAMES) - 1)) for i in range(min(frames, SAMPLE_FRAMES))})
+                duration, times = 0, []
                 for index in range(start, count):
                     image.seek(index)
                     image.load()
+                    if index in selected:
+                        times.append(f"{float(duration):g}")
                     value = image.info.get("duration", 100)
                     if (not isinstance(value, (int, float)) or not math.isfinite(value)
                         or value <= 0):
                         raise ValueError()
                     duration += Fraction(str(value))
-                image.seek(start)
-                frame = image.convert("RGBA")
-                frame.thumbnail((512, 512), Image.Resampling.LANCZOS)
-                background = Image.new("RGB", frame.size, "white")
-                background.paste(frame, mask=frame)
+                try:
+                    prepared = prepare(data, mime, policy)
+                except CoreError:
+                    raise ValueError() from None
                 output = io.BytesIO()
-                background.save(output, format="PNG")
+                with Image.open(io.BytesIO(prepared.data)) as sheet:
+                    sheet.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                    if sheet.width * sheet.height > policy.max_pixels_per_image:
+                        raise ValueError()
+                    sheet.save(output, format="PNG")
                 if len(output.getvalue()) > policy.max_bytes_per_image:
                     raise ValueError()
-                note = (f"[动图首帧预览：{count - start}帧，时长{float(duration):g}ms。"
-                        "预览不能显示动作；要确认动作、时序或表情变化时调用 understand_video。]")
+                note = (f"[动图抽样预览：{FORMATS[mime]}共{frames}帧，"
+                        f"时长{float(duration):g}ms，抽取第"
+                        + ",".join(str(index - start + 1) for index in selected)
+                        + "帧；对应起始时间(ms)=" + ",".join(times)
+                        + "。拼图按从左到右、从上到下排列，仅为抽样画面，不能声称看过完整动画；"
+                        "要确认动作、时序或表情变化时调用 understand_video。]")
                 return PreparedImage(output.getvalue(), "image/png", note), True
     except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError, Warning):
         raise CoreError("CONTENT_VIDEO_INPUT_INVALID", 400) from None

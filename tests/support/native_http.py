@@ -31,7 +31,14 @@ def owned_http_protocol(servers):
     class HTTPProtocol(AutoHTTPProtocol):
         def connection_made(self, transport):
             super().connection_made(transport)
-            if not native_http_proactor_scope(transport, servers()):
+            if not native_http_proactor_scope():
+                return
+            from asyncio.sslproto import _SSLProtocolTransport
+
+            # TLS exposes an app wrapper; cleanup still belongs to its owned native socket.
+            if isinstance(transport, _SSLProtocolTransport):
+                transport = getattr(transport._ssl_protocol, "_transport", None)
+            if transport is None or not native_http_proactor_scope(transport, servers()):
                 return
             original = transport._call_connection_lost
 

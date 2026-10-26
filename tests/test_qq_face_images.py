@@ -19,6 +19,7 @@ from companion_onebot_bridge import face_graphics as graphics
 from companion_onebot_bridge import images
 from companion_onebot_bridge.event_normalizer import normalize
 from tests.conftest import run
+from tests.native_continuous_support import frame
 from tests.support.native_images import image_host, upload
 from tests.test_live_image_input import options
 from tests.test_onebot_direct import config, raw_event
@@ -163,8 +164,7 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
     raw = raw_event(message=[face()])
 
     async def source(ws):
-        raw["time"] = int(core.clock.now.timestamp())
-        await ws.send(json.dumps(raw))
+        await ws.send(frame(raw["message_id"], message=raw["message"]))
         await ws.wait_closed()
 
     def provider(request):
@@ -219,3 +219,28 @@ def test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp
                 assert active.attempts() == {"ACK": 1}
 
     run(scenario())
+
+
+@pytest.mark.parametrize("microsecond", [995432, 999792])
+def test_signed_face_graphic_uses_receive_wall_clock_across_second_boundary(
+    core, tmp_path, monkeypatch, microsecond,
+):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from companion_onebot_bridge import app
+    from tests import native_continuous_support
+
+    received = datetime.now(UTC).replace(microsecond=microsecond)
+    wall_clock = SimpleNamespace(now=lambda _: received)
+    monkeypatch.setattr(native_continuous_support, "datetime", wall_clock)
+    monkeypatch.setattr(app, "datetime", wall_clock)
+    capture = native_continuous_support.Host.capture
+
+    async def capture_at_boundary(active, count=1):
+        # Business deadlines have crossed a second that the receiver wall clock has not.
+        core.clock.now = received.replace(microsecond=0) + timedelta(seconds=1)
+        await capture(active, count)
+
+    monkeypatch.setattr(native_continuous_support.Host, "capture", capture_at_boundary)
+    test_signed_face_graphic_crosses_api_independent_worker_and_qq_ack(core, tmp_path, "inline")

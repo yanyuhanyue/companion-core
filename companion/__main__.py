@@ -18,7 +18,7 @@ from companion.config import Settings
 from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.runtime import Runtime
-from companion.store import encode, migrate, uid
+from companion.store import encode, migrate, uid, utcnow
 from companion.worker_lock import single_worker
 from companion.worker_loop import Recorder
 from companion.worker_schedule import run_native_unit
@@ -89,15 +89,23 @@ def main():
     server.add_argument("--memory-control-sha256")
     archive = sub.add_parser("backup")
     archive.add_argument("destination")
+    archive.add_argument("--immutable-source", action="store_true",
+                         help="Assert all source writers and maintenance stay stopped before "
+                              "invocation through completion; reject WAL/SHM/journal sidecars")
     recovery = sub.add_parser("restore")
     recovery.add_argument("source")
     recovery.add_argument("destination")
     correction = sub.add_parser("reconcile-video-rates")
     correction.add_argument("--request", required=True)
     correction.add_argument("--request-sha256", required=True)
+    for name in ("preview-model-carry", "carry-closed-model-attempts"):
+        carry = sub.add_parser(name)
+        carry.add_argument("--request", required=True)
+        carry.add_argument("--request-sha256", required=True)
     args = parser.parse_args()
     try:
-        settings = Settings.load()
+        settings = (Settings.load(apply_operator_config=False)
+                    if args.command in {"backup", "restore"} else Settings.load())
         if args.command == "init":
             migrate(settings.database)
             with Runtime(settings):
@@ -164,7 +172,8 @@ def main():
             with single_worker(settings.database, "executive-worker"):
                 asyncio.run(executive_worker(settings))
         elif args.command == "backup":
-            backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode())
+            backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode(),
+                   immutable_source=args.immutable_source)
             print("Encrypted backup saved. Keep the latest erasure ledger separately.")
         elif args.command == "content-worker":
             from companion.content_worker import content_worker
@@ -180,6 +189,32 @@ def main():
                 settings.erasure_ledger,
             )
             print("Restored to a new database; erasure ledger replay complete.")
+        elif args.command in {"preview-model-carry", "carry-closed-model-attempts"}:
+            from companion import model_carry, owner_authority
+            from companion.model_carry_controller import verify
+            from companion_delivery_protocol import digest
+
+            raw = Path(args.request).read_bytes()
+            if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != args.request_sha256:
+                raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+            request = json.loads(raw)
+            with ExitStack() as locks:
+                for kind in ("worker", "diary-worker", "life-worker", "executive-worker",
+                             "content-worker"):
+                    locks.enter_context(single_worker(settings.database, kind))
+                verified = verify(request["executors"])
+                with Runtime(settings) as runtime:
+                    if args.command == "preview-model-carry":
+                        with runtime.store.transaction():
+                            view = owner_authority.custody(runtime.store, settings, settlement=True)
+                            value = model_carry.manifest(runtime.store, settings,
+                                request["authority"], request["successor_window_id"],
+                                verified.value, view)
+                        print(encode({"manifest": value, "manifest_sha256": digest(value)}))
+                    else:
+                        print(encode(model_carry.prepare(runtime.store, settings, request,
+                                                       verified, utcnow(),
+                                                       request_sha256=args.request_sha256)))
         elif args.command == "reconcile-video-rates":
             from companion.video_accounting import reconcile
 

@@ -5,14 +5,18 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 from contextlib import closing, contextmanager
 from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
+from pydantic import SecretStr
 
 from companion import backup as backup_module
+from companion import operator_config
+from companion.config import Settings
 from companion.contracts import CoreError
 
 
@@ -131,6 +135,9 @@ def test_readonly_source_committed_wal_and_private_plaintext_cleanup(
                 pytest.skip("Read-only directory permissions are not enforced for this user")
             with pytest.raises(PermissionError):
                 (source_dir / "write-must-fail").mkdir()
+            with pytest.raises(CoreError, match="BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS"):
+                backup_module.backup(database, archive, key, immutable_source=True)
+            assert not archive.exists()
             if failure:
                 expected = RuntimeError if failure == "encrypt" else OSError
                 with pytest.raises(expected, match="synthetic"):
@@ -163,3 +170,89 @@ def test_readonly_source_committed_wal_and_private_plaintext_cleanup(
     finally:
         writer.rollback()
         writer.close()
+
+
+def test_immutable_backup_of_stopped_readonly_wal_source(tmp_path):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir(mode=0o700)
+    database, archive = source_dir / "core.sqlite3", tmp_path / "backup.enc"
+    with closing(sqlite3.connect(database)) as writer:
+        assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        writer.execute("CREATE TABLE facts (value TEXT)")
+        writer.execute("INSERT INTO facts VALUES ('committed-before-stop')")
+        writer.commit()
+    sidecars = [Path(str(database) + suffix) for suffix in ("-wal", "-shm", "-journal")]
+    assert not any(path.exists() for path in sidecars)
+    before = database.read_bytes()
+    key = Fernet.generate_key()
+    with readonly_directory(source_dir):
+        if os.name != "nt" and os.access(source_dir, os.W_OK):
+            pytest.skip("Read-only directory permissions are not enforced for this user")
+        with pytest.raises(PermissionError):
+            (source_dir / "write-must-fail").mkdir()
+        backup_module.backup(database, archive, key, immutable_source=True)
+        env = {name: value for name, value in os.environ.items()
+               if not name.startswith("COMPANION_")}
+        env.update(COMPANION_CONFIG=str(tmp_path / "absent.toml"),
+                   COMPANION_DATABASE=str(database), COMPANION_MODE="demo",
+                   COMPANION_OWNER_QQ_ID="10001", COMPANION_BOT_QQ_ID="10002",
+                   COMPANION_BRIDGE_TOKEN="synthetic-stopped-backup-token",
+                   COMPANION_BACKUP_KEY=key.decode())
+        subprocess.run([sys.executable, "-B", "-m", "companion", "backup",
+                        str(tmp_path / "cli-backup.enc"), "--immutable-source"],
+                       env=env, capture_output=True, check=True, timeout=30)
+        assert database.read_bytes() == before
+        assert not any(path.exists() for path in sidecars)
+    for backup_path in (archive, tmp_path / "cli-backup.enc"):
+        inspection = tmp_path / (backup_path.stem + ".sqlite3")
+        inspection.write_bytes(Fernet(key).decrypt(backup_path.read_bytes()))
+        with closing(sqlite3.connect(inspection)) as snapshot:
+            assert snapshot.execute("SELECT value FROM facts").fetchall() == [
+                ("committed-before-stop",)]
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+@pytest.mark.parametrize("payload", [b"", b"synthetic-stale-sidecar"])
+def test_immutable_backup_rejects_each_sidecar_before_reading(tmp_path, suffix, payload):
+    database, archive = tmp_path / "core.sqlite3", tmp_path / "backup.enc"
+    with closing(sqlite3.connect(database)) as writer:
+        writer.execute("CREATE TABLE facts (value TEXT)")
+        writer.commit()
+    before = database.read_bytes()
+    sidecar = Path(str(database) + suffix)
+    sidecar.write_bytes(payload)
+    with pytest.raises(CoreError, match="BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS"):
+        backup_module.backup(database, archive, Fernet.generate_key(), immutable_source=True)
+    assert not archive.exists()
+    assert database.read_bytes() == before
+    assert sidecar.read_bytes() == payload
+
+
+def test_settings_load_keeps_runtime_overrides_and_deployment_custody(core, monkeypatch, tmp_path):
+    password = "synthetic-configuration-layering-token"
+    core.settings.control_token = SecretStr(password)
+    operator_config.update(
+        core.store, core.settings,
+        operator_config.ConfigurationChange(
+            expected_version=0, changes={"max_output_tokens": 1024},
+        ),
+        "o1-configuration-layering", core.clock(),
+    )
+    for name in tuple(os.environ):
+        if name.startswith("COMPANION_"):
+            monkeypatch.delenv(name)
+    values = {
+        "CONFIG": str(tmp_path / "absent.toml"), "DATABASE": core.settings.database,
+        "ERASURE_LEDGER": core.settings.erasure_ledger, "MODE": "demo",
+        "OWNER_QQ_ID": core.settings.owner_qq_id, "BOT_QQ_ID": core.settings.bot_qq_id,
+        "BRIDGE_TOKEN": core.settings.bridge_token.get_secret_value(), "CONTROL_TOKEN": password,
+        "MAX_OUTPUT_TOKENS": "768",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv("COMPANION_" + name, value)
+    runtime = Settings.load()
+    assert runtime.max_output_tokens == 1024 and runtime._operator_config_version == 1
+    deployment = Settings.load(apply_operator_config=False)
+    assert deployment.max_output_tokens == 768 and deployment._operator_config_version == 0
+    assert runtime.database == deployment.database == core.settings.database
+    assert runtime.erasure_ledger == deployment.erasure_ledger == core.settings.erasure_ledger

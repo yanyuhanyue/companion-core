@@ -1,0 +1,121 @@
+# Explicit opt-in only: -f compose.yaml -f deploy/compose.dev.yaml -p companion-dev-<suffix>
+# Always pass the project's dedicated --env-file. Requires Docker Compose >= 2.30.
+x-dev: &dev
+  image: companion-core-dev:${COMPOSE_PROJECT_NAME:?select a companion-dev project}
+  env_file: !override []
+  environment: !override &dev-environment
+    COMPANION_CONFIG: /app/config.toml
+    COMPANION_MODE: demo
+    COMPANION_OWNER_QQ_ID: "10001"
+    COMPANION_BOT_QQ_ID: "10002"
+    COMPANION_BRIDGE_TOKEN: ${COMPANION_DEV_BRIDGE_TOKEN:?set a dev-only random token}
+    COMPANION_MODEL_KEY: ""
+    COMPANION_MODEL_URL: https://synthetic.invalid/v1
+    COMPANION_INPUT_RATE: "0"
+    COMPANION_CACHED_INPUT_RATE: "0"
+    COMPANION_OUTPUT_RATE: "0"
+    COMPANION_MONTHLY_LIMIT_MICRO_USD: "0"
+    COMPANION_AUTONOMOUS_DAILY_MICRO_USD: "0"
+    COMPANION_MEMORY_DAILY_MICRO_USD: "0"
+    COMPANION_DATABASE: /data/companion.sqlite3
+    COMPANION_ERASURE_LEDGER: /privacy/erasures.jsonl
+    COMPANION_EMBEDDING_CACHE_DIR: /data/embedding-cache
+  volumes: !override
+    - type: bind
+      source: ./deploy/qq-beta-core.example.toml
+      target: /app/config.toml
+      read_only: true
+      bind: {create_host_path: false}
+    - type: bind
+      source: ./companion
+      target: /app/companion
+      read_only: true
+      bind: {create_host_path: false}
+    - type: bind
+      source: ./migrations
+      target: /app/migrations
+      read_only: true
+      bind: {create_host_path: false}
+    - type: bind
+      source: ./db
+      target: /app/db
+      read_only: true
+      bind: {create_host_path: false}
+    - type: volume
+      source: core-data
+      target: /data
+    - type: volume
+      source: erasure-ledger
+      target: /privacy
+  user: "10001:10001"
+
+services:
+  migrate:
+    <<: *dev
+    profiles: [dev-maintenance]
+  companion-api:
+    <<: *dev
+    depends_on: !reset {}
+  companion-worker:
+    <<: *dev
+  companion-life-worker:
+    <<: *dev
+  companion-executive-worker:
+    <<: *dev
+  companion-content-worker:
+    <<: *dev
+  dev-backup:
+    <<: *dev
+    build: .
+    profiles: [dev-maintenance]
+    command: [--help]
+    restart: "no"
+    environment: !override
+      <<: *dev-environment
+      COMPANION_DATABASE: /source/companion.sqlite3
+      COMPANION_BACKUP_KEY: ${COMPANION_DEV_BACKUP_KEY:-}
+    volumes: !override
+      - type: bind
+        source: ./deploy/qq-beta-core.example.toml
+        target: /app/config.toml
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./companion
+        target: /app/companion
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./migrations
+        target: /app/migrations
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./db
+        target: /app/db
+        read_only: true
+        bind: {create_host_path: false}
+      - type: volume
+        source: core-data
+        target: /source
+        read_only: true
+      - type: volume
+        source: erasure-ledger
+        target: /privacy
+        read_only: true
+      - type: volume
+        source: dev-snapshots
+        target: /data
+    networks: [companion]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 60s
+
+networks:
+  companion:
+    name: !reset null
+    internal: true
+volumes:
+  dev-snapshots:

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 与侧栏品牌标记一致：墨蓝底，左边月白圆，右边灯光黄圆，重叠处最亮 -->
+  <defs>
+    <clipPath id="moon"><circle cx="23" cy="32" r="17"/></clipPath>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#23264a"/>
+  <circle cx="41" cy="32" r="17" fill="#a87a17"/>
+  <circle cx="23" cy="32" r="17" fill="#f4f5fb"/>
+  <circle cx="41" cy="32" r="17" fill="#f0b429" clip-path="url(#moon)"/>
+</svg>

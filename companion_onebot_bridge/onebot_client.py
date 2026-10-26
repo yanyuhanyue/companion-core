@@ -1,8 +1,11 @@
+import asyncio
 import re
+import time
 
 import httpx
 
 from .event_normalizer import decode, identifier
+from .metrics import core_rpc_finished, probe_finished
 
 
 async def bounded_post(
@@ -11,17 +14,24 @@ async def bounded_post(
 ):
     if type(max_bytes) is not int or not 1 <= max_bytes <= 6000000:
         raise ValueError("INVALID_RESPONSE_LIMIT")
-    async with client.stream("POST", path, json=body, headers=headers) as response:
-        if response.status_code not in statuses:
-            response.raise_for_status()
-            raise ValueError("UNEXPECTED_HTTP_STATUS")
-        content = bytearray()
-        async for chunk in response.aiter_bytes(chunk_size=8192):
-            content.extend(chunk)
-            if len(content) > max_bytes:
-                raise ValueError("RESPONSE_TOO_LARGE")
-    result = decode(bytes(content), max_bytes, max_depth=max_depth)
-    return (response.status_code, result) if with_status else result
+    started, error = time.perf_counter_ns(), None
+    try:
+        async with client.stream("POST", path, json=body, headers=headers) as response:
+            if response.status_code not in statuses:
+                response.raise_for_status()
+                raise ValueError("UNEXPECTED_HTTP_STATUS")
+            content = bytearray()
+            async for chunk in response.aiter_bytes(chunk_size=8192):
+                content.extend(chunk)
+                if len(content) > max_bytes:
+                    raise ValueError("RESPONSE_TOO_LARGE")
+        result = decode(bytes(content), max_bytes, max_depth=max_depth)
+        return (response.status_code, result) if with_status else result
+    except BaseException as failure:
+        error = failure
+        raise
+    finally:
+        core_rpc_finished(path, started, error)
 
 
 class OneBotClient:
@@ -63,9 +73,31 @@ class OneBotClient:
         return await self.action("get_forward_msg", {"id": reference})
 
     async def probe(self):
-        identity = await self.action("get_login_info", {})
-        status = await self.action("get_status", {})
-        version = await self.action("get_version_info", {})
+        async def measured(name):
+            started, error = time.perf_counter_ns(), None
+            try:
+                return await self.action(name, {})
+            except BaseException as failure:
+                error = failure
+                raise
+            finally:
+                probe_finished(name, started, error)
+
+        try:
+            async with asyncio.TaskGroup() as group:
+                identity_task = group.create_task(measured("get_login_info"))
+                status_task = group.create_task(measured("get_status"))
+                version_task = group.create_task(measured("get_version_info"))
+        except ExceptionGroup as failures:
+            # TaskGroup has joined every sibling. Preserve existing typed failure
+            # handling while retaining simultaneous failures as the complete cause.
+            first = failures
+            while isinstance(first, ExceptionGroup):
+                first = first.exceptions[0]
+            raise first from failures
+        identity, status, version = (
+            identity_task.result(), status_task.result(), version_task.result(),
+        )
         matches = identifier(identity.get("user_id")) == self.config.bot_qq_id
         expected = (
             version.get("app_name") == "SnowLuma" and version.get("app_version") == "2.0.3-node"

@@ -56,9 +56,9 @@ decides coverage.
 Main pushes, tags, merge queues and manual runs keep full platform coverage (or the existing
 documentation-only profile). Main can reuse only independently verified **full** PR evidence;
 a `selected` PR must run full validation after merge. Missing Windows work never counts as
-full coverage. The full reuse artifact is version 2 and explicitly records Windows product
-and browser coverage in addition to checking all actual job names/results. Older receipts
-and selected receipts are rejected.
+full coverage. The full reuse artifact is version 3 and records Windows product and browser
+coverage plus the retained runtime-image metadata artifact. Reuse checks all actual job
+names/results and the original image artifacts. Older receipts and selected receipts are rejected.
 
 Preflight emits the native GitHub Actions JSON matrix. Full product validation gets all
 four shards on each platform, plus its replay/smoke/package checks once. Console-only PRs
@@ -104,6 +104,74 @@ only when a full integration run is needed without a PR. The final job's
 Validation receipt is the one handoff record; link it instead of replaying the
 same candidate's checks or duplicating its commit/tree identifiers.
 
+## Retained public runtime images
+
+The full container job builds Core, OneBot Bridge, Source Reader and Console UI once,
+runs the existing
+isolation and entry-point checks, then saves those exact Docker image IDs as standard Docker
+archives. It also loads and inspects the exported archives before upload. Executor, file-parser
+and all existing smoke checks remain required; their images are outside this delivery slice.
+The Bridge still builds through the actual native Compose build file. The UI candidate image
+is the one used by the real Linux Nginx/HTTP checks and UI replacement/rollback smoke;
+the synthetic rollback baseline is not a release component. Main exact-tree reuse
+inherits the original full run and its retained images instead of building them again.
+
+These artifacts are labelled `PUBLIC_SOURCE_RUNTIME_ARTIFACT`. This repository is public:
+its Actions artifacts are not private storage. The build context is a Git archive of the
+checked-out commit. The producer checks the reviewed Dockerfile COPY inputs, the existing
+package privacy exclusions and packaging canary, image environment keys and credential-like
+history assignments. Local configuration, credentials, databases, user data, logs and private
+staging directories are excluded. An unexpected COPY shape or private input fails before upload.
+Existing wheel/source privacy and canary checks continue in the product shards.
+Before each build, the producer compares the actual directory/file set and raw blob IDs with
+the committed Git tree, then repeats the COPY/privacy checks. Added files, changed source,
+recipes or build configuration fail before Docker runs; the metadata JSON alone cannot authorize
+a build. Directory permissions may differ for the owner-only migration-directory test.
+
+| Identity | Meaning |
+|---|---|
+| Commit, tree, run ID and attempt | Original full CI source and all fourteen successful jobs |
+| `image_id` / `config_digest` | Actual Docker image configuration ID on `linux/amd64` |
+| Archive SHA256 and bytes | Exact compressed Docker archive to download and load |
+| Actions artifact ID and digest | Immutable uploaded ZIP identity and transport checksum |
+| `registry_manifest_digest` | Unset; this slice does not push to a registry |
+
+The image configuration ID is not a registry manifest digest. The small `ci-container-images-*`
+artifact binds the four separate `runtime-image-{core,bridge,reader,ui}-*` archives; `ci-full-*`
+and `ci-validation-*` reference that metadata. A selected run cannot emit reusable image proof.
+Missing, expired, changed, ambiguous or incomplete image evidence makes main run full validation.
+All retained artifacts expire after seven days. Reuse and consumption retain the existing
+24-hour freshness requirement for the original full run.
+
+BuildKit's local cache backend and the existing pinned Actions cache preserve dependency
+layers. The dependency installation steps already precede application COPY steps in the
+Dockerfiles. Recorded cache imports/exports describe configured indexes and bytes; they do
+not claim a measured cache hit. No inferred dependency graph chooses release components.
+UI dependencies are its pinned official Nginx base; its dependency-lock field is unset.
+The UI privacy check accepts only the exact public environment of that pinned base, scoped
+to UI, and its four public assets plus the public Nginx configuration. Python-image environment
+rules are unchanged. A base-image or environment change requires updating this reviewed boundary.
+
+`container-images.json` records actual per-image raw/compressed sizes, save/hash,
+compression/hash and build/inspect durations. `runtime-image-load-*` preserves local load
+timings. Native Actions upload-step timestamps and logs supply upload duration and transport
+size; the consumer records download and load/inspect time. Measurements are produced by the
+actual Linux run, not estimated locally. `--previous-run` compares actual verified image IDs
+and platforms, so an unchanged image is identified by content rather than a source label.
+
+The read-only consumer and its deployment boundary are documented in
+[deployment preparation](deployment.md#加载已验证的-ci-镜像).
+The implementation uses Docker's documented
+[image archive sharing](https://docs.docker.com/build/ci/github-actions/share-image-jobs/),
+[BuildKit cache backends](https://docs.docker.com/build/ci/github-actions/cache/),
+[Compose build cache](https://docs.docker.com/reference/compose-file/build/), and
+[immutable Actions artifact outputs](https://github.com/actions/upload-artifact#using-outputs).
+The official Nginx base environment was read from its actual `linux/amd64` configuration using
+[`docker buildx imagetools inspect`](https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/).
+Build-context verification uses Git's documented
+[`ls-tree`](https://git-scm.com/docs/git-ls-tree) and
+[`hash-object --no-filters`](https://git-scm.com/docs/git-hash-object) commands.
+
 ## File shards and timing maintenance
 
 The ordinary suite runs as four disjoint file shards on each selected platform.
@@ -124,8 +192,8 @@ directory and real port tests continue binding kernel-assigned ports.
 Before starting workers, the coordinator prepares the pinned BGE file snapshot
 once per job. A cold model cache still downloads the required files; a warm cache
 uses the local snapshot. Each worker retains its own real ONNX inference session
-and process-local encoder cache. Dependency/model caches, four-shard weights,
-platform matrix, required jobs and full-tree proof format are unchanged. JUnit
+and process-local encoder cache. Sharding preserves dependency/model cache rules,
+four-shard weights, the platform matrix, required jobs and full-tree evidence requirements. JUnit
 continues recording setup, call and teardown durations. If resource pressure or
 instability outweighs the measured gain, set `--workers 0` in the product command
 to restore serial execution without changing its scope; test failures never

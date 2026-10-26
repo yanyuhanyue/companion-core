@@ -1,7 +1,24 @@
+import asyncio
 import json
+import os
 import re
 import time
 import uuid
+
+import httpx
+
+PROBE_STAGES = {"get_login_info": "t_onebot_probe_login", "get_status": "t_onebot_probe_status",
+                "get_version_info": "t_onebot_probe_version"}
+
+CORE_RPC_STAGES = {
+    "/internal/v1/owner-authority/check": "t_core_owner_check",
+    "/internal/v1/owner-authority/inputs/approve": "t_core_input_approve",
+    "/internal/v1/inbox/events": "t_core_inbox",
+    "/internal/v1/deliveries/lease": "t_core_delivery_lease",
+    "/internal/v1/owner-authority/send-check": "t_core_send_check",
+}
+DELIVERY_RPC_STAGES = {"begin-send": "t_core_delivery_begin_send",
+                       "result": "t_core_delivery_result"}
 
 STAGES = {
     "t_onebot_received",
@@ -20,6 +37,54 @@ STAGES = {
     "media_unavailable",
     "t_bridge_send_ack",
 }
+
+
+def probe_finished(name, started_ns, error=None):
+    _request_finished(PROBE_STAGES[name], started_ns, error)
+
+
+def core_rpc_finished(path, started_ns, error=None):
+    """Select only fixed labels; dynamic delivery identifiers are never exported."""
+    if not isinstance(path, str):
+        return
+    stage = CORE_RPC_STAGES.get(path)
+    if stage is None and (match := re.fullmatch(
+        r"/internal/v1/deliveries/msg_[a-f0-9]{32}/(begin-send|result)", path,
+    )):
+        stage = DELIVERY_RPC_STAGES[match[1]]
+    if stage is not None:
+        _request_finished(stage, started_ns, error)
+
+
+def _request_finished(stage, started_ns, error=None):
+    """Opt-in elapsed spans; no request, response or exception text is exported."""
+    if os.environ.get("COMPANION_TELEMETRY") != "1":
+        return
+    if error is None:
+        error_class = "none"
+    elif isinstance(error, asyncio.CancelledError):
+        error_class = "cancelled"
+    elif isinstance(error, httpx.TimeoutException):
+        error_class = "timeout"
+    elif isinstance(error, httpx.HTTPStatusError):
+        error_class = "http_status"
+    elif isinstance(error, httpx.TransportError):
+        error_class = "transport"
+    elif isinstance(error, ValueError):
+        error_class = "validation"
+    else:
+        error_class = "unexpected"
+    evidence = os.environ.get("COMPANION_TELEMETRY_EVIDENCE", "LIVE_ONEBOT")
+    if evidence not in {"LIVE_ONEBOT", "OFFLINE_FIXTURE"}:
+        evidence = "LIVE_ONEBOT"
+    finished = time.perf_counter_ns()
+    record = {"schema_version": 1, "evidence_type": evidence, "stage": stage,
+              "monotonic_ns": finished, "elapsed_ms": round(max(0, finished - started_ns) / 1e6, 4),
+              "error_class": error_class}
+    try:
+        print(json.dumps(record), flush=True)
+    except Exception:
+        pass  # Telemetry cannot change delivery state or request a retry.
 
 
 class Metrics:

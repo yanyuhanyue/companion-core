@@ -53,6 +53,9 @@ class OwnerGrantPolicy(StrictModel):
     purposes: list[Purpose] = Field(min_length=1, max_length=24)
     authorization_sha256: str = Field(pattern=SHA)
     paid_contract_sha256: str = Field(pattern=SHA)
+    unknown_carry_sha256: str | None = Field(
+        default=None, pattern=SHA, exclude_if=lambda value: value is None,
+    )
     capture: CaptureIdentity | None = None
     history: HistoryPolicy = Field(default_factory=HistoryPolicy)
     memory_scope: Literal["none", "owner_private"] = "none"
@@ -116,6 +119,11 @@ class AuthorityReference(StrictModel):
     @classmethod
     def valid_reference(cls, value):
         return validate_authority_ref(value)
+
+
+class ModelCarryReference(AuthorityReference):
+    carry_sha256: str = Field(pattern=SHA)
+    successor_policy_sha256: str = Field(pattern=SHA)
 
 
 class OwnerCapture(AuthorityReference):

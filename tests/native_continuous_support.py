@@ -90,7 +90,8 @@ async def core_http(core, *, independent=False, provider_reply=None):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = Server(uvicorn.Config(api, lifespan="on", log_config=None, access_log=False,
-                                   http=owned_http_protocol(lambda: server.servers)))
+                                   http=owned_http_protocol(lambda: server.servers),
+                                   timeout_keep_alive=60))
     # API vision may call the external model; only its HTTP transport is replaced.
     substitute = patch("companion.api.AsyncClient", lambda **kwargs: httpx.AsyncClient(
         transport=httpx.MockTransport(provider_reply), **kwargs,
