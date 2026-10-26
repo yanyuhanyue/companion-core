@@ -60,6 +60,7 @@ class ModelResponse:
     cached_tokens: int = 0
     tool_calls: tuple[dict, ...] = ()
     finish_reason: str | None = None
+    cache_usage_present: bool | None = None
 
 
 class ModelResponseError(CoreError):
@@ -221,6 +222,8 @@ class ModelClient:
                 body = None
             usage_present = isinstance(body, dict) and "usage" in body
             usage = body["usage"] if usage_present else {}
+            cache_usage_present = ("prompt_cache_hit_tokens" in usage
+                                   if usage_present and isinstance(usage, dict) else None)
             if not isinstance(usage, dict):
                 usage = {}
             prompt = usage.get("prompt_tokens")
@@ -228,7 +231,8 @@ class ModelClient:
             cached = usage.get("prompt_cache_hit_tokens", 0)
             if not all(type(x) is int and x >= 0 for x in (prompt, output, cached)):
                 prompt, output, cached = None, None, 0
-            received = ModelResponse("", prompt, output, cached)
+            received = ModelResponse("", prompt, output, cached,
+                                     cache_usage_present=cache_usage_present)
             if response.status_code >= 400:
                 code, status = (
                     ("MODEL_RETRYABLE", 503)

@@ -70,6 +70,48 @@ def observed_usage(row, admission):
                 and 0 <= row["cached_input_tokens"] <= row["input_tokens"])
 
 
+def cache_usage(store, row, admission):
+    """Project cache usage only from one original, consistent usage diagnostic."""
+    unknown = {"state": "NOT_RECORDED", "cached_input_tokens": None}
+    if not observed_usage(row, admission):
+        return unknown
+    records = store.rows(
+        "SELECT safe_detail_json FROM audit_log WHERE action='model.usage_diagnostic' "
+        "AND entity_id=? LIMIT 2", (row["request_id"],),
+    )
+    if len(records) != 1:
+        return unknown
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise ValueError
+
+    try:
+        raw = records[0]["safe_detail_json"]
+        if not isinstance(raw, str) or len(raw) > 16384:
+            return unknown
+        receipt = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
+        if (not isinstance(receipt, dict) or receipt.get("cache_usage_present") is not True
+            or receipt.get("actual_usage_known") is not True):
+            return unknown
+        for key, column in (("input_actual_tokens", "input_tokens"),
+                            ("output_actual_tokens", "output_tokens"),
+                            ("cached_input_tokens", "cached_input_tokens"),
+                            ("usage_priced_micro_usd", "billed_micro_usd")):
+            if type(receipt.get(key)) is not int or receipt[key] != row[column]:
+                return unknown
+    except (ValueError, TypeError, RecursionError):
+        return unknown
+    return {"state": "RECORDED", "cached_input_tokens": row["cached_input_tokens"]}
+
+
 def decision_reason(row, settings):
     result = {"kind": "decision_reason", "state": "NOT_RECORDED"}
     reason = row.get("reason")
@@ -240,6 +282,7 @@ class CognitionRead:
             )
             item["measurement"] = measurement(admission and admission["measurement_json"])
             item["usage"]["observed"] = observed_usage(row, admission)
+            item["usage"]["cache_usage"] = cache_usage(self.store, row, admission)
             item["context_regions"] = item["trimming_reason"] = "NOT_RECORDED"
             item["job_id"] = row["job_id"]
         if kind in {"diary", "reflection"}:
