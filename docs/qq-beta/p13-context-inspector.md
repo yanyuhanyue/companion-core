@@ -51,7 +51,16 @@ payload 大小反推裁剪原因。原生 SDK 尚未保存旧窗口的 context �
 
 Console 的“思考与决策 → 模型调用”显示同一回执，并将有效已结算、已记录发送的用量
 与本地计量分开。demo、未发送、UNKNOWN 的实际用量显示为未记录。原有主人会话、来源
-过滤、隐私版本校验及 no-store 规则继续生效；不增加表、迁移或持久元数据。
+过滤、隐私版本校验及 no-store 规则继续生效；沿用既有表与诊断记录。
+
+缓存用量另读取该 request 唯一的 `model.usage_diagnostic` 原回执。适配器在归一化前记录
+`cache_usage_present`：收到 usage 对象且含受支持的 `prompt_cache_hit_tokens` 为 true，
+该对象缺字段为 false；无 usage 对象、旧行或人工响应未记录为 null。存在标记不证明数值有效。
+只有有效原用量、已发送 admission、唯一诊断及各用量/金额一致且标记严格为 true 时，
+共享 `cache_usage` 投影为 `RECORDED`，展示明确的 0 或正数。其余为 `NOT_RECORDED`/null，
+Console 显示“未记录”；有效的实际输入、输出、配置费率金额仍照常显示。重复、损坏、超长、
+缺失或不匹配诊断不挑选最新一条。原财务列、SDK 数值计数及结算回退保留；不回填历史。
+这份观察不证明 provider 缓存隔离、命中策略或真实账单。
 
 补充验证使用 100/1000 轮公开合成候选请求，复用原裁剪和固定 tokenizer，包含完整工具
 声明、两项工具调用/结果及过大的必需结果。它逐项测量并对超限候选执行原 reserve

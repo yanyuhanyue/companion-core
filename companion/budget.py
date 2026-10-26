@@ -653,6 +653,8 @@ def _settle_paid(store, settings, admission, response):
                 admission["request_id"],
             ),
         )
+    present = getattr(response, "cache_usage_present", None)
+    diagnostic["cache_usage_present"] = present if type(present) is bool else None
     store.audit(
         "model.usage_diagnostic", admission["request_id"], "budget", usage["occurred_at"],
         **diagnostic,

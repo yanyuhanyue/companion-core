@@ -60,6 +60,40 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
     run(scenario())
 
 
+def test_console_cache_receipt_three_states_preserve_known_usage(core, tmp_path):
+    from pathlib import Path
+
+    from playwright.async_api import expect
+
+    from tests.test_cache_usage_presence import ABSENT, attempt
+    from tests.test_token_measurement import configure
+
+    core.clock.now = datetime.now(UTC)
+    configure(core, tmp_path)
+    attempts = [attempt(core, cache=value)[1] for value in (ABSENT, 0, 40)]
+    target = Path(__file__).parents[1] / "output/playwright"
+    target.mkdir(parents=True, exist_ok=True)
+
+    async def exercise():
+        async with console_page(core, tmp_path) as page:
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            for row, expected, name in zip(attempts, ("未记录", "0", "40"),
+                                           ("absent", "zero", "positive"), strict=True):
+                await page.goto(page.url.split("#")[0] + "#thinking/model:" + row["request_id"])
+                panel = page.locator(".steps-view").filter(has_text="本次请求计量")
+                await panel.wait_for()
+                cache = panel.locator(".kv").filter(has_text="实际缓存输入")
+                await expect(cache.locator("span").last).to_have_text(expected)
+                assert "80 / 3" in await panel.inner_text()
+                assert "固定渲染器本地计数" in await panel.inner_text()
+                assert "已计或预留费用" in await panel.inner_text()
+                await page.screenshot(path=str(target / f"c5a-cache-{name}.png"), full_page=True)
+            assert errors == []
+
+    run(exercise())
+
+
 def assert_receipts(core, states):
     receipts = core.store.rows("SELECT state,result_json FROM console_operations ORDER BY rowid")
     assert all(item["state"] == "COMPLETE" for item in receipts)

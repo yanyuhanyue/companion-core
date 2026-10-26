@@ -9,7 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from companion.cognition_read import measurement, observed_usage
+from companion.cognition_read import cache_usage, measurement, observed_usage
 from companion.contracts import CoreError
 from companion.ops_status import _ReadView, schema_head
 from companion.paid_budget import sha
@@ -307,6 +307,7 @@ def _trace(view, trace_id):
         for row in usage:
             # RESERVED/UNKNOWN tokens may be estimates. Demo calls are never real usage proof.
             actual = observed_usage(row, row)
+            cache = cache_usage(view, row, row)
             calls.append({
                 "request_ref_sha256": _hash(row["request_id"]),
                 "logical_request_ref_sha256": (
@@ -317,7 +318,8 @@ def _trace(view, trace_id):
                 "paid_dispatch_recorded": row["io_started_at"] is not None,
                 "attempt_number": _number(row["attempt_number"]),
                 "prompt_tokens": _number(row["input_tokens"]) if actual else None,
-                "prompt_cache_hit_tokens": _number(row["cached_input_tokens"]) if actual else None,
+                "prompt_cache_hit_tokens": cache["cached_input_tokens"],
+                "cache_usage": cache,
                 "completion_tokens": _number(row["output_tokens"]) if actual else None,
                 "configured_price_micro_usd": (
                     _number(row["billed_micro_usd"]) if actual and row["pricing_known"] else None
