@@ -192,7 +192,7 @@ const state = {
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
   actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
-  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, contentTab: "items",
+  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, contentTab: "items", expanded: new Set(),
 };
 
 class ApiError extends Error {
@@ -826,10 +826,10 @@ PAGES.life = data => {
           el("button", { type: "button", class: "icon-btn", "aria-label": "下个月", onclick: () => shift(1) }, icon("right"))),
           el("div", { class: "cal-grid" }, WEEK.map(w => el("span", { class: "wd" }, w)), cells),
           el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看"))),
-        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, goals.map(g => goalCard(g))) : el("p", { class: "note" }, "还没有目标。")),
+        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, capped("goals", byRank(goals, goalRank).map(g => goalCard(g)), 3, "div")) : el("p", { class: "note" }, "还没有目标。"), countNote(goals.length, 20)),
         topicsSheet(data.topics)),
       el("div", { class: "stack" }, paper,
-        sheet("最近的反思", reflections.length ? el("div", { class: "stack" }, reflections.map(r => reflectionCard(r))) : el("p", { class: "note" }, "还没有反思记录。")))));
+        sheet("最近的反思", reflections.length ? el("div", { class: "stack" }, capped("reflections", byRank(reflections, r => r.state === "PENDING" ? 0 : 1).map(r => reflectionCard(r)), 3, "div")) : el("p", { class: "note" }, "还没有反思记录。"), countNote(reflections.length, 20)))));
 };
 async function loadDiary(day, paper) {
   const epoch = state.epoch;
@@ -2330,7 +2330,7 @@ function topicsSheet(topics) {
   const items = topics.items || [], candidates = topics.candidate_sources || [];
   return sheet("生活话题", [
     topics.mode === "OFF" ? el("p", { class: "note mb" }, "生活循环没有开启，下面只显示已有记录。") : null,
-    items.length ? el("div", { class: "topics" }, items.map(topicCard)) : el("p", { class: "note" }, "还没有生活话题。"),
+    items.length ? el("div", { class: "topics" }, capped("topics", byRank(items, t => ["WAITING", "DUE"].includes(t.state) ? 0 : t.state === "CLOSED" ? 1 : 2).map(topicCard), 3, "div")) : el("p", { class: "note" }, "还没有生活话题。"),
     candidates.length ? el("p", { class: "note mt" }, "另有 " + candidates.length + " 条来源可以成为新话题，由她在下一轮决定。") : null]);
 }
 function topicCard(t) {
@@ -2420,21 +2420,22 @@ function evidenceDates(list) {
 function preferenceSheet(p) {
   if (!p || p.error) return sheet("你的偏好", failNote("偏好档案", p?.error));
   const items = p["owner.preference"] || [];
-  return sheet("你的偏好", items.length ? el("ul", { class: "rows" }, items.map(m => el("li", { class: "block" }, el("b", {}, m.content),
-    el("span", { class: "meta-line" }, el("span", { class: "chip" }, "来自你的 " + (m.evidence || []).length + " 条原话"), el("span", { class: "note" }, evidenceDates(m.evidence))))))
-    : el("p", { class: "note" }, "还没有确认过的偏好。在记忆页确认一条偏好后会出现在这里。"));
+  return sheet("你的偏好", items.length ? el("ul", { class: "rows" }, capped("prefs", items.map(m => el("li", { class: "block" }, el("b", {}, m.content),
+    el("span", { class: "meta-line" }, el("span", { class: "chip" }, "来自你的 " + (m.evidence || []).length + " 条原话"), el("span", { class: "note" }, evidenceDates(m.evidence)))))
+    , 5)) : el("p", { class: "note" }, "还没有确认过的偏好。在记忆页确认一条偏好后会出现在这里。"), countNote(items.length, 40));
 }
 function interestSheet(p) {
   if (!p || p.error) return sheet("她的兴趣", failNote("兴趣档案", p?.error));
   const items = p["self.interest"] || [];
-  return sheet("她的兴趣", [items.length ? el("ul", { class: "rows" }, items.map(i => el("li", { class: "block" },
+  const rank = { STABLE: 0, EMERGING: 1, EXPLORING: 2, FADING: 3 };
+  return sheet("她的兴趣", [items.length ? el("ul", { class: "rows" }, capped("interests", byRank(items, i => rank[i.status] ?? 4).map(i => el("li", { class: "block" },
     el("div", { class: "row-gap" }, el("b", {}, i.topic), tag(i.status)),
     el("span", { class: "meta-line" }, el("span", { class: "note" }, "读完 " + count(i.independent_sessions) + " 篇，分布在 " + count(i.independent_days) + " 天，证据覆盖 " + Math.round((i.confidence || 0) * 100) + "%")),
     (i.evidence || []).length ? el("details", { class: "ev" }, el("summary", {}, "看读过的内容"), el("ul", {}, i.evidence.slice(0, 8).map(e => el("li", {},
       safeUrl(e.canonical_url) ? el("a", { href: safeUrl(e.canonical_url), target: "_blank", rel: "noopener noreferrer" }, new URL(safeUrl(e.canonical_url)).hostname) : el("span", {}, "来源"),
-      el("span", { class: "note" }, " " + fmtDate(e.occurred_at) + "，" + statusOf(String(e.evidence_level || "").replace(/^SIMULATED_/, ""))[0] + (String(e.evidence_level).startsWith("SIMULATED_") ? "（模拟）" : "")))))) : null)))
+      el("span", { class: "note" }, " " + fmtDate(e.occurred_at) + "，" + statusOf(String(e.evidence_level || "").replace(/^SIMULATED_/, ""))[0] + (String(e.evidence_level).startsWith("SIMULATED_") ? "（模拟）" : "")))))) : null)), 4))
     : el("p", { class: "note" }, "还没有兴趣记录。她完成自己的阅读目标后才会累计。"),
-    el("p", { class: "note mt" }, "兴趣只说明她自己读过什么，不会当成你的偏好，也不会授予任何权限。")]);
+    el("p", { class: "note mt" }, "兴趣只说明她自己读过什么，不会当成你的偏好，也不会授予任何权限。")], countNote(items.length, 40));
 }
 function expressionSheet(x) {
   if (!x || x.error) return sheet("表达习惯学习", failNote("表达习惯学习", x?.error));
@@ -2765,3 +2766,21 @@ PAGES.thinking.after = () => {
     }
   }
 };
+
+/* ---------- 长列表 ---------- */
+/** 先显示前几条，其余点“展开”查看；展开状态在本次登录里保留 */
+function capped(key, nodes, limit, tagName = "li") {
+  const open = state.expanded.has(key), rest = nodes.length - limit;
+  if (rest <= 0) return nodes;
+  return [...(open ? nodes : nodes.slice(0, limit)), el(tagName, { class: "more-row" }, el("button", { type: "button", class: "more-btn", "aria-expanded": String(open),
+    onclick: () => { open ? state.expanded.delete(key) : state.expanded.add(key); rerender(); } }, open ? "收起" : "展开其余 " + rest + " 条"))];
+}
+/** 需要你处理的排在前面，同一级保持服务端原顺序（新的在前） */
+function byRank(items, rank) { return items.map((x, i) => [rank(x), i, x]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map(r => r[2]); }
+function goalRank(g) {
+  if (g.state === "CANDIDATE") return 0;
+  if ((g.allowed_actions || []).length) return 1;
+  return ["DONE", "CANCELLED", "FAILED"].includes(g.state) ? 3 : 2;
+}
+/** 标题旁的条数；到达服务端上限时说明只读了最近的这么多条 */
+const countNote = (n, cap) => n ? el("span", { class: "note" }, n >= cap ? "最近 " + n + " 条" : n + " 条") : null;
