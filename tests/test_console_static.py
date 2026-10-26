@@ -24,14 +24,37 @@ def client(core, monkeypatch):
         yield http
 
 
-def test_console_assets_are_served_with_private_csp(client):
-    for path, kind in (("/console/", "text/html"), ("/console/app.js", "text/javascript"),
-                       ("/console/app.css", "text/css"), ("/console/icon.svg", "image/svg+xml")):
+def test_console_assets_delegate_only_after_native_gate(client):
+    for path, asset in (("/console/", "index.html"), ("/console/app.js", "app.js"),
+                        ("/console/app.css", "app.css"), ("/console/icon.svg", "icon.svg")):
         response = client.get(path)
         assert response.status_code == 200, path
-        assert response.headers["content-type"].startswith(kind)
-        assert "script-src 'self'" in response.headers["content-security-policy"]
-        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["x-accel-redirect"] == "/_console_assets/" + asset
+        assert response.content == b""  # No packaged resource fallback.
+        assert "content-security-policy" not in response.headers
+        assert "cache-control" not in response.headers
+
+
+@pytest.mark.parametrize("path", ["/console/", "/console/app.js", "/console/unknown"])
+@pytest.mark.parametrize("state,status,error", [
+    ("disabled", 404, "CONSOLE_DISABLED"),
+    ("no-credential", 503, "CONSOLE_OWNER_CREDENTIAL_REQUIRED"),
+])
+def test_console_static_refusals_never_delegate(client, core, path, state, status, error):
+    if state == "disabled":
+        core.settings.console.enabled = False
+    else:
+        core.settings.control_token = SecretStr("")
+    response = client.get(path)
+    assert response.status_code == status and response.json() == {"error": error}
+    assert "x-accel-redirect" not in response.headers
+
+
+@pytest.mark.parametrize("path", ["index.html", "unknown", "app.js/extra", "%2e%2e/config.toml"])
+def test_console_rejects_non_public_assets(client, path):
+    response = client.get("/console/" + path)
+    assert response.status_code == 404
+    assert "x-accel-redirect" not in response.headers
 
 
 def test_index_has_no_inline_script_or_style():

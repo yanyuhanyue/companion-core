@@ -367,7 +367,8 @@ def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(co
                 has_text="1").wait_for()
             text = await card.inner_text()
             assert "今天还没有模型调用" not in text and "不完整" not in text
-            await page.unroute("**/v1/console/cognition?*")
+            # Drain callbacks before replacing the paginated response source.
+            await page.unroute_all(behavior="wait")
             await serve_model_pages(page, never_ending)
             await page.get_by_role("button", name="刷新当前页面").click()
             await card.filter(has_text="没有全部读到").wait_for()
