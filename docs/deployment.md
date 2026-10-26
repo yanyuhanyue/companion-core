@@ -8,6 +8,30 @@
 
 2026-10-19 的运行版本记录为 AstrBot 4.29.1 / NapCat 4.18.38；镜像固定方式和 NapCat 构建步骤见 [运行版本说明](../deploy/README.md)。
 
+## 加载已验证的 CI 镜像
+
+CI 为 Core、OneBot Bridge、Source Reader 保留已通过容器检查的原始 Docker 归档。
+在源码仓库中使用已有 `gh` 只读连接，指定成功的主分支或 full PR workflow run：
+
+```bash
+python -B scripts/ci_container_artifacts.py consume --repository yanyuhanyue/companion-core --run-id <successful-run-id> --destination .local/verified-images
+```
+
+消费者核对原始 full run 的十四项成功 job、源码 tree、attempt、制品身份和 SHA256，
+然后下载、`docker image load` 并核对实际 image ID 与 `linux/amd64` 平台。
+主分支复用回执指向原 full run 的原制品；证据缺失、过期或不一致会直接失败，不回退重建。
+`consumed-images.json` 保存实际 image ID、下载及加载耗时。可加 `--previous-run`
+比较两次已验证镜像的真实 ID，源码标签不用于判定组件相同。
+
+公开仓库的这些制品标记为 `PUBLIC_SOURCE_RUNTIME_ARTIFACT`，只包含公共源码和锁定依赖。
+本轮没有推送 registry，因此 `config_digest` 是 Docker 配置 ID，不能填作 registry
+manifest digest。私密配置、数据库和密钥继续由现有部署机制提供。
+详细证据与保留期限见 [CI 镜像制品](ci.md#retained-public-runtime-images)。
+
+该命令仅准备本机镜像，不启动、替换或迁移服务。正式激活仍按现有停写、授权、
+备份、迁移和交接步骤执行，并保留费用及投递结果不明记录。开发环境继续沿用
+[隔离开发 Compose](../deploy/README.md) 的源码挂载流程。
+
 ## 启动核心容器
 
 ```bash

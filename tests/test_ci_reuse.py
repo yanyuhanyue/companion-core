@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from scripts import ci_container_artifacts as images
 from scripts import ci_policy, ci_reuse
 from tests import test_ci_policy as policy_tests
+from tests.test_ci_container_artifacts import runtime_evidence
 from tests.test_ci_policy import commit
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,9 +33,11 @@ def evidence(repository, monkeypatch, tmp_path):
     event = {"after": target["commit"], "repository": {
         "full_name": repo, "default_branch": "main",
     }}
-    record = {"version": 2, "profile": "full", "repository": repo, "event": "pull_request",
+    record = {"version": 3, "profile": "full", "repository": repo, "event": "pull_request",
               "coverage": {"windows_product": True, "windows_browser": True},
               "tree": target["tree"], "commit": "b" * 40, "run_id": 101, "attempt": 2}
+    runtime = runtime_evidence(record)
+    record["container_images"] = runtime["reference"]
     # The recorded checkout is deliberately different from the PR head and main
     # commit. Reuse must bind the actual tested tree, not infer it from head_sha.
     run = {"id": 101, "run_attempt": 2, "event": "pull_request", "path": ci_reuse.WORKFLOW,
@@ -49,7 +53,8 @@ def evidence(repository, monkeypatch, tmp_path):
         for name in ci_reuse.REQUIRED_JOBS
     ]}
     state = {"run": run, "pr": pr, "record": record, "artifact": artifact, "jobs": jobs,
-             "calls": [], "additional_runs": [], "additional_artifacts": []}
+             "calls": [], "additional_runs": [], "additional_artifacts": [], "runtime": runtime,
+             "preview_parents": [{"sha": "d" * 40}, {"sha": head}]}
 
     def read(path, *, binary=False):
         state["calls"].append(path)
@@ -57,14 +62,33 @@ def evidence(repository, monkeypatch, tmp_path):
             raise subprocess.TimeoutExpired(["gh", "api", path], 30)
         if state.get("unavailable"):
             raise OSError("synthetic API failure")
+        if "/git/commits/" in path:
+            return {"tree": {"sha": state["record"]["tree"]},
+                    "parents": state["preview_parents"]}
         if "/commits/" in path:
             return [deepcopy(state["pr"])]
         if "/workflows/ci.yml/runs?" in path:
             return {"workflow_runs": [deepcopy(state["run"]), *state["additional_runs"]]}
         if path.endswith("/artifacts?per_page=100"):
-            return {"artifacts": [deepcopy(state["artifact"]), *state["additional_artifacts"]]}
+            if "/runs/201/" in path:
+                return {"artifacts": [{"id": 400, "name": "ci-validation-1",
+                                       "expired": False, "size_in_bytes": 1024}]}
+            return {"artifacts": [deepcopy(state["artifact"]), *state["additional_artifacts"],
+                                  *deepcopy(state["runtime"]["artifacts"])]}
+        if path.endswith("/actions/runs/101"):
+            return deepcopy(state["run"])
+        if path.endswith("/actions/runs/201"):
+            return deepcopy(state["main"])
         if path.endswith("/zip"):
             assert binary
+            artifact_id = int(path.split("/")[-2])
+            if artifact_id == 400:
+                data = io.BytesIO()
+                with zipfile.ZipFile(data, "w") as archive:
+                    archive.writestr("validation.json", json.dumps(state["validation"]))
+                return data.getvalue()
+            if artifact_id != 300:
+                return state["runtime"]["payloads"][artifact_id]
             if state.get("bad_zip"):
                 return b"not an archive"
             data = io.BytesIO()
@@ -94,7 +118,7 @@ def evidence(repository, monkeypatch, tmp_path):
         values = dict(line.split("=", 1) for line in output.read_text().splitlines())
         return values["profile"], json.loads(values["reuse"])
 
-    state.update(event=event, plan=plan, root=repository)
+    state.update(event=event, plan=plan, root=repository, read=read)
     return state
 
 
@@ -102,7 +126,8 @@ def test_identical_actual_tree_reuses_full_success_and_validates_again(evidence)
     profile, proof = evidence["plan"]()
     assert profile == "reuse"
     assert proof == {"run_id": 101, "attempt": 2, "tree": evidence["record"]["tree"]}
-    assert len(evidence["calls"]) == 5
+    assert len(evidence["calls"]) == 6
+    assert evidence["calls"][-1].endswith("/artifacts/301/zip")
     assert ci_reuse.validate_reuse({"CI_REUSE": json.dumps(proof), "GITHUB_EVENT_NAME": "push"},
                                   root=evidence["root"]) == proof
 
@@ -120,7 +145,8 @@ def test_identical_actual_tree_reuses_full_success_and_validates_again(evidence)
     ("record", "profile", "reuse"), ("record", "repository", "other/repository"),
     ("record", "run_id", 100), ("record", "attempt", 1),
     ("record", "event", "push"), ("record", "version", 1),
-    ("record", "version", 3), ("record", "profile", "selected"),
+    ("record", "version", 2), ("record", "version", 4), ("record", "profile", "selected"),
+    ("record", "container_images", None),
     ("record", "coverage", {"windows_product": False, "windows_browser": True}),
     ("record", "coverage", {"windows_product": True, "windows_browser": False}),
     ("record", "coverage", None),
@@ -228,11 +254,14 @@ def test_record_cli_captures_real_tree_only_for_full_success(repository, monkeyp
                         "GITHUB_REPOSITORY": "synthetic/repository", "GITHUB_RUN_ID": "101",
                         "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "pull_request"}.items():
         monkeypatch.setenv(name, value)
+    monkeypatch.setenv("CI_IMAGES_ARTIFACT_ID", "301")
+    monkeypatch.setenv("CI_IMAGES_ARTIFACT_DIGEST", "a" * 64)
     monkeypatch.setattr(sys, "argv", ["ci_reuse.py", "record"])
     ci_reuse.main()
     record = json.loads((repository / ".local/ci/verified-tree.json").read_text())
     assert record["profile"] == "full" and record["attempt"] == 2
     assert record["tree"] == target["tree"] and record["commit"] == target["commit"]
+    assert record["version"] == 3 and record["container_images"]["id"] == 301
     monkeypatch.setenv("CI_PROFILE", "reuse")
     with pytest.raises(ValueError, match="full run"):
         ci_reuse.main()
@@ -256,3 +285,85 @@ def test_old_two_shard_receipt_cannot_replace_four_shard_validation(evidence):
                                 if not job["name"].endswith((", 2)", ", 3)"))]
     evidence["jobs"]["total_count"] = len(evidence["jobs"]["jobs"])
     assert evidence["plan"]() == ("full", None)
+
+
+def main_reuse(evidence):
+    evidence["main"] = {**evidence["run"], "id": 201, "run_attempt": 1, "event": "push",
+                        "head_branch": "main", "head_sha": evidence["event"]["after"]}
+    evidence["validation"] = {
+        "passed": True, "profile": "reuse", "commit": evidence["event"]["after"],
+        "tree": evidence["record"]["tree"], "run_id": "201", "attempt": "1",
+        "reuse": {"run_id": 101, "attempt": 2, "tree": evidence["record"]["tree"]},
+    }
+
+
+@pytest.mark.parametrize("branch", ["main", "feature"])
+def test_direct_full_push_requires_default_branch_and_original_images(evidence, branch):
+    evidence["run"].update(event="push", head_branch=branch)
+    evidence["record"]["event"] = "push"
+    result = ci_reuse.verified_run(
+        evidence["run"], "synthetic/repository", evidence["run"]["head_sha"],
+        {"tree": evidence["record"]["tree"]}, evidence["read"], datetime.now(UTC),
+        expected_event="push",
+    )
+    assert (result is not None) == (branch == "main")
+
+
+def test_main_consumer_cli_follows_original_full_artifacts_without_build(
+    evidence, tmp_path, monkeypatch, capsys,
+):
+    main_reuse(evidence)
+    calls = []
+    components = evidence["runtime"]["metadata"]["components"]
+
+    def runner(arguments, *, output=None):
+        calls.append(arguments)
+        if arguments[0] == "gh":
+            output.write(evidence["runtime"]["payloads"][int(arguments[-1].split("/")[-2])])
+        elif "load" in arguments:
+            return b"loaded"
+        else:
+            assert arguments[:3] == ["docker", "image", "inspect"]
+            return json.dumps([{"Id": arguments[-1], "Os": "linux",
+                                "Architecture": "amd64"}]).encode()
+
+    consume = images.consume
+    monkeypatch.setattr(images, "consume", lambda repo, run_id, dest, previous_run=None: consume(
+        repo, run_id, dest, previous_run=previous_run, read=evidence["read"], runner=runner))
+    monkeypatch.setattr(sys, "argv", ["ci_container_artifacts.py", "consume", "--repository",
+                                    "synthetic/repository", "--run-id", "201", "--destination",
+                                    str(tmp_path / "consumed")])
+    images.main()
+    report = json.loads((tmp_path / "consumed/consumed-images.json").read_text())
+    assert report["original_full_proof"]["run_id"] == 101
+    assert report["build_performed"] is False and report["registry_manifest_digest"] is None
+    assert {name: item["image_id"] for name, item in report["components"].items()} == {
+        name: item["image_id"] for name, item in components.items()}
+    assert len(calls) == 9 and not any("build" in call for call in calls)
+    assert '"build_performed": false' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("fault", [
+    "selected", "failed-source", "changed-attempt", "wrong-parent", "wrong-main-run",
+    "wrong-main-tree", "expired-archive", "missing-images",
+])
+def test_main_consumer_rejects_unverified_chain_before_docker(evidence, fault):
+    main_reuse(evidence)
+    if fault == "selected":
+        evidence["validation"]["profile"] = "selected"
+    elif fault == "failed-source":
+        evidence["run"]["conclusion"] = "failure"
+    elif fault == "changed-attempt":
+        evidence["run"]["run_attempt"] = 3
+    elif fault == "wrong-parent":
+        evidence["preview_parents"][1]["sha"] = "f" * 40
+    elif fault == "wrong-main-run":
+        evidence["validation"]["run_id"] = "202"
+    elif fault == "wrong-main-tree":
+        evidence["validation"]["tree"] = "f" * 40
+    elif fault == "expired-archive":
+        evidence["runtime"]["artifacts"][1]["expired"] = True
+    else:
+        evidence["record"]["container_images"] = None
+    with pytest.raises(ValueError, match="PUBLIC_IMAGE_"):
+        images.resolve_source("synthetic/repository", 201, read=evidence["read"])

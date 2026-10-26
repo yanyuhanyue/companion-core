@@ -295,6 +295,16 @@ def main():
             selection = {"product": args.profile == "full", "browser": args.profile == "full",
                          "reason": args.profile}
         passed = valid_selection(selection) and check_results(args.profile, needs, selection)
+        image_artifact = None
+        if args.profile == "full":
+            if __package__:
+                from .ci_container_artifacts import metadata_reference
+            else:
+                from ci_container_artifacts import metadata_reference
+            try:
+                image_artifact = metadata_reference()
+            except (KeyError, TypeError, ValueError):
+                passed = False
         try:
             reuse = json.loads(os.environ.get("CI_REUSE", "null"))
         except ValueError:
@@ -310,7 +320,8 @@ def main():
                               for job in ("preflight", "quality", *FULL_JOBS)},
                    "expected": expected_results(args.profile, selection)
                    if valid_selection(selection) else {},
-                   "reuse": reuse, "timings": job_timings(),
+                   "reuse": reuse, "container_images": image_artifact,
+                   "timings": job_timings(),
                    "run_id": os.environ.get("GITHUB_RUN_ID"),
                    "attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}
         path = ROOT / ".local/ci/validation.json"

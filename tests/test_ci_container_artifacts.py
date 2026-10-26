@@ -1,0 +1,360 @@
+"""Bind public runtime archives to the original full run without a consumer build."""
+
+import gzip
+import hashlib
+import io
+import json
+import subprocess
+import zipfile
+from copy import deepcopy
+from pathlib import Path
+
+import pytest
+import yaml
+
+from scripts import ci_container_artifacts as images
+from scripts import ci_reuse
+from tests.test_ci_policy import commit, git
+
+
+def zipped(name, payload):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(name, payload)
+    return output.getvalue()
+
+
+def seal_metadata(state):
+    payload = zipped(images.MANIFEST, json.dumps(state["metadata"]))
+    digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+    state["reference"]["digest"] = digest
+    state["artifacts"][0]["digest"] = digest
+    state["artifacts"][0]["size_in_bytes"] = len(payload)
+    state["payloads"][301] = payload
+
+
+def runtime_evidence(record):
+    """Small synthetic API artifacts; Docker transport is mocked in these tests."""
+    source = {key: record[key] for key in ("commit", "tree", "repository", "run_id", "attempt")}
+    state = {"metadata": {"kind": images.KIND, **source, "components": {}},
+             "reference": {"id": 301, "name": "ci-container-images-2", "digest": ""},
+             "artifacts": [{"id": 301, "name": "ci-container-images-2", "expired": False}],
+             "payloads": {}}
+    for number, name in enumerate(images.COMPONENTS, 302):
+        data = gzip.compress(("SYNTHETIC_DOCKER_TRANSPORT_" + name).encode())
+        payload = zipped(name + ".tar.gz", data)
+        ref = {"id": number, "name": f"runtime-image-{name}-2",
+               "digest": "sha256:" + hashlib.sha256(payload).hexdigest()}
+        state["artifacts"].append({**ref, "expired": False, "size_in_bytes": len(payload)})
+        state["payloads"][number] = payload
+        state["metadata"]["components"][name] = {
+            "component": name, "commit": record["commit"], "tree": record["tree"],
+            "image_id": "sha256:" + str(number - 301) * 64,
+            "config_digest": "sha256:" + str(number - 301) * 64,
+            "platform": "linux/amd64", "registry_manifest_digest": None, "artifact": ref,
+            "archive": {"filename": name + ".tar.gz", "bytes": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest()},
+        }
+    seal_metadata(state)
+    return state
+
+
+@pytest.fixture
+def retained():
+    return runtime_evidence({"commit": "a" * 40, "tree": "b" * 40,
+                             "repository": "synthetic/repository", "run_id": 101, "attempt": 2})
+
+
+def verify(state):
+    return images.verified_metadata(
+        state["reference"], state["artifacts"],
+        lambda path, **_: state["payloads"][int(path.split("/")[-2])],
+        "synthetic/repository", {"repository": "synthetic/repository", "commit": "a" * 40,
+                                 "tree": "b" * 40, "run_id": 101, "attempt": 2},
+    )
+
+
+@pytest.mark.parametrize("fault", [
+    "metadata-bytes", "archive-expired", "archive-retargeted", "missing-archive", "duplicate-id",
+    "wrong-tree", "wrong-platform", "fake-registry-digest", "wrong-config-id", "traversal",
+    "extra-component", "selected-source", "null-image-id",
+])
+def test_retained_metadata_rejects_tamper_incomplete_and_unbound_images(retained, fault):
+    component = retained["metadata"]["components"]["core"]
+    if fault == "metadata-bytes":
+        retained["payloads"][301] += b"changed"
+    elif fault == "archive-expired":
+        retained["artifacts"][1]["expired"] = True
+    elif fault == "archive-retargeted":
+        retained["artifacts"][1]["digest"] = "sha256:" + "f" * 64
+    elif fault == "missing-archive":
+        retained["artifacts"].pop()
+    elif fault == "duplicate-id":
+        retained["artifacts"].append(deepcopy(retained["artifacts"][1]))
+    else:
+        if fault == "wrong-tree":
+            component["tree"] = "c" * 40
+        elif fault == "wrong-platform":
+            component["platform"] = "linux/arm64"
+        elif fault == "fake-registry-digest":
+            component["registry_manifest_digest"] = component["image_id"]
+        elif fault == "wrong-config-id":
+            component["config_digest"] = "sha256:" + "f" * 64
+        elif fault == "traversal":
+            component["archive"]["filename"] = "../core.tar.gz"
+        elif fault == "extra-component":
+            retained["metadata"]["components"]["executor"] = deepcopy(component)
+        elif fault == "selected-source":
+            retained["metadata"]["run_id"] = 102
+        else:
+            component["image_id"] = None
+        seal_metadata(retained)
+    with pytest.raises(ValueError, match="PUBLIC_IMAGE_"):
+        verify(retained)
+
+
+def test_consumer_checks_hashes_then_loads_exact_id_without_build(retained, tmp_path):
+    component = verify(retained)["components"]["core"]
+    calls = []
+
+    def runner(arguments, *, output=None):
+        calls.append(arguments)
+        if arguments[0] == "gh":
+            output.write(retained["payloads"][302])
+            return None
+        if arguments[:3] == ["docker", "image", "load"]:
+            return b"loaded"
+        assert arguments == ["docker", "image", "inspect", component["image_id"]]
+        return json.dumps([{"Id": component["image_id"], "Os": "linux",
+                            "Architecture": "amd64"}]).encode()
+
+    archive, seconds = images.download_archive("synthetic/repository", component, tmp_path,
+                                                runner=runner)
+    assert seconds >= 0 and images.load_archive(component, archive, runner=runner) == (
+        component["image_id"])
+    assert len(calls) == 3 and not any("build" in call for call in calls)
+    archive.write_bytes(archive.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="ARCHIVE_DIGEST_CHANGED"):
+        images.load_archive(component, archive, runner=runner)
+    assert len(calls) == 3  # A bad archive never reaches the daemon.
+
+
+@pytest.mark.parametrize("fault", ["zip-digest", "loaded-id", "loaded-platform"])
+def test_consumer_fails_closed_without_a_rebuild_fallback(retained, tmp_path, fault):
+    component = verify(retained)["components"]["core"]
+    calls = []
+
+    def runner(arguments, *, output=None):
+        calls.append(arguments)
+        if arguments[0] == "gh":
+            output.write(retained["payloads"][302] + (b"changed" if fault == "zip-digest" else b""))
+        elif "load" in arguments:
+            return b"loaded"
+        else:
+            return json.dumps([{"Id": "sha256:" + "f" * 64 if fault == "loaded-id"
+                               else component["image_id"], "Os": "linux",
+                               "Architecture": "arm64" if fault == "loaded-platform"
+                               else "amd64"}]).encode()
+
+    with pytest.raises(ValueError, match="DIGEST_CHANGED|IDENTITY_CHANGED"):
+        archive, _ = images.download_archive("synthetic/repository", component, tmp_path,
+                                             runner=runner)
+        images.load_archive(component, archive, runner=runner)
+    assert not any("build" in call for call in calls)
+
+
+def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expansion(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    git(root, "init", "-q")
+    for spec in images.COMPONENTS.values():
+        recipe = root / spec["recipe"]
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text("FROM synthetic\nCOPY " + " ".join(sorted(spec["copies"])) + " /app\n")
+    # Source-shaped files suffice; the test exercises Git archive and COPY boundaries.
+    for spec in images.COMPONENTS.values():
+        for name in spec["copies"]:
+            path = root / name
+            if not path.suffix:
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "public.txt").write_text("public input")
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                path.write_text("public input")
+    commit(root)
+    (root / "config.toml").write_bytes(images.CANARY)
+    (root / ".env").write_bytes(images.CANARY)
+    context = tmp_path / "public" / "source"
+    images.prepare_context(context, root=root)
+    assert not (context / "config.toml").exists() and not (context / ".env").exists()
+    canary = context / "source_reader/public.txt"
+    canary.write_bytes(images.CANARY)
+    with pytest.raises(ValueError, match="PACKAGING_CANARY"):
+        images.check_public_inputs(context)
+    canary.unlink()
+    (context / "Dockerfile").write_text("FROM synthetic\nCOPY . /app\n")
+    with pytest.raises(ValueError, match="COPY_INPUTS_CHANGED"):
+        images.check_public_inputs(context)
+
+
+@pytest.mark.parametrize("value", [
+    "private.key", "config.toml", ".env.production", "dump.sqlite3", "client.pem", "runtime.log",
+    "keys/nested.txt", "CONFIG.TOML",
+])
+def test_public_copy_inputs_reject_nested_private_files(tmp_path, value):
+    # Use the actual reviewed recipes and all inputs without invoking Docker.
+    for spec in images.COMPONENTS.values():
+        recipe = tmp_path / spec["recipe"]
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_bytes((images.ROOT / spec["recipe"]).read_bytes())
+        for name in spec["copies"]:
+            path = tmp_path / name
+            if Path(name).suffix:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    path.write_text("public")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+    private = tmp_path / "source_reader" / value
+    private.parent.mkdir(parents=True, exist_ok=True)
+    private.write_text("private")
+    with pytest.raises(ValueError, match="PRIVATE_INPUT"):
+        images.check_public_inputs(tmp_path)
+
+
+@pytest.mark.parametrize("fault", ["env", "history", "platform"])
+def test_image_privacy_validation_rejects_credential_canaries_without_echo(fault, capsys):
+    canary = "SYNTHETIC_PRIVATE_VALUE_DO_NOT_ECHO"
+    document = {"Id": "sha256:" + "a" * 64, "Os": "linux", "Architecture": "amd64",
+                "Config": {"Env": ["PYTHON_VERSION=3.12"]}}
+    if fault == "env":
+        document["Config"]["Env"].append("COMPANION_TOKEN=" + canary)
+    if fault == "platform":
+        document["Architecture"] = "arm64"
+
+    def runner(arguments):
+        return (json.dumps([document]).encode() if "inspect" in arguments else
+                ("RUN password=" + canary if fault == "history" else "RUN public").encode())
+
+    with pytest.raises(ValueError, match="PUBLIC_IMAGE_") as error:
+        images.inspect_image("core", runner=runner)
+    assert canary not in str(error.value) + capsys.readouterr().out
+
+
+def test_export_captures_validated_image_ids_and_actual_archive_sizes(tmp_path, monkeypatch):
+    monkeypatch.setattr(images, "source_identity", lambda _: {"commit": "a", "tree": "b"})
+    monkeypatch.setattr(images, "inspect_image", lambda name, **_: {"Id": "sha256:" + name})
+    captured = {name: {"component": name, "commit": "a", "tree": "b",
+                       "image_id": "sha256:" + name} for name in images.COMPONENTS}
+    calls = []
+
+    def save(arguments):
+        calls.append(arguments)
+        assert arguments[:3] == ["docker", "image", "save"]
+        Path(arguments[4]).write_bytes(b"SYNTHETIC_ARCHIVE" * 100)
+
+    metadata = images.export_images(captured, tmp_path, runner=save)
+    assert len(calls) == 3 and all(call[-1] == captured[name]["image_id"]
+                                   for call, name in zip(calls, captured, strict=True))
+    for name, component in metadata["components"].items():
+        compressed = tmp_path / (name + ".tar.gz")
+        assert component["archive"]["bytes"] == compressed.stat().st_size
+        assert component["archive"]["uncompressed_bytes"] == 1700
+        assert not (tmp_path / (name + ".tar")).exists()
+    captured["core"]["image_id"] = "changed-after-smoke"
+    with pytest.raises(ValueError, match="CHANGED_AFTER_VALIDATION"):
+        images.export_images(captured, tmp_path, runner=save)
+    assert len(calls) == 3
+
+
+def test_local_load_checks_all_exported_archives_before_upload(retained, tmp_path):
+    images.write_json(tmp_path / images.MANIFEST, retained["metadata"])
+    for name, component in retained["metadata"]["components"].items():
+        payload = retained["payloads"][component["artifact"]["id"]]
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            (tmp_path / (name + ".tar.gz")).write_bytes(archive.read(name + ".tar.gz"))
+    calls = []
+
+    def runner(arguments):
+        calls.append(arguments)
+        if "load" in arguments:
+            return b"loaded"
+        assert arguments[:3] == ["docker", "image", "inspect"]
+        return json.dumps([{"Id": arguments[-1], "Os": "linux",
+                            "Architecture": "amd64"}]).encode()
+
+    result = images.load_local(tmp_path / images.MANIFEST, runner=runner)
+    assert set(result) == set(images.COMPONENTS) and len(calls) == 6
+    assert not any("build" in command for command in calls)
+    assert json.loads((tmp_path / "local-load.json").read_text())["build_performed"] is False
+
+
+def test_build_uses_public_identity_and_native_compose_cache_without_second_build(
+    tmp_path, monkeypatch,
+):
+    context, cache = tmp_path / "public", tmp_path / "cache"
+    context.mkdir()
+    source = {"commit": "a", "tree": "b"}
+    images.write_json(context.parent / "public-context.json", source)
+    monkeypatch.setattr(images, "source_identity", lambda _: source)
+    calls = []
+
+    def runner(arguments):
+        calls.append(arguments)
+        images.write_json(cache / "bridge-next/index.json", {"cache": "synthetic"})
+
+    def capture(name, *, root, runner, identity):
+        assert name == "bridge" and root == context and identity == source
+        return {**identity, "image_id": "sha256:" + "a" * 64}
+
+    monkeypatch.setattr(images, "capture", capture)
+    result = images.build_component("bridge", context, cache, runner=runner)
+    assert len(calls) == 1 and calls[0][:2] == ["docker", "compose"]
+    assert str(context / "deploy/compose.onebot-build.yaml") in calls[0]
+    assert calls[0][-4:] == ["build", "--builder", "companion-ci", "onebot-bridge"]
+    assert result["dependency_cache"]["configured_import_index_sha256"] is None
+    images.build_component("bridge", context, cache, runner=runner)
+    override = json.loads((tmp_path / "bridge-cache.json").read_text())
+    assert override["services"]["onebot-bridge"]["build"]["cache_from"] == [
+        "type=local,src=" + str(cache / "bridge")]
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("endpoint", ["ssh://host", "tcp://127.0.0.1:2375", "unix://relative"])
+def test_daemon_boundary_never_uses_a_remote_context(monkeypatch, endpoint):
+    images.local_context.cache_clear()
+    monkeypatch.setattr(images.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, stdout=json.dumps(endpoint).encode()))
+    try:
+        with pytest.raises(ValueError, match="LOCAL_CONTEXT_REQUIRED"):
+            images.local_context()
+    finally:
+        images.local_context.cache_clear()
+
+
+def test_workflow_exports_only_after_all_existing_smokes_and_never_publishes_from_pr():
+    workflow = yaml.load((images.ROOT / ci_reuse.WORKFLOW).read_text(), Loader=yaml.BaseLoader)
+    jobs = workflow["jobs"]
+    assert workflow["permissions"] == {"contents": "read"}
+    assert all("packages" not in job.get("permissions", {}) for job in jobs.values())
+    steps = jobs["container"]["steps"]
+    commands = [step.get("run", "") for step in steps]
+    exported = next(i for i, command in enumerate(commands) if "artifacts.py export " in command)
+    loaded = next(i for i, command in enumerate(commands) if "artifacts.py load " in command)
+    assert exported < loaded
+    assert all(i < exported for i, command in enumerate(commands)
+               if "docker run" in command or "smoke_" in command)
+    assert any("smoke_dev_compose --context default --image" in c for c in commands)
+    assert any("deploy/executor.Dockerfile" in c for c in commands)
+    assert any("deploy/file-parser.Dockerfile" in c for c in commands)
+    for name in images.COMPONENTS:
+        assert sum(f"artifacts.py build {name} " in command for command in commands) == 1
+        upload = next(step for step in steps if step.get("id") == name + "-image")
+        assert loaded < steps.index(upload)
+        assert upload["if"] == "${{ needs.preflight.outputs.profile == 'full' }}"
+        assert upload["with"]["path"] == f".local/container-images/{name}.tar.gz"
+        assert upload["with"]["compression-level"] == "0"
+    assert "images-artifact-id" in jobs["container"]["outputs"]
+    assert jobs["ci"]["env"]["CI_IMAGES_ARTIFACT_ID"] == (
+        "${{ needs.container.outputs.images-artifact-id }}")
