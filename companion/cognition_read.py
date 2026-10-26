@@ -40,15 +40,34 @@ def object_value(value):
 
 
 def measurement(value):
-    receipt = object_value(value)
+    if not value:
+        return {"state": "NOT_RECORDED"}
+    try:
+        if not isinstance(value, str) or len(value) > 16384:
+            raise ValueError
+        receipt = json.loads(value)
+        if not isinstance(receipt, dict):
+            raise ValueError
+    except (ValueError, TypeError, RecursionError):
+        return {"state": "INCONSISTENT"}
     if not receipt:
         return {"state": "NOT_RECORDED"}
-    result = {"state": "RECORDED", "count_kind": symbol(receipt.get("count_kind"), {
+    kind = receipt.get("count_kind")
+    result = {"state": "RECORDED", "count_kind": symbol(kind if isinstance(kind, str) else None, {
         "exact_local_render", "provider_count", "estimate", "unsupported"})}
     for key in ("input_tokens", "reservation_margin", "output_allowance"):
         number = receipt.get(key)
         result[key] = number if type(number) is int and number >= 0 else None
     return result
+
+
+def observed_usage(row, admission):
+    """Distinguish valid paid usage from demo, reservations and proven zero I/O."""
+    return bool(row["state"] == "SETTLED" and admission and admission["io_started_at"]
+                and all(type(row[key]) is int and row[key] > 0
+                        for key in ("input_tokens", "output_tokens"))
+                and type(row["cached_input_tokens"]) is int
+                and 0 <= row["cached_input_tokens"] <= row["input_tokens"])
 
 
 def decision_reason(row, settings):
@@ -211,10 +230,12 @@ class CognitionRead:
                 "input_tokens", "cached_input_tokens", "output_tokens", "billed_micro_usd",
                 "is_estimate")}
             admission = self.store.one(
-                "SELECT measurement_json FROM model_admissions WHERE request_id=?",
+                "SELECT measurement_json,io_started_at FROM model_admissions WHERE request_id=?",
                 (row["request_id"],),
             )
             item["measurement"] = measurement(admission and admission["measurement_json"])
+            item["usage"]["observed"] = observed_usage(row, admission)
+            item["context_regions"] = item["trimming_reason"] = "NOT_RECORDED"
             item["job_id"] = row["job_id"]
         if kind in {"diary", "reflection"}:
             item["model_request_id"] = row["model_request_id"]

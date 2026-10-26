@@ -5,8 +5,6 @@ import base64
 import hashlib
 import io
 import json
-import time
-from datetime import timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -21,29 +19,11 @@ from companion_onebot_bridge import app, images
 from companion_onebot_bridge.event_normalizer import normalize
 from companion_onebot_bridge.pending_media import MediaPump
 from tests.conftest import run
-from tests.native_continuous_support import host, until
+from tests.native_continuous_support import frame, host, until
 from tests.test_image_connect_recovery import ConnectThenGet
 from tests.test_live_image_input import options as image_options
 from tests.test_onebot_direct import config, raw_event
 from tests.test_onebot_images import image_segment
-
-
-class AdvancingClock:
-    """The multi-turn source's wall clock must advance with its real socket waits."""
-
-    def __init__(self, now):
-        self.now = now
-
-    @property
-    def now(self):
-        return self.anchor + timedelta(seconds=time.monotonic() - self.started)
-
-    @now.setter
-    def now(self, value):
-        self.anchor, self.started = value, time.monotonic()
-
-    def __call__(self):
-        return self.now.isoformat(timespec="microseconds")
 
 
 def animation(format="GIF", *, count=3, size=(12, 8)):
@@ -148,8 +128,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
         segment = image_segment("https://gchat.qpic.cn/animation")
         segment["data"].update(sub_type=subtype, file="owner-animation",
                                summary="synthetic-summary-not-visual-evidence")
-        await ws.send(json.dumps(raw_event(1, time=int(core.clock.now.timestamp()),
-                                          message=[segment])))
+        await ws.send(frame(1, message=[segment]))
         closed = asyncio.create_task(ws.wait_closed())
         next_turn = asyncio.create_task(next_input.wait())
         try:
@@ -160,8 +139,7 @@ def test_real_api_and_independent_worker_reply_to_animation_then_continue_semant
             closed.cancel()
             next_turn.cancel()
             await asyncio.gather(closed, next_turn, return_exceptions=True)
-        await ws.send(json.dumps(raw_event(2, time=int(core.clock.now.timestamp()),
-                                          text="接着刚才的话题聊")))
+        await ws.send(frame(2, text="接着刚才的话题聊"))
         await ws.wait_closed()
 
     def construct(*args, **kwargs):

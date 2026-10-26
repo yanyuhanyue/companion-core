@@ -322,6 +322,10 @@ class OwnerOneBot:
     async def probe(self):
         return await self.delegate.probe()
 
+    def release_prepared(self):
+        if self.config.meme_catalog_owner == "core":
+            self.guard.prepared_message = None
+
     async def prepare_delivery(self, item):
         if account_actions.is_account(item):
             permission = await self.guard.runtime.check(self.guard.client,
@@ -349,7 +353,10 @@ class OwnerOneBot:
                 if journal.digest(item) != original:
                     raise ValueError("OWNER_DELIVERY_BINDING_CHANGED")
 
-            image = self.guard.runtime.memes.prepare(item, check=fence)
+            if self.config.meme_catalog_owner == "core":
+                image = await self.guard.runtime.memes.prepare(self.guard.client, item, check=fence)
+            else:
+                image = self.guard.runtime.memes.prepare(item, check=fence)
             self.guard.meme_prepared = image is not None
             message = [{"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
             if image is None:

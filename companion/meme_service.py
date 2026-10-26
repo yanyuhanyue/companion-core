@@ -112,7 +112,7 @@ def policy_hash(settings):
             or settings.meme_semantics_enabled):
         return None
     paid = settings.paid_model
-    return digest({
+    value = {
         "discovery": settings.meme_discovery_enabled,
         "semantics": settings.meme_semantics_enabled,
         "expression": settings.expression_enabled,
@@ -124,11 +124,21 @@ def policy_hash(settings):
             "expression_selection_probability", "expression_cooldown_minutes",
             "expression_meme_categories",
         )},
-    })
+    }
+    owner = getattr(settings, "meme_catalog_owner", "bridge")
+    rules = getattr(settings, "meme_trusted_sources", ())
+    cooldown = getattr(settings, "meme_cooldown_seconds", 1800)
+    if owner != "bridge" or rules or cooldown != 1800:
+        from companion.meme_policy import source_rules
+
+        value["catalog"] = {"owner": owner, "sources": [r.model_dump(mode="json")
+            for r in source_rules(settings)], "cooldown_seconds": cooldown}
+    return digest(value)
 
 
 def _scope(store, settings, clock):
-    if not getattr(settings, "meme_discovery_enabled", False):
+    if (getattr(settings, "meme_catalog_owner", "bridge") == "core"
+        or not getattr(settings, "meme_discovery_enabled", False)):
         raise CoreError("MEME_DISCOVERY_DISABLED", 403)
     return owner_authority.current(store, settings, clock, purpose="meme")
 

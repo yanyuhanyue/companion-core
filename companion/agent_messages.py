@@ -172,6 +172,12 @@ def to_runtime_response(response: ModelResponse, *, model_name: str,
     return ModelResponse(parts, model_name=model_name, provider_name=provider_name, usage=usage)
 
 
+def request_wire(messages, parameters):
+    """The same resolved instructions and messages for planning and model dispatch."""
+    return [*({"role": "system", "content": part.content}
+              for part in parameters.instruction_parts or []), *to_wire_messages(messages)]
+
+
 def estimate_messages(messages, tools=()):
     """Map only for the existing estimator; never rewrite the actual provider payload."""
     result = []

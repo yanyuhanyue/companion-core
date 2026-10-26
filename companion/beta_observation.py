@@ -9,6 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
+from companion.cognition_read import measurement, observed_usage
 from companion.contracts import CoreError
 from companion.ops_status import _ReadView, schema_head
 from companion.paid_budget import sha
@@ -44,7 +45,7 @@ def _context(view, job_id, current_epoch):
     row = view.one("SELECT value FROM runtime_meta WHERE key=?",
                    ("live_text_context:" + job_id,))
     if row is None:
-        return {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+        return _native_context(view, job_id, current_epoch)
     if len(row["value"]) > 131072:
         raise ValueError("CONTEXT_TOO_LARGE")
     value = json.loads(row["value"])
@@ -87,6 +88,44 @@ def _context(view, job_id, current_epoch):
             )},
         } for source in images],
     }
+
+
+def _native_context(view, job_id, current_epoch):
+    from companion.context_planner import check_bound
+
+    result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+    row = view.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?", (job_id,))
+    if row is None:
+        return result
+    try:
+        if len(row["snapshots_json"]) > 1048576:
+            raise ValueError
+        snapshots = json.loads(row["snapshots_json"])
+        entries = [item for item in snapshots if item["kind"] == "context_plan"]
+        if len(entries) == 1:
+            metadata = entries[0]["metadata"]["core_context"]
+            if metadata.get("version") == 1 and metadata.get("privacy_epoch") != current_epoch:
+                return {**result, "state": "STALE_EPOCH"}
+        job = view.one("SELECT job_id,authority_json FROM jobs WHERE job_id=?", (job_id,))
+        plan = check_bound(view, job, snapshots, current_epoch)
+        if plan is None:
+            return result
+        def project(record):
+            return {"state": record["state"],
+                    "request_ref_sha256": (_hash(record["request_id"])
+                                           if record["request_id"] else None),
+                    "payload_sha256": record["payload_sha256"],
+                    "measurement_sha256": record["measurement_sha256"],
+                    "selected_group_count": len(record["selected"]),
+                    "dropped": record["dropped"]}
+        return {**result, "state": "RECORDED", "privacy_epoch": plan["privacy_epoch"],
+                "plan_sha256": sha(plan), "payload_sha256": (
+                    plan["requests"][-1]["payload_sha256"] if plan["requests"] else None),
+                "groups": dict(Counter(group["kind"] for group in plan["groups"])),
+                "requests": [project(record) for record in plan["requests"]],
+                "pending": project(plan["pending"]) if plan["pending"] else None}
+    except (CoreError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return {**result, "state": "INCONSISTENT"}
 
 
 def _memory_selection(view, job_id, event_id, current_epoch):
@@ -258,7 +297,8 @@ def _trace(view, trace_id):
             "SELECT m.request_id,m.state,m.scenario,m.input_tokens,m.cached_input_tokens,"
             "m.output_tokens,a.logical_request_id,"
             "m.billed_micro_usd,m.pricing_known,a.io_started_at,a.attempt_number,"
-            "a.reserved_micro_usd FROM model_usage m LEFT JOIN model_admissions a "
+            "a.reserved_micro_usd,a.measurement_json "
+            "FROM model_usage m LEFT JOIN model_admissions a "
             "USING(request_id) WHERE m.job_id=? ORDER BY m.rowid LIMIT 101", (job["job_id"],),
         )
         if len(usage) > 100:
@@ -266,7 +306,7 @@ def _trace(view, trace_id):
         calls = []
         for row in usage:
             # RESERVED/UNKNOWN tokens may be estimates. Demo calls are never real usage proof.
-            actual = row["state"] == "SETTLED" and row["io_started_at"] is not None
+            actual = observed_usage(row, row)
             calls.append({
                 "request_ref_sha256": _hash(row["request_id"]),
                 "logical_request_ref_sha256": (
@@ -284,6 +324,8 @@ def _trace(view, trace_id):
                 ),
                 "accounted_or_reserved_micro_usd": _number(row["billed_micro_usd"]),
                 "reservation_micro_usd": _number(row["reserved_micro_usd"]),
+                "measurement": measurement(row["measurement_json"]),
+                "context_regions": "NOT_RECORDED", "trimming_reason": "NOT_RECORDED",
             })
         inspected.append({
             "job_ref_sha256": _hash(job["job_id"]),
