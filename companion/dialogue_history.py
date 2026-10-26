@@ -184,9 +184,12 @@ def fit_context(rules, references, turns, current_input, soft_limit, *, settings
     def count():
         if settings is None:
             return token_upper_bound(messages)
+        from companion.context_planner import pressure
         from companion.token_measurement import measure_request
 
-        return measure_request(settings, messages, scenario).reserved_input_tokens
+        measured = measure_request(settings, messages, scenario)
+        return soft_limit + 1 if pressure(settings, measured, soft_limit=soft_limit,
+                                         scenario=scenario) else 0
 
     while groups and count() > soft_limit:
         del messages[1 : 1 + len(groups.pop(0))]
