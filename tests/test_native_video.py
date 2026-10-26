@@ -59,7 +59,7 @@ def test_native_sdk_motion_tool_uses_real_video_and_original_ledger(core, tmp_pa
             requests = json.loads(output.read_text(encoding="utf-8"))
             assert len(requests) == 3
             assert "understand_video" in encode(requests[0]["tools"])
-            assert "首帧预览" in encode(requests[0]["messages"])
+            assert "抽样预览" in encode(requests[0]["messages"])
             assert requests[1]["model"] == core.settings.paid_model.video_input.model
             parts = requests[1]["messages"][0]["content"]
             videos = [part for part in parts if part["type"] == "video_url"]
