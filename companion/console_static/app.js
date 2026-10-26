@@ -420,10 +420,39 @@ const DETAIL_LABELS = {
 };
 
 /* ================= 会话、导航与读取 ================= */
+const TODAY_MODEL_PAGES = 10;
+/**
+ * 今天的模型调用：按 next_cursor 往前读，直到一页里出现今天以前的记录或没有更早记录。
+ * 空页不代表没有调用（失效来源会被服务端滤掉），只要还有游标就继续读。
+ * 读到上限或无法确认今天的日期时 complete=false，界面写明统计不完整，不报零。
+ * 各页隐私版本不同、游标失效或隐私版本变化时，从第一页重读一次。
+ */
+async function todayModelCalls(signal, today) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const items = [], seen = new Set();
+      let page = null, cursor = null, epoch, complete = false;
+      for (let n = 0; n < TODAY_MODEL_PAGES; n++) {
+        page = await api.get("/cognition?kind=model&limit=50" + (cursor ? "&before=" + encodeURIComponent(cursor) : ""), signal);
+        if (n === 0) epoch = page.privacy_epoch;
+        else if (page.privacy_epoch !== epoch) throw new ApiError("PRIVACY_CHANGED", 409);
+        for (const i of page.items || []) if (i && !seen.has(String(i.id))) { seen.add(String(i.id)); items.push(i); }
+        const older = (page.items || []).some(i => valid(i?.occurred_at) && today && localDay(i.occurred_at) < today);
+        if (!page.next_cursor || older) { complete = !!today; break; }
+        cursor = page.next_cursor;
+      }
+      return { items, complete, privacy_epoch: epoch, as_of: page?.as_of };
+    } catch (error) {
+      if (!["PRIVACY_CHANGED", "COGNITION_CURSOR_UNAVAILABLE"].includes(error.code) || attempt > 0) throw error;
+    }
+  }
+}
 const LOADERS = {
   overview: async signal => {
-    const [o, a, d, c, m] = await Promise.allSettled([api.get("/overview", signal), api.get("/activity?limit=60", signal),
-      api.get("/diagnostics", signal), api.get("/configuration", signal), api.get("/cognition?kind=model&limit=50", signal)]);
+    const overview = api.get("/overview", signal);
+    const [o, a, d, c, m] = await Promise.allSettled([overview, api.get("/activity?limit=60", signal),
+      api.get("/diagnostics", signal), api.get("/configuration", signal),
+      overview.then(v => { if (v.budget?.timezone) state.tz = v.budget.timezone; return todayModelCalls(signal, v.budget?.local_day); })]);
     if (o.status !== "fulfilled") throw o.reason;
     return { ...o.value, recent: a.status === "fulfilled" ? a.value : null, diagnostics: d.status === "fulfilled" ? d.value : null,
       configuration: c.status === "fulfilled" ? c.value : null, model: m.status === "fulfilled" ? m.value : null };
@@ -634,10 +663,9 @@ PAGES.overview = data => {
 function tokenCard(page, today) {
   const more = el("a", { class: "link", href: "#thinking", onclick: () => { state.cogKind = "model"; state.cogSel = null; } }, "查看明细", icon("arrow"));
   if (!page) return sheet("今日 Token 统计", el("p", { class: "note" }, "模型调用记录暂时读不到，可以稍后刷新。"), more, "tok");
-  const all = (page.items || []).filter(Boolean);
-  const items = all.filter(i => valid(i.occurred_at) && localDay(i.occurred_at) === today);
-  // 一页 50 条全是今天且还有更早记录时，说明今天的调用没有全部读到
-  const partial = !!page.next_cursor && items.length === all.length && items.length > 0;
+  const items = (page.items || []).filter(i => i && valid(i.occurred_at) && localDay(i.occurred_at) === today);
+  // complete 由 todayModelCalls 判断：没读完时不把空结果当成“今天没有调用”，也不报零费用
+  const partial = page.complete !== true;
   const xs = items.map(meterOf), actual = xs.filter(x => x.actual), cacheXs = actual.filter(x => x.cacheKnown);
   const sum = (list, f) => list.reduce((s, x) => s + (f(x) || 0), 0);
   const parts = [["cached", sum(cacheXs, x => x.cached)], ["fresh", sum(cacheXs, x => x.input - x.cached)],
@@ -649,14 +677,15 @@ function tokenCard(page, today) {
   const anim = state.tokenAnim !== state.updatedAt && motionOk();
   const stat = (n, v, sub, count) => el("div", { class: "tok-stat" }, el("span", {}, n), el("b", { class: "num", "data-count": count ?? null }, v), sub ? el("small", {}, sub) : null);
   return sheet("今日 Token 统计", [
-    el("div", { class: "m-donut" }, donut(shown, tk(total), actual.length ? "实际总量" : items.length ? "未记录" : "今天还没有", actual.length ? total : null),
+    partial ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "今天的调用没有全部读到，下面的数字不完整。")) : null,
+    el("div", { class: "m-donut" }, donut(shown, tk(total), actual.length ? (partial ? "已读到的总量" : "实际总量") : items.length ? "未记录" : partial ? "未读完" : "今天还没有", actual.length ? total : null),
       actual.length ? meterLegend(shown, total, { cached: "缓存命中", fresh: "未命中缓存", unknown: "缓存未记录", output: "输出" })
-        : el("p", { class: "note" }, items.length ? "今天的调用都没有有效的实际用量回执。" : "今天还没有模型调用。")),
+        : el("p", { class: "note" }, items.length ? "今天的调用都没有有效的实际用量回执。" : partial ? "还没读到今天的调用，不能确定今天有没有调用。" : "今天还没有模型调用。")),
     el("div", { class: "tok-stats" },
-      stat("模型调用", String(items.length), actual.length < items.length ? "实际用量已记录 " + actual.length + " 次" : null),
+      stat("模型调用", partial ? (items.length ? "≥ " + items.length : "未读完") : String(items.length), actual.length < items.length ? "实际用量已记录 " + actual.length + " 次" : null),
       stat("缓存命中", cacheIn > 0 ? pctText(hit, cacheIn) : "未记录", cacheXs.length && cacheXs.length < actual.length ? "按 " + cacheXs.length + " 次已记录的计算" : null),
-      stat("已计或预留", usd(sum(xs, x => x.billed)), unknown ? unknown + " 次结果不明" : "按配置费率估算")),
-    el("p", { class: "note mt" }, (partial ? "今天的调用较多，这里只统计了最近 " + items.length + " 次。" : "")
+      stat("已计或预留", partial && !items.length ? "未读完" : (partial ? "≥ " : "") + usd(sum(xs, x => x.billed)), unknown ? unknown + " 次结果不明" : partial ? "只含已读到的调用" : "按配置费率估算")),
+    el("p", { class: "note mt" }, (partial ? "已读到 " + items.length + " 次今天的调用，更早的部分没有读完。" : "")
       + "上下文分区（系统提示词、工具定义等）没有保存，这里不做拆分。")], more, "meter tok" + (anim ? " anim" : ""));
 }
 function dayStrip(items, nowMin, data) {
@@ -2018,7 +2047,7 @@ PAGES.thinking = data => {
   for (const kind of Object.keys(COGNITION_KINDS)) {
     const kindData = data[kind];
     if (kindData && kindData.items) {
-      for (const item of kindData.items) {
+      for (const item of pageRecords(kindData)) {
         allItems.push({ ...item, _kind: kind, _title: cognitionTitle(item, kind), _summary: cognitionSummary(item, kind) });
       }
     }
@@ -2524,7 +2553,8 @@ async function locateCognition(data, signal) {
   if (!(page.items || []).some(i => String(i.id) === id)) {
     const one = await cognitionPage(kind, signal, "&record_id=" + encodeURIComponent(id));
     if (!(one.items || []).length) data.locate = { kind, id, missing: true, epoch: one.privacy_epoch };
-    else { data[kind] = { ...page, items: [...one.items, ...(page.items || [])] }; data.locate = { kind, id, found: true, epoch: one.privacy_epoch }; }
+    // 单独定位到的记录放在 located 里：items 保持服务端分页顺序，排序与序号按保存时间计算
+    else { data[kind] = { ...page, located: one.items }; data.locate = { kind, id, found: true, epoch: one.privacy_epoch }; }
   }
   return data;
 }
@@ -2538,7 +2568,7 @@ async function moreCognition(kind) {
     if (epoch !== state.epoch || generation !== state.generation || state.route !== "thinking" || !state.data) return;
     if (next.privacy_epoch !== page.privacy_epoch) { await loadRoute({ reset: true }); return; }
     const seen = new Set(page.items.map(i => String(i.id)));
-    state.data[kind] = { ...next, items: [...page.items, ...(next.items || []).filter(i => !seen.has(String(i.id)))] };
+    state.data[kind] = { ...next, located: page.located, items: [...page.items, ...(next.items || []).filter(i => !seen.has(String(i.id)))] };
   } catch (error) {
     // 游标失效或隐私版本变化：丢弃已加载的分页，从首页重新读取
     if (["COGNITION_CURSOR_UNAVAILABLE", "PRIVACY_CHANGED"].includes(error.code) && epoch === state.epoch && generation === state.generation) {
@@ -2672,10 +2702,20 @@ function meterParts(x) {
     ? [["cached", x.cached], ["fresh", x.input - x.cached], ["output", x.output]]
     : [["unknown", x.input], ["output", x.output]];
 }
-/** 同一任务里的第几次调用：按服务端顺序（新到旧）倒过来数，只在已加载记录里计算 */
+/** 分页记录加上单独定位的记录，按编号去重；分页里已有的以分页为准 */
+function pageRecords(page) {
+  const items = (page?.items || []).filter(Boolean), seen = new Set(items.map(i => String(i.id)));
+  return [...items, ...(page?.located || []).filter(i => i && !seen.has(String(i.id)))];
+}
+/** 已加载的模型调用按保存时间从旧到新；时间相同或无效时保持服务端顺序（新到旧）的倒序 */
+function modelTimeline(page) {
+  const list = pageRecords(page).map((item, n) => ({ item, n, t: Date.parse(item.occurred_at) }));
+  return list.sort((a, b) => (Number.isFinite(a.t) ? a.t : -Infinity) - (Number.isFinite(b.t) ? b.t : -Infinity) || b.n - a.n).map(r => r.item);
+}
+/** 同一任务里的第几次调用：按保存时间从旧到新数，只在已加载记录里计算 */
 function jobSequence(items, sel) {
   if (!sel.job_id) return null;
-  const same = items.filter(i => i.job_id === sel.job_id).reverse();
+  const same = items.filter(i => i.job_id === sel.job_id);
   return { index: same.findIndex(i => i.id === sel.id) + 1, total: same.length };
 }
 
@@ -2698,7 +2738,8 @@ function meterLegend(parts, total, names = METER_NAMES) {
 
 /** 本页已加载的模型调用总览，放在“模型调用”筛选的列表上方 */
 function meterOverview(page) {
-  const items = (page?.items || []).filter(Boolean);
+  // 新到旧，按保存时间排；单独定位的旧记录落在它自己的时间位置上
+  const items = modelTimeline(page).reverse();
   if (!items.length) return null;
   const rows = items.map(i => ({ item: i, x: meterOf(i) }));
   const actual = rows.filter(r => r.x.actual), cacheRows = actual.filter(r => r.x.cacheKnown);
@@ -2735,15 +2776,16 @@ function meterBuckets(rows, scale) {
   const groups = new Map();
   for (const r of rows) { if (!valid(r.item.occurred_at)) continue; const k = keyOf(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
   if (!groups.size) return { trimmed: false, buckets: [] };
-  const today = localDay(new Date().toISOString()), last = scale === "day" ? today : today.slice(0, 7);
-  const first = [...groups.keys()].sort()[0];
-  const next = k => {
-    if (scale === "day") { const d = new Date(k + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); }
-    const [y, m] = k.split("-").map(Number); return m === 12 ? (y + 1) + "-01" : y + "-" + String(m + 1).padStart(2, "0");
+  // 窗口固定为截至今天的最近 30 天或 12 个月，再把已加载的记录填进去；更早的只计入 trimmed
+  const today = localDay(new Date().toISOString()), cap = scale === "day" ? 30 : 12;
+  const prev = k => {
+    if (scale === "day") { const d = new Date(k + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+    const [y, m] = k.split("-").map(Number); return m === 1 ? (y - 1) + "-12" : y + "-" + String(m - 1).padStart(2, "0");
   };
-  const keys = []; for (let k = first; k <= last && keys.length < 400; k = next(k)) keys.push(k);
-  const cap = scale === "day" ? 30 : 12;
-  return { trimmed: keys.length > cap, buckets: keys.slice(-cap).map(key => {
+  const keys = [scale === "day" ? today : today.slice(0, 7)];
+  while (keys.length < cap) keys.unshift(prev(keys[0]));
+  const trimmed = [...groups.keys()].some(k => k < keys[0]);
+  return { trimmed, buckets: keys.map(key => {
     const list = groups.get(key) || [], actual = list.filter(r => r.x.actual), sum = f => actual.reduce((s, r) => s + (f(r.x) || 0), 0);
     return { key, list, actual: actual.length,
       parts: [["cached", sum(x => x.cacheKnown ? x.cached : 0)], ["fresh", sum(x => x.cacheKnown ? x.input - x.cached : 0)],
@@ -2822,7 +2864,7 @@ function meterChart(rows) {
 
 /** 单次请求明细，用在“模型调用”记录的决策记录标签里 */
 function modelMeasurementView(sel) {
-  const x = meterOf(sel), seq = jobSequence(state.data?.model?.items || [], sel);
+  const x = meterOf(sel), seq = jobSequence(modelTimeline(state.data?.model), sel);
   const parts = meterParts(x), total = parts.reduce((s, [, v]) => s + v, 0);
   const pending = ["UNKNOWN", "RESERVED"].includes(sel.state);
   const chips = [["实际输入", x.actual ? tk(x.input) : "未记录"], ["输出", x.actual ? tk(x.output) : "未记录"],
