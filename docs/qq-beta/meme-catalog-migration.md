@@ -182,3 +182,49 @@ hash and size are reported. The CLI neither discovers nor traverses an operator'
 guarantee: restoration must repeat current STOP/authority validation, latest Core
 Ledger/reconcile and the reviewed retirement procedure. B3b cleanup, compaction,
 pin receipt projection and production acceptance are separate work.
+
+
+## 停止态 caption 财务恢复
+
+已停用旧 Bridge 业务执行、完成原 native STOP 并等 daemon 退出释放原实例锁后，可显式运行：
+
+```powershell
+python -m companion_onebot_bridge --config /path/to/bridge.toml owner-meme-accounting-drain
+```
+
+该命令有独立停止态入口。普通 daemon 的原 active gate、Pump 和启动顺序不变，停止后普通
+重启仍拒绝。ACTIVE daemon 持锁时财务命令拒绝；它不会主动停止进程或启用自动财务轮询。
+不构造 Spool、OwnerRuntime、MemeRuntime 或业务 catalog，不创建 schema、不刷新 profile、
+不领取 discovery、不取图、不运行模型、不启动 OneBot/WS/probe，不执行 handoff 或清理。
+只使用既有 Bridge 配置的私有 Core URL/Bearer，通过已知 job 的 responsibility 接口读原责任；
+配置、token、私钥、原始 ID、路径与正文均不输出。
+
+原 `existing_only` 实例锁、精确原 schema/身份、STOP 标记、native capture/journal 必须有效。
+只打开原库 `mode=rw`；非空 WAL/journal/SHM 需要恢复时保守拒绝，不做恢复或 checkpoint。
+每次 HTTP 前后及提交事务内重验原 custody 和完整绑定快照。唯一允许的 SQL 写入是既有
+`meme_caption_bindings.usage_json` 单调费用投影；与活跃内容路径共用一个 writer，原
+retain_usage 的 job/state/None-usage 内容保护仍在原 atomic 内。不会把原 Core CANCELLED
+改写为本地 FAILED，不覆盖本地 SUCCEEDED，不制造 CaptionOutcome、NO_ADMISSION 表或成功。
+
+每个命令对有限完整 inventory 扫描一遍，最多 10000 行；缺 job、重复 job、超限或证据缺失
+均为未验证。每 pass 最多 8 个不同 job，每次 await 最多 0.5 秒，每 pass 协作预算 2 秒；
+失败、超时、未变 UNKNOWN 或 NO_ADMISSION 后游标也前移，后续费用不会被第一行饿死。
+游标仅在 RAM，不循环等待 SETTLED；取消后重新运行会重新验证。同步 native 验签、SQLite、
+文件 I/O 和取消收尾不能被 asyncio 抢占，因此 2 秒不是硬墙钟保证，也没有新增子进程强杀机制。
+
+JSON 输出 `version=1`，含固定 `state`、`reasons`、`custody_sha256`、`cutover_authorized=false`，
+以及 inventory/attempted/updated/settled/unknown/reserved/no_admission/cancelled/unverified/
+remaining/result_pending 计数。计数按绑定行，不累计或重复收取共享原 U 的金额。
+启动阶段未能验证库存时 inventory/remaining/result_pending/custody_sha256 为 null，
+unverified 至少为 1。解析器只拒绝参数；财务拒绝作为固定 JSON 状态返回，不能仅凭进程退出码
+判定已完成。前端如将来展示该摘要，应按以下状态与计数对接，仍需独立前端验证；本片不含 UI。
+
+- COMPLETE：本轮已知 job 财务均验证、原工作终态，费用 SETTLED 或完整 NO_ADMISSION。
+- PENDING：保留 RESERVED/UNKNOWN、非终态工作或 RESULT_PENDING；原责任不能释放。
+- UNVERIFIED：原锁、schema、custody、接口、库存或证据无法验证；保留旧投影，不能推定无费用。
+
+UNKNOWN 不退款，原 RESULT_PENDING/CANCELLED 与取消异常不被成功恢复掩盖；取消只回滚当前
+未提交事务，先前合法提交保留。旧备份的最新 Ledger 重放/restore 标记以及原 v2 owner decision
+journal 后续 policy_redacted 的保守拒绝不变，不恢复 policy、不清标记、不扩大 journal 权限。
+COMPLETE 也只是本轮财务摘要，原 preflight、ACK/pin/cooldown、拷贝退役与切换门禁继续独立。
+正文读取仍服务活跃 caption/索引消费者；本命令不允许清正文或重启旧内容 worker。
