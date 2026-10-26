@@ -192,7 +192,7 @@ const state = {
   tz: undefined, updatedAt: null, toastTimer: null, searchTimer: null,
   actKind: "all", memTab: "review", memQ: "", diaryDay: null, capQ: "", capF: "all", capCollapsed: new Set(),
   capMobile: false, contentF: "all", draft: new Map(), configSave: null, budgetDraft: new Map(), budgetSave: null,
-  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, contentTab: "items", expanded: new Set(),
+  deliverySaves: new Map(), cfgQ: "", currency: "CNY", fx: 8000000, actFrom: "", actTo: "", memView: "list", gSel: null, voiceTab: "in", cogKind: "all", cogSel: null, cogTab: "overview", cogMore: null, meterScale: "call", meterDrawn: null, contentTab: "items", expanded: new Set(),
 };
 
 class ApiError extends Error {
@@ -2055,7 +2055,7 @@ PAGES.thinking = data => {
   return el("div", {},
     head("思考与决策", "她每一次决定做不做，以及当时依据了哪些信息。只显示真实记录，没有的就写没有。"),
     stats, coverage, filters,
-    state.cogKind === "model" ? meterOverview(data.model) : null,
+    ["all", "model"].includes(state.cogKind) ? meterOverview(data.model) : null,
     el("div", { class: "dk-wrap" },
       el("ul", { class: "dk-list" + (state.cogKind === "model" ? " compact" : "") + (freshLoad() ? " anim" : ""), "data-keep-scroll": "cog-list" }, filtered.map((i, n) => {
         const ik = COGNITION_KINDS[i._kind] || { name: "其他", ic: "spark" };
@@ -2702,34 +2702,90 @@ function meterOverview(page) {
     el("p", { class: "note mt" }, "统计只包含实际用量已记录的请求；缓存命中率只按缓存已记录的请求计算。费用是已计或预留的责任金额，按配置费率估算，不等于服务商账单。耗时、上下文分区与裁剪原因没有保存，这里不做拆分。"));
 }
 
-/** 逐次请求：柱子是实际输入（按缓存分段）与输出，折线是本地准入计数；未记录实际用量的只画虚线框 */
+const METER_SCALES = [["call", "逐次"], ["day", "按天"], ["month", "按月"]];
+/** 已加载的请求按本地日期或月份归组；轴是连续的，到今天为止，最多 30 天或 12 个月 */
+function meterBuckets(rows, scale) {
+  const keyOf = r => scale === "day" ? localDay(r.item.occurred_at) : localDay(r.item.occurred_at).slice(0, 7);
+  const groups = new Map();
+  for (const r of rows) { if (!valid(r.item.occurred_at)) continue; const k = keyOf(r); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+  if (!groups.size) return { trimmed: false, buckets: [] };
+  const today = localDay(new Date().toISOString()), last = scale === "day" ? today : today.slice(0, 7);
+  const first = [...groups.keys()].sort()[0];
+  const next = k => {
+    if (scale === "day") { const d = new Date(k + "T12:00:00Z"); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); }
+    const [y, m] = k.split("-").map(Number); return m === 12 ? (y + 1) + "-01" : y + "-" + String(m + 1).padStart(2, "0");
+  };
+  const keys = []; for (let k = first; k <= last && keys.length < 400; k = next(k)) keys.push(k);
+  const cap = scale === "day" ? 30 : 12;
+  return { trimmed: keys.length > cap, buckets: keys.slice(-cap).map(key => {
+    const list = groups.get(key) || [], actual = list.filter(r => r.x.actual), sum = f => actual.reduce((s, r) => s + (f(r.x) || 0), 0);
+    return { key, list, actual: actual.length,
+      parts: [["cached", sum(x => x.cacheKnown ? x.cached : 0)], ["fresh", sum(x => x.cacheKnown ? x.input - x.cached : 0)],
+        ["unknown", sum(x => x.cacheKnown ? 0 : x.input)], ["output", sum(x => x.output)]] };
+  }) };
+}
+function bucketLabel(key, scale, i, prev) {
+  const [y, m, d] = key.split("-").map(Number);
+  if (scale === "month") return i === 0 || m === 1 ? String(y).slice(2) + "年" + m + "月" : m + "月";
+  return i === 0 || !prev || prev.slice(0, 7) !== key.slice(0, 7) ? m + "/" + d : String(d);
+}
+
+/** 逐次：柱子是实际输入（按缓存分段）与输出，折线是本地准入计数；按天/按月：同一时段的实际用量相加 */
 function meterChart(rows) {
-  const list = rows.slice(0, 30).reverse();
-  const top = Math.max(1, ...list.map(r => r.x.actual ? r.x.input + r.x.output : 0), ...list.map(r => r.x.measured || 0), ...list.map(r => r.x.measured != null && r.x.margin != null ? r.x.measured + r.x.margin : 0));
-  const W = 640, H = 170, L = 44, R = 8, T = 10, B = 22, bw = Math.min(28, (W - L - R) / list.length * 0.62);
-  const xAt = i => L + (i + 0.5) * (W - L - R) / list.length, yAt = v => T + (H - T - B) * (1 - v / top);
+  const scale = state.meterScale || "call", page = state.data?.model;
+  const W = 640, H = 170, L = 44, R = 8, T = 10, B = 22;
+  let cols, top, trimmed = false;
+  if (scale === "call") {
+    const list = rows.slice(0, 30).reverse();
+    top = Math.max(1, ...list.map(r => r.x.actual ? r.x.input + r.x.output : 0), ...list.map(r => r.x.measured || 0), ...list.map(r => r.x.measured != null && r.x.margin != null ? r.x.measured + r.x.margin : 0));
+    cols = list.map((r, i) => ({ id: r.item.id, label: String(i + 1), parts: r.x.actual ? meterParts(r.x) : null, none: !r.x.actual, ghost: r.x.measured || 0, measured: r.x.measured,
+      aria: "第 " + (i + 1) + " 次请求，" + (r.x.actual ? "实际输入 " + tk(r.x.input) + "，输出 " + tk(r.x.output) : "实际用量未记录") }));
+  } else {
+    const grouped = meterBuckets(rows, scale), buckets = grouped.buckets; trimmed = grouped.trimmed;
+    top = Math.max(1, ...buckets.map(b => b.parts.reduce((s, [, v]) => s + v, 0)));
+    cols = buckets.map((b, i) => {
+      const total = b.parts.reduce((s, [, v]) => s + v, 0), when = scale === "day" ? b.key : b.key.replace("-", " 年 ") + " 月";
+      return { id: b.list[0]?.item.id, label: bucketLabel(b.key, scale, i, buckets[i - 1]?.key), parts: b.actual ? b.parts : null, none: b.list.length > 0 && !b.actual, ghost: 0,
+        aria: when + "，" + b.list.length + " 次请求" + (b.actual ? "，实际总量 " + tk(total) + (b.actual < b.list.length ? "，其中 " + (b.list.length - b.actual) + " 次未记录" : "") : b.list.length ? "，实际用量未记录" : "") };
+    });
+  }
+  const n = Math.max(1, cols.length), bw = Math.min(28, (W - L - R) / n * 0.62);
+  const xAt = i => L + (i + 0.5) * (W - L - R) / n, yAt = v => T + (H - T - B) * (1 - v / top);
   const grid = [0, 0.5, 1].map(f => [el("line", { x1: String(L), x2: String(W - R), y1: yAt(top * f).toFixed(1), y2: yAt(top * f).toFixed(1), class: "m-grid-l" }),
     el("text", { x: String(L - 6), y: (yAt(top * f) + 4).toFixed(1), "text-anchor": "end", class: "m-axis" }, tk(Math.round(top * f)))]);
-  const bars = list.map((r, i) => {
-    const x = xAt(i) - bw / 2, sel = state.cogSel === "model:" + r.item.id;
-    const go = () => { state.cogSel = "model:" + r.item.id; rerender(); };
+  const every = Math.ceil(n / 16);
+  const bars = cols.map((c, i) => {
+    const x = xAt(i) - bw / 2, sel = c.id != null && state.cogSel === "model:" + c.id;
+    const go = () => { if (c.id == null) return; state.cogSel = "model:" + c.id; rerender(); };
     let y = yAt(0);
-    const segs = r.x.actual ? meterParts(r.x).filter(([, v]) => v > 0).map(([k, v]) => {
+    const segs = c.parts ? c.parts.filter(([, v]) => v > 0).map(([k, v]) => {
       const h = (H - T - B) * v / top; y -= h;
       return el("rect", { x: x.toFixed(1), y: y.toFixed(1), width: bw.toFixed(1), height: Math.max(h, 0.5).toFixed(1), fill: METER_COLORS[k] });
-    }) : [el("rect", { x: x.toFixed(1), y: yAt(r.x.measured || 0).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * (r.x.measured || 0) / top, 2).toFixed(1), class: "m-bar-none" })];
-    return el("g", { class: "m-bar" + (sel ? " sel" : ""), style: { "--i": String(i) }, tabindex: "0", role: "button", onclick: go, onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } },
-      "aria-label": "第 " + (i + 1) + " 次请求，" + (r.x.actual ? "实际输入 " + tk(r.x.input) + "，输出 " + tk(r.x.output) : "实际用量未记录") },
-      el("rect", { x: (x - 3).toFixed(1), y: String(T), width: (bw + 6).toFixed(1), height: String(H - T - B), class: "m-hit" }), segs,
-      el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, String(i + 1)));
+    }) : c.none ? [el("rect", { x: x.toFixed(1), y: yAt(c.ghost).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * c.ghost / top, 2).toFixed(1), class: "m-bar-none" })] : [];
+    const label = (n - 1 - i) % every === 0 ? el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, c.label) : null;
+    if (c.id == null) return el("g", { class: "m-bar empty", style: { "--i": String(i) }, role: "img", "aria-label": c.aria }, label);
+    return el("g", { class: "m-bar" + (sel ? " sel" : ""), style: { "--i": String(i) }, tabindex: "0", role: "button", onclick: go,
+      onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } }, "aria-label": c.aria + (scale === "call" ? "" : "，查看其中最近一次") },
+      el("rect", { x: (x - 3).toFixed(1), y: String(T), width: (bw + 6).toFixed(1), height: String(H - T - B), class: "m-hit" }), segs, label);
   });
-  const pts = list.map((r, i) => r.x.measured != null ? xAt(i).toFixed(1) + "," + yAt(r.x.measured).toFixed(1) : null);
-  const line = el("polyline", { points: pts.filter(Boolean).join(" "), class: "m-line", pathLength: "1" });
-  const dots = list.map((r, i) => r.x.measured != null ? el("circle", { cx: xAt(i).toFixed(1), cy: yAt(r.x.measured).toFixed(1), r: "2.6", class: "m-dot" }) : null);
-  return el("div", { class: "sheet m-chart" }, el("div", { class: "sheet-head" }, el("h2", {}, "逐次请求"), el("span", { class: "note" }, "从旧到新，点一根柱子查看明细")),
-    el("div", { class: "sheet-body" }, el("svg", { viewBox: `0 0 ${W} ${H}`, class: "m-svg", role: "group", "aria-label": "逐次请求的输入输出" }, grid, bars, line, dots),
+  const pts = scale === "call" ? cols.map((c, i) => c.measured != null ? [xAt(i), yAt(c.measured)] : null).filter(Boolean) : [];
+  const line = pts.length ? el("polyline", { points: pts.map(([a, b]) => a.toFixed(1) + "," + b.toFixed(1)).join(" "), class: "m-line", pathLength: "1" }) : null;
+  const dots = pts.map(([a, b]) => el("circle", { cx: a.toFixed(1), cy: b.toFixed(1), r: "2.6", class: "m-dot" }));
+  const oldest = rows.map(r => r.item.occurred_at).filter(valid).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+  const hint = scale === "call" ? "从旧到新，点一根柱子查看明细" : "按已加载的 " + rows.length + " 次请求汇总" + (oldest && valid(oldest) ? "，最早 " + fmtDate(oldest) : "") + (trimmed ? "，图中只画最近 " + (scale === "day" ? "30 天" : "12 个月") : "") + "；点柱子看该时段最近一次";
+  // 切换粒度时只给柱子重播生长动画
+  const swap = state.meterDrawn != null && state.meterDrawn !== scale; state.meterDrawn = scale;
+  return el("div", { class: "sheet m-chart" + (swap && motionOk() ? " swap" : "") },
+    el("div", { class: "sheet-head" }, el("h2", {}, scale === "call" ? "逐次请求" : scale === "day" ? "每日用量" : "每月用量"),
+      el("div", { class: "seg sm", role: "group", "aria-label": "柱状图粒度" }, METER_SCALES.map(([k, t]) =>
+        el("button", { type: "button", "aria-pressed": String(scale === k), onclick: () => { state.meterScale = k; rerender(); } }, t)))),
+    el("div", { class: "sheet-body" },
+      el("p", { class: "note m-hint" }, hint, scale !== "call" && page?.next_cursor
+        ? el("button", { type: "button", class: "more-btn", disabled: state.cogMore === "model", onclick: () => moreCognition("model") }, state.cogMore === "model" ? "正在加载…" : "加载更早的记录") : null),
+      cols.length ? el("svg", { viewBox: `0 0 ${W} ${H}`, class: "m-svg", role: "group", "aria-label": scale === "call" ? "逐次请求的输入输出" : "按时段汇总的实际用量" }, grid, bars, line, dots)
+        : el("p", { class: "note" }, "已加载的记录里没有有效时间，无法按时段汇总。"),
       el("div", { class: "m-keys" }, ["cached", "fresh", "unknown", "output"].map(k => el("span", {}, el("i", { style: { background: METER_COLORS[k] } }), METER_NAMES[k])),
-        el("span", {}, el("i", { class: "k-line" }), "本地准入计数"), el("span", {}, el("i", { class: "k-none" }), "实际用量未记录"))));
+        scale === "call" ? el("span", {}, el("i", { class: "k-line" }), "本地准入计数") : null, el("span", {}, el("i", { class: "k-none" }), "实际用量未记录"))));
 }
 
 /** 单次请求明细，用在“模型调用”记录的决策记录标签里 */
