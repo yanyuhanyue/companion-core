@@ -80,7 +80,11 @@ def test_unknown_usage_never_promoted_to_observed_tokens_or_invoice(core):
     result = beta_observation.inspect_context(core.settings, "trace_test_1")
     call = result["trace"]["jobs"][0]["model_calls"][0]
     assert call["prompt_tokens"] == 100
-    assert call["prompt_cache_hit_tokens"] == 40
+    # The manual fixture has no original provider cache diagnostic.
+    assert call["prompt_cache_hit_tokens"] is None
+    assert call["cache_usage"] == {"state": "NOT_RECORDED", "cached_input_tokens": None}
+    cached = core.store.one("SELECT cached_input_tokens FROM model_usage")
+    assert cached["cached_input_tokens"] == 40
     assert call["completion_tokens"] == 20
     assert call["configured_price_micro_usd"] is not None
     core.store.execute("UPDATE model_usage SET state='UNKNOWN'")
@@ -88,6 +92,8 @@ def test_unknown_usage_never_promoted_to_observed_tokens_or_invoice(core):
     call = result["trace"]["jobs"][0]["model_calls"][0]
     assert call["state"] == "UNKNOWN"
     assert call["prompt_tokens"] is call["configured_price_micro_usd"] is None
+    assert call["prompt_cache_hit_tokens"] is None
+    assert call["cache_usage"] == {"state": "NOT_RECORDED", "cached_input_tokens": None}
     assert call["accounted_or_reserved_micro_usd"] > 0
     assert call["reservation_micro_usd"] == 100
 
