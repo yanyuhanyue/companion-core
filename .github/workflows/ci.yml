@@ -143,6 +143,19 @@ jobs:
       - run: chmod 700 migrations/versions
       - run: docker build -t companion-core:test .
       - run: chmod 755 migrations/versions
+      - name: Exercise isolated dev Compose with the existing Core image
+        run: |
+          image_id=$(docker image inspect --format '{{.Id}}' companion-core:test)
+          python -B -m scripts.smoke_dev_compose --context default --image "$image_id"
+      - name: Preserve dev Compose container evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dev-compose-smoke-${{ github.run_attempt }}
+          path: .local/verification/dev-compose-smoke.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - run: docker build -f deploy/executor.Dockerfile -t companion-executor:test .
       - run: docker build -f deploy/source-reader.Dockerfile -t companion-source-reader:test .
       - run: docker build -f deploy/file-parser.Dockerfile -t companion-file-parser:test .

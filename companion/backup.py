@@ -11,16 +11,25 @@ from companion.privacy import ErasureLedger, advance_epoch
 from companion.store import Store, migrate, uid, utcnow
 
 
-def backup(database, destination, key):
+def backup(database, destination, key, *, immutable_source=False):
+    """Encrypt a SQLite snapshot; immutable_source asserts all writers stay stopped."""
     target = Path(destination)
     if target.exists():
         raise CoreError("BACKUP_DESTINATION_EXISTS")
+    source_path = Path(database).resolve()
+    if immutable_source and any(os.path.lexists(str(source_path) + suffix)
+                                for suffix in ("-wal", "-shm", "-journal")):
+        raise CoreError("BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS")
+    # Immutable is an explicit caller assertion: no process may change the source.
+    source_uri = source_path.as_uri() + "?mode=ro"
+    if immutable_source:
+        source_uri += "&immutable=1"
     target.parent.mkdir(parents=True, exist_ok=True)
     cipher = Fernet(key)
     # Stdlib backup API includes committed WAL pages. Temporary directory is OS-private.
     with tempfile.TemporaryDirectory() as directory:
         snapshot = Path(directory) / "snapshot.sqlite3"
-        source = sqlite3.connect(f"file:{Path(database).resolve().as_posix()}?mode=ro", uri=True)
+        source = sqlite3.connect(source_uri, uri=True)
         dest = sqlite3.connect(snapshot)
         try:
             source.backup(dest)
