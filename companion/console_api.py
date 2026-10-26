@@ -5,11 +5,9 @@ import hmac
 import json
 import secrets
 from datetime import date
-from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, Header, Request, Response
-from fastapi.responses import FileResponse
 from pydantic import Field, SecretStr, StrictFloat, StrictInt
 
 from companion import cloud_budget, console_read, delegation, operator_config
@@ -124,7 +122,6 @@ def _operation(core, request, key, body, apply, *, recover=None, rejected_errors
 
 def register_console_routes(app, settings):
     prefix = "/v1/console"
-    resources = Path(__file__).with_name("console_static")
 
     def enabled():
         if not settings.console.enabled:
@@ -153,7 +150,9 @@ def register_console_routes(app, settings):
     @app.middleware("http")
     async def private_headers(request, call_next):
         response = await call_next(request)
-        if request.url.path.startswith((prefix, "/console")):
+        # The TLS proxy owns static headers, including internal redirects and
+        # errors. Nginx retains gate response headers across X-Accel-Redirect.
+        if request.url.path.startswith(prefix):
             response.headers.update({
                 "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
                 "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
@@ -166,15 +165,14 @@ def register_console_routes(app, settings):
     @app.get("/console/")
     async def index():
         enabled()
-        return FileResponse(resources / "index.html", media_type="text/html")
+        return Response(headers={"X-Accel-Redirect": "/_console_assets/index.html"})
 
     @app.get("/console/{asset}")
     async def static(asset: str):
         enabled()
-        types = {"app.js": "text/javascript", "app.css": "text/css", "icon.svg": "image/svg+xml"}
-        if asset not in types:
+        if asset not in {"app.js", "app.css", "icon.svg"}:
             raise CoreError("NOT_FOUND", 404)
-        return FileResponse(resources / asset, media_type=types[asset])
+        return Response(headers={"X-Accel-Redirect": "/_console_assets/" + asset})
 
     @app.post(prefix + "/session")
     async def login(body: Login, request: Request, response: Response):
