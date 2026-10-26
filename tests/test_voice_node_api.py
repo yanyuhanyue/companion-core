@@ -304,6 +304,8 @@ async def tls_core(core, tmp_path):
             lifespan="off",
             log_config=None,
             access_log=False,
+            # Match real_core_http: server idle expiry outlasts the client's 5s pool expiry.
+            timeout_keep_alive=60,
             ssl_certfile=str(cert),
             ssl_keyfile=str(key),
         )
