@@ -37,14 +37,14 @@ def video_policy(**changes):
 @pytest.mark.parametrize("format,mime", [
     ("GIF", "image/gif"), ("WEBP", "image/webp"), ("PNG", "image/apng"),
 ])
-def test_animation_keeps_timeline_and_first_frame_preview_without_a_grid(format, mime):
+def test_animation_keeps_timeline_and_ordered_preview(format, mime):
     data, image_policy, video = animation(format), policy(), video_policy()
     first, animated = preview(data, mime, image_policy)
-    assert animated and "首帧" in first.note and "300ms" in first.note
+    assert animated and "抽样预览" in first.note and "300ms" in first.note
     from PIL import Image
 
     with Image.open(io.BytesIO(first.data)) as frame:
-        assert frame.size == (12, 8) and frame.n_frames == 1
+        assert frame.size == (36, 8) and frame.n_frames == 1
     encoded = encode_animation(data, mime, image_policy, video)
     assert 0.3 <= encoded.seconds <= 0.34
     with av.open(io.BytesIO(encoded.data)) as container:
