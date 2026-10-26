@@ -32,8 +32,11 @@ def provider(request):
     else:
         assert any(m["role"] == "tool" and m["tool_call_id"] == "clock"
                    for m in payload["messages"])
-    return httpx.Response(200, json={"choices": [{"message": message}],
-        "usage": {"prompt_tokens": 100, "completion_tokens": 4}})
+    usage = {"prompt_tokens": 100, "completion_tokens": 4}
+    cache = value.get("cache_usage", [None, None])[len(calls) - 1]
+    if cache is not None:
+        usage["prompt_cache_hit_tokens"] = cache
+    return httpx.Response(200, json={"choices": [{"message": message}], "usage": usage})
 
 
 native_client = httpx.AsyncClient
@@ -70,4 +73,6 @@ async def exercise():
 
 asyncio.run(exercise())
 assert len(calls) == 2
+if "requests_path" in value:
+    Path(value["requests_path"]).write_text(json.dumps(calls), "utf-8")
 print(json.dumps({"mock_provider_requests": len(calls)}))
