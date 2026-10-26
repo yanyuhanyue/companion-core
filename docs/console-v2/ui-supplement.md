@@ -78,11 +78,12 @@
 
 下列为合成后端 fixture 的 `items[].usage` 响应片段；省略其余记录与分页字段。
 三例的有效回执输入/输出均为 80/3，金额按测试配置费率计算（微美元）。
+已知 Token 不等于供应商真实账单；配置费率金额仍为估算，`observed: true` 与 `is_estimate: 1` 可同时成立。
 
 ```json
 {
   "input_tokens": 80, "output_tokens": 3, "cached_input_tokens": 0,
-  "billed_micro_usd": 86, "is_estimate": 0, "observed": true,
+  "billed_micro_usd": 86, "is_estimate": 1, "observed": true,
   "cache_usage": {"state": "NOT_RECORDED", "cached_input_tokens": null}
 }
 ```
@@ -90,7 +91,7 @@
 ```json
 {
   "input_tokens": 80, "output_tokens": 3, "cached_input_tokens": 0,
-  "billed_micro_usd": 86, "is_estimate": 0, "observed": true,
+  "billed_micro_usd": 86, "is_estimate": 1, "observed": true,
   "cache_usage": {"state": "RECORDED", "cached_input_tokens": 0}
 }
 ```
@@ -98,7 +99,7 @@
 ```json
 {
   "input_tokens": 80, "output_tokens": 3, "cached_input_tokens": 40,
-  "billed_micro_usd": 50, "is_estimate": 0, "observed": true,
+  "billed_micro_usd": 50, "is_estimate": 1, "observed": true,
   "cache_usage": {"state": "RECORDED", "cached_input_tokens": 40}
 }
 ```
