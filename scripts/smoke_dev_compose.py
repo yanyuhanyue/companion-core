@@ -129,7 +129,7 @@ print("PASS")
 '''
 
 RESTORE_PROBE = r'''
-import hashlib, json, sqlite3, sys
+import hashlib, json, os, sqlite3, sys
 from pathlib import Path
 from companion.privacy import ErasureLedger
 archive = Path("/data/pre-init.enc").read_bytes()
@@ -152,7 +152,11 @@ with sqlite3.connect(destination) as store:
     assert one("SELECT count(*) FROM model_usage WHERE state='SETTLED'") == 3
     assert one("SELECT value FROM runtime_meta WHERE key='cloud_budget_restore_required'") == "1"
     assert one("SELECT count(*) FROM privacy_erasure_ledger") == int(after_erasure)
-with sqlite3.connect("file:/source/companion.sqlite3?mode=ro", uri=True) as source:
+# The controller keeps every writer stopped throughout both restore probes.
+source_path = Path("/source/companion.sqlite3")
+assert not any(os.path.lexists(str(source_path) + suffix)
+               for suffix in ("-wal", "-shm", "-journal")), "STOPPED_SOURCE_HAS_SIDECARS"
+with sqlite3.connect(source_path.as_uri() + "?mode=ro&immutable=1", uri=True) as source:
     row = source.execute("SELECT state FROM outbox WHERE origin_event_id='evt_dev_smoke_2'")
     assert row.fetchone()[0] == ("CANCELLED" if after_erasure else "PENDING")
     row = source.execute("SELECT count(*) FROM model_usage WHERE state='RESERVED'")
@@ -166,6 +170,7 @@ print(json.dumps({"encrypted_sha256": hashlib.sha256(archive).hexdigest(),
 
 _STDERR_LINES = {
     "BACKUP_DESTINATION_EXISTS": "BACKUP_DESTINATION_EXISTS",
+    "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS": "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS",
     "RESTORE_REQUIRES_NEW_PATH": "RESTORE_REQUIRES_NEW_PATH",
     "BACKUP_INTEGRITY_FAILED": "BACKUP_INTEGRITY_FAILED",
     "BACKUP_FOREIGN_KEYS_FAILED": "BACKUP_FOREIGN_KEYS_FAILED",
@@ -342,9 +347,9 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
             backup_args = ("run", *RUN_OPTIONS,
                            "dev-backup")
             proof["step"] = "backup_create"
-            command(*backup_args, "backup", "/data/pre-init.enc")
+            command(*backup_args, "backup", "/data/pre-init.enc", "--immutable-source")
             proof["step"] = "backup_reject_existing"
-            command(*backup_args, "backup", "/data/pre-init.enc", expected=2,
+            command(*backup_args, "backup", "/data/pre-init.enc", "--immutable-source", expected=2,
                     contains="BACKUP_DESTINATION_EXISTS")
             proof["step"] = "restore_before_ledger"
             command(*backup_args, "restore", "/data/pre-init.enc",

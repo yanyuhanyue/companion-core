@@ -89,6 +89,9 @@ def main():
     server.add_argument("--memory-control-sha256")
     archive = sub.add_parser("backup")
     archive.add_argument("destination")
+    archive.add_argument("--immutable-source", action="store_true",
+                         help="Assert all source writers and maintenance stay stopped before "
+                              "invocation through completion; reject WAL/SHM/journal sidecars")
     recovery = sub.add_parser("restore")
     recovery.add_argument("source")
     recovery.add_argument("destination")
@@ -97,7 +100,7 @@ def main():
     correction.add_argument("--request-sha256", required=True)
     args = parser.parse_args()
     try:
-        settings = Settings.load()
+        settings = Settings.load(apply_operator_config=args.command not in {"backup", "restore"})
         if args.command == "init":
             migrate(settings.database)
             with Runtime(settings):
@@ -164,7 +167,8 @@ def main():
             with single_worker(settings.database, "executive-worker"):
                 asyncio.run(executive_worker(settings))
         elif args.command == "backup":
-            backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode())
+            backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode(),
+                   immutable_source=args.immutable_source)
             print("Encrypted backup saved. Keep the latest erasure ledger separately.")
         elif args.command == "content-worker":
             from companion.content_worker import content_worker

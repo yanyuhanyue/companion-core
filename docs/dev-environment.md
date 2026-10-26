@@ -2,7 +2,7 @@
 
 使用 `compose.yaml` 和显式选择的 `deploy/compose.dev.yaml`，在独立 Compose project 中运行
 Demo API 和聊天 worker。需要 Docker Compose 2.30 及以上、可用的本地 Linux Docker engine，
-并先合入支持只读源数据库的标准私有临时目录备份修复，完成下面的容器验证后启用。
+此流程依赖备份的私有临时目录与显式 immutable 来源选项，完成下面的容器验证后启用。
 
 覆盖层固定合成 owner/bot、Demo 模型、空模型 key 和零预算，使用 internal 网络，不发布宿主端口。
 基础六个 Core 服务和维护备份服务均使用开发配置、独立镜像 tag 与 project 命名的数据卷。
@@ -86,7 +86,7 @@ docker @devCompose stop companion-api
 docker @devCompose --profile '*' ps --status running
 # 使用本轮全新文件名；原 backup CLI 拒绝覆盖。
 $devSnapshot = '/data/pre-schema-20261026-01.enc'
-docker @devCompose run --rm --no-deps --pull never dev-backup backup $devSnapshot
+docker @devCompose run --rm --no-deps --pull never dev-backup backup $devSnapshot --immutable-source
 # 核对上一条退出码为0，再记录密文SHA-256。
 docker @devCompose run --rm --no-deps --pull never --entrypoint /app/.venv/bin/python dev-backup -c "import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())" $devSnapshot
 docker @devCompose run --rm --no-deps --pull never migrate init
@@ -94,6 +94,14 @@ docker @devCompose run --rm --no-deps --pull never migrate init
 
 备份服务将源 Core 卷挂到 `/source:ro`、当前 Ledger 挂到 `/privacy:ro`，仅独立 snapshot 卷的
 `/data` 可写。明文 SQLite 快照位于系统私有临时目录，结束后清除；归档沿用现有 Fernet 格式。
+这里的 `--immutable-source` 明确承诺：从调用前到备份完成，全部写入者和并行维护命令始终停止。
+命令保守拒绝任何已有 `-wal`、`-shm` 或 `-journal`，包括空文件；若命中应检查停写/关闭状态，
+不能删除 sidecar、自动修复或 checkpoint 强行继续。
+缺少 sidecar 并不能证明停写，调用者仍须保证上述前提。SQLite 的
+[只读 WAL 条件](https://www.sqlite.org/wal.html#read_only_databases)、
+[热 journal 恢复](https://www.sqlite.org/lockingv3.html#hot_journals)与
+[immutable 合同](https://www.sqlite.org/uri.html#uriimmutable)解释了无 sidecar 的只读目录为何需要此显式模式。
+默认备份仍通过标准库 backup API 读取已提交 WAL，适用于在线来源；显式模式只用于已确认不再变化的来源。
 迁移成功后依次启动 API、检查认证 ready、启动聊天 worker。迁移失败时保留快照和全部卷，保持
 服务停止，不能跳过失败继续启动。
 

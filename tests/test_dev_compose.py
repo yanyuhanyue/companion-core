@@ -238,6 +238,7 @@ def test_smoke_report_exposes_only_fixed_error_codes(monkeypatch, tmp_path, caps
     ("sqlite3.OperationalError: unable to open database file", "SQLITE_CANTOPEN_TEXT"),
     ("sqlite3.OperationalError: database is locked", "SQLITE_BUSY_TEXT"),
     ("BACKUP_DESTINATION_EXISTS", "BACKUP_DESTINATION_EXISTS"),
+    ("BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS", "BACKUP_IMMUTABLE_SOURCE_HAS_SIDECARS"),
     ("AssertionError: synthetic-private-text", "PYTHON_ASSERTION"),
     ("PermissionError: synthetic-private-path", "PYTHON_PERMISSION"),
     ("synthetic-private-unrecognized", "UNCLASSIFIED"),
@@ -408,8 +409,8 @@ async def native_probe_contracts(tmp_path):
                 process.terminate()
             await asyncio.wait_for(process.communicate(), 15)
     assert (await command("-c", smoke.SEED_RESERVATION)).strip() == "PASS"
-    await command("-m", "companion", "backup", str(archive))
-    await command("-m", "companion", "backup", str(archive), expected=2)
+    await command("-m", "companion", "backup", str(archive), "--immutable-source")
+    await command("-m", "companion", "backup", str(archive), "--immutable-source", expected=2)
     code = smoke.RESTORE_PROBE.replace("/data/pre-init.enc", archive.as_posix())
     code = code.replace("/data/recovered-before-erasure.sqlite3", before_erasure.as_posix())
     code = code.replace("/data/recovered.sqlite3", recovered.as_posix())

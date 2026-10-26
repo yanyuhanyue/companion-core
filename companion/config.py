@@ -624,7 +624,7 @@ class Settings(BaseModel):
         return self.timeout_seconds
 
     @classmethod
-    def load(cls):
+    def load(cls, *, apply_operator_config=True):
         path = Path(os.getenv("COMPANION_CONFIG", "config.toml"))
         data = tomllib.loads(path.read_text("utf-8")) if path.exists() else {}
         for field in cls.model_fields:
@@ -670,4 +670,5 @@ class Settings(BaseModel):
                     data[field] = value
         from companion.operator_config import load
 
-        return load(cls.model_validate(data))
+        settings = cls.model_validate(data)
+        return load(settings) if apply_operator_config else settings
