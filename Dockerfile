@@ -8,12 +8,13 @@ COPY companion ./companion
 COPY source_reader ./source_reader
 COPY companion_onebot_bridge ./companion_onebot_bridge
 COPY companion_meme_protocol ./companion_meme_protocol
+COPY companion_meme_sources ./companion_meme_sources
 COPY companion_voice_node ./companion_voice_node
 COPY companion_delivery_protocol ./companion_delivery_protocol
 COPY migrations ./migrations
 COPY db ./db
 # Public source archives may have owner-only directories after private extraction.
-RUN chmod -R a+rX companion source_reader companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol migrations db && \
+RUN chmod -R a+rX companion source_reader companion_onebot_bridge companion_meme_protocol companion_meme_sources companion_voice_node companion_delivery_protocol migrations db && \
     uv sync --frozen --no-dev && useradd -m -u 10001 companion && \
     mkdir -p /data /privacy && chown companion:companion /data /privacy
 USER companion

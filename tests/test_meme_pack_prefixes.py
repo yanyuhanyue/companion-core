@@ -7,9 +7,9 @@ from urllib.parse import quote
 
 import pytest
 
+from companion_meme_sources.community import CommunityPacks
+from companion_meme_sources.review import TrustedReviewer
 from companion_onebot_bridge.meme_discovery import run_discovery
-from companion_onebot_bridge.meme_packs import CommunityPacks
-from companion_onebot_bridge.meme_runtime import TrustedReviewer
 from tests.test_meme_pack_files import MANIFEST, REPO, REVISION, RULE, Upstream, blob_sha, discover
 from tests.test_meme_pack_files import catalog as catalog
 from tests.test_meme_runtime import RULE as LEGACY_RULE

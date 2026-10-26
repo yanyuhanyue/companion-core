@@ -313,6 +313,8 @@ class MemeRetrieval:
         return binding, result, meta, sources, image
 
     async def prepare(self, job):
+        from companion import meme_service
+
         s, deadline = self.store, time.monotonic() + 2
         # Never suspend while holding the shared Core connection's transaction.
         if s.db.in_transaction:
@@ -458,6 +460,13 @@ class MemeRetrieval:
             self._bounded(value)
             s.insert("runtime_meta", key=OFFER + job["event_id"], value=encode(value))
             self.check(job)
+            if (query["intent"] and not facts and not selected and fallback is None
+                and self.settings.meme_discovery_enabled and self.settings.meme_trusted_sources
+                and self.settings.paid_model and self.settings.paid_model.meme_input):
+                meme_service.submit_native(s, self.settings, self.clock,
+                    meme_service.DiscoveryRequest(event_id=job["event_id"],
+                        reply_revision=event["reply_revision"], intent=query["intent"],
+                        provider="community"), origin_job=job)
 
     @staticmethod
     def _bounded(value):

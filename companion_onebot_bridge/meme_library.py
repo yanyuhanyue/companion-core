@@ -2,7 +2,6 @@
 
 import hashlib
 import os
-import re
 import stat
 import time
 from collections import deque
@@ -11,9 +10,9 @@ from pathlib import Path
 
 from companion_meme_protocol import PreparedImage as PreparedImage
 from companion_meme_protocol import validate_bytes
+from companion_meme_sources import CATEGORY
 
 DEFAULT_CATEGORIES = ("happy", "like", "surprised", "morning", "sleep")
-CATEGORY = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 class MemeLibrary:

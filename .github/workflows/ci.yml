@@ -61,7 +61,7 @@ jobs:
           CI_REUSE: ${{ needs.preflight.outputs.reuse }}
         run: python scripts/ci_reuse.py validate
       - if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
-        run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
+        run: uv run --extra onebot ruff check companion companion_onebot_bridge companion_meme_protocol companion_meme_sources companion_voice_node companion_delivery_protocol source_reader migrations astrbot_plugin_companion_bridge tests scripts
       - name: Type-check the owner console
         if: ${{ needs.preflight.outputs.profile == 'full' || needs.preflight.outputs.profile == 'selected' }}
         # Explicit package selection: https://docs.npmjs.com/cli/v11/commands/npm-exec/
