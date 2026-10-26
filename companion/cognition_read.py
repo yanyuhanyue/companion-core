@@ -89,6 +89,11 @@ class CognitionRead:
         self.core, self.store = core, core.store
         self.projections = MemoryProjections(core.memory)
 
+    def activity_snapshot(self, selection):
+        from companion.activity_projection import snapshot
+
+        return snapshot(self, selection)
+
     def page(self, kind, *, limit=30, before=None, record_id=None):
         if kind not in KINDS or type(limit) is not int or not 1 <= limit <= 50:
             raise CoreError("INVALID_COGNITION_SELECTION", 400)
