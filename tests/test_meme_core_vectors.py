@@ -116,7 +116,12 @@ def test_same_bytes_cannot_borrow_another_licensed_sources_vector(runtime_case, 
     c = runtime_case
     assets = c.core.store.rows("SELECT asset_id FROM meme_assets ORDER BY asset_id")
     other = c.core.store.one(
-        "SELECT caption_job_id FROM meme_asset_sources WHERE asset_id=?", (assets[1]["asset_id"],)
+        "SELECT s.caption_job_id FROM meme_asset_sources s "
+        "JOIN meme_assets a ON a.asset_id=s.asset_id "
+        "JOIN meme_captions c ON c.job_id=s.caption_job_id "
+        "WHERE s.asset_id=? AND c.asset_sha256=a.asset_sha256 "
+        "AND c.source_sha256=a.source_sha256 ORDER BY s.caption_job_id",
+        (assets[1]["asset_id"],),
     )
     binding, *_ = c.retrieval._resolve(assets[1]["asset_id"], other["caption_job_id"])
     with c.core.store.transaction():
