@@ -75,7 +75,24 @@ with sqlite3.connect("file:/data/companion.sqlite3?mode=ro", uri=True) as db:
             break
         time.sleep(0.2)
     else:
-        raise RuntimeError("INDEPENDENT_WORKER_DID_NOT_COMPLETE")
+        # Failure-only evidence; keep the polling budget and success contract unchanged.
+        from types import SimpleNamespace
+        from companion.worker_loop import snapshot
+        db.row_factory = sqlite3.Row
+        loop = snapshot(SimpleNamespace(one=lambda *args: db.execute(*args).fetchone()),
+                        datetime.now(UTC))
+        details = {
+            "job_state": row[0] if row else None,
+            "model_usage": dict(db.execute(
+                "SELECT state,count(*) FROM model_usage WHERE job_id=? GROUP BY state",
+                (first["job_id"],)).fetchall()),
+            "outbox": dict(db.execute(
+                "SELECT state,count(*) FROM outbox WHERE origin_event_id=? GROUP BY state",
+                (event["event_id"],)).fetchall()),
+            "worker_loop": {key: loop[key] for key in ("state", "stage", "sequence")
+                            if key in loop},
+        }
+        raise RuntimeError("INDEPENDENT_WORKER_DID_NOT_COMPLETE " + json.dumps(details))
     assert db.execute("SELECT count(*) FROM jobs WHERE event_id=?", (event["event_id"],)
                       ).fetchone()[0] == 1
     assert db.execute("SELECT count(*) FROM model_usage WHERE job_id=?", (first["job_id"],)

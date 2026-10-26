@@ -371,18 +371,53 @@ async def native_probe_contracts(tmp_path):
            "COMPANION_MEMORY_ENABLED": "false", "COMPANION_MODEL_KEY": "",
            "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
            "COMPANION_BACKUP_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}
+    children, child_logs = [], {}
+    log_dir = tmp_path / "child-logs"
+    log_dir.mkdir()
 
-    async def start(*args):
-        return await asyncio.create_subprocess_exec(
-            sys.executable, "-B", *args, cwd=ROOT, env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+    def safe_text(text):
+        for name in ("COMPANION_BRIDGE_TOKEN", "COMPANION_BACKUP_KEY"):
+            text = text.replace(env[name], "[REDACTED]")
+        return text[-8192:]
+
+    def failure_data(process, output=b"", error=b"", *, timed_out=False):
+        return {
+            "pid": process.pid, "returncode": process.returncode, "timed_out": timed_out,
+            "stdout": safe_text(output.decode(errors="replace")),
+            "stderr": safe_text(error.decode(errors="replace")),
+            "children": [
+                {"role": child_logs[child.pid][0], "pid": child.pid,
+                 "returncode": child.returncode,
+                 "output_tail": safe_text(child_logs[child.pid][1].read_text(
+                     encoding="utf-8", errors="replace"))}
+                for child in children
+            ],
+        }
+
+    async def start(*args, role=None):
+        if role is None:
+            return await asyncio.create_subprocess_exec(
+                sys.executable, "-B", *args, cwd=ROOT, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+        log = log_dir / f"{len(child_logs)}-{role}.log"
+        with log.open("wb") as output:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "-B", *args, cwd=ROOT, env=env,
+                stdout=output, stderr=asyncio.subprocess.STDOUT,
+            )
+        child_logs[process.pid] = role, log
+        return process
 
     async def command(*args, expected=0):
         process = await start(*args)
         try:
-            output, error = await asyncio.wait_for(process.communicate(), 30)
-            assert process.returncode == expected, (output.decode(), error.decode())
+            try:
+                output, error = await asyncio.wait_for(process.communicate(), 30)
+            except TimeoutError:
+                raise AssertionError(failure_data(process, timed_out=True)) from None
+            if process.returncode != expected:
+                raise AssertionError(failure_data(process, output, error))
             return output.decode()
         finally:
             if process.returncode is None:
@@ -393,10 +428,9 @@ async def native_probe_contracts(tmp_path):
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
     await command("-m", "companion", "init")
-    children = []
     try:
-        children.append(await start("-m", "companion", "serve", "--port", str(port)))
-        children.append(await start("-m", "companion", "worker"))
+        children.append(await start("-m", "companion", "serve", "--port", str(port), role="api"))
+        children.append(await start("-m", "companion", "worker", role="worker"))
         http_code = smoke.HTTP_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
         http_code = http_code.replace("/data/companion.sqlite3", database.as_posix())
         for number in (1, 2, 3):
@@ -424,10 +458,10 @@ async def native_probe_contracts(tmp_path):
     await command("-m", "companion", "init")
     children = []
     try:
-        children.append(await start("-m", "companion", "serve", "--port", str(port)))
+        children.append(await start("-m", "companion", "serve", "--port", str(port), role="api"))
         ready = smoke.HTTP_READY_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
         assert (await command("-c", ready + "\nprint('PASS')")).strip() == "PASS"
-        children.append(await start("-m", "companion", "worker"))
+        children.append(await start("-m", "companion", "worker", role="worker"))
         result = json.loads(await command("-c", http_code, "4"))
         assert result["event"] == 4 and result["duplicate_job_usage_delivery"] == "PASS"
         assert all(process.returncode is None for process in children)
@@ -436,3 +470,52 @@ async def native_probe_contracts(tmp_path):
             if process.returncode is None:
                 process.terminate()
             await asyncio.wait_for(process.communicate(), 15)
+
+
+@pytest.mark.parametrize("state", ["QUEUED", "RUNNING"])
+def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeypatch, state):
+    spawn = asyncio.create_subprocess_exec
+    captured = {}
+
+    async def fail_worker(*args, **kwargs):
+        if args[-3:] == ("-m", "companion", "worker"):
+            captured["token"] = kwargs["env"]["COMPANION_BRIDGE_TOKEN"]
+            captured["backup_key"] = kwargs["env"]["COMPANION_BACKUP_KEY"]
+            args = (*args[:-3], "-c", "import os, sys; "
+                    "print('SYNTHETIC_WORKER_BOOT_FAILURE ' + "
+                    "os.environ['COMPANION_BRIDGE_TOKEN'] + ' ' + "
+                    "os.environ['COMPANION_BACKUP_KEY'], file=sys.stderr, flush=True); "
+                    "raise SystemExit(7)")
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_worker)
+    probe = smoke.HTTP_PROBE
+    if state == "RUNNING":
+        before = 'with sqlite3.connect("file:/data/companion.sqlite3?mode=ro", uri=True) as db:'
+        controlled = '''with sqlite3.connect(os.environ["COMPANION_DATABASE"]) as controlled:
+    controlled.execute("UPDATE jobs SET state='RUNNING' WHERE job_id=?", (first["job_id"],))
+    controlled.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('worker_loop',?)",
+        (json.dumps({"session": "a" * 32, "sequence": 2,
+                     "completed_at": datetime.now(UTC).isoformat(),
+                     "stage": "WAITING_AFTER_POLL"}),))
+'''
+        assert before in probe
+        probe = probe.replace(before, controlled + before)
+    monkeypatch.setattr(smoke, "HTTP_PROBE", probe)
+    with pytest.raises(AssertionError) as failure:
+        asyncio.run(native_probe_contracts(tmp_path))
+    data = failure.value.args[0]
+    assert isinstance(data, dict), "Native probe failure discarded child diagnostics"
+    projection = json.loads(data["stderr"].split("INDEPENDENT_WORKER_DID_NOT_COMPLETE ")[1])
+    assert projection["job_state"] == state
+    assert projection["model_usage"] == projection["outbox"] == {}
+    assert projection["worker_loop"] == (
+        {"state": "UNOBSERVED"} if state == "QUEUED" else
+        {"state": "STALE", "stage": "WAITING_AFTER_POLL", "sequence": 2}
+    )
+    worker = next(child for child in data["children"] if child["role"] == "worker")
+    assert worker["returncode"] == 7 and worker["pid"] > 0
+    assert "SYNTHETIC_WORKER_BOOT_FAILURE" in worker["output_tail"]
+    assert "[REDACTED]" in worker["output_tail"]
+    assert captured["token"] not in str(data)
+    assert captured["backup_key"] not in str(data)
