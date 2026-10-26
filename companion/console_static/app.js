@@ -2025,17 +2025,16 @@ PAGES.thinking = data => {
     stats, coverage, filters,
     state.cogKind === "model" ? meterOverview(data.model) : null,
     el("div", { class: "dk-wrap" },
-      el("ul", { class: "dk-list" }, filtered.map(i => {
+      el("ul", { class: "dk-list" + (state.cogKind === "model" ? " compact" : "") + (freshLoad() ? " anim" : ""), "data-keep-scroll": "cog-list" }, filtered.map((i, n) => {
         const ik = COGNITION_KINDS[i._kind] || { name: "其他", ic: "spark" };
         const iState = cognitionState(i) || "UNKNOWN";
         const tone = COGNITION_TONE[iState] || "ok";
-        return el("li", {},
+        const [title, sub] = i._kind === "model" ? modelRowText(i) : [i._title, fmtDate(i.occurred_at) + "，" + ik.name];
+        return el("li", { style: { "--i": String(Math.min(n, 16)) } },
           el("button", { type: "button", class: i === sel ? "sel" : "", "data-record-id": i.id,
             onclick: () => { state.cogSel = i._kind + ":" + i.id; rerender(); } },
             el("span", { class: "ic" }, icon(ik.ic)),
-            el("span", { class: "dk-l" },
-              el("b", {}, i._title),
-              el("small", {}, fmtDate(i.occurred_at) + "，" + ik.name)),
+            el("span", { class: "dk-l" }, el("b", {}, title), el("small", {}, sub)),
             el("span", { class: "tag " + tone }, cognitionStateName(i))));
       }), el("li", { class: "dk-more" }, cognitionMore())),
       el("section", { class: "dk-card" },
@@ -2622,16 +2621,16 @@ function jobSequence(items, sel) {
   return { index: same.findIndex(i => i.id === sel.id) + 1, total: same.length };
 }
 
-function donut(parts, center, sub) {
+function donut(parts, center, sub, countTo) {
   const total = parts.reduce((s, [, v]) => s + v, 0), r = 42, c = 2 * Math.PI * r;
   let offset = 0;
   const arcs = total > 0 ? parts.filter(([, v]) => v > 0).map(([k, v]) => {
     const len = v / total * c, arc = el("circle", { cx: "60", cy: "60", r: String(r), fill: "none", stroke: METER_COLORS[k], "stroke-width": "14",
       "stroke-dasharray": len.toFixed(2) + " " + (c - len).toFixed(2), "stroke-dashoffset": (-offset).toFixed(2), transform: "rotate(-90 60 60)" });
-    offset += len; return arc;
+    offset += len; arc.style.setProperty("--len", len.toFixed(2)); return arc;
   }) : [el("circle", { cx: "60", cy: "60", r: String(r), fill: "none", stroke: "var(--line)", "stroke-width": "14" })];
   return el("div", { class: "donut" }, el("svg", { viewBox: "0 0 120 120", role: "img", "aria-label": center + " " + sub }, arcs),
-    el("div", { class: "donut-c" }, el("b", { class: "num" }, center), el("span", {}, sub)));
+    el("div", { class: "donut-c" }, el("b", { class: "num", "data-count": countTo ?? null }, center), el("span", {}, sub)));
 }
 function meterLegend(parts, total) {
   return el("ul", { class: "m-legend" }, parts.map(([k, v]) => el("li", {},
@@ -2655,7 +2654,7 @@ function meterOverview(page) {
   const billed = sum(rows, x => x.billed);
   const stat = (title, value, chips) => el("div", { class: "m-stat" }, el("div", { class: "m-stat-h" }, el("span", {}, title), el("b", { class: "num" }, value)),
     chips.length ? el("div", { class: "m-chips" }, chips.map(([n, v, tone]) => el("span", { class: "m-chip" + (tone ? " " + tone : "") }, n, el("b", { class: "num" }, String(v))))) : null);
-  return el("section", { class: "meter" },
+  return el("section", { class: "meter" + (freshLoad() ? " anim" : "") },
     el("div", { class: "m-grid" },
       el("div", { class: "sheet m-summary" }, el("div", { class: "sheet-head" }, el("h2", {}, "请求统计"), el("span", { class: "note" }, "本页已加载 " + items.length + " 次")),
         el("div", { class: "sheet-body m-stats" },
@@ -2665,7 +2664,7 @@ function meterOverview(page) {
           stat("费用", usd(billed), [["按配置费率估算", rows.filter(r => r.x.estimate).length, ""]]))),
       el("div", { class: "sheet m-tokens" }, el("div", { class: "sheet-head" }, el("h2", {}, "Token 统计"),
           el("span", { class: "note" }, cacheIn > 0 ? "缓存命中 " + pctText(hit, cacheIn) : actual.length ? "缓存未记录" : "")),
-        el("div", { class: "sheet-body m-donut" }, donut(parts, tk(total), actual.length ? "实际总量" : "未记录"),
+        el("div", { class: "sheet-body m-donut" }, donut(parts, tk(total), actual.length ? "实际总量" : "未记录", actual.length ? total : null),
           actual.length ? meterLegend(parts, total) : el("p", { class: "note" }, "本页没有有效的实际用量回执。")))),
     meterChart(rows),
     el("p", { class: "note mt" }, "统计只包含实际用量已记录的请求；缓存命中率只按缓存已记录的请求计算。费用是已计或预留的责任金额，按配置费率估算，不等于服务商账单。耗时、上下文分区与裁剪原因没有保存，这里不做拆分。"));
@@ -2687,13 +2686,13 @@ function meterChart(rows) {
       const h = (H - T - B) * v / top; y -= h;
       return el("rect", { x: x.toFixed(1), y: y.toFixed(1), width: bw.toFixed(1), height: Math.max(h, 0.5).toFixed(1), fill: METER_COLORS[k] });
     }) : [el("rect", { x: x.toFixed(1), y: yAt(r.x.measured || 0).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * (r.x.measured || 0) / top, 2).toFixed(1), class: "m-bar-none" })];
-    return el("g", { class: "m-bar" + (sel ? " sel" : ""), tabindex: "0", role: "button", onclick: go, onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } },
+    return el("g", { class: "m-bar" + (sel ? " sel" : ""), style: { "--i": String(i) }, tabindex: "0", role: "button", onclick: go, onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } },
       "aria-label": "第 " + (i + 1) + " 次请求，" + (r.x.actual ? "实际输入 " + tk(r.x.input) + "，输出 " + tk(r.x.output) : "实际用量未记录") },
       el("rect", { x: (x - 3).toFixed(1), y: String(T), width: (bw + 6).toFixed(1), height: String(H - T - B), class: "m-hit" }), segs,
       el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, String(i + 1)));
   });
   const pts = list.map((r, i) => r.x.measured != null ? xAt(i).toFixed(1) + "," + yAt(r.x.measured).toFixed(1) : null);
-  const line = el("polyline", { points: pts.filter(Boolean).join(" "), class: "m-line" });
+  const line = el("polyline", { points: pts.filter(Boolean).join(" "), class: "m-line", pathLength: "1" });
   const dots = list.map((r, i) => r.x.measured != null ? el("circle", { cx: xAt(i).toFixed(1), cy: yAt(r.x.measured).toFixed(1), r: "2.6", class: "m-dot" }) : null);
   return el("div", { class: "sheet m-chart" }, el("div", { class: "sheet-head" }, el("h2", {}, "逐次请求"), el("span", { class: "note" }, "从旧到新，点一根柱子查看明细")),
     el("div", { class: "sheet-body" }, el("svg", { viewBox: `0 0 ${W} ${H}`, class: "m-svg", role: "group", "aria-label": "逐次请求的输入输出" }, grid, bars, line, dots),
@@ -2711,7 +2710,8 @@ function modelMeasurementView(sel) {
   const reserve = x.measured != null && x.margin != null ? x.measured + x.margin : null;
   const scale = Math.max(1, reserve || 0, x.measured || 0, x.actual ? x.input : 0);
   const compare = [["准入预留", reserve, "res"], ["本地输入计数", x.measured, "loc"], ["实际输入", x.actual ? x.input : null, "act"]];
-  return el("section", { class: "steps-view meter-one" },
+  const freshOne = state.meterOne !== sel.id; state.meterOne = sel.id;
+  return el("section", { class: "steps-view meter-one" + (freshOne ? " anim" : "") },
     el("div", { class: "m-one-h" }, el("h4", {}, "本次请求计量"),
       el("span", { class: "note" }, seq && seq.total > 1 ? "同一任务第 " + seq.index + " 次调用（本页共 " + seq.total + " 次）" : "同一任务里只加载到这一次调用")),
     pending ? el("div", { class: "alert" }, icon("warn"), el("span", {}, "这次请求的结果不明或仍在预留：实际用量未记录，费用按预留责任保留，不代表实际账单。")) : null,
@@ -2730,3 +2730,38 @@ function modelMeasurementView(sel) {
     el("p", { class: "note" }, "本地计量用于准入和预留，实际用量以有效的服务商回执为准；缓存只在原回执明确返回时显示。费用按配置费率核算，不是服务商账单。"),
     el("p", { class: "note" }, "上下文区域分布与裁剪原因未记录。"));
 }
+
+/* ---------- 列表与动画 ---------- */
+/** 模型调用的列表行写用量，不再重复“模型调用” */
+function modelRowText(i) {
+  const x = meterOf(i);
+  return [x.actual ? tk(x.input) + " 输入 · " + tk(x.output) + " 输出" : "实际用量未记录",
+    fmtDate(i.occurred_at) + (x.cacheKnown ? "，缓存 " + pctText(x.cached, x.input) : x.actual ? "，缓存未记录" : "")];
+}
+const motionOk = () => !globalThis.matchMedia || globalThis.matchMedia("(prefers-reduced-motion: no-preference)").matches;
+/** 每次读取到新数据只播放一次入场动画，切换选中不重播 */
+function freshLoad() { return state.meterAnim !== state.updatedAt; }
+/** 数字从 0 滚到目标值；只用于入场 */
+function countUp(root) {
+  if (!motionOk()) return;
+  for (const node of root.querySelectorAll("[data-count]")) {
+    const to = Number(node.dataset.count), fmt = node.dataset.fmt === "usd" ? usd : tk, t0 = performance.now();
+    if (!Number.isFinite(to) || to <= 0) continue;
+    const step = now => { const k = Math.min(1, (now - t0) / 700), e = 1 - Math.pow(1 - k, 3);
+      node.textContent = fmt(Math.round(to * e)); if (k < 1 && node.isConnected) requestAnimationFrame(step); };
+    node.textContent = fmt(0); requestAnimationFrame(step);
+  }
+}
+PAGES.thinking.after = () => {
+  const page = $("#page");
+  if (freshLoad()) { state.meterAnim = state.updatedAt; if (page) countUp(page); }
+  // 选中项不在列表可见范围时，只滚动列表，不移动整页
+  if (state.cogScrolled !== state.cogSel) {
+    state.cogScrolled = state.cogSel;
+    const list = $(".dk-list"), item = $(".dk-list button.sel");
+    if (list && item && list.scrollHeight > list.clientHeight) {
+      const top = item.offsetTop - list.offsetTop;
+      if (top < list.scrollTop || top + item.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = Math.max(0, top - list.clientHeight / 3);
+    }
+  }
+};
