@@ -29,11 +29,14 @@ from tests.test_owner_authority import activate, prepare
 
 @asynccontextmanager
 async def window(core, tmp_path, *, media=False, content=False, history=False, video=False,
-                 bili=False, voice=False, model=None, video_config=None, image_count=1):
+                 bili=False, voice=False, model=None, video_config=None, image_count=1, meme=False):
     core.clock.now = datetime.now(UTC).replace(microsecond=0)
     policy = prepare(core, tmp_path)
     core.settings.rich_input_scope = "references_v1"
     core.settings.content_enabled = content
+    if meme:
+        core.settings.meme_semantics_enabled = True
+        core.settings.expression_enabled = True
     if media:
         core.settings.paid_model = core.settings.paid_model.model_copy(update={
             "image_input": ImageInputPolicy(approval_sha256="b" * 64,
@@ -77,15 +80,18 @@ async def window(core, tmp_path, *, media=False, content=False, history=False, v
         bot_qq_id=core.settings.bot_qq_id,
         bridge_token=core.settings.bridge_token.get_secret_value(),
         onebot_token="s" * 32, protocol_epoch="native-capture-test",
-        onebot_http_url="http://127.0.0.1:3000", onebot_ws_url="ws://127.0.0.1:3001")
+        onebot_http_url="http://127.0.0.1:3000", onebot_ws_url="ws://127.0.0.1:3001",
+        meme_enabled=meme, meme_semantics_enabled=meme)
     hashes = owner_authority.capability_hashes(core.settings)
     purposes = (["chat", "image", "file"] if media else ["chat"])
     purposes += ["content"] if content else []
     purposes += ["history"] if history else []
     purposes += ["bili_video"] if bili else []
     purposes += ["voice"] if voice else []
+    purposes += ["meme", "expression"] if meme else []
     capability_names = (["image", "file"] if media else []) + (["bili_video"] if bili else [])
     capability_names += ["voice"] if voice else []
+    capability_names += ["meme"] if meme else []
     policy = OwnerGrantPolicy.model_validate({**policy.model_dump(),
         "paid_contract_sha256": paid_budget.sha(paid_budget.snapshot(core.settings)),
         "purposes": purposes,

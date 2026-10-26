@@ -19,6 +19,7 @@ from companion_delivery_protocol import digest
 from companion_onebot_bridge.capture import prepare_owner_input
 from companion_onebot_bridge.network import private_http_client
 from companion_onebot_bridge.outbound import deliver_tick
+from companion_onebot_bridge.owner_memes import MemePump
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.owner_send import OwnerOneBot, OwnerSendGuard
 from companion_onebot_bridge.spool import Spool
@@ -68,12 +69,16 @@ async def stopped(process):
     assert process.returncode is not None
 
 
+@pytest.mark.parametrize(
+    "meme_enabled", [False, True], ids=["default_scope", "meme_expression_enabled"]
+)
 @pytest.mark.parametrize("current_timeout", [False, True])
 def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
     core,
     tmp_path,
     monkeypatch,
     current_timeout,
+    meme_enabled,
 ):
     import tests.test_prepare_owner_input as preparation
 
@@ -90,12 +95,36 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
     core.settings.control_token = SecretStr("synthetic-native-carry-control")
 
     async def scenario():
+        async def semantic_offer(runtime, client, event_id):
+            if not meme_enabled:
+                return
+            assert runtime.config.meme_enabled and runtime.config.meme_semantics_enabled
+            pump = MemePump(runtime, client)
+            try:
+                pump.admitted(event_id)
+                assert pump.query_task is not None
+                await pump.query_task
+            finally:
+                await pump.close()
+            offer = json.loads(
+                core.store.one(
+                    "SELECT value FROM runtime_meta WHERE key=?", ("meme_offer:" + event_id,)
+                )["value"]
+            )
+            assert offer["event_id"] == event_id and offer["offer"] is None
+
         # Initial capture/upload is real authenticated HTTP over original synthetic pixels.
         # Honest frozen rates yield an 84 microUSD video reservation, matching
         # the recovery case without editing any usage or reservation projection.
         video = video_policy(input_rate=1, cached_input_rate=1, output_rate=650000)
         async with window(
-            core, tmp_path, media=True, content=True, video=True, video_config=video
+            core,
+            tmp_path,
+            media=True,
+            content=True,
+            video=True,
+            video_config=video,
+            meme=meme_enabled,
         ) as (
             client,
             config,
@@ -111,6 +140,13 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
         )
         old_paid = core.settings.paid_model
         old_policy = owner_authority.evidence(core.store, core.settings, plan.authority).policy
+        if meme_enabled:
+            assert core.settings.meme_semantics_enabled and core.settings.expression_enabled
+            assert {"meme", "expression"} <= set(old_policy.purposes)
+            assert (
+                old_policy.capability_policies["meme"]
+                == owner_authority.capability_hashes(core.settings)["meme"]
+            )
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
@@ -267,6 +303,23 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 )
                 assert activated.status_code == 200, activated.text
                 successor = activated.json()["authority"]
+
+                async def retained_scope(authority):
+                    if meme_enabled:
+                        assert core.settings.meme_semantics_enabled
+                        assert core.settings.expression_enabled
+                        for purpose in ("meme", "expression"):
+                            checked = await client.post(
+                                "/internal/v1/owner-authority/check",
+                                json={"authority": authority, "purpose": purpose},
+                            )
+                            assert checked.status_code == 200, checked.text
+                            assert (
+                                checked.json()["capability_policies"]["meme"]
+                                == (old_policy.capability_policies["meme"])
+                            )
+
+                await retained_scope(successor)
                 newer = replace(config, owner_authority=successor)
                 assert (await bridge(["owner-handoff"], newer))["state"] == "ACTIVE"
                 # Old source/reference cannot become an independent new input.
@@ -292,6 +345,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                         value["event"], frame, received_at=core.clock.now, peer=("127.0.0.1", 3001)
                     )
                     assert await runtime.flush_one(client)
+                    await semantic_offer(runtime, client, value["event"]["event_id"])
                 text_worker = await child(
                     tmp_path,
                     "new-worker",
@@ -339,6 +393,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                             peer=("127.0.0.1", 3001),
                         )
                         assert await runtime.flush_one(client)
+                        await semantic_offer(runtime, client, value["event"]["event_id"])
                     output = tmp_path / f"current-provider-{number}.json"
                     process = await child(
                         tmp_path, f"current-worker-{number}", core, mode=mode, output=str(output)
@@ -437,6 +492,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 )
                 assert activated_again.status_code == 200, activated_again.text
                 final_authority = activated_again.json()["authority"]
+                await retained_scope(final_authority)
                 assert final_authority == successor | {"revision": 5}
                 assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == preserved
                 assert (
@@ -455,6 +511,8 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
             assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
             assert core.store.one("SELECT COUNT(*) n FROM outbox WHERE state='SENT'")["n"] == 2
             assert core.store.one("SELECT * FROM agent_tool_calls") == original_tool
+            assert not core.store.one("SELECT 1 FROM meme_captions")
+            assert not core.store.one("SELECT 1 FROM model_usage WHERE scenario='meme_caption'")
             assert (
                 core.store.rows(
                     "SELECT * FROM model_usage WHERE request_id IN (?,?) ORDER BY rowid",
