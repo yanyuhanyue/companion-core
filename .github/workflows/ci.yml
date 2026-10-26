@@ -254,6 +254,11 @@ jobs:
           cache-suffix: python-3.12
       - run: uv sync --frozen --group reader
       - run: uv run --group reader python -m playwright install chromium --only-shell
+      - name: Prepare Nginx for console proxy checks
+        shell: pwsh
+        run: |
+          $nginx = ./scripts/check_console_proxy.ps1 -PrepareOnly
+          "COMPANION_TEST_NGINX=$nginx" >> $env:GITHUB_ENV
       - name: Validate browser readers and console interactions
         if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
         run: >-

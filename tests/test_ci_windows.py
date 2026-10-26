@@ -175,9 +175,17 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
     for command in ("uv build", "uv run python scripts/verify_package.py"):
         step = next(step for step in tests if step.get("run") == command)
         assert step["if"] == "${{ matrix.shard == matrix.verify_shard }}"
-    browsers = [step for step in jobs["browser-reader"]["steps"]
+    browser_job = jobs["browser-reader"]
+    assert browser_job["env"]["COMPANION_TEST_BROWSER"] == "1"
+    browser_steps = browser_job["steps"]
+    proxy = next(step for step in browser_steps
+                 if "check_console_proxy.ps1 -PrepareOnly" in step.get("run", ""))
+    assert proxy["shell"] == "pwsh" and "if" not in proxy
+    assert '"COMPANION_TEST_NGINX=$nginx" >> $env:GITHUB_ENV' in proxy["run"]
+    browsers = [step for step in browser_steps
                 if "pytest" in step.get("run", "")]
     assert len(browsers) == 2
+    assert all(browser_steps.index(proxy) < browser_steps.index(step) for step in browsers)
     scoped = next(step for step in browsers if step["if"] == console)
     assert "tests/test_console_browser.py" in scoped["run"]
     assert "tests/test_console_supplement_browser.py" in scoped["run"]
