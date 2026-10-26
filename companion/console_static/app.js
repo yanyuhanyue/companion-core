@@ -2112,7 +2112,7 @@ PAGES.thinking = data => {
 function goalCard(g) {
   const steps = g.steps || [], actions = g.allowed_actions || [];
   return el("div", { class: "goal" },
-    el("div", {}, el("b", {}, g.topic), tag(g.state),
+    el("div", {}, el("div", { class: "goal-h" }, el("b", {}, g.topic), tag(g.state)),
       el("p", {}, "更新于 " + fmtDate(g.updated_at)),
       g.commitment_state ? el("p", {}, "承诺：" + statusOf(g.commitment_state)[0]) : null,
       steps.length ? el("ul", { class: "goal-steps" }, steps.map(s =>
@@ -2769,9 +2769,15 @@ function meterChart(rows) {
   } else {
     const grouped = meterBuckets(rows, scale), buckets = grouped.buckets; trimmed = grouped.trimmed;
     top = Math.max(1, ...buckets.map(b => b.parts.reduce((s, [, v]) => s + v, 0)));
+    // 标签从最新一根往回每隔 every 根标一次；月份在第一个标签和跨月处写出
+    const step = Math.ceil(Math.max(1, buckets.length) / 16);
+    let shownKey = null;
+    const labels = buckets.map((b, i) => (buckets.length - 1 - i) % step === 0
+      ? (() => { const t = bucketLabel(b.key, scale, shownKey == null ? 0 : 1, shownKey); shownKey = b.key; return t; })() : "");
     cols = buckets.map((b, i) => {
       const total = b.parts.reduce((s, [, v]) => s + v, 0), when = scale === "day" ? b.key : b.key.replace("-", " 年 ") + " 月";
-      return { id: b.list[0]?.item.id, label: bucketLabel(b.key, scale, i, buckets[i - 1]?.key), parts: b.actual ? b.parts : null, none: b.list.length > 0 && !b.actual, ghost: 0,
+      const ghost = b.list.reduce((t, r) => t + (r.x.measured || 0), 0);
+      return { id: b.list[0]?.item.id, label: labels[i], parts: b.actual ? b.parts : null, none: b.list.length > 0 && !b.actual, ghost,
         aria: when + "，" + b.list.length + " 次请求" + (b.actual ? "，实际总量 " + tk(total) + (b.actual < b.list.length ? "，其中 " + (b.list.length - b.actual) + " 次未记录" : "") : b.list.length ? "，实际用量未记录" : "") };
     });
   }
@@ -2787,8 +2793,8 @@ function meterChart(rows) {
     const segs = c.parts ? c.parts.filter(([, v]) => v > 0).map(([k, v]) => {
       const h = (H - T - B) * v / top; y -= h;
       return el("rect", { x: x.toFixed(1), y: y.toFixed(1), width: bw.toFixed(1), height: Math.max(h, 0.5).toFixed(1), fill: METER_COLORS[k] });
-    }) : c.none ? [el("rect", { x: x.toFixed(1), y: yAt(c.ghost).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * c.ghost / top, 2).toFixed(1), class: "m-bar-none" })] : [];
-    const label = (n - 1 - i) % every === 0 ? el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, c.label) : null;
+    }) : c.none ? [el("rect", { x: x.toFixed(1), y: Math.min(yAt(c.ghost), yAt(0) - 12).toFixed(1), width: bw.toFixed(1), height: Math.max((H - T - B) * c.ghost / top, 12).toFixed(1), class: "m-bar-none" })] : [];
+    const label = (n - 1 - i) % every === 0 && c.label ? el("text", { x: xAt(i).toFixed(1), y: String(H - 6), "text-anchor": "middle", class: "m-axis" }, c.label) : null;
     if (c.id == null) return el("g", { class: "m-bar empty", style: { "--i": String(i) }, role: "img", "aria-label": c.aria }, label);
     return el("g", { class: "m-bar" + (sel ? " sel" : ""), style: { "--i": String(i) }, tabindex: "0", role: "button", onclick: go,
       onkeydown: e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } }, "aria-label": c.aria + (scale === "call" ? "" : "，查看其中最近一次") },

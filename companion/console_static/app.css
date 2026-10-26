@@ -973,7 +973,7 @@ details.ev ul { display: grid; gap: 4px; margin-top: 6px; font-size: 12.5px; }
 .m-hit { fill: transparent; }
 .m-bar:hover .m-hit, .m-bar:focus-visible .m-hit { fill: rgba(35, 38, 74, .06); }
 .m-bar.sel .m-hit { fill: rgba(240, 180, 41, .18); }
-.m-bar-none { fill: none; stroke: var(--faint); stroke-dasharray: 3 2; }
+.m-bar-none { fill: rgba(195, 200, 216, .12); stroke: var(--faint); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; shape-rendering: crispEdges; }
 .m-line { fill: none; stroke: var(--ink); stroke-width: 1.4; }
 .m-dot { fill: var(--raised); stroke: var(--ink); stroke-width: 1.2; }
 .m-keys { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
@@ -1099,3 +1099,6 @@ details.ev ul { display: grid; gap: 4px; margin-top: 6px; font-size: 12.5px; }
   .m-chart.swap .m-line { stroke-dasharray: 1; animation: m-draw .8s ease-out .3s both; }
   .m-chart.swap .m-dot { animation: m-fade .3s both; animation-delay: .9s; }
 }
+/* 目标标题与状态标签分开，标签不贴着标题 */
+.goal-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.goal-h b { min-width: 0; }
