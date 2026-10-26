@@ -197,8 +197,9 @@ def public_repository(tmp_path):
     return root
 
 
+@pytest.mark.parametrize("source_root", ["source_reader", "companion_meme_sources"])
 def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expansion(
-    tmp_path, public_repository,
+    tmp_path, public_repository, source_root,
 ):
     root = public_repository
     (root / "config.toml").write_bytes(images.CANARY)
@@ -206,7 +207,7 @@ def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expans
     context = tmp_path / "public" / "source"
     images.prepare_context(context, root=root)
     assert not (context / "config.toml").exists() and not (context / ".env").exists()
-    canary = context / "source_reader/public.txt"
+    canary = context / source_root / "public.txt"
     canary.write_bytes(images.CANARY)
     with pytest.raises(ValueError, match="PACKAGING_CANARY"):
         images.check_public_inputs(context)
@@ -220,7 +221,8 @@ def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expans
     "private.key", "config.toml", ".env.production", "dump.sqlite3", "client.pem", "runtime.log",
     "keys/nested.txt", "CONFIG.TOML",
 ])
-def test_public_copy_inputs_reject_nested_private_files(tmp_path, value):
+@pytest.mark.parametrize("source_root", ["source_reader", "companion_meme_sources"])
+def test_public_copy_inputs_reject_nested_private_files(tmp_path, value, source_root):
     # Use the actual reviewed recipes and all inputs without invoking Docker.
     for spec in images.COMPONENTS.values():
         recipe = tmp_path / spec["recipe"]
@@ -234,11 +236,17 @@ def test_public_copy_inputs_reject_nested_private_files(tmp_path, value):
                     path.write_text("public")
             else:
                 path.mkdir(parents=True, exist_ok=True)
-    private = tmp_path / "source_reader" / value
+    private = tmp_path / source_root / value
     private.parent.mkdir(parents=True, exist_ok=True)
     private.write_text("private")
     with pytest.raises(ValueError, match="PRIVATE_INPUT"):
         images.check_public_inputs(tmp_path)
+
+
+def test_real_recipes_allow_shared_sources_only_in_core_and_bridge():
+    images.check_public_inputs()
+    assert {name for name, spec in images.COMPONENTS.items()
+            if "companion_meme_sources" in spec["copies"]} == {"core", "bridge"}
 
 
 @pytest.mark.parametrize("fault", ["env", "history", "platform"])
