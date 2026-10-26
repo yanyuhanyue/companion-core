@@ -218,6 +218,8 @@ AuthorityRef、DB journal 身份及该 revision 的原 journal_path。预算校�
 `record=None, initialize=False, allow_settlement=True`，前后固定 Ledger 与 journal。
 当前设置里的新路径不能替代原证据。合法 policy_redacted 通过保留摘要与原 journal
 投影验证；STOP、过期、撤回或擦除不消除原费用，CANCELLED + UNKNOWN 保持原样。
+若原 journal 含 OWNER_RECONCILED v2 且其原 revision 后来合法 policy_redacted，
+现有 journal 校验仍要求未 redacted 的原 policy，故保守拒绝读取；该历史组合尚未验证。
 旧快照缺少最新 Ledger 重放、证据缺失和备份恢复标记继续拒绝；读取不重放、不建文件、
 不修复、不清标记，不进行 SQL 写入、审计、工作提交、模型调用或结算。
 
