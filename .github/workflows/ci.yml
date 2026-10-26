@@ -247,6 +247,85 @@ jobs:
           -e COMPANION_ERASURE_LEDGER=/privacy/test.jsonl
           -e COMPANION_EMBEDDING_CACHE_DIR=/data/embedding-cache
           companion-core:test init
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.10'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: python-3.12
+      - name: Prepare native Linux console proxy checks
+        env:
+          UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nginx
+          nginx -v
+          uv sync --frozen --group reader
+      - name: Validate the UI image, proxy contracts and isolated UI replacement
+        env:
+          UV_CACHE_DIR: ${{ github.workspace }}/.local/uv-cache
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -euo pipefail
+          created=()
+          network="console-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            for container in "${created[@]}"; do
+              docker rm -f "$container" >/dev/null 2>&1 || true
+            done
+            docker network rm "$network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker build -f deploy/console-ui.Dockerfile -t companion-console-ui:test .
+          baseline=.local/console-ui-baseline
+          mkdir -p "$baseline/deploy" "$baseline/companion/console_static"
+          cp deploy/console-ui.Dockerfile deploy/console-ui.nginx.conf "$baseline/deploy/"
+          cp companion/console_static/{index.html,app.js,app.css,icon.svg} "$baseline/companion/console_static/"
+          printf '\n/* Synthetic UI rollback baseline */\n' >> "$baseline/companion/console_static/app.css"
+          docker build -f "$baseline/deploy/console-ui.Dockerfile" -t companion-console-ui:synthetic-baseline "$baseline"
+          candidate_id=$(docker image inspect --format '{{.Id}}' companion-console-ui:test)
+          baseline_id=$(docker image inspect --format '{{.Id}}' companion-console-ui:synthetic-baseline)
+          # These bounded synthetic holders prove container identity continuity, not business health.
+          protected=()
+          for tag in companion-core:test companion-onebot-bridge:review companion-source-reader:test; do
+            image_id=$(docker image inspect --format '{{.Id}}' "$tag")
+            container=$(docker run -d --label companion.console-synthetic=true --network none \
+              --read-only --cap-drop ALL --security-opt no-new-privileges --cpus 0.25 \
+              --memory 128m --pids-limit 32 --entrypoint python "$image_id" \
+              -c 'import time; time.sleep(600)')
+            created+=("$container")
+            protected+=("$container")
+          done
+          docker network create --label companion.console-synthetic=true "$network"
+          ui=$(docker run -d --label companion.console-synthetic=true --network "$network" \
+            --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+            --cpus 0.25 --memory 64m --pids-limit 32 -p 127.0.0.1::8080 "$candidate_id")
+          created+=("$ui")
+          address=$(docker port "$ui" 8080/tcp)
+          [[ "$address" == 127.0.0.1:* ]]
+          COMPANION_TEST_CONSOLE_PROXY=1 COMPANION_TEST_CONSOLE_UI_URL="http://$address" \
+            uv run --group reader python -m pytest -q tests/test_console_frontend.py \
+            --basetemp=.local/test-temp/console-oci -o cache_dir=.local/test-temp/console-oci-cache \
+            --junitxml=.local/test-results/console-oci.xml
+          python -B scripts/smoke_console_ui.py --ui-image "$baseline_id" \
+            --replacement-ui-image "$candidate_id" --core-container "${protected[0]}" \
+            --bridge-container "${protected[1]}" --reader-container "${protected[2]}" \
+            --output .local/test-results/console-ui-replacement.json
+          python -c 'import json; from pathlib import Path; r=json.loads(Path(".local/test-results/console-ui-replacement.json").read_text()); assert r["protected_unchanged"] and all(r["protected_running"].values())'
+      - name: Preserve native UI and proxy results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: console-ui-native-${{ github.run_attempt }}
+          path: |
+            .local/test-results/console-oci.xml
+            .local/test-results/console-ui-replacement.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Export only the validated public-source runtime images
         if: ${{ needs.preflight.outputs.profile == 'full' }}
         run: python -B scripts/ci_container_artifacts.py export .local/container-build .local/container-images
@@ -335,16 +414,21 @@ jobs:
           cache-suffix: python-3.12
       - run: uv sync --frozen --group reader
       - run: uv run --group reader python -m playwright install chromium --only-shell
+      - name: Prepare Nginx for console proxy checks
+        shell: pwsh
+        run: |
+          $nginx = ./scripts/check_console_proxy.ps1 -PrepareOnly
+          "COMPANION_TEST_NGINX=$nginx" >> $env:GITHUB_ENV
       - name: Validate browser readers and console interactions
         if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
         run: >-
           uv run --group reader python -m pytest -q tests/test_source_browser.py
-          tests/test_next_reading_browser.py tests/test_console_browser.py
+          tests/test_next_reading_browser.py tests/test_console_frontend.py tests/test_console_browser.py
           tests/test_console_supplement_browser.py --basetemp=.local/test-temp
       - name: Validate console interactions
         if: ${{ !fromJSON(needs.preflight.outputs.windows).product }}
         run: >-
-          uv run --group reader python -m pytest -q tests/test_console_browser.py
+          uv run --group reader python -m pytest -q tests/test_console_frontend.py tests/test_console_browser.py
           tests/test_console_supplement_browser.py --basetemp=.local/test-temp
   plugin-native:
     needs: preflight
