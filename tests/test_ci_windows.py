@@ -186,6 +186,7 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
                 if "pytest" in step.get("run", "")]
     assert len(browsers) == 2
     assert all(browser_steps.index(proxy) < browser_steps.index(step) for step in browsers)
+    assert all("tests/test_console_frontend.py" in step["run"] for step in browsers)
     scoped = next(step for step in browsers if step["if"] == console)
     assert "tests/test_console_browser.py" in scoped["run"]
     assert "tests/test_console_supplement_browser.py" in scoped["run"]
@@ -193,6 +194,27 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
     assert next(step for step in browsers if step is not scoped)["if"] == product
     for name in ("container", "plugin-native"):
         assert "&& fromJSON(needs.preflight.outputs.windows).product" in jobs[name]["if"]
+    container_steps = jobs["container"]["steps"]
+    prepare = next(step for step in container_steps
+                   if "apt-get install --yes nginx" in step.get("run", ""))
+    assert "uv sync --frozen --group reader" in prepare["run"] and "if" not in prepare
+    native = next(step for step in container_steps
+                  if "scripts/smoke_console_ui.py" in step.get("run", ""))
+    command = native["run"]
+    assert container_steps.index(prepare) < container_steps.index(native) and "if" not in native
+    for required in ("-f deploy/console-ui.Dockerfile", "tests/test_console_frontend.py",
+                     "COMPANION_TEST_CONSOLE_PROXY=1", "COMPANION_TEST_CONSOLE_UI_URL=",
+                     "trap cleanup EXIT", '--replacement-ui-image "$candidate_id"',
+                     "companion-core:test companion-onebot-bridge:review "
+                     "companion-source-reader:test"):
+        assert required in command
+    assert "docker image inspect" in command and '"protected_running"' in command
+    assert "playwright install" not in command
+    evidence = next(step for step in container_steps if step.get("with", {}).get("name")
+                    == "console-ui-native-${{ github.run_attempt }}")
+    assert evidence["if"] == "${{ always() }}"
+    assert ".local/test-results/console-oci.xml" in evidence["with"]["path"]
+    assert ".local/test-results/console-ui-replacement.json" in evidence["with"]["path"]
 
 
 @pytest.mark.parametrize("job", ["preflight", "quality", "test", "browser-reader"])
