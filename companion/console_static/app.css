@@ -717,9 +717,18 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .dlg-form { display: grid; gap: 14px; }
 .dlg-form > p { font-size: 13px; }
 .form-error { color: var(--rose); font-size: 12.5px; }
-.mode-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
-.mode-row b { display: block; font-size: 13.5px; } .mode-row span { font-size: 12px; color: var(--muted); }
-.sm-select { width: 120px; flex: none; }
+.mode-item { border: 1px solid var(--line); border-radius: 10px; transition: border-color .15s, background .15s; }
+.mode-item:has(.mode-row.changed) { border-color: var(--ink); background: #f6f7fb; }
+.mode-row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; }
+.mode-txt { flex: 1; min-width: 0; }
+.mode-txt b { display: block; font-size: 13.5px; } .mode-txt span { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.mode-state { flex: none; font-size: 12px; font-weight: 600; color: #2f8a62; white-space: nowrap; }
+.mode-state.off { color: var(--muted); } .mode-state.changed { color: var(--ink); }
+.mode-note { display: flex; gap: 6px; align-items: center; margin: -4px 14px 12px; font-size: 12px; color: #9a6a00; }
+.mode-note svg { width: 14px; height: 14px; flex: none; }
+.switch:disabled { opacity: .45; cursor: not-allowed; }
+/* select.input 的 width:100% 优先级更高，这里要同样带上元素名 */
+.sm-select, select.input.sm-select { width: 120px; flex: none; }
 .rows > li.block { display: block; }
 .meta-line { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
 .meme .pic .hash { font-size: 15px; color: rgba(35,38,74,.55); letter-spacing: .08em; }

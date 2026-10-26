@@ -899,20 +899,46 @@ function diaryAction(day, operation, current) {
   openDialog(input ? "修订 " + day + " 的日记" : "删除 " + day + " 的日记？", form, { wide: !!input });
 }
 function openModeDialog() {
-  const targets = [["proactive", "主动私聊", "不主动找你，也会取消还没发出的主动消息"], ["life", "自主活动", "不再自己安排阅读和整理，已接受的任务继续处理"], ["diary", "写日记", "暂停之后不再整理新的日记"]];
-  const form = el("form", { class: "dlg-form" }, el("p", { class: "muted" }, "只影响她主动做的事，你发来的消息始终会回复。改动立即生效，不需要重启。"));
-  const rows = targets.map(([key, name, sub]) => {
-    const sw = el("select", { class: "input sm-select", "aria-label": name }, el("option", { value: "" }, "保持不变"), el("option", { value: "true" }, "恢复"), el("option", { value: "false" }, "暂停"));
-    form.append(el("div", { class: "mode-row" }, el("div", {}, el("b", {}, name), el("span", {}, sub)), sw));
-    return [key, sw];
+  // 当前状态来自 overview.runtime.modes；旧后端没有这个字段时显示“状态未知”，开关仍可用
+  const modes = state.data?.runtime?.modes || null;
+  const targets = [
+    ["proactive", "主动私聊", "她会在合适的时候主动找你聊天", "暂停后会取消还没发出的主动消息"],
+    ["life", "自主活动", "她自己安排阅读、整理和生活话题", "暂停后不再安排新的活动，已接受的任务继续处理"],
+    ["diary", "写日记", "每天整理当天的日记", "暂停后不再整理新的日记，已有日记不受影响"]];
+  const form = el("form", { class: "dlg-form mode-form" }, el("p", { class: "muted" }, "只影响她主动做的事，你发来的消息始终会回复。改动保存后立即生效，不需要重启。"));
+  const submit = el("button", { type: "submit", class: "btn primary", disabled: true }, "保存");
+  const draft = new Map();
+  const rows = targets.map(([key, name, sub, pauseNote]) => {
+    // 配置文件没开启时，控制台不能恢复，开关锁定为关
+    const m = modes?.[key], known = m && typeof m.paused === "boolean", locked = m?.available === false;
+    const now = known ? !m.paused && !locked : null;
+    const status = el("span", { class: "mode-state" }), note = el("p", { class: "mode-note", hidden: true }, icon("warn"), el("span", {}, pauseNote));
+    const sw = el("button", { type: "button", class: "switch", role: "switch", "aria-label": name, disabled: !!locked });
+    const row = el("div", { class: "mode-row" }, el("div", { class: "mode-txt" }, el("b", {}, name), el("span", {}, sub)), status, sw);
+    const paint = () => {
+      const on = draft.has(key) ? draft.get(key) : now, changed = draft.has(key);
+      sw.setAttribute("aria-checked", String(on === true));
+      status.textContent = locked ? "配置文件里未开启" : changed ? (on ? "将恢复" : "将暂停") : now == null ? "状态未知" : now ? "进行中" : "已暂停";
+      status.className = "mode-state" + (changed ? " changed" : now === false ? " off" : "");
+      row.classList.toggle("changed", changed);
+      note.hidden = !(changed && on === false);
+      submit.disabled = draft.size === 0;
+    };
+    sw.addEventListener("click", () => {
+      const cur = draft.has(key) ? draft.get(key) : now, next = !(cur === true);
+      if (now != null && next === now) draft.delete(key); else draft.set(key, next);
+      paint();
+    });
+    paint();
+    form.append(el("div", { class: "mode-item" }, row, note));
+    return key;
   });
-  const submit = el("button", { type: "submit", class: "btn primary" }, "保存");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
     e.preventDefault();
-    const changes = rows.filter(([, sw]) => sw.value).map(([key, sw]) => ({ target: key, enabled: sw.value === "true" }));
-    if (!changes.length) { formError(form, "没有选择要改的项目。"); return; }
-    perform(form, submit, async () => { for (const c of changes) await api.write("/mode", c, "POST", r => typeof r.enabled === "boolean" || r.state === "COMPLETE"); },
+    const changes = rows.filter(k => draft.has(k)).map(k => ({ target: k, enabled: draft.get(k) }));
+    if (!changes.length) { formError(form, "没有改动。"); return; }
+    perform(form, submit, async () => { for (const c of changes) await api.write("/mode", c, "POST", r => typeof r.enabled === "boolean" || typeof r.state === "string"); },
       async () => { closeDialog(); toast("已保存，立即生效"); await loadRoute({ reset: true }); });
   });
   openDialog("管理主动行为", form);
