@@ -18,7 +18,7 @@ def backup(database, destination, key):
     target.parent.mkdir(parents=True, exist_ok=True)
     cipher = Fernet(key)
     # Stdlib backup API includes committed WAL pages. Temporary directory is OS-private.
-    with tempfile.TemporaryDirectory(dir=Path(database).resolve().parent) as directory:
+    with tempfile.TemporaryDirectory() as directory:
         snapshot = Path(directory) / "snapshot.sqlite3"
         source = sqlite3.connect(f"file:{Path(database).resolve().as_posix()}?mode=ro", uri=True)
         dest = sqlite3.connect(snapshot)

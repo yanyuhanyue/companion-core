@@ -211,6 +211,7 @@ class OwnerRuntime:
             elif record["kind"] in {"RECALL_RECEIVED", "RECALL_ACCEPTED",
                                     "CORE_STOP_CONFIRMED", "DELIVERY_QUIESCED", "OWNER_RECONCILED",
                                     "OWNER_INPUT_TERMINAL", "OWNER_HANDOFF_PREPARED",
+                                    "OWNER_INPUT_CARRIED", "OWNER_CARRY_HANDOFF_PREPARED",
                                     "MEDIA_QUEUED", "MEDIA_STATE"}:
                 pass  # The original durable notice projection is checked below.
             elif record["kind"] in {"IO_STARTED", "ACK", "UNKNOWN", "NOT_SENT"}:

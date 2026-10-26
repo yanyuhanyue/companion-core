@@ -43,6 +43,91 @@
   `record_id` 定位并选中原始记录。翻页结果受当前加载代次限制，隐私版本改变时
   重新读取，刷新后的记录不会被先前发出的分页请求覆盖。
 
+### 缓存用量后端契约（前端待接入）
+
+本节是后端交付的前端对接约定。缓存三态尚未接入前端，前端实现与验收待独立开展。
+现有 Console 使用方式见上文；本次复用 `GET /v1/console/cognition?kind=model`，
+定位单次请求可加 `record_id=<request_id>`，分页沿用 `before` 和 `limit`（1–50，默认 30）。
+请求 ID 来自原模型记录，前端不构造新的模型请求，也不从当前模型配置补写历史。
+
+每个 `items[]` 的原 `usage` 对象新增 `cache_usage`；只读 Inspector 的
+`trace.jobs[].model_calls[]` 返回同一个投影。Inspector 同时令原
+`prompt_cache_hit_tokens` 等于该投影的 `cached_input_tokens`，未知时为 null。
+
+| 字段/组合 | 后端含义与前端接入约定 |
+|---|---|
+| `cache_usage.state="RECORDED"` 且 `cached_input_tokens=0` | 有效原回执明确返回受支持缓存字段且为 0；可显示明确的 0 |
+| `cache_usage.state="RECORDED"` 且 `cached_input_tokens>0` | 同一有效原回执的缓存输入 Token；可显示该非负整数 |
+| `cache_usage.state="NOT_RECORDED"` 且 `cached_input_tokens=null` | 缓存观察未知；应表示未记录，不把 null 转为 0 |
+| 老响应缺少 `cache_usage`、未知状态或无效状态/值组合 | 按未记录处理，不据原数值列推断缓存命中 |
+| `usage.cached_input_tokens` | 保留原财务数值列与结算默认值；0 本身不能证明 provider 明确返回 0 |
+| `usage.observed`、`input_tokens`、`output_tokens` | 原有效实际用量判定和计数；缓存未知不影响它们 |
+| `usage.billed_micro_usd`、`is_estimate` | 原已计/预留责任金额与估算身份；UNKNOWN/RESERVED 的责任金额不冒称实际账单 |
+
+`RECORDED` 要求原已结算用量及已发送 admission 有效、恰好一条原请求诊断、
+诊断 `actual_usage_known` 与 `cache_usage_present` 严格为 true，且输入/输出/缓存/金额
+与原记录一致。缺失、损坏、超长、重复或不匹配诊断只使缓存观察未知，不隐藏已知的
+输入、输出或配置费率金额。前端直接消费这一个后端投影，不从最新诊断、SDK 计数、
+原财务 0 或当前 provider 设置另行推断。
+
+内部 `model.usage_diagnostic.safe_detail_json.cache_usage_present` 仅是有界观察：
+收到原 usage 对象且含受支持的 `prompt_cache_hit_tokens` 为 true，收到该对象但缺字段
+为 false；无 usage 对象、旧数据或人工响应未记录为 null。仅严格 bool/None 被保留，
+数字或字符串标记变为 null。存在标记不证明数值有效；前端无需读取此内部诊断。
+本字段不证明缓存隔离、缓存策略或供应商真实账单。
+
+下列为合成后端 fixture 的 `items[].usage` 响应片段；省略其余记录与分页字段。
+三例的有效回执输入/输出均为 80/3，金额按测试配置费率计算（微美元）。
+已知 Token 不等于供应商真实账单；配置费率金额仍为估算，`observed: true` 与 `is_estimate: 1` 可同时成立。
+
+```json
+{
+  "input_tokens": 80, "output_tokens": 3, "cached_input_tokens": 0,
+  "billed_micro_usd": 86, "is_estimate": 1, "observed": true,
+  "cache_usage": {"state": "NOT_RECORDED", "cached_input_tokens": null}
+}
+```
+
+```json
+{
+  "input_tokens": 80, "output_tokens": 3, "cached_input_tokens": 0,
+  "billed_micro_usd": 86, "is_estimate": 1, "observed": true,
+  "cache_usage": {"state": "RECORDED", "cached_input_tokens": 0}
+}
+```
+
+```json
+{
+  "input_tokens": 80, "output_tokens": 3, "cached_input_tokens": 40,
+  "billed_micro_usd": 50, "is_estimate": 1, "observed": true,
+  "cache_usage": {"state": "RECORDED", "cached_input_tokens": 40}
+}
+```
+
+来源：`tests/test_cache_usage_presence.py` 的实际 ModelClient → budget.complete → 两个读取入口
+断言；`tests/test_cache_usage_process.py` 另覆盖签名 HTTP 入站、独立 worker、真实 TLS 主人
+会话读取及 ACK。外部模型和 OneBot 传输使用 Mock；这些是后端证据，前端三态验收尚未完成。
+
+认证与错误沿用原契约：
+
+- HTTPS 主人会话使用 Secure/HttpOnly/SameSite=Strict cookie；业务读取沿用会话，
+  不新增控制 Token 下发或持久化。Console 读取不新增写操作，现有写入的
+  Origin/CSRF/幂等约束继续生效。
+- 响应保持 `Cache-Control: no-store`。失效来源可使原记录从 `items[]` 消失；不可用记录
+  不回填内容。请求前后仍校验 privacy epoch 与最新 ErasureLedger custody。
+- `privacy_epoch` 变化时丢弃旧分页与旧详情，按当前加载代次重读；保留 `as_of` 以标识
+  快照时间。不得拼接不同代次的来源，也不得将读取失败显示成未知缓存的成功响应。
+- 401 `CONSOLE_LOGIN_REQUIRED` 重新认证；404 `CONSOLE_DISABLED`、503
+  `CONSOLE_OWNER_CREDENTIAL_REQUIRED` 按现有不可用状态处理。
+- 400 `INVALID_COGNITION_QUERY` / `INVALID_COGNITION_SELECTION` 修正查询；
+  `before` 与 `record_id` 不同时提交。409 `COGNITION_CURSOR_UNAVAILABLE` 重新读取首页；
+  409 `PRIVACY_CHANGED` 丢弃旧结果并重读。其余失败沿用现有同步错误处理。
+- `NOT_RECORDED`/null 是成功读取内的字段状态，不是 HTTP 错误；成功空 `items[]`
+  也不证明模型从未被调用。
+
+后续前端验收需分别覆盖上述三个响应、缺字段/无效组合、已知输入输出费用持续可见、
+认证失效与版本变化；本次保留现有前端原实现，不交付界面改动或前端验收结论。
+
 ## 能力授权
 
 `PUT autonomy/{capability}` 提交 `mode`、`allow_pause` 和 `ranges`。

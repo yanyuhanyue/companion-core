@@ -51,7 +51,20 @@ payload 大小反推裁剪原因。原生 SDK 尚未保存旧窗口的 context �
 
 Console 的“思考与决策 → 模型调用”显示同一回执，并将有效已结算、已记录发送的用量
 与本地计量分开。demo、未发送、UNKNOWN 的实际用量显示为未记录。原有主人会话、来源
-过滤、隐私版本校验及 no-store 规则继续生效；不增加表、迁移或持久元数据。
+过滤、隐私版本校验及 no-store 规则继续生效；沿用既有表与诊断记录。
+
+缓存用量另读取该 request 唯一的 `model.usage_diagnostic` 原回执。适配器在归一化前记录
+`cache_usage_present`：收到 usage 对象且含受支持的 `prompt_cache_hit_tokens` 为 true，
+该对象缺字段为 false；无 usage 对象、旧行或人工响应未记录为 null。存在标记不证明数值有效。
+只有有效原用量、已发送 admission、唯一诊断及各用量/金额一致且标记严格为 true 时，
+共享后端 `cache_usage` 投影为 `RECORDED`，返回明确的 0 或正数。其余为 `NOT_RECORDED`/null；
+有效的实际输入、输出、配置费率金额仍照常返回。重复、损坏、超长、
+缺失或不匹配诊断不挑选最新一条。原财务列、SDK 数值计数及结算回退保留；不回填历史。
+这份观察不证明 provider 缓存隔离、命中策略或真实账单。
+
+本次交付仅包含后端字段与读取契约。缓存三态的前端消费和验收待接入，现有界面行为
+不作为该字段的验收证据。集中字段说明、合成响应与认证/版本/错误处理见
+[前端对接文档](../console-v2/ui-supplement.md#缓存用量后端契约前端待接入)。
 
 补充验证使用 100/1000 轮公开合成候选请求，复用原裁剪和固定 tokenizer，包含完整工具
 声明、两项工具调用/结果及过大的必需结果。它逐项测量并对超限候选执行原 reserve
@@ -62,3 +75,21 @@ Console 的“思考与决策 → 模型调用”显示同一回执，并将有�
 回归覆盖空/待定/选中/最终差异、被遗忘/epoch变化、错误摘要/事件/重复候选/外来选择、
 未结算或错误 payload、损坏/超长记录及数据库不变；另在原本地认证记忆召回链中验证
 实际冻结记录的投影，仍使用 Mock provider，不是付费或 QQ 真人证据。
+
+## 原生请求规划记录
+
+原生 Conversation 有 v1 规划记录、且没有旧窗口上下文记录时，`context` 展示实际保存的
+区域数量及逐请求选择：原 request ID 的 SHA-256、payload/measurement 摘要、选中区域数，
+以及 `SOFT_LIMIT / INPUT_LIMIT / CONTEXT_WINDOW_LIMIT` 原因。只投影已有记录，不重计 Token，
+不推测模型语义理由。未准入候选单列 pending，不计为已发生模型请求。
+
+读取先核对 job、privacy epoch、authority 引用、来源快照前缀及原 admission/measurement。
+缺项或未知版本为 `NOT_RECORDED`，损坏或请求绑定不一致为 `INCONSISTENT`；旧 epoch 与擦除后
+隐藏规划详情。`source_validity=NOT_REVALIDATED` 保留，不替代执行时的权限和来源检查。
+规划 JSON 沿原 Conversation 擦除闭包删除，历史费用和 UNKNOWN 责任不变。
+
+原 assembler 仍先执行既有初始软容量选择，再登记实际选中的来源；未选入的候选不被 pin。
+初始 fit 的淘汰原因仍为未记录；逐请求原因只覆盖其后新 planner 实际执行的裁剪。
+请求时 planner 可继续裁剪已选入的可选区域，但不撤销既有来源责任；未完成的主人输入、
+原图及其完整 turn 保持必需。记录中的 epoch 是布局捕获代次；无关 epoch 前进时，执行仍由
+原授权、实际来源和最终输出核验决定，诊断继续把旧代次标为 `STALE_EPOCH`。

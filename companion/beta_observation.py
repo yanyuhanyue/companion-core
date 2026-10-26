@@ -9,7 +9,7 @@ from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from companion.cognition_read import measurement, observed_usage
+from companion.cognition_read import cache_usage, measurement, observed_usage
 from companion.contracts import CoreError
 from companion.ops_status import _ReadView, schema_head
 from companion.paid_budget import sha
@@ -45,7 +45,7 @@ def _context(view, job_id, current_epoch):
     row = view.one("SELECT value FROM runtime_meta WHERE key=?",
                    ("live_text_context:" + job_id,))
     if row is None:
-        return {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+        return _native_context(view, job_id, current_epoch)
     if len(row["value"]) > 131072:
         raise ValueError("CONTEXT_TOO_LARGE")
     value = json.loads(row["value"])
@@ -88,6 +88,44 @@ def _context(view, job_id, current_epoch):
             )},
         } for source in images],
     }
+
+
+def _native_context(view, job_id, current_epoch):
+    from companion.context_planner import check_bound
+
+    result = {"state": "NOT_RECORDED", "source_validity": "NOT_REVALIDATED"}
+    row = view.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?", (job_id,))
+    if row is None:
+        return result
+    try:
+        if len(row["snapshots_json"]) > 1048576:
+            raise ValueError
+        snapshots = json.loads(row["snapshots_json"])
+        entries = [item for item in snapshots if item["kind"] == "context_plan"]
+        if len(entries) == 1:
+            metadata = entries[0]["metadata"]["core_context"]
+            if metadata.get("version") == 1 and metadata.get("privacy_epoch") != current_epoch:
+                return {**result, "state": "STALE_EPOCH"}
+        job = view.one("SELECT job_id,authority_json FROM jobs WHERE job_id=?", (job_id,))
+        plan = check_bound(view, job, snapshots, current_epoch)
+        if plan is None:
+            return result
+        def project(record):
+            return {"state": record["state"],
+                    "request_ref_sha256": (_hash(record["request_id"])
+                                           if record["request_id"] else None),
+                    "payload_sha256": record["payload_sha256"],
+                    "measurement_sha256": record["measurement_sha256"],
+                    "selected_group_count": len(record["selected"]),
+                    "dropped": record["dropped"]}
+        return {**result, "state": "RECORDED", "privacy_epoch": plan["privacy_epoch"],
+                "plan_sha256": sha(plan), "payload_sha256": (
+                    plan["requests"][-1]["payload_sha256"] if plan["requests"] else None),
+                "groups": dict(Counter(group["kind"] for group in plan["groups"])),
+                "requests": [project(record) for record in plan["requests"]],
+                "pending": project(plan["pending"]) if plan["pending"] else None}
+    except (CoreError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return {**result, "state": "INCONSISTENT"}
 
 
 def _memory_selection(view, job_id, event_id, current_epoch):
@@ -269,6 +307,7 @@ def _trace(view, trace_id):
         for row in usage:
             # RESERVED/UNKNOWN tokens may be estimates. Demo calls are never real usage proof.
             actual = observed_usage(row, row)
+            cache = cache_usage(view, row, row)
             calls.append({
                 "request_ref_sha256": _hash(row["request_id"]),
                 "logical_request_ref_sha256": (
@@ -279,7 +318,8 @@ def _trace(view, trace_id):
                 "paid_dispatch_recorded": row["io_started_at"] is not None,
                 "attempt_number": _number(row["attempt_number"]),
                 "prompt_tokens": _number(row["input_tokens"]) if actual else None,
-                "prompt_cache_hit_tokens": _number(row["cached_input_tokens"]) if actual else None,
+                "prompt_cache_hit_tokens": cache["cached_input_tokens"],
+                "cache_usage": cache,
                 "completion_tokens": _number(row["output_tokens"]) if actual else None,
                 "configured_price_micro_usd": (
                     _number(row["billed_micro_usd"]) if actual and row["pricing_known"] else None
