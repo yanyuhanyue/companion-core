@@ -344,10 +344,22 @@ async def serve_model_pages(page, respond):
     await page.route("**/v1/console/cognition?*", handle)
 
 
-def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(core, tmp_path):
-    core.clock.now = datetime.now(UTC)
-    today = synthetic_call(1, datetime.now(UTC) - timedelta(minutes=1))
-    yesterday = synthetic_call(2, datetime.now(UTC) - timedelta(days=2))
+@pytest.fixture(params=[
+    pytest.param(("Asia/Shanghai", "2026-10-27T00:00:30+08:00"), id="shanghai-after-midnight"),
+    pytest.param(("Asia/Shanghai", "2026-10-27T23:59:30+08:00"), id="shanghai-before-midnight"),
+    pytest.param(("UTC", "2026-10-27T00:00:30+00:00"), id="utc-after-midnight"),
+])
+def model_chart_clock(core, request):
+    core.settings.timezone, instant = request.param
+    core.clock.now = datetime.fromisoformat(instant)
+    return core.clock.now
+
+
+def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(
+    core, tmp_path, model_chart_clock,
+):
+    today = synthetic_call(1, model_chart_clock)
+    yesterday = synthetic_call(2, model_chart_clock - timedelta(days=2))
 
     def filtered_first_page(query):
         # The first page is empty after source filtering but still has a cursor.
@@ -360,6 +372,7 @@ def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(co
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
+            await page.clock.set_fixed_time(model_chart_clock)
             card = page.locator(".sheet.tok")
             await serve_model_pages(page, filtered_first_page)
             await page.get_by_role("button", name="刷新当前页面").click()
@@ -378,11 +391,13 @@ def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(co
     run(scenario())
 
 
-def test_located_old_call_keeps_time_order_and_day_chart_ends_today(core, tmp_path):
-    core.clock.now = datetime.now(UTC)
-    now = datetime.now(UTC)
-    newest = synthetic_call(3, now - timedelta(minutes=5))
-    middle = synthetic_call(2, now - timedelta(minutes=30))
+def test_located_old_call_keeps_time_order_and_day_chart_ends_today(
+    core, tmp_path, model_chart_clock,
+):
+    now = model_chart_clock
+    # Keep both recent calls on the fixed local date, including just after midnight.
+    newest = synthetic_call(3, now)
+    middle = synthetic_call(2, now.replace(hour=0, minute=0, second=0, microsecond=0))
     oldest = synthetic_call(1, now - timedelta(days=500))
 
     def first_page_without_oldest(query):
@@ -392,6 +407,7 @@ def test_located_old_call_keeps_time_order_and_day_chart_ends_today(core, tmp_pa
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
+            await page.clock.set_fixed_time(now)
             await serve_model_pages(page, first_page_without_oldest)
             await page.evaluate("id => { location.hash = 'thinking/model:' + id; }", oldest["id"])
             await page.locator("#page[aria-busy=false]").wait_for()
@@ -407,6 +423,7 @@ def test_located_old_call_keeps_time_order_and_day_chart_ends_today(core, tmp_pa
             day = await page.evaluate("() => new Intl.DateTimeFormat('en-CA', {timeZone: "
                                       "state.tz, year: 'numeric', month: '2-digit', "
                                       "day: '2-digit'}).format(new Date())")
+            assert day == now.date().isoformat()
             assert await bars.count() == 30
             label = await bars.last.get_attribute("aria-label")
             assert label.startswith(day) and "2 次请求" in label
