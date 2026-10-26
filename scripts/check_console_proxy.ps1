@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$Python = '.venv/Scripts/python.exe', [int]$Workers = 2)
+param([string]$Python = '.venv/Scripts/python.exe', [int]$Workers = 2, [switch]$PrepareOnly)
 $ErrorActionPreference = 'Stop'
 $taskRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location -LiteralPath $taskRoot
@@ -25,6 +25,10 @@ try {
         } else {
             $env:COMPANION_TEST_NGINX = (Get-Command nginx -ErrorAction Stop).Source
         }
+    }
+    if ($PrepareOnly) {
+        Write-Output $env:COMPANION_TEST_NGINX
+        return
     }
     $env:COMPANION_TEST_BROWSER = '1'
     $env:COMPANION_TEST_CONSOLE_PROXY = '1'
