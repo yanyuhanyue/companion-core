@@ -99,6 +99,76 @@ async def resolve(*_):
     return ["1.1.1.1"]
 
 
+def observe_delivery(active):
+    retries, responses = Counter(), Counter()
+    sink = active.metrics.sink
+
+    def observed(record):
+        sink(record)
+        if record["stage"] == "send_unavailable":
+            error = sys.exception()
+            status = error.response.status_code if isinstance(
+                error, httpx.HTTPStatusError) else 0
+            retries[f"{type(error).__name__}:{status}"] += 1
+
+    active.metrics.sink = observed
+
+    async def response_observed(response):
+        path = response.request.url.path
+        phase = next((phase for phase in (
+            "lease", "begin-send", "result", "send-check", "cancel-before-send", "check",
+        ) if path.endswith("/" + phase)), None)
+        if phase:
+            responses[f"{phase}:{response.status_code}"] += 1
+            size = response.headers.get("Content-Length", "")
+            if response.is_error and size.isdecimal() and int(size) <= 512:
+                await response.aread()
+                try:
+                    code = response.json().get("error")
+                except (ValueError, AttributeError):
+                    code = None
+                if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code):
+                    responses[f"{phase}:{response.status_code}:{code}"] += 1
+
+    active.client.event_hooks["response"].append(response_observed)
+    return retries, responses
+
+
+async def wait_for_ack(core, active, sends, tasks, count, retries, responses):
+    try:
+        await until(lambda: active.attempts() == {"ACK": count}, tasks=tasks,
+                    deadline_seconds=20)
+    except TimeoutError as error:
+        now = core.clock()
+        evidence = {
+            "expected_acks": count, "attempts": active.attempts(),
+            "sends": len(sends), "runtime": active.runtime.row()["state"],
+            "stop": active.stop.is_set(),
+            "stop_marker": active.runtime.stop_path.exists(),
+            "clock_minus_wall_seconds": (core.clock.now - datetime.now(UTC)
+                                         ).total_seconds(),
+            "outbox": core.store.rows(
+                "SELECT state,last_error_code,attempt_count,"
+                "(julianday(lease_until)-julianday(?))*86400 lease_seconds,"
+                "(julianday(next_attempt_at)-julianday(?))*86400 due_seconds "
+                "FROM outbox ORDER BY rowid", (now, now)),
+            "jobs": core.store.rows(
+                "SELECT kind,state,last_error_code FROM jobs ORDER BY rowid"),
+            "retry_errors": dict(retries), "http_responses": dict(responses),
+            "tasks": [{
+                "done": task.done(), "cancelled": task.cancelled(),
+                "error_class": (type(task.exception()).__name__ if task.done()
+                    and not task.cancelled() and task.exception() else None),
+                "stack": [f"{frame.f_code.co_name}:{frame.f_lineno}"
+                          for frame in task.get_stack()],
+            } for task in tasks],
+        }
+        # The assertion survives TaskGroup cleanup and capsys consumption in CI.
+        # Project only states/codes/counts, never bodies, URLs or exception text.
+        raise AssertionError("NATIVE_IMAGE_ACK_TIMEOUT " + json.dumps(
+            evidence, sort_keys=True)) from error
+
+
 @pytest.mark.parametrize("failure", ["connection", "read_timeout", "log_failure"])
 def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_turn(
     core, tmp_path, monkeypatch, capsys, failure,
@@ -107,37 +177,7 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
         async with native_host(core, tmp_path, monkeypatch, count=2) as values:
             active, inbound, handshakes, sends, calls = values
             failed, downloads, requests = asyncio.Event(), [], []
-            retries, responses = Counter(), Counter()
-            sink = active.metrics.sink
-
-            def observed(record):
-                sink(record)
-                if record["stage"] == "send_unavailable":
-                    error = sys.exception()
-                    status = error.response.status_code if isinstance(
-                        error, httpx.HTTPStatusError) else 0
-                    retries[f"{type(error).__name__}:{status}"] += 1
-
-            active.metrics.sink = observed
-
-            async def response_observed(response):
-                path = response.request.url.path
-                phase = next((phase for phase in (
-                    "lease", "begin-send", "result", "send-check", "cancel-before-send", "check",
-                ) if path.endswith("/" + phase)), None)
-                if phase:
-                    responses[f"{phase}:{response.status_code}"] += 1
-                    size = response.headers.get("Content-Length", "")
-                    if response.is_error and size.isdecimal() and int(size) <= 512:
-                        await response.aread()
-                        try:
-                            code = response.json().get("error")
-                        except (ValueError, AttributeError):
-                            code = None
-                        if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code):
-                            responses[f"{phase}:{response.status_code}:{code}"] += 1
-
-            active.client.event_hooks["response"].append(response_observed)
+            retries, responses = observe_delivery(active)
             good = picture("green")
 
             def cdn(request):
@@ -166,40 +206,6 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
                 image_transport=httpx.MockTransport(cdn), image_resolver=resolve,
                 metrics=active.metrics)
             async with bridge_tasks(active, pump) as tasks:
-                async def wait_for_ack(count):
-                    try:
-                        await until(lambda: active.attempts() == {"ACK": count}, tasks=tasks,
-                                    deadline_seconds=20)
-                    except TimeoutError as error:
-                        now = core.clock()
-                        evidence = {
-                            "expected_acks": count, "attempts": active.attempts(),
-                            "sends": len(sends), "runtime": active.runtime.row()["state"],
-                            "stop": active.stop.is_set(),
-                            "stop_marker": active.runtime.stop_path.exists(),
-                            "clock_minus_wall_seconds": (core.clock.now - datetime.now(UTC)
-                                                         ).total_seconds(),
-                            "outbox": core.store.rows(
-                                "SELECT state,last_error_code,attempt_count,"
-                                "(julianday(lease_until)-julianday(?))*86400 lease_seconds,"
-                                "(julianday(next_attempt_at)-julianday(?))*86400 due_seconds "
-                                "FROM outbox ORDER BY rowid", (now, now)),
-                            "jobs": core.store.rows(
-                                "SELECT kind,state,last_error_code FROM jobs ORDER BY rowid"),
-                            "retry_errors": dict(retries), "http_responses": dict(responses),
-                            "tasks": [{
-                                "done": task.done(), "cancelled": task.cancelled(),
-                                "error_class": (type(task.exception()).__name__ if task.done()
-                                    and not task.cancelled() and task.exception() else None),
-                                "stack": [f"{frame.f_code.co_name}:{frame.f_lineno}"
-                                          for frame in task.get_stack()],
-                            } for task in tasks],
-                        }
-                        # The assertion survives TaskGroup cleanup and capsys consumption in CI.
-                        # Project only states/codes/counts, never bodies, URLs or exception text.
-                        raise AssertionError("NATIVE_IMAGE_ACK_TIMEOUT " + json.dumps(
-                            evidence, sort_keys=True)) from error
-
                 await send(core, inbound, 1, [
                     {"type": "text", "data": {"text": "保留这段文字，并看看附件"}},
                     image_segment("https://gchat.qpic.cn/bad?rkey=synthetic-signed-key", subtype=1),
@@ -220,13 +226,13 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
                 first = await run_worker(core, tmp_path, 1, "文字已收到，一张图片暂时读不到。")
                 assert len(first) == 1 and model_images(first[0]) == [good]
                 assert "保留这段文字" in json.dumps(first[0]["messages"], ensure_ascii=False)
-                await wait_for_ack(1)
+                await wait_for_ack(core, active, sends, tasks, 1, retries, responses)
                 await send(core, inbound, 2, [{"type": "text", "data": {"text": "继续聊天"}}])
                 await until(lambda: len(core.store.rows("SELECT * FROM events")) == 2,
                             tasks=tasks, deadline_seconds=20)
                 second = await run_worker(core, tmp_path, 2, "可以，继续聊。")
                 assert len(second) == 1 and model_images(second[0]) == []
-                await wait_for_ack(2)
+                await wait_for_ack(core, active, sends, tasks, 2, retries, responses)
                 assert active.runtime.row()["state"] == "ACTIVE"
                 assert all(not task.done() for task in tasks)
                 assert len(handshakes) == 1 and len(sends) == 2 and calls == []
@@ -308,6 +314,7 @@ def test_image_burst_and_latest_text_keep_all_originals_in_order(
     async def scenario():
         async with native_host(core, tmp_path, monkeypatch, count=count, history=True) as values:
             active, inbound, handshakes, sends, calls = values
+            retries, responses = observe_delivery(active)
             originals = [picture(color) for color in ("red", "blue", "green")][:count]
             started, release, downloads = asyncio.Event(), asyncio.Event(), []
             question = "结合这些图片，按发送顺序说明区别"
@@ -356,8 +363,7 @@ def test_image_burst_and_latest_text_keep_all_originals_in_order(
                 request = await run_worker(core, tmp_path, 1, "按原图顺序进行合成回答。")
                 assert len(request) == 1 and model_images(request[0]) == originals
                 assert question in json.dumps(request[0]["messages"], ensure_ascii=False)
-                await until(lambda: active.attempts() == {"ACK": 1}, tasks=tasks,
-                            deadline_seconds=20)
+                await wait_for_ack(core, active, sends, tasks, 1, retries, responses)
                 assert [row["origin_event_id"] for row in core.store.rows("SELECT * FROM outbox")
                         ] == [job["event_id"]]
                 assert len(sends) == len(handshakes) == 1 and calls == []
