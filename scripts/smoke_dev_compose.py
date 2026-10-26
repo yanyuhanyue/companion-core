@@ -18,6 +18,7 @@ else:
     from verify_dev_compose import ROOT, compose_command, environment, render, validate
 
 PYTHON = "/app/.venv/bin/python"
+RUN_OPTIONS = ("--rm", "--no-deps", "--pull", "never")
 WRITERS = ["companion-worker", "companion-life-worker", "companion-executive-worker",
            "companion-content-worker", "companion-api"]
 
@@ -223,7 +224,7 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
 
         def probe(service, code, *args, maintenance=False):
             if maintenance:
-                return command("run", "--rm", "--no-deps", "--no-build", "--pull", "never",
+                return command("run", *RUN_OPTIONS,
                                "--entrypoint", PYTHON, service, "-c", code, *args)
             return command("exec", "-T", service, PYTHON, "-c", code, *args)
 
@@ -271,14 +272,14 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
                 "print('PASS')"
             )
             assert probe("migrate", permission, maintenance=True) == "PASS"
-            command("run", "--rm", "--no-deps", "--no-build", "--pull", "never", "migrate", "init")
+            command("run", *RUN_OPTIONS, "migrate", "init")
             command("up", "-d", "--no-deps", "--no-build", "--pull", "never",
                     "companion-api", "companion-worker")
             proof["phase"] = "http_worker_restart"
             proof["checks"].append(json.loads(probe("companion-api", HTTP_PROBE, "1")))
             api, worker = state("companion-api"), state("companion-worker")
             assert api["image"] == worker["image"] == image_id
-            command("run", "--rm", "--no-deps", "--no-build", "--pull", "never",
+            command("run", *RUN_OPTIONS,
                     "companion-worker", "worker", expected=2, contains="WORKER_ALREADY_RUNNING")
             command("restart", "--no-deps", "companion-worker")
             assert state("companion-api") == api
@@ -297,7 +298,7 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
             assert not command("ps", "--status", "running", "-q")
             proof["phase"] = "backup_latest_ledger_restore"
             assert probe("migrate", SEED_RESERVATION, maintenance=True) == "PASS"
-            backup_args = ("run", "--rm", "--no-deps", "--no-build", "--pull", "never",
+            backup_args = ("run", *RUN_OPTIONS,
                            "dev-backup")
             command(*backup_args, "backup", "/data/pre-init.enc")
             command(*backup_args, "backup", "/data/pre-init.enc", expected=2,
@@ -321,7 +322,7 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
                 document, = json.loads(run([*docker, "volume", "inspect", f"{project}_{name}"]))
                 assert document["Labels"]["com.docker.compose.project"] == project
                 volumes[name] = document["CreatedAt"]
-            command("run", "--rm", "--no-deps", "--no-build", "--pull", "never", "migrate", "init")
+            command("run", *RUN_OPTIONS, "migrate", "init")
             command("up", "-d", "--no-deps", "--no-build", "--pull", "never", "companion-api")
             assert state("companion-api")["image"] == image_id
             assert probe("companion-api", "import sqlite3; "

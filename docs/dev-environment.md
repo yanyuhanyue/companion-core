@@ -40,11 +40,18 @@ $devCompose = @('--context', $devContext, 'compose', '--env-file', $devEnv,
 # config 输出包含开发 token/key，只在本机检查，不收集到公共日志。
 docker @devCompose config --services
 docker @devCompose build companion-api
-docker @devCompose run --rm --no-deps --no-build --pull never migrate init
+docker @devCompose run --rm --no-deps --pull never migrate init
 docker @devCompose up -d --no-deps --no-build --pull never companion-api
 docker @devCompose exec -T companion-api /app/.venv/bin/python -c "import os,urllib.request; r=urllib.request.Request('http://127.0.0.1:8765/internal/v1/health/ready',headers={'Authorization':'Bearer '+os.environ['COMPANION_BRIDGE_TOKEN']}); print(urllib.request.urlopen(r,timeout=3).status)"
 docker @devCompose up -d --no-deps --no-build --pull never companion-worker
 ```
+
+一次性 `run` 使用 `--rm --no-deps --pull never`；`--no-build` 仅保留在支持它的 `up` 调用。
+先完成显式镜像构建或复用已核对的不可变 image ID，再运行维护命令。官方
+[`run` 参数定义](https://github.com/docker/compose/blob/v2.38.2/cmd/compose/run.go#L215-L245)
+未提供 `--no-build`。在本地镜像已存在且未指定强制构建策略时，Compose 的
+[构建选择逻辑](https://github.com/docker/compose/blob/v2.38.2/pkg/compose/build.go#L90-L105)
+跳过该镜像的构建；`--pull never` 保持禁止拉取。
 
 API 的带认证 ready 检查通过后再启动 worker。liveness 只证明 API 存活；独立 worker 必须通过真实
 入站、处理、投递租约和模拟 ACK 证明。首次空卷初始化无需旧数据库快照。若初始化失败，保持服务
@@ -79,10 +86,10 @@ docker @devCompose stop companion-api
 docker @devCompose --profile '*' ps --status running
 # 使用本轮全新文件名；原 backup CLI 拒绝覆盖。
 $devSnapshot = '/data/pre-schema-20261026-01.enc'
-docker @devCompose run --rm --no-deps --no-build --pull never dev-backup backup $devSnapshot
+docker @devCompose run --rm --no-deps --pull never dev-backup backup $devSnapshot
 # 核对上一条退出码为0，再记录密文SHA-256。
-docker @devCompose run --rm --no-deps --no-build --pull never --entrypoint /app/.venv/bin/python dev-backup -c "import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())" $devSnapshot
-docker @devCompose run --rm --no-deps --no-build --pull never migrate init
+docker @devCompose run --rm --no-deps --pull never --entrypoint /app/.venv/bin/python dev-backup -c "import hashlib,sys; from pathlib import Path; print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())" $devSnapshot
+docker @devCompose run --rm --no-deps --pull never migrate init
 ```
 
 备份服务将源 Core 卷挂到 `/source:ro`、当前 Ledger 挂到 `/privacy:ro`，仅独立 snapshot 卷的
@@ -93,7 +100,7 @@ docker @devCompose run --rm --no-deps --no-build --pull never migrate init
 恢复演练只写 snapshot 卷中的全新目标路径：
 
 ```powershell
-docker @devCompose run --rm --no-deps --no-build --pull never dev-backup restore $devSnapshot /data/recovery-new-01.sqlite3
+docker @devCompose run --rm --no-deps --pull never dev-backup restore $devSnapshot /data/recovery-new-01.sqlite3
 ```
 
 恢复读取当前独立 Ledger，回放快照之后的遗忘。遗忘优先取消不再安全的未发送回复；其余在途

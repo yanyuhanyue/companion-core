@@ -291,6 +291,14 @@ def test_container_smoke_queries_engine_only_for_canonical_local_endpoint(
     assert calls == expected
 
 
+def test_native_one_off_options_parse_without_engine(native_config):
+    result = subprocess.run(
+        ["docker", "compose", "run", *smoke.RUN_OPTIONS, "--entrypoint", smoke.PYTHON, "--help"],
+        cwd=ROOT, env=environment(), capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, "DEV_COMPOSE_ONE_OFF_OPTIONS_REJECTED"
+
+
 def test_container_probe_contracts_through_native_api_and_independent_worker(tmp_path):
     asyncio.run(native_probe_contracts(tmp_path))
 
