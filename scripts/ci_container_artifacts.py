@@ -597,7 +597,8 @@ def load_archive(component, archive, *, runner=run, reuse_existing=False):
     allowed = {identity["config_digest"], *descriptors}
 
     def inspect_existing():
-        inventory = set(runner(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split())
+        inventory = set(runner([
+            "docker", "image", "ls", "--all", "--no-trunc", "--quiet"]).decode().split())
         if any(not DIGEST.fullmatch(value) for value in inventory):
             raise ValueError("PUBLIC_IMAGE_LOCAL_INVENTORY_INVALID")
         matches = inventory & allowed
