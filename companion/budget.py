@@ -401,6 +401,15 @@ def reserve(
 
 
 def _admit(store, settings, approval, logical, estimate, now, day, month):
+    from companion import model_carry
+
+    carry_view = None
+    if model_carry.active(settings):
+        model_carry.supported(store, settings)
+        carry_view = paid_budget.journal(store, approval)
+        if store.one("SELECT 1 FROM model_admissions a JOIN model_usage m USING(request_id) "
+                     "WHERE a.logical_request_id=? AND m.state='UNKNOWN' LIMIT 1", (logical,)):
+            raise CoreError("MODEL_OUTCOME_UNKNOWN", 503)
     if store.one(
         "SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
         "WHERE a.request_id IS NULL AND m.state IN ('RESERVED','UNKNOWN') LIMIT 1"
@@ -458,17 +467,22 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
             "REQUEST",
         ),
     ):
+        window_scope = (model_carry.scope_windows(carry_view, value)
+                        if column == "window_id" and carry_view else [value])
         usage = store.one(
             "SELECT COUNT(*) AS calls,COALESCE(SUM(m.billed_micro_usd),0) AS amount "
-            "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a." + column + "=?",
-            (value,),
+            "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a." + column
+            + " IN (" + ",".join("?" for _ in window_scope) + ")", window_scope,
         )
         limited = column != "window_id" or not approval.unlimited_period_spend
         if usage["calls"] >= calls or (limited and usage["amount"] + estimate > amount):
             raise CoreError("MODEL_" + code + "_BUDGET_EXHAUSTED", 429)
+    closed = sorted(carry_view["model_closures"]) if carry_view else []
     running = store.one(
         "SELECT COUNT(*) AS n FROM model_usage m JOIN model_admissions a USING(request_id) "
         "WHERE m.state IN ('RESERVED','UNKNOWN')"
+        + (" AND m.request_id NOT IN (" + ",".join("?" for _ in closed) + ")" if closed else ""),
+        closed,
     )["n"]
     if running >= approval.concurrency:
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
@@ -856,6 +870,10 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     finally:
         # Cancellation is an unknown outcome too; callers never refund a started attempt.
         settle(store, settings, request_id, response)
+        from companion import model_carry
+
+        if model_carry.active(settings):
+            model_carry.close_owned(store, settings, request_id, dispatch, clock())
 
 
 def _model_scope(store, settings, clock, request_id, scenario):
@@ -974,8 +992,12 @@ async def _dispatch(
                 **({"quota": quota} if quota else {}),
             },
         )
-        if dispatch is not None:
-            dispatch.update(owned=True, io_started_at=now)
+    if dispatch is not None:
+        dispatch.update(owned=True, io_started_at=now)
+        from companion import model_carry
+
+        if model_carry.active(settings):
+            dispatch["owner_tuple"] = model_carry._tuple({**row, "io_started_at": now})
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
     cumulative.preflight(store, settings, clock)
@@ -1083,8 +1105,12 @@ async def _dispatch(
         if dispatch is not None:
             dispatch["admission"] = admission
     if isinstance(model, ModelClient):
-        return await model.complete(messages, scenario, admission=admission,
-                                    **({"tools": tools} if tools else {}))
+        try:
+            return await model.complete(messages, scenario, admission=admission,
+                                        **({"tools": tools} if tools else {}))
+        finally:
+            if dispatch is not None:
+                dispatch["transport_returned"] = True
     with store.transaction():
         cloud_budget.mark_dispatched(store, "model", request_id, clock())
     return await model.complete(messages, scenario, **({"tools": tools} if tools else {}))

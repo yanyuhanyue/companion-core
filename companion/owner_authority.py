@@ -432,7 +432,14 @@ def activate(store, settings, clock, request):
                      "('cloud_budget_restore_required','model_budget_restore_required')"):
             raise CoreError("OWNER_AUTHORITY_RESTORE_RECONCILIATION_REQUIRED", 503)
         # Preserve the native quiescence inventory: neither UNKNOWN nor a pending send is idle.
-        live_text._idle(store)
+        from companion import model_carry
+
+        if model_carry.active(settings):
+            model_carry.activation(store, settings, request.policy)
+        else:
+            if request.policy.unknown_carry_sha256 is not None:
+                raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
+            live_text._idle(store)
         old = live_text._meta(store, live_text.BINDING)
         if old and not live_text.stopped(store, old["plan_sha256"]):
             raise CoreError("OWNER_AUTHORITY_LEGACY_STOP_REQUIRED", 409)
