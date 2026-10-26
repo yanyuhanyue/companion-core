@@ -422,11 +422,11 @@ const DETAIL_LABELS = {
 /* ================= 会话、导航与读取 ================= */
 const LOADERS = {
   overview: async signal => {
-    const [o, a, d, c] = await Promise.allSettled([api.get("/overview", signal), api.get("/activity?limit=60", signal),
-      api.get("/diagnostics", signal), api.get("/configuration", signal)]);
+    const [o, a, d, c, m] = await Promise.allSettled([api.get("/overview", signal), api.get("/activity?limit=60", signal),
+      api.get("/diagnostics", signal), api.get("/configuration", signal), api.get("/cognition?kind=model&limit=50", signal)]);
     if (o.status !== "fulfilled") throw o.reason;
     return { ...o.value, recent: a.status === "fulfilled" ? a.value : null, diagnostics: d.status === "fulfilled" ? d.value : null,
-      configuration: c.status === "fulfilled" ? c.value : null };
+      configuration: c.status === "fulfilled" ? c.value : null, model: m.status === "fulfilled" ? m.value : null };
   },
   activity: async (signal, more) => {
     // 按日期筛选时继续往前翻页，直到越过开始日期（最多 20 页）。
@@ -628,8 +628,37 @@ PAGES.overview = data => {
     dayStrip(items, nowMin, data), todoList(data),
     el("div", { class: "grid-2" },
       el("div", { class: "stack" }, budgetCard(data.budget, data.counts), recentCard(data.recent)),
-      el("div", { class: "stack" }, capsCard(data.capabilities?.capabilities || []))));
+      el("div", { class: "stack" }, capsCard(data.capabilities?.capabilities || []), tokenCard(data.model, today))));
 };
+/** 今日 Token 统计：只汇总今天、实际用量已记录的模型调用，分段规则与“请求计量”相同 */
+function tokenCard(page, today) {
+  const more = el("a", { class: "link", href: "#thinking", onclick: () => { state.cogKind = "model"; state.cogSel = null; } }, "查看明细", icon("arrow"));
+  if (!page) return sheet("今日 Token 统计", el("p", { class: "note" }, "模型调用记录暂时读不到，可以稍后刷新。"), more, "tok");
+  const all = (page.items || []).filter(Boolean);
+  const items = all.filter(i => valid(i.occurred_at) && localDay(i.occurred_at) === today);
+  // 一页 50 条全是今天且还有更早记录时，说明今天的调用没有全部读到
+  const partial = !!page.next_cursor && items.length === all.length && items.length > 0;
+  const xs = items.map(meterOf), actual = xs.filter(x => x.actual), cacheXs = actual.filter(x => x.cacheKnown);
+  const sum = (list, f) => list.reduce((s, x) => s + (f(x) || 0), 0);
+  const parts = [["cached", sum(cacheXs, x => x.cached)], ["fresh", sum(cacheXs, x => x.input - x.cached)],
+    ["unknown", sum(actual.filter(x => !x.cacheKnown), x => x.input)], ["output", sum(actual, x => x.output)]];
+  const shown = parts.filter(([k, v]) => v > 0 || (k === "output" && actual.length));
+  const total = parts.reduce((s, [, v]) => s + v, 0);
+  const cacheIn = sum(cacheXs, x => x.input), hit = sum(cacheXs, x => x.cached);
+  const unknown = items.filter(i => ["UNKNOWN", "RESERVED"].includes(i.state)).length;
+  const anim = state.tokenAnim !== state.updatedAt && motionOk();
+  const stat = (n, v, sub, count) => el("div", { class: "tok-stat" }, el("span", {}, n), el("b", { class: "num", "data-count": count ?? null }, v), sub ? el("small", {}, sub) : null);
+  return sheet("今日 Token 统计", [
+    el("div", { class: "m-donut" }, donut(shown, tk(total), actual.length ? "实际总量" : items.length ? "未记录" : "今天还没有", actual.length ? total : null),
+      actual.length ? meterLegend(shown, total, { cached: "缓存命中", fresh: "未命中缓存", unknown: "缓存未记录", output: "输出" })
+        : el("p", { class: "note" }, items.length ? "今天的调用都没有有效的实际用量回执。" : "今天还没有模型调用。")),
+    el("div", { class: "tok-stats" },
+      stat("模型调用", String(items.length), actual.length < items.length ? "实际用量已记录 " + actual.length + " 次" : null),
+      stat("缓存命中", cacheIn > 0 ? pctText(hit, cacheIn) : "未记录", cacheXs.length && cacheXs.length < actual.length ? "按 " + cacheXs.length + " 次已记录的计算" : null),
+      stat("已计或预留", usd(sum(xs, x => x.billed)), unknown ? unknown + " 次结果不明" : "按配置费率估算")),
+    el("p", { class: "note mt" }, (partial ? "今天的调用较多，这里只统计了最近 " + items.length + " 次。" : "")
+      + "上下文分区（系统提示词、工具定义等）没有保存，这里不做拆分。")], more, "meter tok" + (anim ? " anim" : ""));
+}
 function dayStrip(items, nowMin, data) {
   const pct = m => (m / 1440 * 100).toFixed(3) + "%";
   const qs = cfgValue(data.configuration, "quiet_start"), qe = cfgValue(data.configuration, "quiet_end");
@@ -662,7 +691,8 @@ function dayStrip(items, nowMin, data) {
     !items.length ? el("p", { class: "note day-empty" }, data.recent ? "今天还没有记录。" : "活动记录暂时读不到。") : null,
     truncated ? el("p", { class: "note day-empty" }, "只显示了最近 60 条记录，更早的在活动时间线里。") : null);
 }
-PAGES.overview.after = () => { const day = $(".day"); const sc = $(".day-scroll");
+PAGES.overview.after = () => { const day = $(".day"); const sc = $(".day-scroll"), tok = $(".sheet.tok");
+  if (state.tokenAnim !== state.updatedAt) { state.tokenAnim = state.updatedAt; if (tok) countUp(tok); }
   if (sc && innerWidth <= 860 && sc.scrollWidth > sc.clientWidth) sc.scrollLeft = sc.scrollWidth * .7 - sc.clientWidth * .7;
   setTimeout(() => day?.classList.remove("enter"), 1600); };
 function todoList(data) {
@@ -2634,9 +2664,9 @@ function donut(parts, center, sub, countTo) {
   return el("div", { class: "donut" }, el("svg", { viewBox: "0 0 120 120", role: "img", "aria-label": center + " " + sub }, arcs),
     el("div", { class: "donut-c" }, el("b", { class: "num", "data-count": countTo ?? null }, center), el("span", {}, sub)));
 }
-function meterLegend(parts, total) {
+function meterLegend(parts, total, names = METER_NAMES) {
   return el("ul", { class: "m-legend" }, parts.map(([k, v]) => el("li", {},
-    el("i", { style: { background: METER_COLORS[k] } }), el("span", { class: "m-name" }, METER_NAMES[k]),
+    el("i", { style: { background: METER_COLORS[k] } }), el("span", { class: "m-name", title: METER_NAMES[k] }, names[k]),
     el("b", { class: "num" }, pctText(v, total)), el("small", { class: "num" }, "≈" + tk(v)))));
 }
 

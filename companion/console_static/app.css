@@ -1030,6 +1030,25 @@ details.ev ul { display: grid; gap: 4px; margin-top: 6px; font-size: 12.5px; }
   .dk-list.anim li { animation: m-up .3s both; animation-delay: calc(var(--i) * 18ms); }
   .dk-body > * { animation: m-fade .2s both; }
 }
+/* ===== 今天：Token 统计卡 ===== */
+.tok .m-donut { grid-template-columns: 132px minmax(0, 1fr); gap: 22px; }
+.tok .donut, .tok .donut svg { width: 132px; height: 132px; }
+.tok .donut circle { transition: stroke-width .2s; }
+.tok .m-legend { gap: 12px 22px; }
+.tok-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 16px; border-top: 1px solid var(--line); }
+.tok-stat { display: grid; gap: 2px; padding: 12px 12px 0; border-left: 1px solid var(--line); }
+.tok-stat:first-child { border-left: 0; padding-left: 0; }
+.tok-stat span { font-size: 12px; color: var(--muted); }
+.tok-stat b { font-size: 18px; color: var(--ink); }
+.tok-stat small { font-size: 11.5px; color: var(--muted); }
+@media (max-width: 600px) { .tok .m-donut { grid-template-columns: minmax(0, 1fr); } .tok-stats { grid-template-columns: minmax(0, 1fr); } .tok-stat { border-left: 0; padding-left: 0; } }
+@media (prefers-reduced-motion: no-preference) {
+  .meter.tok.anim { animation: m-up .45s cubic-bezier(.2, .7, .2, 1) .08s both; }
+  .meter.tok.anim .donut circle { animation-duration: 1.1s; animation-delay: .25s; }
+  .meter.tok.anim .m-legend li:nth-child(2) { animation-delay: .42s; } .meter.tok.anim .m-legend li:nth-child(3) { animation-delay: .49s; } .meter.tok.anim .m-legend li:nth-child(4) { animation-delay: .56s; }
+  .meter.tok.anim .tok-stat { animation: m-up .4s both; animation-delay: .5s; }
+  .meter.tok.anim .tok-stat:nth-child(2) { animation-delay: .57s; } .meter.tok.anim .tok-stat:nth-child(3) { animation-delay: .64s; }
+}
 /* 长列表的“展开其余” */
 .more-row { list-style: none; display: flex; justify-content: center; padding-top: 4px; }
 .more-btn { border: 1px dashed var(--line-strong); background: transparent; color: var(--ink-soft); font-size: 12.5px; font-weight: 600; height: 30px; padding: 0 14px; border-radius: 8px; cursor: pointer; }
@@ -1059,3 +1078,4 @@ details.ev ul { display: grid; gap: 4px; margin-top: 6px; font-size: 12.5px; }
 /* 中等宽度仍保持日历在左、日记在右，窄屏时日历不撑满整行 */
 @media (max-width: 1100px) and (min-width: 861px) { .diary-wrap { grid-template-columns: 270px minmax(0, 1fr); } }
 @media (max-width: 860px) { .diary-wrap .cal { width: 100%; max-width: 340px; justify-self: center; } }
+.tok .m-legend .m-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
