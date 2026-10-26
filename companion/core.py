@@ -472,6 +472,7 @@ class Core(Runtime):
     def _check_context_snapshots(self, job, snapshots, *, current_request=None):
         reply_revision.check_job(self.store, job)
         authority = self._owner_job_view(job)
+        self.memes.check_offer(job)
         if private_life.strict(self.store, self.settings):
             live_text.check_job(self.store, self.settings, self.clock, job,
                                 current_request=current_request)
@@ -885,7 +886,7 @@ class Core(Runtime):
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )
-        if planning or protected:
+        if protected:
             # History is capped before review. Do not silently discard reviewed
             # conflict evidence or selected facts here; full paid admission still applies.
             messages = [rules, *references, *(m for turn in turns for m in turn), *current_input]
@@ -942,7 +943,8 @@ class Core(Runtime):
                     committed and reference is references[0]) or (
                     reference is memory_reference and bool(hits))) for reference in references
                     if any(message is reference for message in messages))
-                blocks.extend(("history", turn, preserve) for turn in turns
+                blocks.extend(("history", turn, preserve or source.get("reply_complete") is False)
+                              for source, turn in zip(sources, turns, strict=True)
                               if any(message is turn[0] for message in messages))
                 blocks.append(("current", current_input, True))
                 initialize(self, job, messages, blocks, snapshots)
@@ -1415,6 +1417,8 @@ class Core(Runtime):
                 and before_command != captured_epoch
             ):
                 raise CoreError("PRIVACY_CHANGED", 503)
+            if reply is None and job["kind"] == "chat":
+                await self.memes.prepare_offer(job)
             if reply is None and job["kind"] == "chat" and authority is not None:
                 from companion.agent_chat import reply as agent_reply
 

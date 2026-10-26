@@ -6,7 +6,6 @@ Outbox send or automatic retry is created by this receiver.
 
 import asyncio
 import hashlib
-from dataclasses import asdict
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -37,7 +36,7 @@ async def capture_once(config, scope, approved_sha256, *, clock=lambda: datetime
             or scope["execution"] not in {"local_synthetic", "approved_stopped_r5"}
             or (not synthetic and not scope.get("b1_acceptance_sha256"))
             or scope["capture_public_key"] != config.capture_public_key
-            or scope["bridge_config_sha256"] != digest(asdict(config))
+            or scope["bridge_config_sha256"] != digest(config.snapshot())
             or scope["bridge_code_sha256"] != bridge_code_sha256()
             or scope["identity_sha256"] != digest([config.owner_qq_id, config.bot_qq_id])
             or scope["protocol_epoch"] != config.protocol_epoch

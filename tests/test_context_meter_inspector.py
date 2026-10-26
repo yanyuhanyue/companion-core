@@ -1,6 +1,7 @@
 """Saved per-attempt diagnostics and offline pressure; no live provider or QQ I/O."""
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -282,7 +283,27 @@ def test_real_http_and_independent_worker_expose_both_sdk_attempts(core, tmp_pat
             calls = trace["jobs"][0]["model_calls"]
             assert len(calls) == 2 and all(c["state"] == "SETTLED" for c in calls)
             assert all(c["measurement"]["count_kind"] == "exact_local_render" for c in calls)
-            assert trace["jobs"][0]["context"]["state"] == "NOT_RECORDED"
+            context = trace["jobs"][0]["context"]
+            assert context["state"] == "RECORDED"
+            assert context["source_validity"] == "NOT_REVALIDATED"
+            assert context["pending"] is None and len(context["requests"]) == 2
+            saved = core.store.one("SELECT snapshots_json FROM agent_conversations WHERE job_id=?",
+                                  (job_id,))
+            plan = next(item["metadata"]["core_context"]
+                        for item in json.loads(saved["snapshots_json"])
+                        if item["kind"] == "context_plan")
+            assert context["plan_sha256"] == paid_budget.sha(plan)
+            admissions = core.store.rows(
+                "SELECT a.* FROM model_admissions a JOIN model_usage m USING(request_id) "
+                "WHERE m.job_id=? ORDER BY m.rowid", (job_id,))
+            assert len(admissions) == 2
+            for record, call, admission in zip(context["requests"], calls, admissions, strict=True):
+                assert record["state"] == "ADMITTED"
+                assert record["request_ref_sha256"] == call["request_ref_sha256"] == (
+                    hashlib.sha256(admission["request_id"].encode()).hexdigest())
+                assert record["payload_sha256"] == admission["payload_sha256"]
+                assert record["measurement_sha256"] == paid_budget.sha(
+                    json.loads(admission["measurement_json"]))
             before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
             await entry.recall(1)
             erased = beta_observation.inspect_context(core.settings, trace_id)["trace"]

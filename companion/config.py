@@ -26,6 +26,7 @@ from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
+from companion.meme_policy import TrustedSource
 from companion.operator_config import ConsoleConfig
 from companion.owner_authority_protocol import OwnerRuntimeConfig
 from companion.poke_protocol import PokePolicy
@@ -497,6 +498,15 @@ class Settings(BaseModel):
     expression_cooldown_minutes: int = Field(default=30, ge=1, le=1440)
     expression_selection_probability: float = Field(default=0.35, ge=0, le=1)
     meme_discovery_enabled: bool = False
+    meme_catalog_owner: Literal["bridge", "core"] = Field(
+        default="bridge", exclude_if=lambda value: value == "bridge",
+    )
+    meme_trusted_sources: list[TrustedSource] = Field(
+        default_factory=list, max_length=32, exclude_if=lambda value: not value,
+    )
+    meme_cooldown_seconds: int = Field(
+        default=1800, strict=True, ge=0, le=86400, exclude_if=lambda value: value == 1800,
+    )
     meme_semantics_enabled: bool = Field(
         default=False, exclude_if=lambda value: value is False,
     )
@@ -634,6 +644,10 @@ class Settings(BaseModel):
                     )
                 elif field in {"expression_meme_categories", "web_reading_hosts"}:
                     data[field] = TypeAdapter(list[str]).validate_json(value)
+                elif field == "meme_trusted_sources":
+                    data[field] = TypeAdapter(list[TrustedSource]).validate_json(value)
+                elif field == "meme_cooldown_seconds":
+                    data[field] = TypeAdapter(int).validate_json(value, strict=True)
                 elif field == "executive":
                     data[field] = ExecutiveConfig.model_validate_json(value)
                 elif field == "media":
