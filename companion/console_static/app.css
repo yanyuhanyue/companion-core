@@ -1034,3 +1034,28 @@ details.ev ul { display: grid; gap: 4px; margin-top: 6px; font-size: 12.5px; }
 .more-row { list-style: none; display: flex; justify-content: center; padding-top: 4px; }
 .more-btn { border: 1px dashed var(--line-strong); background: transparent; color: var(--ink-soft); font-size: 12.5px; font-weight: 600; height: 30px; padding: 0 14px; border-radius: 8px; cursor: pointer; }
 .more-btn:hover { background: #f2f3f8; border-style: solid; }
+
+/* ===== 日记与成长：上方日历与日记，下方三列 ===== */
+@media (min-width: 1800px) { .page-wrap { max-width: 1760px; } }
+.diary-wrap > .stack:first-child { align-self: start; }
+.life-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; margin-top: 18px; align-items: start; }
+.life-list { display: grid; }
+.life-list > * { padding: 12px 0; border-top: 1px solid var(--line); }
+.life-list > *:first-child { border-top: 0; padding-top: 0; }
+.life-list > .more-row { border-top: 0; padding: 10px 0 0; }
+.life-list > .goal { gap: 4px 12px; }
+.life-list > .goal .goal-acts { margin-top: 6px; }
+.reflection-card { display: grid; gap: 8px; }
+.rc-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.rc-head b { font-size: 13.5px; font-weight: 600; margin-right: 2px; }
+.rc-head .note { margin-left: auto; font-size: 12px; }
+.refl-evidence summary { cursor: pointer; font-size: 12.5px; color: var(--ink-soft); }
+.refl-evidence ul { display: grid; gap: 4px; margin-top: 6px; padding-left: 12px; font-size: 12.5px; color: var(--ink-soft); }
+.topic { gap: 6px; }
+.topics { gap: 0; }
+.topics .topic { padding: 12px 0; }
+.topics > .more-row { padding-top: 10px; }
+.note.faint { color: var(--faint); font-size: 12px; }
+/* 中等宽度仍保持日历在左、日记在右，窄屏时日历不撑满整行 */
+@media (max-width: 1100px) and (min-width: 861px) { .diary-wrap { grid-template-columns: 270px minmax(0, 1fr); } }
+@media (max-width: 860px) { .diary-wrap .cal { width: 100%; max-width: 340px; justify-self: center; } }

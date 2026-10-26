@@ -825,11 +825,13 @@ PAGES.life = data => {
           el("button", { type: "button", class: "icon-btn", "aria-label": "上个月", onclick: () => shift(-1) }, icon("left")), el("b", {}, `${y} 年 ${mo} 月`),
           el("button", { type: "button", class: "icon-btn", "aria-label": "下个月", onclick: () => shift(1) }, icon("right"))),
           el("div", { class: "cal-grid" }, WEEK.map(w => el("span", { class: "wd" }, w)), cells),
-          el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看"))),
-        sheet("目标与承诺", goals.length ? el("div", { class: "stack" }, capped("goals", byRank(goals, goalRank).map(g => goalCard(g)), 3, "div")) : el("p", { class: "note" }, "还没有目标。"), countNote(goals.length, 20)),
-        topicsSheet(data.topics)),
-      el("div", { class: "stack" }, paper,
-        sheet("最近的反思", reflections.length ? el("div", { class: "stack" }, capped("reflections", byRank(reflections, r => r.state === "PENDING" ? 0 : 1).map(r => reflectionCard(r)), 3, "div")) : el("p", { class: "note" }, "还没有反思记录。"), countNote(reflections.length, 20)))));
+          el("div", { class: "cal-legend" }, el("span", {}, el("span", { class: "tag ok" }), "最近 14 篇日记"), el("span", {}, "其他日期也可以点开查看")))),
+      paper),
+    // 目标、反思、话题并排三列，宽度不够时依次换行，不留大块空白
+    el("div", { class: "life-grid" },
+      sheet("目标与承诺", goals.length ? el("div", { class: "life-list" }, capped("goals", byRank(goals, goalRank).map(g => goalCard(g)), 3, "div")) : el("p", { class: "note" }, "还没有目标。"), countNote(goals.length, 20)),
+      sheet("最近的反思", reflections.length ? el("div", { class: "life-list" }, capped("reflections", byRank(reflections, r => r.state === "PENDING" ? 0 : 1).map(r => reflectionCard(r)), 3, "div")) : el("p", { class: "note" }, "还没有反思记录。"), countNote(reflections.length, 20)),
+      topicsSheet(data.topics)));
 };
 async function loadDiary(day, paper) {
   const epoch = state.epoch;
@@ -2130,9 +2132,8 @@ function goalContinue(g) {
 
 function reflectionCard(r) {
   const evidence = r.evidence || [];
-  return el("div", { class: "reflection-card stack" },
-    el("div", {}, el("b", {}, r.content), tag(r.state)),
-    el("p", { class: "meta" }, fmtDate(r.created_at)),
+  return el("div", { class: "reflection-card" },
+    el("div", { class: "rc-head" }, el("b", {}, r.content), tag(r.state), el("span", { class: "note" }, fmtDate(r.created_at))),
     evidence.length ? el("details", { class: "refl-evidence" }, el("summary", {}, "证据（" + evidence.length + " 条原话）"),
       el("ul", {}, evidence.map(e => el("li", {}, "\"" + e.exact_quote + "\"")))
     ) : null,
@@ -2338,21 +2339,21 @@ function topicCard(t) {
   const owner = sources.filter(s => s.kind === "owner_message"), open = ["WAITING", "DUE"].includes(t.state);
   const closeable = open || t.state === "CLOSED" && t.reason_code === "CONSUMED";
   return el("article", { class: "topic" },
-    el("div", { class: "topic-head" }, el("b", {}, TOPIC_KIND[t.kind] || "话题"), tag(t.state),
-      el("span", { class: "note" }, open ? (t.state === "DUE" ? "已到期，" : "到期于 " + fmtDate(t.due_at) + "，") + "有效期至 " + fmtDate(t.expires_at)
-        : t.reason_code ? reasonText(t.reason_code) : "")),
+    el("div", { class: "topic-head" }, el("b", {}, TOPIC_KIND[t.kind] || "话题"), tag(t.state)),
+    el("p", { class: "note" }, (open ? (t.state === "DUE" ? "已到期，" : "到期于 " + fmtDate(t.due_at) + "，") + "有效期至 " + fmtDate(t.expires_at)
+      : t.reason_code ? reasonText(t.reason_code) : "") + (sources.length ? "" : (t.state === "EXPIRED" ? "；来源已过期或被清除" : "；没有可以显示的来源"))),
     sources.length ? el("ul", { class: "topic-src" }, sources.slice(0, 4).map(s => el("li", {},
       el("span", { class: "chip" }, s.kind === "owner_message" ? "你说" : "她读到"), el("span", { class: "txt" }, s.text),
       safeUrl(s.url) ? el("a", { href: safeUrl(s.url), target: "_blank", rel: "noopener noreferrer" }, "原文") : null,
       el("small", { class: "note" }, fmtDate(s.occurred_at)))))
-      : el("p", { class: "note" }, t.state === "EXPIRED" ? "来源已过期或被清除，原文不再显示。" : "没有可以显示的来源。"),
+      : null,
     sources.length > 4 ? el("p", { class: "note" }, "还有 " + (sources.length - 4) + " 条来源") : null,
     results.length ? el("div", { class: "topic-res" }, results.map(r => el("div", { class: "topic-r" },
       el("div", { class: "row-gap" }, el("b", {}, LIFE_ACTION[r.action] || "其他决定"), el("span", { class: "chip" }, LIFE_DEST[r.destination] || "未记录去向"), tag(r.state)),
       r.reason ? el("p", {}, r.reason) : null, r.text ? el("blockquote", {}, r.text) : null,
       r.goal ? el("p", { class: "note" }, "关联目标：" + statusOf(r.goal.state)[0] + "，", linkTo("thinking/goal:" + r.goal.goal_id, "查看目标")) : null))) : null,
     closeable ? (owner.length ? el("div", { class: "row-gap mt" }, btn("关闭话题", () => topicClose(t, owner), { cls: "sm", symbol: "close" }))
-      : el("p", { class: "note mt" }, "这个话题里没有你的原话，不能在这里关闭；在私聊里说一句不想聊这个，她会自己收起。")) : null);
+      : el("p", { class: "note faint" }, "没有你的原话，不能在这里关闭；在私聊里说不想聊这个，她会自己收起。")) : null);
 }
 function topicClose(t, owner) {
   const sel = el("select", { class: "input", id: "topic-source", required: true },
