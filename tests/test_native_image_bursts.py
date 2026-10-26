@@ -7,9 +7,11 @@ import io
 import json
 import re
 import sys
+import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -17,7 +19,8 @@ from PIL import Image
 
 from companion import api
 from companion.core import Core
-from companion_onebot_bridge import app, pending_media
+from companion_onebot_bridge import app, metrics, pending_media
+from companion_onebot_bridge.onebot_client import bounded_post
 from tests.conftest import run
 from tests.native_continuous_support import host, until
 from tests.test_live_image_input import options
@@ -99,9 +102,27 @@ async def resolve(*_):
     return ["1.1.1.1"]
 
 
-def observe_delivery(active):
+def observe_delivery(active, monkeypatch):
     retries, responses = Counter(), Counter()
     sink = active.metrics.sink
+    rpc = {"errors": [], "last": {}}
+    anchor = time.perf_counter_ns()
+    rpc_sink = metrics._request_finished
+    stages = set(metrics.CORE_RPC_STAGES.values()) | set(
+        metrics.DELIVERY_RPC_STAGES.values()) | set(metrics.PROBE_STAGES.values())
+
+    def rpc_observed(stage, started_ns, error=None):
+        rpc_sink(stage, started_ns, error)
+        if stage in stages:
+            span = {"stage": stage, "started_ms": round((started_ns - anchor) / 1e6, 4),
+                    "finished_ms": round((time.perf_counter_ns() - anchor) / 1e6, 4),
+                    "error_class": type(error).__name__ if error is not None else None}
+            rpc["last"][stage] = span
+            # Later idle polling must not overwrite the first failed operation.
+            if error is not None and len(rpc["errors"]) < 8:
+                rpc["errors"].append(span)
+
+    monkeypatch.setattr(metrics, "_request_finished", rpc_observed)
 
     def observed(record):
         sink(record)
@@ -131,10 +152,10 @@ def observe_delivery(active):
                     responses[f"{phase}:{response.status_code}:{code}"] += 1
 
     active.client.event_hooks["response"].append(response_observed)
-    return retries, responses
+    return retries, responses, rpc
 
 
-async def wait_for_ack(core, active, sends, tasks, count, retries, responses):
+async def wait_for_ack(core, active, sends, tasks, count, retries, responses, rpc):
     try:
         await until(lambda: active.attempts() == {"ACK": count}, tasks=tasks,
                     deadline_seconds=20)
@@ -155,6 +176,7 @@ async def wait_for_ack(core, active, sends, tasks, count, retries, responses):
             "jobs": core.store.rows(
                 "SELECT kind,state,last_error_code FROM jobs ORDER BY rowid"),
             "retry_errors": dict(retries), "http_responses": dict(responses),
+            "rpc_spans": rpc,
             "tasks": [{
                 "done": task.done(), "cancelled": task.cancelled(),
                 "error_class": (type(task.exception()).__name__ if task.done()
@@ -177,7 +199,7 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
         async with native_host(core, tmp_path, monkeypatch, count=2) as values:
             active, inbound, handshakes, sends, calls = values
             failed, downloads, requests = asyncio.Event(), [], []
-            retries, responses = observe_delivery(active)
+            retries, responses, rpc = observe_delivery(active, monkeypatch)
             good = picture("green")
 
             def cdn(request):
@@ -226,13 +248,13 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
                 first = await run_worker(core, tmp_path, 1, "文字已收到，一张图片暂时读不到。")
                 assert len(first) == 1 and model_images(first[0]) == [good]
                 assert "保留这段文字" in json.dumps(first[0]["messages"], ensure_ascii=False)
-                await wait_for_ack(core, active, sends, tasks, 1, retries, responses)
+                await wait_for_ack(core, active, sends, tasks, 1, retries, responses, rpc)
                 await send(core, inbound, 2, [{"type": "text", "data": {"text": "继续聊天"}}])
                 await until(lambda: len(core.store.rows("SELECT * FROM events")) == 2,
                             tasks=tasks, deadline_seconds=20)
                 second = await run_worker(core, tmp_path, 2, "可以，继续聊。")
                 assert len(second) == 1 and model_images(second[0]) == []
-                await wait_for_ack(core, active, sends, tasks, 2, retries, responses)
+                await wait_for_ack(core, active, sends, tasks, 2, retries, responses, rpc)
                 assert active.runtime.row()["state"] == "ACTIVE"
                 assert all(not task.done() for task in tasks)
                 assert len(handshakes) == 1 and len(sends) == 2 and calls == []
@@ -252,6 +274,45 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
         assert ("IMAGE_FETCH_FAILED" if failure == "read_timeout" else
                 "IMAGE_CONNECTION_FAILED") in output
     assert "synthetic-signed-key" not in output and "synthetic-owner-private-detail" not in output
+
+
+@pytest.mark.parametrize("path,stage", [
+    ("/internal/v1/owner-authority/check", "t_core_owner_check"),
+    ("/internal/v1/deliveries/msg_" + "a" * 32 + "/begin-send",
+     "t_core_delivery_begin_send"),
+], ids=["check", "begin-send"])
+def test_delivery_observer_retains_failed_operation_after_successful_poll(
+    monkeypatch, path, stage,
+):
+    canary = "synthetic-owner-private-detail"
+    calls, failures = [], []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            failures.append(httpx.ReadError(canary, request=request))
+            raise failures[0]
+        return httpx.Response(200, json={})
+
+    async def scenario():
+        async with httpx.AsyncClient(base_url="http://127.0.0.1:1234",
+            transport=httpx.MockTransport(respond)) as client:
+            active = SimpleNamespace(client=client, metrics=metrics.Metrics(sink=lambda _: None))
+            _, _, rpc = observe_delivery(active, monkeypatch)
+            with pytest.raises(httpx.ReadError) as caught:
+                await bounded_post(client, path, {"private": canary})
+            assert caught.value is failures[0]
+            assert await bounded_post(client, path, {}) == {}
+            return rpc
+
+    rpc = run(scenario())
+    assert len(calls) == 2 and len(rpc["errors"]) == 1
+    failed = rpc["errors"][0]
+    assert failed["stage"] == stage and failed["error_class"] == "ReadError"
+    assert 0 <= failed["started_ms"] <= failed["finished_ms"]
+    assert rpc["last"][stage]["error_class"] is None
+    assert not any(value in json.dumps(rpc)
+                   for value in (canary, "127.0.0.1", "/internal/", "msg_"))
 
 
 @pytest.mark.parametrize("fault", ["core_transport", "preflight"])
@@ -297,6 +358,8 @@ def test_ack_timeout_retains_unsent_states_and_safe_retry_diagnostics(
     if fault == "core_transport":
         assert evidence["attempts"] == {} and evidence["outbox"][0]["state"] == "PENDING"
         assert evidence["retry_errors"]["ConnectError:0"] > 0
+        assert evidence["rpc_spans"]["errors"][0]["stage"] == "t_core_delivery_lease"
+        assert evidence["rpc_spans"]["errors"][0]["error_class"] == "ConnectError"
     else:
         assert evidence["attempts"] == {"RESERVED": 1}, evidence
         assert evidence["outbox"][0]["state"] == "LEASED", evidence
@@ -314,7 +377,7 @@ def test_image_burst_and_latest_text_keep_all_originals_in_order(
     async def scenario():
         async with native_host(core, tmp_path, monkeypatch, count=count, history=True) as values:
             active, inbound, handshakes, sends, calls = values
-            retries, responses = observe_delivery(active)
+            retries, responses, rpc = observe_delivery(active, monkeypatch)
             originals = [picture(color) for color in ("red", "blue", "green")][:count]
             started, release, downloads = asyncio.Event(), asyncio.Event(), []
             question = "结合这些图片，按发送顺序说明区别"
@@ -363,7 +426,7 @@ def test_image_burst_and_latest_text_keep_all_originals_in_order(
                 request = await run_worker(core, tmp_path, 1, "按原图顺序进行合成回答。")
                 assert len(request) == 1 and model_images(request[0]) == originals
                 assert question in json.dumps(request[0]["messages"], ensure_ascii=False)
-                await wait_for_ack(core, active, sends, tasks, 1, retries, responses)
+                await wait_for_ack(core, active, sends, tasks, 1, retries, responses, rpc)
                 assert [row["origin_event_id"] for row in core.store.rows("SELECT * FROM outbox")
                         ] == [job["event_id"]]
                 assert len(sends) == len(handshakes) == 1 and calls == []

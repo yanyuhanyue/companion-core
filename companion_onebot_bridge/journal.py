@@ -1,11 +1,17 @@
 """The Bridge's original fsynced hash-chain codec, shared by custody versions."""
 
 import hashlib
+import json
 import os
 import stat
+from functools import lru_cache
 
 from .event_normalizer import decode
 from .spool import encode
+
+# One entry retains at most 1 MiB of input plus 1 MiB + 2 of JSON bytes and a head.
+# Larger reads and failed reads evict it; no file metadata or authority is cached.
+CACHE_MAX_BYTES = 1048576
 
 
 def digest(value):
@@ -36,12 +42,36 @@ def stop_marker(path):
 
 
 def read(path, *, maximum=32 * 1048576):
-    info = path.lstat()
-    if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > maximum
-            or (os.name != "nt" and info.st_mode & 0o077)):
-        raise ValueError("INVALID_WINDOW_JOURNAL")
+    try:
+        info = path.lstat()
+        if (path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > maximum
+                or (os.name != "nt" and info.st_mode & 0o077)):
+            raise ValueError("INVALID_WINDOW_JOURNAL")
+        raw = path.read_bytes()
+        if len(raw) > maximum:
+            raise ValueError("INVALID_WINDOW_JOURNAL")
+        if len(raw) > CACHE_MAX_BYTES:
+            _validated_bytes.cache_clear()
+            return _decode_lines(raw.decode("utf-8").splitlines())
+        payload, head = _validated_bytes(raw)
+        return json.loads(payload), head
+    except Exception:
+        _validated_bytes.cache_clear()
+        raise
+
+
+@lru_cache(maxsize=1)
+def _validated_bytes(raw):
+    lines = raw.decode("utf-8").splitlines()
+    _, head = _decode_lines(lines)
+    # Joining validated object lines preserves their values without mutable aliases.
+    # Replacing line separators with commas and adding brackets costs at most 2 bytes.
+    return ("[" + ",".join(lines) + "]").encode("utf-8"), head
+
+
+def _decode_lines(lines):
     records, head = [], "0" * 64
-    for line in path.read_text("utf-8").splitlines():
+    for line in lines:
         record = decode(line, 65536)
         if record.get("previous") != head or record.get("seq") != len(records) + 1:
             raise ValueError("INVALID_WINDOW_JOURNAL")
