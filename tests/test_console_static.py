@@ -26,7 +26,7 @@ def client(core, monkeypatch):
 
 def test_console_assets_are_served_with_private_csp(client):
     for path, kind in (("/console/", "text/html"), ("/console/app.js", "text/javascript"),
-                       ("/console/app.css", "text/css")):
+                       ("/console/app.css", "text/css"), ("/console/icon.svg", "image/svg+xml")):
         response = client.get(path)
         assert response.status_code == 200, path
         assert response.headers["content-type"].startswith(kind)

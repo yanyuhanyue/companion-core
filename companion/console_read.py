@@ -211,8 +211,19 @@ def overview(core):
     budget = budget_view(core)
     blocked = s.one("SELECT 1 FROM runtime_meta WHERE key IN "
                     "('model_budget_blocked','model_budget_restore_required')")
+    paused = {row["key"]: row["value"] == "1" for row in s.rows(
+        "SELECT key,value FROM runtime_meta WHERE key IN "
+        "('proactive_paused','life_paused','diary_paused')")}
+    # 主人在“管理主动行为”里切换的三个开关；available=false 表示配置文件没有开启，不能在控制台恢复
+    modes = {
+        "proactive": {"paused": paused.get("proactive_paused", False),
+                      "available": bool(core.settings.proactive_enabled)},
+        "life": {"paused": paused.get("life_paused", False), "available": True},
+        "diary": {"paused": paused.get("diary_paused", False),
+                  "available": bool(core.settings.diary_enabled)},
+    }
     return {"schema_version": 1, "observed_at": now,
-            "runtime": {"mode": core.settings.mode, "worker": worker,
+            "runtime": {"mode": core.settings.mode, "worker": worker, "modes": modes,
                         "state": "ATTENTION" if blocked or counts["unknown_calls"]
                         or budget["admission_blocked"] or worker["state"] != "RECORDED"
                         else "READY"},
