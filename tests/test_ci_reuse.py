@@ -322,14 +322,19 @@ def test_main_consumer_cli_follows_original_full_artifacts_without_build(
             output.write(evidence["runtime"]["payloads"][int(arguments[-1].split("/")[-2])])
         elif "load" in arguments:
             return b"loaded"
+        elif "ls" in arguments:
+            return ("\n".join(item["image_id"] for item in components.values()) + "\n").encode()
         else:
             assert arguments[:3] == ["docker", "image", "inspect"]
+            component, = [item for item in components.values() if item["image_id"] == arguments[-1]]
             return json.dumps([{"Id": arguments[-1], "Os": "linux",
-                                "Architecture": "amd64"}]).encode()
+                                "Architecture": "amd64", "RootFS": {
+                                    "Layers": component["rootfs_diff_ids"]}}]).encode()
 
     consume = images.consume
-    monkeypatch.setattr(images, "consume", lambda repo, run_id, dest, previous_run=None: consume(
-        repo, run_id, dest, previous_run=previous_run, read=evidence["read"], runner=runner))
+    monkeypatch.setattr(images, "consume", lambda repo, run_id, dest, previous_run=None,
+        reuse_existing=False: consume(repo, run_id, dest, previous_run=previous_run,
+            read=evidence["read"], runner=runner, reuse_existing=reuse_existing))
     monkeypatch.setattr(sys, "argv", ["ci_container_artifacts.py", "consume", "--repository",
                                     "synthetic/repository", "--run-id", "201", "--destination",
                                     str(tmp_path / "consumed")])
@@ -337,9 +342,10 @@ def test_main_consumer_cli_follows_original_full_artifacts_without_build(
     report = json.loads((tmp_path / "consumed/consumed-images.json").read_text())
     assert report["original_full_proof"]["run_id"] == 101
     assert report["build_performed"] is False and report["registry_manifest_digest"] is None
-    assert {name: item["image_id"] for name, item in report["components"].items()} == {
+    assert {name: item["consumer_local_image_id"]
+            for name, item in report["components"].items()} == {
         name: item["image_id"] for name, item in components.items()}
-    assert len(calls) == 3 * len(images.COMPONENTS) and not any("build" in call for call in calls)
+    assert len(calls) == 4 * len(images.COMPONENTS) and not any("build" in call for call in calls)
     assert '"build_performed": false' in capsys.readouterr().out
 
 

@@ -14,6 +14,7 @@ import subprocess
 import tarfile
 import time
 import zipfile
+import zlib
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -72,6 +73,16 @@ UI_BASE_ENV = {
 PRIVATE_PARTS = FORBIDDEN | {".git", "logs", "private-stage", "keys", "secrets", "credentials"}
 CANARY = b"SYNTHETIC_PACKAGING_CANARY_NOT_A_SECRET"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+OCI_INDEX = "application/vnd.oci.image.index.v1+json"
+MANIFEST_TYPES = {OCI_MANIFEST, "application/vnd.docker.distribution.manifest.v2+json"}
+INDEX_TYPES = {OCI_INDEX, "application/vnd.docker.distribution.manifest.list.v2+json"}
+CONFIG_TYPES = {"application/vnd.oci.image.config.v1+json",
+                "application/vnd.docker.container.image.v1+json"}
+LAYER_TYPES = {"application/vnd.oci.image.layer.v1.tar",
+               "application/vnd.oci.image.layer.v1.tar+gzip",
+               "application/vnd.docker.image.rootfs.diff.tar",
+               "application/vnd.docker.image.rootfs.diff.tar.gzip"}
 
 
 def run(arguments, *, root=ROOT, output=None, timeout=900):
@@ -290,13 +301,155 @@ def capture(name, *, root=ROOT, runner=run, identity=None):
     spec = COMPONENTS[name]
     return {"component": name, **(source_identity(root) if identity is None else identity),
             "image_id": image["Id"],
-            "config_digest": image["Id"], "platform": "linux/amd64",
+            "producer_descriptor": image.get("Descriptor"), "platform": "linux/amd64",
             "image_bytes": image["Size"],
             "rootfs_diff_ids": image.get("RootFS", {}).get("Layers", []),
             "recipe_sha256": digest_file(root / spec["recipe"]),
             "dependency_lock_sha256": digest_file(root / spec["lock"]) if spec["lock"] else None,
             "base_image": spec.get("base"),
             "registry_manifest_digest": None}
+
+
+def descriptor(value, media_types):
+    if (not isinstance(value, dict) or value.get("mediaType") not in media_types
+            or not isinstance(value.get("digest"), str) or not DIGEST.fullmatch(value["digest"])
+            or type(value.get("size")) is not int or value["size"] <= 0):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_DESCRIPTOR_INVALID")
+    platform = value.get("platform")
+    if platform is not None and (not isinstance(platform, dict) or platform.get("os") != "linux"
+            or platform.get("architecture") != "amd64"
+            or platform.get("variant") not in (None, "")):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_PLATFORM_CHANGED")
+    return {key: value[key] for key in ("mediaType", "digest", "size")}
+
+
+def archive_identity(path, component):
+    """Read one Docker OCI save graph; no extraction, registry lookup, or tag trust."""
+    path = Path(path)
+    expected_archive = component.get("archive")
+    if expected_archive is not None and (path.stat().st_size != expected_archive["bytes"]
+            or digest_file(path) != expected_archive["sha256"]):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_DIGEST_CHANGED")
+    blobs, documents, seen = {}, {}, set()
+    with tarfile.open(path, mode="r|*") as archive:
+        for member in archive:
+            identity_file = member.name in {"index.json", "oci-layout", "manifest.json"}
+            blob_name = re.fullmatch(r"blobs/sha256/([0-9a-f]{64})", member.name)
+            if not identity_file and not blob_name:
+                continue
+            if not member.isfile() or member.name in seen:
+                raise ValueError("PUBLIC_IMAGE_ARCHIVE_ENTRY_INVALID")
+            seen.add(member.name)
+            if identity_file and member.size > 1024 * 1024:
+                raise ValueError("PUBLIC_IMAGE_ARCHIVE_DOCUMENT_TOO_LARGE")
+            digest, diff, small, decompressor = hashlib.sha256(), hashlib.sha256(), [], None
+            with archive.extractfile(member) as source:
+                first = True
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+                    if member.size <= 1024 * 1024:
+                        small.append(chunk)
+                    if first and chunk.startswith(b"\x1f\x8b"):
+                        decompressor = zlib.decompressobj(31)
+                    first = False
+                    if decompressor is None:
+                        diff.update(chunk)
+                    else:
+                        pending = chunk
+                        while pending:
+                            diff.update(decompressor.decompress(pending, 1024 * 1024))
+                            pending = decompressor.unconsumed_tail
+                if decompressor is not None and (not decompressor.eof or decompressor.unused_data):
+                    raise ValueError("PUBLIC_IMAGE_ARCHIVE_LAYER_INVALID")
+            if blob_name:
+                if digest.hexdigest() != blob_name[1]:
+                    raise ValueError("PUBLIC_IMAGE_ARCHIVE_BLOB_DIGEST_CHANGED")
+                blobs[member.name] = {"digest": "sha256:" + digest.hexdigest(),
+                                     "size": member.size, "diff_id": "sha256:" + diff.hexdigest(),
+                                     "gzip": decompressor is not None}
+            if small:
+                documents[member.name] = b"".join(small)
+    if (not documents.get("index.json") or not documents.get("oci-layout")
+            or json.loads(documents["oci-layout"]).get("imageLayoutVersion") != "1.0.0"):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_LAYOUT_INVALID")
+
+    def content(value, media_types):
+        reference = descriptor(value, media_types)
+        name = "blobs/sha256/" + reference["digest"][7:]
+        actual = blobs.get(name, {})
+        if any(actual.get(key) != reference[key] for key in ("digest", "size")):
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_DESCRIPTOR_CHANGED")
+        return reference, name
+
+    def single(index):
+        if not isinstance(index, dict) or index.get("schemaVersion") != 2 or (
+                not isinstance(index.get("manifests"), list)) or (
+                len(index["manifests"]) != 1):
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_SINGLE_PLATFORM_REQUIRED")
+        return index["manifests"][0]
+
+    root, name = content(single(json.loads(documents["index.json"])), INDEX_TYPES | MANIFEST_TYPES)
+    manifest = json.loads(documents[name])
+    platform_manifest = root
+    if root["mediaType"] in INDEX_TYPES:
+        if (not isinstance(manifest, dict)
+                or manifest.get("mediaType", root["mediaType"]) != root["mediaType"]):
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_MANIFEST_INVALID")
+        platform_manifest, name = content(single(manifest), MANIFEST_TYPES)
+        manifest = json.loads(documents[name])
+    if (not isinstance(manifest, dict) or manifest.get("schemaVersion") != 2
+            or manifest.get("mediaType", platform_manifest["mediaType"]) !=
+            platform_manifest["mediaType"]):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_MANIFEST_INVALID")
+    config, name = content(manifest.get("config"), CONFIG_TYPES)
+    settings = json.loads(documents[name])
+    if not isinstance(settings, dict) or not isinstance(settings.get("rootfs"), dict):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_CONFIG_INVALID")
+    rootfs = settings["rootfs"]
+    diff_ids = rootfs.get("diff_ids")
+    if (settings.get("os") != "linux" or settings.get("architecture") != "amd64"
+            or rootfs.get("type") != "layers" or not isinstance(diff_ids, list)
+            or any(not isinstance(value, str) or not DIGEST.fullmatch(value) for value in diff_ids)
+            or not isinstance(manifest.get("layers"), list)
+            or len(manifest["layers"]) != len(diff_ids)):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_PLATFORM_CHANGED")
+    for layer, diff_id in zip(manifest["layers"], diff_ids, strict=True):
+        _, name = content(layer, LAYER_TYPES)
+        compressed = layer["mediaType"].endswith(("tar+gzip", "tar.gzip"))
+        if blobs[name]["diff_id"] != diff_id or blobs[name]["gzip"] != compressed:
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_ROOTFS_CHANGED")
+    if "manifest.json" in seen:
+        legacy = json.loads(documents.get("manifest.json", b"null"))
+        if not isinstance(legacy, list) or len(legacy) != 1 or not isinstance(legacy[0], dict):
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_DOCKER_MANIFEST_CHANGED")
+        legacy = legacy[0]
+        legacy_config = legacy.get("Config")
+        legacy_layers = legacy.get("Layers")
+        if (not isinstance(legacy_config, str)
+                or blobs.get(legacy_config, {}).get("digest") != config["digest"]
+                or not isinstance(legacy_layers, list)
+                or any(not isinstance(value, str) for value in legacy_layers)
+                or [blobs.get(value, {}).get("diff_id") for value in legacy_layers] != diff_ids):
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_DOCKER_MANIFEST_CHANGED")
+    if ("config_digest" in component and "archive_descriptor" not in component
+            and component["config_digest"] != component["image_id"]):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_IDENTITY_CHANGED")
+    if (component.get("platform") != "linux/amd64"
+            or component.get("config_digest", config["digest"]) != config["digest"]
+            or component.get("rootfs_diff_ids") != diff_ids
+            or component.get("image_id") not in {config["digest"], root["digest"],
+                                                 platform_manifest["digest"]}):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_IDENTITY_CHANGED")
+    for key, actual in (("archive_descriptor", root),
+                        ("platform_manifest_descriptor", platform_manifest)):
+        if key in component and descriptor(component[key], INDEX_TYPES | MANIFEST_TYPES) != actual:
+            raise ValueError("PUBLIC_IMAGE_ARCHIVE_IDENTITY_CHANGED")
+    producer = component.get("producer_descriptor")
+    if producer is not None and descriptor(producer, INDEX_TYPES | MANIFEST_TYPES) not in (
+            root, platform_manifest):
+        raise ValueError("PUBLIC_IMAGE_ARCHIVE_PRODUCER_CHANGED")
+    return {"config_digest": config["digest"], "archive_descriptor": root,
+            "platform_manifest_descriptor": platform_manifest, "rootfs_diff_ids": diff_ids}
 
 
 def export_images(captured, destination, *, root=ROOT, runner=run):
@@ -319,13 +472,17 @@ def export_images(captured, destination, *, root=ROOT, runner=run):
         runner(["docker", "image", "save", "--output", str(raw), built["image_id"]])
         raw_sha, raw_bytes = digest_file(raw), raw.stat().st_size
         saved = time.monotonic()
+        portable = archive_identity(raw, built)
+        verified = time.monotonic()
         with raw.open("rb") as source, gzip.open(compressed, "wb", compresslevel=1) as output:
             shutil.copyfileobj(source, output, length=1024 * 1024)
-        entry = {**built, "archive": {"filename": compressed.name,
+        entry = {**built, **portable, "archive": {"filename": compressed.name,
                  "sha256": digest_file(compressed), "bytes": compressed.stat().st_size,
                  "uncompressed_sha256": raw_sha, "uncompressed_bytes": raw_bytes},
                  "measurement": {"save_and_hash_seconds": round(saved - started, 3),
-                                 "compress_and_hash_seconds": round(time.monotonic() - saved, 3)}}
+                                 "archive_identity_seconds": round(verified - saved, 3),
+                                 "compress_and_hash_seconds": round(
+                                     time.monotonic() - verified, 3)}}
         raw.unlink()
         metadata["components"][name] = entry
     write_json(destination / MANIFEST, metadata)
@@ -395,10 +552,22 @@ def verified_metadata(reference, artifacts, read, repo, expected):
         if (not isinstance(component, dict) or component.get("component") != name
                 or not isinstance(component.get("image_id"), str)
                 or not DIGEST.fullmatch(component["image_id"])
-                or component.get("config_digest") != component["image_id"]
+                or not isinstance(component.get("config_digest"), str)
+                or not DIGEST.fullmatch(component["config_digest"])
                 or component.get("platform") != "linux/amd64"
                 or component.get("registry_manifest_digest") is not None
                 or any(component.get(k) != expected[k] for k in ("commit", "tree"))):
+            raise ValueError("PUBLIC_IMAGE_COMPONENT_INVALID")
+        if "archive_descriptor" in component:
+            archive_descriptor = descriptor(component["archive_descriptor"],
+                                            INDEX_TYPES | MANIFEST_TYPES)
+            platform_descriptor = descriptor(component.get("platform_manifest_descriptor"),
+                                             MANIFEST_TYPES)
+            if component["image_id"] not in {
+                    component["config_digest"], archive_descriptor["digest"],
+                    platform_descriptor["digest"]}:
+                raise ValueError("PUBLIC_IMAGE_COMPONENT_INVALID")
+        elif component["config_digest"] != component["image_id"]:
             raise ValueError("PUBLIC_IMAGE_COMPONENT_INVALID")
         if name == "ui" and (component.get("base_image") != COMPONENTS[name]["base"]
                              or "dependency_lock_sha256" not in component
@@ -419,21 +588,55 @@ def verified_metadata(reference, artifacts, read, repo, expected):
     return metadata
 
 
-def load_archive(component, archive, *, runner=run):
+def load_archive(component, archive, *, runner=run, reuse_existing=False):
     """An authenticated original archive is the only input; there is no build fallback."""
     archive = Path(archive)
-    if (archive.stat().st_size != component["archive"]["bytes"]
-            or digest_file(archive) != component["archive"]["sha256"]):
-        raise ValueError("PUBLIC_IMAGE_ARCHIVE_DIGEST_CHANGED")
-    runner(["docker", "image", "load", "--input", str(archive)])
-    image, = json.loads(runner(["docker", "image", "inspect", component["image_id"]]))
-    if (image["Id"] != component["image_id"] or image.get("Os") != "linux"
-            or image.get("Architecture") != "amd64"):
-        raise ValueError("PUBLIC_IMAGE_LOADED_IDENTITY_CHANGED")
-    return image["Id"]
+    identity = archive_identity(archive, component)
+    descriptors = {identity[key]["digest"]: identity[key] for key in (
+        "archive_descriptor", "platform_manifest_descriptor")}
+    allowed = {identity["config_digest"], *descriptors}
+
+    def inspect_existing():
+        inventory = set(runner(["docker", "image", "ls", "--no-trunc", "--quiet"]).decode().split())
+        if any(not DIGEST.fullmatch(value) for value in inventory):
+            raise ValueError("PUBLIC_IMAGE_LOCAL_INVENTORY_INVALID")
+        matches = inventory & allowed
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ValueError("PUBLIC_IMAGE_LOADED_IDENTITY_AMBIGUOUS")
+        selected, = matches
+        image, = json.loads(runner(["docker", "image", "inspect", selected]))
+        if (image.get("Id") != selected or image.get("Os") != "linux"
+                or image.get("Architecture") != "amd64"
+                or image.get("RootFS", {}).get("Layers") != identity["rootfs_diff_ids"]):
+            raise ValueError("PUBLIC_IMAGE_LOADED_IDENTITY_CHANGED")
+        actual_descriptor = image.get("Descriptor")
+        if selected != identity["config_digest"] and actual_descriptor is None:
+            raise ValueError("PUBLIC_IMAGE_LOADED_DESCRIPTOR_REQUIRED")
+        if actual_descriptor is not None:
+            actual_descriptor = descriptor(actual_descriptor, INDEX_TYPES | MANIFEST_TYPES)
+            if (descriptors.get(actual_descriptor["digest"]) != actual_descriptor
+                    or selected != identity["config_digest"]
+                    and actual_descriptor["digest"] != selected):
+                raise ValueError("PUBLIC_IMAGE_LOADED_IDENTITY_CHANGED")
+        return selected
+
+    selected = inspect_existing() if reuse_existing else None
+    action = "already_present"
+    if selected is None:
+        runner(["docker", "image", "load", "--input", str(archive)])
+        action, selected = "loaded", inspect_existing()
+        if selected is None:
+            raise ValueError("PUBLIC_IMAGE_LOADED_IDENTITY_CHANGED")
+    return {"producer_image_id": component["image_id"],
+            **{key: value for key, value in identity.items() if key != "rootfs_diff_ids"},
+            "consumer_local_image_id": selected, "platform": "linux/amd64", "action": action,
+            "archive_sha256": component["archive"]["sha256"],
+            "archive_bytes": archive.stat().st_size}
 
 
-def load_local(path, *, runner=run):
+def load_local(path, *, runner=run, reuse_existing=False):
     """Exercise Docker's archive codec before upload; this alone is not full CI proof."""
     path = Path(path)
     metadata = json.loads(path.read_text())
@@ -444,10 +647,11 @@ def load_local(path, *, runner=run):
         if component["archive"]["filename"] != name + ".tar.gz":
             raise ValueError("PUBLIC_IMAGE_LOCAL_ARCHIVE_NAME_CHANGED")
         started = time.monotonic()
-        loaded[name] = {"image_id": load_archive(
-            component, path.parent / component["archive"]["filename"], runner=runner),
+        loaded[name] = {**load_archive(component, path.parent / component["archive"]["filename"],
+                                     runner=runner, reuse_existing=reuse_existing),
             "load_and_inspect_seconds": round(time.monotonic() - started, 3)}
-    write_json(path.parent / "local-load.json", {"components": loaded, "build_performed": False})
+    write_json(path.parent / "local-load.json", {"components": loaded, "build_performed": False,
+                                                "reuse_existing": reuse_existing})
     return loaded
 
 
@@ -553,7 +757,8 @@ def download_archive(repo, component, destination, *, runner=run):
     return archive_path, round(time.monotonic() - started, 3)
 
 
-def consume(repo, run_id, destination, *, previous_run=None, read=None, runner=run):
+def consume(repo, run_id, destination, *, previous_run=None, read=None, runner=run,
+            reuse_existing=False):
     metadata, proof = resolve_source(repo, run_id, read=read)
     previous, previous_proof = resolve_source(repo, previous_run, read=read) if previous_run else (
         None, None)
@@ -561,16 +766,18 @@ def consume(repo, run_id, destination, *, previous_run=None, read=None, runner=r
     for name, component in metadata["components"].items():
         archive, seconds = download_archive(repo, component, destination, runner=runner)
         started = time.monotonic()
-        identity = load_archive(component, archive, runner=runner)
-        results[name] = {"image_id": identity, "download_seconds": seconds,
+        identity = load_archive(component, archive, runner=runner, reuse_existing=reuse_existing)
+        results[name] = {**identity, "download_seconds": seconds,
                          "load_and_inspect_seconds": round(time.monotonic() - started, 3),
                          "archive_bytes": archive.stat().st_size,
                          "same_as_previous_verified_image": None if previous is None else (
-                             component["image_id"] == previous["components"][name]["image_id"]
+                             component["config_digest"] ==
+                             previous["components"][name]["config_digest"]
                              and component["platform"] == previous["components"][name]["platform"])}
     result = {"kind": KIND, "original_full_proof": proof, "components": results,
               "previous_full_proof": previous_proof,
-              "registry_manifest_digest": None, "build_performed": False}
+              "registry_manifest_digest": None, "build_performed": False,
+              "reuse_existing": reuse_existing}
     write_json(Path(destination) / "consumed-images.json", result)
     return result
 
@@ -594,11 +801,13 @@ def main():
     bind.add_argument("metadata", type=Path)
     load = commands.add_parser("load")
     load.add_argument("metadata", type=Path)
+    load.add_argument("--reuse-existing", action="store_true")
     consumer = commands.add_parser("consume")
     consumer.add_argument("--repository", required=True)
     consumer.add_argument("--run-id", type=int, required=True)
     consumer.add_argument("--destination", type=Path, required=True)
     consumer.add_argument("--previous-run", type=int)
+    consumer.add_argument("--reuse-existing", action="store_true")
     args = parser.parse_args()
     if args.command == "prepare":
         print(json.dumps(prepare_context(args.destination)))
@@ -613,10 +822,11 @@ def main():
     elif args.command == "bind":
         bind_artifacts(args.metadata)
     elif args.command == "load":
-        print(json.dumps(load_local(args.metadata)))
+        print(json.dumps(load_local(args.metadata, reuse_existing=args.reuse_existing)))
     else:
         print(json.dumps(consume(args.repository, args.run_id, args.destination,
-                                 previous_run=args.previous_run)))
+                                 previous_run=args.previous_run,
+                                 reuse_existing=args.reuse_existing)))
 
 
 if __name__ == "__main__":
