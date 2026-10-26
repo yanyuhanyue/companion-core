@@ -211,7 +211,9 @@ def test_cli_receipt_records_actual_checkout_only_after_required_checks_pass(tmp
     results["quality"]["result"] = "failure"
     env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary),
            "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "synthetic/project",
-           "GITHUB_RUN_ID": "123", "NEEDS_JSON": json.dumps(results)}
+           "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2",
+           "CI_IMAGES_ARTIFACT_ID": "301", "CI_IMAGES_ARTIFACT_DIGEST": "a" * 64,
+           "NEEDS_JSON": json.dumps(results)}
     command = [sys.executable, "scripts/ci_policy.py", "gate", "--profile", profile]
     assert subprocess.run(command, cwd=ROOT, env=env, capture_output=True).returncode != 0
     assert not summary.exists()

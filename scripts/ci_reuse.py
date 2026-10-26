@@ -11,6 +11,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
+if __package__:
+    from . import ci_container_artifacts as images
+else:
+    import ci_container_artifacts as images
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ".github/workflows/ci.yml"
 RECORD = "verified-tree.json"
@@ -51,12 +56,14 @@ def unpack_record(data):
         return json.loads(archive.read(entries[0]))
 
 
-def verified_run(run, repo, head, target, read, now):
+def verified_run(run, repo, head, target, read, now, *, expected_event="pull_request"):
     """Every condition comes from this repository's API and this run's artifact."""
     if (
         type(run.get("id")) is not int or type(run.get("run_attempt")) is not int
         or run["id"] <= 0 or run["run_attempt"] <= 0
-        or run.get("event") != "pull_request" or run.get("path") != WORKFLOW
+        or expected_event not in {"pull_request", "push"}
+        or run.get("event") != expected_event or run.get("path") != WORKFLOW
+        or expected_event == "push" and run.get("head_branch") != "main"
         or run.get("status") != "completed" or run.get("conclusion") != "success"
         or run.get("head_sha") != head
         or run.get("repository", {}).get("full_name") != repo
@@ -80,10 +87,10 @@ def verified_run(run, repo, head, target, read, now):
         f"repos/{repo}/actions/artifacts/{matches[0]['id']}/zip", binary=True,
     ))
     if (
-        type(record.get("version")) is not int or record["version"] != 2
+        type(record.get("version")) is not int or record["version"] != 3
         or record.get("profile") != "full"
         or record.get("coverage") != {"windows_product": True, "windows_browser": True}
-        or record.get("repository") != repo or record.get("event") != "pull_request"
+        or record.get("repository") != repo or record.get("event") != expected_event
         or record.get("run_id") != run["id"] or record.get("attempt") != run["run_attempt"]
         or record.get("tree") != target["tree"]
         or not re.fullmatch(r"[0-9a-f]{40}", record.get("commit", ""))
@@ -97,6 +104,12 @@ def verified_run(run, repo, head, target, read, now):
         or any(job.get("status") != "completed" or job.get("conclusion") != "success"
                for job in jobs["jobs"])
     ):
+        return None
+    try:
+        images.verified_metadata(record.get("container_images"), artifacts["artifacts"], read,
+                                 repo, {"repository": repo, **{key: record[key] for key in (
+                                     "commit", "tree", "run_id", "attempt")}})
+    except (KeyError, TypeError, ValueError, zipfile.BadZipFile):
         return None
     return {"run_id": run["id"], "attempt": run["run_attempt"], "tree": target["tree"]}
 
@@ -167,12 +180,13 @@ def main():
             windows.get("browser") is not True
         ):
             raise ValueError("Full Windows product and browser coverage required")
-        record = {"version": 2, "profile": "full", **target,
+        record = {"version": 3, "profile": "full", **target,
                   "coverage": {"windows_product": True, "windows_browser": True},
                   "repository": os.environ["GITHUB_REPOSITORY"],
                   "event": os.environ["GITHUB_EVENT_NAME"],
                   "run_id": int(os.environ["GITHUB_RUN_ID"]),
-                  "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"])}
+                  "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "container_images": images.metadata_reference()}
         path = ROOT / ".local/ci" / RECORD
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record) + "\n", encoding="utf-8")

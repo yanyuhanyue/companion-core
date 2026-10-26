@@ -1,11 +1,13 @@
 """Private config migration plus real HTTP and the independent Reader CLI."""
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -17,6 +19,54 @@ from tests.test_exploration import configure
 from tests.test_onebot_capture import real_core_http
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def output_evidence(value):
+    if value is None:
+        return {"available": False}
+    if isinstance(value, bytes):
+        return {"available": True, "bytes": len(value),
+                "sha256": hashlib.sha256(value).hexdigest()}
+    return {"available": True, "text_characters": len(value), "raw_bytes_available": False}
+
+
+def compose_config(command, *, timeout=30):
+    """Preserve bounded native rendering while retaining safe timeout-stage evidence."""
+    started = time.monotonic()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True) as process:
+        try:
+            output, error = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as failure:
+            observed_returncode = process.poll()
+            elapsed = time.monotonic() - started
+            before = {"stdout": output_evidence(failure.stdout),
+                      "stderr": output_evidence(failure.stderr)}
+            process.kill()
+            # Match subprocess.run's original platform-specific timeout cleanup.
+            if os.name == "nt":
+                failure.stdout, failure.stderr = process.communicate()
+            else:
+                process.wait()
+            evidence = {
+                "stage": "compose_config", "timeout_seconds": timeout,
+                "elapsed_seconds": round(elapsed, 3), "pid": process.pid,
+                "returncode_at_timeout": observed_returncode,
+                "returncode_after_cleanup": process.returncode,
+                "output_at_timeout": before,
+                "output_after_cleanup": {"stdout": output_evidence(failure.stdout),
+                                         "stderr": output_evidence(failure.stderr)},
+                "docker_executable_present": shutil.which("docker") is not None,
+                "ambient_environment_present": {name: name in os.environ for name in (
+                    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "COMPOSE_FILE",
+                    "COMPOSE_PROFILES", "COMPOSE_ENV_FILES", "COMPOSE_PROJECT_NAME")},
+            }
+            failure.add_note("COMPOSE_CONFIG_TIMEOUT_DIAGNOSTICS=" + json.dumps(evidence))
+            raise
+        except BaseException:
+            process.kill()
+            raise
+        return subprocess.CompletedProcess(command, process.returncode, output, error)
 
 
 def legacy(source="bilibili"):
@@ -81,8 +131,8 @@ def test_migration_cli_and_compose_preserve_literal_credentials(tmp_path):
         cwd=ROOT, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
     assert original["heybox_reader_token"] not in result.stdout + result.stderr
-    configured = subprocess.run(["docker", "compose", "-f", str(target / "compose.json"),
-        "config", "--format", "json"], capture_output=True, text=True, timeout=30)
+    configured = compose_config(["docker", "compose", "-f", str(target / "compose.json"),
+        "config", "--format", "json"])
     assert configured.returncode == 0, configured.stderr
     service = json.loads(configured.stdout)["services"]["heybox-reader"]
     # Compose's config renderer doubles '$' for re-loading the canonical output.
@@ -90,6 +140,69 @@ def test_migration_cli_and_compose_preserve_literal_credentials(tmp_path):
     assert service["environment"]["COMPANION_READER_TOKEN"] == (
         original["heybox_reader_token"].replace("$", "$$"))
     assert "--public-discovery" in service["command"]
+
+
+def test_compose_timeout_retains_process_stage_without_printing_credentials(tmp_path, monkeypatch):
+    canary = "SYNTHETIC_PRIVATE_COMPOSE_VALUE"
+    program, ready = tmp_path / "controlled_compose.py", tmp_path / "ready"
+    program.write_text("import sys,time; from pathlib import Path; "
+        f"print({canary!r},flush=True); print({canary!r},file=sys.stderr,flush=True); "
+        f"Path({str(ready)!r}).touch(); time.sleep(60)", encoding="utf-8")
+    command = [sys.executable, "-B", str(program)]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "Controlled subprocess did not reach the output stage"
+        # Only startup is injected; communicate/timeout/poll/kill/drain use the real child.
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: process)
+        with pytest.raises(subprocess.TimeoutExpired) as caught:
+            compose_config(command, timeout=0.1)
+        evidence = json.loads(caught.value.__notes__[0].split("=", 1)[1])
+        assert evidence["stage"] == "compose_config" and evidence["pid"] == process.pid
+        assert evidence["returncode_at_timeout"] is None
+        assert evidence["returncode_after_cleanup"] is not None
+        assert caught.value.timeout == 0.1
+        assert evidence["timeout_seconds"] == 0.1
+        assert evidence["elapsed_seconds"] >= 0
+        for value in evidence["output_after_cleanup"].values():
+            assert value["available"] is True
+            if "bytes" in value:
+                assert value["bytes"] == len(canary) + 1
+                assert value["sha256"] == hashlib.sha256((canary + "\n").encode()).hexdigest()
+            else:
+                assert value["text_characters"] == len(canary) + 1
+                assert value["raw_bytes_available"] is False
+        assert canary not in json.dumps(evidence)
+        assert canary not in "".join(caught.value.__notes__)
+        assert all(type(value) is bool for value in
+                   evidence["ambient_environment_present"].values())
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_compose_diagnostic_preserves_completed_process_output_and_status(
+    tmp_path, capsys, exit_code,
+):
+    canary = "SYNTHETIC_PRIVATE_COMPOSE_VALUE"
+    program = tmp_path / "completed_compose.py"
+    program.write_text("import sys; " + f"print({canary!r}); "
+                       + f"print({canary!r},file=sys.stderr); raise SystemExit({exit_code})",
+                       encoding="utf-8")
+    result = compose_config([sys.executable, "-B", str(program)])
+    assert result.returncode == exit_code
+    assert result.stdout == result.stderr == canary + "\n"
+    assert capsys.readouterr() == ("", "")
+
+
+def test_compose_diagnostic_distinguishes_missing_output_from_received_empty_bytes():
+    assert output_evidence(None) == {"available": False}
+    assert output_evidence(b"") == {"available": True, "bytes": 0,
+                                     "sha256": hashlib.sha256(b"").hexdigest()}
 
 
 @pytest.mark.parametrize("source", ["bilibili", "heybox"])
