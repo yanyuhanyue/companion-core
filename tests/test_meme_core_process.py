@@ -145,7 +145,7 @@ def test_signed_core_worker_and_bridge_process_use_one_original_image(runtime_ca
                                     ("owner_delivery:" + row["message_id"],),
                                 )["value"]
                             )["meme_binding_version"]
-                            == 1
+                            == 2
                         )
 
                         def locally_acknowledged():

@@ -366,7 +366,10 @@ def erase_captions(store, event_ids):
 
 class MemeCaptionService:
     def __init__(self, store, settings, model, clock):
+        from companion.meme_index import MemeIndex
+
         self.store, self.settings, self.model, self.clock = store, settings, model, clock
+        self.index = MemeIndex()
 
     def profile(self):
         scope(self.store, self.settings, self.clock)
@@ -900,7 +903,7 @@ class MemeCaptionService:
             and not reply_revision.control_job(self.store, job)):
             retrieval = MemeRetrieval(self)
             if not retrieval.optional_disabled(job):
-                retrieval.prepare(job)
+                await retrieval.prepare(job)
 
     def check_offer(self, job):
         from companion.meme_retrieval import MemeRetrieval, core_owned
