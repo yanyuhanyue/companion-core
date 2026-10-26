@@ -213,6 +213,7 @@ def smoke(context, *, image=None, root=ROOT, proof=None):
         env_file.write_text(f"COMPANION_DEV_BRIDGE_TOKEN={token}\nCOMPANION_DEV_BACKUP_KEY={key}\n",
                             encoding="utf-8")
         env_file.chmod(0o600)
+        proof["phase"] = "compose_render"
         config = render(root, env_file, project, context=context)
         resources = validate(config, root, project, token)
         compose = compose_command(root, env_file, project, context=context)
@@ -376,6 +377,8 @@ def main():
         raise SystemExit(2) from None
     except (OSError, ValueError, RuntimeError, AssertionError, subprocess.SubprocessError) as error:
         proof["error_type"] = type(error).__name__
+        if str(error) in {"DEV_COMPOSE_RENDER_FAILED", "DEV_COMPOSE_VERSION_FAILED"}:
+            proof["error_code"] = str(error)
         proof["container_smoke"] = "FAIL"
         raise SystemExit(2) from None
     finally:

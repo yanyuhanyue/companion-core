@@ -2,7 +2,7 @@
 # Always pass the project's dedicated --env-file. Requires Docker Compose >= 2.30.
 x-dev: &dev
   image: companion-core-dev:${COMPOSE_PROJECT_NAME:?select a companion-dev project}
-  env_file: !reset []
+  env_file: !override []
   environment: !override &dev-environment
     COMPANION_CONFIG: /app/config.toml
     COMPANION_MODE: demo

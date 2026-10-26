@@ -7,12 +7,14 @@ import json
 import secrets
 import shutil
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from scripts import smoke_dev_compose as smoke
+from scripts import verify_dev_compose as dev_compose
 from scripts.verify_dev_compose import (
     ROOT,
     SYNTHETIC_TOKEN,
@@ -83,6 +85,141 @@ def test_unsafe_rendered_configuration_is_rejected(native_config, change):
         api["environment"]["COMPANION_CONTROL_TOKEN"] = "synthetic-host-poison"
     with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
         validate(config, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+def replay_render(monkeypatch, config, version, *, failed_stage=None):
+    calls = []
+    synthetic_env = {"SYNTHETIC_ENV": "dedicated"}
+    command = compose_command(ROOT, ROOT / ".local/synthetic.env", "companion-dev-test",
+                              context="synthetic-local")
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert kwargs["cwd"] == ROOT and kwargs["env"] is synthetic_env
+        assert kwargs["capture_output"] and kwargs["text"]
+        assert args[:len(command)] == command
+        if args[len(command):] == ["--profile", "*", "config", "--format", "json"]:
+            stage, output = "config", json.dumps(config)
+        else:
+            assert args[len(command):] == ["version", "--short"]
+            stage, output = "version", version
+        return subprocess.CompletedProcess(args, int(stage == failed_stage), output,
+                                           "synthetic-private-stderr")
+
+    monkeypatch.setattr(dev_compose.subprocess, "run", run)
+    result = render(ROOT, ROOT / ".local/synthetic.env", "companion-dev-test",
+                    context="synthetic-local", env=synthetic_env)
+    assert len(calls) == 2
+    return result
+
+
+@pytest.mark.parametrize("version,legacy", [
+    ("2.30.0", True), ("v2.38.2", True), ("2.40.3", True),
+    ("2.29.9", False), ("2.40.4", False), ("2.40.3-custom", False),
+    ("5.0.0", False), ("5.5.0", False), ("6.0.0", False), ("unknown", False),
+])
+def test_render_missing_bind_false_uses_only_known_native_schema(
+    native_config, monkeypatch, version, legacy,
+):
+    config = copy.deepcopy(native_config)
+    for service in config["services"].values():
+        for mount in service["volumes"]:
+            if mount["type"] == "bind":
+                del mount["bind"]["create_host_path"]
+    rendered = replay_render(monkeypatch, config, version)
+    if legacy:
+        assert len(validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)) == 4
+    else:
+        with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+            validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("version", ["2.40.3", "5.5.0"])
+@pytest.mark.parametrize("value", [False, True, None, 0, 1, "false", [], {}])
+def test_render_preserves_explicit_bind_values(native_config, monkeypatch, version, value):
+    config = copy.deepcopy(native_config)
+    mount = config["services"]["companion-api"]["volumes"][0]
+    mount["bind"]["create_host_path"] = value
+    rendered = replay_render(monkeypatch, config, version)
+    actual = rendered["services"]["companion-api"]["volumes"][0]["bind"]["create_host_path"]
+    assert type(actual) is type(value) and actual == value
+    if value is False:
+        validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+    else:
+        with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+            validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("version", ["2.40.3", "5.5.0"])
+@pytest.mark.parametrize("change", ["missing-bind", "source", "readonly"])
+def test_render_does_not_hide_other_bind_failures(native_config, monkeypatch, version, change):
+    config = copy.deepcopy(native_config)
+    mount = config["services"]["companion-api"]["volumes"][0]
+    if change == "missing-bind":
+        del mount["bind"]
+    elif change == "source":
+        mount["source"] = str(ROOT / "config.toml")
+    else:
+        mount["read_only"] = False
+    rendered = replay_render(monkeypatch, config, version)
+    with pytest.raises(ValueError, match="DEV_COMPOSE_ISOLATION_FAILED"):
+        validate(rendered, ROOT, "companion-dev-test", SYNTHETIC_TOKEN)
+
+
+@pytest.mark.parametrize("stage,code", [
+    ("config", "DEV_COMPOSE_RENDER_FAILED"), ("version", "DEV_COMPOSE_VERSION_FAILED"),
+])
+def test_render_rejects_failed_native_command(monkeypatch, stage, code):
+    with pytest.raises(RuntimeError, match=code):
+        replay_render(monkeypatch, {}, "2.40.3", failed_stage=stage)
+
+
+def test_smoke_marks_render_phase_before_render_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(smoke, "require_local_context", lambda context: None)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("DEV_COMPOSE_RENDER_FAILED")
+
+    monkeypatch.setattr(smoke, "render", fail)
+    proof = {}
+    with pytest.raises(RuntimeError, match="DEV_COMPOSE_RENDER_FAILED"):
+        smoke.smoke("synthetic-local", root=tmp_path, proof=proof)
+    assert proof["phase"] == "compose_render" and proof["checks"] == []
+
+
+@pytest.mark.parametrize("error,code", [
+    (RuntimeError("DEV_COMPOSE_RENDER_FAILED"), "DEV_COMPOSE_RENDER_FAILED"),
+    (RuntimeError("DEV_COMPOSE_VERSION_FAILED"), "DEV_COMPOSE_VERSION_FAILED"),
+    (RuntimeError("synthetic-private-exception"), None),
+    (subprocess.CalledProcessError(7, ["synthetic-private-command"],
+                                  "synthetic-private-output", "synthetic-private-stderr"), None),
+])
+def test_smoke_report_exposes_only_fixed_error_codes(monkeypatch, tmp_path, capsys, error, code):
+    for name in ("compose.yaml", "deploy/compose.dev.yaml", "scripts/verify_dev_compose.py",
+                 "scripts/smoke_dev_compose.py", "tests/test_dev_compose.py",
+                 "docs/dev-environment.md", "Dockerfile", "uv.lock",
+                 "deploy/qq-beta-core.example.toml"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic fixture", encoding="utf-8")
+
+    def fail(context, *, image, proof):
+        proof["phase"] = "compose_render"
+        raise error
+
+    monkeypatch.setattr(smoke, "ROOT", tmp_path)
+    monkeypatch.setattr(smoke, "smoke", fail)
+    monkeypatch.setattr(smoke, "run", lambda command: "synthetic-source-identity")
+    monkeypatch.setattr(sys, "argv", ["smoke", "--context", "synthetic-local"])
+    with pytest.raises(SystemExit) as stopped:
+        smoke.main()
+    assert stopped.value.code == 2
+    text = (tmp_path / ".local/verification/dev-compose-smoke.json").read_text(encoding="utf-8")
+    proof = json.loads(text)
+    assert proof["phase"] == "compose_render" and proof["container_smoke"] == "FAIL"
+    assert proof.get("error_code") == code
+    captured = capsys.readouterr()
+    assert "synthetic-private" not in text + captured.out + captured.err
 
 
 @pytest.mark.parametrize("project", ["companion", "production", "companion-dev-",

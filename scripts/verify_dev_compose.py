@@ -39,15 +39,31 @@ def compose_command(root, env_file, project, *, context=None):
 
 
 def render(root, env_file, project, *, context=None, env=None):
+    command = compose_command(root, env_file, project, context=context)
+    process_env = environment() if env is None else env
     result = subprocess.run(
-        [*compose_command(root, env_file, project, context=context), "--profile", "*",
-         "config", "--format", "json"],
-        cwd=root, env=environment() if env is None else env, capture_output=True,
-        text=True, timeout=60,
+        [*command, "--profile", "*", "config", "--format", "json"],
+        cwd=root, env=process_env, capture_output=True, text=True, timeout=60,
     )
     if result.returncode:
         raise RuntimeError("DEV_COMPOSE_RENDER_FAILED")
-    return json.loads(result.stdout)
+    config = json.loads(result.stdout)
+    version = subprocess.run(
+        [*command, "version", "--short"], cwd=root, env=process_env,
+        capture_output=True, text=True, timeout=15,
+    )
+    if version.returncode:
+        raise RuntimeError("DEV_COMPOSE_VERSION_FAILED")
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)",
+                         version.stdout.strip())
+    # Official Compose 2.30.0..2.40.3 use bool + omitempty for this field.
+    # From 5.0.0 it is OptOut; unknown versions keep strict missing-value rejection.
+    if match and (2, 30, 0) <= tuple(map(int, match.groups())) <= (2, 40, 3):
+        for service in config.get("services", {}).values():
+            for mount in service.get("volumes", []):
+                if mount.get("type") == "bind" and isinstance(mount.get("bind"), dict):
+                    mount["bind"].setdefault("create_host_path", False)
+    return config
 
 
 def validate(config, root, project, token):

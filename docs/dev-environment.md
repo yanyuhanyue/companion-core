@@ -115,6 +115,28 @@ python -B scripts/verify_dev_compose.py
 检查覆盖所有 Core profiles、根与宿主合成污染、缺失根配置、两组 project 的网络/卷隔离、只读
 源码和显式迁移。`OFFLINE_FIXTURE` 结果只证明实际 Compose 合并配置。
 
+覆盖层的 `env_file: !override []` 在旧版 Compose 的共享 anchor 中也能清除基础 `.env`。
+旧 loader 的 `!reset` 会先移除 anchor 内的节点，使后续服务丢失 reset 路径；上游的
+[共享 alias 修复及测试](https://github.com/compose-spec/compose-go/commit/468e3142d7878f6ec8f0c99e3e64c913cf3d3148)
+记录了这个问题。
+
+原生 JSON 的 bind 布尔编码有版本差异。官方 Compose
+[2.30.0](https://github.com/docker/compose/blob/v2.30.0/go.mod) 到
+[2.40.3](https://github.com/docker/compose/blob/v2.40.3/go.mod) 使用的旧类型为
+[`bool` 加 `omitempty`](https://github.com/compose-spec/compose-go/blob/v2.9.1/types/types.go#L594-L601)，
+显式 false 会成为既存 `bind` 对象内的缺失字段；容器创建时的
+[`CreateMountpoint`](https://github.com/docker/compose/blob/v2.40.3/pkg/compose/create.go#L1208-L1215)
+直接使用该原生布尔值。[5.0.0](https://github.com/docker/compose/blob/v5.0.0/go.mod) 起采用
+[`OptOut`](https://github.com/compose-spec/compose-go/blob/v2.14.0/types/types.go#L564-L579)，省略的是 true。
+JSON、YAML 和 `--no-normalize` 均有这一编码差异。
+
+验证脚本只在精确匹配官方稳定版 2.30.0–2.40.3 时，于 render 边界补回旧 schema 的 false。
+既存值保持原样，缺失整个 bind 对象不补；新版或未知版本的缺失字段仍拒绝，路径、只读等其他
+隔离条件保持严格校验。此版本区间来自上游 schema 边界；本轮实际 config-only 验证版本为
+Windows Compose 2.40.3 和本机 5.5.0，并不代表逐版执行或 Linux 容器通过。Linux 2.38.2 的
+完整容器门禁尚待独立 CI 验证。失败报告只增加 `compose_render` 阶段与两个固定错误码
+`DEV_COMPOSE_RENDER_FAILED`、`DEV_COMPOSE_VERSION_FAILED`，不写入异常正文或命令输出。
+
 真实容器检查需显式运行：
 
 ```powershell
