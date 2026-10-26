@@ -1,0 +1,147 @@
+# Retained UNKNOWN model liability handoff, v1
+
+Core owns `companion_delivery_protocol/model_carry.py`, the Core API, configuration,
+authority, original budget journal, cumulative budget and offline controller. Bridge
+owns `owner_handoff.py`, its CLI and journal reader. No other Bridge files are owned
+by the Core slice. Base is main `90bc5b3`; factory is parked separately.
+
+The frozen read endpoint is `POST /internal/v1/owner-authority/model-carry-receipt`,
+using the existing Bridge Bearer credential and `Cache-Control: no-store`.
+Its exact request is `{authority, carry_sha256, successor_policy_sha256}`. Authority
+is the original ACTIVE AuthorityRef v2, not its STOP revision. The two digests must
+match the original journal-backed prepared carry. It is readable only at the exact
+STOP successor (r+1) or the exact ACTIVE successor (r+2, matching policy), same grant
+and restore generation. The immutable response is validated by `model_carry.receipt`.
+All fields and bounds are defined in that shared dependency-free module.
+
+Hashes use existing wire `canonical`/`digest` (sorted compact UTF-8 JSON, SHA256).
+`carry_sha256` hashes the Core-computed carry manifest; `record_sha256` is the
+original budget journal record hash; `receipt_sha256` hashes the response excluding
+itself. There is no new signature domain: authentication is the direct Core lookup,
+as for existing input-state receipts. Existing signatures and STOP receipts retain
+their exact meaning. No offline caller-supplied receipt substitutes for the lookup.
+
+Bridge prepare requires its original exclusive stopped Spool, original Core STOP
+confirmation (`quiescence_proven=false`), and a direct carry lookup. Ordinary inputs
+continue through existing `terminal()`. Only listed nonterminal model inputs may
+use `model_carry.carried(original_state,capture,receipt)`; retain the complete
+original false terminal/true unsettled_model values in `OWNER_INPUT_CARRIED` data:
+`{version:1, authority, event_id, input_state, carry_receipt}`. The new preparation
+record kind is `OWNER_CARRY_HANDOFF_PREPARED`, with exact data
+`{version:1, authority, core_stop, custody_sha256, carry_receipt}`. Ordinary
+`OWNER_HANDOFF_PREPARED` remains unchanged. Include carried records and the carry
+receipt in the existing custody digest. Re-fetch the same carry receipt after
+building custody, and require exact equality with the first lookup before append.
+The new CLI returns state `CARRY_HANDOFF_PREPARED`.
+`verify/closed` validate stored carried evidence; preserve all original input refs,
+source capture bytes, attempts, provider ACKs and reconciliation requirements.
+
+Existing OWNER_REBOUND shape remains unchanged. For carry preparation its
+successor must additionally have `policy_sha256 == receipt.successor_policy_sha256`.
+The original same grant, revision r+2, generation, journal-ID, active Core check and
+stop-marker rules continue to apply. No original tool state, input or model request
+is retried. The original pending inbox may close locally after the explicit carried
+record is durable, as ordinary prepare closes terminal inbox entries; no ACK is made.
+
+Core errors are `OWNER_MODEL_CARRY_REQUIRED` (403),
+`OWNER_MODEL_CARRY_CHANGED` (409), `OWNER_MODEL_CARRY_NOT_QUIESCENT` (409), or existing
+budget custody/restore errors (503). Shape failures remain HTTP 422. Shared wire
+validation raises `OWNER_MODEL_CARRY_RECEIPT_INVALID` or
+`OWNER_MODEL_CARRY_INPUT_CHANGED`. Bridge must retain STOP on every failure.
+
+Policy uses PaidModelApproval.concurrency_basis=`local_active_attempts_v2` and
+OwnerGrantPolicy.unknown_carry_sha256. Optional fields are omitted for old policies.
+The reviewed target has neither cumulative approval nor its runtime projection.
+This urgent slice explicitly rejects either one with
+`MODEL_CARRY_CUMULATIVE_UNSUPPORTED`; it does not change cumulative v1 behavior.
+Cumulative v2 is deferred. Its later review must cover both overwrite directions
+of OWNER_PAUSE/DELIVERY_UNCERTAIN versus UNKNOWN, and closure after later timeouts;
+checking only the final displayed pause reason is insufficient.
+Historical UNKNOWN and STARTED remain present. New window counters include the
+predecessor's full budget scope; cumulative financial identities are never rewritten.
+
+Integration order is original STOP -> real API/all-model-worker exits -> controlled
+offline carry append -> new API only -> authenticated Bridge carry prepare -> exact
+authority preview/activate -> Bridge handoff -> workers/new independent signed input
+and real ACK, external transports mocked. Core provides the full prepared receipt
+from the approved offline request, including the target policy hash. The deployment
+controller verifies actual inspect/wait evidence before executing the offline command;
+the product neither mounts docker.sock nor pretends the supplier stopped execution.
+
+The original append-only budget journal retains only the successor policy and paid
+contract hashes, not the private policy JSON. Activation checks those exact hashes.
+It must not defeat native policy redaction or source erasure. `retained_micro_usd`
+is the frozen original liability floor; later larger known responsibility remains
+accounted by the original ledger. New v2 admissions reject any logical request
+which already has UNKNOWN, including after local closure. A new independently
+authenticated input has a different native job/logical identity.
+
+## Controlled operator execution
+
+Use the reviewed Python environment on the trusted deployment host, with the same
+absolute DB, journal and erasure paths as the frozen custody. This is not an API or
+worker container permission. If that environment or path binding is unavailable,
+stop at preflight; do not mount docker.sock into the product or rewrite custody paths.
+
+First collect the reviewed deployment inventory before STOP, retaining the full
+container ID, image ID, source artifact SHA256, service, original process ID and
+StartedAt. After the original Core and Bridge STOP, the deployment operator disables
+restart for those exact retired containers and stops/waits for all of them. The
+controller independently performs local `inspect`, full project `ps -a --no-trunc`,
+`wait` and a second `inspect`. It refuses a missing API/worker, omitted executor,
+running/restarting process, changed image/start identity or enabled restart policy.
+Existing OS worker locks are held while inspecting and committing native custody.
+The private request's `executors` entries contain exactly `container_id`, `image_id`,
+`source_sha256`, `service`, `started_at`, `finished_at`, `process_id`.
+
+The exact private request fields are `version=1`, `operation_id`,
+`authorization_sha256`, `expected_head_sha256`, original `authority`,
+`successor_window_id`, `manifest_sha256`, `successor_policy`, `executors`.
+The new paid configuration is loaded separately through existing Settings. Both the
+paid approval and owner authorization evidence must be new; all other limits,
+prices, keys, permissions and original approval intervals remain unchanged.
+
+```sh
+python -m companion preview-model-carry --request PRIVATE_REQUEST --request-sha256 REVIEWED_SHA256
+python -m companion carry-closed-model-attempts --request PRIVATE_REQUEST --request-sha256 REVIEWED_SHA256
+```
+
+Preview computes the exact manifest/digest for review and does not append a carry.
+Fill that digest and the exact successor policy, then review the complete request
+bytes before commit. The commit re-observes the real stopped executors and recomputes
+the whole manifest; a caller cannot submit a list that omits an UNKNOWN or an amount.
+Only the identical approved request can complete an interrupted journal/projection
+commit; normal readers remain blocked. It fsyncs the existing record again before
+restoring that exact projection and never replays a provider attempt.
+
+These native Docker operations follow the primary CLI contracts:
+[inspect](https://docs.docker.com/reference/cli/docker/container/inspect/),
+[wait](https://docs.docker.com/reference/cli/docker/container/wait/) and
+[container listing/filtering](https://docs.docker.com/reference/cli/docker/container/ls/).
+
+## Candidate image and migration boundary
+
+This candidate is based on main `90bc5b3`, not the running c8 image plus two files.
+Between those revisions main also merged optional routed context limits and native
+request planning/checkpoints; read-only context/activity inspection; Core-owned meme
+asset/runtime/erasure support; backend cache-usage presence; the private temporary
+backup staging fix; native image-transfer source-check repairs; and HTTP test tooling.
+The image contains the previously merged console inspection code; this P0 adds no UI.
+
+Schema `0047_meme_assets` is part of that base and must follow the original reviewed
+init/migration procedure with a preserved latest backup. Its empty tables do not
+authorize an asset import or ownership transfer. Keep `meme_catalog_owner=bridge`,
+`meme_trusted_sources=[]`, and do not enable discovery/captioning or add paid meme
+input approval as part of P0. Preserve the original disabled/absent Life shadow and
+all existing owner permission scopes. Do not add `max_context_tokens`, routing or
+token-counting approval; the optional new fields remain omitted at their defaults.
+Native planning and the inherited source-check fixes are active code changes and
+must not be represented as disabled by an invented feature flag. Their already
+verified main evidence and the final combined native check accompany release review.
+
+After a new control record is appended, old c8 is not a compatible journal reader.
+Do not roll back to an old database or journal prefix: new responsibilities and the
+84 microUSD UNKNOWN must remain. Stop/OFF on the new reader and forward repair are
+the conservative rollback. Returning to old bytes requires proving that no new
+responsibility or control record has crossed that boundary. Source retention and
+original image expiry are never extended by this operation.

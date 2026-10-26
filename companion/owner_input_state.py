@@ -1,6 +1,7 @@
 """Read-only original input completion receipts for stopped Bridge custody."""
 
 import json
+from contextlib import nullcontext
 from datetime import datetime
 
 import companion_delivery_protocol as wire
@@ -60,7 +61,7 @@ def _deliveries(store, rows, jobs, *, erased):
 
 
 def read(store, settings, capture):
-    with store.transaction():
+    with nullcontext() if store.db.in_transaction else store.transaction():
         native_poke = isinstance(capture, OwnerPokeCapture)
         if native_poke:
             original, _, source = poke.verify_original(

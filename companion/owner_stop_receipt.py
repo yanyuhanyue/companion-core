@@ -1,5 +1,7 @@
 """Read original journal-backed STOP evidence without granting execution permission."""
 
+from contextlib import nullcontext
+
 from companion import owner_authority
 from companion.contracts import CoreError
 from companion_delivery_protocol.authority import AuthorityRef
@@ -7,7 +9,7 @@ from companion_delivery_protocol.authority import AuthorityRef
 
 def read(store, settings, authority):
     ref = AuthorityRef.from_dict(authority)
-    with store.transaction():
+    with nullcontext() if store.db.in_transaction else store.transaction():
         owner_authority.custody(store, settings, settlement=True)
         original = store.one(
             "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",

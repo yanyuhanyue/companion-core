@@ -1,0 +1,607 @@
+"""Local execution closure and explicitly approved retained UNKNOWN responsibility.
+
+These control records share the original budget journal. They never settle or
+refund a model attempt and never authorize replaying its original input or tool.
+"""
+
+import json
+import os
+from types import SimpleNamespace
+
+from companion import paid_budget
+from companion.contracts import CoreError
+from companion_delivery_protocol import digest, hash_value, identifier, timestamp
+from companion_delivery_protocol import model_carry as wire
+
+CLOSE = "model_local_close"
+CARRY = "model_unknown_carry"
+KINDS = {CLOSE, CARRY}
+CLOSE_FIELDS = {
+    "kind",
+    "version",
+    "request_id",
+    "authority",
+    "contract_sha256",
+    "payload_sha256",
+    "lease_sha256",
+    "io_started_at",
+    "settlement_sha256",
+    "closed_at",
+    "previous",
+}
+CARRY_FIELDS = {
+    "kind",
+    "version",
+    "operation_id",
+    "authorization_sha256",
+    "manifest",
+    "carry_sha256",
+    "successor_policy_sha256",
+    "successor_paid_contract_sha256",
+    "successor_approval_sha256",
+    "concurrency_basis",
+    "concurrency",
+    "closed_executors",
+    "at",
+    "request_sha256",
+    "request_fingerprint_sha256",
+    "previous",
+}
+
+
+def active(settings):
+    return bool(settings.paid_model and settings.paid_model.concurrency_basis == wire.MODE)
+
+
+def supported(store, settings):
+    # Cumulative v2 is a separate explicitly reviewed capability. Never bypass v1.
+    if settings.paid_model.cumulative is not None or store.one(
+        "SELECT 1 FROM runtime_meta WHERE key='model_budget_cumulative'"
+    ):
+        raise CoreError("MODEL_CARRY_CUMULATIVE_UNSUPPORTED", 503)
+
+
+def _tuple(admission):
+    return {
+        "request_id": admission["request_id"],
+        "authority": json.loads(admission["authority_json"]),
+        "contract_sha256": admission["contract_sha256"],
+        "payload_sha256": admission["payload_sha256"],
+        "lease_sha256": digest(admission["lease_token"]),
+        "io_started_at": admission["io_started_at"],
+    }
+
+
+def _validate_close(store, row, latest):
+    admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (row["request_id"],))
+    financial = latest.get(row["request_id"])
+    if (
+        not admission
+        or not financial
+        or financial["kind"] != "settle"
+        or financial["state"] != "UNKNOWN"
+        or row["settlement_sha256"] != paid_budget.sha(financial)
+        or any(row[k] != v for k, v in _tuple(admission).items())
+        or not admission["io_started_at"]
+        or timestamp(row["closed_at"]) < timestamp(admission["io_started_at"])
+    ):
+        raise ValueError("model local closure binding")
+    if json.loads(admission["snapshot_json"]).get("concurrency_basis") != wire.MODE:
+        raise ValueError("local closure requires explicit new approval")
+
+
+def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closures, carries):
+    """Validate control evidence at its original journal cutoff, never as a charge."""
+    if type(row.get("version")) is not int or row["version"] != 1:
+        raise ValueError("model control record version")
+    if row["kind"] == CLOSE:
+        if set(row) != CLOSE_FIELDS or row["request_id"] in blocked:
+            raise ValueError("invalid model local closure")
+        _validate_close(store, row, latest)
+        if row["request_id"] in closures:
+            raise ValueError("duplicate model local closure")
+        closures[row["request_id"]] = record_sha
+        return
+    if set(row) != CARRY_FIELDS or not hash_value(row["authorization_sha256"]):
+        raise ValueError("invalid model carry record")
+    manifest = row["manifest"]
+    if (
+        digest(manifest) != row["carry_sha256"]
+        or row["carry_sha256"] in carries
+        or manifest["budget_journal_id"] != journal_id
+        or blocked
+        or not authorities
+        or authorities[-1]["state"] != "STOPPED"
+        or authorities[-1]["record_sha256"] != manifest["core_stop_sha256"]
+        or manifest["closed_executors_sha256"] != digest(row["closed_executors"])
+    ):
+        raise ValueError("model carry custody")
+    unknown = {k for k, v in latest.items() if v["state"] == "UNKNOWN"}
+    items = manifest["unknowns"]
+    if (
+        not 1 <= len(items) <= 100
+        or [i["request_id"] for i in items] != sorted(unknown)
+        or any(v["state"] == "RESERVED" for v in latest.values())
+    ):
+        raise ValueError("model carry incomplete inventory")
+    for item in items:
+        admission = store.one(
+            "SELECT * FROM model_admissions WHERE request_id=?", (item["request_id"],)
+        )
+        financial = latest[item["request_id"]]
+        if (
+            not admission
+            or item["settlement_sha256"] != paid_budget.sha(financial)
+            or financial["kind"] != "settle"
+            or item["minimum_micro_usd"] != financial["minimum_micro_usd"]
+            or item["reserved_micro_usd"] != admission["reserved_micro_usd"]
+            or any(item[k] != v for k, v in _tuple(admission).items())
+            or item["authority"] != manifest["authority"]
+        ):
+            raise ValueError("model carry original admission")
+        closures[item["request_id"]] = record_sha
+    if (
+        row["concurrency_basis"] != wire.MODE
+        or type(row["concurrency"]) is not int
+        or row["concurrency"] != 1
+        or any(
+            not hash_value(row[k])
+            for k in (
+                "successor_policy_sha256",
+                "successor_paid_contract_sha256",
+                "successor_approval_sha256",
+            )
+        )
+    ):
+        raise ValueError("model carry successor approval")
+    carries[row["carry_sha256"]] = {**row, "record_sha256": record_sha}
+
+
+def validate_projection(store, controls, *, replay=None):
+    rows = store.rows("SELECT key,value FROM runtime_meta WHERE key LIKE 'model_control:%'")
+    saved = {row["key"].removeprefix("model_control:"): row["value"] for row in rows}
+    if (
+        any(key != value for key, value in saved.items())
+        or set(saved) - set(controls)
+        or set(controls) - set(saved) - ({replay} if replay else set())
+    ):
+        raise ValueError("model control DB behind journal")
+
+
+def close_owned(store, settings, request_id, dispatch, now):
+    """Only this committed admission owner may close its own unwound transport."""
+    if not active(settings) or not dispatch.get("owned") or not dispatch.get("transport_returned"):
+        return
+    supported(store, settings)
+    with store.transaction():
+        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
+        usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        if not admission or not usage or usage["state"] != "UNKNOWN":
+            return
+        if dispatch.get("owner_tuple") != _tuple(admission) or admission[
+            "io_started_at"
+        ] != dispatch.get("io_started_at"):
+            raise CoreError("MODEL_LOCAL_CLOSE_OWNER_CHANGED", 503)
+        custody = SimpleNamespace(journal_path=admission["journal_path"])
+        view = paid_budget.journal(store, custody, allow_settlement=True)
+        if view["blocked_request_ids"] or request_id in view["model_closures"]:
+            return
+        if store.one(
+            "SELECT 1 FROM runtime_meta WHERE key IN "
+            "('model_budget_blocked','model_budget_restore_required',"
+            "'cloud_budget_restore_required')"
+        ):
+            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        record = {
+            "kind": CLOSE,
+            "version": 1,
+            **_tuple(admission),
+            "settlement_sha256": paid_budget.sha(view["model_latest"][request_id]),
+            "closed_at": now,
+        }
+        paid_budget.journal(store, custody, record, allow_settlement=True)
+
+
+def _work(store, settings, authority):
+    from companion import owner_input_state
+    from companion.owner_authority_protocol import OwnerCapture
+
+    result = {}
+    for row in store.rows("SELECT value FROM runtime_meta WHERE key LIKE 'owner_input:%'"):
+        value = json.loads(row["value"])
+        capture = value.get("capture")
+        if not capture or capture["authority"] != authority:
+            continue
+        state = owner_input_state.read(store, settings, OwnerCapture.model_validate(capture))
+        if state["unsettled_work"] or state["unsettled_delivery"]:
+            raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+        result[capture["event_id"]] = state
+    return result
+
+
+def manifest(store, settings, authority, successor_window, witness, view):
+    from companion import live_text, owner_authority, owner_stop_receipt
+
+    supported(store, settings)
+    stop = owner_stop_receipt.read(store, settings, authority)
+    if store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?", (successor_window,)):
+        raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+    if view["blocked_request_ids"] or store.one(
+        "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked',"
+        "'model_budget_restore_required','cloud_budget_restore_required')"
+    ):
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+    for table, states in (
+        ("jobs", "'SUCCEEDED','FAILED','CANCELLED'"),
+        ("outbox", "'SENT','FAILED','CANCELLED'"),
+        ("tool_tasks", "'SUCCEEDED','FAILED','CANCELLED'"),
+    ):
+        if store.one(f"SELECT 1 FROM {table} WHERE state NOT IN ({states}) LIMIT 1"):
+            raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    if store.one("SELECT 1 FROM model_usage WHERE state='RESERVED'"):
+        raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    work = _work(store, settings, authority)
+    unknowns, inputs = [], {}
+    rows = store.rows(
+        "SELECT a.*,m.job_id,m.billed_micro_usd FROM model_admissions a "
+        "JOIN model_usage m USING(request_id) WHERE m.state='UNKNOWN' "
+        "ORDER BY a.request_id LIMIT 101"
+    )
+    total_unknown = store.one("SELECT COUNT(*) n FROM model_usage WHERE state='UNKNOWN'")["n"]
+    if not rows or len(rows) > 100 or len(rows) != total_unknown:
+        raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+    original = owner_authority.evidence(store, settings, authority)
+    for row in rows:
+        financial = view["model_latest"].get(row["request_id"])
+        if (
+            not financial
+            or financial["kind"] != "settle"
+            or financial["state"] != "UNKNOWN"
+            or json.loads(row["authority_json"]) != authority
+            or row["contract_sha256"] != original.policy.paid_contract_sha256
+            or not row["io_started_at"]
+        ):
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        job = store.one("SELECT event_id FROM jobs WHERE job_id=?", (row["job_id"],))
+        if not job or job["event_id"] not in work:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        event = job["event_id"]
+        state = work[event]
+        if state["terminal"] or not state["unsettled_model"]:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        inputs.setdefault(
+            event,
+            {
+                "event_id": event,
+                "input_sha256": state["input_sha256"],
+                "work_sha256": state["work_sha256"],
+                "request_ids": [],
+            },
+        )
+        inputs[event]["request_ids"].append(row["request_id"])
+        tools = store.rows(
+            "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'", (row["job_id"],)
+        )
+        for tool in tools:
+            metadata = json.loads(tool["metadata_json"] or "{}")
+            if (
+                tool["tool_name"] != "understand_video"
+                or metadata.get("kind") != "qq_animation"
+                or metadata.get("request_id") != row["request_id"]
+            ):
+                raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+        unknowns.append(
+            {
+                **_tuple(row),
+                "logical_request_id": row["logical_request_id"],
+                "reserved_micro_usd": row["reserved_micro_usd"],
+                "minimum_micro_usd": row["billed_micro_usd"],
+                "settlement_sha256": paid_budget.sha(financial),
+                "tool_sha256": digest(tools),
+            }
+        )
+    windows = sorted(
+        {
+            store.one(
+                "SELECT window_id FROM model_admissions WHERE request_id=?", (item["request_id"],)
+            )["window_id"]
+            for item in unknowns
+        }
+    )
+    for carry in view["model_carries"].values():
+        if set(windows) & {carry["manifest"]["successor_window_id"]}:
+            windows = sorted(set(windows) | set(carry["manifest"]["budget_scope_window_ids"]))
+    live_text._ledger_custody(store, settings)
+    return {
+        "authority": authority,
+        "core_stop_sha256": stop["core_stop_sha256"],
+        "budget_journal_id": original.journal_id,
+        "successor_window_id": successor_window,
+        "budget_scope_window_ids": windows,
+        "unknowns": unknowns,
+        "inputs": [inputs[key] for key in sorted(inputs)],
+        "closed_executors_sha256": digest(witness),
+        "budget_baseline_sha256": digest(
+            {
+                k: v
+                for k, v in view["model_latest"].items()
+                if store.one("SELECT window_id FROM model_admissions WHERE request_id=?", (k,))[
+                    "window_id"
+                ]
+                in windows
+            }
+        ),
+    }
+
+
+def _same_approval(old, new):
+    allowed = {
+        "window_id",
+        "approval_sha256",
+        "concurrency_basis",
+        "credential_tag",
+        "video_credential_tag",
+    }
+    if (
+        new.get("concurrency_basis") != wire.MODE
+        or old["concurrency"] != 1
+        or new["concurrency"] != 1
+        or old["window_id"] == new["window_id"]
+        or old["approval_sha256"] == new["approval_sha256"]
+        or {k: v for k, v in old.items() if k not in allowed}
+        != {k: v for k, v in new.items() if k not in allowed}
+    ):
+        raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+
+
+def prepare(store, settings, request, verified_executors, now, *, request_sha256=None):
+    """Offline operation; the deployment controller, not HTTP input, verifies exits."""
+    from companion import owner_authority
+    from companion.model_carry_controller import VerifiedExecutors
+    from companion.owner_authority_protocol import OwnerGrantPolicy
+
+    if not isinstance(verified_executors, VerifiedExecutors):
+        raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    supported(store, settings)
+    paid_budget.contract(settings, now)
+    fields = {
+        "version",
+        "operation_id",
+        "authorization_sha256",
+        "expected_head_sha256",
+        "authority",
+        "successor_window_id",
+        "manifest_sha256",
+        "successor_policy",
+        "executors",
+    }
+    if (
+        not isinstance(request, dict)
+        or set(request) != fields
+        or type(request["version"]) is not int
+        or request["version"] != 1
+        or not hash_value(request["authorization_sha256"])
+        or not hash_value(request["expected_head_sha256"])
+        or not hash_value(request["manifest_sha256"])
+        or not identifier(request["operation_id"], r"[A-Za-z0-9_-]{8,128}")
+    ):
+        raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+    if verified_executors.value != request["executors"]:
+        raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    reviewed_sha = request_sha256 or digest(request)
+    if not hash_value(reviewed_sha):
+        raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+    with store.transaction():
+        # Only the same reviewed offline request may complete fsync-before-commit
+        # projection recovery. Normal readers always fail closed on this mismatch.
+        journal_path = settings.paid_model.journal_path
+        from pathlib import Path
+
+        authority_row = owner_authority._latest(store)
+        if (
+            not authority_row
+            or Path(journal_path).resolve() != Path(authority_row["journal_path"]).resolve()
+        ):
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        raw_records = [
+            json.loads(line) for line in Path(journal_path).read_text("utf-8").splitlines()
+        ]
+        previous = [
+            row
+            for row in raw_records
+            if row.get("kind") == CARRY and row.get("operation_id") == request["operation_id"]
+        ]
+        if previous:
+            if (
+                len(previous) != 1
+                or previous[0]["request_sha256"] != reviewed_sha
+                or previous[0]["request_fingerprint_sha256"] != digest(request)
+            ):
+                raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+            candidate = previous[0]
+            projected = store.one(
+                "SELECT value FROM runtime_meta WHERE key=?",
+                ("model_control:" + candidate["sha256"],),
+            )
+            if not projected:
+                paid_budget.journal(
+                    store,
+                    SimpleNamespace(journal_path=journal_path),
+                    allow_settlement=True,
+                    model_control_replay=candidate["sha256"],
+                )
+                with Path(journal_path).open("r+b") as stream:
+                    os.fsync(stream.fileno())
+                store.execute(
+                    "INSERT INTO runtime_meta VALUES (?,?)",
+                    ("model_control:" + candidate["sha256"], candidate["sha256"]),
+                )
+        view = owner_authority.custody(store, settings, settlement=True)
+        for saved in view["model_carries"].values():
+            if saved["operation_id"] == request["operation_id"]:
+                if saved["carry_sha256"] != request["manifest_sha256"]:
+                    raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+                return _receipt(saved)
+        if view["head_sha256"] != request["expected_head_sha256"]:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        value = manifest(
+            store,
+            settings,
+            request["authority"],
+            request["successor_window_id"],
+            verified_executors.value,
+            view,
+        )
+        if digest(value) != request["manifest_sha256"]:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        policy = OwnerGrantPolicy.model_validate(request["successor_policy"])
+        original = owner_authority.evidence(store, settings, request["authority"])
+        old_policy = original.policy.model_dump(mode="json")
+        new_policy = policy.model_dump(mode="json")
+        allowed = {"authorization_sha256", "paid_contract_sha256", "unknown_carry_sha256"}
+        if (
+            policy.unknown_carry_sha256 != digest(value)
+            or policy.authorization_sha256 != request["authorization_sha256"]
+            or policy.authorization_sha256 == original.policy.authorization_sha256
+            or policy.paid_contract_sha256 != paid_budget.sha(paid_budget.snapshot(settings))
+            or {k: v for k, v in old_policy.items() if k not in allowed}
+            != {k: v for k, v in new_policy.items() if k not in allowed}
+        ):
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        old = json.loads(
+            store.one(
+                "SELECT snapshot_json FROM model_admissions WHERE request_id=?",
+                (value["unknowns"][0]["request_id"],),
+            )["snapshot_json"]
+        )
+        new = paid_budget.snapshot(settings)
+        _same_approval(old, new)
+        if new["window_id"] != request["successor_window_id"]:
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        # Recompute the original per-window credential tags using the current key.
+        previous_paid = settings.paid_model
+        try:
+            settings.paid_model = previous_paid.model_copy(update={"window_id": old["window_id"]})
+            tags = paid_budget.snapshot(settings)
+        finally:
+            settings.paid_model = previous_paid
+        if any(old.get(k) != tags.get(k) for k in ("credential_tag", "video_credential_tag")):
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        record = {
+            "kind": CARRY,
+            "version": 1,
+            "operation_id": request["operation_id"],
+            "request_sha256": reviewed_sha,
+            "request_fingerprint_sha256": digest(request),
+            "authorization_sha256": request["authorization_sha256"],
+            "manifest": value,
+            "carry_sha256": digest(value),
+            "successor_policy_sha256": digest(new_policy),
+            "successor_paid_contract_sha256": paid_budget.sha(new),
+            "successor_approval_sha256": settings.paid_model.approval_sha256,
+            "concurrency_basis": wire.MODE,
+            "concurrency": 1,
+            "closed_executors": verified_executors.value,
+            "at": now,
+        }
+        paid_budget.journal(
+            store,
+            SimpleNamespace(journal_path=original.journal_path),
+            record,
+            allow_settlement=True,
+        )
+        saved = owner_authority.custody(store, settings, settlement=True)["model_carries"][
+            digest(value)
+        ]
+        return _receipt(saved)
+
+
+def _receipt(saved):
+    value = saved["manifest"]
+    result = {
+        "kind": wire.KIND,
+        "version": 1,
+        "state": "PREPARED",
+        **{
+            k: value[k]
+            for k in (
+                "authority",
+                "core_stop_sha256",
+                "budget_journal_id",
+                "successor_window_id",
+                "inputs",
+                "closed_executors_sha256",
+            )
+        },
+        "carry_sha256": saved["carry_sha256"],
+        "record_sha256": saved["record_sha256"],
+        "successor_policy_sha256": saved["successor_policy_sha256"],
+        "request_ids": [i["request_id"] for i in value["unknowns"]],
+        "retained_micro_usd": sum(i["minimum_micro_usd"] for i in value["unknowns"]),
+    }
+    result["receipt_sha256"] = digest(result)
+    return wire.receipt(result)
+
+
+def read(store, settings, authority, carry_sha, successor_policy_sha):
+    from companion import owner_authority
+
+    with store.transaction():
+        view = owner_authority.custody(store, settings, settlement=True)
+        saved = view["model_carries"].get(carry_sha)
+        if not saved:
+            raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
+        result = _receipt(saved)
+        head = owner_authority._latest(store)
+        if (
+            result["authority"] != authority
+            or result["successor_policy_sha256"] != successor_policy_sha
+            or not head
+            or head["grant_id"] != authority["grant_id"]
+            or head["restore_generation"] != authority["restore_generation"]
+            or owner_authority._meta(store, owner_authority.GENERATION)
+            != authority["restore_generation"]
+            or not (
+                head["state"] == "STOPPED"
+                and head["revision"] == authority["revision"] + 1
+                or head["state"] == "ACTIVE"
+                and head["revision"] == authority["revision"] + 2
+                and head["policy_sha256"] == successor_policy_sha
+            )
+        ):
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        return result
+
+
+def activation(store, settings, policy):
+    from companion import owner_authority
+
+    supported(store, settings)
+    view = owner_authority.custody(store, settings, settlement=True)
+    saved = view["model_carries"].get(policy.unknown_carry_sha256)
+    if not saved or saved["successor_policy_sha256"] != digest(policy.model_dump(mode="json")):
+        raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
+    head = owner_authority._latest(store)
+    value = manifest(
+        store,
+        settings,
+        saved["manifest"]["authority"],
+        settings.paid_model.window_id,
+        saved["closed_executors"],
+        view,
+    )
+    if (
+        head["record_sha256"] != saved["manifest"]["core_stop_sha256"]
+        or value != saved["manifest"]
+        or paid_budget.sha(paid_budget.snapshot(settings))
+        != saved["successor_paid_contract_sha256"]
+    ):
+        raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+
+
+def scope_windows(view, window_id):
+    result = {window_id}
+    for saved in view["model_carries"].values():
+        if saved["manifest"]["successor_window_id"] == window_id:
+            result.update(saved["manifest"]["budget_scope_window_ids"])
+    return sorted(result)
