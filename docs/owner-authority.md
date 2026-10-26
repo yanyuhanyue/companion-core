@@ -163,7 +163,8 @@ Bridge 将原尝试记为 `NOT_SENT`，保存 accepted 收口结果；丢失 HTT
 重新取得同一回执，不同证明拒绝冲突。它不要求主人猜测平台结果，也不生成
 `owner_manual` 决定；原 `SENDING`/`DELIVERY_UNCERTAIN` 的主人 `SENT`/`CANCELLED`
 核对合同保持严格。原图、模型或其他任务仍有未知责任时，输入终态及 handoff 继续阻止恢复。
-所有原责任闭合后，才由既有 `owner-handoff-prepare`、后继授权及 `owner-handoff` 接续。
+所有原责任闭合后，由既有 `owner-handoff-prepare`、后继授权及 `owner-handoff` 接续。
+仅有已封存模型 UNKNOWN 责任时，可使用下述独立 carry 准备路径。
 
 同一命令也可补交已经持久化的普通私聊成功 ACK：原进程须停止并持有排他锁，
 Core 须确认对应授权已 STOP，原日志须为同一 `RESERVED → IO_STARTED` 尝试，
@@ -229,3 +230,46 @@ HTTP 钩子等待期间的 STOP；所有外部 provider 使用强制 synthetic `
 仍将 running/stopping 计入所属 owner 的活动责任；复用本项目已有等待策略，不引入第二个调度器。
 [SQLite 事务](https://www.sqlite.org/lang_transaction.html)提供领取时的串行写入边界，
 真实 HTTP burst 和独立 Store 的 claim 负例验证取消业务任务不会提前释放未结 I/O。
+
+
+## 已封存模型责任的 Bridge 交接
+
+这条路径依赖 Core 的 `local_active_attempts_v2` 审批、受控离线 carry 和认证只读回执。
+原模型 `UNKNOWN`、费用、原工具调用标记及原输入状态保持原值；物理调用退出不等于
+供应商停止执行，也不构成结算、投递确认或输入终结。累计配置或累计投影仍按 Core 门禁拒绝。
+
+先对原 Core 和 Bridge 执行 STOP，并由部署 operator 确认旧 API 与全部模型 worker
+实际退出，完成离线 carry。新 Core API 可启动提供只读核对，此时 worker 和 Bridge 接收保持停止。
+离线结果给出的 carry 与目标 policy 摘要用于原配置下的显式命令：
+
+```powershell
+python -m companion_onebot_bridge --config <private-old-config.toml> owner-carry-handoff-prepare --carry-sha256 <approved-carry-sha256> --successor-policy-sha256 <approved-policy-sha256>
+```
+
+命令必须独占原 Spool、持有原 STOP 标记与原 authority。它直接认证查询
+`POST /internal/v1/owner-authority/model-carry-receipt`，请求只有
+`authority`、`carry_sha256`、`successor_policy_sha256`；不接受本地文件替代 Core 回执。
+回执的原 STOP、预算 Journal、全部被 carry 的输入和目标 policy 必须精确匹配。
+其他旧输入继续经过原 `terminal()` 校验；未决发送、待处理媒体或 recall 仍需原核对流程。
+
+每个被 carry 的输入在原 Journal 追加 `OWNER_INPUT_CARRIED`，version 为 1，保存完整的
+原 `input_state` 和 `carry_receipt`。其中 `terminal=false`、`unsettled_model=true`
+原样保留；其他未结束工作或投递不满足此合同。只有原 pending inbox 可以按原 prepare
+方式本地关闭，原 capture、window_inputs、模型请求、发送尝试及 provider ACK 不改写。
+
+准备完成记录为 `OWNER_CARRY_HANDOFF_PREPARED`，version 为 1，绑定原 authority、
+原 `core_stop`、custody 摘要和完整 carry 回执。准备前后两次 Core STOP 与 carry 回执
+必须相同；每次 HTTP 等待后复核原 Journal、STOP 与相关数据库 custody。回执或本地
+证据变化、HTTP 失败或取消都会保持 STOP；已持久化的部分证据可在核对一致后重用。
+
+随后在 Core 对精确目标 policy 执行原 preview/activate，得到同 grant、generation 且
+revision 为 r+2 的后继 authority。使用后继私密配置执行原 `owner-handoff`；它额外核对
+目标 policy，并在认证的后继 check 后重新查询同一 carry 回执，才写原形状的
+`OWNER_REBOUND`。`prepared_sha256` 必须引用对应的新准备记录。旧配置继续被隔离，
+后续普通交接仍保留并校验此前的 carried 证据。
+
+成功交接后才由 operator 启用 worker 和新的独立输入接收。原输入、媒体、工具及 QQ
+发送均不重放。普通 `OWNER_INPUT_TERMINAL` / `OWNER_HANDOFF_PREPARED`、STOP 签名域、
+AuthorityRef v2 和 capture v2 保持各自原合同。Bridge 复用原独占锁、原 fsync Journal、
+原停止与 reconciliation 机制；wire DTO 与摘要规则由 Core 的
+`companion_delivery_protocol/model_carry.py` 统一维护。
