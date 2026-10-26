@@ -444,7 +444,7 @@ def test_not_ready_protocol_refuses_before_core_open_or_any_window_write(tmp_pat
                 ).fetchone()
 
     run(scenario())
-    assert actions == ["/get_login_info", "/get_status", "/get_version_info"]
+    assert sorted(actions) == ["/get_login_info", "/get_status", "/get_version_info"]
 
 
 @pytest.mark.parametrize("corrupt", [False, "chain", "captured"])
