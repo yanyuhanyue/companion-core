@@ -1,4 +1,4 @@
-# Retained UNKNOWN model liability handoff, v1
+# Retained UNKNOWN model liability handoff
 
 Core owns `companion_delivery_protocol/model_carry.py`, the Core API, configuration,
 authority, original budget journal, cumulative budget and offline controller. Bridge
@@ -8,11 +8,44 @@ by the Core slice. Base is main `90bc5b3`; factory is parked separately.
 The frozen read endpoint is `POST /internal/v1/owner-authority/model-carry-receipt`,
 using the existing Bridge Bearer credential and `Cache-Control: no-store`.
 Its exact request is `{authority, carry_sha256, successor_policy_sha256}`. Authority
-is the original ACTIVE AuthorityRef v2, not its STOP revision. The two digests must
+is the stopped ACTIVE AuthorityRef v2, not its STOP revision. The two digests must
 match the original journal-backed prepared carry. It is readable only at the exact
 STOP successor (r+1) or the exact ACTIVE successor (r+2, matching policy), same grant
 and restore generation. The immutable response is validated by `model_carry.receipt`.
 All fields and bounds are defined in that shared dependency-free module.
+
+The first migration returns `owner_model_unknown_carry_v1`, version 1, for the
+original legacy authority. Later STOP/ACTIVE cycles reuse the exact successor
+policy, paid approval, window, interval and full predecessor budget scope. Core
+checks the uninterrupted native revision chain under that same grant and restore
+generation. Every UNKNOWN must still have verified closure in the original journal;
+an outstanding transport, pending send, changed approval, restore or missing
+projection blocks activation. This continuation does not append another carry or
+create a financial window. A cycle with only settled current inputs uses ordinary
+Bridge `owner-handoff-prepare`; its historical carried facts remain in custody.
+
+When the current authority has a locally closed UNKNOWN, the same endpoint returns
+`owner_model_unknown_carry_v2`, version 2. It has all v1 field names plus
+`origin_authority` and `local_closures`. `authority` identifies this cycle's stopped
+ACTIVE ref and `core_stop_sha256` its immediate native STOP. `origin_authority`,
+`carry_sha256`, `record_sha256`, `successor_policy_sha256` and `successor_window_id`
+retain the original approved migration anchor. `inputs` includes every current
+source linked by native job responsibility to the selected UNKNOWN requests,
+including history sources. `request_ids` and `retained_micro_usd` cover those current
+requests; historical migration liability remains separately retained.
+`local_closures` is a sorted list of exact `{request_id, record_sha256}` pairs, one
+per selected request. Each hash must identify that request's existing validated
+`model_local_close` record under the current authority. In this explicit version,
+`closed_executors_sha256` hashes `local_closures`; it is not a Docker exit claim.
+There is no new journal control kind, remote attestation or financial record.
+
+The v2 response is derived read-only from original custody at STOP r+1 or its exact
+same-policy ACTIVE r+2. Bridge uses its existing carry prepare and handoff commands,
+requires the same authenticated response before and after activation, and retains
+the v2 proof inside the existing version-1 Bridge record wrappers. Shared validation
+dispatches by the explicit kind/version. Original input-state booleans and prior
+stored v1 receipts retain their existing meanings. In particular, local closure
+never makes UNKNOWN settled or permits replay of its original logical request.
 
 Hashes use existing wire `canonical`/`digest` (sorted compact UTF-8 JSON, SHA256).
 `carry_sha256` hashes the Core-computed carry manifest; `record_sha256` is the

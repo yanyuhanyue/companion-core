@@ -5,6 +5,7 @@ from companion_delivery_protocol.authority import validate_authority_ref
 
 KIND = "owner_model_unknown_carry_v1"
 VERSION = 1
+LOCAL_KIND = "owner_model_unknown_carry_v2"
 MODE = "local_active_attempts_v2"
 FIELDS = {
     "kind", "version", "state", "authority", "core_stop_sha256", "budget_journal_id",
@@ -12,11 +13,32 @@ FIELDS = {
     "inputs", "request_ids", "retained_micro_usd", "closed_executors_sha256", "receipt_sha256",
 }
 INPUT_FIELDS = {"event_id", "input_sha256", "work_sha256", "request_ids"}
+LOCAL_FIELDS = FIELDS | {"origin_authority", "local_closures"}
+
+
+def _local(value):
+    validate_authority_ref(value["origin_authority"])
+    origin, current = value["origin_authority"], value["authority"]
+    closures = value["local_closures"]
+    if (origin["grant_id"] != current["grant_id"]
+        or origin["restore_generation"] != current["restore_generation"]
+        or current["revision"] < origin["revision"] + 2
+        or current["policy_sha256"] != value["successor_policy_sha256"]
+        or not isinstance(closures, list) or not 1 <= len(closures) <= 100
+        or any(not isinstance(item, dict) or set(item) != {"request_id", "record_sha256"}
+               or not hash_value(item["record_sha256"]) for item in closures)
+        or [item["request_id"] for item in closures] != value["request_ids"]
+        or digest(closures) != value["closed_executors_sha256"]):
+        raise ValueError("OWNER_MODEL_CARRY_RECEIPT_INVALID")
 
 
 def receipt(value):
-    if (not isinstance(value, dict) or set(value) != FIELDS or value["kind"] != KIND
-        or type(value["version"]) is not int or value["version"] != VERSION
+    if not isinstance(value, dict) or type(value.get("version")) is not int:
+        raise ValueError("OWNER_MODEL_CARRY_RECEIPT_INVALID")
+    local = value["version"] == 2
+    if (set(value) != (LOCAL_FIELDS if local else FIELDS)
+        or value["kind"] != (LOCAL_KIND if local else KIND)
+        or value["version"] != (2 if local else VERSION)
         or value["state"] != "PREPARED"
         or not identifier(value["budget_journal_id"], r"budget_[a-f0-9]{32}")
         or not identifier(value["successor_window_id"], r"[A-Za-z0-9_-]{8,96}")
@@ -28,6 +50,8 @@ def receipt(value):
         or any(not identifier(k, r"model_[a-f0-9]{32}") for k in value["request_ids"])):
         raise ValueError("OWNER_MODEL_CARRY_RECEIPT_INVALID")
     validate_authority_ref(value["authority"])
+    if local:
+        _local(value)
     events, requests = [], set()
     for item in value["inputs"]:
         if (not isinstance(item, dict) or set(item) != INPUT_FIELDS

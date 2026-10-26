@@ -9,6 +9,7 @@ import sys
 from dataclasses import replace
 
 import httpx
+import pytest
 from pydantic import SecretStr
 
 from companion import owner_authority, owner_input_state, paid_budget
@@ -67,10 +68,12 @@ async def stopped(process):
     assert process.returncode is not None
 
 
+@pytest.mark.parametrize("current_timeout", [False, True])
 def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
     core,
     tmp_path,
     monkeypatch,
+    current_timeout,
 ):
     import tests.test_prepare_owner_input as preparation
 
@@ -313,7 +316,144 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                             client, OwnerOneBot(guard, protocol), spool, guard=guard
                         )
                 assert len(sends) == 1
-            assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
+
+                async def independent_input(number, bridge_config, mode):
+                    with Spool(bridge_config) as spool:
+                        runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                        frame = encode(
+                            raw_event(
+                                number=number,
+                                time=int(core.clock.now.timestamp()),
+                                message=[
+                                    {"type": "text", "data": {"text": f"新的独立消息 {number}"}}
+                                ],
+                            )
+                        )
+                        value = await prepare_owner_input(
+                            runtime, client, None, frame, core.clock.now, ("127.0.0.1", 3001)
+                        )
+                        assert runtime.persist_capture(
+                            value["event"],
+                            frame,
+                            received_at=core.clock.now,
+                            peer=("127.0.0.1", 3001),
+                        )
+                        assert await runtime.flush_one(client)
+                    output = tmp_path / f"current-provider-{number}.json"
+                    process = await child(
+                        tmp_path, f"current-worker-{number}", core, mode=mode, output=str(output)
+                    )
+                    workers.append(process)
+                    await finished(process)
+                    assert len(json.loads(output.read_text("utf-8"))) == 1
+                    if mode == "worker-timeout":
+                        return
+                    acknowledged = []
+                    with Spool(bridge_config) as spool:
+                        runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                        async with private_http_client(
+                            bridge_config.onebot_http_url,
+                            bridge_config.onebot_token,
+                            transport=httpx.MockTransport(
+                                lambda req: provider(
+                                    req,
+                                    acknowledged,
+                                    {
+                                        "status": "ok",
+                                        "retcode": 0,
+                                        "data": {"message_id": 123456 + number},
+                                    },
+                                )
+                            ),
+                        ) as protocol:
+                            guard = OwnerSendGuard(runtime, client)
+                            assert await deliver_tick(
+                                client, OwnerOneBot(guard, protocol), spool, guard=guard
+                            )
+                    assert len(acknowledged) == 1
+
+                if current_timeout:
+                    await independent_input(44, newer, "worker-timeout")
+                second_stop = await client.post(
+                    "/internal/v1/owner-authority/stop",
+                    json={"authority": successor, "operation_id": "native-second-stop"},
+                    headers=control_headers,
+                )
+                assert second_stop.status_code == 200, second_stop.text
+                with Spool(newer) as spool:
+                    OwnerRuntime(spool, clock=lambda: core.clock.now).stop()
+                preserved = core.store.rows("SELECT * FROM model_usage ORDER BY rowid")
+                windows = core.store.rows("SELECT * FROM model_budget_windows ORDER BY window_id")
+                if current_timeout:
+                    query_carry = {
+                        "authority": successor,
+                        "carry_sha256": receipt["carry_sha256"],
+                        "successor_policy_sha256": digest(request["successor_policy"]),
+                    }
+                    current_proof = await client.post(
+                        "/internal/v1/owner-authority/model-carry-receipt", json=query_carry
+                    )
+                    assert current_proof.status_code == 200, current_proof.text
+                    current_proof = current_proof.json()
+                    assert current_proof["version"] == 2
+                    assert current_proof["kind"] == "owner_model_unknown_carry_v2"
+                    assert current_proof["origin_authority"] == plan.authority
+                    assert current_proof["authority"] == successor
+                    assert not set(current_proof["request_ids"]) & set(receipt["request_ids"])
+                    assert len(current_proof["local_closures"]) == 1
+                    with core.store.transaction():
+                        view = owner_authority.custody(core.store, core.settings, settlement=True)
+                    local_close = view["model_controls"][
+                        current_proof["local_closures"][0]["record_sha256"]
+                    ]
+                    assert local_close["kind"] == "model_local_close"
+                    assert local_close["authority"] == successor
+                    arguments = [
+                        "owner-carry-handoff-prepare",
+                        "--carry-sha256",
+                        receipt["carry_sha256"],
+                        "--successor-policy-sha256",
+                        digest(request["successor_policy"]),
+                    ]
+                    prepared_state = "CARRY_HANDOFF_PREPARED"
+                else:
+                    arguments, prepared_state = ["owner-handoff-prepare"], "HANDOFF_PREPARED"
+                assert (await bridge(arguments, newer))["state"] == prepared_state
+                repeated_query = {"expected_revision": 4, "policy": request["successor_policy"]}
+                preview = await client.post(
+                    "/internal/v1/owner-authority/preview",
+                    json=repeated_query,
+                    headers=control_headers,
+                )
+                assert preview.status_code == 200, preview.text
+                activated_again = await client.post(
+                    "/internal/v1/owner-authority/activate",
+                    json={
+                        **repeated_query,
+                        "operation_id": "native-second-activate",
+                        "preview_sha256": preview.json()["preview_sha256"],
+                    },
+                    headers=control_headers,
+                )
+                assert activated_again.status_code == 200, activated_again.text
+                final_authority = activated_again.json()["authority"]
+                assert final_authority == successor | {"revision": 5}
+                assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == preserved
+                assert (
+                    core.store.rows("SELECT * FROM model_budget_windows ORDER BY window_id")
+                    == windows
+                )
+                if current_timeout:
+                    assert (
+                        await client.post(
+                            "/internal/v1/owner-authority/model-carry-receipt", json=query_carry
+                        )
+                    ).json() == current_proof
+                final_config = replace(newer, owner_authority=final_authority)
+                assert (await bridge(["owner-handoff"], final_config))["state"] == "ACTIVE"
+                await independent_input(45, final_config, "worker-text")
+            assert core.store.one("SELECT COUNT(*) n FROM outbox")["n"] == 2
+            assert core.store.one("SELECT COUNT(*) n FROM outbox WHERE state='SENT'")["n"] == 2
             assert core.store.one("SELECT * FROM agent_tool_calls") == original_tool
             assert (
                 core.store.rows(

@@ -202,7 +202,7 @@ def close_owned(store, settings, request_id, dispatch, now):
         paid_budget.journal(store, custody, record, allow_settlement=True)
 
 
-def _work(store, settings, authority):
+def _work(store, settings, authority, model_requests=None):
     from companion import owner_input_state
     from companion.owner_authority_protocol import OwnerCapture
 
@@ -212,20 +212,19 @@ def _work(store, settings, authority):
         capture = value.get("capture")
         if not capture or capture["authority"] != authority:
             continue
-        state = owner_input_state.read(store, settings, OwnerCapture.model_validate(capture))
+        models = []
+        state = owner_input_state.read(
+            store, settings, OwnerCapture.model_validate(capture), model_requests=models
+        )
         if state["unsettled_work"] or state["unsettled_delivery"]:
             raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
         result[capture["event_id"]] = state
+        if model_requests is not None:
+            model_requests[capture["event_id"]] = models
     return result
 
 
-def manifest(store, settings, authority, successor_window, witness, view):
-    from companion import live_text, owner_authority, owner_stop_receipt
-
-    supported(store, settings)
-    stop = owner_stop_receipt.read(store, settings, authority)
-    if store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?", (successor_window,)):
-        raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+def _quiescent(store, view):
     if view["blocked_request_ids"] or store.one(
         "SELECT 1 FROM runtime_meta WHERE key IN ('model_budget_blocked',"
         "'model_budget_restore_required','cloud_budget_restore_required')"
@@ -240,7 +239,18 @@ def manifest(store, settings, authority, successor_window, witness, view):
             raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
     if store.one("SELECT 1 FROM model_usage WHERE state='RESERVED'"):
         raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
-    work = _work(store, settings, authority)
+
+
+def manifest(store, settings, authority, successor_window, witness, view):
+    from companion import live_text, owner_authority, owner_stop_receipt
+
+    supported(store, settings)
+    stop = owner_stop_receipt.read(store, settings, authority)
+    if store.one("SELECT 1 FROM model_budget_windows WHERE window_id=?", (successor_window,)):
+        raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+    _quiescent(store, view)
+    model_requests = {}
+    work = _work(store, settings, authority, model_requests)
     unknowns, inputs = [], {}
     rows = store.rows(
         "SELECT a.*,m.job_id,m.billed_micro_usd FROM model_admissions a "
@@ -269,16 +279,20 @@ def manifest(store, settings, authority, successor_window, witness, view):
         state = work[event]
         if state["terminal"] or not state["unsettled_model"]:
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
-        inputs.setdefault(
-            event,
-            {
-                "event_id": event,
-                "input_sha256": state["input_sha256"],
-                "work_sha256": state["work_sha256"],
-                "request_ids": [],
-            },
-        )
-        inputs[event]["request_ids"].append(row["request_id"])
+        for source, source_models in model_requests.items():
+            if row["request_id"] not in {item["request_id"] for item in source_models}:
+                continue
+            state = work[source]
+            inputs.setdefault(
+                source,
+                {
+                    "event_id": source,
+                    "input_sha256": state["input_sha256"],
+                    "work_sha256": state["work_sha256"],
+                    "request_ids": [],
+                },
+            )
+            inputs[source]["request_ids"].append(row["request_id"])
         tools = store.rows(
             "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'", (row["job_id"],)
         )
@@ -547,10 +561,16 @@ def read(store, settings, authority, carry_sha, successor_policy_sha):
     from companion import owner_authority
 
     with store.transaction():
+        supported(store, settings)
         view = owner_authority.custody(store, settings, settlement=True)
         saved = view["model_carries"].get(carry_sha)
         if not saved:
             raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
+        if saved["successor_policy_sha256"] != successor_policy_sha:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        if authority != saved["manifest"]["authority"]:
+            stopped = _continuation(store, settings, authority, saved, view)
+            return _local_receipt(store, settings, authority, saved, stopped, view)
         result = _receipt(saved)
         head = owner_authority._latest(store)
         if (
@@ -573,6 +593,119 @@ def read(store, settings, authority, carry_sha, successor_policy_sha):
         return result
 
 
+def _local_receipt(store, settings, authority, saved, stopped, view):
+    models = {}
+    work = _work(store, settings, authority, models)
+    inputs, requests = [], set()
+    for event, state in sorted(work.items()):
+        ids = [row["request_id"] for row in models[event] if row["state"] == "UNKNOWN"]
+        if not ids:
+            continue
+        if state["terminal"] or not state["unsettled_model"]:
+            raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+        for request_id in ids:
+            closed_sha = view["model_closures"].get(request_id)
+            closed = view["model_controls"].get(closed_sha)
+            if not closed or closed["kind"] != CLOSE or closed["authority"] != authority:
+                raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+        inputs.append(
+            {
+                "event_id": event,
+                "input_sha256": state["input_sha256"],
+                "work_sha256": state["work_sha256"],
+                "request_ids": ids,
+            }
+        )
+        requests.update(ids)
+    current_unknown = store.rows(
+        "SELECT a.request_id,a.authority_json FROM model_admissions a "
+        "JOIN model_usage m USING(request_id) WHERE m.state='UNKNOWN'"
+    )
+    if not requests or requests != {
+        row["request_id"]
+        for row in current_unknown
+        if json.loads(row["authority_json"]) == authority
+    }:
+        raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    closures = [
+        {"request_id": request_id, "record_sha256": view["model_closures"][request_id]}
+        for request_id in sorted(requests)
+    ]
+    result = {
+        **_receipt(saved),
+        "kind": wire.LOCAL_KIND,
+        "version": 2,
+        "authority": authority,
+        "origin_authority": saved["manifest"]["authority"],
+        "core_stop_sha256": stopped["record_sha256"],
+        "inputs": inputs,
+        "request_ids": sorted(requests),
+        "retained_micro_usd": sum(view["model_latest"][k]["minimum_micro_usd"] for k in requests),
+        "local_closures": closures,
+        "closed_executors_sha256": digest(closures),
+    }
+    result["receipt_sha256"] = digest({k: v for k, v in result.items() if k != "receipt_sha256"})
+    return wire.receipt(result)
+
+
+def _continuation(store, settings, authority, saved, view):
+    """Reuse one approval across native STOP/ACTIVE revisions, never a fresh window."""
+    from companion import live_text, owner_authority
+
+    origin = saved["manifest"]["authority"]
+    original = owner_authority.evidence(store, settings, authority)
+    head = owner_authority._latest(store)
+    stopped = store.one(
+        "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+        (authority["grant_id"], authority["revision"] + 1),
+    )
+    revisions = store.rows(
+        "SELECT * FROM owner_authority_revisions WHERE grant_id=? "
+        "AND revision BETWEEN ? AND ? ORDER BY revision",
+        (origin["grant_id"], origin["revision"] + 2, authority["revision"]),
+    )
+    if (
+        authority["grant_id"] != origin["grant_id"]
+        or authority["restore_generation"] != origin["restore_generation"]
+        or authority["policy_sha256"] != saved["successor_policy_sha256"]
+        or authority["revision"] < origin["revision"] + 2
+        or not revisions
+        or len(revisions) != authority["revision"] - origin["revision"] - 1
+        or any(
+            row["policy_sha256"] != saved["successor_policy_sha256"]
+            or row["restore_generation"] != origin["restore_generation"]
+            or row["state"] != ("ACTIVE" if index % 2 == 0 else "STOPPED")
+            for index, row in enumerate(revisions)
+        )
+        or not stopped
+        or stopped["state"] != "STOPPED"
+        or stopped["predecessor_sha256"] != revisions[-1]["record_sha256"]
+        or stopped["policy_sha256"] != saved["successor_policy_sha256"]
+        or stopped["restore_generation"] != origin["restore_generation"]
+        or owner_authority._meta(store, owner_authority.GENERATION) != origin["restore_generation"]
+        or not head
+        or not (
+            head["record_sha256"] == stopped["record_sha256"]
+            or head["state"] == "ACTIVE"
+            and head["revision"] == authority["revision"] + 2
+            and head["grant_id"] == origin["grant_id"]
+            and head["restore_generation"] == origin["restore_generation"]
+            and head["policy_sha256"] == saved["successor_policy_sha256"]
+            and head["predecessor_sha256"] == stopped["record_sha256"]
+        )
+        or paid_budget.sha(paid_budget.snapshot(settings))
+        != saved["successor_paid_contract_sha256"]
+        or original.policy.unknown_carry_sha256 != saved["carry_sha256"]
+    ):
+        raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+    _quiescent(store, view)
+    unknown = store.rows("SELECT request_id FROM model_usage WHERE state='UNKNOWN'")
+    if any(row["request_id"] not in view["model_closures"] for row in unknown):
+        raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+    live_text._ledger_custody(store, settings)
+    return stopped
+
+
 def activation(store, settings, policy):
     from companion import owner_authority
 
@@ -582,6 +715,19 @@ def activation(store, settings, policy):
     if not saved or saved["successor_policy_sha256"] != digest(policy.model_dump(mode="json")):
         raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
     head = owner_authority._latest(store)
+    if head and head["record_sha256"] != saved["manifest"]["core_stop_sha256"]:
+        if head["state"] != "STOPPED":
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        previous = store.one(
+            "SELECT * FROM owner_authority_revisions WHERE grant_id=? AND revision=?",
+            (head["grant_id"], head["revision"] - 1),
+        )
+        if not previous:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        authority = owner_authority.reference(previous).as_dict()
+        _continuation(store, settings, authority, saved, view)
+        _work(store, settings, authority)
+        return
     value = manifest(
         store,
         settings,

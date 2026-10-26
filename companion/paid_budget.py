@@ -455,6 +455,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         return {"head_sha256": previous, "lifecycle": lifecycle, "cumulative": account,
                 "blocked_request_ids": sorted(blocked), "send_resolutions": resolutions,
                 "model_closures": model_closures, "model_carries": model_carries,
+                "model_controls": model_controls,
                 "model_latest": latest,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:

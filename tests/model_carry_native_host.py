@@ -32,6 +32,9 @@ class Finished(BaseException):
 
 def provider(request):
     requests.append(json.loads(request.content))
+    if mode == "worker-timeout":
+        assert len(requests) == 1
+        raise httpx.ReadTimeout("current native transport ended", request=request)
     if mode == "worker-video":
         if request.url.host == "video.example.test":
             raise httpx.ReadTimeout("synthetic video connection ended", request=request)
@@ -67,7 +70,7 @@ class TimedCore(core_module.Core):
         if progressed and mode.startswith("worker"):
             write_output()
             print("WORK_COMPLETED", flush=True)
-            if mode == "worker-text":
+            if mode in {"worker-text", "worker-timeout"}:
                 raise Finished()
         return progressed
 

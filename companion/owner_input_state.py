@@ -60,7 +60,7 @@ def _deliveries(store, rows, jobs, *, erased):
             raise CoreError("OWNER_DELIVERY_BINDING_REQUIRED", 409) from None
 
 
-def read(store, settings, capture):
+def read(store, settings, capture, *, model_requests=None):
     with nullcontext() if store.db.in_transaction else store.transaction():
         native_poke = isinstance(capture, OwnerPokeCapture)
         if native_poke:
@@ -122,6 +122,8 @@ def read(store, settings, capture):
             except (ValueError, TypeError, KeyError):
                 raise CoreError("OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED", 409) from None
         models = [{key: model[key] for key in ("request_id", "state")} for model in models]
+        if model_requests is not None:
+            model_requests.extend(models)
         # Frozen responsibility survives a changed/null origin pointer. Inspect only
         # source-linked identity metadata; _deliveries checks the selected original records.
         deliveries = store.rows("SELECT o.message_id,o.state,o.attempt_count,o.authority_json "
