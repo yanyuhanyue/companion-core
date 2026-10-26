@@ -5,7 +5,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -716,6 +718,52 @@ def test_actual_cli_entry_uses_mock_http_and_real_child(node, tmp_path):
     assert len(child_receipts(counter)) == 1 and len(core.result_bodies) == 1
 
 
+def publish_parent_ready(path, value):
+    pending = path.with_suffix(".part")
+    try:
+        pending.write_text(json.dumps(value), encoding="utf-8")
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def test_parent_ready_is_hidden_until_written_and_published(tmp_path, monkeypatch):
+    ready = tmp_path / "parent-ready.json"
+    value = {"pid": 12345, "identity": "synthetic-child-identity"}
+    writing, written = threading.Event(), threading.Event()
+    finish_write, publish = threading.Event(), threading.Event()
+    original_replace = Path.replace
+
+    def delayed_write(path, text, *, encoding):
+        with path.open("w", encoding=encoding) as output:
+            writing.set()
+            assert finish_write.wait(5), "writer was not released"
+            return output.write(text)
+
+    def delayed_replace(path, target):
+        assert json.loads(path.read_text(encoding="utf-8")) == value
+        written.set()
+        assert publish.wait(5), "publication was not released"
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "write_text", delayed_write)
+    monkeypatch.setattr(Path, "replace", delayed_replace)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(publish_parent_ready, ready, value)
+        try:
+            assert writing.wait(5), "writer did not open its file"
+            assert not ready.exists(), "empty ready file became visible before JSON was written"
+            finish_write.set()
+            assert written.wait(5), "completed JSON did not reach publication"
+            assert not ready.exists(), "ready became visible before atomic publication"
+        finally:
+            finish_write.set()
+            publish.set()
+        pending.result(timeout=5)
+    assert json.loads(ready.read_text(encoding="utf-8")) == value
+    assert sorted(path.name for path in tmp_path.iterdir()) == [ready.name]
+
+
 async def parent_fixture(spec_path):
     spec = json.loads(await asyncio.to_thread(Path(spec_path).read_bytes))
     config = VoiceNodeConfig.model_validate(spec["config"])
@@ -744,8 +792,9 @@ async def parent_fixture(spec_path):
             }
         )
         await asyncio.to_thread(
-            Path(spec["ready"]).write_text,
-            json.dumps({"pid": supervisor.process.pid, "identity": supervisor.identity}),
+            publish_parent_ready,
+            Path(spec["ready"]),
+            {"pid": supervisor.process.pid, "identity": supervisor.identity},
         )
         await asyncio.Event().wait()
 
