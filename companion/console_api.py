@@ -171,7 +171,7 @@ def register_console_routes(app, settings):
     @app.get("/console/{asset}")
     async def static(asset: str):
         enabled()
-        types = {"app.js": "text/javascript", "app.css": "text/css"}
+        types = {"app.js": "text/javascript", "app.css": "text/css", "icon.svg": "image/svg+xml"}
         if asset not in types:
             raise CoreError("NOT_FOUND", 404)
         return FileResponse(resources / asset, media_type=types[asset])
