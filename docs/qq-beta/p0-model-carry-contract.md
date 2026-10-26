@@ -121,8 +121,9 @@ These native Docker operations follow the primary CLI contracts:
 
 ## Candidate image and migration boundary
 
-This candidate is based on main `90bc5b3`, not the running c8 image plus two files.
-Between those revisions main also merged optional routed context limits and native
+The feature was authored on main `90bc5b3`; final integration normally inherits
+main `6107b2d`, including its separately reviewed bounded animation preview. Relative
+to the running c8 image, main also merged optional routed context limits and native
 request planning/checkpoints; read-only context/activity inspection; Core-owned meme
 asset/runtime/erasure support; backend cache-usage presence; the private temporary
 backup staging fix; native image-transfer source-check repairs; and HTTP test tooling.

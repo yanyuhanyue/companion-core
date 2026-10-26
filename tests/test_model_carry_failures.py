@@ -309,3 +309,45 @@ def test_cancelled_transport_cleanup_precedes_local_closure(core, tmp_path):
             assert request_id in view["model_closures"]
 
     asyncio.run(exercise())
+
+
+def test_native_erasure_and_restore_preserve_carry_finance_without_reactivating(core, tmp_path):
+    from cryptography.fernet import Fernet
+
+    from companion.backup import backup, restore
+    from companion.runtime import Runtime
+
+    case = stranded(core, tmp_path)
+    receipt = model_carry.prepare(
+        core.store, core.settings, case.request, case.verified, core.clock()
+    )
+    before = core.store.rows("SELECT request_id,billed_micro_usd,state FROM model_usage")
+    snapshot, restored, key = (
+        tmp_path / "carry.enc",
+        tmp_path / "carry-restored.db",
+        Fernet.generate_key(),
+    )
+    backup(core.settings.database, snapshot, key)
+    with core.store.transaction():
+        core.ledger.expire_events(core.store, [case.capture.event_id], core.clock())
+        view = paid_budget.journal(core.store, core.settings.paid_model, allow_settlement=True)
+    assert receipt["carry_sha256"] in view["model_carries"]
+    restore(snapshot, restored, key, core.settings.erasure_ledger)
+    settings = core.settings.model_copy(update={"database": str(restored)})
+    with Runtime(settings, core.clock) as runtime:
+        assert owner_authority.status(runtime.store, settings, core.clock)["state"] == "OFF"
+        assert (
+            runtime.store.rows("SELECT request_id,billed_micro_usd,state FROM model_usage")
+            == before
+        )
+        assert runtime.store.one(
+            "SELECT redacted FROM events WHERE event_id=?", (case.capture.event_id,)
+        )["redacted"]
+        with pytest.raises(CoreError):
+            model_carry.read(
+                runtime.store,
+                settings,
+                case.active["authority"],
+                receipt["carry_sha256"],
+                receipt["successor_policy_sha256"],
+            )
