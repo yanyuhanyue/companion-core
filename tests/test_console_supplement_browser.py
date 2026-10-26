@@ -60,6 +60,39 @@ def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(
     run(scenario())
 
 
+def test_console_shows_cache_three_states_from_the_backend_projection(core, tmp_path):
+    from tests.test_cache_usage_presence import ABSENT
+    from tests.test_cache_usage_presence import attempt as cache_attempt
+    from tests.test_paid_model_gate import approved_live
+
+    approved_live(core, tmp_path)
+    core.clock.now = datetime.now(UTC)
+    rows = [cache_attempt(core, cache=cache, number=n)[1]
+            for n, cache in enumerate([ABSENT, 0, 40], start=1)]
+    # The financial column keeps its settlement default; only cache_usage may show a value.
+    assert [row["cached_input_tokens"] for row in rows] == [0, 0, 40]
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            for row, expected in zip(rows, ["未记录", "0", "40"], strict=True):
+                await page.evaluate("id => { location.hash = 'thinking/model:' + id; }",
+                                    row["request_id"])
+                await page.locator("#page[aria-busy=false]").wait_for()
+                panel = page.locator(".steps-view").filter(has_text="本次请求计量")
+                cached = panel.locator(".kv").filter(has_text="缓存命中输入")
+                assert (await cached.locator("span").last.inner_text()) == expected
+                usage = panel.locator(".kv").filter(has_text="实际输入 / 输出")
+                assert "80 / 3" in await usage.inner_text()
+                fee = panel.locator(".kv").filter(has_text="已计或预留费用")
+                assert "未记录" not in await fee.inner_text()
+            overview = page.locator(".meter")
+            # 40 of the 160 inputs whose cache was recorded; the unknown request is excluded.
+            assert "缓存命中 25%" in await overview.inner_text()
+            assert await page.locator(".m-bar").count() == 3
+
+    run(scenario())
+
+
 def assert_receipts(core, states):
     receipts = core.store.rows("SELECT state,result_json FROM console_operations ORDER BY rowid")
     assert all(item["state"] == "COMPLETE" for item in receipts)
@@ -279,5 +312,104 @@ def test_console_redacted_tool_scope_disables_approval_but_allows_rejection(core
                 "decision": "REJECT", "scope_sha256": task["scope_sha256"]}
             assert_receipts(core, ["CANCELLED"])
             assert executor.calls == core.model.calls == []
+
+    run(scenario())
+
+
+def synthetic_call(number, at, job="job_meter"):
+    """A model-call projection with the native field shape; only the frontend reads it."""
+    return {"id": f"model_meter_{number}", "state": "SETTLED", "job_id": job,
+            "occurred_at": at.isoformat(), "source_event_ids": [], "reason_code": "NOT_RECORDED",
+            "context_regions": "NOT_RECORDED", "trimming_reason": "NOT_RECORDED",
+            "usage": {"input_tokens": 1000 * number, "output_tokens": 10, "cached_input_tokens": 0,
+                      "billed_micro_usd": 500, "is_estimate": 1, "observed": True,
+                      "cache_usage": {"state": "NOT_RECORDED", "cached_input_tokens": None}},
+            "measurement": {"state": "NOT_RECORDED"}}
+
+
+async def serve_model_pages(page, respond):
+    """Replace only kind=model reads, keeping the backend's privacy epoch so pages stay coherent."""
+    async def handle(route):
+        url = route.request.url
+        if "kind=model" not in url:
+            await route.continue_()
+            return
+        # Synthetic cursors are unknown to the backend, so read the epoch from its first page.
+        first = url.split("?", 1)[0] + "?kind=model&limit=30"
+        real = await route.fetch(url=first)
+        body = await real.json()
+        query = dict(part.split("=", 1) for part in url.split("?", 1)[1].split("&"))
+        await route.fulfill(status=200, json={**body, **respond(query)})
+
+    await page.route("**/v1/console/cognition?*", handle)
+
+
+def test_today_tokens_page_past_empty_pages_and_never_report_zero_when_unread(core, tmp_path):
+    core.clock.now = datetime.now(UTC)
+    today = synthetic_call(1, datetime.now(UTC) - timedelta(minutes=1))
+    yesterday = synthetic_call(2, datetime.now(UTC) - timedelta(days=2))
+
+    def filtered_first_page(query):
+        # The first page is empty after source filtering but still has a cursor.
+        if "before" not in query:
+            return {"items": [], "next_cursor": "c1", "truncated": True}
+        return {"items": [today, yesterday], "next_cursor": None, "truncated": False}
+
+    def never_ending(query):
+        return {"items": [], "next_cursor": "c" + query.get("before", "0"), "truncated": True}
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            card = page.locator(".sheet.tok")
+            await serve_model_pages(page, filtered_first_page)
+            await page.get_by_role("button", name="刷新当前页面").click()
+            await card.filter(has_text="模型调用").locator(".tok-stat b").first.filter(
+                has_text="1").wait_for()
+            text = await card.inner_text()
+            assert "今天还没有模型调用" not in text and "不完整" not in text
+            await page.unroute("**/v1/console/cognition?*")
+            await serve_model_pages(page, never_ending)
+            await page.get_by_role("button", name="刷新当前页面").click()
+            await card.filter(has_text="没有全部读到").wait_for()
+            text = await card.inner_text()
+            assert "今天还没有模型调用" not in text and "¥0" not in text and "$0" not in text
+            assert "未读完" in text
+
+    run(scenario())
+
+
+def test_located_old_call_keeps_time_order_and_day_chart_ends_today(core, tmp_path):
+    core.clock.now = datetime.now(UTC)
+    now = datetime.now(UTC)
+    newest = synthetic_call(3, now - timedelta(minutes=5))
+    middle = synthetic_call(2, now - timedelta(minutes=30))
+    oldest = synthetic_call(1, now - timedelta(days=500))
+
+    def first_page_without_oldest(query):
+        if query.get("record_id") == oldest["id"]:
+            return {"items": [oldest], "next_cursor": None}
+        return {"items": [newest, middle], "next_cursor": "older", "truncated": True}
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await serve_model_pages(page, first_page_without_oldest)
+            await page.evaluate("id => { location.hash = 'thinking/model:' + id; }", oldest["id"])
+            await page.locator("#page[aria-busy=false]").wait_for()
+            panel = page.locator(".steps-view").filter(has_text="本次请求计量")
+            assert "同一任务第 1 次调用（本页共 3 次）" in await panel.inner_text()
+            bars = page.locator(".m-chart .m-bar")
+            assert await bars.count() == 3
+            assert "sel" in await bars.first.get_attribute("class")
+            # The list keeps the newest call first even though the old one was located separately.
+            first_row = page.locator(".dk-list button").first
+            assert await first_row.get_attribute("data-record-id") == newest["id"]
+            await page.locator(".m-chart .seg").get_by_role("button", name="按天").click()
+            day = await page.evaluate("() => new Intl.DateTimeFormat('en-CA', {timeZone: "
+                                      "state.tz, year: 'numeric', month: '2-digit', "
+                                      "day: '2-digit'}).format(new Date())")
+            assert await bars.count() == 30
+            label = await bars.last.get_attribute("aria-label")
+            assert label.startswith(day) and "2 次请求" in label
+            assert "图中只画最近 30 天" in await page.locator(".m-chart").inner_text()
 
     run(scenario())
