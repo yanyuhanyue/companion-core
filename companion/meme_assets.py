@@ -173,8 +173,17 @@ def erase(store, event_ids):
         return
     from companion.store import encode
 
+    events = encode(sorted(event_ids))
+    store.execute(
+        "DELETE FROM meme_vectors WHERE asset_id IN (SELECT asset_id FROM meme_asset_sources "
+        "WHERE event_id IN (SELECT value FROM json_each(?))) "
+        "OR caption_job_id IN (SELECT job_id FROM job_sources "
+        "WHERE event_id IN (SELECT value FROM json_each(?))) "
+        "OR caption_job_id IN (SELECT job_id FROM jobs "
+        "WHERE event_id IN (SELECT value FROM json_each(?)))", (events, events, events),
+    )
     store.execute(
         "UPDATE meme_assets SET state='ERASED',data=NULL,metadata_json=NULL,mime=NULL "
         "WHERE asset_id IN (SELECT asset_id FROM meme_asset_sources "
-        "WHERE event_id IN (SELECT value FROM json_each(?)))", (encode(sorted(event_ids)),),
+        "WHERE event_id IN (SELECT value FROM json_each(?)))", (events,),
     )
