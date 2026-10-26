@@ -20,7 +20,7 @@ from companion.contracts import CoreError
 from companion.privacy import ErasureLedger, epoch
 from companion.store import Store
 from companion_delivery_protocol.authority import validate_authority_ref
-from companion_meme_protocol import canonical, digest, strict_json, validate_bytes
+from companion_meme_protocol import digest, strict_json, validate_bytes
 
 MAX_ROWS, MAX_BYTES, MAX_MANIFEST = 4096, 64 * 1024 * 1024, 100 * 1024 * 1024
 SHA = re.compile(r"[a-f0-9]{64}")
@@ -146,42 +146,9 @@ def _apply(store, settings, manifest, items):
         raise ValueError("MEME_ASSET_CUSTODY_MISMATCH")
     results = []
     for item, data in items:
-        key = meme_assets.asset_id(custody, item)
-        content_hash = digest({
-            "asset_sha256": item["asset_sha256"], "source_sha256": item["source_sha256"],
-            "metadata_sha256": digest(item["metadata"]),
-        })
-        prior = store.one("SELECT * FROM meme_assets WHERE asset_id=?", (key,))
-        if prior and prior["record_sha256"] != content_hash:
-            raise ValueError("MEME_ASSET_CONTENT_CONFLICT")
         sources, withdrawn = meme_assets.provenance(store, settings, custody, item, data)
-        state = ("ERASED" if withdrawn else "REMOVED" if not item["active"] else
-                 "STAGED" if sources else "QUARANTINED")
-        if prior:
-            # Quarantine is resolved by a later reviewed onboarding, never replay.
-            if prior["state"] == "ERASED" or prior["state"] == "REMOVED" and state != "ERASED":
-                state = prior["state"]
-            elif prior["state"] == "QUARANTINED" and state == "STAGED":
-                state = "QUARANTINED"
-        values = {"state": state, "data": data if state == "STAGED" else None,
-                  "metadata_json": canonical(item["metadata"]) if state == "STAGED" else None,
-                  "mime": item["mime"] if state == "STAGED" else None}
-        changed = not prior or any(prior[k] != v for k, v in values.items())
-        if not prior:
-            store.insert("meme_assets", asset_id=key,
-                         custody_sha256=meme_assets.custody_digest(custody),
-                         asset_sha256=item["asset_sha256"], source_sha256=item["source_sha256"],
-                         record_sha256=content_hash, **values)
-        elif changed:
-            store.execute("UPDATE meme_assets SET state=?,data=?,metadata_json=?,mime=? "
-                          "WHERE asset_id=?", (*values.values(), key))
-        for event, job in sources:
-            store.execute("INSERT OR IGNORE INTO meme_asset_sources VALUES (?,?,?)",
-                          (key, event, job))
-        results.append({"asset_id": key, "state": state, "changed": changed})
-    total = store.one("SELECT COUNT(*) AS n,COALESCE(SUM(length(data)),0) AS size FROM meme_assets")
-    if total["n"] > MAX_ROWS or total["size"] > MAX_BYTES:
-        raise ValueError("MEME_ASSET_STORAGE_LIMIT")
+        results.append(meme_assets.store_original(store, custody, item, data, sources, withdrawn))
+    meme_assets.check_capacity(store, max_rows=MAX_ROWS, max_bytes=MAX_BYTES)
     return results
 
 

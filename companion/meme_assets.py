@@ -54,6 +54,88 @@ def asset_id(custody, item):
     return digest([custody_digest(custody), item["source_sha256"], item["asset_sha256"]])
 
 
+def record_digest(item):
+    return digest({"asset_sha256": item["asset_sha256"],
+                   "source_sha256": item["source_sha256"],
+                   "metadata_sha256": digest(item["metadata"])})
+
+
+def store_original(store, custody, item, data, sources, withdrawn):
+    """Original immutable record/terminal-state rules, inside the caller transaction."""
+    from companion_meme_protocol import canonical
+
+    if not store.db.in_transaction:
+        raise RuntimeError("MEME_ASSET_STAGE_REQUIRES_TRANSACTION")
+    key, content_hash = asset_id(custody, item), record_digest(item)
+    prior = store.one("SELECT * FROM meme_assets WHERE asset_id=?", (key,))
+    if prior and prior["record_sha256"] != content_hash:
+        raise ValueError("MEME_ASSET_CONTENT_CONFLICT")
+    state = ("ERASED" if withdrawn else "REMOVED" if not item["active"] else
+             "STAGED" if sources else "QUARANTINED")
+    if prior:
+        if prior["state"] == "ERASED" or prior["state"] == "REMOVED" and state != "ERASED":
+            state = prior["state"]
+        elif prior["state"] == "QUARANTINED" and state == "STAGED":
+            state = "QUARANTINED"
+    values = {"state": state, "data": data if state == "STAGED" else None,
+              "metadata_json": canonical(item["metadata"]) if state == "STAGED" else None,
+              "mime": item["mime"] if state == "STAGED" else None}
+    changed = not prior or any(prior[k] != v for k, v in values.items())
+    if not prior:
+        store.insert("meme_assets", asset_id=key, custody_sha256=custody_digest(custody),
+                     asset_sha256=item["asset_sha256"], source_sha256=item["source_sha256"],
+                     record_sha256=content_hash, **values)
+    elif changed:
+        store.execute("UPDATE meme_assets SET state=?,data=?,metadata_json=?,mime=? "
+                      "WHERE asset_id=?", (*values.values(), key))
+    for event, job in sources:
+        store.execute("INSERT OR IGNORE INTO meme_asset_sources VALUES (?,?,?)", (key, event, job))
+    return {"asset_id": key, "state": state, "changed": changed}
+
+
+def check_capacity(store, *, max_rows=4096, max_bytes=64 * 1024 * 1024):
+    total = store.one("SELECT COUNT(*) AS n,COALESCE(SUM(length(data)),0) AS size FROM meme_assets")
+    if total["n"] > max_rows or total["size"] > max_bytes:
+        raise ValueError("MEME_ASSET_STORAGE_LIMIT")
+
+
+def stage_native(store, settings, clock, *, caption_job_id, metadata_value, data, custody):
+    from companion import meme_policy, meme_service
+    from companion.meme_core import check_caption_job
+    from companion.meme_retrieval import media
+
+    if not store.db.in_transaction:
+        raise RuntimeError("MEME_ASSET_STAGE_REQUIRES_TRANSACTION")
+    approval = meme_service._native_scope(store, settings, clock)
+    job = store.one("SELECT * FROM jobs WHERE job_id=?", (caption_job_id,))
+    if not job:
+        raise CoreError("MEME_CAPTION_JOB_MISSING", 404)
+    check_caption_job(store, settings, approval, job, clock=clock)
+    caption = store.one("SELECT * FROM meme_captions WHERE job_id=?", (caption_job_id,))
+    meta, image = metadata(metadata_value), media(settings, data)
+    item = {"asset_sha256": caption["asset_sha256"], "source_sha256": caption["source_sha256"],
+            "active": True, "metadata": meta, "mime": image.mime_type if image else ""}
+    acquired = strict_json(meta["acquisition_json"])
+    if (image is None or image.sha256 != item["asset_sha256"]
+        or source_digest(meta) != item["source_sha256"]
+        or original_custody(store, settings, job["event_id"]) != custody
+        or "source_files" not in acquired or acquired.get("archive_member")
+        or not meme_policy.trusted_source(meta, meme_policy.source_rules(settings))):
+        raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
+    sources, withdrawn = provenance(store, settings, custody, item, data,
+                                    caption_job_id=caption_job_id)
+    if not sources or withdrawn:
+        raise CoreError("MEME_ASSET_SOURCE_CHANGED", 403)
+    prior = store.one("SELECT * FROM meme_assets WHERE asset_id=?", (asset_id(custody, item),))
+    if prior and prior["state"] != "STAGED":
+        raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
+    result = store_original(store, custody, item, data, sources, withdrawn)
+    check_capacity(store)
+    if result["state"] != "STAGED":
+        raise CoreError("MEME_ASSET_UNAVAILABLE", 409)
+    return result["asset_id"], 0 if prior else len(data)
+
+
 def erased(store, event_id):
     event = store.one("SELECT redacted FROM events WHERE event_id=?", (event_id,))
     return bool(not event or event["redacted"] or store.one(

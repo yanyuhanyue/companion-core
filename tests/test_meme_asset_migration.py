@@ -294,6 +294,7 @@ def test_erasure_before_import_and_old_backup_restore_reimport_cannot_revive(bun
     with (closing(migration.readonly(bundle.core.settings.database)) as source,
           closing(sqlite3.connect(legacy)) as destination):
         source.backup(destination)
+        destination.execute("DROP TABLE meme_vectors")
         destination.execute("DROP TABLE meme_asset_sources")
         destination.execute("DROP TABLE meme_assets")
         destination.execute("UPDATE alembic_version SET version_num='0046_capability_delegation'")
