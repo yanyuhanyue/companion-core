@@ -52,6 +52,8 @@ def runtime_evidence(record):
             "image_id": "sha256:" + str(number - 301) * 64,
             "config_digest": "sha256:" + str(number - 301) * 64,
             "platform": "linux/amd64", "registry_manifest_digest": None, "artifact": ref,
+            "base_image": images.COMPONENTS[name].get("base"),
+            "dependency_lock_sha256": None if name == "ui" else "a" * 64,
             "archive": {"filename": name + ".tar.gz", "bytes": len(data),
                         "sha256": hashlib.sha256(data).hexdigest()},
         }
@@ -77,7 +79,7 @@ def verify(state):
 @pytest.mark.parametrize("fault", [
     "metadata-bytes", "archive-expired", "archive-retargeted", "missing-archive", "duplicate-id",
     "wrong-tree", "wrong-platform", "fake-registry-digest", "wrong-config-id", "traversal",
-    "extra-component", "selected-source", "null-image-id",
+    "extra-component", "selected-source", "null-image-id", "ui-base",
 ])
 def test_retained_metadata_rejects_tamper_incomplete_and_unbound_images(retained, fault):
     component = retained["metadata"]["components"]["core"]
@@ -106,8 +108,10 @@ def test_retained_metadata_rejects_tamper_incomplete_and_unbound_images(retained
             retained["metadata"]["components"]["executor"] = deepcopy(component)
         elif fault == "selected-source":
             retained["metadata"]["run_id"] = 102
-        else:
+        elif fault == "null-image-id":
             component["image_id"] = None
+        else:
+            retained["metadata"]["components"]["ui"]["base_image"] = "unbound-base"
         seal_metadata(retained)
     with pytest.raises(ValueError, match="PUBLIC_IMAGE_"):
         verify(retained)
@@ -170,7 +174,8 @@ def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expans
     for spec in images.COMPONENTS.values():
         recipe = root / spec["recipe"]
         recipe.parent.mkdir(parents=True, exist_ok=True)
-        recipe.write_text("FROM synthetic\nCOPY " + " ".join(sorted(spec["copies"])) + " /app\n")
+        recipe.write_text("FROM " + spec.get("base", "synthetic") + "\nCOPY "
+                          + " ".join(sorted(spec["copies"])) + " /app\n")
     # Source-shaped files suffice; the test exercises Git archive and COPY boundaries.
     for spec in images.COMPONENTS.values():
         for name in spec["copies"]:
@@ -242,6 +247,55 @@ def test_image_privacy_validation_rejects_credential_canaries_without_echo(fault
     assert canary not in str(error.value) + capsys.readouterr().out
 
 
+@pytest.mark.parametrize("fault", [None, "unknown-key", "changed-value", "python-env"])
+def test_ui_capture_uses_only_the_reviewed_official_base_environment(fault):
+    environment = [key + "=" + value for key, value in images.UI_BASE_ENV.items()]
+    if fault == "unknown-key":
+        environment.append("PRIVATE_TOKEN=SYNTHETIC_PRIVATE_VALUE")
+    elif fault == "changed-value":
+        environment = [v.replace("NGINX_VERSION=1.31.8", "NGINX_VERSION=0") for v in environment]
+    elif fault == "python-env":
+        environment.append("PYTHON_VERSION=3.12")
+    image_id = "sha256:" + "a" * 64
+
+    def runner(arguments):
+        return (json.dumps([{"Id": image_id, "Os": "linux", "Architecture": "amd64",
+                             "Size": 1000, "Config": {"Env": environment}}]).encode()
+                if "inspect" in arguments else b"RUN public base history")
+
+    if fault:
+        with pytest.raises(ValueError, match="ENV_NOT_ALLOWLISTED|BASE_ENV_CHANGED"):
+            images.capture("ui", runner=runner, identity={"commit": "a", "tree": "b"})
+    else:
+        result = images.capture("ui", runner=runner, identity={"commit": "a", "tree": "b"})
+        assert result["image_id"] == image_id
+        assert result["base_image"] == images.COMPONENTS["ui"]["base"]
+        assert result["dependency_lock_sha256"] is None
+        assert result["registry_manifest_digest"] is None
+
+
+def test_ui_environment_does_not_widen_python_image_privacy_allowlist():
+    def runner(_):
+        return json.dumps([{"Id": "sha256:" + "a" * 64, "Os": "linux", "Architecture": "amd64",
+                            "Config": {"Env": ["NGINX_VERSION=1.31.8"]}}]).encode()
+
+    with pytest.raises(ValueError, match="ENV_NOT_ALLOWLISTED"):
+        images.inspect_image("core", runner=runner)
+
+
+@pytest.mark.parametrize("fault", ["base", "copy"])
+def test_ui_public_context_rejects_retargeted_base_and_added_private_copy(tmp_path, fault):
+    context = tmp_path / "public"
+    images.prepare_context(context)
+    recipe = context / images.COMPONENTS["ui"]["recipe"]
+    text = recipe.read_text("utf-8")
+    changed = (text.replace(images.COMPONENTS["ui"]["base"], "nginx:latest")
+               if fault == "base" else text + "\nCOPY config.toml /secret\n")
+    recipe.write_text(changed, encoding="utf-8")
+    with pytest.raises(ValueError, match="UI_BASE_CHANGED|COPY_INPUTS_CHANGED"):
+        images.check_public_inputs(context)
+
+
 def test_export_captures_validated_image_ids_and_actual_archive_sizes(tmp_path, monkeypatch):
     monkeypatch.setattr(images, "source_identity", lambda _: {"commit": "a", "tree": "b"})
     monkeypatch.setattr(images, "inspect_image", lambda name, **_: {"Id": "sha256:" + name})
@@ -255,7 +309,7 @@ def test_export_captures_validated_image_ids_and_actual_archive_sizes(tmp_path, 
         Path(arguments[4]).write_bytes(b"SYNTHETIC_ARCHIVE" * 100)
 
     metadata = images.export_images(captured, tmp_path, runner=save)
-    assert len(calls) == 3 and all(call[-1] == captured[name]["image_id"]
+    assert len(calls) == len(images.COMPONENTS) and all(call[-1] == captured[name]["image_id"]
                                    for call, name in zip(calls, captured, strict=True))
     for name, component in metadata["components"].items():
         compressed = tmp_path / (name + ".tar.gz")
@@ -265,7 +319,7 @@ def test_export_captures_validated_image_ids_and_actual_archive_sizes(tmp_path, 
     captured["core"]["image_id"] = "changed-after-smoke"
     with pytest.raises(ValueError, match="CHANGED_AFTER_VALIDATION"):
         images.export_images(captured, tmp_path, runner=save)
-    assert len(calls) == 3
+    assert len(calls) == len(images.COMPONENTS)
 
 
 def test_local_load_checks_all_exported_archives_before_upload(retained, tmp_path):
@@ -285,7 +339,7 @@ def test_local_load_checks_all_exported_archives_before_upload(retained, tmp_pat
                             "Architecture": "amd64"}]).encode()
 
     result = images.load_local(tmp_path / images.MANIFEST, runner=runner)
-    assert set(result) == set(images.COMPONENTS) and len(calls) == 6
+    assert set(result) == set(images.COMPONENTS) and len(calls) == 2 * len(images.COMPONENTS)
     assert not any("build" in command for command in calls)
     assert json.loads((tmp_path / "local-load.json").read_text())["build_performed"] is False
 

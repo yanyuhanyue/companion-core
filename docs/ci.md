@@ -106,11 +106,14 @@ same candidate's checks or duplicating its commit/tree identifiers.
 
 ## Retained public runtime images
 
-The full container job builds Core, OneBot Bridge and Source Reader once, runs the existing
+The full container job builds Core, OneBot Bridge, Source Reader and Console UI once,
+runs the existing
 isolation and entry-point checks, then saves those exact Docker image IDs as standard Docker
 archives. It also loads and inspects the exported archives before upload. Executor, file-parser
 and all existing smoke checks remain required; their images are outside this delivery slice.
-The Bridge still builds through the actual native Compose build file. Main exact-tree reuse
+The Bridge still builds through the actual native Compose build file. The UI candidate image
+is the one used by the real Linux Nginx/HTTP checks and UI replacement/rollback smoke;
+the synthetic rollback baseline is not a release component. Main exact-tree reuse
 inherits the original full run and its retained images instead of building them again.
 
 These artifacts are labelled `PUBLIC_SOURCE_RUNTIME_ARTIFACT`. This repository is public:
@@ -130,7 +133,7 @@ Existing wheel/source privacy and canary checks continue in the product shards.
 | `registry_manifest_digest` | Unset; this slice does not push to a registry |
 
 The image configuration ID is not a registry manifest digest. The small `ci-container-images-*`
-artifact binds the three separate `runtime-image-{core,bridge,reader}-*` archives; `ci-full-*`
+artifact binds the four separate `runtime-image-{core,bridge,reader,ui}-*` archives; `ci-full-*`
 and `ci-validation-*` reference that metadata. A selected run cannot emit reusable image proof.
 Missing, expired, changed, ambiguous or incomplete image evidence makes main run full validation.
 All retained artifacts expire after seven days. Reuse and consumption retain the existing
@@ -140,6 +143,10 @@ BuildKit's local cache backend and the existing pinned Actions cache preserve de
 layers. The dependency installation steps already precede application COPY steps in the
 Dockerfiles. Recorded cache imports/exports describe configured indexes and bytes; they do
 not claim a measured cache hit. No inferred dependency graph chooses release components.
+UI dependencies are its pinned official Nginx base; its dependency-lock field is unset.
+The UI privacy check accepts only the exact public environment of that pinned base, scoped
+to UI, and its four public assets plus the public Nginx configuration. Python-image environment
+rules are unchanged. A base-image or environment change requires updating this reviewed boundary.
 
 `container-images.json` records actual per-image raw/compressed sizes, save/hash,
 compression/hash and build/inspect durations. `runtime-image-load-*` preserves local load
@@ -155,6 +162,8 @@ The implementation uses Docker's documented
 [BuildKit cache backends](https://docs.docker.com/build/ci/github-actions/cache/),
 [Compose build cache](https://docs.docker.com/reference/compose-file/build/), and
 [immutable Actions artifact outputs](https://github.com/actions/upload-artifact#using-outputs).
+The official Nginx base environment was read from its actual `linux/amd64` configuration using
+[`docker buildx imagetools inspect`](https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/).
 
 ## File shards and timing maintenance
 

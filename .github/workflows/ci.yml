@@ -148,9 +148,9 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .local/docker-build-cache
-          key: ${{ runner.os }}-runtime-images-${{ hashFiles('uv.lock', 'deploy/onebot-bridge.lock', 'Dockerfile', 'deploy/onebot-bridge.Dockerfile', 'deploy/source-reader.Dockerfile') }}-${{ github.sha }}
+          key: ${{ runner.os }}-runtime-images-${{ hashFiles('uv.lock', 'deploy/onebot-bridge.lock', 'Dockerfile', 'deploy/onebot-bridge.Dockerfile', 'deploy/source-reader.Dockerfile', 'deploy/console-ui.Dockerfile') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-runtime-images-${{ hashFiles('uv.lock', 'deploy/onebot-bridge.lock', 'Dockerfile', 'deploy/onebot-bridge.Dockerfile', 'deploy/source-reader.Dockerfile') }}-
+            ${{ runner.os }}-runtime-images-${{ hashFiles('uv.lock', 'deploy/onebot-bridge.lock', 'Dockerfile', 'deploy/onebot-bridge.Dockerfile', 'deploy/source-reader.Dockerfile', 'deploy/console-ui.Dockerfile') }}-
       - name: Prepare the committed public build context
         run: |
           python -B scripts/ci_container_artifacts.py prepare .local/container-build/source
@@ -279,7 +279,7 @@ jobs:
             docker network rm "$network" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          docker build -f deploy/console-ui.Dockerfile -t companion-console-ui:test .
+          python -B scripts/ci_container_artifacts.py build ui --context .local/container-build/source --cache .local/docker-build-cache
           baseline=.local/console-ui-baseline
           mkdir -p "$baseline/deploy" "$baseline/companion/console_static"
           cp deploy/console-ui.Dockerfile deploy/console-ui.nginx.conf "$baseline/deploy/"
@@ -362,6 +362,16 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+      - id: ui-image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ needs.preflight.outputs.profile == 'full' }}
+        with:
+          name: runtime-image-ui-${{ github.run_attempt }}
+          path: .local/container-images/ui.tar.gz
+          compression-level: 0
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Bind immutable Actions artifact identities
         if: ${{ needs.preflight.outputs.profile == 'full' }}
         env:
@@ -371,6 +381,8 @@ jobs:
           CI_BRIDGE_ARTIFACT_DIGEST: ${{ steps.bridge-image.outputs.artifact-digest }}
           CI_READER_ARTIFACT_ID: ${{ steps.reader-image.outputs.artifact-id }}
           CI_READER_ARTIFACT_DIGEST: ${{ steps.reader-image.outputs.artifact-digest }}
+          CI_UI_ARTIFACT_ID: ${{ steps.ui-image.outputs.artifact-id }}
+          CI_UI_ARTIFACT_DIGEST: ${{ steps.ui-image.outputs.artifact-digest }}
         run: python -B scripts/ci_container_artifacts.py bind .local/container-images/container-images.json
       - id: images
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

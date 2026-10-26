@@ -202,7 +202,7 @@ def test_static_ui_workflow_requires_console_types_browser_contracts_and_packagi
                   if "scripts/smoke_console_ui.py" in step.get("run", ""))
     command = native["run"]
     assert container_steps.index(prepare) < container_steps.index(native) and "if" not in native
-    for required in ("-f deploy/console-ui.Dockerfile", "tests/test_console_frontend.py",
+    for required in ("artifacts.py build ui --context", "tests/test_console_frontend.py",
                      "COMPANION_TEST_CONSOLE_PROXY=1", "COMPANION_TEST_CONSOLE_UI_URL=",
                      "trap cleanup EXIT", '--replacement-ui-image "$candidate_id"',
                      "companion-core:test companion-onebot-bridge:review "

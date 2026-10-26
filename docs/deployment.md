@@ -10,7 +10,7 @@
 
 ## 加载已验证的 CI 镜像
 
-CI 为 Core、OneBot Bridge、Source Reader 保留已通过容器检查的原始 Docker 归档。
+CI 为 Core、OneBot Bridge、Source Reader、Console UI 保留已通过容器检查的原始 Docker 归档。
 在源码仓库中使用已有 `gh` 只读连接，指定成功的主分支或 full PR workflow run：
 
 ```bash
@@ -26,6 +26,8 @@ python -B scripts/ci_container_artifacts.py consume --repository yanyuhanyue/com
 公开仓库的这些制品标记为 `PUBLIC_SOURCE_RUNTIME_ARTIFACT`，只包含公共源码和锁定依赖。
 本轮没有推送 registry，因此 `config_digest` 是 Docker 配置 ID，不能填作 registry
 manifest digest。私密配置、数据库和密钥继续由现有部署机制提供。
+UI 也加载本次已验证的原归档；运行时不重新构建。其依赖固定在官方 Nginx 基础镜像 digest，
+仅复制四项公共静态资源和公开 Nginx 配置。
 详细证据与保留期限见 [CI 镜像制品](ci.md#retained-public-runtime-images)。
 
 该命令仅准备本机镜像，不启动、替换或迁移服务。正式激活仍按现有停写、授权、

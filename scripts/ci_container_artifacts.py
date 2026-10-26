@@ -46,12 +46,27 @@ COMPONENTS = {
                    "companion/source_policy.py", "companion/video_media_contract.py",
                    "companion/bili_video_protocol.py"},
     },
+    "ui": {
+        "tag": "companion-console-ui:test", "recipe": "deploy/console-ui.Dockerfile",
+        "lock": None,
+        "base": "nginx:1.31.8-alpine@sha256:"
+                "1ef7ca94d7879df82421428ce13bd1eaa412404953859cf7a5b6512c25e67a60",
+        "copies": {"deploy/console-ui.nginx.conf", "companion/console_static/index.html",
+                   "companion/console_static/app.js", "companion/console_static/app.css",
+                   "companion/console_static/icon.svg"},
+    },
 }
 SAFE_ENV = {
     "PATH", "LANG", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256", "PYTHON_PIP_VERSION",
     "PYTHON_SETUPTOOLS_VERSION", "PYTHON_GET_PIP_URL", "PYTHON_GET_PIP_SHA256",
     "PYTHONDONTWRITEBYTECODE", "PYTHONUNBUFFERED", "UV_LINK_MODE", "HF_HUB_DISABLE_XET",
     "PLAYWRIGHT_BROWSERS_PATH", "TMPDIR",
+}
+# Actual linux/amd64 config of the pinned official Nginx base, read with imagetools.
+UI_BASE_ENV = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "NGINX_VERSION": "1.31.8", "PKG_RELEASE": "1", "DYNPKG_RELEASE": "1",
+    "NJS_VERSION": "1.0.2", "NJS_RELEASE": "1", "ACME_VERSION": "0.4.1",
 }
 PRIVATE_PARTS = FORBIDDEN | {".git", "logs", "private-stage", "keys", "secrets", "credentials"}
 CANARY = b"SYNTHETIC_PACKAGING_CANARY_NOT_A_SECRET"
@@ -105,6 +120,10 @@ def check_public_inputs(root=ROOT):
     """Fixed reviewed COPY inputs, rather than an inferred source dependency graph."""
     for spec in COMPONENTS.values():
         recipe = (root / spec["recipe"]).read_text("utf-8")
+        if spec.get("base") and [line.strip() for line in recipe.splitlines()
+                                 if line.lstrip().upper().startswith("FROM ")] != [
+                                     "FROM " + spec["base"]]:
+            raise ValueError("PUBLIC_IMAGE_UI_BASE_CHANGED")
         inputs = set()
         for line in re.sub(r"\\\r?\n", " ", recipe).splitlines():
             if not line.lstrip().upper().startswith("COPY "):
@@ -204,10 +223,15 @@ def inspect_image(name, *, runner=run):
         raise ValueError("PUBLIC_IMAGE_ID_REQUIRED")
     if document.get("Os") != "linux" or document.get("Architecture") != "amd64":
         raise ValueError("PUBLIC_IMAGE_PLATFORM_CHANGED")
-    for value in document.get("Config", {}).get("Env") or []:
+    environment = document.get("Config", {}).get("Env") or []
+    for value in environment:
         key, separator, _ = value.partition("=")
-        if not separator or key not in SAFE_ENV:
+        if not separator or key not in (UI_BASE_ENV if name == "ui" else SAFE_ENV):
             raise ValueError("PUBLIC_IMAGE_ENV_NOT_ALLOWLISTED")
+    if name == "ui" and sorted(environment) != sorted(
+        key + "=" + value for key, value in UI_BASE_ENV.items()
+    ):
+        raise ValueError("PUBLIC_IMAGE_UI_BASE_ENV_CHANGED")
     history = runner(["docker", "image", "history", "--no-trunc", "--format",
                       "{{json .CreatedBy}}", document["Id"]]).decode()
     if re.search(r"(?:COMPANION_\w+|password|secret|token|private_key)\s*=", history, re.I):
@@ -224,7 +248,8 @@ def capture(name, *, root=ROOT, runner=run, identity=None):
             "image_bytes": image["Size"],
             "rootfs_diff_ids": image.get("RootFS", {}).get("Layers", []),
             "recipe_sha256": digest_file(root / spec["recipe"]),
-            "dependency_lock_sha256": digest_file(root / spec["lock"]),
+            "dependency_lock_sha256": digest_file(root / spec["lock"]) if spec["lock"] else None,
+            "base_image": spec.get("base"),
             "registry_manifest_digest": None}
 
 
@@ -329,6 +354,10 @@ def verified_metadata(reference, artifacts, read, repo, expected):
                 or component.get("registry_manifest_digest") is not None
                 or any(component.get(k) != expected[k] for k in ("commit", "tree"))):
             raise ValueError("PUBLIC_IMAGE_COMPONENT_INVALID")
+        if name == "ui" and (component.get("base_image") != COMPONENTS[name]["base"]
+                             or "dependency_lock_sha256" not in component
+                             or component["dependency_lock_sha256"] is not None):
+            raise ValueError("PUBLIC_IMAGE_UI_BASE_METADATA_CHANGED")
         ref = artifact_reference(component.get("artifact"),
                                  f"runtime-image-{name}-{expected['attempt']}")
         actual = by_id.get(ref["id"], {})

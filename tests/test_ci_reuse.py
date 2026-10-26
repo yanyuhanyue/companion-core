@@ -339,7 +339,7 @@ def test_main_consumer_cli_follows_original_full_artifacts_without_build(
     assert report["build_performed"] is False and report["registry_manifest_digest"] is None
     assert {name: item["image_id"] for name, item in report["components"].items()} == {
         name: item["image_id"] for name, item in components.items()}
-    assert len(calls) == 9 and not any("build" in call for call in calls)
+    assert len(calls) == 3 * len(images.COMPONENTS) and not any("build" in call for call in calls)
     assert '"build_performed": false' in capsys.readouterr().out
 
 
