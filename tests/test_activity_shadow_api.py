@@ -22,12 +22,12 @@ from tests.test_activity_shadow import diagnostic, goal
 from tests.test_onebot_capture import real_core_http
 
 
-async def worker(settings, now, job_id, boundary, path):
+async def worker(settings, now, job_id, boundary, path, *, cache_usage=None):
     value = settings.model_dump(mode="json")
     for field in ("model_key", "bridge_token", "control_token"):
         value[field] = getattr(settings, field).get_secret_value()
     path.write_text(encode({"settings": value, "now": now, "job_id": job_id,
-                            "boundary": boundary}), encoding="utf-8")
+                            "boundary": boundary, "cache_usage": cache_usage}), encoding="utf-8")
     child = await asyncio.create_subprocess_exec(sys.executable, "-B", "-m",
         "tests.activity_shadow_worker", str(path),
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},

@@ -26,9 +26,12 @@ async def exercise(value):
                       "wire_utf8": request.content.decode("utf-8")})
         if value["boundary"] == "unknown":
             raise httpx.ReadTimeout("synthetic unknown after dispatch", request=request)
+        usage = {"prompt_tokens": 100, "completion_tokens": 4}
+        if value.get("cache_usage") is not None:
+            usage["prompt_cache_hit_tokens"] = value["cache_usage"]
         return httpx.Response(200, json={"choices": [{"message": {
             "content": "SYNTHETIC shadow comparison reply"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 4}})
+            "usage": usage})
 
     async def before_request(request):
         if value["boundary"] == "cancel":
