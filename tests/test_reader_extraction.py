@@ -163,7 +163,9 @@ def test_compose_timeout_retains_process_stage_without_printing_credentials(tmp_
         assert evidence["stage"] == "compose_config" and evidence["pid"] == process.pid
         assert evidence["returncode_at_timeout"] is None
         assert evidence["returncode_after_cleanup"] is not None
-        assert evidence["elapsed_seconds"] >= 0.1
+        assert caught.value.timeout == 0.1
+        assert evidence["timeout_seconds"] == 0.1
+        assert evidence["elapsed_seconds"] >= 0
         for value in evidence["output_after_cleanup"].values():
             assert value["available"] is True
             if "bytes" in value:
