@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import time
@@ -169,12 +170,57 @@ def prepare_context(destination, *, root=ROOT):
     return source
 
 
+def verify_context(context, commit, *, root=ROOT):
+    """Git's tree and raw blob IDs bind the actual build directory to the commit."""
+    expected, directories = {}, set()
+    for entry in run(["git", "ls-tree", "-r", "-t", "-z", "--full-tree", commit],
+                     root=root).split(b"\0"):
+        if not entry:
+            continue
+        fields, name = entry.split(b"\t", 1)
+        mode, kind, identity = fields.decode().split()
+        name = name.decode("utf-8")
+        if kind == "tree":
+            directories.add(name)
+        elif kind == "blob" and mode in {"100644", "100755"}:
+            expected[name] = (mode, identity)
+        else:
+            raise ValueError("PUBLIC_IMAGE_CONTEXT_TYPE_UNSUPPORTED")
+    files, actual_directories = {}, set()
+    for path in context.rglob("*"):
+        name = path.relative_to(context).as_posix()
+        if path.is_symlink():
+            raise ValueError("PUBLIC_IMAGE_CONTEXT_TYPE_CHANGED")
+        if path.is_dir():
+            actual_directories.add(name)
+        elif path.is_file():
+            files[name] = path
+        else:
+            raise ValueError("PUBLIC_IMAGE_CONTEXT_TYPE_CHANGED")
+    if set(files) != set(expected) or actual_directories != directories:
+        raise ValueError("PUBLIC_IMAGE_CONTEXT_PATHS_CHANGED")
+    names = list(expected)
+    # Bounded argv batches handle Windows spaces without filters or shell parsing.
+    for offset in range(0, len(names), 32):
+        batch = names[offset:offset + 32]
+        actual = run(["git", "hash-object", "--no-filters", "--",
+                      *(str(files[name]) for name in batch)], root=root).decode().splitlines()
+        if actual != [expected[name][1] for name in batch]:
+            raise ValueError("PUBLIC_IMAGE_CONTEXT_CONTENT_CHANGED")
+        if os.name != "nt" and any(stat.S_IMODE(files[name].stat().st_mode) !=
+                                   int(expected[name][0][-3:], 8) for name in batch):
+            raise ValueError("PUBLIC_IMAGE_CONTEXT_FILE_MODE_CHANGED")
+    # Recheck COPY/recipe and privacy policy at the actual build entry point too.
+    check_public_inputs(context)
+
+
 def build_component(name, context, cache, *, root=ROOT, runner=run):
     """Native BuildKit and Compose retain the existing build and smoke surfaces."""
     context, cache = Path(context).resolve(), Path(cache).resolve()
     source = json.loads((context.parent / "public-context.json").read_text())
     if source != source_identity(root):
         raise ValueError("PUBLIC_IMAGE_BUILD_SOURCE_CHANGED")
+    verify_context(context, source["commit"], root=root)
     previous = cache / name
     exported = cache / (name + "-next")
     imported = previous / "index.json"

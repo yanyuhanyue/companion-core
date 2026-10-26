@@ -167,7 +167,8 @@ def test_consumer_fails_closed_without_a_rebuild_fallback(retained, tmp_path, fa
     assert not any("build" in call for call in calls)
 
 
-def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expansion(tmp_path):
+@pytest.fixture
+def public_repository(tmp_path):
     root = tmp_path / "source"
     root.mkdir()
     git(root, "init", "-q")
@@ -187,7 +188,19 @@ def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expans
             path.parent.mkdir(parents=True, exist_ok=True)
             if not path.exists():
                 path.write_text("public input")
+    (root / ".gitattributes").write_text("* text=auto eol=lf\n", encoding="utf-8")
+    (root / ".dockerignore").write_text(".env\n", encoding="utf-8")
+    (root / "deploy/compose.onebot-build.yaml").write_text("services: {}\n", encoding="utf-8")
+    (root / "migrations/versions").mkdir(parents=True)
+    (root / "migrations/versions/public.py").write_text("# synthetic migration\n", encoding="utf-8")
     commit(root)
+    return root
+
+
+def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expansion(
+    tmp_path, public_repository,
+):
+    root = public_repository
     (root / "config.toml").write_bytes(images.CANARY)
     (root / ".env").write_bytes(images.CANARY)
     context = tmp_path / "public" / "source"
@@ -345,13 +358,10 @@ def test_local_load_checks_all_exported_archives_before_upload(retained, tmp_pat
 
 
 def test_build_uses_public_identity_and_native_compose_cache_without_second_build(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, public_repository,
 ):
     context, cache = tmp_path / "public", tmp_path / "cache"
-    context.mkdir()
-    source = {"commit": "a", "tree": "b"}
-    images.write_json(context.parent / "public-context.json", source)
-    monkeypatch.setattr(images, "source_identity", lambda _: source)
+    source = images.prepare_context(context, root=public_repository)
     calls = []
 
     def runner(arguments):
@@ -363,16 +373,81 @@ def test_build_uses_public_identity_and_native_compose_cache_without_second_buil
         return {**identity, "image_id": "sha256:" + "a" * 64}
 
     monkeypatch.setattr(images, "capture", capture)
-    result = images.build_component("bridge", context, cache, runner=runner)
+    result = images.build_component("bridge", context, cache, root=public_repository, runner=runner)
     assert len(calls) == 1 and calls[0][:2] == ["docker", "compose"]
     assert str(context / "deploy/compose.onebot-build.yaml") in calls[0]
     assert calls[0][-4:] == ["build", "--builder", "companion-ci", "onebot-bridge"]
     assert result["dependency_cache"]["configured_import_index_sha256"] is None
-    images.build_component("bridge", context, cache, runner=runner)
+    images.build_component("bridge", context, cache, root=public_repository, runner=runner)
     override = json.loads((tmp_path / "bridge-cache.json").read_text())
     assert override["services"]["onebot-bridge"]["build"]["cache_from"] == [
         "type=local,src=" + str(cache / "bridge")]
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("fault", [
+    "content", "canary", "added-public", "added-private", "deleted", "recipe", "dockerignore",
+    "compose", "extra-directory", "attributes",
+])
+def test_build_entry_rejects_changed_prepared_context_before_docker(
+    tmp_path, public_repository, fault,
+):
+    context = tmp_path / "prepared source"
+    images.prepare_context(context, root=public_repository)
+    metadata = (context.parent / "public-context.json").read_bytes()
+    if fault in {"content", "canary"}:
+        (context / "companion/__init__.py").write_bytes(
+            images.CANARY if fault == "canary" else b"arbitrary changed public content")
+    elif fault in {"added-public", "added-private"}:
+        (context / "source_reader" / ("extra.py" if fault == "added-public" else "secret.key"))\
+            .write_text("synthetic additional file", encoding="utf-8")
+    elif fault == "deleted":
+        (context / "companion/__init__.py").unlink()
+    elif fault == "recipe":
+        recipe = context / "Dockerfile"
+        recipe.write_text(recipe.read_text() + "\nRUN echo arbitrary_recipe_change\n")
+    elif fault == "dockerignore":
+        (context / ".dockerignore").write_text("different context ignore rules\n")
+    elif fault == "compose":
+        (context / "deploy/compose.onebot-build.yaml").write_text("different compose input\n")
+    elif fault == "attributes":
+        (context / ".gitattributes").write_text("* text eol=crlf\n")
+    else:
+        (context / "companion/added-directory").mkdir()
+    calls = []
+
+    def runner(arguments):
+        calls.append(arguments)
+        raise AssertionError("Docker must not be reached")
+
+    assert (context.parent / "public-context.json").read_bytes() == metadata
+    with pytest.raises(ValueError, match="PUBLIC_IMAGE_CONTEXT_"):
+        images.build_component("core", context, tmp_path / "cache",
+                               root=public_repository, runner=runner)
+    assert calls == []
+
+
+@pytest.mark.parametrize("name", images.COMPONENTS)
+@pytest.mark.parametrize("owner_only_directory", [False, True])
+def test_build_entry_accepts_committed_context_and_owner_only_directory(
+    tmp_path, public_repository, name, owner_only_directory,
+):
+    context, cache = tmp_path / "prepared source", tmp_path / "cache"
+    images.prepare_context(context, root=public_repository)
+    if owner_only_directory:
+        (context / "migrations/versions").chmod(0o700)
+    calls = []
+
+    class BuildReached(Exception):
+        pass
+
+    def runner(arguments):
+        calls.append(arguments)
+        raise BuildReached
+
+    with pytest.raises(BuildReached):
+        images.build_component(name, context, cache, root=public_repository, runner=runner)
+    assert len(calls) == 1 and calls[0][0] == "docker"
 
 
 @pytest.mark.parametrize("endpoint", ["ssh://host", "tcp://127.0.0.1:2375", "unix://relative"])

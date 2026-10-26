@@ -123,6 +123,10 @@ package privacy exclusions and packaging canary, image environment keys and cred
 history assignments. Local configuration, credentials, databases, user data, logs and private
 staging directories are excluded. An unexpected COPY shape or private input fails before upload.
 Existing wheel/source privacy and canary checks continue in the product shards.
+Before each build, the producer compares the actual directory/file set and raw blob IDs with
+the committed Git tree, then repeats the COPY/privacy checks. Added files, changed source,
+recipes or build configuration fail before Docker runs; the metadata JSON alone cannot authorize
+a build. Directory permissions may differ for the owner-only migration-directory test.
 
 | Identity | Meaning |
 |---|---|
@@ -164,6 +168,9 @@ The implementation uses Docker's documented
 [immutable Actions artifact outputs](https://github.com/actions/upload-artifact#using-outputs).
 The official Nginx base environment was read from its actual `linux/amd64` configuration using
 [`docker buildx imagetools inspect`](https://docs.docker.com/reference/cli/docker/buildx/imagetools/inspect/).
+Build-context verification uses Git's documented
+[`ls-tree`](https://git-scm.com/docs/git-ls-tree) and
+[`hash-object --no-filters`](https://git-scm.com/docs/git-hash-object) commands.
 
 ## File shards and timing maintenance
 
