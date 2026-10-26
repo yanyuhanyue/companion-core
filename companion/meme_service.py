@@ -133,6 +133,10 @@ def policy_hash(settings):
 
         value["catalog"] = {"owner": owner, "sources": [r.model_dump(mode="json")
             for r in source_rules(settings)], "cooldown_seconds": cooldown}
+    if owner == "core":
+        from companion.meme_index import PROFILE
+
+        value["catalog"]["retrieval"] = {"binding_version": 2, "profile": PROFILE}
     return digest(value)
 
 

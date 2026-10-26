@@ -139,7 +139,8 @@ def _material(store, row, job, view, requests, *, meme_binding=None):
             "history_sha256": paid_budget.sha(_history_proof(store, job)),
             "context_sha256": paid_budget.sha(_snapshots(store, job)),
             "request_ids": requests,
-            **({"meme_binding_version": 1, "meme_binding_sha256": paid_budget.sha(meme_binding)}
+            **({"meme_binding_version": meme_binding["version"],
+                "meme_binding_sha256": paid_budget.sha(meme_binding)}
                if meme_binding is not None else {})}
 
 

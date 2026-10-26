@@ -273,7 +273,7 @@ def test_native_evidence_freezes_exact_source_and_registers_prompt_roots(runtime
 @pytest.mark.parametrize("change", ["remove", "caption", "usage", "epoch", "binding", "stop"])
 def test_frozen_source_cannot_be_replaced_or_silently_dropped(runtime_case, change):
     c = runtime_case
-    c.retrieval.prepare(c.job)
+    run(c.retrieval.prepare(c.job))
     s = c.core.store
     if change == "remove":
         s.execute("UPDATE meme_assets SET state='REMOVED',data=NULL,mime=NULL,metadata_json=NULL")
@@ -357,7 +357,7 @@ def test_same_bytes_choose_one_exact_origin_and_never_substitute(runtime_case):
     c = runtime_case
     assets = c.core.store.rows("SELECT * FROM meme_assets ORDER BY asset_id")
     assert len(assets) == 2 and assets[0]["source_sha256"] != assets[1]["source_sha256"]
-    c.retrieval.prepare(c.job)
+    run(c.retrieval.prepare(c.job))
     saved = c.retrieval.check(c.job)
     assert len(saved["offer"]["candidates"]) == len(saved["catalog_bindings"]) == 1
     selected = next(iter(saved["catalog_bindings"].values()))
@@ -371,12 +371,12 @@ def test_same_bytes_choose_one_exact_origin_and_never_substitute(runtime_case):
     with pytest.raises(CoreError, match="MEME_ASSET_UNAVAILABLE"):
         c.retrieval.check(c.job)
     with pytest.raises(CoreError):
-        c.retrieval.prepare(c.job)
+        run(c.retrieval.prepare(c.job))
 
 
 def test_erasure_of_original_root_invalidates_derived_offer_without_refunding(runtime_case):
     c = runtime_case
-    c.retrieval.prepare(c.job)
+    run(c.retrieval.prepare(c.job))
     before = c.core.store.rows("SELECT * FROM model_usage")
     with c.core.store.transaction():
         c.core.ledger.expire_events(c.core.store, [c.source["event_id"]], c.core.clock())
@@ -398,7 +398,7 @@ def test_independent_connections_to_same_authoritative_store_reserve_one_image(r
     from companion.store import Store
 
     c = runtime_case
-    c.retrieval.prepare(c.job)
+    run(c.retrieval.prepare(c.job))
     sha = c.item["asset_sha256"]
     barrier = Barrier(2)
 
@@ -516,7 +516,7 @@ def test_current_exact_license_rule_keeps_original_no_redirect_archive_boundary(
 )
 def test_frozen_prompt_and_binding_reject_tampering_before_new_model_work(runtime_case, field):
     c = runtime_case
-    c.retrieval.prepare(c.job)
+    run(c.retrieval.prepare(c.job))
     saved = c.retrieval.check(c.job)
     if field == "epoch_type":
         saved["privacy_epoch"] = bool(saved["privacy_epoch"])

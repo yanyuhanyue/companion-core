@@ -60,7 +60,7 @@ def test_native_planner_binds_core_offer_actual_wire_and_ack(runtime_case, tmp_p
         "SELECT value FROM runtime_meta WHERE key=?", ("meme_offer:" + job["event_id"],)
     )["value"])
     candidate = c.item["asset_sha256"]
-    assert offer["catalog_owner"] == "core" and offer["binding_version"] == 1
+    assert offer["catalog_owner"] == "core" and offer["binding_version"] == 2
     assert offer["catalog_bindings"][candidate]["caption_job_id"] == c.caption_id
     assert offer["catalog_bindings"][candidate]["source_sha256"] == c.item["source_sha256"]
     assert candidate in json.dumps(payload["messages"], ensure_ascii=False)
