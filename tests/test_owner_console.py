@@ -58,6 +58,23 @@ def test_console_requires_its_own_owner_session_origin_and_csrf(client, core):
     assert client.get("/v1/console/configuration").status_code == 401
 
 
+def test_overview_reports_the_current_pause_state_the_mode_dialog_changes(client, core):
+    headers = login(client)
+    client.app_core.settings.proactive_enabled = True
+    modes = client.get("/v1/console/overview").json()["runtime"]["modes"]
+    assert {k: v["paused"] for k, v in modes.items()} == {
+        "proactive": False, "life": False, "diary": False}
+    response = client.post("/v1/console/mode", json={"target": "life", "enabled": False},
+                           headers=headers)
+    assert response.status_code == 200, response.text
+    modes = client.get("/v1/console/overview").json()["runtime"]["modes"]
+    assert modes["life"] == {"paused": True, "available": True}
+    assert modes["proactive"]["paused"] is False
+    client.app_core.settings.diary_enabled = False
+    assert client.get("/v1/console/overview").json()["runtime"]["modes"]["diary"][
+        "available"] is False
+
+
 def test_empty_views_report_real_empty_and_unobserved_states(client):
     login(client)
     for view in ("activity", "memories", "life", "content", "memes", "diagnostics"):

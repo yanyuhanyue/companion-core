@@ -12,11 +12,11 @@ from pydantic import SecretStr
 
 from companion import delegation
 from tests.conftest import run
+from tests.console_proxy import console_proxy
 from tests.test_cognition_goal_steps import finish_record, retained_plan
 from tests.test_consolidation import enable_nightly
 from tests.test_diary import DAY
 from tests.test_goals import setup_goal
-from tests.test_voice_node_api import tls_core
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("COMPANION_TEST_BROWSER") != "1", reason="Explicit isolated browser run"
@@ -31,8 +31,8 @@ async def console_page(core, tmp_path):
     core.settings.console.enabled = True
     core.settings.console.public_origin = "https://console.example.test"
     core.settings.control_token = SecretStr(PASSWORD)
-    async with tls_core(core, tmp_path) as (url, _), async_playwright() as playwright:
-        core.settings.console.public_origin = url
+    async with console_proxy(core, tmp_path) as proxy, async_playwright() as playwright:
+        url = proxy.url
         browser = await playwright.chromium.launch(
             channel=os.environ.get("COMPANION_TEST_BROWSER_CHANNEL"), headless=True)
         try:

@@ -27,8 +27,10 @@ fx_validity_seconds = 2592000
 `COMPANION_CONSOLE`、`COMPANION_CLOUD_BUDGET` 可用相应 JSON 对象覆盖配置。运行前执行既有 `python -m companion init` 应用迁移，API 与独立 worker 使用同一数据库和私有配置。TLS 反向代理应只发布控制台静态路径及 `/v1/console`，其他内部传输接口继续保留原有网络边界。公网访问必须先验证 DNS、证书、反向代理与浏览器实际 Origin；仅保存新地址不代表域名切换完成。
 
 `public_origin` 默认为空；启用控制台时必须显式给出规范 HTTPS Origin。
-单机 Nginx 示例见 [console.nginx.conf](../deploy/console.nginx.conf)。它只转发
-`/console/` 与 `/v1/console/`，其余路径返回 404。Core 监听回环地址：
+单机 Nginx 示例见 [console.nginx.conf](../deploy/console.nginx.conf)。公开入口只有
+`/console/` 与 `/v1/console/`。静态请求先经 Core 的原生开关和凭据配置检查，成功后
+通过 `X-Accel-Redirect` 转至 Nginx `internal` location，再读取回环端口 8766 的
+独立 UI 镜像；直接访问内部资源路径返回 404。Core 监听回环地址：
 
 ```powershell
 python -m companion serve --host 127.0.0.1 --port 8765 --forwarded-allow-ips 127.0.0.1
@@ -43,6 +45,74 @@ python -m companion serve --host 127.0.0.1 --port 8765 --forwarded-allow-ips 127
 容器部署使用实际代理容器地址，并保持 Core 端口不公开；示例本身不是部署完成证据。
 这里复用 [Uvicorn 的代理信任配置](https://www.uvicorn.org/settings/#http) 和
 [Nginx 的请求头覆盖规则](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header)。
+
+### 独立 UI 镜像
+
+[console-ui.Dockerfile](../deploy/console-ui.Dockerfile) 从唯一源目录
+`companion/console_static` 复制四个资源。Core 不再读取包内资源，也没有静态交付 fallback。
+首次切分需要配套部署 Core gate、UI 镜像及代理配置；以后仅 UI 修改可以单独替换 UI 容器。
+生产镜像内文件保持不可变，不挂载业务源码或可变资源目录。
+
+UI 使用官方 `nginx:1.31.8-alpine`，固定多架构索引 digest
+`sha256:1ef7ca94d7879df82421428ce13bd1eaa412404953859cf7a5b6512c25e67a60`。
+来源为 [官方镜像清单](https://github.com/docker-library/official-images/blob/master/library/nginx)
+和 Docker Hub Registry `library/nginx` 的该版本 manifest。内部跳转和直访拒绝复用
+[Nginx X-Accel 语义](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_ignore_headers)
+及 [internal](https://nginx.org/en/docs/http/ngx_http_core_module.html#internal)。
+
+将 `console-static-headers.nginx.conf` 安装为 `/etc/nginx/console-static-headers.conf`，
+并使用完整的 `console.nginx.conf`。静态成功、Core 拒绝和代理错误均设置同一 CSP、
+`no-store`、nosniff 等头；隐藏静态上游同名头以免重复。API 响应继续使用 Core 的安全头。
+内部跳转不向 UI 传 Cookie、Authorization、原始请求头或请求体。Core 的禁用 404、
+缺 owner credential 503 及错误正文直接透传，UI 故障返回代理错误，不回退包内页面。
+原 owner cookie 路径 `/v1/console`、Secure/HttpOnly/Strict、Origin、CSRF 和幂等契约不变。
+
+[compose.console.yaml](../deploy/compose.console.yaml) 只新增 UI 服务，映射回环端口，
+使用独立 bridge 网络、非 root 用户和只读根目录；它不加入 Core 网络。Docker 的
+`internal` 网络在本次 Engine 验证中未建立宿主端口映射，因此宿主 Nginx 方案采用
+[仅回环发布端口](https://docs.docker.com/engine/network/port-publishing/)，通过实际绑定检查
+保证后端不向外网发布。设置 `COMPANION_CONSOLE_UI_IMAGE` 为
+验证过的 `repository@sha256:...`，由现有部署流程使用 `--no-build --no-deps` 仅替换
+`console-ui`；保留前一镜像 digest 用于回滚。该 overlay 不会公开 Core 端口；Core 的
+回环监听或已有私网连接以及实际可信代理 IP 仍由部署者配置。
+
+UI/API 兼容性沿用 `/v1/console`，发布清单绑定已验证的 UI 和 Core OCI digest；
+发布前对实际组合运行 TLS/浏览器契约检查。`overview.schema_version=1` 只断言该响应的
+结构版本，不代表全部 UI/API 已兼容。没有新增 UI 版本协商协议。
+
+### CI 接入与合成检查
+
+以下构建和开发验证在本地或正式 CI runner 执行；生产宿主只部署已验证产物。
+容器 identity 保持不变不能证明 CPU／IO 没有干扰现场运行。
+
+Windows 和 Linux 均使用真实 Nginx 及同一份部署配置，启用检查后缺少 Nginx 必须失败。
+Windows 使用 [官方原生发行包](https://nginx.org/en/docs/windows.html)，版本 1.31.8、
+ZIP SHA256 `fbb1501009be34655cc238d460714cf20391b639013f4c73859813d7938783fd`；
+`scripts/check_console_proxy.ps1` 下载至工作区并校验哈希。Linux 显式安装 Nginx 或设置
+`COMPANION_TEST_NGINX`，不通过平台条件跳过代理检查。已有 Console 浏览器公共 fixture
+也经过 TLS Nginx。HTTP 检查验证合成 CA 和 IP SAN；浏览器仍使用隔离测试证书例外，
+不作为公网 DNS／证书信任验收。
+
+```powershell
+./scripts/check_console_proxy.ps1 -Python <project-python>
+```
+
+CI 需预先安装锁定版本的 Chromium，并保存 `.local/test-results/console-proxy.xml`。
+Linux 可以使用 [console-check.Dockerfile](../deploy/console-check.Dockerfile)，提供
+本轮已构建的不可变 Core 和 Reader 镜像 ID，复用其 Python 依赖和浏览器运行库。
+设置 `COMPANION_TEST_CONSOLE_UI_URL` 为私网候选 UI 容器地址，既有浏览器流即可使用实际
+OCI 资源；凭据隔离与后端中断用例仍启动独立原生后端，明确覆盖这两个故障边界。
+UI 镜像替换检查需另存 Core／Bridge／Reader 容器 identity 前后快照，确保仅 UI 被替换。
+`scripts/smoke_console_ui.py` 只创建、替换、回滚和清理自己的回环 UI 测试容器，对三个
+指定运行时仅做只读 identity 检查。两个 UI 镜像必须是不同的不可变 ID；替换版本的四个
+资源须与当前源码逐字节一致，回滚版本须与首次读取的哈希一致。收据记录各受保护容器
+原有的运行／停止状态；状态保持不变不代表已停止的 Bridge 恢复，也不替代 QQ 验收。
+
+```text
+python scripts/smoke_console_ui.py --ui-image <baseline-image-id> --replacement-ui-image <candidate-image-id> --core-container <core> --bridge-container <bridge> --reader-container <reader>
+```
+
+CI workflow 和通用发布脚本由 CI 负责人接入，本片不修改其队列或发布规则。
 
 登录密码来自已有 `COMPANION_CONTROL_TOKEN`。浏览器使用 Secure、HttpOnly、SameSite cookie；写入同时要求精确 Origin、CSRF 与幂等键。传输令牌不能代替主人会话。密码错误限流和会话数量／期限由服务端执行，退出后清除界面上的私人内容。
 

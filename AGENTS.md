@@ -31,6 +31,8 @@
   entry point and independent worker before live acceptance. Mock external provider transport.
 - When work proceeds in parallel, agree on file ownership and one integration owner for shared
   contracts. Keep one final verification receipt; link its CI summary instead of copying identities.
-- Deliver independently reviewable vertical slices, with at most two active PRs. Preserve deferred
+- Deliver independently reviewable vertical slices, with at most three active PRs. Track candidate
+  wait time and CI queue time during this trial; merge in dependency order and keep production
+  releases under one coordinator. Preserve deferred
   work on branches and reopen its PR when dependencies and a review slot are ready. Keep unrelated
   product repairs, test infrastructure, and architecture changes out of the same delivery slice.
