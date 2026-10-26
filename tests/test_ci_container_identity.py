@@ -119,6 +119,39 @@ def test_containerd_uses_archive_manifest_id_and_preserves_existing_core(tmp_pat
     assert sum("load" in call for call in calls) == (0 if present else 1)
 
 
+@pytest.mark.parametrize("reuse_existing", [True, False], ids=["reuse-existing", "default-load"])
+def test_untagged_image_is_found_for_resume_and_after_default_load(tmp_path, reuse_existing):
+    path, component, identity = component_archive(tmp_path)
+    native = native_image(component, identity, containerd=True)
+    calls, loaded = [], reuse_existing
+
+    def runner(command):
+        nonlocal loaded
+        calls.append(command)
+        if command[:3] == ["docker", "image", "ls"]:
+            visible = ["sha256:" + "f" * 64]
+            if loaded and "--all" in command:
+                visible.append(native["Id"])
+            return ("\n".join(visible) + "\n").encode()
+        if command[:3] == ["docker", "image", "load"]:
+            assert not reuse_existing, "An existing untagged image must not be loaded again"
+            assert not loaded
+            loaded = True
+            return b"loaded"
+        assert command == ["docker", "image", "inspect", native["Id"]]
+        assert loaded
+        return json.dumps([native]).encode()
+
+    options = {"reuse_existing": True} if reuse_existing else {}
+    result = images.load_archive(component, path, runner=runner, **options)
+    assert result["action"] == ("already_present" if reuse_existing else "loaded")
+    assert result["consumer_local_image_id"] == native["Id"]
+    assert result["config_digest"] == component["config_digest"]
+    assert sum("load" in command for command in calls) == (0 if reuse_existing else 1)
+    if not reuse_existing:
+        assert calls[0][:3] == ["docker", "image", "load"]
+
+
 @pytest.mark.parametrize("containerd", [False, True])
 @pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("compressed", [False, True])
