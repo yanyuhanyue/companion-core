@@ -742,7 +742,11 @@ def test_actual_native_host_stop_exit_restart_gate_then_explicit_cli_is_the_reac
                         blocked_code, blocked = await cli(path)
                         assert blocked_code == 0 and blocked["state"] == "UNVERIFIED"
                         _, stopped = await cli(path, "owner-stop")
-                        assert stopped["state"] == "STOP_REQUESTED"
+                        # The daemon may release its lock before this command opens Spool.
+                        assert stopped["state"] in {"STOP_REQUESTED", "STOPPED"}
+                        assert stopped["authority"] == case.owner.authority
+                        assert stopped["core_stop_confirmed"] is False
+                        assert case.owner.stop_path.read_bytes() == b"OWNER_STOP\n"
                         assert (await finish(daemon))[0] == 1
                         _, completed = await cli(path, "owner-stop")
                         assert completed["state"] == "STOPPED"
