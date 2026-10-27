@@ -9,9 +9,8 @@ from datetime import datetime
 from companion_meme_protocol import digest, validate_bytes
 
 from . import journal, reply_segments
-from .network import checked_http_client, private_request_matches
+from .network import checked_http_client, private_request_matches, seal_protocol_content
 from .onebot_client import bounded_post
-from .window import seal_protocol_content
 
 
 async def read_asset(runtime, client, item, *, check):

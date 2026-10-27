@@ -399,9 +399,8 @@ class OwnerRuntime:
 
     async def probe(self, core_client, protocol):
         from .event_normalizer import decode
-        from .network import checked_http_client, private_request_matches
+        from .network import checked_http_client, private_request_matches, seal_protocol_content
         from .onebot_client import OneBotClient
-        from .window import seal_protocol_content
 
         async def boundary(request):
             def validate():

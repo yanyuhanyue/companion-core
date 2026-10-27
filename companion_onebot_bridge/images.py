@@ -311,8 +311,7 @@ async def owner_media_request(runtime, client, path, body=b"", headers=None, *, 
 async def _media_request(runtime, client, path, body=b"", headers=None, *, purpose,
                          authorize, method="POST"):
     from .event_normalizer import decode
-    from .network import checked_http_client, private_request_matches
-    from .window import seal_protocol_content
+    from .network import checked_http_client, private_request_matches, seal_protocol_content
 
     expected = body if isinstance(body, bytes) else encode(body).encode()
     if method not in {"GET", "POST"} or method == "GET" and expected:

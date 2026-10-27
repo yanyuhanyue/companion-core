@@ -19,9 +19,9 @@ from PIL import Image
 from .event_normalizer import decode, identifier
 from .files import _get
 from .images import _private_download, global_address, owner_media_request, resolve_public
-from .network import checked_http_client, private_request_matches
+from .journal import digest
+from .network import checked_http_client, private_request_matches, seal_protocol_content
 from .onebot_client import bounded_post
-from .window import digest, seal_protocol_content
 
 STATE = "/internal/v1/account-actions/profile-baselines/state"
 SUBMIT = "/internal/v1/account-actions/profile-baselines"
@@ -282,7 +282,7 @@ class ProfilePump:
         self.next_run = 0
 
     async def execute(self):
-        from .continuous import emit
+        from .metrics import emit
 
         try:
             result = await collect(self.window, self.client, self.protocol,

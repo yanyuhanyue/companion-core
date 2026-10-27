@@ -24,7 +24,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from . import account_actions, cumulative, reply_segments
 from .event_normalizer import decode, normalize
-from .network import checked_http_client, private_http_client, private_request_matches
+from .journal import digest
+from .network import (
+    checked_http_client,
+    private_http_client,
+    private_request_matches,
+    seal_protocol_content,
+)
 from .onebot_client import OneBotClient, bounded_post
 from .outbound import deliver_tick
 from .spool import Spool, encode
@@ -38,10 +44,6 @@ HANDOFF_FIELDS = {"predecessor_plan_sha256", "predecessor_window_id",
                   "erasure_ledger_sha256", "evidence_sha256"}
 INPUT_STATE_FIELDS = {"window_sha256", "event_id", "input_sha256", "reply_revision", "state",
                       "unsettled_model", "unsettled_delivery"}
-
-
-def digest(value):
-    return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
 def config_matches(config, expected):
@@ -2449,15 +2451,6 @@ class WindowOneBot:
         if self.operation.meme_sending:
             self.window.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
         return provider_id
-
-
-def seal_protocol_content(request, content):
-    # HTTPX sends stream, not its content cache. Seal exactly the bounded
-    # bytes just checked; never consume an arbitrary replacement stream.
-    if "Transfer-Encoding" in request.headers:
-        raise ValueError("WINDOW_REQUEST_FRAMING_CHANGED")
-    request.stream = httpx.ByteStream(content)
-    request.headers["Content-Length"] = str(len(content))
 
 
 def check_protocol_request(window, request, *, reference_read=False, file_read=False,

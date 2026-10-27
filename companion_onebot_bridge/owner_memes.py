@@ -7,7 +7,7 @@ import time
 import companion_delivery_protocol as wire
 
 from . import journal, pending_media
-from .continuous import emit
+from .metrics import emit
 from .onebot_client import bounded_post
 from .owner_handoff import terminal
 
