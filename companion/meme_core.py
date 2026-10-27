@@ -572,7 +572,6 @@ class MemeCaptionService:
         with s.transaction():
             if (
                 private_life.busy(s, now)
-                or private_life.owner_waiting(s, self.settings, now)
                 or s.one(
                     "SELECT 1 FROM outbox WHERE state IN ('PENDING','LEASED','SENDING') LIMIT 1"
                 )
@@ -594,6 +593,8 @@ class MemeCaptionService:
                     (error.code, now, job["job_id"]),
                 )
                 return True
+            if private_life.owner_waiting(s, self.settings, now):
+                return False
             row = s.one("SELECT * FROM meme_captions WHERE job_id=?", (job["job_id"],))
             if row["reuse_job_id"]:
                 prior = s.one(
