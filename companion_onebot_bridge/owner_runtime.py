@@ -3,6 +3,8 @@
 import hashlib
 import json
 import re
+import sqlite3
+import stat
 from datetime import UTC, datetime
 
 from companion_delivery_protocol.authority import validate_authority_ref
@@ -148,10 +150,60 @@ class OwnerRuntime:
                 self._memes = MemeRuntime(self)
         return self._memes
 
+    def _custody_key(self, row):
+        """Exact inputs of the journal/database replay; any change forces a full verify.
+
+        `total_changes` counts this connection's row writes (committed or not),
+        `schema_version` its table changes, and `data_version` changes after any other
+        connection commits, so the key is equal only when neither the journal bytes nor
+        the spool database changed.
+        """
+        try:
+            info = self.path.lstat()
+        except OSError:
+            return None
+        if self.path.is_symlink() or not stat.S_ISREG(info.st_mode):
+            return None
+        try:
+            versions = (self.db.execute("PRAGMA schema_version").fetchone()[0],
+                        self.db.execute("PRAGMA data_version").fetchone()[0])
+        except sqlite3.DatabaseError:
+            # A caller-installed authorizer (e.g. the meme accounting drain) may deny
+            # these reads; such callers always get the original full verification.
+            return None
+        return (self.path.read_bytes(), tuple(row.values()), self.db.total_changes, *versions)
+
     def verify(self, *, active=True):
+        """Revalidate custody; an unchanged journal and database reuse the last full proof.
+
+        The legacy cutover evidence reads other files and is always rechecked, as are
+        the binding, the persisted state and the stop marker.
+        """
         row = self.row()
         if row is None or json.loads(row["authority_json"]) != self.authority:
             raise ValueError("OWNER_AUTHORITY_BINDING_CHANGED")
+        key = self._custody_key(row)
+        cached = getattr(self, "_verified", None)
+        if key is not None and cached is not None and cached[0] == key:
+            records, state, references = cached[1], cached[2], cached[3]
+        else:
+            self._verified = None
+            records, state, references = self._replay(row)
+            if key is not None and self._custody_key(row) == key:
+                self._verified = (key, records, state, references)
+        if self.legacy is not None:
+            from . import owner_cutover
+
+            owner_cutover.verify(self, self.legacy, references)
+        if row["state"] != state or references[-1] != self.authority:
+            raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+        if active and (state != "ACTIVE" or self.spool.reconciliation_only
+                       or self.stop_path.exists() or self.stop_path.is_symlink()):
+            raise ValueError("OWNER_RUNTIME_STOPPED")
+        # A new list; records are shared read-only values between unchanged proofs.
+        return list(records)
+
+    def _replay(self, row):
         records, head = journal.read(self.path)
         if (not records or head != row["journal_head"]
             or records[0]["kind"] != "OWNER_BOUND"
@@ -282,16 +334,7 @@ class OwnerRuntime:
         from . import owner_handoff
 
         owner_handoff.verify(self, records)
-        if self.legacy is not None:
-            from . import owner_cutover
-
-            owner_cutover.verify(self, self.legacy, references)
-        if row["state"] != state or current != self.authority:
-            raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
-        if active and (state != "ACTIVE" or self.spool.reconciliation_only
-                       or self.stop_path.exists() or self.stop_path.is_symlink()):
-            raise ValueError("OWNER_RUNTIME_STOPPED")
-        return records
+        return records, state, references
 
     def _inputs(self, references):
         from . import owner_pokes

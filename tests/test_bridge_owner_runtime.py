@@ -264,3 +264,68 @@ def test_checked_dispatch_rechecks_stop_and_retains_uncertainty(config, interrup
         runtime.verify(active=False)
         with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
             OwnerSendGuard(runtime, None).reserve(item)
+
+
+def _replays(runtime, monkeypatch):
+    calls = []
+    original = runtime._replay
+
+    def counted(row):
+        calls.append(row)
+        return original(row)
+
+    monkeypatch.setattr(runtime, "_replay", counted)
+    return calls
+
+
+def test_unchanged_custody_reuses_the_last_full_verification(config, monkeypatch):
+    with Spool(config) as spool:
+        runtime = OwnerRuntime(spool)
+        calls = _replays(runtime, monkeypatch)
+        # Construction already completed one full verification of this custody.
+        first = runtime.verify()
+        second = runtime.verify()
+        assert calls == []
+        assert first == second and first is not second
+        first.append("caller-owned list")
+        assert runtime.verify() == second
+
+
+def test_any_spool_write_or_journal_append_forces_a_full_replay(config, monkeypatch):
+    with Spool(config) as spool:
+        runtime = OwnerRuntime(spool)
+        calls = _replays(runtime, monkeypatch)
+        runtime.verify()
+        assert calls == []
+        spool.db.execute("CREATE TABLE IF NOT EXISTS verify_cache_probe(x)")
+        runtime.verify()
+        runtime.verify()
+        assert len(calls) == 1
+        with spool.db:
+            runtime.append("OWNER_STOPPED", {"authority": runtime.authority})
+            spool.db.execute("UPDATE owner_runtime SET state='STOPPED' WHERE id=1")
+        with pytest.raises(ValueError, match="OWNER_RUNTIME_STOPPED"):
+            runtime.verify()
+        assert runtime.verify(active=False)[-1]["kind"] == "OWNER_STOPPED"
+
+
+@pytest.mark.parametrize("change", ["journal_tamper", "other_connection", "stop_marker"])
+def test_cached_proof_never_hides_out_of_band_changes(config, change):
+    import sqlite3
+
+    with Spool(config) as spool:
+        runtime = OwnerRuntime(spool)
+        runtime.verify()
+        if change == "journal_tamper":
+            raw = runtime.path.read_bytes()
+            runtime.path.write_bytes(raw.replace(b'"OWNER_BOUND"', b'"OWNER_BOUNX"'))
+            expected = "OWNER_JOURNAL_RECONCILIATION_REQUIRED|INVALID_WINDOW_JOURNAL"
+        elif change == "other_connection":
+            with sqlite3.connect(spool.directory / "spool.sqlite3") as other:
+                other.execute("UPDATE owner_runtime SET journal_head=? WHERE id=1", ("e" * 64,))
+            expected = "OWNER_JOURNAL_RECONCILIATION_REQUIRED"
+        else:
+            journal.stop_marker(runtime.stop_path)
+            expected = "OWNER_RUNTIME_STOPPED"
+        with pytest.raises(ValueError, match=expected):
+            runtime.verify()
