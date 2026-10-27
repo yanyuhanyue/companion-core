@@ -22,8 +22,11 @@ from websockets.asyncio.server import serve
 
 from companion import owner_authority, paid_budget
 from companion.api import create_app
+from companion.core import Core
 from companion.model import ModelClient
 from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
+from companion.worker_schedule import run_native_unit
+from companion.worker_wakeup import Wakeup
 from companion_onebot_bridge import app
 from companion_onebot_bridge.metrics import Metrics
 from companion_onebot_bridge.network import private_http_client
@@ -68,9 +71,12 @@ async def until(predicate, *, tasks=(), deadline_seconds=8):
 
 
 async def worker(core, stop):
-    while not stop.is_set():
-        if not await core.run_once("native-continuous-test"):
-            await asyncio.sleep(0.01)
+    with Wakeup(core.store, core.settings, "worker", core.clock) as wake:
+        while not stop.is_set():
+            scan = wake.before_scan()
+            result = await run_native_unit(core.run_once, "native-continuous-test")
+            if not result.progressed:
+                await wake.wait(scan, result)
 
 
 @asynccontextmanager
@@ -153,7 +159,8 @@ class Host:
         return self.tasks
 
     async def run_worker(self):
-        await worker(self.core, self.stop)
+        with Core(self.core.settings, self.core.model, self.core.clock) as independent:
+            await worker(independent, self.stop)
 
     async def pause(self):
         self.stop.set()
