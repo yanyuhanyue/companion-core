@@ -1,6 +1,7 @@
 """Native equivalents of the historical synthetic-window transport fence tests."""
 
 import json
+from datetime import datetime
 
 import httpx
 import pytest
@@ -14,8 +15,15 @@ from tests.support.native_dispatch import attempts, dispatch, staged
 def test_native_probe_rechecks_after_dns_wait(core, tmp_path, path, change):
     async def scenario():
         async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
-            dispatched = []
+            dispatched, changed, reservations = [], [], []
             original = protocol._transport
+            reserve = guard.reserve
+
+            def observed_reserve(item):
+                reservations.append(core.clock.now)
+                return reserve(item)
+
+            guard.reserve = observed_reserve
 
             class Observed(httpx.AsyncBaseTransport):
                 async def handle_async_request(self, request):
@@ -28,15 +36,28 @@ def test_native_probe_rechecks_after_dns_wait(core, tmp_path, path, change):
             protocol._transport = Observed()
             async def after_dns(request):
                 if request.url.path == path:
+                    assert attempts(owner) == {} and guard.current_item is None
                     if change == "deadline":
-                        core.clock.now = guard.lease_until
+                        lease = core.store.one("SELECT lease_until FROM outbox")["lease_until"]
+                        deadline = datetime.fromisoformat(lease)
+                        assert core.clock.now < deadline
+                        core.clock.now = deadline
                     else:
                         owner.stop()
+                    changed.append(core.clock.now)
             protocol.event_hooks["request"].append(after_dns)
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match=("^OWNER_DELIVERY_LEASE_LOST$"
+                if change == "deadline" else "^OWNER_RUNTIME_STOPPED$")):
                 await dispatch(owner, client, protocol, guard)
-            assert path not in dispatched and not sends and not guard.dispatched
-            assert attempts(owner) == {"RESERVED": 1}
+            assert len(changed) == 1 and not sends and not guard.dispatched
+            if change == "deadline":
+                assert core.clock.now == changed[0] and reservations == changed
+                assert set(dispatched) == {"/get_login_info", "/get_status", "/get_version_info"}
+            else:
+                assert path not in dispatched and reservations == []
+            assert attempts(owner) == {} and guard.current_item is None
+            assert core.store.one("SELECT attempt_count FROM outbox")["attempt_count"] == 0
+            assert not owner.db.execute("SELECT 1 FROM results").fetchone()
     run(scenario())
 
 
