@@ -74,6 +74,15 @@ docker network connect companion-internal <你的AstrBot容器名>
 仍保留，授权、签名或来源完整性错误仍拒绝。下载和上传开始后的原租约、UNKNOWN 及费用责任
 继续沿用既有恢复规则。
 
+Bridge 的部署默认保持 `restart: "no"`，持久 STOP 或未闭合投递需要按原生流程核对。
+生产需要容忍短暂进程故障时，在实际 Compose 覆盖链的最后对 Bridge 设置
+`restart: "on-failure:3"`，限制非零退出后的自动重试；不要用无限重启替代故障处理。
+使用实际 Bridge 服务名，并在重建后检查容器的 `HostConfig.RestartPolicy.Name=on-failure`
+和 `MaximumRetryCount=3`。正在核对的停止实例仍保持 `restart: "no"`，修复、原生交接及
+镜像验收完成后再启动。该策略不会因 Docker daemon 重启自动拉起容器，启动由既有运维
+流程执行；不要同时叠加另一个反复拉起容器的守护管理器。
+策略语义见 [Docker restart policies](https://docs.docker.com/engine/containers/start-containers-automatically/)。
+
 AstrBot 插件 v0.6.0 删除 ImageQueue、旧图片下载/上传以及宿主新发送入口。
 主人事件仍 `stop_event()`，阻止旧宿主默认 Agent 回答，但不写入新 inbox。
 `drain_existing=false` 为默认值，不连接 Core；显式启用时只重报已有投递回执、上传原 inbox，

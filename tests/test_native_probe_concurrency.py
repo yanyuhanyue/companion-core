@@ -5,15 +5,32 @@ import asyncio
 import httpx
 import pytest
 
+from companion_onebot_bridge.owner_send import OwnerOneBot
 from tests.conftest import run
 from tests.support.native_dispatch import attempts, dispatch, staged
 
 PROBES = {"/get_login_info", "/get_status", "/get_version_info"}
 
 
+def preparation_calls(monkeypatch):
+    calls = []
+    prepare = OwnerOneBot.prepare_delivery
+
+    async def tracked(driver, item):
+        calls.append(item["message_id"])
+        return await prepare(driver, item)
+
+    monkeypatch.setattr(OwnerOneBot, "prepare_delivery", tracked)
+    return calls
+
+
 @pytest.mark.parametrize("phase", ["capture", "send"])
 @pytest.mark.parametrize("change", ["stop", "parent_cancel"])
-def test_native_stop_or_cancel_joins_every_probe_without_send(core, tmp_path, phase, change):
+def test_native_stop_or_cancel_joins_every_probe_without_send(
+    core, tmp_path, monkeypatch, phase, change,
+):
+    prepared = preparation_calls(monkeypatch)
+
     async def scenario():
         async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
             entered, release = asyncio.Event(), asyncio.Event()
@@ -48,7 +65,9 @@ def test_native_stop_or_cancel_joins_every_probe_without_send(core, tmp_path, ph
                         await asyncio.wait_for(task, 10)
                 assert len(finished) == 3 and all(child.done() for child in tasks)
                 assert not sends and not guard.dispatched
-                assert attempts(owner) == ({} if phase == "capture" else {"RESERVED": 1})
+                assert attempts(owner) == {} and not prepared
+                assert guard.current_item is None and guard.prepared_message is None
+                assert not owner.db.execute("SELECT 1 FROM results").fetchone()
             finally:
                 release.set()
                 task.cancel()
@@ -56,7 +75,11 @@ def test_native_stop_or_cancel_joins_every_probe_without_send(core, tmp_path, ph
     run(scenario())
 
 
-def test_native_delivery_waits_for_all_three_results_then_uses_original_send_fence(core, tmp_path):
+def test_native_delivery_waits_for_all_three_results_then_uses_original_send_fence(
+    core, tmp_path, monkeypatch,
+):
+    prepared = preparation_calls(monkeypatch)
+
     async def scenario():
         async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
             entered, release = asyncio.Event(), asyncio.Event()
@@ -84,11 +107,13 @@ def test_native_delivery_waits_for_all_three_results_then_uses_original_send_fen
             task = asyncio.create_task(dispatch(owner, client, protocol, guard))
             try:
                 await asyncio.wait_for(entered.wait(), 10)
-                assert not sends and not guard.dispatched and attempts(owner) == {"RESERVED": 1}
+                assert not sends and not guard.dispatched and attempts(owner) == {}
+                assert not prepared and guard.current_item is None
                 release.set()
                 assert await asyncio.wait_for(task, 10)
                 assert all(child.done() for child in tasks)
                 assert len(sends) == 1 and attempts(owner) == {"ACK": 1}
+                assert len(prepared) == 1
             finally:
                 release.set()
                 task.cancel()
@@ -99,8 +124,10 @@ def test_native_delivery_waits_for_all_three_results_then_uses_original_send_fen
 @pytest.mark.parametrize("phase", ["capture", "send"])
 @pytest.mark.parametrize("path", sorted(PROBES))
 def test_each_probe_revalidates_its_request_after_async_authority_check(
-    core, tmp_path, phase, path,
+    core, tmp_path, monkeypatch, phase, path,
 ):
+    prepared = preparation_calls(monkeypatch)
+
     async def scenario():
         async with staged(core, tmp_path) as (owner, client, protocol, guard, sends):
             inflight, dispatched = {}, []
@@ -132,5 +159,7 @@ def test_each_probe_revalidates_its_request_after_async_authority_check(
                 else:
                     await dispatch(owner, client, protocol, guard)
             assert path not in dispatched and not sends and not guard.dispatched
-            assert attempts(owner) == ({} if phase == "capture" else {"RESERVED": 1})
+            assert attempts(owner) == {} and not prepared
+            assert guard.current_item is None and guard.prepared_message is None
+            assert not owner.db.execute("SELECT 1 FROM results").fetchone()
     run(scenario())

@@ -361,11 +361,11 @@ def test_ack_timeout_retains_unsent_states_and_safe_retry_diagnostics(
         assert evidence["rpc_spans"]["errors"][0]["stage"] == "t_core_delivery_lease"
         assert evidence["rpc_spans"]["errors"][0]["error_class"] == "ConnectError"
     else:
-        assert evidence["attempts"] == {"RESERVED": 1}, evidence
+        assert evidence["attempts"] == {}, evidence
         assert evidence["outbox"][0]["state"] == "LEASED", evidence
         assert evidence["outbox"][0]["last_error_code"] is None
-        assert evidence["http_responses"][
-            "cancel-before-send:409:INPUT_CANCEL_BEFORE_SEND_UNPROVEN"] == 1
+        assert not any(key.startswith("cancel-before-send:")
+                       for key in evidence["http_responses"])
         assert evidence["retry_errors"]["ConnectError:0"] == 1
 
 
