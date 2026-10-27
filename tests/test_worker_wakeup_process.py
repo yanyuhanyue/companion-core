@@ -8,6 +8,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -20,6 +21,7 @@ from companion.owner_authority_protocol import OwnerCapture, OwnerGrantPolicy
 from companion.store import after, utcnow
 from companion_delivery_protocol.authority import capture_signing_payload
 from tests.conftest import ingest, run
+from tests.support.worker_scan_progress import Child, read_scan_progress
 from tests.test_onebot_capture import pinned_plan, real_core_http
 from tests.test_owner_authority import activate
 from tests.test_owner_input import captured, inbound
@@ -41,7 +43,7 @@ async def start(
                 "ready": str(ready),
                 "report": str(report),
                 "release": str(directory / "release") if controlled else None,
-                "scan_progress": str(directory / "scans") if controlled else None,
+                "report_scans": controlled,
             },
             default=lambda v: v.get_secret_value() if isinstance(v, SecretStr) else str(v),
         ),
@@ -57,37 +59,59 @@ async def start(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    return process, ready, report
+    return Child(process, ready, report, reports_scans=controlled)
 
 
 async def ready(child):
-    process, path, _ = child
+    process, path = child.process, child.ready
     async with asyncio.timeout(15):
-        while not path.exists():
+        while True:
+            if child.reports_scans and child.progress_error is not None:
+                read_scan_progress(child)
+            if path.exists() and (not child.reports_scans or child.scans is not None):
+                return
             if process.returncode is not None:
-                _, error = await process.communicate()
-                raise AssertionError(error.decode(errors="replace"))
+                await alive(child)
             await asyncio.sleep(0.02)
 
 
 async def finish(child, *, code=0):
-    process, _, report = child
-    output, error = await asyncio.wait_for(process.communicate(), 15)
+    process, report = child.process, child.report
+    output, error = await asyncio.wait_for(child.collect(), 15)
     assert process.returncode == code, (
         output.decode(errors="replace"),
         error.decode(errors="replace"),
     )
+    if child.reports_scans or child.progress_error is not None:
+        try:
+            read_scan_progress(child)
+        except ValueError as failure:
+            failure.add_note(json.dumps({"stdout": output.decode(errors="replace"),
+                                         "stderr": error.decode(errors="replace")}))
+            raise
     result = json.loads(report.read_text(encoding="utf-8"))
     assert result["pid"] != os.getpid()
     assert result["watchers"] == result["closed_watchers"]
     return result
 
 
+async def alive(child):
+    process, report = child.process, child.report
+    if process.returncode is not None:
+        output, error = await child.collect()
+        raise AssertionError({
+            "returncode": process.returncode,
+            "stdout": output.decode(errors="replace"),
+            "stderr": error.decode(errors="replace"),
+            "report": json.loads(report.read_text(encoding="utf-8")) if report.exists() else None,
+        })
+
+
 async def close_child(child):
-    process = child[0]
+    process = child.process
     if process.returncode is None:
         process.kill()
-    await process.communicate()
+    await child.collect()
 
 
 def signed_input(core, template, key, number):
@@ -133,7 +157,7 @@ def test_four_native_entrypoints_use_shared_scan_and_unit_boundary(core, tmp_pat
             try:
                 return await operation(child)
             except TimeoutError as error:
-                process, ready_path, report_path = child
+                process, ready_path, report_path = child.process, child.ready, child.report
                 error.add_note(json.dumps({"role": role, "pid": process.pid,
                     "returncode": process.returncode, "ready": ready_path.exists(),
                     "report": report_path.exists()}))
@@ -199,16 +223,19 @@ def test_four_native_workers_cancel_waiters_before_failure_cleanup(
 
     async def controlled_start(core, directory, role, **options):
         directory.mkdir()
-        child = Process(role), directory / "ready", directory / "result.json"
+        process = Process(role)
+        child = SimpleNamespace(process=process, ready=directory / "ready",
+                                report=directory / "result.json", reports_scans=False,
+                                progress_error=None, collect=process.communicate)
         children.append(child)
         if phase == "finish":
-            child[1].write_text("ready", encoding="utf-8")
+            child.ready.write_text("ready", encoding="utf-8")
         return child
 
     async def controlled_ready(child):
-        ready_calls.append(child[0].role)
+        ready_calls.append(child.process.role)
         if phase == "ready":
-            await blocked(child[0].role)
+            await blocked(child.process.role)
         else:
             await original_ready(child)
 
@@ -393,17 +420,17 @@ def test_stop_api_wakes_independent_worker_and_lock_remains_exclusive(core, tmp_
                     duplicate = await start(core, tmp_path / "duplicate", duration=1)
                     denied = await finish(duplicate, code=2)
                     assert denied["watchers"] == 0
-                    scans = (directory / "scans").read_text(encoding="utf-8")
+                    scans = read_scan_progress(child)
                     stopped = await api.post(
                         "/internal/v1/live-text/stop", json={"window_sha256": plan.sha256}
                     )
                     assert stopped.status_code == 200, stopped.text
                     async with asyncio.timeout(5):
-                        while (directory / "scans").read_text(encoding="utf-8") == scans:  # noqa: ASYNC110 - independent worker progress
+                        while read_scan_progress(child) == scans:  # noqa: ASYNC110 - independent worker progress
                             await asyncio.sleep(0.02)
                 finally:
                     (directory / "release").touch()
-                    await child[0].communicate()
+                    await child.collect()
                 result = await finish(child)
                 assert result["steady"]["scans"] >= 1
                 assert result["total"]["provider_calls"] == 0

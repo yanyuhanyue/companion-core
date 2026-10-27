@@ -11,11 +11,20 @@ from companion import owner_authority, owner_input
 from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion.store import utcnow
 from tests.conftest import run
+from tests.support.worker_scan_progress import read_scan_progress
 from tests.test_meme_core import body, caption_environment, worker
 from tests.test_onebot_capture import real_core_http
 from tests.test_owner_authority import activate, prepare
 from tests.test_owner_input import captured
-from tests.test_worker_wakeup_process import close_child, finish, ready, signed_input, start, state
+from tests.test_worker_wakeup_process import (
+    alive,
+    close_child,
+    finish,
+    ready,
+    signed_input,
+    start,
+    state,
+)
 
 
 @pytest.mark.parametrize("fence", ["stop", "restore", "disabled"])
@@ -105,18 +114,18 @@ def test_owner_stop_and_activation_keep_one_independent_worker(
             child = await start(core, directory, duration=30, controlled=True)
             try:
                 await ready(child)
-                scans = int((directory / "scans").read_text())
+                scans = int(read_scan_progress(child))
                 if not initially_stopped:
                     await stop()
                     async with asyncio.timeout(5):
-                        while int((directory / "scans").read_text()) == scans:  # noqa: ASYNC110 - independent worker progress
-                            assert child[0].returncode is None
+                        while int(read_scan_progress(child)) == scans:  # noqa: ASYNC110 - independent worker progress
+                            await alive(child)
                             await asyncio.sleep(0.02)
-                stopped_scans = int((directory / "scans").read_text())
+                stopped_scans = int(read_scan_progress(child))
                 duplicate = await start(core, tmp_path / "duplicate", duration=1)
                 assert (await finish(duplicate, code=2))["watchers"] == 0
-                assert child[0].returncode is None
-                assert int((directory / "scans").read_text()) <= stopped_scans + 1
+                await alive(child)
+                assert int(read_scan_progress(child)) <= stopped_scans + 1
                 assert core.store.rows("SELECT * FROM model_usage") == []
                 assert core.store.rows("SELECT * FROM outbox") == []
 
@@ -143,7 +152,7 @@ def test_owner_stop_and_activation_keep_one_independent_worker(
                     headers={**bridge, "X-Idempotency-Key": "owner-worker-after-resume"})
                 assert response.status_code == 202, response.text
                 await state(core, response.json()["job_id"], seconds=5)
-                assert child[0].returncode is None
+                await alive(child)
                 (directory / "release").touch()
                 result = await finish(child)
                 assert result["total"]["provider_calls"] == 1

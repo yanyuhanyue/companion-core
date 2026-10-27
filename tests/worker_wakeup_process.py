@@ -15,6 +15,7 @@ from companion.config import Settings
 from companion.retrieval import SemanticIndex
 from companion.store import Store
 from companion.worker_schedule import ScanContext, UnitResult
+from tests.support.worker_scan_progress import emit_scan_progress
 
 
 def main():
@@ -57,6 +58,7 @@ def main():
         "native_units": 0,
     }
     start, watchers, wakeups = {}, [], []
+    progress_error = {}
     original_store = Store.__init__
 
     def trace(sql):
@@ -74,10 +76,7 @@ def main():
     native_scan = getattr(service, method)
 
     def report_scan():
-        path = Path(args["scan_progress"])
-        pending = path.with_suffix(".next")
-        pending.write_text(str(stats["scans"]), encoding="utf-8")
-        pending.replace(path)
+        emit_scan_progress(stats["scans"])
 
     async def scan(self, *a, **kw):
         stats["scans"] += 1
@@ -85,8 +84,13 @@ def main():
         if role == "life-worker":
             assert isinstance(result.result, UnitResult)
             stats["native_units"] += int(result.lane is not None)
-        if args.get("scan_progress"):
-            await asyncio.to_thread(report_scan)
+        if args.get("report_scans"):
+            try:
+                await asyncio.to_thread(report_scan)
+            except OSError as error:
+                progress_error.update(type=type(error).__name__, errno=error.errno,
+                                      winerror=getattr(error, "winerror", None))
+                raise
         return result
 
     setattr(service, method, scan)
@@ -197,6 +201,8 @@ def main():
         "watchers": len(watchers),
         "closed_watchers": closed,
     }
+    if progress_error:
+        result["progress_error"] = progress_error
     Path(args["report"]).write_text(json.dumps(result), encoding="utf-8")
     raise SystemExit(code)
 
