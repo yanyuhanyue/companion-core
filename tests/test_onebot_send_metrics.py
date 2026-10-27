@@ -1,7 +1,9 @@
 """Send-call diagnostics preserve delivery uncertainty and never export exception text."""
 
 import asyncio
+import gc
 import json
+import weakref
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ from companion_onebot_bridge import metrics
 from companion_onebot_bridge.outbound import _deliver_item
 from companion_onebot_bridge.spool import Spool
 from tests.conftest import run
+from tests.support.astrbot_delivery import deliver_expression, journal
 from tests.test_onebot_direct import config
 from tests.test_onebot_rpc_metrics import CANARY, records
 
@@ -126,3 +129,55 @@ def test_send_span_includes_preflight_and_provider_but_ends_before_cancellation_
     run(attempt(tmp_path, "lost_ack", clock))
     rows = [row for row in records(capsys) if row["stage"] == "t_onebot_send_result"]
     assert len(rows) == 1 and rows[0]["elapsed_ms"] == 12
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_swallowed_send_timeout_releases_astrbot_spool_without_cyclic_gc(
+    tmp_path, monkeypatch, capsys, enabled,
+):
+    monkeypatch.setenv("COMPANION_TELEMETRY", "1" if enabled else "0")
+    monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
+    item = {"message_id": "msg_" + "a" * 32, "lease_token": "lease_" + "b" * 32,
+        "lease_until": (datetime.now(UTC) + timedelta(minutes=1)).isoformat(),
+        "conversation_platform_session_key": "aiocqhttp:FriendMessage:10001",
+        "action_type": "qq.private.reply", "content": {"text": CANARY},
+        "delivery_key": "synthetic-lifetime"}
+    spool_ref = None
+
+    async def send(origin, chain):
+        raise httpx.ReadTimeout(CANARY)
+
+    def respond(request):
+        return httpx.Response(200, json={"state": "SENDING" if request.url.path.endswith(
+            "/begin-send") else "DELIVERY_UNCERTAIN"})
+
+    async def scenario():
+        nonlocal spool_ref
+        spool = journal(tmp_path)
+        spool_ref = weakref.ref(spool)
+        async with httpx.AsyncClient(base_url="http://private.invalid",
+            transport=httpx.MockTransport(respond),
+        ) as client:
+            return await deliver_expression(client, item, None, lambda text, image: text,
+                                            send, spool=spool)
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        result = run(scenario())
+        assert result["result"] == "DELIVERY_UNCERTAIN"
+        assert result["error_code"] == "BRIDGE_SEND_INTERRUPTED"
+        assert spool_ref() is None, "Swallowed send exception retained the operation's Spool"
+        reopened = journal(tmp_path)
+        try:
+            assert reopened.db.execute("SELECT state FROM results").fetchone()[0] == "accepted"
+        finally:
+            reopened.close()
+    finally:
+        # A failed regression still owns cleanup; release occurs after the assertion.
+        if spool_ref is not None and (retained := spool_ref()) is not None:
+            retained.close()
+        if was_enabled:
+            gc.enable()
+    rows = [row for row in records(capsys) if row["stage"] == "t_onebot_send_result"]
+    assert [row["error_class"] for row in rows] == ["timeout"] * enabled

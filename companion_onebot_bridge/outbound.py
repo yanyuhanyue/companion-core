@@ -179,16 +179,15 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
     spool.start_delivery(item)
     provider_id = None
     send_start = time.perf_counter_ns()
-    send_error = None
     try:
         try:
             provider_id = await onebot.send_content(item["content"]) if hasattr(
                 onebot, "send_content") else await onebot.send_text(item["content"]["text"])
         except BaseException as error:
-            send_error = error
+            send_finished(send_start, error)
             raise
-        finally:
-            send_finished(send_start, send_error)
+        else:
+            send_finished(send_start)
     except Exception:
         if guard is not None and await guard.cancel_before_send(item):
             return True
