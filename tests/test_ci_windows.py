@@ -24,9 +24,14 @@ def selection(files, event="pull_request", ref="refs/pull/1/merge", profile="ful
     "source_reader/browser.py", "tests/test_source_browser.py", "tests/test_new_feature.py",
     "companion/new_backend.py", "unknown/new.txt", "docs/unknown.json", "companion/NEW.py",
     "companion/console_api.py", "companion/console_cognition.py", "tsconfig.console.json",
+    "tests/test_console_static.py", "tests/test_owner_console.py",
+    "tests/test_console_cognition.py", "tests/test_console_browser_extra.py",
+    "tests/test_console_supplement_browser_new.py", "contracts/new.json",
+    "migrations/versions/new.py", "companion_delivery_protocol/__init__.py",
 ])
 def test_shared_platform_browser_and_unknown_paths_keep_both_windows_checks(path):
-    value = selection(["companion/console_static/app.css", path])
+    value = selection(["companion/console_static/app.css", "tests/test_console_browser.py",
+                       "tests/test_console_supplement_browser.py", path])
     assert value["product"] and value["browser"]
 
 
@@ -34,6 +39,11 @@ def test_shared_platform_browser_and_unknown_paths_keep_both_windows_checks(path
     (["companion/console_static/app.css"], False, True),
     (["companion/console_static/app.js", "docs/guide.md"], False, True),
     (["companion/console_static/app.js", "docs/qq-beta/p13-gates.json"], False, True),
+    (["tests/test_console_browser.py"], False, True),
+    (["tests/test_console_supplement_browser.py"], False, True),
+    (["tests/test_console_browser.py", "tests/test_console_supplement_browser.py"], False, True),
+    (["companion/console_static/app.js", "tests/test_console_browser.py",
+      "tests/test_console_supplement_browser.py", "docs/guide.md"], False, True),
     (["companion/expression.py", "tests/test_expression.py"], True, False),
     (["companion/diary.py", "docs/guide.md"], True, False),
     (["companion/diary.py", "companion/console_static/app.css"], True, True),
@@ -49,7 +59,8 @@ def test_only_reviewed_paths_can_reduce_one_surface(files, product, browser):
     ("pull_request", "unknown"), ("unknown", "refs/pull/1/merge"),
 ])
 def test_non_pr_events_keep_full_platform_checks(event, ref):
-    value = selection(["companion/console_static/app.css"], event, ref)
+    value = selection(["companion/console_static/app.css", "tests/test_console_browser.py",
+                       "tests/test_console_supplement_browser.py"], event, ref)
     assert value["product"] and value["browser"]
 
 
@@ -67,7 +78,8 @@ def test_docs_and_reuse_have_no_new_windows_jobs(profile):
 
 
 def test_allowlists_are_existing_files_and_do_not_hide_new_tests():
-    assert all((ROOT / name).is_file() for name in ci_policy.STATIC_UI | ci_policy.NON_BROWSER)
+    assert all((ROOT / name).is_file() for name in (
+        ci_policy.STATIC_UI | ci_policy.CONSOLE_BROWSER_TESTS | ci_policy.NON_BROWSER))
     assert not any(name.startswith("companion_voice_node/") for name in ci_policy.NON_BROWSER)
 
 
@@ -91,6 +103,17 @@ def test_last_ui_commit_cannot_hide_backend_changes_earlier_in_the_pr(tmp_path):
 
 @pytest.mark.parametrize("event,files,profile,count,browser", [
     ("pull_request", ["companion/console_static/app.css"], "selected", 1, True),
+    ("pull_request", ["tests/test_console_browser.py"], "selected", 1, True),
+    ("pull_request", ["companion/console_static/app.js",
+                      "tests/test_console_supplement_browser.py"], "selected", 1, True),
+    ("pull_request", ["companion/console_static/app.js", "tests/test_console_browser.py",
+                      "tests/test_console_supplement_browser.py"], "selected", 1, True),
+    ("pull_request", ["tests/test_console_supplement_browser.py",
+                      "companion/console_api.py"], "full", 8, True),
+    ("pull_request", ["tests/test_console_browser.py",
+                      "tests/test_console_browser_extra.py"], "full", 8, True),
+    ("pull_request", ["tests/test_console_browser.py",
+                      ".github/workflows/ci.yml"], "full", 8, True),
     ("pull_request", ["companion/expression.py"], "selected", 8, False),
     ("pull_request", ["companion/new.py"], "full", 8, True),
     ("pull_request", ["uv.lock"], "full", 8, True),
@@ -244,6 +267,9 @@ def test_failed_preflight_still_writes_machine_result(tmp_path, monkeypatch, pro
 @pytest.mark.parametrize("path,reason,skips", [
     ("companion/expression.py", "known-backend-only", ["browser-reader"]),
     ("companion/console_static/app.js", "known-static-ui-only", ["container", "plugin-native"]),
+    ("tests/test_console_browser.py", "known-static-ui-only", ["container", "plugin-native"]),
+    ("tests/test_console_supplement_browser.py", "known-static-ui-only",
+     ["container", "plugin-native"]),
 ])
 def test_selected_receipt_records_skips_and_cannot_mint_full_reuse(
     tmp_path, monkeypatch, path, reason, skips,

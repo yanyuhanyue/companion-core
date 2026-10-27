@@ -12,9 +12,12 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 FULL_JOBS = ("test", "container", "browser-reader", "plugin-native")
-# Only these existing UI assets can use console checks instead of backend suites.
-# New assets and every Python file fail open to full CI; no inferred import graph.
+# Only these existing Console assets and their browser regressions can use Console
+# checks instead of backend suites. Other Python files and new assets keep full CI.
 STATIC_UI = {"companion/console_static/" + name for name in ("app.css", "app.js", "index.html")}
+CONSOLE_BROWSER_TESTS = {
+    "tests/test_console_browser.py", "tests/test_console_supplement_browser.py",
+}
 # These existing backend-only files still run complete Ubuntu AND Windows suites,
 # but do not change the browser reader. Shared code, new tests and unknown paths
 # intentionally stay outside this narrow reviewed list.
@@ -140,7 +143,7 @@ def windows_selection(profile, event_name, ref, files):
         name in DOC_EVIDENCE or name.endswith(".md")
         and (name == "README.md" or name.startswith("docs/"))
     )]
-    if code and all(name in STATIC_UI for name in code):
+    if code and all(name in STATIC_UI | CONSOLE_BROWSER_TESTS for name in code):
         return {"product": False, "browser": True, "reason": "known-static-ui-only"}
     if code and all(name in NON_BROWSER for name in code):
         return {"product": True, "browser": False, "reason": "known-backend-only"}

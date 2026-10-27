@@ -30,7 +30,7 @@ a final UI-only commit cannot hide backend changes from earlier commits in that 
 
 | Complete non-document diff | Product tests and packaging | Browser | Containers / native plugins |
 |---|---|---|---|
-| Only the three existing Console static assets in `STATIC_UI` | One Ubuntu job: Console CSP/assets, owner API contracts, wheel/source package checks | Console interactions on Windows | Omitted |
+| Only the three existing Console static assets in `STATIC_UI` and/or the two browser tests in `CONSOLE_BROWSER_TESTS` | One Ubuntu job: Console CSP/assets, owner API contracts, wheel/source package checks | Console interactions on Windows | Omitted |
 | Only existing backend files/tests explicitly listed in `NON_BROWSER` | Complete Ubuntu and Windows suites, replay, smoke and packages | Omitted | Required |
 | Mixed surfaces, shared dependencies, packaging/deployment, PowerShell, process/path/lock, voice/bridge, new tests/files or any unknown path | Complete Ubuntu and Windows suites, replay, smoke and packages | Readers and Console on Windows | Required |
 
@@ -43,6 +43,12 @@ backend replay/smoke, reader browser tests or unchanged container/native-plugin 
 The existing backend-only selection and all full validation keep their previous coverage.
 Documentation privacy and registered evidence checks also run, so Markdown or evidence
 JSON accompanying a Console-only change retains its validators.
+
+The two existing Console browser test files can accompany static assets or select this
+same profile on their own. This exception covers exactly those filenames. Adding backend
+Python, locks, protocols, migrations, deployment, CI changes or a new/unknown test file to
+this Console diff requires full validation. The separate `NON_BROWSER` allowlist and all
+checks within each profile are unchanged.
 
 The exact small allowlists live in `scripts/ci_policy.py`. Generic Python changes are **not**
 assumed portable or browser-independent; they keep Windows unless explicitly listed. Even
