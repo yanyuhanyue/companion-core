@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import sqlite3
 import stat
 from datetime import UTC, datetime
 
@@ -163,9 +164,14 @@ class OwnerRuntime:
             return None
         if self.path.is_symlink() or not stat.S_ISREG(info.st_mode):
             return None
-        return (self.path.read_bytes(), tuple(row.values()), self.db.total_changes,
-                self.db.execute("PRAGMA schema_version").fetchone()[0],
-                self.db.execute("PRAGMA data_version").fetchone()[0])
+        try:
+            versions = (self.db.execute("PRAGMA schema_version").fetchone()[0],
+                        self.db.execute("PRAGMA data_version").fetchone()[0])
+        except sqlite3.DatabaseError:
+            # A caller-installed authorizer (e.g. the meme accounting drain) may deny
+            # these reads; such callers always get the original full verification.
+            return None
+        return (self.path.read_bytes(), tuple(row.values()), self.db.total_changes, *versions)
 
     def verify(self, *, active=True):
         """Revalidate custody; an unchanged journal and database reuse the last full proof.
