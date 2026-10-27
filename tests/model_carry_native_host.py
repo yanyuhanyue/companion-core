@@ -87,7 +87,8 @@ if mode == "api":
     class ReadyServer(uvicorn.Server):
         async def startup(self, sockets=None):
             await super().startup(sockets=sockets)
-            print("API_READY", flush=True)
+            port = self.servers[0].sockets[0].getsockname()[1]
+            print(f"API_READY {port}", flush=True)
 
     main_module.Server = ReadyServer
     sys.argv = ["companion", "serve", "--host", "127.0.0.1", "--port", str(bundle["port"])]

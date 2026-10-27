@@ -6,10 +6,12 @@ import copy
 import json
 import secrets
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -24,6 +26,212 @@ from scripts.verify_dev_compose import (
     validate,
     verify,
 )
+from tests.native_probe_worker import NativeWatch
+
+NATIVE_WORKER_HOST = "tests.native_probe_worker"
+NATIVE_TRACE_SIGNAL = getattr(signal, "SIGUSR1", None)
+
+
+async def capture_native_probe_workers(data, children, child_logs, redact):
+    """Append failure-only observations, preserving the original error and exit states."""
+    captures = data["worker_captures"] = []
+    for child in children:
+        role, path, confirmed_host = child_logs[child.pid]
+        if role != "worker":
+            continue
+        before = next(row for row in data["children"] if row["pid"] == child.pid)
+        capture = {"pid": child.pid, "natural_returncode": before["returncode"],
+                   "returncode_before_capture": child.returncode,
+                   "returncode_after_capture": child.returncode,
+                   "started_at": monotonic(), "traceback_observed": False}
+        captures.append(capture)
+        if child.returncode is not None:
+            capture["status"] = "already_exited"
+            continue
+        if not confirmed_host or NATIVE_TRACE_SIGNAL is None:
+            capture["status"] = "unavailable"
+            continue
+        offset = None
+        try:
+            offset = path.stat().st_size
+            capture["signal_attempted_at"] = monotonic()
+            child.send_signal(NATIVE_TRACE_SIGNAL)
+            capture["signal_sent"] = True
+            await asyncio.wait_for(child.wait(), 2)
+            capture["status"] = "exited_after_signal"
+        except Exception as error:
+            capture["status"] = (
+                "capture_timeout" if isinstance(error, TimeoutError) else "capture_error"
+            )
+            capture["error_type"] = type(error).__name__
+        finally:
+            capture["returncode_after_capture"] = child.returncode
+            capture["finished_at"] = monotonic()
+        if offset is not None:
+            try:
+                with path.open("rb") as output:
+                    output.seek(offset)
+                    text = redact(output.read().decode("utf-8", errors="replace"))
+                capture["output_tail"] = text[-8192:]
+                capture["output_truncated"] = len(text) > 8192
+                capture["traceback_observed"] = "(most recent call first):" in text
+            except OSError as error:
+                capture["log_error_type"] = type(error).__name__
+    return data
+
+
+@pytest.mark.parametrize("outcome,status", [
+    ("captured", "exited_after_signal"), ("exited", "already_exited"),
+    ("unconfirmed", "unavailable"), ("race", "capture_error"),
+    ("signal_error", "capture_error"), ("timeout", "capture_timeout"),
+    ("missing_log", "capture_error"), ("log_removed", "exited_after_signal"),
+])
+def test_native_probe_capture_preserves_failure_and_separates_exit_states(
+    tmp_path, monkeypatch, outcome, status,
+):
+    # Only a fake process uses SIGTERM here; Windows never signals a real worker.
+    monkeypatch.setattr(sys.modules[__name__], "NATIVE_TRACE_SIGNAL", signal.SIGTERM)
+    log = tmp_path / "worker.log"
+    log.write_text("original worker output\n", encoding="utf-8")
+    secret = "SYNTHETIC_CAPTURE_SECRET"
+    signals, cancelled = [], []
+
+    class Child:
+        pid = 1234
+        returncode = 7 if outcome == "exited" else None
+
+        def send_signal(self, signum):
+            signals.append(signum)
+            if outcome == "race":
+                self.returncode = 7
+                raise ProcessLookupError
+            if outcome == "signal_error":
+                raise OSError
+            with log.open("a", encoding="utf-8") as output:
+                output.write("x" * 9000 + secret + "\nThread (most recent call first):\n"
+                             '  File "tests/native_probe_worker.py", line 20 in watch\n')
+            if outcome == "log_removed":
+                log.unlink()
+
+        async def wait(self):
+            if outcome == "timeout":
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(True)
+            self.returncode = -int(signal.SIGTERM)
+            return self.returncode
+
+    child = Child()
+    data = {"stderr": "INDEPENDENT_WORKER_DID_NOT_COMPLETE original projection",
+            "returncode": 1, "timed_out": False,
+            "children": [{"role": "worker", "pid": child.pid,
+                          "returncode": child.returncode, "output_tail": "original output"}]}
+    original = copy.deepcopy(data)
+    if outcome == "missing_log":
+        log.unlink()
+    result = asyncio.run(capture_native_probe_workers(
+        data, [child], {child.pid: ("worker", log, outcome != "unconfirmed")},
+        lambda text: text.replace(secret, "[REDACTED]"),
+    ))
+    assert result is data
+    assert {key: data[key] for key in original} == original
+    capture, = data["worker_captures"]
+    assert capture["status"] == status
+    assert capture["natural_returncode"] == original["children"][0]["returncode"]
+    assert capture["returncode_before_capture"] == capture["natural_returncode"]
+    assert capture["returncode_after_capture"] == child.returncode
+    assert signals == ([] if outcome in {"exited", "unconfirmed", "missing_log"}
+                       else [signal.SIGTERM])
+    if outcome in {"captured", "log_removed"}:
+        assert capture["natural_returncode"] is None
+        assert capture["returncode_after_capture"] == -int(signal.SIGTERM)
+    if outcome == "captured":
+        assert capture["traceback_observed"] and capture["output_truncated"]
+        assert len(capture["output_tail"]) == 8192
+        assert secret not in str(data) and "[REDACTED]" in capture["output_tail"]
+        assert "original worker output" not in capture["output_tail"]
+    if outcome == "timeout":
+        assert cancelled == [True] and child.returncode is None
+    if outcome == "log_removed":
+        assert capture["log_error_type"] == "FileNotFoundError"
+
+
+def test_native_probe_watch_forwards_original_native_call_and_close():
+    result, stop = object(), object()
+    calls = []
+
+    class Native:
+        def watch(self, *args):
+            calls.append(args)
+            return result
+
+        def close(self):
+            calls.append("close")
+            return result
+
+    native = Native()
+    watch = NativeWatch(native)
+    assert watch.native is native
+    assert watch.watch(50, 50, 60000, stop) is result
+    assert watch.close() is result
+    assert calls == [(50, 50, 60000, stop), "close"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Native SIGUSR1 capture requires Linux")
+def test_native_probe_linux_signal_captures_named_watch_and_reaps_own_child(tmp_path):
+    async def run():
+        watched = tmp_path / "watched"
+        watched.mkdir()
+        log = tmp_path / "worker.log"
+        code = '''import faulthandler, signal, sys, threading
+from watchfiles._rust_notify import RustNotify
+from tests.native_probe_worker import NativeWatch
+signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+native = RustNotify([sys.argv[1]], False, False, 300, False, False)
+entered = threading.Event()
+class EnteredNative:
+    def watch(self, *args):
+        entered.set()
+        return native.watch(*args)
+    def close(self):
+        return native.close()
+watch = NativeWatch(EnteredNative())
+thread = threading.Thread(target=watch.watch, args=(50, 50, 60000, threading.Event()))
+thread.start()
+assert entered.wait(5)
+print("READY", flush=True)
+thread.join()
+'''
+        with log.open("wb") as output:
+            child = await asyncio.create_subprocess_exec(
+                sys.executable, "-B", "-c", code, str(watched), cwd=ROOT, env=environment(),
+                stdout=asyncio.subprocess.PIPE, stderr=output,
+            )
+        try:
+            assert await asyncio.wait_for(child.stdout.readline(), 5) == b"READY\n"
+            data = {"stderr": "original business failure", "returncode": 1,
+                    "children": [{"role": "worker", "pid": child.pid, "returncode": None}]}
+            await capture_native_probe_workers(
+                data, [child], {child.pid: ("worker", log, True)}, lambda text: text,
+            )
+            capture, = data["worker_captures"]
+            assert data["stderr"] == "original business failure"
+            assert data["children"][0]["returncode"] is None
+            assert capture["natural_returncode"] is None
+            assert capture["status"] == "exited_after_signal"
+            assert capture["returncode_after_capture"] == -int(signal.SIGUSR1)
+            assert capture["traceback_observed"]
+            assert "native_probe_worker.py" in capture["output_tail"]
+            assert " in watch" in capture["output_tail"]
+            assert child.returncode == await child.wait()
+        finally:
+            if child.returncode is None:
+                child.kill()
+            await asyncio.wait_for(child.communicate(), 5)
+
+    asyncio.run(run())
 
 
 @pytest.fixture(scope="module")
@@ -371,20 +579,25 @@ async def native_probe_contracts(tmp_path):
            "COMPANION_MEMORY_ENABLED": "false", "COMPANION_MODEL_KEY": "",
            "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
            "COMPANION_BACKUP_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}
-    children, child_logs = [], {}
+    children, child_logs, stages = [], {}, []
     log_dir = tmp_path / "child-logs"
     log_dir.mkdir()
 
-    def safe_text(text):
+    def redact(text):
         for name in ("COMPANION_BRIDGE_TOKEN", "COMPANION_BACKUP_KEY"):
             text = text.replace(env[name], "[REDACTED]")
-        return text[-8192:]
+        return text
 
-    def failure_data(process, output=b"", error=b"", *, timed_out=False):
-        return {
+    def safe_text(text):
+        return redact(text)[-8192:]
+
+    async def failure_data(process, output=b"", error=b"", *, timed_out=False):
+        stages.append({"stage": "failure_snapshot", "at": monotonic()})
+        data = {
             "pid": process.pid, "returncode": process.returncode, "timed_out": timed_out,
             "stdout": safe_text(output.decode(errors="replace")),
             "stderr": safe_text(error.decode(errors="replace")),
+            "stages": list(stages),
             "children": [
                 {"role": child_logs[child.pid][0], "pid": child.pid,
                  "returncode": child.returncode,
@@ -393,6 +606,11 @@ async def native_probe_contracts(tmp_path):
                 for child in children
             ],
         }
+        try:
+            return await capture_native_probe_workers(data, children, child_logs, redact)
+        except Exception as error:
+            data["capture_error_type"] = type(error).__name__
+            return data
 
     async def start(*args, role=None):
         if role is None:
@@ -400,29 +618,35 @@ async def native_probe_contracts(tmp_path):
                 sys.executable, "-B", *args, cwd=ROOT, env=env,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
+        confirmed_host = role == "worker" and sys.platform == "linux"
+        if confirmed_host:
+            args = ("-m", NATIVE_WORKER_HOST)
         log = log_dir / f"{len(child_logs)}-{role}.log"
         with log.open("wb") as output:
             process = await asyncio.create_subprocess_exec(
                 sys.executable, "-B", *args, cwd=ROOT, env=env,
                 stdout=output, stderr=asyncio.subprocess.STDOUT,
             )
-        child_logs[process.pid] = role, log
+        child_logs[process.pid] = role, log, confirmed_host
+        stages.append({"stage": role + "_spawned", "at": monotonic(), "pid": process.pid})
         return process
 
-    async def command(*args, expected=0):
+    async def command(*args, expected=0, probe=None):
+        stages.append({"stage": "command_started", "at": monotonic(), "probe": probe})
         process = await start(*args)
         try:
             try:
                 output, error = await asyncio.wait_for(process.communicate(), 30)
             except TimeoutError:
-                raise AssertionError(failure_data(process, timed_out=True)) from None
+                raise AssertionError(await failure_data(process, timed_out=True)) from None
             if process.returncode != expected:
-                raise AssertionError(failure_data(process, output, error))
+                raise AssertionError(await failure_data(process, output, error))
             return output.decode()
         finally:
             if process.returncode is None:
                 process.kill()
                 await process.communicate()
+            stages.append({"stage": "command_finished", "at": monotonic(), "probe": probe})
 
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -434,7 +658,7 @@ async def native_probe_contracts(tmp_path):
         http_code = smoke.HTTP_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
         http_code = http_code.replace("/data/companion.sqlite3", database.as_posix())
         for number in (1, 2, 3):
-            result = json.loads(await command("-c", http_code, str(number)))
+            result = json.loads(await command("-c", http_code, str(number), probe=number))
             assert result["independent_worker"] == "PASS"
         assert all(process.returncode is None for process in children)
     finally:
@@ -462,7 +686,7 @@ async def native_probe_contracts(tmp_path):
         ready = smoke.HTTP_READY_PROBE.replace("127.0.0.1:8765", f"127.0.0.1:{port}")
         assert (await command("-c", ready + "\nprint('PASS')")).strip() == "PASS"
         children.append(await start("-m", "companion", "worker", role="worker"))
-        result = json.loads(await command("-c", http_code, "4"))
+        result = json.loads(await command("-c", http_code, "4", probe=4))
         assert result["event"] == 4 and result["duplicate_job_usage_delivery"] == "PASS"
         assert all(process.returncode is None for process in children)
     finally:
@@ -478,10 +702,10 @@ def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeyp
     captured = {}
 
     async def fail_worker(*args, **kwargs):
-        if args[-3:] == ("-m", "companion", "worker"):
+        if args[2:] in (("-m", "companion", "worker"), ("-m", NATIVE_WORKER_HOST)):
             captured["token"] = kwargs["env"]["COMPANION_BRIDGE_TOKEN"]
             captured["backup_key"] = kwargs["env"]["COMPANION_BACKUP_KEY"]
-            args = (*args[:-3], "-c", "import os, sys; "
+            args = (*args[:2], "-c", "import os, sys; "
                     "print('SYNTHETIC_WORKER_BOOT_FAILURE ' + "
                     "os.environ['COMPANION_BRIDGE_TOKEN'] + ' ' + "
                     "os.environ['COMPANION_BACKUP_KEY'], file=sys.stderr, flush=True); "
@@ -519,3 +743,13 @@ def test_native_probe_failure_keeps_worker_exit_and_safe_state(tmp_path, monkeyp
     assert "[REDACTED]" in worker["output_tail"]
     assert captured["token"] not in str(data)
     assert captured["backup_key"] not in str(data)
+    capture, = data["worker_captures"]
+    assert capture["status"] == "already_exited"
+    assert capture["natural_returncode"] == capture["returncode_after_capture"] == 7
+    assert "signal_sent" not in capture
+    assert data["stages"][-1]["stage"] == "failure_snapshot"
+    assert data["stages"][-2]["stage"] == "command_started"
+    assert data["stages"][-2]["probe"] == 1
+    assert [row["at"] for row in data["stages"]] == sorted(
+        row["at"] for row in data["stages"]
+    )
