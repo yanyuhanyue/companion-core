@@ -214,7 +214,7 @@ class ReadingService:
             self._validate(attempt, validation)
         return {"valid": True}
 
-    def _evidence(self, attempt, row, context, result):
+    def _evidence(self, attempt, row, context, result, *, completed_at=None):
         if result.status == "SUCCESS" and (not result.used_requests or not result.used_bytes):
             raise CoreError("READER_USAGE_REQUIRED", 400)
         if result.source_grant is not None:
@@ -246,7 +246,9 @@ class ReadingService:
                 ):
                     raise CoreError("READER_TARGET_MISMATCH", 400)
             fetched = observation.fetched_at.astimezone(UTC).isoformat(timespec="microseconds")
-            if not after(row["started_at"], -5) <= fetched <= after(self.clock(), 5):
+            if not after(row["started_at"], -5) <= fetched <= after(
+                completed_at or self.clock(), 5,
+            ):
                 raise CoreError("READING_TIME_OUT_OF_RANGE", 400)
             discovered = row["operation"] == "discover"
             if (observation.result_status == "DISCOVERED") != discovered:
@@ -257,6 +259,53 @@ class ReadingService:
                               else getattr(evidence, "response_bytes", 0))
             if result.used_bytes is None or evidence_bytes > result.used_bytes:
                 raise CoreError("READING_EVIDENCE_USAGE_MISMATCH", 400)
+
+    def check_done(self, row, attempt, result_ids):
+        """Historical text receipt; caller checked DONE/URL identity and admitted IDs.
+
+        No current Goal/request lease is required or renewed. All reads borrow the
+        caller transaction. Missing/reconstructed-different evidence is unavailable.
+        """
+        from companion.reading_protocol import ReadObservation
+
+        s = self.store
+        if not s.db.in_transaction:
+            raise RuntimeError("historical receipt requires caller transaction")
+        if (row["goal_step_json"] == "{}" or row["operation"] != "read"
+            or len(result_ids) != 1 or row["state"] != "DONE" or attempt["state"] != "DONE"):
+            raise CoreError("ACTIVITY_SOURCE_UNAVAILABLE", 409)
+        context = ReadingContext.model_validate_json(attempt["context_json"])
+        policy = self.exploration.adapter(row["adapter_id"])
+        expected = self._context(row, policy.source)
+        expected = expected.model_copy(update={"source_event_ids": sorted(
+            set(expected.source_event_ids) - set(result_ids))})
+        if (context != expected or context.privacy_epoch > epoch(s)
+            or not row["started_at"] <= row["updated_at"] <= self.clock()):
+            raise CoreError("READING_PROVENANCE_MISMATCH", 409)
+        if policy.source == "web" and not set(json.loads(attempt["allowed_hosts_json"])) <= set(
+            self.settings.web_reading_hosts
+        ):
+            raise CoreError("READER_SCOPE_CHANGED", 409)
+        self._sources(row, context)
+        observations = self.exploration.observations
+        captured = observations.grants.captured(row)
+        if json.loads(attempt["source_grant_json"]) != (captured.snapshot() if captured else None):
+            raise CoreError("SOURCE_GRANT_REVISION_CHANGED", 409)
+        if captured or policy.source_grant_required:
+            observations.grants.require(row["adapter_id"], captured)
+        # Media protocol receipts need their own complete historical domain checker.
+        if s.one("SELECT 1 FROM bili_video_items WHERE request_id=?", (row["request_id"],)):
+            raise CoreError("ACTIVITY_SOURCE_UNAVAILABLE", 409)
+        items = observations.reading_receipt(row, context, captured, result_ids)
+        result = ReadObservation(schema_version=1, status="SUCCESS", observations=items,
+            lease_token=attempt["lease_token"], source_grant=captured,
+            used_requests=row["used_requests"], used_bytes=row["used_bytes"],
+            observed_requests=attempt["observed_requests"],
+            observed_bytes=attempt["observed_bytes"],
+            error_code=row["last_error_code"])
+        if digest(result.model_dump(mode="json")) != attempt["result_sha256"]:
+            raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+        self._evidence(attempt, row, context, result, completed_at=row["updated_at"])
 
     def complete(self, adapter_id, request_id, result):
         s, fingerprint, step = self.store, digest(result.model_dump(mode="json")), None

@@ -608,10 +608,25 @@ class GoalEngine:
             raise CoreError("GOALS_DISABLED", 403)
         self.validate_reflection(self.get(step["goal_id"])["reflection_suggestion_id"])
         self.validate_sources(self.step_source_ids(step["step_id"]))
+        self.validate_step_scope(self.get(step["goal_id"]), step)
+
+    @staticmethod
+    def validate_step_scope(goal, step):
+        """Read-only target containment; does not grant a lease or execution."""
         target = GoalScope.model_validate_json(step["scope_json"])
-        parent = GoalScope.model_validate_json(self.get(step["goal_id"])["scope_json"])
+        parent = GoalScope.model_validate_json(goal["scope_json"])
         if target.operation != "read_content" or target.url not in parent.targets():
             raise CoreError("GOAL_STEP_SCOPE_MISMATCH", 409)
+
+    @staticmethod
+    def validate_result_target(step, result):
+        """The original finish target test, without finishing or changing state."""
+        scope = GoalScope.model_validate_json(step["scope_json"])
+        if scope.url.rstrip("/") not in {
+            result["canonical_url"].rstrip("/"),
+            json.loads(result["evidence_json"]).get("requested_url", "").rstrip("/"),
+        }:
+            raise CoreError("GOAL_RESULT_TARGET_MISMATCH", 409)
 
     def finish(self, step, result_event_id):
         s, now = self.store, self.clock()
@@ -648,12 +663,7 @@ class GoalEngine:
                     (result_event_id, step["step_id"], step["lease_token"]))
                 if not matched:
                     raise CoreError("GOAL_RESULT_REQUEST_MISMATCH", 409)
-            scope = GoalScope.model_validate_json(step["scope_json"])
-            if scope.url.rstrip("/") not in {
-                result["canonical_url"].rstrip("/"),
-                json.loads(result["evidence_json"]).get("requested_url", "").rstrip("/"),
-            }:
-                raise CoreError("GOAL_RESULT_TARGET_MISMATCH", 409)
+            self.validate_result_target(step, result)
             s.execute(
                 "UPDATE goal_steps SET state='DONE',lease_token=NULL,outcome_event_id=?,"
                 "updated_at=? WHERE step_id=?",

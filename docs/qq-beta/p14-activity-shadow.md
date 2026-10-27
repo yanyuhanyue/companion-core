@@ -97,3 +97,22 @@ This follows the existing [context planner](p13-context-inspector.md),
 The implementation research reuses DSH's pinned
 [session-owned read-only job views](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/jobs/jobs-local/src/index.ts);
 that in-memory registry does not replace Core's durable execution, billing or ACK authority.
+
+## C2b-b1 native evidence helpers
+
+The independent helper slice reuses the original Goal execution projection, scope/target
+predicates and Reading/Observation integrity checks. Its internal SourceAdmissions comes
+from actual current-input custody and selected history/Memory/Reader checkpoint proofs.
+Each call borrows the caller transaction and checks the latest Ledger before and after
+reading. Goal roots, request inputs and derived observations must close inside that admitted
+scope before their bodies are read; job_sources and an old global Goal reference grant no scope.
+
+Historical text DONE requires the original context, captured source grant, native observation
+identity, content/append fingerprints and full original Reading result hash. An expired
+historical lease is not a new execution permission. UNKNOWN remains uncertain. Media protocol
+receipts, missing legacy evidence and content that cannot be reconstructed are unavailable
+as a whole candidate. The existing chat-only Reader entry keeps its original Goal-row rejection.
+
+These are pure evidence helpers. Core prompt assembly, final owner delivery, the activity
+materializer and ENABLED configuration remain at their existing behavior. This slice does
+not establish ENABLED or E4 acceptance.

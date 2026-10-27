@@ -77,15 +77,6 @@ def catalog(core, job, snapshots):
 
 
 def _reading_result(store, settings, clock, job, request_id, *, executing):
-    from companion.bili_video import BiliVideoService
-    from companion.exploration import ExplorationService
-    from companion.goals import GoalEngine
-    from companion.observation import ObservationService
-
-    # These existing services only hold references; no Core lifecycle or model is opened.
-    goals = GoalEngine(store, settings, None, clock)
-    observations = ObservationService(store, settings, clock)
-    exploration = ExplorationService(store, settings, observations, goals, None, None, clock)
     row = store.one("SELECT * FROM exploration_requests WHERE request_id=? AND redacted=0",
                          (request_id,))
     if not row or row["goal_step_json"] != "{}":
@@ -98,6 +89,21 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
         raise CoreError("CONVERSATION_READER_SOURCE_REQUIRED", 403)
     for event_id in owners:
         _read_owner_source(store, settings, clock, job, event_id, executing=executing)
+    return checked_result(store, settings, clock, row, sources)
+
+
+def checked_result(store, settings, clock, row, sources, *, authorize_results=None):
+    """Original integrity after root admission; Goal callers also gate derived IDs."""
+    from companion.bili_video import BiliVideoService
+    from companion.exploration import ExplorationService
+    from companion.goals import GoalEngine
+    from companion.observation import ObservationService
+
+    # These existing services only hold references; no Core lifecycle or model is opened.
+    goals = GoalEngine(store, settings, None, clock)
+    observations = ObservationService(store, settings, clock)
+    exploration = ExplorationService(store, settings, observations, goals, None, None, clock)
+    request_id = row["request_id"]
     policy = exploration.adapter(row["adapter_id"])
     captured = observations.grants.captured(row)
     if captured or policy.source_grant_required:
@@ -119,6 +125,11 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
             or any(not isinstance(value, str) for value in result_ids)
             or len(result_ids) != len(set(result_ids))):
             raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+        if authorize_results is not None:
+            authorize_results(result_ids)  # BEFORE video/evidence/body reads.
+            from companion.reading import ReadingService
+
+            ReadingService(store, settings, exploration, clock).check_done(row, attempt, result_ids)
         BiliVideoService(store, settings, None, clock=clock).check_result(request_id, result_ids)
         sources = sorted(set(sources) | set(result_ids))
         for item in store.rows(

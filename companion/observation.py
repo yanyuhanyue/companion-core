@@ -509,11 +509,8 @@ class ObservationService:
             raise CoreError("TOOL_RECEIPT_REQUIRED", 403)
         return occurred
 
-    def append(self, adapter_id, observation, *, reading=False):
-        adapter = self.policy(adapter_id)
-        if adapter.source == "web" and not reading:
-            raise CoreError("READER_PROTOCOL_REQUIRED", 409)
-        now, s = self.clock(), self.store
+    @staticmethod
+    def receipt_sha256(observation):
         receipt = observation.model_dump(
             mode="json", exclude={"event_id", "trace_id", "privacy_epoch"}
         )
@@ -522,7 +519,69 @@ class ObservationService:
         for field in ("reading", "article"):
             if receipt["payload"][field] is None:
                 receipt["payload"].pop(field)
-        fingerprint = digest(receipt)
+        return digest(receipt)
+
+    def reading_receipt(self, request, context, captured, result_ids):
+        """Read-only native text receipt after caller admits every ID and ancestor."""
+        from companion.reading_protocol import ObservationEvidence
+
+        items = []
+        for index, event_id in enumerate(result_ids):
+            meta = self.store.one(
+                "SELECT e.source,e.source_event_id,e.actor_id,e.event_type,e.privacy_scope,"
+                "e.trace_id,e.occurred_at,e.fingerprint,e.redacted,o.adapter_id,o.source_kind,"
+                "o.result_status,o.source_sha256,o.canonical_url,o.captured_privacy_epoch,"
+                "o.redacted AS observation_redacted FROM events e "
+                "JOIN observations o USING(event_id) "
+                "WHERE event_id=?", (event_id,))
+            provider = request["request_id"] + ":" + str(index)
+            if (not meta or meta["redacted"] or meta["observation_redacted"]
+                or (meta["source"], meta["source_event_id"], meta["actor_id"],
+                    meta["event_type"],
+                    meta["privacy_scope"], meta["trace_id"], meta["adapter_id"],
+                    meta["source_kind"],
+                    meta["result_status"], meta["captured_privacy_epoch"]) != (
+                    "observation." + context.source, request["adapter_id"] + ":" + provider,
+                    "companion", "content.observed", "private", request["request_id"],
+                    request["adapter_id"], "text", "FETCHED", context.privacy_epoch)):
+                raise CoreError("ACTIVITY_SOURCE_UNAVAILABLE", 409)
+            roots = {r["source_event_id"] for r in self.store.rows(
+                "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (event_id,))}
+            grants = {(r["grant_id"], r["grant_epoch"]) for r in self.store.rows(
+                "SELECT grant_id,grant_epoch FROM source_grant_events WHERE event_id=?",
+                (event_id,))}
+            if (roots != set(context.source_event_ids) or grants != (
+                {(captured.grant_id, captured.epoch)} if captured else set())):
+                raise CoreError("READING_PROVENANCE_MISMATCH", 409)
+            row = self.store.one("SELECT body_json,evidence_json FROM events JOIN observations "
+                                 "USING(event_id) WHERE event_id=?", (event_id,))
+            body, evidence = json.loads(row["body_json"]), json.loads(row["evidence_json"])
+            item = ObservationEvidence.model_validate({**evidence.pop("read_observation"),
+                "text": body["text"], "title": body["title"]})
+            payload = ObservationPayload.model_validate({**evidence, "text": body["text"],
+                "title": body["title"], "url": meta["canonical_url"]})
+            if ((item.url, item.original_url, item.result_status, item.content_sha256) != (
+                payload.url, payload.requested_url, body["result_status"], meta["source_sha256"])):
+                raise CoreError("OBSERVATION_DIGEST_MISMATCH", 409)
+            observation = ObservationEvent(schema_version=2, event_id=event_id,
+                event_type="content.observed", source=context.source, source_kind="text",
+                provider_event_id=provider, occurred_at=meta["occurred_at"],
+                trace_id=meta["trace_id"],
+                result_status="FETCHED", source_event_ids=context.source_event_ids,
+                source_sha256=meta["source_sha256"], privacy_epoch=context.privacy_epoch,
+                source_grant=captured, payload=payload)
+            self.validate(observation, self.policy(request["adapter_id"]))
+            if self.receipt_sha256(observation) != meta["fingerprint"]:
+                raise CoreError("CONVERSATION_READER_RESULT_CHANGED", 409)
+            items.append(item)
+        return items
+
+    def append(self, adapter_id, observation, *, reading=False):
+        adapter = self.policy(adapter_id)
+        if adapter.source == "web" and not reading:
+            raise CoreError("READER_PROTOCOL_REQUIRED", 409)
+        now, s = self.clock(), self.store
+        fingerprint = self.receipt_sha256(observation)
         source, external_id = (
             "observation." + adapter.source,
             adapter_id + ":" + observation.provider_event_id,
