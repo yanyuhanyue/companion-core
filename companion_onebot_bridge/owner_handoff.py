@@ -43,13 +43,35 @@ def carried(value, capture):
     model_carry.carried(value["input_state"], capture, value["carry_receipt"])
 
 
-def closed(runtime, records, references, *, carry_receipt=None):
+class _Tables:
+    """One read of the custody tables for every handoff checked in a single verify.
+
+    `closed` filters these rows exactly as its per-row queries did (same columns,
+    ORDER BY and primary-key lookups), so each handoff digest is unchanged. It is
+    only used while the caller holds the spool connection with no intervening write.
+    """
+
+    def __init__(self, db):
+        self.db = db
+        self.inputs = _rows(db, "SELECT * FROM window_inputs ORDER BY event_id")
+        self.attempts = _rows(db, "SELECT * FROM window_attempts ORDER BY message_id")
+        self.inbox = {row["key"]: row for row in _rows(db, "SELECT * FROM inbox")}
+        self.results = {row["message_id"]: row for row in _rows(db, "SELECT * FROM results")}
+        self.queues = {}
+        for table in ("automatic_recalls", "automatic_media"):
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+                columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})")]
+                self.queues[table] = ("authority_json" in columns,
+                                      _rows(db, f"SELECT * FROM {table}"))
+
+
+def closed(runtime, records, references, *, carry_receipt=None, tables=None):
     hashes = [wire.digest(ref) for ref in references]
-    placeholders = ",".join("?" for _ in hashes)
-    inputs = _rows(runtime.db, f"SELECT * FROM window_inputs WHERE plan_hash IN ({placeholders}) "
-                   "ORDER BY event_id", hashes)
-    attempts = _rows(runtime.db, "SELECT * FROM window_attempts "
-                     f"WHERE plan_hash IN ({placeholders}) ORDER BY message_id", hashes)
+    if tables is None:
+        tables = _Tables(runtime.db)
+    selected = set(hashes)
+    inputs = [row for row in tables.inputs if row["plan_hash"] in selected]
+    attempts = [row for row in tables.attempts if row["plan_hash"] in selected]
     receipts = {record["data"]["delivery"]["message_id"]: record["data"] for record in records
                 if record["kind"] == "OWNER_RECONCILED"}
     terminals = {record["data"]["event_id"]: record["data"] for record in records
@@ -71,15 +93,16 @@ def closed(runtime, records, references, *, carry_receipt=None):
                 if carry_receipt is None or retained["data"]["carry_receipt"] != carry_receipt:
                     raise ValueError("OWNER_MODEL_CARRY_REQUIRED")
                 current_carried.add(source["event_id"])
-        inbox.extend(_rows(runtime.db, "SELECT * FROM inbox WHERE key=?", (source["event_id"],)))
+        if source["event_id"] in tables.inbox:
+            inbox.append(tables.inbox[source["event_id"]])
     if carry_receipt is not None:
         model_carry.receipt(carry_receipt)
         if (carry_receipt["authority"] != references[-1]
             or current_carried != {item["event_id"] for item in carry_receipt["inputs"]}):
             raise ValueError("OWNER_MODEL_CARRY_INPUT_CHANGED")
     for attempt in attempts:
-        result = _rows(runtime.db, "SELECT * FROM results WHERE message_id=?",
-                       (attempt["message_id"],))
+        result = ([tables.results[attempt["message_id"]]]
+                  if attempt["message_id"] in tables.results else [])
         receipt = receipts.get(attempt["message_id"])
         if attempt["state"] in owner_native_resolution.UNCERTAIN:
             if receipt is None:
@@ -101,15 +124,14 @@ def closed(runtime, records, references, *, carry_receipt=None):
     queues = {}
     for table, done in (("automatic_recalls", {"ACCEPTED"}),
                         ("automatic_media", {"DONE", "CANCELLED"})):
-        if not runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
+        if table not in tables.queues:
             continue
-        columns = [row[1] for row in runtime.db.execute(f"PRAGMA table_info({table})")]
-        if "authority_json" in columns:
-            entries = [row for row in _rows(runtime.db, f"SELECT * FROM {table}")
+        has_authority, rows = tables.queues[table]
+        if has_authority:
+            entries = [row for row in rows
                        if row["authority_json"] and json.loads(row["authority_json"]) in references]
         else:
-            entries = _rows(runtime.db,
-                f"SELECT * FROM {table} WHERE plan_hash IN ({placeholders})", hashes)
+            entries = [row for row in rows if row["plan_hash"] in selected]
         if any(row["state"] not in done for row in entries):
             raise ValueError("OWNER_HANDOFF_QUEUE_RECONCILIATION_REQUIRED")
         queues[table] = sorted(entries, key=wire.canonical)
@@ -170,13 +192,32 @@ async def _carry_lookup(runtime, client, carry_sha256, successor_policy_sha256):
     return proof
 
 
+_CUSTODY_KINDS = frozenset({"OWNER_RECONCILED", "OWNER_INPUT_TERMINAL", "OWNER_INPUT_CARRIED"})
+
+
 def verify(runtime, records):
+    tables = None
+    digests = {}
+    custody_records = 0
+
+    def closed_once(index, carry_receipt=None):
+        # `closed` reads only these record kinds and the unchanged tables, so a
+        # PREPARED/REBOUND pair over the same prefix shares one digest.
+        nonlocal tables
+        tables = tables or _Tables(runtime.db)
+        key = (custody_records, len(references), wire.digest(carry_receipt))
+        if key not in digests:
+            digests[key] = closed(runtime, records[:index], references,
+                                  carry_receipt=carry_receipt, tables=tables)
+        return digests[key]
+
     references = []
     prepared = None
     stopped = False
     terminal_events, carried_events = set(), set()
     for index, record in enumerate(records):
         value = record["data"]
+        custody_records += record["kind"] in _CUSTODY_KINDS
         if record["kind"] == "OWNER_BOUND":
             references.append(value["authority"])
         elif record["kind"] == "OWNER_STOPPED":
@@ -201,14 +242,13 @@ def verify(runtime, records):
             context = SimpleNamespace(authority=references[-1])
             if (not stopped or set(value) != {"authority", "core_stop", "custody_sha256"}
                 or value["authority"] != references[-1]
-                or value["custody_sha256"] != closed(runtime, records[:index], references)):
+                or value["custody_sha256"] != closed_once(index)):
                 raise ValueError("OWNER_HANDOFF_CUSTODY_CHANGED")
             owner_native_resolution._confirmation(context, value["core_stop"])
             prepared = record
         elif record["kind"] == "OWNER_CARRY_HANDOFF_PREPARED":
             proof = _carry_prepared(value, references[-1])
-            if (not stopped or value["custody_sha256"] != closed(
-                    runtime, records[:index], references, carry_receipt=proof)):
+            if not stopped or value["custody_sha256"] != closed_once(index, proof):
                 raise ValueError("OWNER_HANDOFF_CUSTODY_CHANGED")
             prepared = record
         elif record["kind"] == "OWNER_REBOUND":
@@ -219,8 +259,7 @@ def verify(runtime, records):
                 or value["prepared_sha256"] != wire.digest(prepared)
                  or proof is not None and value["authority"]["policy_sha256"] != (
                      proof["successor_policy_sha256"])
-                 or value["custody_sha256"] != closed(
-                     runtime, records[:index], references, carry_receipt=proof)):
+                 or value["custody_sha256"] != closed_once(index, proof)):
                 raise ValueError("OWNER_HANDOFF_CUSTODY_CHANGED")
             references.append(value["authority"])
             stopped, prepared = False, None
