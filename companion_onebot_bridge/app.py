@@ -181,10 +181,21 @@ async def transfer_media(pump, stop):
     try:
         while not stop.is_set():
             pump.window.verify()
-            pump.tick()
-            if pump.task is not None:
-                await pump.task
-            else:
+            try:
+                pump.tick()
+                if pump.task is not None:
+                    await pump.task
+                else:
+                    await pause(stop, pump.window.config.poll_seconds)
+            except (TimeoutError, httpx.TransportError):
+                if not hasattr(pump.window, "authority"):
+                    raise
+                # The failed transfer has unwound before this await returns. Drop
+                # its task, preserving the durable phase for native reconciliation;
+                # never repeat a claim, download or upload from this error handler.
+                await pump.close()
+                if pump.metrics is not None:
+                    pump.metrics.emit("media_unavailable")
                 await pause(stop, pump.window.config.poll_seconds)
     finally:
         await pump.close()
