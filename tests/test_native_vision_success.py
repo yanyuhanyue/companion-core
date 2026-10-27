@@ -28,8 +28,10 @@ def test_new_images_reach_vision_reply_ack_and_following_text(
     core, tmp_path, monkeypatch, count,
 ):
     async def scenario():
-        async with native_host(core, tmp_path, monkeypatch, count=count, history=True) as values:
+        async with native_host(core, tmp_path, monkeypatch, count=count,
+                               history=True, poll_seconds=1.0) as values:
             active, inbound, handshakes, sends, calls = values
+            assert active.config.poll_seconds == 1.0
             retries, responses, rpc = observe_delivery(active, monkeypatch)
             originals = [picture(color) for color in ("red", "blue", "green")][:count]
             downloads, uploads = [], []

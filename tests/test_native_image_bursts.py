@@ -62,7 +62,7 @@ async def bridge_tasks(active, pump):
 
 
 @asynccontextmanager
-async def native_host(core, tmp_path, monkeypatch, *, count, history=False):
+async def native_host(core, tmp_path, monkeypatch, *, count, history=False, poll_seconds=None):
     inbound = asyncio.Queue()
 
     async def source(ws):
@@ -83,11 +83,14 @@ async def native_host(core, tmp_path, monkeypatch, *, count, history=False):
         update={"max_images_per_event": count})
     scope["paid_options"]["image_input"] = scope["paid_options"]["image_input"].model_copy(
         update={"max_images_per_request": count})
+    bridge_options = {"rich_input_scope": "references_v1"}
+    if poll_seconds is not None:
+        bridge_options["poll_seconds"] = poll_seconds
     async with host(core, tmp_path, source,
         core_options={**scope["core_options"], "rich_input_scope": "references_v1"},
         paid_options=scope["paid_options"], purposes=("chat", "image", "content",
             *(('history',) if history else ())),
-        bridge_options={"rich_input_scope": "references_v1"}, independent_api=True,
+        bridge_options=bridge_options, independent_api=True,
     ) as (active, handshakes, sends, calls):
         core.content.options = core.settings.content
         yield active, inbound, handshakes, sends, calls
