@@ -131,17 +131,43 @@ a build. Directory permissions may differ for the owner-only migration-directory
 | Identity | Meaning |
 |---|---|
 | Commit, tree, run ID and attempt | Original full CI source and all fourteen successful jobs |
-| `image_id` / `config_digest` | Actual Docker image configuration ID on `linux/amd64` |
+| `image_id` | Actual producer-local Docker ID; classic stores use config IDs, containerd uses manifest/index IDs |
+| `config_digest` | Portable SHA256 of the original saved image configuration bytes |
+| `archive_descriptor` / `platform_manifest_descriptor` | Validated OCI root and single `linux/amd64` manifest descriptors |
+| `consumer_local_image_id` | Actual verified Docker ID on the receiving daemon, recorded in the load receipt |
 | Archive SHA256 and bytes | Exact compressed Docker archive to download and load |
 | Actions artifact ID and digest | Immutable uploaded ZIP identity and transport checksum |
 | `registry_manifest_digest` | Unset; this slice does not push to a registry |
 
-The image configuration ID is not a registry manifest digest. The small `ci-container-images-*`
+The configuration digest, saved OCI manifest identity and local daemon ID have separate roles.
+The producer derives portable identity from the original save archive rather than treating
+`docker inspect`'s ID as a configuration hash. Descriptor hashes and byte sizes bind the
+single-image OCI index, manifest, raw config and ordered layers. If the Docker-compatible
+`manifest.json` is present, its config hash and ordered layer identities must describe that
+same image. Unknown platforms and ambiguous images fail before any daemon operation.
+Classic and containerd stores can report different local IDs for identical saved image content,
+as explained in [Moby's storage-backend discussion](https://github.com/moby/moby/issues/51934)
+and [Docker's containerd image-store documentation](https://docs.docker.com/engine/storage/containerd/).
+The archive parser follows the standard [OCI layout](https://github.com/opencontainers/image-spec/blob/v1.1.1/image-layout.md),
+[descriptors](https://github.com/opencontainers/image-spec/blob/v1.1.1/descriptor.md)
+and [manifest](https://github.com/opencontainers/image-spec/blob/v1.1.1/manifest.md).
+The small `ci-container-images-*`
 artifact binds the four separate `runtime-image-{core,bridge,reader,ui}-*` archives; `ci-full-*`
 and `ci-validation-*` reference that metadata. A selected run cannot emit reusable image proof.
 Missing, expired, changed, ambiguous or incomplete image evidence makes main run full validation.
 All retained artifacts expire after seven days. Reuse and consumption retain the existing
 24-hour freshness requirement for the original full run.
+
+The default `load` command always performs Docker load, including in producer CI where the
+images already exist, so native archive codec validation remains exercised. A deployment resume
+may explicitly use `load container-images.json --reuse-existing`. It first authenticates the
+original archive, lists exact local IDs and inspects the matching archive-bound ID. Only a
+verified existing image is skipped; absent images are loaded and verified through the same path.
+Daemon errors or inconsistent identity never authorize a fallback load. The receipt reports
+`action` as `already_present` or `loaded`, the producer ID, portable config digest, archive
+descriptors and `consumer_local_image_id`. No tags, registry references or daemon configuration
+are changed. Original retained metadata and archives remain unchanged; the deployment pins the
+reviewed consumer-tool revision separately from the original full-run image source.
 
 BuildKit's local cache backend and the existing pinned Actions cache preserve dependency
 layers. The dependency installation steps already precede application COPY steps in the
@@ -153,10 +179,10 @@ to UI, and its four public assets plus the public Nginx configuration. Python-im
 rules are unchanged. A base-image or environment change requires updating this reviewed boundary.
 
 `container-images.json` records actual per-image raw/compressed sizes, save/hash,
-compression/hash and build/inspect durations. `runtime-image-load-*` preserves local load
+compression/hash, archive-identity validation and build/inspect durations. `runtime-image-load-*` preserves local load
 timings. Native Actions upload-step timestamps and logs supply upload duration and transport
 size; the consumer records download and load/inspect time. Measurements are produced by the
-actual Linux run, not estimated locally. `--previous-run` compares actual verified image IDs
+actual Linux run, not estimated locally. `--previous-run` compares portable configuration digests
 and platforms, so an unchanged image is identified by content rather than a source label.
 
 The read-only consumer and its deployment boundary are documented in

@@ -14,6 +14,7 @@ import yaml
 
 from scripts import ci_container_artifacts as images
 from scripts import ci_reuse
+from tests.test_ci_container_identity import oci_archive
 from tests.test_ci_policy import commit, git
 
 
@@ -41,7 +42,8 @@ def runtime_evidence(record):
              "artifacts": [{"id": 301, "name": "ci-container-images-2", "expired": False}],
              "payloads": {}}
     for number, name in enumerate(images.COMPONENTS, 302):
-        data = gzip.compress(("SYNTHETIC_DOCKER_TRANSPORT_" + name).encode())
+        raw, identity = oci_archive(name)
+        data = gzip.compress(raw)
         payload = zipped(name + ".tar.gz", data)
         ref = {"id": number, "name": f"runtime-image-{name}-2",
                "digest": "sha256:" + hashlib.sha256(payload).hexdigest()}
@@ -49,8 +51,9 @@ def runtime_evidence(record):
         state["payloads"][number] = payload
         state["metadata"]["components"][name] = {
             "component": name, "commit": record["commit"], "tree": record["tree"],
-            "image_id": "sha256:" + str(number - 301) * 64,
-            "config_digest": "sha256:" + str(number - 301) * 64,
+            "image_id": identity["config_digest"],
+            "config_digest": identity["config_digest"],
+            "rootfs_diff_ids": identity["rootfs_diff_ids"],
             "platform": "linux/amd64", "registry_manifest_digest": None, "artifact": ref,
             "base_image": images.COMPONENTS[name].get("base"),
             "dependency_lock_sha256": None if name == "ui" else "a" * 64,
@@ -117,6 +120,23 @@ def test_retained_metadata_rejects_tamper_incomplete_and_unbound_images(retained
         verify(retained)
 
 
+@pytest.mark.parametrize("unbound", [False, True])
+def test_metadata_binds_containerd_producer_separately_from_portable_config(retained, unbound):
+    _, identity = oci_archive("core")
+    component = retained["metadata"]["components"]["core"]
+    component.update(identity)
+    component["image_id"] = ("sha256:" + "f" * 64 if unbound else
+                             identity["archive_descriptor"]["digest"])
+    seal_metadata(retained)
+    if unbound:
+        with pytest.raises(ValueError, match="COMPONENT_INVALID"):
+            verify(retained)
+    else:
+        verified = verify(retained)["components"]["core"]
+        assert verified["image_id"] != verified["config_digest"]
+        assert verified["config_digest"] == identity["config_digest"]
+
+
 def test_consumer_checks_hashes_then_loads_exact_id_without_build(retained, tmp_path):
     component = verify(retained)["components"]["core"]
     calls = []
@@ -128,19 +148,22 @@ def test_consumer_checks_hashes_then_loads_exact_id_without_build(retained, tmp_
             return None
         if arguments[:3] == ["docker", "image", "load"]:
             return b"loaded"
+        if arguments[:3] == ["docker", "image", "ls"]:
+            return (component["image_id"] + "\n").encode()
         assert arguments == ["docker", "image", "inspect", component["image_id"]]
         return json.dumps([{"Id": component["image_id"], "Os": "linux",
-                            "Architecture": "amd64"}]).encode()
+                            "Architecture": "amd64", "RootFS": {
+                                "Layers": component["rootfs_diff_ids"]}}]).encode()
 
     archive, seconds = images.download_archive("synthetic/repository", component, tmp_path,
                                                 runner=runner)
-    assert seconds >= 0 and images.load_archive(component, archive, runner=runner) == (
-        component["image_id"])
-    assert len(calls) == 3 and not any("build" in call for call in calls)
+    loaded = images.load_archive(component, archive, runner=runner)
+    assert seconds >= 0 and loaded["consumer_local_image_id"] == component["image_id"]
+    assert len(calls) == 4 and not any("build" in call for call in calls)
     archive.write_bytes(archive.read_bytes() + b"changed")
     with pytest.raises(ValueError, match="ARCHIVE_DIGEST_CHANGED"):
         images.load_archive(component, archive, runner=runner)
-    assert len(calls) == 3  # A bad archive never reaches the daemon.
+    assert len(calls) == 4  # A bad archive never reaches the daemon.
 
 
 @pytest.mark.parametrize("fault", ["zip-digest", "loaded-id", "loaded-platform"])
@@ -154,11 +177,14 @@ def test_consumer_fails_closed_without_a_rebuild_fallback(retained, tmp_path, fa
             output.write(retained["payloads"][302] + (b"changed" if fault == "zip-digest" else b""))
         elif "load" in arguments:
             return b"loaded"
+        elif "ls" in arguments:
+            return (component["image_id"] + "\n").encode()
         else:
             return json.dumps([{"Id": "sha256:" + "f" * 64 if fault == "loaded-id"
                                else component["image_id"], "Os": "linux",
                                "Architecture": "arm64" if fault == "loaded-platform"
-                               else "amd64"}]).encode()
+                               else "amd64", "RootFS": {
+                                   "Layers": component["rootfs_diff_ids"]}}]).encode()
 
     with pytest.raises(ValueError, match="DIGEST_CHANGED|IDENTITY_CHANGED"):
         archive, _ = images.download_archive("synthetic/repository", component, tmp_path,
@@ -311,15 +337,20 @@ def test_ui_public_context_rejects_retargeted_base_and_added_private_copy(tmp_pa
 
 def test_export_captures_validated_image_ids_and_actual_archive_sizes(tmp_path, monkeypatch):
     monkeypatch.setattr(images, "source_identity", lambda _: {"commit": "a", "tree": "b"})
-    monkeypatch.setattr(images, "inspect_image", lambda name, **_: {"Id": "sha256:" + name})
+    archives = {name: oci_archive(name) for name in images.COMPONENTS}
     captured = {name: {"component": name, "commit": "a", "tree": "b",
-                       "image_id": "sha256:" + name} for name in images.COMPONENTS}
+                       "image_id": identity["archive_descriptor"]["digest"],
+                       "rootfs_diff_ids": identity["rootfs_diff_ids"], "platform": "linux/amd64"}
+                for name, (_, identity) in archives.items()}
+    monkeypatch.setattr(images, "inspect_image", lambda name, **_: {
+        "Id": captured[name]["image_id"]})
     calls = []
 
     def save(arguments):
         calls.append(arguments)
         assert arguments[:3] == ["docker", "image", "save"]
-        Path(arguments[4]).write_bytes(b"SYNTHETIC_ARCHIVE" * 100)
+        name, = [name for name, built in captured.items() if built["image_id"] == arguments[-1]]
+        Path(arguments[4]).write_bytes(archives[name][0])
 
     metadata = images.export_images(captured, tmp_path, runner=save)
     assert len(calls) == len(images.COMPONENTS) and all(call[-1] == captured[name]["image_id"]
@@ -327,9 +358,11 @@ def test_export_captures_validated_image_ids_and_actual_archive_sizes(tmp_path, 
     for name, component in metadata["components"].items():
         compressed = tmp_path / (name + ".tar.gz")
         assert component["archive"]["bytes"] == compressed.stat().st_size
-        assert component["archive"]["uncompressed_bytes"] == 1700
+        assert component["archive"]["uncompressed_bytes"] == len(archives[name][0])
+        assert component["config_digest"] == archives[name][1]["config_digest"]
+        assert component["config_digest"] != component["image_id"]
         assert not (tmp_path / (name + ".tar")).exists()
-    captured["core"]["image_id"] = "changed-after-smoke"
+    monkeypatch.setattr(images, "inspect_image", lambda name, **_: {"Id": "changed-after-smoke"})
     with pytest.raises(ValueError, match="CHANGED_AFTER_VALIDATION"):
         images.export_images(captured, tmp_path, runner=save)
     assert len(calls) == len(images.COMPONENTS)
@@ -347,14 +380,55 @@ def test_local_load_checks_all_exported_archives_before_upload(retained, tmp_pat
         calls.append(arguments)
         if "load" in arguments:
             return b"loaded"
+        if "ls" in arguments:
+            return ("\n".join(c["image_id"] for c in retained["metadata"]["components"].values())
+                    + "\n").encode()
         assert arguments[:3] == ["docker", "image", "inspect"]
-        return json.dumps([{"Id": arguments[-1], "Os": "linux",
-                            "Architecture": "amd64"}]).encode()
+        component, = [c for c in retained["metadata"]["components"].values()
+                      if c["image_id"] == arguments[-1]]
+        return json.dumps([{"Id": arguments[-1], "Os": "linux", "Architecture": "amd64",
+                            "RootFS": {"Layers": component["rootfs_diff_ids"]}}]).encode()
 
     result = images.load_local(tmp_path / images.MANIFEST, runner=runner)
-    assert set(result) == set(images.COMPONENTS) and len(calls) == 2 * len(images.COMPONENTS)
+    assert set(result) == set(images.COMPONENTS) and len(calls) == 3 * len(images.COMPONENTS)
     assert not any("build" in command for command in calls)
     assert json.loads((tmp_path / "local-load.json").read_text())["build_performed"] is False
+    assert all(row["action"] == "loaded" for row in result.values())
+
+
+def test_resume_keeps_existing_core_and_loads_only_three_missing_images(retained, tmp_path):
+    images.write_json(tmp_path / images.MANIFEST, retained["metadata"])
+    components = retained["metadata"]["components"]
+    identities = {name: oci_archive(name)[1] for name in components}
+    native_ids = {name: identity["archive_descriptor"]["digest"]
+                  for name, identity in identities.items()}
+    present, loaded = {native_ids["core"]}, []
+    for name, component in components.items():
+        data = retained["payloads"][component["artifact"]["id"]]
+        with zipfile.ZipFile(io.BytesIO(data)) as payload:
+            (tmp_path / (name + ".tar.gz")).write_bytes(payload.read(name + ".tar.gz"))
+
+    def runner(command):
+        if "ls" in command:
+            return ("\n".join(sorted(present)) + "\n").encode()
+        if "load" in command:
+            name = Path(command[-1]).name.split(".")[0]
+            assert name != "core"
+            loaded.append(name)
+            present.add(native_ids[name])
+            return b"loaded"
+        name, = [name for name, value in native_ids.items() if value == command[-1]]
+        return json.dumps([{"Id": native_ids[name], "Os": "linux", "Architecture": "amd64",
+            "RootFS": {"Layers": components[name]["rootfs_diff_ids"]},
+            "Descriptor": identities[name]["archive_descriptor"]}]).encode()
+
+    before = (tmp_path / images.MANIFEST).read_bytes()
+    result = images.load_local(tmp_path / images.MANIFEST, runner=runner, reuse_existing=True)
+    assert result["core"]["action"] == "already_present"
+    assert loaded == [name for name in components if name != "core"]
+    assert all(row["consumer_local_image_id"] == native_ids[name] for name, row in result.items())
+    assert all("image_id" not in row for row in result.values())
+    assert (tmp_path / images.MANIFEST).read_bytes() == before
 
 
 def test_build_uses_public_identity_and_native_compose_cache_without_second_build(
