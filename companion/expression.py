@@ -172,10 +172,10 @@ class ExpressionEngine:
             if (offer is None or not offer.candidates
                 or not self._selection_allowed(event_id, offer.offer_key)):
                 return rules, "本轮只回复文字，不添加表情标记。"
-            return rules + (
+            return rules, (
                 "如有合适候选，只在回复末尾附一个⬡候选ID⬡；也可选择none并省略标记。"
                 "只能使用本轮列表的candidate_id，不能用类别名或自造ID。"
-            ), "\n候选数据：\n" + encode(offer.model_dump())
+            ) + "\n候选数据：\n" + encode(offer.model_dump())
         return (
             "表达自然，按当下内容选择长短，不必固定开场、重复总结或刻意卖萌。"
             "表达风格不改变事实、权限和承诺；不要把表达选择当成真实情绪。"
