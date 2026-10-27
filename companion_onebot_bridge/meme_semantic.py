@@ -61,6 +61,18 @@ def managed(db, sha):
     )
 
 
+def retain_usage_projection(db, request_sha, previous, receipt):
+    """Single monotonic projection writer; callers own original guards and transaction."""
+    if not db.in_transaction:
+        raise RuntimeError("MEME_CALL_REQUIRES_TRANSACTION_BOUNDARY")
+    if previous and (receipt is None
+                     or not receipt_follows(parse(UsageReceipt, previous), receipt)):
+        raise ValueError("MEME_CAPTION_USAGE_CONFLICT")
+    if receipt is not None:
+        db.execute("UPDATE meme_caption_bindings SET usage_json=? WHERE request_sha=?",
+                   (receipt.model_dump_json(), request_sha))
+
+
 def retain_usage(catalog, request_sha, raw):
     """Retain original liability before any current content/source authorization."""
     receipt = parse(UsageReceipt, raw["usage"]) if raw.get("usage") is not None else None
@@ -77,14 +89,7 @@ def retain_usage(catalog, request_sha, raw):
             binding[1] or raw.get("state") not in {"QUEUED", "FAILED", "CANCELLED"}
         ):
             raise ValueError("MEME_CAPTION_USAGE_REQUIRED")
-        if binding[1] and not receipt_follows(parse(UsageReceipt, binding[1]), receipt):
-            raise ValueError("MEME_CAPTION_USAGE_CONFLICT")
-        # Accounting survives malformed semantics, deletion and a late cancelled result.
-        if receipt is not None:
-            catalog.db.execute(
-                "UPDATE meme_caption_bindings SET usage_json=? WHERE request_sha=?",
-                (receipt.model_dump_json(), request_sha),
-            )
+        retain_usage_projection(catalog.db, request_sha, binding[1], receipt)
     return binding
 
 

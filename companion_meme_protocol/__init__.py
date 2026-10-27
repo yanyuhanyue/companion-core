@@ -144,6 +144,45 @@ class UsageReceipt(Contract):
         return self
 
 
+class CaptionResponsibility(Contract):
+    """Original accounting facts; never a caption, execution grant or retirement permission."""
+
+    version: Literal[1]
+    job_id: str = Field(pattern=r"^job_[a-f0-9]{32}$")
+    event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
+    request_sha256: SHA
+    asset_sha256: SHA
+    source_evidence_sha256: SHA
+    cache_key: SHA
+    authority_sha256: SHA
+    job_state: Literal["QUEUED", "RUNNING", "RETRY_WAIT", "SUCCEEDED", "FAILED", "CANCELLED"]
+    body_erased: bool
+    liability_kind: Literal["USAGE", "NO_ADMISSION"]
+    usage_owner_job_id: str | None = Field(pattern=r"^job_[a-f0-9]{32}$")
+    usage: UsageReceipt | None
+    lineage_sha256: SHA
+    erasure_ledger_sha256: SHA
+    budget_journal_id_sha256: SHA
+    budget_journal_head_sha256: SHA
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def version_is_integer(cls, value):
+        if type(value) is not int:
+            raise ValueError("MEME_SCHEMA_VERSION_INVALID")
+        return value
+
+    @model_validator(mode="after")
+    def original_liability(self):
+        if self.liability_kind == "NO_ADMISSION":
+            if (self.usage is not None or self.usage_owner_job_id is not None
+                or self.job_state not in {"FAILED", "CANCELLED"}):
+                raise ValueError("MEME_RESPONSIBILITY_INVALID")
+        elif self.usage is None or self.usage_owner_job_id is None:
+            raise ValueError("MEME_RESPONSIBILITY_INVALID")
+        return self
+
+
 class CaptionOutcome(Contract):
     schema_version: Literal[1]
     job_id: str = Field(pattern=r"^job_[a-f0-9]{32}$")

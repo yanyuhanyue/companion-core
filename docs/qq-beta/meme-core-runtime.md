@@ -198,6 +198,41 @@ SENT/CANCELLED 转移、原 NOT_SENT 证明及晚到 ACK；重复 ACK 不改原 
 事实，立即回退仅限对账后的兼容 text-only 状态；旧候选重启须另审逆向对账或原 cooldown
 完全到期并完成擦除。不得覆盖旧快照、放行 UNKNOWN、退款或制造新成功。
 
+## 已知 caption 的责任读取
+
+`POST /internal/v1/memes/captions/{job_id}/responsibility` 复用私有 Bearer 边界，
+请求必须为严格空对象 `{}`，成功响应标记 `Cache-Control: no-store`。共享
+`CaptionResponsibility` v1 DTO 保留原 job/event/request/asset/source/cache/authority 摘要、
+原数据库 `job_state`、`body_erased`、责任类型、实际费用 owner 与原 UsageReceipt，以及
+完整有界复用链、ErasureLedger、预算 journal 身份和 head 的摘要。响应不含 caption、
+图片、URL、query 或 context 正文。
+
+`USAGE` 要求唯一、相互一致的原 model_usage/admission 与费用根节点；同时按真实
+job_id、admission.logical_request_id 和所有保留费用指针核对。缓存后代的空指针不会
+隐藏祖先费用。`NO_ADMISSION` 只适用于目标及全部复用祖先均为 FAILED/CANCELLED，
+且整条链不存在实际 U/admission；预分配 UID 本身不是费用。非终态、断链、循环、
+越界、多个费用 owner 或身份/指针不一致均拒绝。
+
+Core 在单个原 Store 事务内读取 jobs.authority_json 所指的精确原 revision，校验
+AuthorityRef、DB journal 身份及该 revision 的原 journal_path。预算校验使用
+`record=None, initialize=False, allow_settlement=True`，前后固定 Ledger 与 journal。
+当前设置里的新路径不能替代原证据。合法 policy_redacted 通过保留摘要与原 journal
+投影验证；STOP、过期、撤回或擦除不消除原费用，CANCELLED + UNKNOWN 保持原样。
+若原 journal 含 OWNER_RECONCILED v2 且其原 revision 后来合法 policy_redacted，
+现有 journal 校验仍要求未 redacted 的原 policy，故保守拒绝读取；该历史组合尚未验证。
+旧快照缺少最新 Ledger 重放、证据缺失和备份恢复标记继续拒绝；读取不重放、不建文件、
+不修复、不清标记，不进行 SQL 写入、审计、工作提交、模型调用或结算。
+
+Bridge `CaptionHTTP.get_responsibility` 仅对已保留绑定提供同一元数据读取，使用原
+native capture、authority、journal 及费用单调性校验，并在实际私有 HTTP 前后重查
+冻结绑定。它不读取 caption context/outcome 正文。既有正文 getter、semantic advance、
+费用写入、retirement preflight 及 pin/ACK/cooldown 路径维持原契约；consumer 接入另行评审。
+
+专用测试使用真实私有 TCP、独立 Core/Bridge SQLite、原签名 capture 与 Mock provider，
+核对读取前后完整逻辑 DB、预算 journal 和 Ledger；SQL authorizer 额外拒绝所有被测写操作
+及 caption/event 正文列。仅合成备份克隆清空两个 caption 正文列，验证元数据仍绑定原
+capture/U，同时旧正文 getter 拒绝。损坏图及请求/响应篡改均明确作为合成故障注入。
+
 ## 本地验证边界
 
 已执行来源冻结/撤权/费用/epoch、同字节双来源、双连接竞争同一权威 SQLite、固定词法/GIF
