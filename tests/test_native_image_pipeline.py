@@ -211,7 +211,7 @@ def test_native_upload_rechecks_original_source_and_lease(core, tmp_path, bounda
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-native-image", authority=plan.authority))
             elif boundary == "expired":
-                core.clock.advance(16)
+                core.clock.advance(61)
             elif boundary == "source_replaced":
                 row = core.store.one("SELECT body_json FROM events WHERE event_id=?",
                                      (event["event_id"],))

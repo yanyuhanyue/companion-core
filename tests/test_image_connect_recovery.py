@@ -122,7 +122,7 @@ def test_native_image_failure_closes_expired_slot_without_the_signed_url(
         return ["1.1.1.1"]
 
     async def refused(request):
-        core.clock.advance(16)
+        core.clock.advance(61)
         await core.content.run_once()
         raise httpx.ConnectError(URL, request=request)
 

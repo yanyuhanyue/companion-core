@@ -27,7 +27,7 @@ def test_expired_native_download_closes_without_new_authority_or_refund(
             before = core.store.one("SELECT * FROM content_items")
             agent_images.expire_downloads(core.content)
             assert core.store.one("SELECT * FROM content_items") == before
-            core.clock.advance(16)
+            core.clock.advance(61)
             if stopped:
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-before-image-expiry", authority=plan.authority))
@@ -108,7 +108,7 @@ def test_download_expiry_does_not_reinterpret_unproven_or_staged_responsibility(
                                    "error_code='CONTENT_VISION_UNCERTAIN'")
             else:
                 core.store.execute("UPDATE content_items SET state='RUNNING'")
-            core.clock.advance(16)
+            core.clock.advance(61)
             before = core.store.one("SELECT * FROM content_items")
             agent_images.expire_downloads(core.content)
             assert core.store.one("SELECT * FROM content_items") == before

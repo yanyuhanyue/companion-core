@@ -143,7 +143,7 @@ def claim(service, event_id, request_key, source_sha256):
         if (row["state"] != "WAITING" or not row["reserved_bytes"]
             or row["deadline"] <= clock()):
             raise CoreError("CONTENT_IMAGE_ALREADY_" + row["state"], 409)
-        token, until = uid("content_lease"), min(row["deadline"], after(clock(), 15))
+        token, until = uid("content_lease"), min(row["deadline"], after(clock(), 60))
         store.execute("UPDATE content_items SET state='FETCHING',lease_token=?,lease_until=?,"
                       "updated_at=? WHERE item_id=?", (token, until, clock(), row["item_id"]))
         return {"state": "FETCHING", "lease_token": token, "lease_until": until,
