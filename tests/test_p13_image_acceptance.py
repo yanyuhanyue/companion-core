@@ -22,7 +22,7 @@ def test_partial_download_is_closed_once_without_model_or_fallback_reply(
     class PartialBody(httpx.AsyncByteStream):
         async def __aiter__(self):
             yield png()[:16]
-            core.clock.advance(16)
+            core.clock.advance(61)
             await core.content.run_once()
             if failure == "read_timeout":
                 raise httpx.ReadTimeout(URL)

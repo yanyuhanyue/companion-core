@@ -48,6 +48,12 @@ main CI [39366854733](https://github.com/yanyuhanyue/companion-core/actions/runs
 4300 micro-USD 只是合成 usage 的预算计算，实际费用0，真人 QQ 和付费调用0。
 真实 P50/P95、样本数、人类评分及 QQ 接收回执均保持 null/0/NOT_RUN。
 
+同一日志中的 `api_request` 按独立十字段 schema 严格验证，未知字段和非法类型、数值、
+标签语法即使属于其他 evidence 也会拒绝。JSON 的 `api_requests` 与 Markdown 只记录验证/
+匹配数量，不回显日志提供的 route，也不把语法验证当作已注册路由证明；按路由统计仍须向
+原 `summarize_api` 显式提供可信注册模板。API 事件不计入消息阶段、端到端延迟、模型费用或
+UNKNOWN 统计；没有 API 事件时原报告结构保持不变，不构造 app、Core 或数据库。
+
 `onebot_direct_bridge_code_ready=true` 依据本轮代码/本地合同检查；它不授予登录、发送或部署。
 真实 OneBot、QQ 20场景、G1、20自然日日记、异地恢复、DSH插件与Windows实机门禁仍未通过。
 许可、具体变更、QQ账号/时段/额度/回退、真模型预算须按 operations 后续逐项确认。

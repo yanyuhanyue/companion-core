@@ -164,7 +164,7 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
                 guard = OwnerSendGuard(runtime, client)
                 onebot = OwnerOneBot(guard, protocol)
             worked = await deliver_tick(client, onebot, spool, metrics=metrics, guard=guard)
-            if not worked and runtime is not None:
+            if not worked and runtime is not None and guard.segment_not_before is None:
                 permission = await runtime.check(client)
                 if "account_actions" in permission["capability_policies"]:
                     worked = await deliver_tick(client, onebot, spool, metrics=metrics,
@@ -180,10 +180,10 @@ async def deliver(client, onebot, spool, stop, metrics, *, runtime=None, protoco
 async def transfer_media(pump, stop):
     try:
         while not stop.is_set():
-            pump.window.verify()
             try:
                 pump.tick()
                 if pump.task is not None:
+                    pump.window.verify()
                     await pump.task
                 else:
                     await pause(stop, pump.window.config.poll_seconds)
@@ -204,11 +204,15 @@ async def transfer_media(pump, stop):
 async def observe_profile(pump, stop):
     try:
         while not stop.is_set():
-            pump.window.verify()
+            if pump.running:
+                pump.window.verify()
             pending = pump.window.db.execute(
                 "SELECT 1 FROM inbox WHERE state='pending' LIMIT 1").fetchone()
             pump.tick(idle=pending is None)
-            await pause(stop, pump.window.config.poll_seconds)
+            delay = pump.window.config.poll_seconds
+            if not pump.running:
+                delay = max(delay, pump.next_run - time.monotonic())
+            await pause(stop, delay)
     finally:
         await pump.close()
 

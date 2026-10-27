@@ -152,7 +152,7 @@ def test_image_guard_timeout_and_lease_expiry_are_distinct(core, tmp_path, bound
                 if state == "DOWNLOADING":
                     claims.append(receipt)
                     if boundary == "lease_expiry":
-                        core.clock.advance(16)
+                        core.clock.advance(61)
 
             async def request_hook(request):
                 if request.url.path.endswith("/image/check"):
@@ -189,7 +189,7 @@ def test_image_guard_timeout_and_lease_expiry_are_distinct(core, tmp_path, bound
                         assert core.clock.now < datetime.fromisoformat(claim["lease_until"])
                         assert diagnostic_fields(caught.value) == {
                             "capture_phase": "core_check", "capture_reason": "CAPTURE_TIMEOUT"}
-                        core.clock.advance(6)
+                        core.clock.advance(51)
                     else:
                         assert caught.value.response.status_code == 409
                     agent_images.expire_downloads(core.content)

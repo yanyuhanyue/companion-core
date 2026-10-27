@@ -253,7 +253,7 @@ def test_restart_download_waits_original_lease_without_replaying_get(core, tmp_p
             original_source = json.loads(row["manifest_json"])["images"][0]["source_sha256"]
             item = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
             if recovery == "expired":
-                core.clock.advance(16)
+                core.clock.advance(61)
                 await core.content.run_once()
             elif recovery == "erased":
                 with core.store.transaction():
@@ -266,7 +266,7 @@ def test_restart_download_waits_original_lease_without_replaying_get(core, tmp_p
                 try:
                     await asyncio.sleep(0.1)
                     assert not task.done() and len(downloads) == 1
-                    core.clock.advance(16)
+                    core.clock.advance(61)
                     await core.content.run_once()
                     await asyncio.wait_for(task, 5)
                 finally:

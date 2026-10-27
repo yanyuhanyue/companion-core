@@ -29,6 +29,8 @@ from companion import (
     qq_images,
     qq_rich,
 )
+from companion.api_store import ApiStore
+from companion.api_telemetry import ApiTelemetry
 from companion.config import Settings
 from companion.console_api import register_console_routes
 from companion.content_api import register_content_routes
@@ -166,6 +168,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         openapi_url=None,
     )
     app.state.observation_instance = uuid4().hex
+    app.state.api_store = ApiStore(settings.database)
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
@@ -636,26 +639,25 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/owner-authority/inputs/approve", dependencies=auth)
     async def owner_input_approve(body: OwnerInputApproval, response: Response):
-        core = app.state.core
+        clock = app.state.core.clock
         response.headers["Cache-Control"] = "no-store"
         capture = OwnerCapture.model_validate(body.model_dump(exclude={"meme_offer"}))
-        return owner_input.approve(core.store, settings, core.clock, capture,
-                                   meme_offer=body.meme_offer)
+        return await app.state.api_store.run(lambda store: owner_input.approve(
+            store, settings, clock, capture, meme_offer=body.meme_offer,
+        ))
 
     @app.post(prefix + "/owner-authority/check", dependencies=auth)
     async def owner_authority_check(body: OwnerAuthorityCheck, response: Response):
-        core = app.state.core
+        clock = app.state.core.clock
         response.headers["Cache-Control"] = "no-store"
-        view = owner_authority.current(core.store, settings, core.clock,
-                                       authority=body.authority, purpose=body.purpose)
-        return {"approved": True, "authority": view.authority.as_dict(),
-                "purpose": body.purpose,
-                "capability_policies": dict(view.policy.capability_policies),
-                "budget_journal_id": view.journal_id,
-                "capture": (view.policy.capture.model_dump(mode="json")
-                            if view.policy.capture else None),
-                "expires_at": (view.policy.expires_at.isoformat()
-                               if view.policy.expires_at else None)}
+
+        def check(store):
+            with store.transaction():
+                view = owner_authority.current(store, settings, clock,
+                                               authority=body.authority, purpose=body.purpose)
+                return owner_authority.check_response(view, body.purpose)
+
+        return await app.state.api_store.run(check)
 
     @app.post(prefix + "/owner-authority/inputs/state", dependencies=auth)
     async def owner_input_state(body: OwnerCapture | OwnerPokeCapture, response: Response):
@@ -681,9 +683,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/owner-authority/send-check", dependencies=auth)
     async def owner_send_check(body: OwnerSendCheck, response: Response):
-        core = app.state.core
+        clock = app.state.core.clock
         response.headers["Cache-Control"] = "no-store"
-        return owner_delivery.send_check(core.store, settings, core.clock, body)
+        return await app.state.api_store.run(lambda store: owner_delivery.send_check(
+            store, settings, clock, body,
+        ))
 
     @app.post(prefix + "/owner-authority/inputs/recall", dependencies=auth)
     async def owner_input_recall(body: OwnerRecall, response: Response):
@@ -855,8 +859,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/deliveries/lease", dependencies=auth)
     async def lease(body: LeaseRequest):
-        core = app.state.core
-        return lease_deliveries(core.store, settings, body, core.clock())
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: lease_deliveries(
+            store, settings, body, clock(),
+        ))
 
     @app.post(prefix + "/deliveries/reconciliation/prepare", dependencies=auth)
     async def prepare_delivery_reconciliation(body: dict):
@@ -909,15 +915,17 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/deliveries/{message_id}/begin-send", dependencies=auth)
     async def begin(message_id: str, body: LeaseToken):
-        core = app.state.core
-        return begin_send(
-            core.store, message_id, body.lease_token, core.clock(), settings, clock=core.clock
-        )
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: begin_send(
+            store, message_id, body.lease_token, clock(), settings, clock=clock,
+        ))
 
     @app.post(prefix + "/deliveries/{message_id}/result", dependencies=auth)
     async def result(message_id: str, body: DeliveryResult):
-        core = app.state.core
-        return delivery_result(core.store, settings, message_id, body, core.clock())
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: delivery_result(
+            store, settings, message_id, body, clock(),
+        ))
 
     @app.post(prefix + "/memories/search", dependencies=auth)
     async def search(body: SearchRequest):
@@ -961,4 +969,5 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def disabled(approval_id: str = ""):
         raise CoreError("CAPABILITY_DISABLED_IN_M0_M1", 403)
 
+    app.add_middleware(ApiTelemetry, routes=app.routes)
     return app

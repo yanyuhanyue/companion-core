@@ -211,7 +211,7 @@ def test_native_upload_rechecks_original_source_and_lease(core, tmp_path, bounda
                 owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
                     operation_id="stop-native-image", authority=plan.authority))
             elif boundary == "expired":
-                core.clock.advance(16)
+                core.clock.advance(61)
             elif boundary == "source_replaced":
                 row = core.store.one("SELECT body_json FROM events WHERE event_id=?",
                                      (event["event_id"],))
@@ -231,6 +231,10 @@ def test_native_upload_rechecks_original_source_and_lease(core, tmp_path, bounda
                 assert withdrawn.status_code == 200, withdrawn.text
             else:
                 image = {**image, "source_sha256": "f" * 64}
+            checked = await client.post("/internal/v2/content/" + event["event_id"]
+                + "/image/check", json={"lease_token": lease["lease_token"],
+                                       "source_sha256": image["source_sha256"]})
+            assert checked.status_code in {403, 409, 410}, checked.text
             response = await client.post("/internal/v2/content/" + event["event_id"] + "/image",
                 content=body, headers=upload_headers(plan, event, image, lease, body))
             assert response.status_code in {403, 409, 410}, response.text

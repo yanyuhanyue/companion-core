@@ -37,8 +37,7 @@ def test_native_media_core_guard_failure_keeps_task_group_and_next_turn_alive(
 
             async def before(request):
                 requests.append(request.url.path)
-                if (request.url.path != "/internal/v1/owner-authority/check"
-                    or json.loads(request.content).get("purpose") != "image" or failed.is_set()):
+                if not request.url.path.endswith("/image/check") or failed.is_set():
                     return
                 if not pending_media.exists(active.runtime):
                     return
@@ -69,7 +68,7 @@ def test_native_media_core_guard_failure_keeps_task_group_and_next_turn_alive(
                 ])
                 await until(unwound.is_set, tasks=tasks, deadline_seconds=20)
                 original = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
-                core.clock.advance(16)
+                core.clock.advance(61)
                 with Core(core.settings, core.model, core.clock) as independent:
                     assert independent.store is not core.store
                     await independent.content.run_once()

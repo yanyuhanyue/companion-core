@@ -62,7 +62,9 @@ async def bridge_tasks(active, pump):
 
 
 @asynccontextmanager
-async def native_host(core, tmp_path, monkeypatch, *, count, history=False):
+async def native_host(
+    core, tmp_path, monkeypatch, *, count, history=False, poll_seconds=None, wait_seconds=30,
+):
     inbound = asyncio.Queue()
 
     async def source(ws):
@@ -80,14 +82,17 @@ async def native_host(core, tmp_path, monkeypatch, *, count, history=False):
         *args, clock=core.clock, **kwargs))
     scope = options()
     scope["core_options"]["content"] = scope["core_options"]["content"].model_copy(
-        update={"max_images_per_event": count})
+        update={"max_images_per_event": count, "wait_seconds": wait_seconds})
     scope["paid_options"]["image_input"] = scope["paid_options"]["image_input"].model_copy(
         update={"max_images_per_request": count})
+    bridge_options = {"rich_input_scope": "references_v1"}
+    if poll_seconds is not None:
+        bridge_options["poll_seconds"] = poll_seconds
     async with host(core, tmp_path, source,
         core_options={**scope["core_options"], "rich_input_scope": "references_v1"},
         paid_options=scope["paid_options"], purposes=("chat", "image", "content",
             *(('history',) if history else ())),
-        bridge_options={"rich_input_scope": "references_v1"}, independent_api=True,
+        bridge_options=bridge_options, independent_api=True,
     ) as (active, handshakes, sends, calls):
         core.content.options = core.settings.content
         yield active, inbound, handshakes, sends, calls
@@ -196,7 +201,7 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
     core, tmp_path, monkeypatch, capsys, failure,
 ):
     async def scenario():
-        async with native_host(core, tmp_path, monkeypatch, count=2) as values:
+        async with native_host(core, tmp_path, monkeypatch, count=2, wait_seconds=90) as values:
             active, inbound, handshakes, sends, calls = values
             failed, downloads, requests = asyncio.Event(), [], []
             retries, responses, rpc = observe_delivery(active, monkeypatch)
@@ -235,7 +240,7 @@ def test_failed_picture_keeps_task_group_alive_for_sibling_image_text_and_next_t
                 ])
                 await until(failed.is_set, tasks=tasks, deadline_seconds=20)
                 original = core.store.one("SELECT * FROM content_items WHERE slot=0")
-                core.clock.advance(16)
+                core.clock.advance(61)
                 await core.content.run_once()
                 await until(lambda: active.db.execute("SELECT state FROM automatic_media")
                     .fetchone()[0] == "DONE", tasks=tasks, deadline_seconds=20)

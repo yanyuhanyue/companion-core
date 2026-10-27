@@ -64,7 +64,9 @@ class OwnerSendGuard:
 
     def waiting_for_segment(self):
         deadline = self._segment_deadline()
-        return deadline is not None and self.runtime.clock() < deadline
+        self.segment_not_before = (deadline if deadline is not None
+                                   and self.runtime.clock() < deadline else None)
+        return self.segment_not_before is not None
 
     def reserve(self, item):
         from .owner_native_resolution import binding

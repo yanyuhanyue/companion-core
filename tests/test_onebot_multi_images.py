@@ -72,7 +72,7 @@ def test_authenticated_batch_downloads_once_in_order_and_isolates_download_failu
         assert request.url.path == f"/synthetic-{index}.png"
         downloads.append(request)
         if failure == "second" and index == 1:
-            core.clock.advance(16)
+            core.clock.advance(61)
             await core.content.run_once()
         return httpx.Response(
             404 if failure and index == 1 else 200,
@@ -89,7 +89,7 @@ def test_authenticated_batch_downloads_once_in_order_and_isolates_download_failu
 
     opts = options()
     opts["core_options"]["content"] = opts["core_options"]["content"].model_copy(
-        update={"max_images_per_event": count},
+        update={"max_images_per_event": count, "wait_seconds": 90},
     )
     opts["paid_options"]["image_input"] = opts["paid_options"]["image_input"].model_copy(
         update={"max_images_per_request": 1 if failure == "policy" else count},

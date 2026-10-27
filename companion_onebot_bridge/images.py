@@ -322,6 +322,17 @@ async def fetch_image(image, max_bytes, *, check, transport=None, resolver=resol
 
 async def owner_media_request(runtime, client, path, body=b"", headers=None, *, purpose,
                               before=None, method="POST"):
+    async def authorize():
+        await runtime.check(client, purpose=purpose)
+        if before is not None:
+            await before()
+
+    return await _media_request(runtime, client, path, body, headers, purpose=purpose,
+                                authorize=authorize, method=method)
+
+
+async def _media_request(runtime, client, path, body=b"", headers=None, *, purpose,
+                         authorize, method="POST"):
     from .event_normalizer import decode
     from .network import checked_http_client, private_request_matches
     from .window import seal_protocol_content
@@ -341,9 +352,7 @@ async def owner_media_request(runtime, client, path, body=b"", headers=None, *, 
 
     async def boundary(request):
         validate(request)
-        await runtime.check(client, purpose=purpose)
-        if before is not None:
-            await before()
+        await authorize()
         validate(request)
         runtime.verify()
         seal_protocol_content(request, expected)
@@ -364,6 +373,19 @@ async def owner_media_request(runtime, client, path, body=b"", headers=None, *, 
         error.capture_diagnostic = capture_diagnostic(error, "core_check")
         raise
     return decode(bytes(result), 65536)
+
+
+def _image_check_receipt(runtime, receipt, lease_until):
+    from .owner_runtime import check_receipt
+
+    if (not isinstance(receipt, dict)
+        or set(receipt) != {"approved", "lease_until", "authority_check"}
+        or receipt["approved"] is not True or receipt["lease_until"] != lease_until):
+        raise ValueError("IMAGE_DOWNLOAD_CHECK_REJECTED")
+    result = check_receipt(runtime.config, runtime.authority, "image",
+                           receipt["authority_check"], runtime.clock())
+    if runtime.legacy and result["budget_journal_id"] != runtime.legacy["budget_journal_id"]:
+        raise ValueError("OWNER_LEGACY_BUDGET_CUSTODY_CHANGED")
 
 
 async def upload_original(runtime, client, event_id, image, *, resume_claim=None,
@@ -399,13 +421,14 @@ async def upload_original(runtime, client, event_id, image, *, resume_claim=None
     _download_claim(claim, runtime, kind="IMAGE")
     await phase("DOWNLOADING", claim)
 
+    async def local_check():
+        runtime.verify()
+
     async def check():
-        receipt = await post(prefix + "/check", {
-            "lease_token": claim["lease_token"], "source_sha256": image.source_sha256})
-        if receipt != {"approved": True, "lease_until": claim["lease_until"]}:
-            raise ValueError("IMAGE_DOWNLOAD_CHECK_REJECTED")
-        if receipt["approved"] is not True:
-            raise ValueError("IMAGE_DOWNLOAD_CHECK_REJECTED")
+        receipt = await _media_request(runtime, client, prefix + "/check", {
+            "lease_token": claim["lease_token"], "source_sha256": image.source_sha256},
+            purpose="image", authorize=local_check)
+        _image_check_receipt(runtime, receipt, claim["lease_until"])
         if datetime.fromisoformat(claim["lease_until"]) <= runtime.clock():
             raise ValueError("IMAGE_DOWNLOAD_LEASE_EXPIRED")
         runtime.verify()
@@ -419,9 +442,11 @@ async def upload_original(runtime, client, event_id, image, *, resume_claim=None
     proof["signature"] = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(
         runtime.config.capture_signing_key)).sign(image_upload_signing_payload(proof)).hex()
     await phase("UPLOADING")
-    result = await post(prefix, data, {"Content-Type": mime,
+    # The later lease check includes the complete current authority receipt.
+    # Other media callers keep owner_media_request's independent authority guard.
+    result = await _media_request(runtime, client, prefix, data, {"Content-Type": mime,
         "X-Content-Key": f"image:{image.slot}", "X-Content-Lease": claim["lease_token"],
-        "X-Content-Proof": encode(proof)}, before=check)
+        "X-Content-Proof": encode(proof)}, purpose="image", authorize=check)
     if (set(result) != {"state", "slot", "duplicate", "input_ready"}
         or result["state"] not in {"STAGED", "SUCCEEDED"}
         or type(result["slot"]) is not int or result["slot"] != image.slot

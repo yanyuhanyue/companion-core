@@ -43,15 +43,27 @@ class Store:
         self.path = path
         self._budget_stops = None
         self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
-        for pragma in (
-            "foreign_keys=ON",
-            "busy_timeout=5000",
-            "journal_mode=WAL",
-            "synchronous=FULL",
-            "secure_delete=ON",
-        ):
-            self.db.execute("PRAGMA " + pragma)
+        try:
+            self.db.row_factory = sqlite3.Row
+            for pragma in (
+                "foreign_keys=ON",
+                "busy_timeout=5000",
+                "journal_mode=WAL",
+                "synchronous=FULL",
+                "secure_delete=ON",
+            ):
+                self.db.execute("PRAGMA " + pragma)
+        except BaseException:
+            try:
+                self.db.close()
+            except Exception:
+                pass  # Initialization's original failure remains authoritative.
+            raise
+
+    @property
+    def in_write_transaction(self):
+        """Whether this Store owns an active BEGIN IMMEDIATE scope."""
+        return self._budget_stops is not None and self.db.in_transaction
 
     @contextmanager
     def transaction(self):

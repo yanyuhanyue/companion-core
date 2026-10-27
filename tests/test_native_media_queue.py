@@ -138,7 +138,7 @@ def test_original_queue_recovers_native_transfer(core, tmp_path, recovery):
                     pending_media.transition(runtime, prepared["event"]["event_id"],
                                                "DOWNLOADING", 0, response.json())
                     original_claim = response.json()
-                    core.clock.advance(16)
+                    core.clock.advance(61)
                     await core.content.run_once()
             finally:
                 spool.close()
@@ -240,7 +240,7 @@ def test_uncertain_native_claim_is_not_reissued(core, tmp_path):
                           "source_sha256": prepared["media"]["images"][0]["source_sha256"]})
                 assert response.status_code == 200
                 original = core.store.one("SELECT * FROM content_items WHERE kind='qq_image'")
-                core.clock.advance(16)
+                core.clock.advance(61)
                 await core.content.run_once()
             finally:
                 spool.close()
@@ -284,7 +284,7 @@ def test_failed_status_must_identify_the_original_media_slot(core, tmp_path, cha
                     "source_sha256": prepared["media"]["images"][0]["source_sha256"]})
                 assert response.status_code == 200
                 pending_media.transition(runtime, event_id, "DOWNLOADING", 0, response.json())
-                core.clock.advance(16)
+                core.clock.advance(61)
                 await core.content.run_once()
                 before = dict(row(runtime))
 

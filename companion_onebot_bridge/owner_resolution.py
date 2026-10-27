@@ -75,10 +75,13 @@ def pending_result(spool, *, runtime=None):
 
             # An active sender owns its existing runtime. Constructing another
             # one here would apply the startup fence to its in-flight attempt.
+            if runtime is not None and runtime.spool is not spool:
+                raise ValueError("OWNER_RECEIPT_SPOOL_REQUIRED")
+            if runtime is not None and not spool.db.execute(
+                "SELECT 1 FROM results WHERE state='pending' LIMIT 1").fetchone():
+                return None
             if runtime is None:
                 runtime = OwnerRuntime(spool)
-            elif runtime.spool is not spool:
-                raise ValueError("OWNER_RECEIPT_SPOOL_REQUIRED")
             runtime.verify(active=False)
             done = {row[0] for row in spool.db.execute(
                 f"SELECT message_id FROM {TABLE} WHERE receipt_json IS NOT NULL")}
