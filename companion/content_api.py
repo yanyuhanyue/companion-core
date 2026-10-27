@@ -4,7 +4,7 @@ import base64
 import binascii
 import json
 
-from fastapi import Header, Request
+from fastapi import Header, Request, Response
 from pydantic import Field
 
 from companion import agent_images, content_files, owner_authority
@@ -79,8 +79,9 @@ def register_content_routes(app, bridge_dependencies):
         return app.state.core.content.claim_upload(event_id, body.request_key, body.source_sha256)
 
     @app.post(prefix + "/image/check", dependencies=bridge_dependencies)
-    async def check_image(event_id: str, body: ImageCheck):
+    async def check_image(event_id: str, body: ImageCheck, response: Response):
         core = app.state.core
+        response.headers["Cache-Control"] = "no-store"
         if owner_authority.required(core.store, core.settings):
             return agent_images.check_upload(core.content, event_id, body.lease_token,
                                              body.source_sha256)

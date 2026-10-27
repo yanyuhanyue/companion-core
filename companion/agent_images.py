@@ -153,10 +153,12 @@ def claim(service, event_id, request_key, source_sha256):
 
 def check_upload(service, event_id, lease_token, source_sha256):
     with service.store.transaction():
-        _, row, image = lease(service.store, service.settings, service.clock, event_id, lease_token)
+        view, row, image = lease(service.store, service.settings, service.clock,
+                                 event_id, lease_token)
         if image["source_sha256"] != source_sha256:
             raise CoreError("OWNER_IMAGE_SOURCE_CHANGED", 403)
-        return {"approved": True, "lease_until": row["lease_until"]}
+        return {"approved": True, "lease_until": row["lease_until"],
+                "authority_check": owner_authority.check_response(view, "image")}
 
 
 def stage(service, event_id, request_key, data, mime, lease_token, proof):

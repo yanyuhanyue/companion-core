@@ -649,14 +649,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         response.headers["Cache-Control"] = "no-store"
         view = owner_authority.current(core.store, settings, core.clock,
                                        authority=body.authority, purpose=body.purpose)
-        return {"approved": True, "authority": view.authority.as_dict(),
-                "purpose": body.purpose,
-                "capability_policies": dict(view.policy.capability_policies),
-                "budget_journal_id": view.journal_id,
-                "capture": (view.policy.capture.model_dump(mode="json")
-                            if view.policy.capture else None),
-                "expires_at": (view.policy.expires_at.isoformat()
-                               if view.policy.expires_at else None)}
+        return owner_authority.check_response(view, body.purpose)
 
     @app.post(prefix + "/owner-authority/inputs/state", dependencies=auth)
     async def owner_input_state(body: OwnerCapture | OwnerPokeCapture, response: Response):

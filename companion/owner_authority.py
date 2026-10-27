@@ -62,6 +62,15 @@ class OwnerAuthorityView:
     journal_path: str
 
 
+def check_response(view, purpose):
+    """Serialize an already checked current view; this does not grant permission."""
+    return {"approved": True, "authority": view.authority.as_dict(), "purpose": purpose,
+            "capability_policies": dict(view.policy.capability_policies),
+            "budget_journal_id": view.journal_id,
+            "capture": view.policy.capture.model_dump(mode="json") if view.policy.capture else None,
+            "expires_at": view.policy.expires_at.isoformat() if view.policy.expires_at else None}
+
+
 def fold(records, row, digest):
     """Fold only versioned native journal evidence; a DB snapshot cannot invent it."""
     if set(row) != RECORD_FIELDS or row["kind"] != RECORD_KIND or row["version"] != 2:
