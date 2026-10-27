@@ -41,7 +41,7 @@ def pressure(settings, measured, *, soft_limit=None, scenario="chat"):
 
 
 def _proofs(snapshots):
-    return [item for item in snapshots if item["kind"] != "context_plan"]
+    return [item for item in snapshots if item["kind"] not in {"context_plan", "activity_shadow"}]
 
 
 def _digest(value):

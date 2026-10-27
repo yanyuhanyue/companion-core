@@ -948,6 +948,9 @@ class Core(Runtime):
                               if any(message is turn[0] for message in messages))
                 blocks.append(("current", current_input, True))
                 initialize(self, job, messages, blocks, snapshots)
+                from companion.activity_shadow import capture
+
+                capture(self, job, snapshots)
         return messages
 
     async def recall_for_reply(self, job):

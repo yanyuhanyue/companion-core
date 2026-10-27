@@ -385,6 +385,11 @@ class LiveTextWindowApproval(BaseModel):
         return self
 
 
+class ActivityContextConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    mode: Literal["OFF", "SHADOW"] = "OFF"
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
@@ -403,6 +408,9 @@ class Settings(BaseModel):
     model_name: str = "deepseek-flash"
     provider: str = "deepseek"
     conversation_policy: ConversationPolicyConfig | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+    activity_context: ActivityContextConfig | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
     token_measurement: TokenMeasurementConfig | None = Field(
