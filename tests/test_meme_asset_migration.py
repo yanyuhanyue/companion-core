@@ -22,7 +22,8 @@ from companion.meme_core import CaptionBody, MemeCaptionService
 from companion.privacy import ErasureLedger
 from companion.store import Store, encode
 from companion_meme_protocol import digest
-from companion_onebot_bridge.meme_catalog import MemeCatalog, Metadata
+from companion_meme_sources import Metadata
+from companion_onebot_bridge.meme_catalog import MemeCatalog
 from companion_onebot_bridge.meme_library import MemeLibrary
 from companion_onebot_bridge.owner_runtime import OwnerRuntime
 from companion_onebot_bridge.spool import Spool

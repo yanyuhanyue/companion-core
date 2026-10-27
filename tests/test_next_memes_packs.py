@@ -9,10 +9,10 @@ import zipfile
 import httpx
 import pytest
 
+from companion_meme_sources.community import CommunityPacks, archive_images, bounded_archive
 from companion_onebot_bridge.meme_catalog import MemeCatalog
 from companion_onebot_bridge.meme_discovery import run_discovery
 from companion_onebot_bridge.meme_library import MemeLibrary
-from companion_onebot_bridge.meme_packs import CommunityPacks, archive_images, bounded_archive
 from tests.test_next_memes_catalog import check, png
 from tests.test_next_memes_discovery import DurableBudget, async_check, resolver, review
 
@@ -158,7 +158,8 @@ def test_community_real_index_contract_resolves_then_downloads_immutable_revisio
 
 
 def test_pinned_community_sources_cannot_redirect_and_claim_original_revision():
-    from companion_onebot_bridge.meme_discovery import DiscoveryLimits, PublicFetcher, Usage
+    from companion_meme_sources import DiscoveryLimits, Usage
+    from companion_meme_sources.fetch import PublicFetcher
 
     calls = []
 

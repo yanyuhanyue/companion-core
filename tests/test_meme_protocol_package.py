@@ -37,6 +37,7 @@ def test_extraction_preserves_contract_hashes_and_compatibility_exports():
 
 def test_shared_protocol_imports_without_either_application_or_storage(tmp_path):
     shutil.copytree(ROOT / "companion_meme_protocol", tmp_path / "companion_meme_protocol")
+    shutil.copytree(ROOT / "companion_meme_sources", tmp_path / "companion_meme_sources")
     bridge = tmp_path / "companion_onebot_bridge"
     bridge.mkdir()
     for name in ("__init__.py", "meme_caption.py", "meme_library.py", "meme_semantic.py"):
