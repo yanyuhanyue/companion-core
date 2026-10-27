@@ -108,6 +108,11 @@ class CaptionHTTP:
     def __init__(self, http, catalog):
         self.http, self.catalog = http, catalog
 
+    async def get_responsibility(self, job_id):
+        from .meme_responsibility import get_responsibility
+
+        return await get_responsibility(self.http, self.catalog, job_id)
+
     async def submit(self, request):
         asset = request.asset
         row = self.catalog.db.execute("SELECT data,metadata,active FROM meme_assets WHERE sha=?",
