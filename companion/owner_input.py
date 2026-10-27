@@ -221,6 +221,17 @@ def _source(store, settings, view, event_id, now, *, allow_commands=False, histo
 
 def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid=None):
     """Apply explicit current history bounds to native source-bound dialogue turns."""
+    if not store.db.in_transaction:
+        # Own one synchronous batch; never upgrade a caller's read transaction or
+        # retain custody across the model await that separates these calls.
+        with store.transaction():
+            return _history_sources(store, settings, clock, job,
+                                    purpose=purpose, cutoff_rowid=cutoff_rowid)
+    return _history_sources(store, settings, clock, job,
+                            purpose=purpose, cutoff_rowid=cutoff_rowid)
+
+
+def _history_sources(store, settings, clock, job, *, purpose, cutoff_rowid):
     from companion.dialogue_history import recent_context_sources, turn_messages
 
     view = owner_authority.check_job(store, settings, clock, job, purpose=purpose)
