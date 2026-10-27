@@ -5,6 +5,7 @@ from datetime import datetime
 from companion_delivery_protocol.authority import validate_authority_ref
 
 from . import account_actions, reply_segments
+from .metrics import send_finished
 from .native_actions import prepare
 from .onebot_client import bounded_post
 
@@ -179,8 +180,14 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
     provider_id = None
     send_start = time.perf_counter_ns()
     try:
-        provider_id = await onebot.send_content(item["content"]) if hasattr(
-            onebot, "send_content") else await onebot.send_text(item["content"]["text"])
+        try:
+            provider_id = await onebot.send_content(item["content"]) if hasattr(
+                onebot, "send_content") else await onebot.send_text(item["content"]["text"])
+        except BaseException as error:
+            send_finished(send_start, error)
+            raise
+        else:
+            send_finished(send_start)
     except Exception:
         if guard is not None and await guard.cancel_before_send(item):
             return True
