@@ -143,3 +143,7 @@ class Metrics:
                 elapsed_ms=(ack_ns - previous[0]) / 1e6,
                 at_ns=ack_ns,
             )
+
+
+def emit(kind, **values):
+    print(json.dumps({"event": kind, **values}), flush=True)

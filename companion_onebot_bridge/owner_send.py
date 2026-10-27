@@ -10,9 +10,8 @@ from companion_delivery_protocol.authority import validate_authority_ref
 
 from . import account_actions, journal, owner_notices, reply_segments
 from .event_normalizer import decode
-from .network import checked_http_client, private_request_matches
+from .network import checked_http_client, private_request_matches, seal_protocol_content
 from .onebot_client import OneBotClient, bounded_post
-from .window import seal_protocol_content
 
 
 class OwnerSendGuard:

@@ -254,7 +254,7 @@ async def upload(window, client, event_id, original, *, check, progress, protoco
         _local(window, bound, original)
         if window.clock() >= deadline:
             raise ValueError("VOICE_INPUT_FENCED")
-        from .window import seal_protocol_content
+        from .network import seal_protocol_content
 
         seal_protocol_content(request, content)
 

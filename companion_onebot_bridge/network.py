@@ -132,3 +132,12 @@ async def websocket(config, *, synthetic=False, check=None):
     )
     connector.companion_private_destination = address
     return connector
+
+
+def seal_protocol_content(request, content):
+    # HTTPX sends stream, not its content cache. Seal exactly the bounded
+    # bytes just checked; never consume an arbitrary replacement stream.
+    if "Transfer-Encoding" in request.headers:
+        raise ValueError("WINDOW_REQUEST_FRAMING_CHANGED")
+    request.stream = httpx.ByteStream(content)
+    request.headers["Content-Length"] = str(len(content))

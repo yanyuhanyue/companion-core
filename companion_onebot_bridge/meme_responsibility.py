@@ -6,9 +6,8 @@ import re
 from companion_meme_protocol import CaptionResponsibility, UsageReceipt, digest, parse, strict_json
 
 from .meme_semantic import receipt_follows
-from .network import checked_http_client, private_request_matches
+from .network import checked_http_client, private_request_matches, seal_protocol_content
 from .onebot_client import bounded_post
-from .window import seal_protocol_content
 
 
 async def get_responsibility(http, catalog, job_id):

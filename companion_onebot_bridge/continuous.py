@@ -20,6 +20,7 @@ from websockets.exceptions import ConnectionClosed
 
 from . import account_actions, capture, pokes, reply_segments
 from .event_normalizer import decode, identifier, normalize, normalize_recall
+from .metrics import emit
 from .native_actions import approval_hash
 from .network import checked_http_client, websocket
 from .onebot_client import OneBotClient
@@ -149,10 +150,6 @@ def evidence(window, kind, value):
                    "window_sha256": window.plan.sha256,
                    "owner_approval_sha256": window.plan.value["live_text"]["approval_sha256"],
                    "material": value})
-
-
-def emit(kind, **values):
-    print(json.dumps({"event": kind, **values}), flush=True)
 
 
 @dataclass(frozen=True)

@@ -18,11 +18,11 @@ import companion_delivery_protocol as wire
 
 from .files import MAX_FILE_BYTES, OriginalFile, fetch_file, original_files
 from .images import OriginalImage, fetch_image, original_images, source_url
+from .journal import digest
 from .network import checked_http_client, private_http_client
 from .onebot_client import OneBotClient, bounded_post
 from .spool import encode
 from .voice_media import OriginalRecord, original_records
-from .window import digest
 
 DOMAIN = b"companion-core/onebot-owner-media-queue/v1\x00"
 OWNER_DOMAIN = b"companion-core/onebot-owner-media-queue/v2\x00"
@@ -825,7 +825,7 @@ class MediaPump:
                     position = current["next_slot"]
                     if (current["state"] == "DOWNLOADING" and 0 <= position < len(originals)
                         and isinstance(originals[position], (OriginalImage, OriginalFile))):
-                        from .continuous import emit
+                        from .metrics import emit
 
                         try:
                             emit("media_download_failed", error_code=error.args[0])

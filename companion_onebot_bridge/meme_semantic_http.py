@@ -18,9 +18,8 @@ from .meme_caption import (
     source_evidence,
 )
 from .meme_semantic_search import SemanticQuery
-from .network import checked_http_client, private_request_matches
+from .network import checked_http_client, private_request_matches, seal_protocol_content
 from .onebot_client import bounded_post
-from .window import seal_protocol_content
 
 BASE = "/internal/v1/memes"
 JOB = re.compile(r"job_[a-f0-9]{32}")
