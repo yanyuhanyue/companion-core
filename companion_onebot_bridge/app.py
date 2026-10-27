@@ -293,6 +293,7 @@ def main():
         default="daemon",
         choices=(
             "daemon",
+            "owner-meme-accounting-drain",
             "owner-status",
             "owner-stop",
             "owner-delivery-prepare",
@@ -331,6 +332,10 @@ def main():
         config = BridgeConfig.load(args.config)
         if args.command == "daemon":
             asyncio.run(run(config))
+        elif args.command == "owner-meme-accounting-drain":
+            from .meme_accounting_drain import command
+
+            print(json.dumps(asyncio.run(command(config, args))), flush=True)
         elif args.command in {"owner-status", "owner-stop"}:
             from .owner_runtime import command
 

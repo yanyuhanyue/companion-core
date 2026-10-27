@@ -6,7 +6,8 @@ from dataclasses import replace
 import pytest
 from PIL import Image
 
-from companion_onebot_bridge.meme_catalog import MemeCatalog, Metadata
+from companion_meme_sources import Metadata
+from companion_onebot_bridge.meme_catalog import MemeCatalog
 from companion_onebot_bridge.meme_library import MemeLibrary
 
 

@@ -79,6 +79,19 @@ class OwnerInputApproval(OwnerCapture):
     meme_offer: meme_core.MemeOffer | None = None
 
 
+class _MemoryControlExclusive:
+    def __init__(self, app, *, enabled):
+        self.app, self.enabled = app, enabled
+
+    async def __call__(self, scope, receive, send):
+        if self.enabled and scope["type"] == "http" and scope["path"] not in {
+            "/internal/v1/health/live", "/internal/v1/memory-control",
+        }:
+            return await JSONResponse({"error": "MEMORY_CONTROL_EXCLUSIVE"}, 403)(
+                scope, receive, send)
+        await self.app(scope, receive, send)
+
+
 class BodyLimit:
     def __init__(self, app, image_limit=131072, meme_limit=131072, file_limit=131072,
                  voice_limit=131072, voice_input_limit=131072, video_limit=131072):
@@ -232,13 +245,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     register_console_routes(app, settings)
     register_voice_node_routes(app)
 
-    @app.middleware("http")
-    async def memory_control_exclusive(request, call_next):
-        if memory_control_grant is not None and request.url.path not in {
-            "/internal/v1/health/live", "/internal/v1/memory-control",
-        }:
-            return JSONResponse({"error": "MEMORY_CONTROL_EXCLUSIVE"}, 403)
-        return await call_next(request)
+    app.add_middleware(_MemoryControlExclusive, enabled=memory_control_grant is not None)
 
     @app.post(prefix + "/memory-control", dependencies=[Depends(control_admin)])
     async def memory_control(body: MemoryControlInput, request: Request):
@@ -805,6 +812,14 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post(prefix + "/memes/captions/{job_id}", dependencies=auth)
     async def meme_caption_status(job_id: str):
         return app.state.core.memes.outcome(job_id)
+
+    from companion import meme_responsibility
+
+    @app.post(prefix + "/memes/captions/{job_id}/responsibility", dependencies=auth)
+    async def meme_caption_responsibility(job_id: str, body: meme_responsibility.EmptyBody,
+                                          response: Response):
+        response.headers["Cache-Control"] = "no-store"
+        return meme_responsibility.read(app.state.core.store, settings, job_id)
 
     @app.post(prefix + "/memes/embeddings", dependencies=auth)
     async def meme_embedding(body: meme_core.EmbedBody):

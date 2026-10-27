@@ -9,6 +9,7 @@ PACKAGES = {
     "companion_onebot_bridge": "_transport",
     "companion_delivery_protocol": "_delivery_protocol",
     "companion_meme_protocol": "_meme_protocol",
+    "companion_meme_sources": "_meme_sources",
 }
 
 

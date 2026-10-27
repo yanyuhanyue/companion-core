@@ -9,10 +9,8 @@ import zipfile
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
-from .meme_caption import strict_json
-from .meme_catalog import INTENTS
-from .meme_discovery import ArchiveMember, RepositoryImage, SearchImage
-from .meme_library import CATEGORY
+from companion_meme_protocol import strict_json
+from companion_meme_sources import CATEGORY, INTENTS, ArchiveMember, RepositoryImage, SearchImage
 
 INDEX_REVISION = "2f173ca5dc0b460d9c6408a4f7f0e9a83371677f"
 INDEX_URL = ("https://raw.githubusercontent.com/anka-afk/astrbot-meme-pack-index/"

@@ -31,15 +31,15 @@ COMPONENTS = {
     "core": {
         "tag": "companion-core:test", "recipe": "Dockerfile", "lock": "uv.lock",
         "copies": {"pyproject.toml", "uv.lock", "companion", "source_reader",
-                   "companion_onebot_bridge", "companion_meme_protocol",
+                   "companion_onebot_bridge", "companion_meme_protocol", "companion_meme_sources",
                    "companion_voice_node", "companion_delivery_protocol", "migrations", "db"},
     },
     "bridge": {
         "tag": "companion-onebot-bridge:review", "recipe": "deploy/onebot-bridge.Dockerfile",
         "lock": "deploy/onebot-bridge.lock",
         "copies": {"deploy/onebot-bridge.lock", "companion_onebot_bridge",
-                   "companion_meme_protocol", "companion_delivery_protocol",
-                   "scripts/probe_snowluma_direct.py"},
+                   "companion_meme_protocol", "companion_meme_sources",
+                   "companion_delivery_protocol", "scripts/probe_snowluma_direct.py"},
     },
     "reader": {
         "tag": "companion-source-reader:test", "recipe": "deploy/source-reader.Dockerfile",

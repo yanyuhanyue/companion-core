@@ -1,8 +1,9 @@
 # Core 素材运行时合同
 
-Core 运行时以 B1b 原生来源、费用和投递合同为基础，B2a 增加有界本地向量排序。
+Core 运行时以 B1b 原生来源、费用和投递合同为基础，B2a 增加有界本地向量排序，
+B2b 增加已批准 community FILE 来源的后台获取。
 当前候选只作本地合成验证；完整 PR CI、生产切换、真人 QQ 和检索质量验收分别记录。
-发现及新来源接入、历史副本退休与责任闭环、独立镜像仍由后续切片负责。
+更多来源格式、历史副本退休与责任闭环、独立镜像仍由后续切片负责。
 
 ## 单主与兼容
 
@@ -10,6 +11,9 @@ Core 运行时以 B1b 原生来源、费用和投递合同为基础，B2a 增加
 默认值不进入旧 Settings / Bridge 快照，默认 paid、owner、meme 摘要及投递材料保持原语义。
 实际非默认来源规则和 cooldown 必须序列化并进入 meme 策略摘要，即使 selector 是 bridge。
 Core 模式摘要包含 selector、exact 来源规则、cooldown 及固定 retrieval profile；旧授权不能取得新策略权限。
+开启 Core discovery 时还包含固定 acquisition profile：community、repository-files-v1、
+原 index revision、原 DiscoveryLimits 和 exact-local-TrustedSource-v1。默认 Bridge 及
+Core discovery 关闭时保留原摘要形状；开启或改变 acquisition profile 必须重新授权。
 该 selector 是迁移窗口，最终退休 Bridge 业务写入，不永久维持两套可写目录。
 
 BridgeConfig.snapshot 基于 asdict 的新拷贝，仅在实际 selector 为 bridge 时删去新增字段。
@@ -20,6 +24,41 @@ Core 模式禁止 Bridge 候选 sidecar、offer、caption 创建、embedding 和
 旧 caption 状态及 discovery result 接口保留原结算职责。Bridge MemePump 不启动业务任务，
 lazy factory 直接构造 CoreMemeTransport，只创建原 pin 和 delivery binding 表。
 旧历史内容副本存在本身不是已完成擦除；真实切换仍受 B3 门禁约束。
+
+## Core 后台 FILE 获取
+
+当前 chat 首次冻结 offer 时，只有存在意图、eligible=0、候选为空且没有检索 fallback，
+并满足原 paid meme_input、expression、meme、exact 来源规则时，才在同一事务创建原
+`meme_discovery` job。相同冻结 offer 不重复入队。前台不联网、不等待、不回填本轮候选。
+实际后台工作沿用 `MemeCaptionService.run_once` 和原 selector 的 meme_caption 调度入口，
+进展返回布尔值；数据库 job kind、租约、attempt、预算、来源检查仍为原 discovery 合同。
+有主人待处理、有效模型预留时让出执行。原 Outbox 为 PENDING/LEASED/SENDING 时，
+在 native lease 原事务内、claim/reservation 之前让出，保留原 QUEUED job 和未消耗的
+attempt；ACK 完成后仍领取该原 job。已开始 I/O 后的 preempt 继续使用原结算路径。
+
+`companion_meme_sources` 的四个平铺文件是 stdlib-only 获取、解析和审核实现，Core 与
+Bridge 复用同一函数和类型。Core 仅接受原 repository FILE、固定 repo/revision 和本地
+批准的许可证文件 hash；不采用档案、搜索提示或模型输出作为来源许可。每次请求继续
+执行原公网 DNS/redirect/Host/SNI、次数、字节和 lease/source fencing。获取字节暂存 RAM。
+
+完成下载后，在原 Store 事务中原子写入原 discovery SETTLED、原 native caption request、
+STAGED asset 及完整 `(event_id, caption_job_id)` 来源元组。pending caption 不可检索；
+只有原 caption 模型费用 SETTLED 且结果有效后，后续轮次才经 B2a 冻结排序和投递检查使用。
+同 SHA 的不同 exact 来源分别保管 BLOB、分别计入本次新写入字节；重复 exact 记录新增字节为零。
+acquisition storage_bytes 计数的是本事务新增 asset BLOB，不能解释为总磁盘占用。
+原 caption 原始字节上限为 2048 行/64 MiB，asset 上限为 4096 行/64 MiB，分别约束。
+
+复用先验证所有匹配缓存的原 capture、完整祖先、原 acquisition 与费用责任。不同 capture
+key/epoch、已擦除、UNKNOWN 或无法核验的匹配缓存会拒绝内容接入，已知下载可仅结算获取
+计数、storage=0；不能跳过旧责任另起 caption 模型。原 UNKNOWN 仍阻止新 grant 激活。
+无费用失败祖先的接管只在原事务中更新原 reuse 边并补齐所有受影响 STAGED 来源元组，
+保留旧元组、资产记录和 capture；深层费用、缺失、坏链或遍历超限在模型预留前拒绝。
+
+已知拒绝或确认回滚时只结算已观察的获取计数、storage=0；部分流、取消或未确认结果保留
+原 UNKNOWN/预留责任。提交结果不明时先读取同一原数据库：已实际 SETTLED 的结果必须
+精确匹配并保留；确认回滚后才允许 accounting-only 结算。不能重下载、重造内容，或以
+猜测 UNKNOWN 覆盖已提交结果。写入不可用时保留原预留，由原 lease recovery 接管。
+擦除与旧备份恢复沿用原独立 Ledger，清除派生内容且保留原费用、获取记录和来源归属。
 
 ## 集成接口
 
@@ -158,6 +197,41 @@ SENT/CANCELLED 转移、原 NOT_SENT 证明及晚到 ACK；重复 ACK 不改原 
 并通过 B3。Core 失败不自动启用旧目录。已有 Core 发送后，旧快照缺少后来来源/cooldown
 事实，立即回退仅限对账后的兼容 text-only 状态；旧候选重启须另审逆向对账或原 cooldown
 完全到期并完成擦除。不得覆盖旧快照、放行 UNKNOWN、退款或制造新成功。
+
+## 已知 caption 的责任读取
+
+`POST /internal/v1/memes/captions/{job_id}/responsibility` 复用私有 Bearer 边界，
+请求必须为严格空对象 `{}`，成功响应标记 `Cache-Control: no-store`。共享
+`CaptionResponsibility` v1 DTO 保留原 job/event/request/asset/source/cache/authority 摘要、
+原数据库 `job_state`、`body_erased`、责任类型、实际费用 owner 与原 UsageReceipt，以及
+完整有界复用链、ErasureLedger、预算 journal 身份和 head 的摘要。响应不含 caption、
+图片、URL、query 或 context 正文。
+
+`USAGE` 要求唯一、相互一致的原 model_usage/admission 与费用根节点；同时按真实
+job_id、admission.logical_request_id 和所有保留费用指针核对。缓存后代的空指针不会
+隐藏祖先费用。`NO_ADMISSION` 只适用于目标及全部复用祖先均为 FAILED/CANCELLED，
+且整条链不存在实际 U/admission；预分配 UID 本身不是费用。非终态、断链、循环、
+越界、多个费用 owner 或身份/指针不一致均拒绝。
+
+Core 在单个原 Store 事务内读取 jobs.authority_json 所指的精确原 revision，校验
+AuthorityRef、DB journal 身份及该 revision 的原 journal_path。预算校验使用
+`record=None, initialize=False, allow_settlement=True`，前后固定 Ledger 与 journal。
+当前设置里的新路径不能替代原证据。合法 policy_redacted 通过保留摘要与原 journal
+投影验证；STOP、过期、撤回或擦除不消除原费用，CANCELLED + UNKNOWN 保持原样。
+若原 journal 含 OWNER_RECONCILED v2 且其原 revision 后来合法 policy_redacted，
+现有 journal 校验仍要求未 redacted 的原 policy，故保守拒绝读取；该历史组合尚未验证。
+旧快照缺少最新 Ledger 重放、证据缺失和备份恢复标记继续拒绝；读取不重放、不建文件、
+不修复、不清标记，不进行 SQL 写入、审计、工作提交、模型调用或结算。
+
+Bridge `CaptionHTTP.get_responsibility` 仅对已保留绑定提供同一元数据读取，使用原
+native capture、authority、journal 及费用单调性校验，并在实际私有 HTTP 前后重查
+冻结绑定。它不读取 caption context/outcome 正文。既有正文 getter、semantic advance、
+费用写入、retirement preflight 及 pin/ACK/cooldown 路径维持原契约；consumer 接入另行评审。
+
+专用测试使用真实私有 TCP、独立 Core/Bridge SQLite、原签名 capture 与 Mock provider，
+核对读取前后完整逻辑 DB、预算 journal 和 Ledger；SQL authorizer 额外拒绝所有被测写操作
+及 caption/event 正文列。仅合成备份克隆清空两个 caption 正文列，验证元数据仍绑定原
+capture/U，同时旧正文 getter 拒绝。损坏图及请求/响应篡改均明确作为合成故障注入。
 
 ## 本地验证边界
 
