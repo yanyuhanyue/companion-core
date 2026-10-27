@@ -107,13 +107,14 @@ def test_slow_roundtrips_preserve_one_claim_and_original_in_independent_sdk_work
 
 
 @pytest.mark.parametrize("history", [False, True])
-def test_two_images_wait_only_for_permitted_history_until_its_original_deadline(
+def test_two_images_wait_only_for_permitted_history_and_release_failed_original(
     core, tmp_path, history,
 ):
     async def scenario():
+        core.settings.content = core.settings.content.model_copy(update={"wait_seconds": 90})
         async with window(core, tmp_path, media=True, content=True, history=history,
                           image_count="unlimited") as (client, config, plan):
-            first, _ = await admit_image(core, client, config, plan, tmp_path, number=41)
+            first, first_image = await admit_image(core, client, config, plan, tmp_path, number=41)
             core.clock.advance(1)
             second, image = await admit_image(core, client, config, plan, tmp_path, number=42)
             old_job = core.store.one("SELECT * FROM jobs WHERE event_id=?", (first["event_id"],))
@@ -130,7 +131,17 @@ def test_two_images_wait_only_for_permitted_history_until_its_original_deadline(
             assert original["state"] == "WAITING"
             if history:
                 assert core.claim_job("new-image-before-old-deadline", job_id=job["job_id"]) is None
-                core.clock.now = datetime.fromisoformat(original["deadline"])
+                old_lease = await claim(client, first, first_image)
+                assert agent_images.waiting(core, job)
+                core.clock.now = (datetime.fromisoformat(old_lease["lease_until"])
+                                  + timedelta(milliseconds=1))
+                with Core(core.settings, clock=core.clock) as independent:
+                    await independent.content.run_once()
+                failed = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+                                        (first["event_id"],))
+                assert failed["state"] == "FAILED"
+                assert failed["error_code"] == "CONTENT_IMAGE_DOWNLOAD_EXPIRED"
+                assert core.clock.now < datetime.fromisoformat(failed["deadline"])
                 assert not agent_images.waiting(core, job)
             assert core.claim_job("new-image-after-media", job_id=job["job_id"]) is not None
     run(scenario())
