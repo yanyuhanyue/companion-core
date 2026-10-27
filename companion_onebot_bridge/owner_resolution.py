@@ -77,8 +77,8 @@ def pending_result(spool, *, runtime=None):
             # one here would apply the startup fence to its in-flight attempt.
             if runtime is not None and runtime.spool is not spool:
                 raise ValueError("OWNER_RECEIPT_SPOOL_REQUIRED")
-            if not spool.db.execute("SELECT 1 FROM results WHERE state='pending' LIMIT 1"
-                                    ).fetchone():
+            if runtime is not None and not spool.db.execute(
+                "SELECT 1 FROM results WHERE state='pending' LIMIT 1").fetchone():
                 return None
             if runtime is None:
                 runtime = OwnerRuntime(spool)
