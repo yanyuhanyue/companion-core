@@ -10,10 +10,44 @@ import json
 import os
 import re
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 from companion.contracts import CoreError
 from companion.store import encode, uid
+
+# One complete input plus at most its length + 2 of immutable JSON payload.
+CACHE_MAX_BYTES = 1048576
+
+
+@lru_cache(maxsize=1)
+def _validated_bytes(raw):
+    lines = raw.decode("utf-8").splitlines()
+    previous = "0" * 64
+    for line in lines:
+        row = json.loads(line)
+        digest = row.pop("sha256")
+        if row.get("previous") != previous or sha(row) != digest:
+            raise ValueError("journal chain")
+        previous = digest
+    # Fresh decoding by the caller prevents fold/pop from changing cached objects.
+    return ("[" + ",".join(lines) + "]").encode("utf-8")
+
+
+def _journal_records(raw):
+    if len(raw) <= CACHE_MAX_BYTES:
+        try:
+            payload = _validated_bytes(raw)
+            records = json.loads(payload)
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            _validated_bytes.cache_clear()
+            # A damaged later line must not skip an earlier fold/error. Replay
+            # the original interleaved path over the same freshly read bytes.
+        else:
+            return records, True
+    else:
+        _validated_bytes.cache_clear()
+    return (json.loads(line) for line in raw.decode("utf-8").splitlines()), False
 
 
 def sha(value):
@@ -228,10 +262,14 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
-    from companion import cumulative, delivery_reconciliation, model_carry, owner_authority
+    try:
+        from companion import cumulative, delivery_reconciliation, model_carry, owner_authority
 
-    path = Path(approval.journal_path)
-    identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+        path = Path(approval.journal_path)
+        identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
+    except BaseException:
+        _validated_bytes.cache_clear()
+        raise
     try:
         if not path.exists():
             if (not initialize or identity or store.one("SELECT 1 FROM model_admissions LIMIT 1")
@@ -248,7 +286,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 os.fsync(stream.fileno())
             store.insert("runtime_meta", key="model_budget_journal_id", value=journal_id)
             identity = {"value": journal_id}
-        lines = path.read_text("utf-8").splitlines()
+        records, checked = _journal_records(path.read_bytes())
         previous, latest, blocked = "0" * 64, {}, {}
         corrections = {}
         measurements = {}
@@ -258,11 +296,10 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
         model_closures, model_carries, model_controls = {}, {}, {}
-        for index, line in enumerate(lines):
-            row = json.loads(line)
+        for index, row in enumerate(records):
             digest = row.pop("sha256")
             heads.add(digest)
-            if row.get("previous") != previous or sha(row) != digest:
+            if not checked and (row.get("previous") != previous or sha(row) != digest):
                 raise ValueError("journal chain")
             previous = digest
             if index == 0:
@@ -338,7 +375,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         lifecycle_record = record and record.get("kind") in {
             "window_stop", "window_open", "window_handoff"
         }
-        if not lines or (blocked and (
+        if not heads or (blocked and (
             not allow_settlement or (
                 record and record.get("kind") in {"window_open", "window_handoff"}
             )
@@ -459,4 +496,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 "model_latest": latest,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
+        _validated_bytes.cache_clear()
         raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from error
+    except BaseException:
+        _validated_bytes.cache_clear()
+        raise
