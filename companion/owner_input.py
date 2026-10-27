@@ -21,9 +21,14 @@ INPUT = "owner_input:"
 
 def verify(store, settings, value):
     """Verify provenance with the original revision, including after STOP or restore."""
+    return _verify(store, settings, value,
+                   lambda ref: owner_authority.evidence(store, settings, ref))
+
+
+def _verify(store, settings, value, evidence):
     try:
         capture = OwnerCapture.model_validate(value)
-        view = owner_authority.evidence(store, settings, capture.authority)
+        view = evidence(capture.authority)
         identity = view.policy.capture
         if identity is None:
             raise ValueError("capture identity absent")
@@ -36,7 +41,8 @@ def verify(store, settings, value):
                         "WHERE grant_id=? AND revision=?",
                         (view.authority.grant_id, view.authority.revision))
         if (
-            capture.identity_sha256 != identity.identity_sha256
+            capture.authority != view.authority.as_dict()
+            or capture.identity_sha256 != identity.identity_sha256
             or capture.protocol_epoch != identity.protocol_epoch
             or not capture.source_event_id.startswith(prefix)
             or not re.fullmatch(r"-?[1-9][0-9]{0,19}", capture.source_event_id[len(prefix):])
@@ -154,6 +160,12 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
     if history:
         view = owner_authority.current(store, settings, lambda: now,
             purpose="history", authority=view.authority)
+    return _source(store, settings, view, event_id, now, allow_commands=allow_commands,
+                   history=history, verify_capture=lambda value: verify(store, settings, value))
+
+
+def _source(store, settings, view, event_id, now, *, allow_commands=False, history=False,
+            verify_capture):
     event = store.one("SELECT e.*,c.scope,c.owner_actor_id FROM events e "
                       "JOIN conversations c USING(conversation_id) WHERE event_id=?", (event_id,))
     receipt = store.one("SELECT value FROM runtime_meta WHERE key=?", (INPUT + event_id,))
@@ -180,7 +192,7 @@ def source(store, settings, view, event_id, now, *, allow_commands=False, histor
             or type(value.get("privacy_epoch")) is not int
             or not 0 <= value["privacy_epoch"] <= epoch(store)):
             raise ValueError("source changed")
-        capture, original = verify(store, settings, value["capture"])
+        capture, original = verify_capture(value["capture"])
         if (value.get("authority") != original.authority.as_dict()
             or capture.event_id != event_id or capture.input_sha256 != value["input_sha256"]
             or capture.source_event_id != event["source_event_id"]
@@ -216,10 +228,38 @@ def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid
         return []
     scope = view.policy.history
     result = []
+    # This local batch never survives this synchronous call or its existing write lock.
+    # Any write on this connection invalidates reuse. Other DB writers cannot enter;
+    # independent files and live authority are checked again before returning.
+    transactional, changes = store.in_write_transaction, store.db.total_changes
+    originals = {encode(view.authority.as_dict()): view}
+
+    def evidence(ref):
+        key = encode(ref)
+        if key not in originals:
+            originals[key] = owner_authority.evidence(store, settings, ref)
+        return originals[key]
+
+    def verify_capture(value):
+        return _verify(store, settings, value, evidence)
+
     for item in recent_context_sources(store, job["conversation_id"], job["event_id"],
                                        scope.max_turns, cutoff_rowid=cutoff_rowid):
         try:
-            source(store, settings, view, item["event_id"], clock(), purpose=purpose, history=True)
+            if transactional and store.in_write_transaction and store.db.total_changes == changes:
+                if settings.owner_runtime.mode != "ENABLED":
+                    raise CoreError("OWNER_AUTHORITY_DISABLED", 403)
+                if purpose not in view.policy.purposes or "history" not in view.policy.purposes:
+                    raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
+                now = clock()
+                if (view.policy.expires_at is not None
+                    and datetime.fromisoformat(now) >= view.policy.expires_at):
+                    raise CoreError("OWNER_AUTHORITY_EXPIRED", 403)
+                _source(store, settings, view, item["event_id"], now, history=True,
+                        verify_capture=verify_capture)
+            else:
+                source(store, settings, view, item["event_id"], clock(),
+                       purpose=purpose, history=True)
             parts = item.get("reply_segments") or ([item] if item.get("message_id") else [])
             for part in parts:
                 sent = store.one("SELECT sent_at FROM outbox WHERE message_id=?",
@@ -237,6 +277,12 @@ def history_sources(store, settings, clock, job, *, purpose="chat", cutoff_rowid
     while result and sum(len(message["content"].encode()) for item in result
                          for message in turn_messages(item)) > scope.max_utf8_bytes:
         result.pop(0)
+    if transactional:
+        # Deliberately outside the per-source exclusion handler: STOP, expiry or
+        # changed independent custody invalidates the entire batch.
+        owner_authority.check_job(store, settings, clock, job, purpose=purpose)
+        if not store.in_write_transaction or store.db.total_changes != changes:
+            raise CoreError(reply_revision.CANCELLED, 409)
     return result
 
 

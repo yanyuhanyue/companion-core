@@ -53,6 +53,11 @@ class Store:
         ):
             self.db.execute("PRAGMA " + pragma)
 
+    @property
+    def in_write_transaction(self):
+        """Whether this Store owns an active BEGIN IMMEDIATE scope."""
+        return self._budget_stops is not None and self.db.in_transaction
+
     @contextmanager
     def transaction(self):
         self.db.execute("BEGIN IMMEDIATE")
