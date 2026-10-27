@@ -9,9 +9,11 @@ from functools import lru_cache
 from .event_normalizer import decode
 from .spool import encode
 
-# One entry retains at most 1 MiB of input plus 1 MiB + 2 of JSON bytes and a head.
+# One entry retains at most 8 MiB of input plus 8 MiB + 2 of JSON bytes and a head
+# (well inside the Bridge's 256 MiB limit). Live owner journals passed 1 MiB within
+# days, after which every read re-decoded the whole chain (~186 ms at 815 KB).
 # Larger reads and failed reads evict it; no file metadata or authority is cached.
-CACHE_MAX_BYTES = 1048576
+CACHE_MAX_BYTES = 8 * 1048576
 
 
 def digest(value):
