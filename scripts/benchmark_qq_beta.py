@@ -6,6 +6,8 @@ import math
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from companion.telemetry import validate_api_record
+
 EVIDENCE = {"OFFLINE_FIXTURE", "LIVE_ONEBOT", "PAID_MODEL"}
 FIELDS = {
     "schema_version",
@@ -41,7 +43,16 @@ def summarize(records, evidence_type, *, delivery_states=None):
         raise ValueError("INVALID_DURABLE_DELIVERY_COUNTS")
     stages, durations = Counter(), defaultdict(list)
     costs, usage_states = [], Counter()
+    api_validated, api_matching = 0, 0
     for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("INVALID_METRIC_RECORD")
+        if record.get("stage") == "api_request":
+            validate_api_record(record)
+            api_validated += 1
+            if record["evidence_type"] == evidence_type:
+                api_matching += 1
+            continue
         if set(record) - FIELDS or record.get("schema_version") != 1:
             raise ValueError("UNRECOGNIZED_METRIC_FIELDS")
         if record.get("evidence_type") != evidence_type:
@@ -75,7 +86,7 @@ def summarize(records, evidence_type, *, delivery_states=None):
             "max_ms": values[-1],
         }
     sends = stages["t_onebot_send_ack"] + stages["delivery_uncertain"]
-    return {
+    report = {
         "schema_version": 1,
         "evidence_type": evidence_type,
         "stage_counts": dict(stages),
@@ -102,6 +113,13 @@ def summarize(records, evidence_type, *, delivery_states=None):
         "only; reconcile with durable model_usage after a crash. Human QQ acceptance and "
         "provider invoices require separate evidence.",
     }
+    if api_validated:
+        report["api_requests"] = {
+            "validated_records": api_validated, "matching_records": api_matching,
+            "note": "API events are counted separately, not message or model spans. "
+                    "Route summaries require summarize_api with a trusted route registry.",
+        }
+    return report
 
 
 def main():
@@ -139,6 +157,13 @@ def main():
             f"| {stage} | {summary['samples']} | {summary['p50_ms']} | "
             f"{summary['p95_ms']} | {summary['max_ms']} |"
         )
+    if "api_requests" in result:
+        api = result["api_requests"]
+        markdown.extend([
+            "", api["note"], "",
+            f"API events validated: {api['validated_records']}; "
+            f"matching evidence: {api['matching_records']}",
+        ])
     args.output.with_suffix(".md").write_text("\n".join(markdown) + "\n", encoding="utf-8")
 
 

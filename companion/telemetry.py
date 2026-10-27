@@ -13,6 +13,8 @@ EVIDENCE_TYPES = {"OFFLINE_FIXTURE", "LIVE_ONEBOT", "PAID_MODEL"}
 API_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER"}
 API_ERRORS = {None, "HTTPError", "OperationalError", "DatabaseError", "CancelledError",
               "UnhandledError"}
+API_FIELDS = {"schema_version", "evidence_type", "session", "stage", "route", "method",
+              "status", "elapsed_ms", "error_class", "response_complete"}
 MAX_API_RECORD_BYTES = 4096
 MAX_API_SAMPLES = 10000
 STAGES = {
@@ -88,6 +90,38 @@ def emit_api(route, method, *, status, elapsed_ms, error_class, response_complet
     except Exception:
         # A closed/broken telemetry sink must not change a business response.
         pass
+
+
+def validate_api_record(record):
+    """Validate structure for count-only readers; this does not prove route registration.
+
+    Route summaries must still use summarize_api with caller-supplied trusted
+    templates. A count-only report must not echo this untrusted label.
+    """
+    if not isinstance(record, dict) or set(record) != API_FIELDS:
+        raise ValueError("UNRECOGNIZED_API_METRIC_FIELDS")
+    if (type(record["schema_version"]) is not int or record["schema_version"] != 1
+        or record["stage"] != "api_request"
+        or type(record["evidence_type"]) is not str or record["evidence_type"] not in EVIDENCE_TYPES
+        or type(record["session"]) is not str
+        or not re.fullmatch(r"[a-f0-9]{32}", record["session"])
+        or type(record["route"]) is not str
+        or len(record["route"]) > 512
+        or record["route"] != "UNMATCHED" and not re.fullmatch(
+            r"/(?:(?:[A-Za-z0-9_.-]+|\{[A-Za-z_][A-Za-z0-9_]*\})(?:/|$))*", record["route"])
+        or any(part in {".", ".."} for part in record["route"].split("/"))
+        or type(record["method"]) is not str or record["method"] not in API_METHODS
+        or record["status"] is not None and (
+            type(record["status"]) is not int or not 100 <= record["status"] <= 599)
+        or type(record["elapsed_ms"]) not in (int, float)
+        or not 0 <= record["elapsed_ms"] < 2**63
+        or type(record["error_class"]) not in (str, type(None))
+        or record["error_class"] not in API_ERRORS
+        or type(record["response_complete"]) is not bool
+        or record["response_complete"] and record["status"] is None):
+        raise ValueError("INVALID_API_METRIC")
+    if len(json.dumps(record)) + 1 > MAX_API_RECORD_BYTES:
+        raise ValueError("API_METRIC_TOO_LARGE")
 
 
 def summarize_api(records, evidence_type, route_templates):
