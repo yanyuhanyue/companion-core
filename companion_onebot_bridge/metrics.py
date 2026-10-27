@@ -43,6 +43,11 @@ def probe_finished(name, started_ns, error=None):
     _request_finished(PROBE_STAGES[name], started_ns, error)
 
 
+def send_finished(started_ns, error=None):
+    """The send call includes its guard/preflight work and provider transport."""
+    _request_finished("t_onebot_send_result", started_ns, error)
+
+
 def core_rpc_finished(path, started_ns, error=None):
     """Select only fixed labels; dynamic delivery identifiers are never exported."""
     if not isinstance(path, str):
