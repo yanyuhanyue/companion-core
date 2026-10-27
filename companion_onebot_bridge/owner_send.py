@@ -310,17 +310,21 @@ class OwnerOneBot:
     companion = True
     account_scope = True
     voice_scope = True
+    probe_before_reservation = True
 
     def __init__(self, guard, protocol):
         self.guard, self.config = guard, guard.config
         if (str(protocol.base_url).rstrip("/") != self.config.onebot_http_url.rstrip("/")
             or protocol.headers.get("Authorization") != "Bearer " + self.config.onebot_token):
             raise ValueError("OWNER_PROTOCOL_ENDPOINT_CHANGED")
+        self.protocol = protocol
         self.delegate = OneBotClient(replace(self.config, delivery_enabled=True),
                                      checked_http_client(protocol, guard.before_dispatch))
 
     async def probe(self):
-        return await self.delegate.probe()
+        # Reuse the authority-bound health check without a leased-item guard.
+        # The actual send retains before_dispatch's current-item/lease fences.
+        return await self.guard.runtime.probe(self.guard.client, self.protocol)
 
     def release_prepared(self):
         if self.config.meme_catalog_owner == "core":

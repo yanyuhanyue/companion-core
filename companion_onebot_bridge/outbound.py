@@ -151,6 +151,9 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
     validate_item(item, onebot.config, companion=getattr(onebot, "companion", False),
                   account_scope=getattr(onebot, "account_scope", False), voice_scope=voice_scope,
                   image_scope=getattr(onebot, "image_scope", False))
+    probe_before_reservation = getattr(onebot, "probe_before_reservation", False)
+    if probe_before_reservation and not (await onebot.probe())["connection_ready"]:
+        raise ValueError("ONEBOT_NOT_READY")
     if hasattr(onebot, "prepare_delivery"):
         await onebot.prepare_delivery(item)
     if guard is not None:
@@ -160,7 +163,7 @@ async def _deliver_item(client, onebot, spool, item, *, metrics=None, guard=None
         metrics.emit("t_outbox_lease", trace)
     message_id = item["message_id"]
     try:
-        if not (await onebot.probe())["connection_ready"]:
+        if not probe_before_reservation and not (await onebot.probe())["connection_ready"]:
             raise ValueError("ONEBOT_NOT_READY")
         started = await bounded_post(
             client,
