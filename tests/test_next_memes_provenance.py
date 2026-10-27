@@ -6,12 +6,8 @@ from dataclasses import FrozenInstanceError, replace
 import httpx
 import pytest
 
-from companion_onebot_bridge.meme_discovery import (
-    ArchiveMember,
-    ReviewApproval,
-    SearchImage,
-    run_discovery,
-)
+from companion_meme_sources import ArchiveMember, ReviewApproval, SearchImage
+from companion_onebot_bridge.meme_discovery import run_discovery
 from tests.test_next_memes_catalog import check, metadata, png
 from tests.test_next_memes_discovery import async_check, resolver
 from tests.test_next_memes_discovery import setup as setup

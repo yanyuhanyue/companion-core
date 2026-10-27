@@ -26,9 +26,16 @@ FORBIDDEN = {
     "__pycache__",
     ".playwright-cli",
 }
+MEME_SOURCE_FILES = {
+    "companion_meme_sources/" + name
+    for name in ("__init__.py", "fetch.py", "community.py", "review.py")
+}
 
 
 def verify_source(archive):
+    assert {f"companion_core-{__version__}/{name}" for name in MEME_SOURCE_FILES} <= (
+        set(archive.getnames())
+    )
     assert not any(FORBIDDEN.intersection(Path(n).parts) for n in archive.getnames())
     assert not any(part.endswith(".owner-images")
                    for name in archive.getnames() for part in Path(name).parts)
@@ -102,6 +109,44 @@ def verify_meme_protocol(destination, env=None):
                    env=env, check=True, timeout=30)
 
 
+def verify_meme_sources(destination, env=None):
+    """Load acquisition code from the artifact, without either application's authority."""
+    script = textwrap.dedent("""
+        import importlib.abc
+        import sys
+        from pathlib import Path
+
+        destination = Path(sys.argv[1]).resolve()
+        sys.path.insert(0, str(destination))
+        blocked = {"companion", "companion_onebot_bridge", "sqlite3", "sqlalchemy",
+                   "fastapi", "fastembed", "uvicorn", "httpx", "pydantic", "PIL",
+                   "companion_meme_protocol"}
+
+        class RuntimeDependencyGuard(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split(".", 1)[0] in blocked:
+                    raise AssertionError("Shared sources imported runtime dependency: " + fullname)
+
+        sys.meta_path.insert(0, RuntimeDependencyGuard())
+        import companion_meme_sources as sources
+        assert not blocked.intersection(sys.modules)
+        blocked.difference_update({"httpx", "pydantic", "PIL", "companion_meme_protocol"})
+        from companion_meme_sources import community, fetch, review
+        assert fetch.FetchedResource is sources.FetchedResource
+        assert community.RepositoryImage is sources.RepositoryImage
+        assert review.Metadata is sources.Metadata
+        assert review.ReviewApproval is sources.ReviewApproval
+        assert callable(fetch.PublicFetcher) and callable(community.CommunityPacks)
+        assert review.TrustedReviewer([], require_semantics=False).rules == ()
+        for name, module in tuple(sys.modules.items()):
+            if name.split(".", 1)[0] in {"companion_meme_sources", "companion_meme_protocol"}:
+                assert Path(module.__file__).resolve().is_relative_to(destination), name
+        assert not blocked.intersection(sys.modules)
+    """)
+    subprocess.run([sys.executable, "-I", "-B", "-c", script, str(destination)], cwd=destination,
+                   env=env, check=True, timeout=30)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist-dir", type=Path, default=ROOT / "dist")
@@ -114,6 +159,7 @@ def main():
         verify_source(archive)
     verify_export_rebuild(source, temporary)
     with zipfile.ZipFile(wheel) as archive:
+        assert MEME_SOURCE_FILES <= set(archive.namelist())
         assert not any(FORBIDDEN.intersection(Path(n).parts) for n in archive.namelist())
         assert not any(part.endswith(".owner-images")
                        for name in archive.namelist() for part in Path(name).parts)
@@ -165,6 +211,7 @@ def main():
                 PYTHONPATH=str(destination),
             )
             verify_meme_protocol(destination, env)
+            verify_meme_sources(destination, env)
             subprocess.run(
                 [sys.executable, "-m", "companion", "init"],
                 cwd=destination,
@@ -183,7 +230,7 @@ def main():
                 [sys.executable, "-m", "companion_voice_node.worker", "--help"],
                 cwd=destination, env=env, check=True, timeout=30,
             )
-    print("PASS: archives exclude private inputs; installed wheel initializes its migrations")
+    print("PASS: archives exclude private inputs; extracted wheel initializes its migrations")
 
 
 if __name__ == "__main__":

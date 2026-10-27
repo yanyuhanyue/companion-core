@@ -2,15 +2,15 @@
 
 import asyncio
 import hashlib
-import ipaddress
 import logging
-import socket
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
 
 import httpx
+
+from companion_meme_sources.fetch import global_address, resolve_public
 
 from . import face_graphics
 from .spool import encode
@@ -161,29 +161,6 @@ def source_url(image):
     if resource is None or image.url != resource["url"]:
         raise ValueError("QQ_FACE_RESOURCE_CHANGED")
     return image.url
-
-
-def global_address(value):
-    try:
-        ip = ipaddress.ip_address(value)
-        return (
-            ip.is_global
-            and not ip.is_multicast
-            and (ip.version == 4 or not (ip.ipv4_mapped or ip.sixtofour or ip.teredo))
-        )
-    except ValueError:
-        return False
-
-
-async def resolve_public(host, port):
-    addresses = await asyncio.wait_for(
-        asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM),
-        5,
-    )
-    values = sorted({row[4][0] for row in addresses})
-    if not values or any(not global_address(value) for value in values):
-        raise ValueError("IMAGE_NONPUBLIC_ADDRESS")
-    return values
 
 
 async def _connect_image(delegate, target, pin, check):

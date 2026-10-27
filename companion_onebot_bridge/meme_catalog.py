@@ -9,62 +9,17 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 
-from .meme_library import CATEGORY
+from companion_meme_sources import CATEGORY, INTENTS, MOCKERY, Metadata
+
 from .meme_transport import PinCustody
-
-INTENTS = {
-    "celebrate": ("celebrate", "congratulations", "happy", "开心", "庆祝", "成功"),
-    "comfort": ("comfort", "hug", "安慰", "抱抱", "陪伴"),
-    "like": ("like", "love", "喜欢", "喜爱", "爱心"),
-    "surprised": ("surprised", "surprise", "惊讶", "意外"),
-    "morning": ("morning", "早安", "早上好"),
-    "sleep": ("sleep", "good night", "晚安", "睡觉"),
-    "playful": ("playful", "joke", "调皮", "玩笑"),
-}
-MOCKERY = ("mock", "laugh at", "sarcas", "嘲笑", "嘲讽", "活该", "哈哈")
 
 
 def key_hash(value):
     if not isinstance(value, str) or not 1 <= len(value) <= 256:
         raise ValueError("MEME_KEY_INVALID")
     return hashlib.sha256(value.encode()).hexdigest()
-
-
-@dataclass(frozen=True)
-class Metadata:
-    category: str
-    description: str
-    tags: tuple[str, ...]
-    suitable: tuple[str, ...]
-    avoid: tuple[str, ...]
-    source_page: str
-    asset_url: str
-    license: str
-    usage_basis: str
-    fetched_at: str
-    revision: str = ""
-    acquisition_json: str = ""
-
-    def __post_init__(self):
-        if not isinstance(self.category, str) or not CATEGORY.fullmatch(self.category):
-            raise ValueError("MEME_CATEGORY_INVALID")
-        for field, maximum in (
-            (self.description, 2000), (self.source_page, 2048), (self.asset_url, 2048),
-            (self.license, 256), (self.usage_basis, 512), (self.fetched_at, 64),
-        ):
-            if not isinstance(field, str) or not field.strip() or len(field) > maximum:
-                raise ValueError("MEME_METADATA_INVALID")
-        if not isinstance(self.revision, str) or len(self.revision) > 200:
-            raise ValueError("MEME_METADATA_INVALID")
-        if not isinstance(self.acquisition_json, str) or len(self.acquisition_json) > 32768:
-            raise ValueError("MEME_METADATA_INVALID")
-        if (not isinstance(self.tags, tuple) or len(self.tags) > 32
-            or any(not isinstance(t, str) or not 1 <= len(t) <= 64 for t in self.tags)
-            or any(not isinstance(v, tuple) or len(v) > len(INTENTS)
-                   or any(t not in INTENTS for t in v) for v in (self.suitable, self.avoid))):
-            raise ValueError("MEME_TAGS_INVALID")
 
 
 def semantic_score(metadata, intent):

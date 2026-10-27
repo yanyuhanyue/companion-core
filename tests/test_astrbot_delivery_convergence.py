@@ -56,18 +56,33 @@ def test_plugin_zip_contains_shared_dispatch_without_core(tmp_path):
     script = '''
 import importlib.abc
 import sys
+from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 class Guard(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split('.')[0] in {'companion', 'companion_onebot_bridge',
-                'companion_delivery_protocol', 'companion_meme_protocol'}:
+                'companion_delivery_protocol', 'companion_meme_protocol',
+                'companion_meme_sources'}:
             raise AssertionError('Unbundled runtime import: ' + fullname)
 sys.meta_path.insert(0, Guard())
 from isolated_plugin.bridge import Spool
 from isolated_plugin._transport.delivery_receipts import DeliveryReceipts
 from isolated_plugin._transport.outbound import deliver_item
+from isolated_plugin import _meme_sources as sources
+from isolated_plugin._meme_sources import community, fetch, review
+from isolated_plugin._transport import images, meme_catalog, meme_discovery, meme_runtime
 assert Spool.flush_result is DeliveryReceipts.flush_result
 assert callable(deliver_item)
+assert meme_catalog.Metadata is review.Metadata is sources.Metadata
+assert meme_discovery.ReviewApproval is review.ReviewApproval is sources.ReviewApproval
+assert meme_discovery.PublicFetcher is fetch.PublicFetcher
+assert meme_runtime.CommunityPacks is community.CommunityPacks
+assert meme_runtime.TrustedReviewer is review.TrustedReviewer
+assert images.resolve_public is fetch.resolve_public
+for module in (sources, community, fetch, review, images, meme_catalog,
+               meme_discovery, meme_runtime):
+    assert Path(module.__file__).resolve().is_relative_to(
+        Path(sys.argv[1]) / 'isolated_plugin')
 '''
     result = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(tmp_path)],
                             cwd=tmp_path, capture_output=True, text=True, timeout=30)

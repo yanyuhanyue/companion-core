@@ -122,10 +122,12 @@ class SendCheck(WindowReference):
 def code_sha256():
     import companion_delivery_protocol
     import companion_meme_protocol
+    import companion_meme_sources
     import companion_voice_node
 
     package = Path(__file__).parent
-    shared = (companion_meme_protocol, companion_delivery_protocol, companion_voice_node)
+    shared = (companion_meme_protocol, companion_delivery_protocol, companion_voice_node,
+              companion_meme_sources)
     return paid_budget.sha([
         [p.relative_to(package).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest()]
         for p in sorted(package.rglob("*.py"))
