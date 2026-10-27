@@ -162,8 +162,8 @@ def test_large_journal_bypasses_and_evicts_the_single_bounded_entry(tmp_path):
     small, _, _ = chain({"value": "small"})
     write(path, small)
     journal.read(path)
-    large, rows, head = chain(*({"text": "x" * 40000} for _ in range(28)))
-    assert journal.CACHE_MAX_BYTES == 1048576 < len(large) < 32 * 1048576
+    large, rows, head = chain(*({"text": "x" * 60000} for _ in range(150)))
+    assert journal.CACHE_MAX_BYTES == 8 * 1048576 < len(large) < 32 * 1048576
     path.write_bytes(large)
     for _ in range(2):
         assert journal.read(path) == (rows, head)
@@ -248,3 +248,14 @@ def test_unchanged_cached_journal_still_checks_the_current_captured_source(confi
         with pytest.raises(ValueError, match="OWNER_CAPTURE_PROJECTION_CHANGED"):
             runtime.verify()
         assert journal._validated_bytes.cache_info().hits == before.hits + 1
+
+
+def test_journal_past_the_former_one_mebibyte_bound_stays_cached(tmp_path):
+    path = tmp_path / "journal.jsonl"
+    raw, rows, head = chain(*({"text": "x" * 40000} for _ in range(28)))
+    assert 1048576 < len(raw) < journal.CACHE_MAX_BYTES
+    write(path, raw)
+    for _ in range(2):
+        assert journal.read(path) == (rows, head)
+    info = journal._validated_bytes.cache_info()
+    assert info.currsize == 1 and info.hits == 1
