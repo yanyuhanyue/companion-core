@@ -59,17 +59,25 @@ def test_recorder_self_writes_do_not_wake_business_scan(core):
     run(scenario())
 
 
-def test_due_retry_wakes_without_a_writer_and_native_claim_succeeds(core):
+@pytest.mark.parametrize("before_scan_delay", [0, 0.2])
+def test_due_retry_wakes_without_a_writer_and_native_claim_succeeds(core, before_scan_delay):
+    controlled_clock = core.clock
     core.clock = utcnow
     job = ingest(core)
-    due = after(utcnow(), 0.15)
-    core.store.execute("UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=? WHERE job_id=?",
-                       (due, job["job_id"]))
 
     async def scenario():
         with Wakeup(core.store, core.settings, "worker", utcnow) as wake:
+            controlled_clock.now = datetime.fromisoformat(utcnow())
+            core.clock = wake.clock = controlled_clock
+            due = after(controlled_clock(), 0.15)
+            core.store.execute(
+                "UPDATE jobs SET state='RETRY_WAIT',next_attempt_at=? WHERE job_id=?",
+                (due, job["job_id"]),
+            )
+            await asyncio.sleep(before_scan_delay)
             scan = wake.before_scan()
             assert core.claim_job("too-early") is None
+            core.clock = wake.clock = utcnow
             assert await asyncio.wait_for(wake.wait(scan, UnitResult(False)), 1) == "deadline"
             assert core.claim_job("now-due")["job_id"] == job["job_id"]
     run(scenario())
