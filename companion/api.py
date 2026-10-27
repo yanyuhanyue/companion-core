@@ -29,6 +29,7 @@ from companion import (
     qq_images,
     qq_rich,
 )
+from companion.api_telemetry import ApiTelemetry
 from companion.config import Settings
 from companion.console_api import register_console_routes
 from companion.content_api import register_content_routes
@@ -961,4 +962,5 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     async def disabled(approval_id: str = ""):
         raise CoreError("CAPABILITY_DISABLED_IN_M0_M1", 403)
 
+    app.add_middleware(ApiTelemetry, routes=app.routes)
     return app
