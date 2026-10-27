@@ -49,8 +49,14 @@ def enabled(settings):
 
 
 def strict(store, settings):
+    from companion import owner_authority
     from companion.live_text import active
 
+    if settings.live_text_window is None and owner_authority.required(store, settings):
+        # A stored, stopped legacy binding is historical custody only; native
+        # OwnerAuthority (which refuses to activate over an unstopped window)
+        # governs current work, so the retired window must not fence it.
+        return False
     return active(store, settings) and not enabled(settings)
 
 
