@@ -9,6 +9,7 @@ from typing import Literal
 
 from fastapi import Depends, Header, Request, Response
 from pydantic import Field, SecretStr, StrictFloat, StrictInt
+from starlette.datastructures import MutableHeaders
 
 from companion import cloud_budget, console_read, delegation, operator_config
 from companion.contracts import CoreError, StrictModel
@@ -52,6 +53,29 @@ class Delegation(StrictModel):
 
 class AdjustmentDecision(StrictModel):
     decision: Literal["approve", "reject", "revert"]
+
+
+class _PrivateHeaders:
+    def __init__(self, app, *, prefix):
+        self.app, self.prefix = app, prefix
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not scope["path"].startswith(self.prefix):
+            return await self.app(scope, receive, send)
+
+        async def private_start(message):
+            if message["type"] == "http.response.start":
+                # The TLS proxy also owns static and internal-redirect headers.
+                MutableHeaders(scope=message).update({
+                    "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                    "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+                    "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
+                    "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+                    "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                })
+            await send(message)
+
+        await self.app(scope, receive, private_start)
 
 
 def digest(value):
@@ -147,20 +171,7 @@ def register_console_routes(app, settings):
     async def owner(request: Request):
         return check_owner(request)
 
-    @app.middleware("http")
-    async def private_headers(request, call_next):
-        response = await call_next(request)
-        # The TLS proxy owns static headers, including internal redirects and
-        # errors. Nginx retains gate response headers across X-Accel-Redirect.
-        if request.url.path.startswith(prefix):
-            response.headers.update({
-                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
-                "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
-                "Content-Security-Policy": "default-src 'self'; script-src 'self'; "
-                "style-src 'self'; img-src 'self' data:; connect-src 'self'; "
-                "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-            })
-        return response
+    app.add_middleware(_PrivateHeaders, prefix=prefix)
 
     @app.get("/console/")
     async def index():
