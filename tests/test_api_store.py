@@ -11,9 +11,11 @@ from time import perf_counter
 import anyio
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from companion import api, api_store, owner_authority, owner_input
 from companion.owner_authority_protocol import AuthorityStop
+from companion.privacy import epoch
 from companion.store import Store
 from tests.test_onebot_capture import real_core_http
 from tests.test_owner_authority import activate
@@ -109,6 +111,84 @@ def test_http_lock_wait_keeps_health_responsive_and_connections_independent(
             connection.execute("SELECT 1")
     assert core.store.one("SELECT COUNT(*) n FROM runtime_meta WHERE key=?",
                           (owner_input.INPUT + capture.event_id,))["n"] == 1
+
+
+def test_affect_reset_wait_keeps_health_responsive_and_duplicate_reset_atomic(
+    core, monkeypatch, record_property,
+):
+    core.settings.control_token = SecretStr("synthetic-affect-control-" * 2)
+    opened, closed, entered = [], [], threading.Event()
+    owner_thread, previous_epoch = threading.get_ident(), epoch(core.store)
+
+    class ObservedStore(Store):
+        def __init__(self, path):
+            super().__init__(path)
+            opened.append((self, threading.get_ident()))
+            if len(opened) == 2:
+                entered.set()
+
+        def close(self):
+            closed.append((self, threading.get_ident()))
+            super().close()
+
+    monkeypatch.setattr(api_store, "Store", ObservedStore)
+
+    async def scenario():
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-B", str(Path(__file__).with_name("api_store_lock_worker.py")),
+            core.settings.database, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        requests = []
+        try:
+            assert (await asyncio.wait_for(process.stdout.readline(), 5)).strip() == b"LOCKED"
+            async with real_core_http(core) as port, httpx.AsyncClient(
+                base_url=f"http://127.0.0.1:{port}", trust_env=False,
+            ) as client:
+                path = "/internal/v2/affect/reset"
+                body = {"request_id": "concurrent-affect-reset"}
+                denied = await client.post(path, json=body, headers=headers(core))
+                assert denied.status_code == 401 and not opened
+                control = {"Authorization": "Bearer "
+                           + core.settings.control_token.get_secret_value()}
+                invalid = await client.post(path, json={"request_id": ""}, headers=control)
+                assert invalid.status_code == 400 and not opened
+                requests = [asyncio.create_task(client.post(path, json=body, headers=control))
+                            for _ in range(2)]
+                await event_wait(entered)
+                before = perf_counter()
+                health = await asyncio.wait_for(client.get(PREFIX + "/health/live"), 0.75)
+                elapsed = perf_counter() - before
+                record_property("health_during_affect_write_wait_ms", round(elapsed * 1000, 3))
+                assert health.status_code == 200 and elapsed < 0.75
+                assert not any(request.done() for request in requests)
+                core.clock.advance(1)
+                process.stdin.write(b"release\n")
+                await process.stdin.drain()
+                responses = await asyncio.wait_for(asyncio.gather(*requests), 8)
+                assert all(response.status_code == 200 for response in responses)
+                assert all(response.headers["Cache-Control"] == "no-store"
+                           for response in responses)
+                assert responses[0].json() == responses[1].json() == {
+                    "state": "RESET", "reset_at": core.clock(),
+                }
+            await child_done(process)
+        finally:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            await asyncio.gather(*requests, return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert len(opened) == len(closed) == 2
+    assert {id(store): thread for store, thread in opened} == {
+        id(store): thread for store, thread in closed}
+    for store, thread in opened:
+        assert store is not core.store and thread != owner_thread
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            store.one("SELECT 1")
+    assert epoch(core.store) == previous_epoch + 1
+    assert len([row for row in core.ledger.read() if row.get("target_type") == "affect_reset"]) == 1
 
 
 @pytest.mark.parametrize(("route", "function", "payload"), [

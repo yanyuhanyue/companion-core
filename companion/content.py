@@ -160,6 +160,112 @@ def erase_content(store, event_ids):
         )
 
 
+def owner_source(store, settings, clock, options, event_id, upload=False):
+    if not settings.content_enabled:
+        raise CoreError("CONTENT_DISABLED", 403)
+    event = store.one(
+        "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
+        "USING(conversation_id) WHERE e.event_id=? AND e.redacted=0",
+        (event_id,),
+    )
+    if not event or (
+        event["source"],
+        event["actor_id"],
+        event["scope"],
+        event["owner_actor_id"],
+    ) != ("qq.onebot", "owner", "private", "owner"):
+        raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
+    body = json.loads(event["body_json"])
+    if owner_authority.required(store, settings):
+        view = owner_authority.current(store, settings, clock, purpose="content")
+        owner_input.source(store, settings, view, event_id, clock())
+    if live_text.active(store, settings):
+        approval, _, _ = live_text.guard(store, settings, clock)
+        files, images = qq_files.manifest(body), qq_images.manifest(body)
+        if files:
+            qq_files.source(store, settings, approval, event_id)
+        if images:
+            qq_images.source(store, settings, approval, event_id)
+        elif not files and getattr(approval, "link_scope", "none") == "owner_links_v1":
+            from companion import qq_source
+
+            qq_source.source(store, settings, approval, event_id)
+        elif not files and body.get("shared_content"):
+            raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
+    if body.get("diary_command") or body.get("control_command"):
+        raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
+    if (
+        upload
+        and after(event["ingested_at"], options.upload_window_seconds) <= clock()
+    ):
+        raise CoreError("CONTENT_UPLOAD_EXPIRED", 410)
+    return event, body
+
+
+def register_link_images(store, settings, clock, options, owner_event_id, source_event_id,
+                         image_urls):
+    owner_source(store, settings, clock, options, owner_event_id)
+    if live_text.active(store, settings):
+        return
+    source = store.one(
+        "SELECT e.source,o.adapter_id FROM events e JOIN observations o USING(event_id) "
+        "JOIN event_dependencies d ON d.event_id=e.event_id WHERE e.event_id=? "
+        "AND d.source_event_id=? AND e.redacted=0 AND o.redacted=0 "
+        "AND o.result_status='FETCHED'",
+        (source_event_id, owner_event_id),
+    )
+    if not source:
+        raise CoreError("CONTENT_IMAGE_PROVENANCE_REQUIRED", 403)
+    platform = source["source"].removeprefix("observation.")
+    s, now = store, clock()
+    with nullcontext() if s.db.in_transaction else s.transaction():
+        owner, _ = owner_source(store, settings, clock, options, owner_event_id)
+        if not s.one(
+            "SELECT 1 FROM observations o JOIN events e USING(event_id) "
+            "JOIN event_dependencies d ON d.event_id=e.event_id WHERE e.event_id=? "
+            "AND d.source_event_id=? AND o.redacted=0 AND e.redacted=0",
+            (source_event_id, owner_event_id),
+        ):
+            raise CoreError("CONTENT_IMAGE_PROVENANCE_REQUIRED", 403)
+        existing = s.rows(
+            "SELECT target_url,slot,source_event_id FROM content_items WHERE owner_event_id=? "
+            "AND kind='link_image'",
+            (owner_event_id,),
+        )
+        for raw in image_urls[:32]:
+            if len(existing) >= 64:
+                break
+            try:
+                url = public_image_url(raw, platform)
+            except CoreError:
+                continue
+            article_images = [
+                item for item in existing if item["source_event_id"] == source_event_id
+            ]
+            if any(item["target_url"] == url for item in article_images):
+                continue
+            slot = max((item["slot"] for item in existing), default=-1) + 1
+            limited = len(article_images) >= options.max_images_per_article
+            s.insert(
+                "content_items",
+                item_id=uid("content"),
+                owner_event_id=owner_event_id,
+                kind="link_image",
+                slot=slot,
+                source_event_id=source_event_id,
+                target_url=url,
+                state="FAILED" if limited else "QUEUED",
+                error_code="CONTENT_ARTICLE_IMAGE_LIMIT" if limited else None,
+                captured_privacy_epoch=epoch(s),
+                deadline=after(owner["ingested_at"], options.wait_seconds),
+                created_at=now,
+                updated_at=now,
+            )
+            existing.append(
+                {"target_url": url, "slot": slot, "source_event_id": source_event_id}
+            )
+
+
 class ContentService:
     def __init__(
         self,
@@ -207,45 +313,7 @@ class ContentService:
             )
 
     def _source(self, event_id, upload=False):
-        if not self.settings.content_enabled:
-            raise CoreError("CONTENT_DISABLED", 403)
-        event = self.store.one(
-            "SELECT e.*,c.scope,c.owner_actor_id FROM events e JOIN conversations c "
-            "USING(conversation_id) WHERE e.event_id=? AND e.redacted=0",
-            (event_id,),
-        )
-        if not event or (
-            event["source"],
-            event["actor_id"],
-            event["scope"],
-            event["owner_actor_id"],
-        ) != ("qq.onebot", "owner", "private", "owner"):
-            raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
-        body = json.loads(event["body_json"])
-        if owner_authority.required(self.store, self.settings):
-            view = owner_authority.current(self.store, self.settings, self.clock, purpose="content")
-            owner_input.source(self.store, self.settings, view, event_id, self.clock())
-        if live_text.active(self.store, self.settings):
-            approval, _, _ = live_text.guard(self.store, self.settings, self.clock)
-            files, images = qq_files.manifest(body), qq_images.manifest(body)
-            if files:
-                qq_files.source(self.store, self.settings, approval, event_id)
-            if images:
-                qq_images.source(self.store, self.settings, approval, event_id)
-            elif not files and getattr(approval, "link_scope", "none") == "owner_links_v1":
-                from companion import qq_source
-
-                qq_source.source(self.store, self.settings, approval, event_id)
-            elif not files and body.get("shared_content"):
-                raise CoreError("LIVE_IMAGE_SOURCE_REQUIRED", 403)
-        if body.get("diary_command") or body.get("control_command"):
-            raise CoreError("CONTENT_OWNER_SOURCE_REQUIRED", 403)
-        if (
-            upload
-            and after(event["ingested_at"], self.options.upload_window_seconds) <= self.clock()
-        ):
-            raise CoreError("CONTENT_UPLOAD_EXPIRED", 410)
-        return event, body
+        return owner_source(self.store, self.settings, self.clock, self.options, event_id, upload)
 
     def schedule(self, event_id):
         if not self.settings.content_enabled:
@@ -737,66 +805,10 @@ class ContentService:
         return render(selected) if selected else ""
 
     def register_link_images(self, owner_event_id, source_event_id, image_urls):
-        self._source(owner_event_id)
-        if live_text.active(self.store, self.settings):
-            return
-        source = self.store.one(
-            "SELECT e.source,o.adapter_id FROM events e JOIN observations o USING(event_id) "
-            "JOIN event_dependencies d ON d.event_id=e.event_id WHERE e.event_id=? "
-            "AND d.source_event_id=? AND e.redacted=0 AND o.redacted=0 "
-            "AND o.result_status='FETCHED'",
-            (source_event_id, owner_event_id),
+        return register_link_images(
+            self.store, self.settings, self.clock, self.options,
+            owner_event_id, source_event_id, image_urls,
         )
-        if not source:
-            raise CoreError("CONTENT_IMAGE_PROVENANCE_REQUIRED", 403)
-        platform = source["source"].removeprefix("observation.")
-        s, now = self.store, self.clock()
-        with nullcontext() if s.db.in_transaction else s.transaction():
-            owner, _ = self._source(owner_event_id)
-            if not s.one(
-                "SELECT 1 FROM observations o JOIN events e USING(event_id) "
-                "JOIN event_dependencies d ON d.event_id=e.event_id WHERE e.event_id=? "
-                "AND d.source_event_id=? AND o.redacted=0 AND e.redacted=0",
-                (source_event_id, owner_event_id),
-            ):
-                raise CoreError("CONTENT_IMAGE_PROVENANCE_REQUIRED", 403)
-            existing = s.rows(
-                "SELECT target_url,slot,source_event_id FROM content_items WHERE owner_event_id=? "
-                "AND kind='link_image'",
-                (owner_event_id,),
-            )
-            for raw in image_urls[:32]:
-                if len(existing) >= 64:
-                    break
-                try:
-                    url = public_image_url(raw, platform)
-                except CoreError:
-                    continue
-                article_images = [
-                    item for item in existing if item["source_event_id"] == source_event_id
-                ]
-                if any(item["target_url"] == url for item in article_images):
-                    continue
-                slot = max((item["slot"] for item in existing), default=-1) + 1
-                limited = len(article_images) >= self.options.max_images_per_article
-                s.insert(
-                    "content_items",
-                    item_id=uid("content"),
-                    owner_event_id=owner_event_id,
-                    kind="link_image",
-                    slot=slot,
-                    source_event_id=source_event_id,
-                    target_url=url,
-                    state="FAILED" if limited else "QUEUED",
-                    error_code="CONTENT_ARTICLE_IMAGE_LIMIT" if limited else None,
-                    captured_privacy_epoch=epoch(s),
-                    deadline=after(owner["ingested_at"], self.options.wait_seconds),
-                    created_at=now,
-                    updated_at=now,
-                )
-                existing.append(
-                    {"target_url": url, "slot": slot, "source_event_id": source_event_id}
-                )
 
     def resume_link_images(self, event_id):
         """Explicitly resume only budget-blocked images that never started I/O."""

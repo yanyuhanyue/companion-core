@@ -422,8 +422,10 @@ class GoalEngine:
                     ),
                 )
 
-    def pause_autonomy(self, paused):
+    def pause_autonomy(self, paused, *, owner_check=None):
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             self.store.execute(
                 "INSERT OR REPLACE INTO runtime_meta VALUES ('life_paused',?)",
                 ("1" if paused else "0",),

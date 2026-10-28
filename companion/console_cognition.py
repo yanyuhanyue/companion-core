@@ -13,12 +13,15 @@ from fastapi import Header, Request
 from companion.affect import feedback_reset_at
 from companion.cognition_read import CognitionRead
 from companion.contracts import CoreError, StrictModel
+from companion.diary import DiaryRepository
+from companion.executive import Executive
 from companion.executive_protocol import ToolDecision
 from companion.goal_protocol import GoalContinuationDecision, GoalDecision
+from companion.goals import GoalEngine
 from companion.life_protocol import TopicClosure
 from companion.memory_context import check_version, read_version
 from companion.privacy import redact, sensitive
-from companion.reflection import ReflectionDecision
+from companion.reflection import ReflectionDecision, ReflectionService
 from companion.transport import digest
 
 COGNITION_KINDS = ("wake", "life", "goal", "diary", "reflection", "nightly", "model", "rem")
@@ -84,8 +87,8 @@ class SourceGrantAction(StrictModel):
     action: Literal["revoke", "forget"]
 
 
-def register_console_cognition_routes(app, prefix, auth, operation):
-    """`operation(core, request, key, body, apply)` is the console's receipt helper."""
+def register_console_cognition_routes(app, prefix, auth, write, reset_affect, grant_action):
+    """Writes reuse the console's isolated connection, owner checks and native receipts."""
 
     @app.get(prefix + "/cognition", dependencies=auth)
     async def cognition(kind: str, before: str | None = None, record_id: str | None = None,
@@ -107,9 +110,7 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.post(prefix + "/affect/reset", dependencies=auth)
     async def affect_reset(body: AffectReset, request: Request,
                            idempotency_key: str = Header(default="")):
-        core = app.state.core
-        return operation(core, request, idempotency_key, body.model_dump(), lambda:
-                         core.affect.reset(core.settings.owner_qq_id, idempotency_key, core.ledger))
+        return await reset_affect(request, idempotency_key, body.model_dump())
 
     @app.get(prefix + "/goals", dependencies=auth)
     async def goals():
@@ -134,17 +135,25 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.post(prefix + "/goals/{goal_id}/decision", dependencies=auth)
     async def goal_decision(goal_id: str, body: GoalDecision, request: Request,
                             idempotency_key: str = Header(default="")):
-        engine = app.state.core.goals
-        return operation(app.state.core, request, idempotency_key, body.model_dump(), lambda:
-                         engine.accept(goal_id) if body.decision == "ACCEPT"
-                         else engine.cancel(goal_id))
+        def apply(core, owner_check):
+            with core.store.transaction():
+                owner_check()
+                engine = GoalEngine(core.store, core.settings, core.ledger, core.clock)
+                return (engine.accept(goal_id) if body.decision == "ACCEPT"
+                        else engine.cancel(goal_id))
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.post(prefix + "/goals/{goal_id}/continuation", dependencies=auth)
     async def goal_continuation(goal_id: str, body: GoalContinuationDecision, request: Request,
                                 idempotency_key: str = Header(default="")):
-        engine = app.state.core.goals
-        return operation(app.state.core, request, idempotency_key, body.model_dump(mode="json"),
-                         lambda: engine.continue_plan(goal_id, body))
+        def apply(core, owner_check):
+            with core.store.transaction():
+                owner_check()
+                return GoalEngine(core.store, core.settings, core.ledger, core.clock).continue_plan(
+                    goal_id, body)
+
+        return await write(request, idempotency_key, body.model_dump(mode="json"), apply)
 
     @app.get(prefix + "/reflections", dependencies=auth)
     async def reflections():
@@ -162,9 +171,12 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.post(prefix + "/reflections/{suggestion_id}/decision", dependencies=auth)
     async def reflection_decision(suggestion_id: str, body: ReflectionDecision, request: Request,
                                   idempotency_key: str = Header(default="")):
-        core = app.state.core
-        return operation(core, request, idempotency_key, body.model_dump(), lambda:
-                         core.reflections.decide(suggestion_id, body.decision))
+        def apply(core, owner_check):
+            diary = DiaryRepository(core.store, core.settings, core.clock)
+            return ReflectionService(core.store, core.settings, None, diary, core.ledger,
+                core.clock).decide(suggestion_id, body.decision, owner_check=owner_check)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.get(prefix + "/life/topics", dependencies=auth)
     async def life_topics():
@@ -174,9 +186,15 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.post(prefix + "/life/topics/{topic_id}/close", dependencies=auth)
     async def close_topic(topic_id: str, body: TopicClosure, request: Request,
                           idempotency_key: str = Header(default="")):
-        core = app.state.core
-        return operation(core, request, idempotency_key, body.model_dump(), lambda:
-                         core.life_topics.close(topic_id, body.source_event_id))
+        from companion.life_topics import LifeTopics
+
+        def apply(core, owner_check):
+            with core.store.transaction():
+                owner_check()
+                return LifeTopics(core.store, core.settings, core.clock).close(
+                    topic_id, body.source_event_id)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.get(prefix + "/interests", dependencies=auth)
     async def interests():
@@ -209,16 +227,20 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.post(prefix + "/tools/{task_id}/decision", dependencies=auth)
     async def tool_decision(task_id: str, body: ToolDecision, request: Request,
                             idempotency_key: str = Header(default="")):
-        core = app.state.core
-        return operation(core, request, idempotency_key, body.model_dump(), lambda:
-                         core.executive.decide(task_id, body))
+        def apply(core, owner_check):
+            return Executive(core.store, core.settings, core.clock).decide(
+                task_id, body, owner_check=owner_check)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.post(prefix + "/tools/{task_id}/revoke", dependencies=auth)
     async def tool_revoke(task_id: str, request: Request,
                           idempotency_key: str = Header(default="")):
-        core = app.state.core
-        return operation(core, request, idempotency_key, {}, lambda:
-                         core.executive.revoke(task_id))
+        def apply(core, owner_check):
+            return Executive(core.store, core.settings, core.clock).revoke(
+                task_id, owner_check=owner_check)
+
+        return await write(request, idempotency_key, {}, apply)
 
     @app.get(prefix + "/source-grants", dependencies=auth)
     async def source_grants():
@@ -227,9 +249,5 @@ def register_console_cognition_routes(app, prefix, auth, operation):
     @app.post(prefix + "/source-grants/{grant_id}", dependencies=auth)
     async def source_grant_action(grant_id: str, body: SourceGrantAction, request: Request,
                                   idempotency_key: str = Header(default="")):
-        core = app.state.core
-        grants = core.observations.grants
-        return operation(core, request, idempotency_key, body.model_dump(), lambda:
-                         grants.revoke(grant_id) if body.action == "revoke"
-                         else grants.forget(grant_id, core.ledger))
+        return await grant_action(request, idempotency_key, body.model_dump(), grant_id)
 

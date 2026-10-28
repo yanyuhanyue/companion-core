@@ -886,10 +886,12 @@ class DiaryService:
             "latest": latest,
         }
 
-    def expire_evidence(self):
+    def expire_evidence(self, *, owner_check=None):
         # Readers must not return expired evidence while a background worker is stopped.
         # Called outside existing transactions; correction uses a single enclosing transaction.
         def expire():
+            if owner_check is not None:
+                owner_check()
             sources = self.store.rows(
                 "SELECT DISTINCT de.event_id FROM diary_evidence de JOIN diary_entries d "
                 "USING(entry_id) WHERE d.status='COMMITTED'"
@@ -912,11 +914,13 @@ class DiaryService:
             with self.store.transaction():
                 expire()
 
-    def set_mode(self, enabled, requester):
+    def set_mode(self, enabled, requester, *, owner_check=None):
         self.authorize(requester)
         if enabled and not self.settings.diary_enabled:
             raise CoreError("DIARY_DISABLED_IN_CONFIG", 409)
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             self.store.execute(
                 "INSERT OR REPLACE INTO runtime_meta VALUES ('diary_paused',?)",
                 ("0" if enabled else "1",),
@@ -925,7 +929,7 @@ class DiaryService:
                 self.repo.cancel_pending("DIARY_PAUSED")
         return self.status(requester)
 
-    def correct(self, day, text, requester):
+    def correct(self, day, text, requester, *, owner_check=None):
         self.authorize(requester)
         if (
             not text.strip()
@@ -934,8 +938,10 @@ class DiaryService:
             or sensitive(text)
         ):
             raise CoreError("INVALID_DIARY_CORRECTION", 400)
-        self.expire_evidence()
+        self.expire_evidence(owner_check=owner_check)
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             entry = self._get_day(day)
             if not entry:
                 raise CoreError("DIARY_NOT_FOUND", 404)
@@ -957,9 +963,11 @@ class DiaryService:
             advance_epoch(self.store)
         return self.get_day(day, requester)
 
-    def forget(self, day, requester):
+    def forget(self, day, requester, *, owner_check=None):
         self.authorize(requester)
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             self.ledger.forget_diary(
                 self.store, day.isoformat(), self.settings.timezone, self.clock()
             )

@@ -5,7 +5,6 @@ import time
 from datetime import UTC, datetime
 
 from companion import (
-    __version__,
     budget,
     conversation_policy,
     dialogue_history,
@@ -1696,50 +1695,6 @@ class Core(Runtime):
 
 
     def status(self):
-        from companion.ops_status import snapshot
+        from companion.ops_status import runtime_snapshot
 
-        s = self.store
-        return {
-            "version": __version__,
-            "mode": self.settings.mode,
-            "operations": snapshot(self.settings),
-            "live_text_window": live_text.status(s, self.settings, self.clock),
-            "features": {
-                "memory": self.settings.memory_enabled,
-                "diary": self.diary.repo.enabled(),
-                "diary_auto_share": False,
-                "affect": self.settings.affect_enabled,
-                "consolidation": self.consolidation.enabled(),
-                "reflection": self.settings.reflection_enabled,
-                "goals": self.settings.goals_enabled,
-                "wake": self.settings.wake_enabled,
-                "executive": self.settings.executive.enabled,
-                "dsh": self.settings.executive.enabled
-                and self.settings.executive.allow_changes
-                and any(
-                    "dsh.run" in endpoint.capabilities
-                    for endpoint in self.settings.executive.endpoints.values()
-                ),
-                "media": self.settings.media.enabled,
-                "content": self.settings.content_enabled,
-                "voice": self.settings.media.enabled and self.settings.voice_enabled,
-                "camera": self.settings.media.enabled and self.settings.camera_enabled,
-                "android": self.settings.media.enabled and self.settings.android_enabled,
-                "public_publish": False,
-            },
-            "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),
-            "deliveries": s.rows("SELECT state,COUNT(*) AS count FROM outbox GROUP BY state"),
-            "tool_usage": s.rows(
-                "SELECT capability,state,COUNT(*) AS calls,"
-                "SUM(billed_micro_usd) AS estimated_micro_usd FROM tool_tasks "
-                "GROUP BY capability,state"
-            ),
-            "usage": s.rows(
-                "SELECT scenario,SUM(input_tokens) AS input_tokens,"
-                "SUM(output_tokens) AS output_tokens,SUM(cached_input_tokens) AS cached_tokens,"
-                "SUM(billed_micro_usd) AS estimated_micro_usd,"
-                "SUM(pricing_known=0) AS unknown_price_requests,"
-                "SUM(state='UNKNOWN') AS unknown_usage_requests "
-                "FROM model_usage GROUP BY scenario"
-            ),
-        }
+        return runtime_snapshot(self.store, self.settings, self.clock)

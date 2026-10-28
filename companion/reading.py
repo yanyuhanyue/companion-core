@@ -18,6 +18,28 @@ from companion.transport import digest
 FOLLOWUP = "reading_followup:"
 
 
+def service_for_store(store, settings, clock):
+    """Compose native receipt handling on one caller-owned connection, without startup I/O."""
+    from companion.bili_video import BiliVideoService
+    from companion.content import register_link_images
+    from companion.exploration import ExplorationService
+    from companion.goals import GoalEngine
+    from companion.observation import ObservationService
+    from companion.privacy import ErasureLedger
+    from companion.social import SocialPlanner
+
+    observations = ObservationService(store, settings, clock)
+    goals = GoalEngine(store, settings, ErasureLedger(settings.erasure_ledger), clock)
+    social = SocialPlanner(store, settings, clock)
+    exploration = ExplorationService(store, settings, observations, goals, social,
+        lambda owner, event, urls: register_link_images(
+            store, settings, clock, settings.content, owner, event, urls,
+        ), clock)
+    reading = ReadingService(store, settings, exploration, clock)
+    reading.video = BiliVideoService(store, settings, reading, clock=clock)
+    return reading
+
+
 def followup_item(store, settings, event_id, *, clock=utcnow):
     """Project a source-bound SDK tool selection through the existing Content view."""
     if settings.owner_runtime.mode != "ENABLED" or not store.one(

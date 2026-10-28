@@ -208,10 +208,13 @@ class Executive:
             s.audit("tool.proposed", task_id, task_id, now, risk=risk)
             return self.get(task_id)
 
-    def decide(self, task_id, decision):
+    def decide(self, task_id, decision, *, owner_check=None):
         self.policy()
-        s, now = self.store, self.clock()
+        s = self.store
         with s.transaction():
+            if owner_check is not None:
+                owner_check()
+            now = self.clock()
             task = self.get(task_id)
             if task["scope_sha256"] != decision.scope_sha256:
                 raise CoreError("TOOL_SCOPE_CHANGED", 409)
@@ -256,9 +259,12 @@ class Executive:
                 (now, now),
             )
 
-    def revoke(self, task_id):
-        s, now = self.store, self.clock()
+    def revoke(self, task_id, *, owner_check=None):
+        s = self.store
         with s.transaction():
+            if owner_check is not None:
+                owner_check()
+            now = self.clock()
             self.get(task_id)
             s.execute("UPDATE tool_approvals SET revoked_at=? WHERE task_id=?", (now, task_id))
             s.execute(

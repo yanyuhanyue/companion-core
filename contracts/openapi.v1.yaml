@@ -57,8 +57,12 @@ paths:
       operationId: leaseDeliveries
       description: >-
         Reserve pending deliveries for an authenticated Bridge. The default lane
-        is owner_private. qq_account requires its explicitly enabled window and
-        account-action authority; it does not extend M0/M1 permissions.
+        is owner_private. qq_account requires its explicitly enabled capability,
+        current owner reference and account-action authorization hash;
+        it does not extend M0/M1 permissions.
+        Live owner operation requires the current authority reference, validated
+        again against native custody when leasing. Omitting authority is only
+        available when the runtime does not require owner authority.
       requestBody:
         required: true
         content:
@@ -68,10 +72,13 @@ paths:
               additionalProperties: false
               required: [worker_id]
               properties:
-                worker_id: {type: string}
+                worker_id: {type: string, minLength: 1, maxLength: 128}
                 limit: {type: integer, minimum: 1, maximum: 20, default: 5}
                 delivery_lane: {enum: [owner_private, qq_account], default: owner_private}
-                window_sha256: {type: [string, 'null'], pattern: '^[a-f0-9]{64}$'}
+                authority:
+                  oneOf:
+                    - $ref: '#/components/schemas/AuthorityRef'
+                    - type: 'null'
                 account_actions_authorization_sha256: {type: [string, 'null'], pattern: '^[a-f0-9]{64}$'}
               allOf:
                 - if:
@@ -79,13 +86,12 @@ paths:
                     properties:
                       delivery_lane: {const: qq_account}
                   then:
-                    required: [window_sha256, account_actions_authorization_sha256]
+                    required: [authority, account_actions_authorization_sha256]
                     properties:
-                      window_sha256: {type: string}
+                      authority: {$ref: '#/components/schemas/AuthorityRef'}
                       account_actions_authorization_sha256: {type: string}
                   else:
                     properties:
-                      window_sha256: {type: 'null'}
                       account_actions_authorization_sha256: {type: 'null'}
       responses:
         '200':
@@ -315,6 +321,16 @@ components:
       required: true
       schema: {type: string, format: date}
   schemas:
+    AuthorityRef:
+      type: object
+      additionalProperties: false
+      required: [version, grant_id, revision, policy_sha256, restore_generation]
+      properties:
+        version: {type: integer, const: 2}
+        grant_id: {type: string, pattern: '^grant_[a-f0-9]{32}$'}
+        revision: {type: integer, minimum: 1, maximum: 9007199254740991}
+        policy_sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        restore_generation: {type: string, pattern: '^[A-Za-z0-9_-]{1,64}$'}
     DiaryEntry:
       type: object
       required: [entry_id, local_date, title, body_md, version, created_at, updated_at]
@@ -348,6 +364,10 @@ components:
           enum: [qq.private.reply, qq.private.proactive, qq.private.poke, qzone.publish,
                  qq.profile.nickname, qq.profile.signature, qq.profile.avatar]
         delivery_lane: {enum: [owner_private, qq_account]}
+        authority: {$ref: '#/components/schemas/AuthorityRef'}
+        origin_event_id: {type: string}
+        content_sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+        reply_revision: {type: integer, minimum: 0}
     MemoryResult:
       type: object
       required: [memory_id, subject, content, status, confidence, evidence_ids]
