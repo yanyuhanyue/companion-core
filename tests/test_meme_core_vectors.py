@@ -368,7 +368,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(restored))) as store:
         assert (
             store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0048_meme_vectors"
+            == "0049_evaluation_ordinals"
         )
         assert not store.rows("SELECT * FROM meme_vectors")
         assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"

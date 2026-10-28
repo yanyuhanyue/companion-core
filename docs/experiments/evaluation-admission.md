@@ -44,8 +44,29 @@ journal 和 cloud/global 预算。`evaluation_enabled=false` 为默认值。部�
 ```
 
 示意值不可直接运行。预览会拒绝不完整、超过120KB、包含凭据、模型/费率不匹配、
-非纯文本、共享上下文不同或改写 payload 的计划。当前用途限定一个 case 的三组重复，
-每组 baseline 与 participation_v1；36-case/72-request 后续实验不在此用途范围内。
+非纯文本、共享上下文不同或改写 payload 的计划。主人 pilot 限定一个 case 的三组重复，
+每组 baseline 与 participation_v1。
+
+## 合成计划（`kind: "synthetic"`）
+
+合成计划只包含仓库中 SYNTHETIC case，由现有 `prepare` 以 schema v2 生成，manifest 写
+`"kind": "synthetic"`，`source_event_ids` 必须为空；主人 pilot 不写 `kind`，其 manifest
+哈希不变。两类计划共用同一 consent、OwnerAuthority `evaluation` 用途、原 paid 合同与
+日/月/窗口限制，以及每次 5000 microUSD 的子上限。
+
+| 限制 | 主人 pilot | 合成计划 |
+|---|---|---|
+| 请求数 | 6 | ≤216（每个 case 的全部重复×两种策略，缺一对即拒绝） |
+| case 数 | 1 | ≤36，每个 case 一个共享上下文 |
+| 合计规划额度 | 50000 microUSD | 1000000 microUSD，预估超过即拒绝 |
+| 每次输入估计 | ≤2400 tokens | ≤8000 tokens |
+| manifest 大小 | 120KB | 1.5MB |
+
+合成计划没有主人来源和会话修订绑定，因此主人新消息不会中止它；事件挂在主人私聊会话
+下仅用于原 job 结构。worker 每次领取最多执行 6 个请求，之后把 job 放回队列，普通聊天
+优先领取；续跑前要求此前每次 usage 都已 SETTLED 且结果条数一致，否则以
+`EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED` 停止，绝不重放已发出的请求。
+迁移 `0049_evaluation_ordinals` 把 `evaluation_results.ordinal` 上限从 6 放宽到 216。
 
 ## 预算和不确定性
 

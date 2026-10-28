@@ -23,7 +23,7 @@ from tests.conftest import event, ingest
 from tests.test_paid_model_gate import approved_live
 
 
-def prepare(core, tmp_path, *, chat=False):
+def prepare(core, tmp_path, *, chat=False, **limits):
     source = None if chat else ingest(core, text="SYNTHETIC private source")
     if source:
         core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (source["job_id"],))
@@ -31,7 +31,7 @@ def prepare(core, tmp_path, *, chat=False):
     core.settings.max_output_tokens = 2048
     approved_live(core, tmp_path, provider="deepseek", model="deepseek-flash",
                   max_output_tokens=2048, input_rate=300000, cached_input_rate=6000,
-                  output_rate=1200000)
+                  output_rate=1200000, **limits)
     from companion.owner_authority_protocol import OwnerGrantPolicy, OwnerRuntimeConfig
     from tests.test_owner_authority import activate
 
