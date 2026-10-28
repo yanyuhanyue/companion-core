@@ -99,6 +99,7 @@ elif mode == "controller":
     import companion.model_carry_controller as controller
 
     original_verify = controller.verify
+    entry.utcnow = clock
     controller.verify = functools.partial(original_verify, observe=observer(bundle["executors"]))
     sys.argv = [
         "companion",

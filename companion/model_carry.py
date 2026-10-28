@@ -15,7 +15,8 @@ from companion_delivery_protocol import model_carry as wire
 
 CLOSE = "model_local_close"
 CARRY = "model_unknown_carry"
-KINDS = {CLOSE, CARRY}
+RENEW = "model_approval_renew"
+KINDS = {CLOSE, CARRY, RENEW}
 CLOSE_FIELDS = {
     "kind",
     "version",
@@ -94,6 +95,12 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     """Validate control evidence at its original journal cutoff, never as a charge."""
     if type(row.get("version")) is not int or row["version"] != 1:
         raise ValueError("model control record version")
+    if row["kind"] == RENEW:
+        from companion import model_renewal
+
+        return model_renewal.fold(
+            store, row, record_sha, journal_id, authorities, latest, blocked, closures, carries,
+        )
     if row["kind"] == CLOSE:
         if set(row) != CLOSE_FIELDS or row["request_id"] in blocked:
             raise ValueError("invalid model local closure")
@@ -261,6 +268,12 @@ def manifest(store, settings, authority, successor_window, witness, view):
     if not rows or len(rows) > 100 or len(rows) != total_unknown:
         raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
     original = owner_authority.evidence(store, settings, authority)
+    if original.policy.unknown_carry_sha256 is not None:
+        from companion import model_renewal
+
+        return model_renewal.manifest(
+            store, settings, authority, successor_window, witness, view, original, stop, work,
+        )
     for row in rows:
         financial = view["model_latest"].get(row["request_id"])
         if (
@@ -348,7 +361,7 @@ def manifest(store, settings, authority, successor_window, witness, view):
     }
 
 
-def _same_approval(old, new):
+def _same_approval(old, new, *, renewal_at=None):
     allowed = {
         "window_id",
         "approval_sha256",
@@ -356,6 +369,12 @@ def _same_approval(old, new):
         "credential_tag",
         "video_credential_tag",
     }
+    if renewal_at is not None:
+        if (not timestamp(old["expires_at"]) <= timestamp(renewal_at) < timestamp(new["expires_at"])
+            or timestamp(new["rates_valid_until"]) < timestamp(new["expires_at"])
+            or timestamp(new["rates_valid_until"]) < timestamp(old["rates_valid_until"])):
+            raise CoreError("OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED", 409)
+        allowed.update({"expires_at", "rates_valid_until"})
     if (
         new.get("concurrency_basis") != wire.MODE
         or old["concurrency"] != 1
@@ -389,11 +408,15 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         "successor_policy",
         "executors",
     }
+    renewal = isinstance(request, dict) and request.get("version") == 2
+    if renewal:
+        fields.add("previous_paid_contract")
+    kind = RENEW if renewal else CARRY
     if (
         not isinstance(request, dict)
         or set(request) != fields
         or type(request["version"]) is not int
-        or request["version"] != 1
+        or request["version"] not in {1, 2}
         or not hash_value(request["authorization_sha256"])
         or not hash_value(request["expected_head_sha256"])
         or not hash_value(request["manifest_sha256"])
@@ -423,7 +446,8 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         previous = [
             row
             for row in raw_records
-            if row.get("kind") == CARRY and row.get("operation_id") == request["operation_id"]
+            if row.get("kind") in {CARRY, RENEW}
+            and row.get("operation_id") == request["operation_id"]
         ]
         if previous:
             if (
@@ -468,11 +492,18 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         )
         if digest(value) != request["manifest_sha256"]:
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        if renewal != ("predecessor_carry_sha256" in value):
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         policy = OwnerGrantPolicy.model_validate(request["successor_policy"])
         original = owner_authority.evidence(store, settings, request["authority"])
         old_policy = original.policy.model_dump(mode="json")
         new_policy = policy.model_dump(mode="json")
         allowed = {"authorization_sha256", "paid_contract_sha256", "unknown_carry_sha256"}
+        if renewal:
+            from companion import model_renewal
+
+            model_renewal.check_policy(store, settings, original.policy, policy, now)
+            allowed.update({"expires_at", "purposes", "life_shadow"})
         if (
             policy.unknown_carry_sha256 != digest(value)
             or policy.authorization_sha256 != request["authorization_sha256"]
@@ -482,14 +513,16 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
             != {k: v for k, v in new_policy.items() if k not in allowed}
         ):
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
-        old = json.loads(
+        old = request["previous_paid_contract"] if renewal else json.loads(
             store.one(
                 "SELECT snapshot_json FROM model_admissions WHERE request_id=?",
                 (value["unknowns"][0]["request_id"],),
             )["snapshot_json"]
         )
         new = paid_budget.snapshot(settings)
-        _same_approval(old, new)
+        if renewal and paid_budget.sha(old) != original.policy.paid_contract_sha256:
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        _same_approval(old, new, renewal_at=now if renewal else None)
         if new["window_id"] != request["successor_window_id"]:
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         # Recompute the original per-window credential tags using the current key.
@@ -502,7 +535,7 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         if any(old.get(k) != tags.get(k) for k in ("credential_tag", "video_credential_tag")):
             raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
         record = {
-            "kind": CARRY,
+            "kind": kind,
             "version": 1,
             "operation_id": request["operation_id"],
             "request_sha256": reviewed_sha,
@@ -532,6 +565,18 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
 
 def _receipt(saved):
     value = saved["manifest"]
+    if saved["kind"] == RENEW:
+        # Renewal is not an input-terminal or Bridge carry receipt. Older inputs
+        # keep their original carry proof; current inputs must already be terminal.
+        return {
+            "kind": "owner_model_approval_renewal_v1", "version": 1, "state": "PREPARED",
+            "authority": value["authority"], "carry_sha256": saved["carry_sha256"],
+            "record_sha256": saved["record_sha256"],
+            "predecessor_carry_sha256": value["predecessor_carry_sha256"],
+            "successor_policy_sha256": saved["successor_policy_sha256"],
+            "successor_window_id": value["successor_window_id"],
+            "retained_micro_usd": sum(i["minimum_micro_usd"] for i in value["unknowns"]),
+        }
     result = {
         "kind": wire.KIND,
         "version": 1,
@@ -568,6 +613,10 @@ def read(store, settings, authority, carry_sha, successor_policy_sha):
             raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
         if saved["successor_policy_sha256"] != successor_policy_sha:
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+        if saved["kind"] == RENEW and authority == saved["manifest"]["authority"]:
+            # Renewal requires terminal current inputs, so there is no new
+            # nonterminal input-carry receipt for Bridge to consume.
+            raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
         if authority != saved["manifest"]["authority"]:
             stopped = _continuation(store, settings, authority, saved, view)
             return _local_receipt(store, settings, authority, saved, stopped, view)
@@ -648,7 +697,7 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
     return wire.receipt(result)
 
 
-def _continuation(store, settings, authority, saved, view):
+def _continuation(store, settings, authority, saved, view, *, approved_contract_sha256=None):
     """Reuse one approval across native STOP/ACTIVE revisions, never a fresh window."""
     from companion import live_text, owner_authority
 
@@ -693,7 +742,7 @@ def _continuation(store, settings, authority, saved, view):
             and head["policy_sha256"] == saved["successor_policy_sha256"]
             and head["predecessor_sha256"] == stopped["record_sha256"]
         )
-        or paid_budget.sha(paid_budget.snapshot(settings))
+        or (approved_contract_sha256 or paid_budget.sha(paid_budget.snapshot(settings)))
         != saved["successor_paid_contract_sha256"]
         or original.policy.unknown_carry_sha256 != saved["carry_sha256"]
     ):

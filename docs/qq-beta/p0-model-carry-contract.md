@@ -152,6 +152,55 @@ These native Docker operations follow the primary CLI contracts:
 [wait](https://docs.docker.com/reference/cli/docker/container/wait/) and
 [container listing/filtering](https://docs.docker.com/reference/cli/docker/container/ls/).
 
+## Expired approval renewal
+
+An already-carried historical UNKNOWN can enter a new explicitly approved period
+through the same offline preview/commit commands. The private request uses
+`version=2` and adds `previous_paid_contract`: the exact previous paid snapshot,
+whose hash must match the stopped authority. Existing executor inspection, five
+worker locks, exact request/head binding and interrupted fsync recovery still apply.
+This reuses the append-only approval/predecessor pattern from
+[cumulative renewal](p13-cumulative-limits.md); it does not enroll a cumulative
+account or remove the existing cumulative/carry compatibility guard.
+
+The previous paid approval must have expired. A new window ID, paid approval and
+owner authorization are required. The rate-validity end may extend with the new
+expiry; prices, starts-at, credentials, provider/model, per-attempt/request limits,
+daily/monthly/window amounts and call limits remain identical. The owner expiry
+must equal the new paid expiry. Every predecessor window, including settled calls
+in the immediately preceding window, remains in the budget scope.
+
+The original journal receives `model_approval_renew`, version 1. Its manifest binds
+the preceding carry, current native STOP, exact historical UNKNOWN inventory,
+full window scope, financial baseline and newly verified closed executors. It
+changes no original admission, charge, closure, tool or input. Current inputs must
+be terminal; a new current UNKNOWN needs its own reconciliation/closure review.
+The original carried inputs retain their original Core and Bridge proofs.
+
+The commit's `owner_model_approval_renewal_v1` response is an offline preparation
+summary, not a Bridge input receipt. The frozen input-carry endpoint does not return
+that summary. Current terminal inputs use ordinary `owner-handoff-prepare`, followed
+by exact preview/activate and `owner-handoff`. Later same-policy STOP cycles retain
+the existing continuation rules. Older journal readers must remain stopped after
+the renewal append; forward repair preserves the whole journal.
+
+The only optional permission addition in this renewal is bounded private Life:
+the old policy must already grant proactive messages and private history. A fresh
+`life_shadow` authorization may select private owner messages in that same retained
+history, conversation, grant and restore generation. It allows only
+`PRIVATE_MESSAGE_DRAFT` and `qq.private.proactive`, excludes sources with uncertain
+model responsibility, and cannot add goals, public posting or other actions. Later
+renewals keep the exact Life source set and limits. Source expiry and erasure still
+apply independently of the new authorization expiry.
+
+Life requires both journal-proven execution closure and explicit retention under
+the current approval to distinguish an old financial UNKNOWN from an outstanding
+execution. A new UNKNOWN, missing closure or journal/projection mismatch still pauses
+Life. Uncertain delivery always pauses it.
+The UNKNOWN charge remains included in all applicable budgets, and its old logical
+request cannot be retried. Daily limits, cooldown, owner-idle and quiet-hour checks
+remain in their existing scheduling and delivery paths.
+
 ## Candidate image and migration boundary
 
 The feature was authored on main `90bc5b3`; final integration normally inherits

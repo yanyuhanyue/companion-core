@@ -64,11 +64,30 @@ def _paused(store, settings, now):
     )
 
 
-def _uncertain(store):
-    return bool(
-        store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN' LIMIT 1")
-        or store.one("SELECT 1 FROM outbox WHERE state IN ('SENDING','DELIVERY_UNCERTAIN') LIMIT 1")
-    )
+def _uncertain(store, settings):
+    from companion import model_carry, paid_budget
+
+    if store.one("SELECT 1 FROM outbox WHERE state IN ('SENDING','DELIVERY_UNCERTAIN') LIMIT 1"):
+        return True
+    unknown = store.rows("SELECT request_id FROM model_usage WHERE state='UNKNOWN'")
+    if not unknown:
+        return False
+    if not model_carry.active(settings):
+        return True
+    try:
+        with _transaction(store):
+            model_carry.supported(store, settings)
+            view = paid_budget.journal(store, settings.paid_model, initialize=False)
+            current = view["owner_authority"]
+            retained = {item["request_id"] for carry in view["model_carries"].values()
+                        if current and carry["successor_policy_sha256"] == current["policy_sha256"]
+                        for item in carry["manifest"]["unknowns"]}
+            # Only the current approval's explicitly retained, closed liability
+            # is exempt. A new UNKNOWN still pauses Life, even after local unwind.
+            return any(row["request_id"] not in retained
+                       or row["request_id"] not in view["model_closures"] for row in unknown)
+    except CoreError:
+        return True
 
 
 def _draft_text(decision, sources, settings, now):
@@ -500,7 +519,7 @@ class LifeTopics:
                               "AND action_type='qq.private.proactive' ORDER BY rowid",
                               (data["job"]["event_id"],))
             if not existing:
-                if _uncertain(s):
+                if _uncertain(s, self.settings):
                     raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
                 count, recent = proactive_counts(s, self.settings, now)
                 if count >= self.settings.proactive_daily_limit or recent:
@@ -528,7 +547,7 @@ class LifeTopics:
         """Consume at most one original result under explicit automatic channel consent."""
         s, cfg, now = self.store, self.settings, self.clock()
         if (cfg.mode != "live" or cfg.life_loop.mode != "SHADOW" or not cfg.wake_enabled
-            or _paused(s, cfg, now) or _uncertain(s) or private_life.busy(s, now)):
+            or _paused(s, cfg, now) or _uncertain(s, cfg) or private_life.busy(s, now)):
             return False
         try:
             view = owner_authority.current(s, cfg, self.clock, purpose="life")
@@ -793,6 +812,12 @@ class LifeTopics:
                     if parent is None:
                         continue
                     conversation = parent["conversation_id"]
+                try:
+                    authority(s, self.settings, conversation, [source], now, check_limit=False)
+                except CoreError:
+                    # An unapproved older source must not join an approved topic
+                    # and prevent the whole conversation from passing its scope.
+                    continue
                 active = (
                     s.one(
                         "SELECT * FROM life_topics WHERE conversation_id=? "
@@ -858,7 +883,7 @@ class LifeTopics:
             return None
         if (
             _paused(s, self.settings, now)
-            or _uncertain(s)
+            or _uncertain(s, self.settings)
             or budget.chat_pending(s, now)
             or not private_life.ready(s, self.settings, self.clock)
         ):
@@ -929,7 +954,7 @@ class LifeTopics:
             or _paused(s, self.settings, now)
         ):
             raise CoreError(reply_revision.CANCELLED, 409)
-        if _uncertain(s):
+        if _uncertain(s, self.settings):
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
         try:
             sources = self.sources(topic_id)
