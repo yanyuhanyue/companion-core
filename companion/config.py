@@ -422,6 +422,10 @@ class Settings(BaseModel):
     segmented_reply: SegmentedReplyConfig | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
+    # Native QQ quote for owner-authority replies; see companion/reply_quote.py.
+    quote_policy: Literal["never", "occasionally", "often"] = Field(
+        default="never", exclude_if=lambda value: value == "never",
+    )
     rich_input_scope: Literal["none", "references_v1"] = "none"
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)

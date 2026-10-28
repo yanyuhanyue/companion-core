@@ -328,7 +328,11 @@ class OwnerOneBot:
         return await self.guard.runtime.probe(self.guard.client, self.protocol)
 
     def release_prepared(self):
-        if self.config.meme_catalog_owner == "core":
+        prepared = self.guard.prepared_message
+        # A quote targets one Core-resolved message and must never reach a later item.
+        if self.config.meme_catalog_owner == "core" or (
+            prepared and prepared[0].get("type") == "reply"
+        ):
             self.guard.prepared_message = None
 
     async def prepare_delivery(self, item):
@@ -363,13 +367,17 @@ class OwnerOneBot:
             else:
                 image = self.guard.runtime.memes.prepare(item, check=fence)
             self.guard.meme_prepared = image is not None
-            message = [{"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
+            message = reply_segments.quote(item) + [
+                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
             if image is None:
                 self.guard.runtime.memes.cancel(reply_segments.event_id(item))
             else:
                 message.append({"type": "image", "data": {
                     "file": "base64://" + base64.b64encode(image.data).decode("ascii")}})
             self.guard.prepared_message = message
+        elif quoted := reply_segments.quote(item):
+            self.guard.prepared_message = quoted + [
+                {"type": "text", "data": {"text": reply_segments.wire_text(item)}}]
 
     async def send_content(self, content):
         item = self.guard.current_item
@@ -395,4 +403,8 @@ class OwnerOneBot:
             if self.guard.meme_sending:
                 self.guard.runtime.memes.receipt(item, "SENT" if provider_id else "UNKNOWN")
             return provider_id
+        if "reply_to" in content:
+            if self.guard.prepared_message is None:
+                raise ValueError("OWNER_MEDIA_PREPARATION_REQUIRED")
+            return await self.delegate.send_message(self.guard.prepared_message)
         return await self.delegate.send_text(reply_segments.wire_text(item))

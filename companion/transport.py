@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from contextlib import nullcontext
 from datetime import datetime
 
@@ -12,13 +13,19 @@ def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
-def enqueue(store, event_id, conversation_id, text, now, action="qq.private.reply", key=None):
+def enqueue(store, event_id, conversation_id, text, now, action="qq.private.reply", key=None, *,
+            reply_to=None):
     if action not in {"qq.private.reply", "qq.private.proactive"}:
         raise CoreError("CAPABILITY_DISABLED", 403)
     with nullcontext() if store.db.in_transaction else store.transaction():
         if action == "qq.private.reply":
             reply_revision.require_reply_source(store, event_id)
         content = {"text": text}
+        if reply_to is not None:
+            # Only a Core-resolved owner input id; the Bridge adds the native quote.
+            if action != "qq.private.reply" or not valid_reply_to({"message_id": reply_to}):
+                raise CoreError("INVALID_REPLY_QUOTE", 400)
+            content["reply_to"] = {"message_id": reply_to}
         key = key or f"reply:{event_id}:v1"
         previous = store.one("SELECT message_id FROM outbox WHERE delivery_key=?", (key,))
         if previous:
@@ -45,7 +52,14 @@ def _group_manifest(job_id, parts, interval_ms):
             "interval_ms": interval_ms, "total_chars": sum(map(len, parts))}
 
 
-def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.private.reply"):
+def valid_reply_to(value):
+    return (isinstance(value, dict) and set(value) == {"message_id"}
+            and isinstance(value["message_id"], str)
+            and re.fullmatch(r"-?[1-9][0-9]{0,19}", value["message_id"]) is not None)
+
+
+def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.private.reply",
+                        reply_to=None):
     """Freeze all parts atomically; a retried job cannot recut or duplicate its reply."""
     if (
         not isinstance(parts, list) or not 1 <= len(parts) <= 2**31 - 1
@@ -76,6 +90,8 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
             if (
                 len(group["rows"]) != len(existing)
                 or [json.loads(row["content_json"])["text"] for row in group["rows"]] != parts
+                or json.loads(group["rows"][0]["content_json"]).get("reply_to") != (
+                    {"message_id": reply_to} if reply_to is not None else None)
                 or (group["segmented"] and any(
                     row["reply_group_id"] != job["job_id"]
                     or row["segment_interval_ms"] != interval_ms for row in group["rows"]
@@ -85,12 +101,13 @@ def enqueue_reply_parts(store, job, parts, interval_ms, now, *, action="qq.priva
             return [row["message_id"] for row in group["rows"]]
         if len(parts) == 1:
             return [enqueue(store, job["event_id"], job["conversation_id"], parts[0], now,
-                            action=action)]
+                            action=action, reply_to=reply_to)]
         group_hash = digest(_group_manifest(job["job_id"], parts, interval_ms))
         ids = []
         for index, text in enumerate(parts):
             message_id = enqueue(store, job["event_id"], job["conversation_id"], text, now,
-                                 key=f"reply:{job['event_id']}:v2:{index}", action=action)
+                                 key=f"reply:{job['event_id']}:v2:{index}", action=action,
+                                 reply_to=reply_to if index == 0 else None)
             store.execute(
                 "UPDATE outbox SET reply_group_id=?,segment_index=?,segment_count=?,"
                 "reply_group_sha256=?,segment_interval_ms=? WHERE message_id=?",
@@ -139,7 +156,9 @@ def reply_group(store, message_id, *, require_sent=False):
                     "origin_event_id", "conversation_id", "action_type", "reply_group_sha256",
                     "segment_interval_ms"))
                 or part["delivery_key"] != f"reply:{row['origin_event_id']}:v2:{index}"
-                or set(content) != {"text"} or not isinstance(content["text"], str)
+                or set(content) - ({"reply_to"} if index == 0 else set()) != {"text"}
+                or ("reply_to" in content and not valid_reply_to(content["reply_to"]))
+                or not isinstance(content["text"], str)
                 or not content["text"].strip() or part["content_sha256"] != digest(content)
             ):
                 raise ValueError("invalid part")

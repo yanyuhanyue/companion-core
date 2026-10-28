@@ -27,6 +27,26 @@ def digest(value):
     return hashlib.sha256(encode(value).encode()).hexdigest()
 
 
+def quote(item):
+    """The OneBot reply segment Core resolved for a native owner reply, or none.
+
+    Only the first bubble of an owner-authority reply may quote; the id is the
+    provider message id Core recorded itself, never text chosen by the model.
+    """
+    target = item.get("content", {}).get("reply_to")
+    if target is None:
+        return []
+    segment = item.get("reply_segment")
+    if ("authority" not in item or item.get("action_type") != "qq.private.reply"
+        or "voice" in item or not isinstance(target, dict) or set(target) != {"message_id"}
+        or not isinstance(target["message_id"], str)
+        or not re.fullmatch(r"-?[1-9][0-9]{0,19}", target["message_id"])
+        or (segment is not None and (not isinstance(segment, dict)
+                                     or segment.get("index") != 0))):
+        raise ValueError("QUOTE_SCOPE_REQUIRED")
+    return [{"type": "reply", "data": {"id": target["message_id"]}}]
+
+
 def scope(plan):
     return plan.value.get("live_text", {}).get("segmented_reply")
 

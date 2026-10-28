@@ -61,6 +61,25 @@ Core 终态推进队列，后续附件和文字继续处理。队列 `DONE` 表�
 
 常规聊天启用后台记忆提取时，应同时运行 `life` profile，由现有 `companion-life-worker` 执行提取。原批准事实范围只读取批准事实；私人陪伴范围可从主人原始文字自动提取记忆。图片参与检索不会使图中文字成为主人事实证据。
 
+## 出站原生引用
+
+仅限 OwnerAuthority 私聊回复，由 `quote_policy` 控制，默认 `never`。开启后，上下文中主人每条消息前带一个
+本地编号 `[编号 m加四位十六进制]`（由事件 ID 的 SHA-256 前四位得到，不改变来源证明）。模型想回应较早的
+一句时在回复开头写 `【引用 编号】`；Core 解析后从回复中删除所有此类标记，再用自己记录的来源解析目标
+（`companion/reply_quote.py`）。模型给出的只是编号，QQ 消息 ID 一律取自该会话 `events.source_event_id`。
+
+| 档位 | 行为 |
+|---|---|
+| `never` | 不显示编号、不引用 |
+| `occasionally` | 引用模型点名的较早主人消息；回复合并了多条未答输入时引用最新一条；点名最新一条时不引用 |
+| `often` | 在 `occasionally` 基础上，点名最新一条时也引用 |
+
+编号不存在、冲突、已擦除、已撤回、超出历史范围或不属于本会话时，只丢弃引用，正文照常发送。引用只写入
+分段回复的第一段 `content.reply_to`，计入 `content_sha256`；重试时目标不同返回 `REPLY_GROUP_CHANGED`，
+不会重复发送。带引用的回复不转语音。Bridge 只在带 OwnerAuthority 的首段 `qq.private.reply` 上接受
+`reply_to`，并在文本前插入 OneBot `{"type": "reply", "data": {"id": ...}}` 段；带表情图的回复和旧窗口
+路径不引用。暂不支持引用小肥鱼自己发出的消息。
+
 ## 上游依据与验证范围
 
 协议操作参考 [OneBot v11 官方接口](https://github.com/botuniverse/onebot-11/blob/master/api/public.md)，正文解析顺序参考 [AstrBot 固定版本的引用解析器](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/astrbot/core/utils/quoted_message/extractor.py)及其[测试](https://github.com/AstrBotDevs/AstrBot/blob/e5e21b71aec5642f110eb115eb8e9a0d8028b7e5/tests/test_quoted_message_parser.py)。多图请求采用 [DeepSeek 官方视觉接口](https://api-docs.deepseek.com/guides/vision/)支持的有序文字与 `image_url` 输入。

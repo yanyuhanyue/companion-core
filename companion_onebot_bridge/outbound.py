@@ -64,11 +64,13 @@ def validate_item(item, config, *, companion=False, account_scope=False, voice_s
         raise ValueError("INVALID_NOTICE_SCOPE")
     if (
         not isinstance(content, dict)
-        or set(content) not in ({"text"}, {"text", "image"})
+        or set(content) - {"reply_to"} not in ({"text"}, {"text", "image"})
         or not isinstance(content["text"], str)
         or not 1 <= len(content["text"]) <= 20000
     ):
         raise ValueError("TEXT_DELIVERY_REQUIRED")
+    if "reply_to" in content:
+        reply_segments.quote(item)
     if "image" in content:
         image = content["image"]
         if (not (companion or image_scope) or item["action_type"] != "qq.private.reply"
