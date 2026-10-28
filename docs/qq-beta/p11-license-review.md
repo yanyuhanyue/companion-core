@@ -1,24 +1,19 @@
 # P11 发行许可核查
 
-状态：`PARTIAL — OWNER_LICENSE_DECISION_PENDING`。本文件记录核查结果与可采用的候选，未为自有代码设立新的生效许可。
+状态：`ADOPTED — AGPL-3.0-or-later`。主人于 2026-10-28 选定，root `LICENSE`、包元数据和 README 已同步。
 
-## 自有代码候选
+## 自有代码许可
 
-基线 `e742e07d11d2e1e245c9073fc28e09c20f4a7d8f` 没有 root `LICENSE`，
-`pyproject.toml` 也未声明项目许可证。源码公开与明确的再分发授权应分开处理。
-建议自有代码选择 [PolyForm Noncommercial 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)：
-其许可覆盖非商业用途的使用、修改与分发，列明个人用途和特定非商业组织的许可范围，并要求保留许可和指定 notices。
-选择前需确认这些具体允许范围符合项目主人的意图。
+自有源码与自有文档采用 [GNU AGPL v3.0 或更高版本](https://www.gnu.org/licenses/agpl-3.0.html)。
+root `LICENSE` 为 GNU 官方原文，SHA-256
+`0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0`；
+`pyproject.toml` 声明 `license = "AGPL-3.0-or-later"`。
 
-已在私有交付目录准备官方原文及适用范围草案，原文 SHA-256 为
-`c0ea4a896d2c8c394b29f9427589996db826cd501c512279ff0ed3ef48fabbe5`，4563 bytes；
-来源为 [PolyForm 官方 1.0.0 文本](https://github.com/polyformproject/polyform-licenses/blob/1.0.0/PolyForm-Noncommercial-1.0.0.md)。
-正式采用仍需主人选定许可与署名，届时再落 root LICENSE、NOTICE、包元数据和 README。
-候选范围为自有源码与自有文档；第三方组件、模型、图片/表情、字体和外部服务仍各自适用原条款。
+选择理由：本项目是联网运行的私人伴侣服务，AGPL 第 13 条要求向通过网络使用修改版的用户提供源码；
+它也与 GPL-3.0 兼容，允许在保留原版权声明的前提下复用 MaiBot（GPL-3.0）等项目的代码。
+复用这类代码时，要在第三方 notices 中记录来源、修订与原许可。
 
-对外措辞应为“源码可见，非商业使用许可”。OSI 的定义要求不能限制特定行业使用，
-包括商业用途，因此禁止商业使用的发行不应标为 OSI 开源。
-参见 [OSI 定义第 6 项](https://opensource.org/osd)。
+第三方组件、模型、图片／表情、字体和外部服务仍各自适用原条款，下表的处理方式不变。
 
 ## 已有第三方与参考项目
 
