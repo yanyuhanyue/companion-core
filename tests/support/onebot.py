@@ -22,7 +22,11 @@ def provider(request, sends, receipt=None):
         body = json.loads(request.content)
         assert body["user_id"] == 10001
         assert set(body) == {"user_id", "message", "auto_escape"}
-        assert body["message"][0]["type"] == "text"
+        segments = body["message"]
+        if segments[0]["type"] == "reply":  # One native quote may precede the text.
+            assert set(segments[0]["data"]) == {"id"} and isinstance(segments[0]["data"]["id"], str)
+            segments = segments[1:]
+        assert segments[0]["type"] == "text"
         sends.append(body)
         if isinstance(receipt, Exception):
             raise receipt

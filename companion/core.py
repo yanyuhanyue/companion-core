@@ -20,6 +20,7 @@ from companion import (
     private_life,
     qq_images,
     qq_rich,
+    reply_quote,
     reply_revision,
 )
 from companion.affect import NEUTRAL, AffectEngine
@@ -462,7 +463,7 @@ class Core(Runtime):
                 > datetime.fromisoformat(current["ingested_at"])):
                 continue
             content = json.loads(row["content_json"])
-            if (isinstance(content, dict) and set(content) == {"text"}
+            if (isinstance(content, dict) and set(content) - {"reply_to"} == {"text"}
                 and content["text"] == nodes[0]["text"]
                 and content["text"] and digest(content) == row["content_sha256"]):
                 indices.append(segment["index"])
@@ -848,6 +849,11 @@ class Core(Runtime):
                                      {"kind": "memory", "proof": continuation["proof"]}))
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             add_rules(qq_rich.RULES)
+        quoting = bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"
+        if quoting:
+            turns = [reply_quote.label_turn(turn, source)
+                     for turn, source in zip(turns, sources, strict=True)]
+            add_rules(reply_quote.RULES)
         current_input = []
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
@@ -881,6 +887,8 @@ class Core(Runtime):
                 {"type": "text", "text": current["content"]},
                 *qq_images.original_parts(s, cfg, self.clock, job),
             ]
+        if quoting:
+            current = reply_quote.label(current, job["event_id"])
         current_input.append(current)
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
@@ -1477,6 +1485,10 @@ class Core(Runtime):
                 request_id = None
                 reply = redact(response.text, self.settings)
                 generated_reply = True
+            quote_choice = None
+            if (authority and generated_reply and job["kind"] == "chat"
+                    and self.settings.quote_policy != "never"):
+                quote_choice, reply = reply_quote.extract(reply)
             with self.store.transaction():
                 self._check_context_snapshots(job, context_snapshots)
                 if bounded_text:
@@ -1541,8 +1553,11 @@ class Core(Runtime):
                             "WHERE event_id=?) LIMIT 1", (job["conversation_id"], job["event_id"]),
                         ):
                             parts = []  # The owner already moved on while the model was answering.
+                        quote_to = reply_quote.target(
+                            self.store, self.settings, self.clock, job, quote_choice,
+                        ) if authority and parts else None
                         message_ids = enqueue_reply_parts(
-                            self.store, job, parts, policy.interval_ms, now,
+                            self.store, job, parts, policy.interval_ms, now, reply_to=quote_to,
                         ) if parts else []
                     else:
                         create_reply = self.expression.enqueue if (
