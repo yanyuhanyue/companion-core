@@ -182,12 +182,14 @@ def test_chat_only_checkpoint_needs_no_reader_permission(core, tmp_path, sdk_mod
 
 
 
-def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_modules):
+def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_modules, monkeypatch):
     import pickle
 
     from tests.test_onebot_capture import real_core_http
     from tests.test_owner_input import captured, inbound
 
+    monkeypatch.setenv("COMPANION_TELEMETRY", "1")
+    monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
     capture, _ = captured(core, tmp_path)
 
     async def scenario():
@@ -199,7 +201,8 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
                                          json=capture.model_dump(mode="json"))
             assert approved.status_code == 200, approved.text
             accepted = await client.post("/internal/v1/inbox/events",
-                json=inbound(core, capture).model_dump(mode="json"),
+                json=inbound(core, capture).model_copy(
+                    update={"trace_id": "trace_" + "a" * 32}).model_dump(mode="json"),
                 headers={"X-Idempotency-Key": "sdk-real-http-input"})
             assert accepted.status_code == 202, accepted.text
             job_id = accepted.json()["job_id"]
@@ -215,6 +218,15 @@ def test_real_http_ingress_and_independent_sdk_worker(core, tmp_path, sdk_module
             await process.wait()
             raise
         assert process.returncode == 0, output.decode(errors="replace")
+        metrics = [json.loads(line) for line in output.decode().splitlines()
+                   if line.startswith("{")]
+        stages = {row["stage"] for row in metrics}
+        assert stages >= {"context_build", "request_plan", "request_checkpoint", "request_reserve",
+                          "transport_sources", "model_transport", "t_model_request", "t_model_done"}
+        from scripts.benchmark_qq_beta import FIELDS, summarize
+
+        assert all(set(row) <= FIELDS for row in metrics)
+        assert summarize(metrics, "OFFLINE_FIXTURE")["model_budget_estimate_complete"]
         assert len(core.store.rows("SELECT * FROM model_usage WHERE state='SETTLED'")) == 1
         assert len(core.store.rows("SELECT * FROM outbox WHERE origin_event_id=?",
                                   (capture.event_id,))) == 1

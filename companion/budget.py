@@ -845,7 +845,7 @@ def _check_measurement(settings, admission, messages, scenario, *, tools=()):
 
 
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
-                   source_check=None, tools=()):
+                   source_check=None, tools=(), trace_id=None):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
     from companion.model import ModelClient, ModelDispatchRefused, ModelResponseError
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
@@ -854,7 +854,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     dispatch = {"dispatched": False}
     try:
         response = await _dispatch(model, store, settings, request_id, messages, scenario, clock,
-                                   dispatch=dispatch, source_check=source_check, tools=tools)
+                                   dispatch=dispatch, source_check=source_check, tools=tools,
+                                   trace_id=trace_id)
         return response
     except ModelResponseError as error:
         # An unusable reply can still carry observed usage.
@@ -888,15 +889,18 @@ def _model_scope(store, settings, clock, request_id, scenario):
 
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
-    source_check=None, tools=(),
+    source_check=None, tools=(), trace_id=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
     from companion import live_text, notices, owner_authority
+    from companion.telemetry import phase
 
     if source_check is not None:
-        source_check()
-    _model_scope(store, settings, clock, request_id, scenario)
-    notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
+        with phase("dispatch_sources", trace_id):
+            source_check()
+    with phase("dispatch_scope", trace_id):
+        _model_scope(store, settings, clock, request_id, scenario)
+        notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
         with store.transaction():
             cloud_budget.mark_dispatched(store, "model", request_id,
@@ -923,7 +927,7 @@ async def _dispatch(
     if isinstance(model, ModelClient) and model.settings is not settings:
         raise CoreError("MODEL_ADMISSION_CONFIGURATION_MISMATCH", 503)
     approval = paid_budget.contract(settings, now)
-    with store.transaction():
+    with phase("dispatch_journal", trace_id), store.transaction():
         cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
         custody = paid_budget.journal(store, approval)
@@ -1000,18 +1004,19 @@ async def _dispatch(
             dispatch["owner_tuple"] = model_carry._tuple({**row, "io_started_at": now})
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
-    cumulative.preflight(store, settings, clock)
-    paid_budget.contract(settings, clock())
-    _model_scope(store, settings, clock, request_id, scenario)
-    if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
-        raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-    if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
-        raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
+    with phase("dispatch_recheck", trace_id):
+        cumulative.preflight(store, settings, clock)
+        paid_budget.contract(settings, clock())
+        _model_scope(store, settings, clock, request_id, scenario)
+        if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
+            raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
+        if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
+            raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)
     if isinstance(model, ModelClient):
         async def before_dispatch(request):
             # Every user hook has completed. Custody and current runtime checks
             # remain here; the adapter only binds the actual HTTP request bytes.
-            with store.transaction():
+            with phase("transport_custody", trace_id), store.transaction():
                 custody = paid_budget.journal(store, approval)
                 quota_state = cumulative.check(store, settings, clock(), custody=custody)
                 current_job = _model_scope(store, settings, clock, request_id, scenario)
@@ -1052,17 +1057,18 @@ async def _dispatch(
                     image_contract(settings, row["usage_job_id"], row["logical_request_id"])
                 if scenario in VIDEO_SCENARIOS:
                     video_contract(settings, row["usage_job_id"], row["logical_request_id"])
-            if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
-                raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
-            if row["payload_sha256"] != paid_budget.sha(
-                model_payload(settings, messages, scenario, tools=tools),
-            ):
-                raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-            _check_measurement(settings, current, messages, scenario, tools=tools)
+            with phase("transport_payload", trace_id):
+                if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
+                    raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
+                if row["payload_sha256"] != paid_budget.sha(
+                    model_payload(settings, messages, scenario, tools=tools),
+                ):
+                    raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
+                _check_measurement(settings, current, messages, scenario, tools=tools)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
-                with store.transaction():
+                with phase("transport_sources", trace_id), store.transaction():
                     source_check()
             with store.transaction():
                 cloud_budget.mark_dispatched(store, "model", request_id, clock())
@@ -1101,7 +1107,7 @@ async def _dispatch(
                 # The checked model transport calls its delegate immediately after
                 # this hook; no await separates the final proof from that handoff.
                 dispatch["dispatched"] = True
-        admission = ModelAdmission(row["payload_sha256"], before_dispatch)
+        admission = ModelAdmission(row["payload_sha256"], before_dispatch, trace_id=trace_id)
         if dispatch is not None:
             dispatch["admission"] = admission
     if isinstance(model, ModelClient):

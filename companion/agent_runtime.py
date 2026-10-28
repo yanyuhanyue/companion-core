@@ -7,6 +7,7 @@ unknown provider or tool effects stop recovery instead of repeating I/O.
 """
 
 from collections.abc import Awaitable, Callable
+from time import perf_counter_ns
 
 from pydantic_ai import Agent, Conversation, DeferredToolRequests
 from pydantic_ai.capabilities import Hooks
@@ -21,6 +22,7 @@ from companion.agent_messages import (
 )
 from companion.contracts import CoreError
 from companion.model import ModelResponse
+from companion.telemetry import emit, phase
 
 
 class ControlledModel(Model):
@@ -98,14 +100,18 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
     def check(*, current_request=None):
         check_conversation(core, job, snapshots, current_request=current_request)
 
-    check()
+    with phase("agent_guard", job["trace_id"]):
+        check()
 
     async def complete(wire, *, tools):
-        check()
+        with phase("request_guard", job["trace_id"]):
+            check()
         try:
-            context_planner.check_request(core, job, snapshots, wire, tools)
-            request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat", wire,
-                                        core.clock(), clock=core.clock, tools=tools)
+            with phase("request_validate", job["trace_id"]):
+                context_planner.check_request(core, job, snapshots, wire, tools)
+            with phase("request_reserve", job["trace_id"]):
+                request_id = budget.reserve(core.store, core.settings, job["job_id"], "chat", wire,
+                                            core.clock(), clock=core.clock, tools=tools)
         except Exception:
             if persistence is not None:
                 persistence.not_admitted()
@@ -114,22 +120,31 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
 
         def check_request():
             nonlocal registered
-            check(current_request=request_id)
-            from companion.agent_images import check_payload
+            with phase("request_sources", job["trace_id"]):
+                check(current_request=request_id)
+                from companion.agent_images import check_payload
 
-            check_payload(core.store, core.settings, core.clock, job, wire)
-            if not registered:
-                if persistence is not None:
-                    persistence.admitted(request_id)
-                else:
-                    context_planner.admitted(core, job, snapshots, request_id)
-                registered = True
+                check_payload(core.store, core.settings, core.clock, job, wire)
+                if not registered:
+                    if persistence is not None:
+                        persistence.admitted(request_id)
+                    else:
+                        context_planner.admitted(core, job, snapshots, request_id)
+                    registered = True
 
+        model_started = perf_counter_ns()
+        emit("t_model_request", job["trace_id"], at_ns=model_started)
         response = await budget.complete(
             core.model, core.store, core.settings, request_id, wire, "chat", core.clock,
-            tools=tools, source_check=check_request,
+            tools=tools, source_check=check_request, trace_id=job["trace_id"],
         )
-        usage = core.store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        model_finished = perf_counter_ns()
+        usage = core.store.one("SELECT state,billed_micro_usd FROM model_usage WHERE request_id=?",
+                               (request_id,))
+        emit("t_model_done", job["trace_id"],
+             elapsed_ms=(model_finished - model_started) / 1e6, at_ns=model_finished,
+             budget_micro_usd=usage["billed_micro_usd"] if usage else None,
+             model_usage_state=usage["state"] if usage else None)
         if usage is None or usage["state"] != "SETTLED":
             # An SDK usage counter cannot turn an unmeasured provider outcome into
             # a settled one, nor authorize the next model or tool side effect.
@@ -143,12 +158,15 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
         return args
 
     async def before_model_request(ctx, request_context):
-        check()
-        messages = context_planner.plan_request(core, job, snapshots, request_context)
-        request_context.messages = messages
-        ctx.messages[:] = messages
+        with phase("request_guard", job["trace_id"]):
+            check()
+        with phase("request_plan", job["trace_id"]):
+            messages = context_planner.plan_request(core, job, snapshots, request_context)
+            request_context.messages = messages
+            ctx.messages[:] = messages
         if persistence is not None:
-            return await persistence.before_model_request(ctx, request_context)
+            with phase("request_checkpoint", job["trace_id"]):
+                return await persistence.before_model_request(ctx, request_context)
         return request_context
 
     hooks = {"before_tool_execute": before_tool_execute,
@@ -156,14 +174,15 @@ async def run_conversation(core, job, messages, *, toolsets=(), conversation=Non
     if persistence is not None:
         hooks.update(after_model_request=persistence.after_model_request,
                      tool_execute=persistence.wrap_tool_execute)
-    agent = Agent(
-        ControlledModel(core.settings.model_name, complete,
-                        image_input=bool(paid and paid.image_input)),
-        output_type=[str, DeferredToolRequests], toolsets=toolsets,
-        retries=1, name="companion", deps_type=object,
-        capabilities=[Hooks(**hooks)],
-    )
-    history = from_wire_messages(messages) if conversation is None else None
+    with phase("agent_setup", job["trace_id"]):
+        agent = Agent(
+            ControlledModel(core.settings.model_name, complete,
+                            image_input=bool(paid and paid.image_input)),
+            output_type=[str, DeferredToolRequests], toolsets=toolsets,
+            retries=1, name="companion", deps_type=object,
+            capabilities=[Hooks(**hooks)],
+        )
+        history = from_wire_messages(messages) if conversation is None else None
     result = await agent.run(
         message_history=history, conversation=conversation,
         conversation_id=job["job_id"] if conversation is None else None,

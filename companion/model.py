@@ -74,10 +74,11 @@ class ModelResponseError(CoreError):
 class ModelAdmission:
     """Single-use payload capability. Accounting and authorization stay in budget."""
 
-    def __init__(self, payload_sha256, before_dispatch=None):
+    def __init__(self, payload_sha256, before_dispatch=None, *, trace_id=None):
         self.payload_sha256 = payload_sha256
         self.before_dispatch = before_dispatch
         self.consumed = False
+        self.trace_id = trace_id
 
 
 class ModelDispatchRefused(CoreError):
@@ -95,11 +96,16 @@ class _AdmissionTransport(httpx.AsyncBaseTransport):
         self.client, self.check, self.admission = client, check, admission
 
     async def handle_async_request(self, request):
+        from companion.telemetry import phase
+
         try:
             await self.check(request)
         except CoreError as error:
             raise ModelDispatchRefused(error, self.admission) from error
-        return await self.client._transport_for_url(request.url).handle_async_request(request)
+        # Emit after the delegate returns, never print between the final admission
+        # fence and its no-await transport handoff. This excludes body decoding.
+        with phase("model_transport", self.admission.trace_id):
+            return await self.client._transport_for_url(request.url).handle_async_request(request)
 
     async def aclose(self):
         pass  # The caller owns the borrowed transport and its connection pool.
