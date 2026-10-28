@@ -223,8 +223,9 @@ def test_bridge_hands_off_across_an_unbound_core_stop_chain(core, tmp_path, monk
                 if case == "bound_work":
                     with core.store.transaction():
                         assert owner_stop_receipt.stopped_chain(core.store, ref) is None
-                    with pytest.raises(Exception):
+                    with pytest.raises(httpx.HTTPStatusError) as refused:
                         await owner_handoff.prepare(runtime, client)
+                    assert refused.value.response.status_code == 409
                     assert runtime.row()["state"] == "STOPPED"
                     return
                 prepared = await owner_handoff.prepare(runtime, client)
