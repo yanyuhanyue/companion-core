@@ -35,6 +35,19 @@ def erase_consolidation(store, event_ids):
     )
 
 
+def enabled(store, settings, clock):
+    try:
+        if owner_authority.required(store, settings):
+            owner_authority.current(store, settings, clock,
+                                    purpose="consolidation")
+        else:
+            private_life.ensure_active(store, settings, clock)
+    except CoreError:
+        return False
+    paused = store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
+    return settings.consolidation_enabled and not (paused and paused["value"] == "1")
+
+
 class NightlyConsolidator:
     def __init__(self, store, settings, diary, reflections, goals, extract_step, clock):
         self.store, self.settings, self.clock = store, settings, clock
@@ -42,16 +55,7 @@ class NightlyConsolidator:
         self.extract_step = extract_step
 
     def enabled(self):
-        try:
-            if owner_authority.required(self.store, self.settings):
-                owner_authority.current(self.store, self.settings, self.clock,
-                                        purpose="consolidation")
-            else:
-                private_life.ensure_active(self.store, self.settings, self.clock)
-        except CoreError:
-            return False
-        paused = self.store.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
-        return self.settings.consolidation_enabled and not (paused and paused["value"] == "1")
+        return enabled(self.store, self.settings, self.clock)
 
     def schedule_day(self, day):
         if not self.enabled():

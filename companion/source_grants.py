@@ -73,13 +73,14 @@ class SourceGrantService:
         )
 
     def register(self, request):
-        policy = self.settings.observation_adapters.get(request.adapter_id)
-        data, s, now = request.snapshot(), self.store, self.clock()
-        if policy is None or not supports(policy.source, "source_grant"):
-            raise CoreError("SOURCE_GRANT_ADAPTER_INVALID", 400)
-        if data["expires_at"] <= now:
-            raise CoreError("SOURCE_GRANT_EXPIRED", 403)
+        data, s = request.snapshot(), self.store
         with s.transaction():
+            now = self.clock()
+            policy = self.settings.observation_adapters.get(request.adapter_id)
+            if policy is None or not supports(policy.source, "source_grant"):
+                raise CoreError("SOURCE_GRANT_ADAPTER_INVALID", 400)
+            if data["expires_at"] <= now:
+                raise CoreError("SOURCE_GRANT_EXPIRED", 403)
             if s.one(
                 "SELECT 1 FROM runtime_meta WHERE key=?", (grant_tombstone(request.grant_id),)
             ):
@@ -150,8 +151,10 @@ class SourceGrantService:
         )
         return SourceGrantSnapshot.model_validate(revision)
 
-    def revoke(self, grant_id):
+    def revoke(self, grant_id, *, owner_check=None):
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             row = self.store.one("SELECT 1 FROM source_grants WHERE grant_id=?", (grant_id,))
             if not row:
                 raise CoreError("SOURCE_GRANT_NOT_FOUND", 404)
@@ -164,8 +167,10 @@ class SourceGrantService:
             self.store.audit("source_grant.read_revoked", grant_id, grant_id, now)
         return {"grant_id": grant_id, "future_reads_revoked": True, "history_erased": False}
 
-    def forget(self, grant_id, ledger):
+    def forget(self, grant_id, ledger, *, owner_check=None):
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             if not self.store.one("SELECT 1 FROM source_grants WHERE grant_id=?", (grant_id,)):
                 raise CoreError("SOURCE_GRANT_NOT_FOUND", 404)
             if not self.store.one(

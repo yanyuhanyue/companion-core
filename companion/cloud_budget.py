@@ -313,7 +313,8 @@ def policy(store, settings, now=None):
     return sync(store, settings, now)
 
 
-def configure(store, settings, request, *, expected_version=None, idempotency_key, now):
+def configure(store, settings, request, *, expected_version=None, idempotency_key, now,
+              owner_check=None, clock=None):
     """Apply {expected_version, changes}, or a full typed configuration, once."""
     changes = None
     if isinstance(request, dict) and "changes" in request:
@@ -338,6 +339,10 @@ def configure(store, settings, request, *, expected_version=None, idempotency_ke
         raise CoreError("CLOUD_BUDGET_CHANGE_INVALID", 400)
     fingerprint = _sha(material)
     with _transaction(store):
+        if owner_check is not None:
+            owner_check()
+        if clock is not None:
+            now = clock()
         receipt = store.one("SELECT * FROM cloud_budget_changes WHERE idempotency_key=?",
                             (idempotency_key,))
         if receipt:

@@ -1,4 +1,8 @@
-"""Content-free diagnostics. Never bootstrap, migrate, replay, or repair runtime state."""
+"""Content-free diagnostics and the native full runtime status.
+
+The read-only snapshot never bootstraps, migrates, replays or repairs state.
+The full runtime view retains the existing live custody checks on its caller's Store.
+"""
 
 import json
 import shutil
@@ -273,3 +277,56 @@ def snapshot(settings, *, integrity=False):
     except (sqlite3.Error, OSError, ValueError, TypeError):
         result["blockers"].append("DATABASE_SNAPSHOT_UNAVAILABLE")
     return result
+
+
+def runtime_snapshot(store, settings, clock):
+    """Full native status on the caller-owned connection, without service bootstrap."""
+    from companion import live_text
+    from companion.consolidation import enabled as consolidation_enabled
+    from companion.diary import DiaryRepository
+
+    s = store
+    return {
+        "version": __version__,
+        "mode": settings.mode,
+        "operations": snapshot(settings),
+        "live_text_window": live_text.status(s, settings, clock),
+        "features": {
+            "memory": settings.memory_enabled,
+            "diary": DiaryRepository(store, settings, clock).enabled(),
+            "diary_auto_share": False,
+            "affect": settings.affect_enabled,
+            "consolidation": consolidation_enabled(store, settings, clock),
+            "reflection": settings.reflection_enabled,
+            "goals": settings.goals_enabled,
+            "wake": settings.wake_enabled,
+            "executive": settings.executive.enabled,
+            "dsh": settings.executive.enabled
+            and settings.executive.allow_changes
+            and any(
+                "dsh.run" in endpoint.capabilities
+                for endpoint in settings.executive.endpoints.values()
+            ),
+            "media": settings.media.enabled,
+            "content": settings.content_enabled,
+            "voice": settings.media.enabled and settings.voice_enabled,
+            "camera": settings.media.enabled and settings.camera_enabled,
+            "android": settings.media.enabled and settings.android_enabled,
+            "public_publish": False,
+        },
+        "jobs": s.rows("SELECT state,COUNT(*) AS count FROM jobs GROUP BY state"),
+        "deliveries": s.rows("SELECT state,COUNT(*) AS count FROM outbox GROUP BY state"),
+        "tool_usage": s.rows(
+            "SELECT capability,state,COUNT(*) AS calls,"
+            "SUM(billed_micro_usd) AS estimated_micro_usd FROM tool_tasks "
+            "GROUP BY capability,state"
+        ),
+        "usage": s.rows(
+            "SELECT scenario,SUM(input_tokens) AS input_tokens,"
+            "SUM(output_tokens) AS output_tokens,SUM(cached_input_tokens) AS cached_tokens,"
+            "SUM(billed_micro_usd) AS estimated_micro_usd,"
+            "SUM(pricing_known=0) AS unknown_price_requests,"
+            "SUM(state='UNKNOWN') AS unknown_usage_requests "
+            "FROM model_usage GROUP BY scenario"
+        ),
+    }

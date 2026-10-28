@@ -310,12 +310,16 @@ def view(store, settings):
             "fields": fields, "history": history}
 
 
-def update(store, settings, body, key, now):
+def update(store, settings, body, key, now, *, owner_check=None, clock=None):
     if set(body.changes) - (set(type(settings).model_fields) - EXCLUDED):
         raise CoreError("CONFIGURATION_FIELD_NOT_EDITABLE", 400)
     fingerprint = hmac.new(settings.control_token.get_secret_value().encode(),
                            encode(body.model_dump()).encode(), hashlib.sha256).hexdigest()
     with store.transaction():
+        if owner_check is not None:
+            owner_check()
+        if clock is not None:
+            now = clock()
         previous = store.one("SELECT request_sha256 FROM operator_configuration WHERE request_id=?",
                              (key,))
         if previous:

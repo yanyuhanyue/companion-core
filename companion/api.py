@@ -8,6 +8,7 @@ from datetime import date
 from ipaddress import ip_address
 from uuid import uuid4
 
+from anyio import to_thread
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -29,6 +30,7 @@ from companion import (
     qq_images,
     qq_rich,
 )
+from companion.affect import AffectEngine
 from companion.api_store import ApiStore
 from companion.api_telemetry import ApiTelemetry
 from companion.config import Settings
@@ -65,6 +67,8 @@ from companion.owner_authority_protocol import (
     OwnerSendCheck,
 )
 from companion.poke_protocol import OwnerPokeCapture, PokeCapture
+from companion.privacy import ErasureLedger
+from companion.reading import service_for_store as reading_service
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
 from companion.voice_node_api import register_voice_node_routes
@@ -315,6 +319,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         ReaderLeaseRequest,
         ReaderReadValidation,
         SourceGrantRegistration,
+        SourceGrantService,
     )
 
     control_auth = [Depends(control_admin)]
@@ -356,15 +361,24 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post("/internal/v2/readers/{adapter_id}/lease", dependencies=adapter_auth)
     async def reader_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
         grant = body.source_grant if body else None
-        return {"item": app.state.core.exploration.lease(adapter_id, grant)}
+        clock = app.state.core.clock
+        return {"item": await app.state.api_store.run(lambda store: reading_service(
+            store, settings, clock,
+        ).exploration.lease(adapter_id, grant))}
 
     @app.post("/internal/v2/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
     async def reader_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
-        return app.state.core.exploration.validate_read(adapter_id, request_id, body)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: reading_service(
+            store, settings, clock,
+        ).exploration.validate_read(adapter_id, request_id, body))
 
     @app.post("/internal/v2/source-grants", dependencies=control_auth, status_code=201)
     async def source_grant_register(body: SourceGrantRegistration):
-        return app.state.core.observations.grants.register(body)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: SourceGrantService(
+            store, settings, clock,
+        ).register(body))
 
     @app.get("/internal/v2/source-grants", dependencies=control_auth)
     async def source_grant_list():
@@ -379,31 +393,47 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/source-grants/{grant_id}/revoke", dependencies=control_auth)
     async def source_grant_revoke(grant_id: str):
-        return app.state.core.observations.grants.revoke(grant_id)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: SourceGrantService(
+            store, settings, clock,
+        ).revoke(grant_id))
 
     @app.post("/internal/v2/source-grants/{grant_id}/forget", dependencies=control_auth)
     async def source_grant_forget(grant_id: str):
-        core = app.state.core
-        return core.observations.grants.forget(grant_id, core.ledger)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: SourceGrantService(
+            store, settings, clock,
+        ).forget(grant_id, ErasureLedger(settings.erasure_ledger)))
 
     @app.post("/internal/v2/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
     async def reader_result(adapter_id: str, request_id: str, body: ReadResult):
-        return app.state.core.exploration.complete(adapter_id, request_id, body)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: reading_service(
+            store, settings, clock,
+        ).exploration.complete(adapter_id, request_id, body))
 
     @app.post("/internal/v3/readers/{adapter_id}/lease", dependencies=adapter_auth)
     async def reading_lease(adapter_id: str, body: ReadingLeaseRequest | None = None):
         grant = body.source_grant if body else None
         capabilities = body.capabilities if body else ()
-        return {"item": app.state.core.reading.lease(adapter_id, grant,
-                                                     capabilities=capabilities)}
+        clock = app.state.core.clock
+        return {"item": await app.state.api_store.run(lambda store: reading_service(
+            store, settings, clock,
+        ).lease(adapter_id, grant, capabilities=capabilities))}
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
     async def reading_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
-        return app.state.core.reading.validate_read(adapter_id, request_id, body)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: reading_service(
+            store, settings, clock,
+        ).validate_read(adapter_id, request_id, body))
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
     async def reading_result(adapter_id: str, request_id: str, body: ReadObservation):
-        return app.state.core.reading.complete(adapter_id, request_id, body)
+        clock = app.state.core.clock
+        return await app.state.api_store.run(lambda store: reading_service(
+            store, settings, clock,
+        ).complete(adapter_id, request_id, body))
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/media/prepare",
               dependencies=adapter_auth)
@@ -444,9 +474,11 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/affect/reset", dependencies=control_auth)
     async def affect_reset(body: AffectResetRequest, response: Response):
-        core = app.state.core
+        clock = app.state.core.clock
         response.headers["Cache-Control"] = "no-store"
-        return core.affect.reset(core.settings.owner_qq_id, body.request_id, core.ledger)
+        return await app.state.api_store.run(lambda store: AffectEngine(
+            store, settings, clock,
+        ).reset(settings.owner_qq_id, body.request_id, ErasureLedger(settings.erasure_ledger)))
 
     @app.get("/internal/v2/expression-learning", dependencies=control_auth)
     async def expression_learning(response: Response):
@@ -970,10 +1002,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.get(prefix + "/ops/status", dependencies=auth)
     async def status(response: Response, summary_only: bool = False):
-        from companion.ops_status import snapshot
+        from companion.ops_status import runtime_snapshot, snapshot
 
         response.headers["Cache-Control"] = "no-store"
-        result = {"operations": snapshot(settings)} if summary_only else app.state.core.status()
+        clock = app.state.core.clock
+        result = {"operations": await to_thread.run_sync(snapshot, settings)} if summary_only else (
+            await app.state.api_store.run(lambda store: runtime_snapshot(store, settings, clock))
+        )
         return result | {"observation": {
             "api_instance": app.state.observation_instance,
             "worker_health_proven": False,

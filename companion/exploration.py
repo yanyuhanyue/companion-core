@@ -335,9 +335,10 @@ class ExplorationService:
         policy = self.adapter(adapter_id)
         if policy.source == "web" and not reading:
             raise CoreError("READER_PROTOCOL_REQUIRED", 409)
-        cfg, s, now = self.settings, self.store, self.clock()
-        day, month = self.periods()
+        cfg, s = self.settings, self.store
         with nullcontext() if s.db.in_transaction else s.transaction():
+            now = self.clock()
+            day, month = self.periods()
             if source_grant or policy.source_grant_required:
                 self.observations.grants.require(adapter_id, source_grant)
             s.execute(
@@ -508,7 +509,7 @@ class ExplorationService:
 
     def complete(self, adapter_id, request_id, result, *, reading=False):
         policy = self.adapter(adapter_id)
-        s, now = self.store, self.clock()
+        s = self.store
         receipt = result.model_dump(mode="json")
         if receipt["source_grant"] is None:
             receipt.pop("source_grant")
@@ -521,6 +522,7 @@ class ExplorationService:
         fingerprint = digest(receipt)
         result_ids, failed_step = [], None
         with nullcontext() if s.db.in_transaction else s.transaction():
+            now = self.clock()
             self._protocol(request_id, reading)
             row = s.one(
                 "SELECT * FROM exploration_requests WHERE request_id=? AND adapter_id=?",

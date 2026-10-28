@@ -7,6 +7,9 @@ import sys
 import pytest
 
 from companion.contracts import CoreError
+from companion.diary import DiaryService
+from companion.goals import GoalEngine
+from companion.memory import Memory
 from companion.store import encode
 from tests import test_owner_console
 
@@ -58,9 +61,9 @@ def test_native_pre_effect_rejections_replay_without_reexecuting(
     # replay its terminal rejection; it may not execute a fresh native operation.
     def forbidden(*args, **kwargs):
         raise AssertionError("terminal rejection must not reexecute")
-    monkeypatch.setattr(client.app_core.memory, "decide", forbidden)
-    monkeypatch.setattr(client.app_core.diary, "correct", forbidden)
-    monkeypatch.setattr(client.app_core.diary, "set_mode", forbidden)
+    monkeypatch.setattr(Memory, "decide", forbidden)
+    monkeypatch.setattr(DiaryService, "correct", forbidden)
+    monkeypatch.setattr(DiaryService, "set_mode", forbidden)
     core.settings.proactive_enabled = True
     repeated = client.post(route, json=body, headers=headers)
     assert repeated.status_code == status and repeated.json() == first.json()
@@ -72,10 +75,10 @@ def test_native_pre_effect_rejections_replay_without_reexecuting(
 
 def test_unknown_native_error_keeps_started_and_does_not_reexecute(client, core, monkeypatch):
     calls = []
-    def uncertain(*args):
+    def uncertain(*args, **kwargs):
         calls.append(1)
         raise CoreError("UNRECOGNIZED_NATIVE_FAILURE", 503)
-    monkeypatch.setattr(client.app_core.goals, "pause_autonomy", uncertain)
+    monkeypatch.setattr(GoalEngine, "pause_autonomy", uncertain)
     headers = test_owner_console.login(client)
     body = {"target": "life", "enabled": False}
     assert client.post("/v1/console/mode", json=body, headers=headers).status_code == 503

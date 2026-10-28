@@ -407,10 +407,12 @@ class ReflectionService:
             "USING(run_id) WHERE s.state<>'REDACTED' ORDER BY s.rowid DESC LIMIT 20"
         )
 
-    def expire_evidence(self):
+    def expire_evidence(self, *, owner_check=None):
         # A recent observation can depend on an older owner/source event. Apply the
         # same transitive lifetime check as Diary before displaying or deciding it.
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             rows = self.store.rows("SELECT DISTINCT event_id FROM reflection_evidence")
             expired = expired_sources(
                 self.store,
@@ -424,11 +426,13 @@ class ReflectionService:
                     ),
                 )
 
-    def decide(self, suggestion_id, decision):
+    def decide(self, suggestion_id, decision, *, owner_check=None):
         if decision not in {"ACCEPT_AS_HYPOTHESIS", "REJECT", "NEED_MORE_EVIDENCE"}:
             raise CoreError("INVALID_REFLECTION_DECISION", 400)
-        self.expire_evidence()
+        self.expire_evidence(owner_check=owner_check)
         with self.store.transaction():
+            if owner_check is not None:
+                owner_check()
             changed = self.store.execute(
                 "UPDATE reflection_suggestions SET state=?,updated_at=? WHERE suggestion_id=? "
                 "AND state<>'REDACTED'",
