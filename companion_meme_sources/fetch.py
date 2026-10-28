@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import socket
 from datetime import UTC, datetime
+from itertools import zip_longest
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -24,15 +25,23 @@ def global_address(value):
         return False
 
 
+def interleave(values):
+    """RFC 8305 section 4: keep the resolver's RFC 6724 order, alternating families."""
+    first = [value for value in values if (":" in value) == (":" in values[0])]
+    other = [value for value in values if (":" in value) != (":" in values[0])]
+    return [value for pair in zip_longest(first, other) for value in pair if value is not None]
+
+
 async def resolve_public(host, port):
     addresses = await asyncio.wait_for(
         asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM),
         5,
     )
-    values = sorted({row[4][0] for row in addresses})
+    # The system order already demotes destinations this host cannot route to.
+    values = list(dict.fromkeys(row[4][0] for row in addresses))
     if not values or any(not global_address(value) for value in values):
         raise ValueError("IMAGE_NONPUBLIC_ADDRESS")
-    return values
+    return interleave(values)
 
 
 def public_url(value):

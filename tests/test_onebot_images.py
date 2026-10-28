@@ -279,3 +279,64 @@ def test_single_bounded_get_is_pinned_source_checked_and_never_logs_url(caplog, 
         assert run(invocation) == (b"fake", "image/png")
     assert calls == (["DNS", "check"] if failure == "source" else ["DNS", "check", "GET"])
     assert URL not in caplog.text and "synthetic-private-reference" not in caplog.text
+
+
+# Production-shaped answer: IPv6 strings sort before "43.", so a sorted list began with three
+# unroutable IPv6 pins and every attempt failed on a host without IPv6.
+V6 = ["240d:c000:2010:1a1f:0:9ee4:42f8:b4e4", "240d:c000:2010:1a1f:0:9ee4:42fe:a3a4",
+      "240d:c000:2010:1a1f:0:9ee4:4303:ce06"]
+V4 = ["43.128.17.103", "43.129.115.219"]
+
+
+def answer(monkeypatch, order):
+    import socket
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        assert (host, port) == ("multimedia.nt.qq.com.cn", 443)
+        return [(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                 (ip, port)) for ip in order]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+
+@pytest.mark.parametrize("order,expected", [
+    (V6 + V4, [V6[0], V4[0], V6[1], V4[1], V6[2]]),
+    (V4 + V6 + V4[:1], [V4[0], V6[0], V4[1], V6[1], V6[2]]),
+])
+def test_resolver_keeps_system_order_and_interleaves_families(monkeypatch, order, expected):
+    answer(monkeypatch, order)
+    assert run(images.resolve_public("multimedia.nt.qq.com.cn", 443)) == expected
+
+
+def test_unroutable_ipv6_falls_back_to_ipv4_within_one_download(monkeypatch):
+    import ssl
+
+    import httpcore
+
+    answer(monkeypatch, V6 + V4)
+    attempts = []
+
+    class Stream(httpcore.AsyncMockStream):
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):  # noqa: ASYNC109
+            assert server_hostname == "multimedia.nt.qq.com.cn"
+            return self
+
+    class Backend(httpcore.AsyncNetworkBackend):
+        async def connect_tcp(self, host, port, **kwargs):
+            attempts.append(host)
+            if ":" in host:
+                raise httpcore.ConnectError("[Errno 101] Network is unreachable")
+            return Stream([b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n"
+                           b"Content-Length: 4\r\n\r\nfake"])
+
+    transport = httpx.AsyncHTTPTransport(trust_env=False, retries=0)
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), network_backend=Backend(),
+        max_keepalive_connections=0, retries=0)
+
+    async def check():
+        return None
+
+    assert run(images.fetch_image(images.original_images([image_segment()])[0], 100,
+                                  check=check, transport=transport)) == (b"fake", "image/png")
+    assert attempts == [V6[0], V4[0]]
