@@ -223,8 +223,11 @@ def check_policy(store, settings, old, new, now, *, retained_unknowns):
     from companion import owner_input_state
     from companion.owner_authority_protocol import OwnerCapture
 
+    # The owner policy follows the paid approval exactly; both may be open-ended.
     expiry = settings.paid_model.expires_at
-    if new.expires_at != expiry or old.expires_at is not None and expiry <= old.expires_at:
+    if new.expires_at != expiry or (
+        expiry is not None and old.expires_at is not None and expiry <= old.expires_at
+    ):
         raise CoreError("OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED", 409)
     old_purposes, new_purposes = set(old.purposes), set(new.purposes)
     if not old_purposes <= new_purposes or not new_purposes - old_purposes <= {"life"}:
@@ -237,7 +240,7 @@ def check_policy(store, settings, old, new, now, *, retained_unknowns):
     if (
         "proactive" not in old_purposes
         or scope.authorization_sha256 != new.authorization_sha256
-        or scope.expires_at > expiry
+        or (expiry is not None and scope.expires_at > expiry)
         or scope.expires_at <= datetime.fromisoformat(now)
         or scope.purposes != ["PRIVATE_MESSAGE_DRAFT"]
         or scope.automatic_actions != ["qq.private.proactive"]

@@ -1102,9 +1102,9 @@ async def _dispatch(
                 # All preceding checks are complete. One final sample must fence
                 # every time limit, not only the longer admission lease.
                 dispatch_now = datetime.fromisoformat(clock())
-                if not paid.starts_at <= dispatch_now < paid.expires_at:
+                if not paid_budget.active(paid, dispatch_now):
                     raise CoreError("PAID_APPROVAL_EXPIRED", 503)
-                if dispatch_now >= paid.rates_valid_until:
+                if not paid_budget.rates_valid(paid, dispatch_now):
                     raise CoreError("PAID_RATES_EXPIRED", 503)
                 if dispatch_now >= lease_deadline:
                     raise CoreError("MODEL_ADMISSION_LEASE_EXPIRED", 503)

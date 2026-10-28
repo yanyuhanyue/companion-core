@@ -99,6 +99,15 @@ def snapshot(settings):
     return value
 
 
+def active(approval, now):
+    """The approval interval; an absent expiry is open-ended."""
+    return approval.starts_at <= now and (approval.expires_at is None or now < approval.expires_at)
+
+
+def rates_valid(approval, now):
+    return approval.rates_valid_until is None or now < approval.rates_valid_until
+
+
 def contract(settings, now):
     if settings.mode != "live":
         raise CoreError("PAID_LIVE_MODE_REQUIRED", 503)
@@ -110,9 +119,9 @@ def contract(settings, now):
     if not settings.model_key.get_secret_value():
         raise CoreError("PAID_MODEL_KEY_REQUIRED", 503)
     current = datetime.fromisoformat(now)
-    if current.tzinfo is None or not approval.starts_at <= current < approval.expires_at:
+    if current.tzinfo is None or not active(approval, current):
         raise CoreError("PAID_APPROVAL_EXPIRED", 503)
-    if approval.rates_valid_until <= current:
+    if not rates_valid(approval, current):
         raise CoreError("PAID_RATES_EXPIRED", 503)
     if (
         settings.provider,

@@ -152,7 +152,7 @@ These native Docker operations follow the primary CLI contracts:
 [wait](https://docs.docker.com/reference/cli/docker/container/wait/) and
 [container listing/filtering](https://docs.docker.com/reference/cli/docker/container/ls/).
 
-## Expired approval renewal
+## Approval renewal
 
 An already-carried historical UNKNOWN can enter a new explicitly approved period
 through the same offline preview/commit commands. The private request uses
@@ -163,12 +163,22 @@ This reuses the append-only approval/predecessor pattern from
 [cumulative renewal](p13-cumulative-limits.md); it does not enroll a cumulative
 account or remove the existing cumulative/carry compatibility guard.
 
-The previous paid approval must have expired. A new window ID, paid approval and
-owner authorization are required. The rate-validity end may extend with the new
-expiry; prices, starts-at, credentials, provider/model, per-attempt/request limits,
-daily/monthly/window amounts and call limits remain identical. The owner expiry
-must equal the new paid expiry. Every predecessor window, including settled calls
-in the immediately preceding window, remains in the budget scope.
+Renewal may run before or after the previous approval expires, so a renewal does not
+leave a gap without model access. Liabilities stay fenced by the native STOP, the
+verified stopped executors, quiescence and the exact UNKNOWN inventory; none of these
+depends on the clock. A new window ID, paid approval and owner authorization are
+required. The new approval is either open-ended (no `expires_at` and no
+`rates_valid_until`) or has a finite expiry that is in the future and later than any
+previous finite expiry, with a rate-validity end at or after it that does not move
+earlier. Prices, starts-at, credentials, provider/model, per-attempt/request limits,
+daily/monthly/window amounts and call limits remain identical. The owner expiry must
+equal the new paid expiry, including both being absent. Every predecessor window,
+including settled calls in the immediately preceding window, remains in the budget scope.
+
+An open-ended approval is still bounded by its daily, monthly and window amounts and
+call limits, the per-attempt and per-request limits, owner STOP and revocation. Window
+amounts and call limits accumulate across the whole renewal chain and are not raised by
+renewal. An open-ended approval cannot sit inside a cumulative account scope.
 
 The original journal receives `model_approval_renew`, version 1. Its manifest binds
 the preceding carry, current native STOP, exact historical UNKNOWN inventory,
