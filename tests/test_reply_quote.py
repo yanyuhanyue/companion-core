@@ -184,3 +184,35 @@ def test_bridge_refuses_quotes_outside_a_first_native_reply(change):
     item = {"authority": {}, "action_type": "qq.private.reply", "reply_segment": {"index": 0},
             "content": {"text": "好", "reply_to": {"message_id": "-7"}}}
     assert reply_segments.quote(item) == [{"type": "reply", "data": {"id": "-7"}}]
+
+
+def first_reply(core):
+    return core.store.one("SELECT message_id FROM outbox ORDER BY rowid LIMIT 1")["message_id"]
+
+
+def test_named_own_earlier_reply_is_quoted_by_its_recorded_provider_id(core, tmp_path):
+    def own(core):
+        return "【引用 " + reply_quote.alias(first_reply(core)) + "】[编号 m0000] 我是认真的"
+
+    sends, requests = converse(core, tmp_path, own)
+    shown = json.dumps(requests[1], ensure_ascii=False)
+    assert "[编号 " + reply_quote.alias(first_reply(core)) + "] 听起来很棒" in shown
+    assert reply_parts(core)[1] == {"text": "我是认真的", "reply_to": {"message_id": "123456"}}
+    assert sends[1]["message"] == [{"type": "reply", "data": {"id": "123456"}},
+                                   {"type": "text", "data": {"text": "我是认真的"}}]
+
+
+def test_erased_own_reply_is_never_resolved(core, tmp_path):
+    converse(core, tmp_path, lambda core: "那座山高吗")
+    job = core.store.one("SELECT j.*,e.conversation_id FROM jobs j JOIN events e USING(event_id) "
+                         "WHERE e.source='qq.onebot' AND e.actor_id='owner' ORDER BY e.rowid DESC")
+    choice = reply_quote.alias(first_reply(core))
+
+    def resolve():
+        with core.store.transaction():
+            return reply_quote.target(core.store, core.settings, core.clock, job, choice)
+
+    assert resolve() == "123456"
+    core.store.execute("UPDATE outbox SET content_json='{}',content_sha256='' WHERE message_id=?",
+                       (first_reply(core),))
+    assert resolve() is None
