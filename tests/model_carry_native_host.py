@@ -113,6 +113,17 @@ elif mode == "bridge":
     from companion_onebot_bridge import app
     from companion_onebot_bridge.config import BridgeConfig
 
+    if bundle.get("freeze_bridge_clock"):
+        from companion_onebot_bridge import owner_runtime
+
+        OriginalRuntime = owner_runtime.OwnerRuntime
+
+        class TimedRuntime(OriginalRuntime):
+            def __init__(self, *args, **kwargs):
+                kwargs.setdefault("clock", lambda: clock.now)
+                super().__init__(*args, **kwargs)
+
+        owner_runtime.OwnerRuntime = TimedRuntime
     BridgeConfig.load = staticmethod(lambda _: bundle["config"])
     sys.argv = ["bridge", "--config", "synthetic-native-config", *bundle["arguments"]]
     entry = app

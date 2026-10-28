@@ -566,8 +566,8 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
 def _receipt(saved):
     value = saved["manifest"]
     if saved["kind"] == RENEW:
-        # Renewal is not an input-terminal or Bridge carry receipt. Older inputs
-        # keep their original carry proof; current inputs must already be terminal.
+        # The CLI summary retains the whole financial scope. Authenticated input
+        # handoff reads a separate receipt for this authority's closed inputs.
         return {
             "kind": "owner_model_approval_renewal_v1", "version": 1, "state": "PREPARED",
             "authority": value["authority"], "carry_sha256": saved["carry_sha256"],
@@ -577,7 +577,13 @@ def _receipt(saved):
             "successor_window_id": value["successor_window_id"],
             "retained_micro_usd": sum(i["minimum_micro_usd"] for i in value["unknowns"]),
         }
-    result = {
+    return _input_receipt(saved)
+
+
+def _carry_fields(saved):
+    value = saved["manifest"]
+    requests = sorted({key for item in value["inputs"] for key in item["request_ids"]})
+    return {
         "kind": wire.KIND,
         "version": 1,
         "state": "PREPARED",
@@ -595,9 +601,14 @@ def _receipt(saved):
         "carry_sha256": saved["carry_sha256"],
         "record_sha256": saved["record_sha256"],
         "successor_policy_sha256": saved["successor_policy_sha256"],
-        "request_ids": [i["request_id"] for i in value["unknowns"]],
-        "retained_micro_usd": sum(i["minimum_micro_usd"] for i in value["unknowns"]),
+        "request_ids": requests,
+        "retained_micro_usd": sum(i["minimum_micro_usd"] for i in value["unknowns"]
+                                 if i["request_id"] in requests),
     }
+
+
+def _input_receipt(saved):
+    result = _carry_fields(saved)
     result["receipt_sha256"] = digest(result)
     return wire.receipt(result)
 
@@ -613,14 +624,13 @@ def read(store, settings, authority, carry_sha, successor_policy_sha):
             raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
         if saved["successor_policy_sha256"] != successor_policy_sha:
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
-        if saved["kind"] == RENEW and authority == saved["manifest"]["authority"]:
-            # Renewal requires terminal current inputs, so there is no new
-            # nonterminal input-carry receipt for Bridge to consume.
+        if (saved["kind"] == RENEW and authority == saved["manifest"]["authority"]
+                and not saved["manifest"]["inputs"]):
             raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
         if authority != saved["manifest"]["authority"]:
             stopped = _continuation(store, settings, authority, saved, view)
             return _local_receipt(store, settings, authority, saved, stopped, view)
-        result = _receipt(saved)
+        result = _input_receipt(saved)
         head = owner_authority._latest(store)
         if (
             result["authority"] != authority
@@ -681,7 +691,7 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
         for request_id in sorted(requests)
     ]
     result = {
-        **_receipt(saved),
+        **_carry_fields(saved),
         "kind": wire.LOCAL_KIND,
         "version": 2,
         "authority": authority,

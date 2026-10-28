@@ -12,7 +12,7 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
     prior = view["model_carries"].get(original.policy.unknown_carry_sha256)
     if prior is None:
         raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
-    model_carry._continuation(
+    stopped = model_carry._continuation(
         store,
         settings,
         authority,
@@ -20,11 +20,36 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
         view,
         approved_contract_sha256=original.policy.paid_contract_sha256,
     )
-    # This narrow renewal only carries already-approved historical liability.
-    # A new uncertain input needs its own original execution-closure review.
-    unknown = sorted(k for k, v in view["model_latest"].items() if v["state"] == "UNKNOWN")
-    if unknown != [item["request_id"] for item in prior["manifest"]["unknowns"]] or any(
-        not state["terminal"] for state in work.values()
+    unknown = {k for k, v in view["model_latest"].items() if v["state"] == "UNKNOWN"}
+    retained = {item["request_id"]: item for item in prior["manifest"]["unknowns"]}
+    inputs = []
+    if unknown - retained.keys():
+        # Reuse the existing admission-owner closure and source-work proof. The
+        # offline controller also proves every executor is stopped before commit.
+        current = model_carry._local_receipt(store, settings, authority, prior, stopped, view)
+        if set(current["request_ids"]) != unknown - retained.keys():
+            raise CoreError("OWNER_MODEL_RENEWAL_CURRENT_WORK_REQUIRED", 409)
+        inputs = current["inputs"]
+        for request_id in current["request_ids"]:
+            admission = store.one(
+                "SELECT * FROM model_admissions WHERE request_id=?", (request_id,)
+            )
+            usage = store.one("SELECT job_id FROM model_usage WHERE request_id=?", (request_id,))
+            financial = view["model_latest"][request_id]
+            retained[request_id] = {
+                **model_carry._tuple(admission),
+                "logical_request_id": admission["logical_request_id"],
+                "reserved_micro_usd": admission["reserved_micro_usd"],
+                "minimum_micro_usd": financial["minimum_micro_usd"],
+                "settlement_sha256": paid_budget.sha(financial),
+                "tool_sha256": digest(store.rows(
+                    "SELECT * FROM agent_tool_calls WHERE job_id=? AND state='STARTED'",
+                    (usage["job_id"],),
+                )),
+            }
+    carried = {item["event_id"] for item in inputs}
+    if unknown != retained.keys() or any(
+        not state["terminal"] and event not in carried for event, state in work.items()
     ):
         raise CoreError("OWNER_MODEL_RENEWAL_CURRENT_WORK_REQUIRED", 409)
     windows = sorted(
@@ -37,8 +62,8 @@ def manifest(store, settings, authority, window, witness, view, original, stop, 
         "budget_journal_id": original.journal_id,
         "successor_window_id": window,
         "budget_scope_window_ids": windows,
-        "unknowns": prior["manifest"]["unknowns"],
-        "inputs": [],
+        "unknowns": [retained[key] for key in sorted(retained)],
+        "inputs": inputs,
         "closed_executors_sha256": digest(witness),
         "predecessor_carry_sha256": prior["carry_sha256"],
         "budget_baseline_sha256": digest(
@@ -77,11 +102,9 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
         or digest(value) != row["carry_sha256"]
         or row["carry_sha256"] in carries
         or value["budget_journal_id"] != journal_id
-        or value["inputs"] != []
         or blocked
         or not authorities
         or value["closed_executors_sha256"] != digest(row["closed_executors"])
-        or value["unknowns"] != prior["manifest"]["unknowns"]
         or value["budget_scope_window_ids"]
         != sorted(
             set(prior["manifest"]["budget_scope_window_ids"])
@@ -114,6 +137,17 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
         item["request_id"] for item in value["unknowns"]
     ] or any(v["state"] == "RESERVED" for v in latest.values()):
         raise ValueError("model renewal liability inventory")
+    previous = {item["request_id"]: item for item in prior["manifest"]["unknowns"]}
+    retained = {item["request_id"]: item for item in value["unknowns"]}
+    if any(retained.get(key) != item for key, item in previous.items()):
+        raise ValueError("model renewal predecessor liability changed")
+    fresh = retained.keys() - previous.keys()
+    if fresh:
+        proof = model_carry._input_receipt({**row, "record_sha256": record_sha})
+        if proof["request_ids"] != sorted(fresh):
+            raise ValueError("model renewal input inventory")
+    elif value["inputs"] != []:
+        raise ValueError("model renewal input inventory")
     for item in value["unknowns"]:
         financial = latest[item["request_id"]]
         if (
@@ -123,6 +157,21 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
             or financial["minimum_micro_usd"] != item["minimum_micro_usd"]
         ):
             raise ValueError("model renewal original liability")
+        if item["request_id"] in fresh:
+            admission = store.one(
+                "SELECT * FROM model_admissions WHERE request_id=?", (item["request_id"],)
+            )
+            if (
+                not admission
+                or item["authority"] != authority
+                or item["contract_sha256"] != prior["successor_paid_contract_sha256"]
+                or admission["window_id"] != prior["manifest"]["successor_window_id"]
+                or any(item[k] != v for k, v in model_carry._tuple(admission).items())
+                or item["logical_request_id"] != admission["logical_request_id"]
+                or item["reserved_micro_usd"] != admission["reserved_micro_usd"]
+                or not hash_value(item["tool_sha256"])
+            ):
+                raise ValueError("model renewal current admission changed")
     baseline = {
         key: data
         for key, data in latest.items()

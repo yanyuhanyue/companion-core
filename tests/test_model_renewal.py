@@ -7,12 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from companion import budget, model_carry, owner_authority, owner_input, paid_budget
+from companion import (
+    budget,
+    model_carry,
+    owner_authority,
+    owner_input,
+    owner_input_state,
+    paid_budget,
+)
 from companion.contracts import CoreError
 from companion.life_topics import _uncertain
 from companion.model_carry_controller import verify
-from companion.owner_authority_protocol import AuthorityStop
+from companion.owner_authority_protocol import AuthorityStop, OwnerCapture
 from companion_delivery_protocol import digest
+from companion_delivery_protocol import model_carry as wire
 from tests.model_carry_support import MESSAGES, executors, migrated, observer
 from tests.owner_model_fixtures import authorized_job
 from tests.test_owner_authority import activate
@@ -148,8 +156,15 @@ def test_renewal_waits_for_old_approval_expiry(core, tmp_path):
         model_carry.prepare(core.store, core.settings, request, witness, core.clock())
 
 
-def test_renewal_fsync_replay_requires_the_exact_reviewed_request(core, tmp_path, monkeypatch):
+@pytest.mark.parametrize("current_closed", [False, True])
+def test_renewal_fsync_replay_requires_the_exact_reviewed_request(
+    core, tmp_path, monkeypatch, current_closed,
+):
     case = migrated(core, tmp_path)
+    if current_closed:
+        from tests.test_model_carry_lifecycle import current_unknown
+
+        current_unknown(core)
     request, policy, witness = renewal(core, case)
     execute = core.store.execute
 
@@ -184,6 +199,81 @@ def test_new_locally_closed_unknown_still_pauses_life(core, tmp_path):
     assert not _uncertain(core.store, core.settings)
     current_unknown(core)
     assert _uncertain(core.store, core.settings)
+
+
+@pytest.mark.parametrize("prior_renewal", [False, True])
+def test_renewal_retains_new_closed_unknown_and_uses_existing_input_handoff(
+    core, tmp_path, prior_renewal,
+):
+    from tests.test_model_carry_lifecycle import current_unknown
+
+    case = migrated(core, tmp_path, expires_at=core.clock.now + timedelta(hours=2),
+                    rates_valid_until=core.clock.now + timedelta(days=4))
+    if prior_renewal:
+        request, policy, witness = renewal(core, case)
+        model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+        active, _ = activate(core, policy, revision=4, operation="first-renewal")
+        case.successor, case.policy = active, policy
+        core.authorized_model_test_capture = active, case.key
+        core.authorized_model_test_jobs = {}
+    current = current_unknown(core)
+    before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
+    assert _uncertain(core.store, core.settings)
+    request, policy, witness = renewal(core, case, number=2 if prior_renewal else 1)
+    receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    assert receipt["retained_micro_usd"] == sum(row["billed_micro_usd"] for row in before)
+    proof = model_carry.read(core.store, core.settings, request["authority"],
+                             receipt["carry_sha256"], receipt["successor_policy_sha256"])
+    assert proof["kind"] == wire.KIND and proof["version"] == 1
+    assert proof["request_ids"] == [current]
+    assert proof["retained_micro_usd"] == next(
+        row["billed_micro_usd"] for row in before if row["request_id"] == current
+    )
+    capture = OwnerCapture.model_validate(json.loads(core.store.one(
+        "SELECT value FROM runtime_meta WHERE key=?",
+        ("owner_input:" + proof["inputs"][0]["event_id"],),
+    )["value"])["capture"])
+    state = owner_input_state.read(core.store, core.settings, capture)
+    assert not state["terminal"] and state["unsettled_model"]
+    assert wire.carried(state, capture.model_dump(mode="json"), proof) == state
+    active, _ = activate(core, policy, revision=request["authority"]["revision"] + 1,
+                         operation="activate-closed-input-renewal")
+    assert not _uncertain(core.store, core.settings)
+    assert model_carry.read(core.store, core.settings, request["authority"],
+                            receipt["carry_sha256"], receipt["successor_policy_sha256"]) == proof
+    assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
+    with pytest.raises(CoreError):
+        owner_input.approve(core.store, core.settings, core.clock, capture)
+    # A later STOP still uses the original local-close continuation protocol,
+    # including when its predecessor record is a renewal rather than a first carry.
+    core.authorized_model_test_capture = active, case.key
+    core.authorized_model_test_jobs = {}
+    later = current_unknown(core)
+    assert _uncertain(core.store, core.settings)
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="stop-after-renewal", authority=active["authority"],
+    ))
+    continuation = model_carry.read(core.store, core.settings, active["authority"],
+                                    receipt["carry_sha256"], receipt["successor_policy_sha256"])
+    assert continuation["kind"] == wire.LOCAL_KIND and continuation["request_ids"] == [later]
+    activate(core, policy, revision=active["authority"]["revision"] + 1,
+             operation="same-approval-after-renewal")
+    for row in before:
+        assert core.store.one("SELECT * FROM model_usage WHERE request_id=?",
+                               (row["request_id"],)) == row
+
+
+def test_renewal_rejects_current_unknown_without_local_close(core, tmp_path, monkeypatch):
+    from tests.test_model_carry_lifecycle import current_unknown
+
+    case = migrated(core, tmp_path)
+    monkeypatch.setattr(model_carry, "close_owned", lambda *args: None)
+    current_unknown(core)
+    with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_NOT_QUIESCENT"):
+        renewal(core, case)
+    rows = [json.loads(line)
+            for line in Path(core.settings.paid_model.journal_path).read_text().splitlines()]
+    assert not any(row["kind"] == model_carry.RENEW for row in rows)
 
 
 def test_life_does_not_trust_unproved_unknown_or_recovering_journal(core, tmp_path):

@@ -174,15 +174,26 @@ The original journal receives `model_approval_renew`, version 1. Its manifest bi
 the preceding carry, current native STOP, exact historical UNKNOWN inventory,
 full window scope, financial baseline and newly verified closed executors. It
 changes no original admission, charge, closure, tool or input. Current inputs must
-be terminal; a new current UNKNOWN needs its own reconciliation/closure review.
-The original carried inputs retain their original Core and Bridge proofs.
+be terminal or have the existing source-bound local-close proof for every remaining
+UNKNOWN. The latter uses the existing local carry validation: original admission,
+settlement, authority, source-work hash and completed transport must match, with no
+outstanding work or uncertain delivery. The new approval explicitly retains these
+additional charges alongside every predecessor charge. Missing closure still blocks
+renewal. Original carried inputs retain their original Core and Bridge proofs.
 
 The commit's `owner_model_approval_renewal_v1` response is an offline preparation
-summary, not a Bridge input receipt. The frozen input-carry endpoint does not return
-that summary. Current terminal inputs use ordinary `owner-handoff-prepare`, followed
-by exact preview/activate and `owner-handoff`. Later same-policy STOP cycles retain
-the existing continuation rules. Older journal readers must remain stopped after
-the renewal append; forward repair preserves the whole journal.
+summary, not a Bridge input receipt. Its retained amount covers the full historical
+liability. When this renewal includes locally closed current inputs, the authenticated
+input-carry endpoint returns the existing `owner_model_unknown_carry_v1` wire proof
+for those inputs and their charges only. The offline executor witness, current STOP,
+new approval and full renewal manifest bind that proof. Bridge uses the existing
+`owner-carry-handoff-prepare`, exact preview/activate and `owner-handoff` commands;
+it records carried inputs without changing their nonterminal financial state or
+replaying them. If every current input is terminal, ordinary `owner-handoff-prepare`
+continues to apply. Later same-policy STOP cycles retain the existing local-close
+continuation rules, including when the predecessor is itself a renewal. Older journal
+readers must remain stopped after the renewal append; forward repair preserves the
+whole journal.
 
 The only optional permission addition in this renewal is bounded private Life:
 the old policy must already grant proactive messages and private history. A fresh
