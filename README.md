@@ -114,3 +114,11 @@ CI 在 Windows/Linux 上各运行两个互斥分片，按测试文件分配，�
 均回退到完整检查；无对应 PR 的代码直接推送、手动运行、标签和合并队列继续完整验证。
 
 `companion/` 是核心包；`astrbot_plugin_companion_bridge/` 可单独打包安装；`migrations/` 维护版本化数据库；`tests/` 按 M0/M1 编号验收；`scripts/` 提供可复现回放和运行检查。运行数据、缓存与交付包不会被加入 Git。
+
+## 许可证
+
+自有源码与文档以 [GNU Affero General Public License v3.0 或更高版本](LICENSE)
+（`AGPL-3.0-or-later`）发布。通过网络向他人提供修改版时，需要按 AGPL 第 13 条向这些用户提供对应源码。
+第三方组件、模型、图片／表情、字体和外部服务仍适用各自条款，见
+[source_reader/THIRD_PARTY_NOTICES.txt](source_reader/THIRD_PARTY_NOTICES.txt) 与
+[许可核查](docs/qq-beta/p11-license-review.md)。
