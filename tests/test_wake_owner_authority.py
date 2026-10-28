@@ -93,3 +93,50 @@ def test_authorized_affect_pause_still_stops_wake(core, tmp_path):
     assert core.store.one("SELECT reason_code FROM wake_decisions") == {
         "reason_code": "OWNER_REQUESTED_PAUSE",
     }
+
+
+def regrant(core, tmp_path):
+    """Activate, keep a goal from that grant, then STOP and activate a later revision."""
+    from companion import owner_authority
+    from companion.owner_authority_protocol import AuthorityStop
+
+    source_before_grant(core)
+    policy = prepare(core, tmp_path).model_copy(update={
+        "purposes": ["wake", "goals", "exploration"],
+    })
+    first, _ = activate(core, policy)
+    stale = goal_after_grant(core)
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="wake-stale-stop", authority=first["authority"]))
+    activate(core, policy, revision=2, operation="wake-stale-reactivate")
+    return stale
+
+
+@pytest.mark.parametrize("entry", ["direct", "selector"])
+def test_goal_from_superseded_grant_is_closed_and_next_goal_runs(core, tmp_path, entry):
+    stale = regrant(core, tmp_path)
+    current = core.goals.propose(GoalProposal(
+        topic="继续了解天文", source_event_ids=["evt_test_1"],
+        scope={"operation": "read_content", "url": "https://example.org/next"},
+    ))
+    assert invoke(core, entry)
+    assert core.goals.get(stale)["state"] == "FAILED"
+    assert core.goals.get(stale)["last_error_code"] == "OWNER_AUTHORITY_REVISION_CHANGED"
+    assert core.goals.get(current)["state"] == "QUEUED"
+    assert core.store.one("SELECT decision,reason_code,goal_id FROM wake_decisions") == {
+        "decision": "EXPLORE", "reason_code": "GOAL_DUE", "goal_id": current,
+    }
+    assert core.store.one("SELECT action FROM audit_log WHERE entity_id=? "
+                          "AND action='goal.authority_rejected'", (stale,))
+
+
+@pytest.mark.parametrize("discovery", [0, 3])
+def test_only_superseded_goals_still_record_a_decision(core, tmp_path, discovery):
+    stale = regrant(core, tmp_path)
+    core.settings.exploration_daily_requests = discovery
+    core.wake.evaluate()
+    assert core.goals.get(stale)["state"] == "FAILED"
+    assert core.store.one("SELECT decision,reason_code FROM wake_decisions") == (
+        {"decision": "OBSERVE", "reason_code": "DISCOVERY_DUE"} if discovery
+        else {"decision": "SKIP", "reason_code": "NO_CANDIDATE"})
+    assert core.store.rows("SELECT * FROM goal_steps") == []

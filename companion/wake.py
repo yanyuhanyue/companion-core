@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from companion import delegation, owner_authority
 from companion.contracts import CoreError
+from companion.goals import AUTHORITY_REJECTIONS
 from companion.store import after, encode, uid
 
 WAKE_PURPOSES = ("wake", "goals", "exploration")
@@ -83,16 +84,23 @@ class WakePlanner:
             elif recent:
                 reason = "COOLDOWN"
             else:
-                candidate = s.one(
+                for candidate in s.rows(
                     "SELECT * FROM goals WHERE kind='self' AND redacted=0 AND state IN "
                     "('CANDIDATE','ACCEPTED','WAITING_RESOURCE','RETRY_WAIT') AND "
-                    "next_due_at<=? ORDER BY priority DESC,created_at LIMIT 1",
+                    "next_due_at<=? ORDER BY priority DESC,created_at LIMIT 64",
                     (now,),
-                )
-                if candidate:
-                    accepted = self.goals.accept(candidate["goal_id"], autonomous=True)
+                ):
+                    try:
+                        accepted = self.goals.accept(candidate["goal_id"], autonomous=True)
+                    except CoreError as error:
+                        # A goal proposed under an earlier grant must not block every later slot.
+                        if error.code not in AUTHORITY_REJECTIONS:
+                            raise
+                        self.goals.reject_authority(candidate["goal_id"], error.code)
+                        continue
                     if accepted["state"] == "QUEUED":
                         reason = "GOAL_DUE"
+                    break
             goal_id = candidate["goal_id"] if reason == "GOAL_DUE" else None
             if reason == "NO_CANDIDATE" and cfg.exploration_daily_requests > 0:
                 reason = "DISCOVERY_DUE"
