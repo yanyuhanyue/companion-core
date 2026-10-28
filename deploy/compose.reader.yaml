@@ -38,6 +38,7 @@ services:
     <<: *reader
     profiles: [heybox-native]
     command: [--source, heybox, --heybox-native, --account-file, /account/grant.json,
+              --heybox-topics, "${COMPANION_HEYBOX_TOPIC_IDS:-}",
               --core-url, "${COMPANION_READER_CORE_URL:?Set a private Core HTTP origin}",
               --adapter-id, "${COMPANION_HEYBOX_READER_ID:-heybox_source}"]
     env_file: ../privacy/heybox-reader.env

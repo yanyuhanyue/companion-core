@@ -34,6 +34,20 @@ localhost／私网 IP，HTTPS 校验证书。请求不继承代理或 Cookie，�
 服务响应 `relogin`、`login`、`need_login`、`show_captcha`、`forbidden` 立即报告受限。
 受限结果不会触发另一个入口的自动重试。
 
+## 原生来源按分区发现
+
+`--heybox-native` 的发现默认读推荐流 `GET /bbs/app/feeds`。配置 `--heybox-topics`
+（逗号分隔的真实分区 ID，最多 20 个，去重保序）后，发现改读
+`GET /bbs/app/topic/feeds?topic_id=…&offset=0&limit=N&lastval=&dw=720`，N ≤ 30。
+接口与参数沿用已核验的上游适配器
+[`xiaoheihe/topic_service.py`](https://github.com/674537331/astrbot_plugin_xiaoheihe_adapter/blob/90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac/xiaoheihe/topic_service.py)，
+签名方式与推荐流相同。上游一次并发读取多个分区；这里每个发现租约仍只发 1 个 GET，
+按配置顺序轮流读下一个分区，重复帖子由既有 URL 去重处理。只有标题的结果仍是 DISCOVERED，
+正文要经单独的读取请求。分区由运维配置，Reader 不读取分区目录、不推断兴趣。
+
+Compose 的 `heybox-native-reader` 从 `COMPANION_HEYBOX_TOPIC_IDS` 读入分区列表，未设置时
+保持推荐流。
+
 ## 图文与证据合同
 
 Reader 解析 `result.link.text` 的文字／HTML／图片块，按原顺序生成文字和 `[图片N链接]`
