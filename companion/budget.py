@@ -488,14 +488,15 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
         raise CoreError("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", 429)
 
 
-def settle(store, settings, request_id, response=None):
+def settle(store, settings, request_id, response=None, *, transport_failure=None):
     with store.transaction():
         usage = store.one("SELECT occurred_at FROM model_usage WHERE request_id=?", (request_id,))
         if usage:
             cloud_budget.sync(store, settings, usage["occurred_at"])
         admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
         if admission:
-            _settle_paid(store, settings, admission, response)
+            _settle_paid(store, settings, admission, response,
+                         transport_failure=transport_failure)
             return
         if response is None or response.input_tokens is None or response.output_tokens is None:
             store.execute(
@@ -558,7 +559,7 @@ def _settle_unstarted_reply(store, request_id, dispatch, reason, now):
         return True
 
 
-def _settle_paid(store, settings, admission, response):
+def _settle_paid(store, settings, admission, response, *, transport_failure=None):
     usage = store.one("SELECT * FROM model_usage WHERE request_id=?", (admission["request_id"],))
     if usage["state"] == "SETTLED":
         return
@@ -597,6 +598,8 @@ def _settle_paid(store, settings, admission, response):
         "code": "TRANSPORT_USAGE_UNKNOWN" if response is None else "USAGE_MISSING_OR_INVALID",
         "actual_usage_known": False,
     }
+    if response is None and transport_failure is not None:
+        diagnostic["transport_failure"] = transport_failure
     if valid:
         actual = cost(
             pricing, response.input_tokens, response.output_tokens, response.cached_tokens
@@ -847,10 +850,16 @@ def _check_measurement(settings, admission, messages, scenario, *, tools=()):
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
                    source_check=None, tools=(), trace_id=None):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
-    from companion.model import ModelClient, ModelDispatchRefused, ModelResponseError
+    from companion.model import (
+        ModelClient,
+        ModelDispatchRefused,
+        ModelResponseError,
+        ModelTransportError,
+    )
     from companion.reply_revision import CANCELLED, SOURCE_RECALLED, SUPERSEDED
 
     response = None
+    transport_failure = None
     dispatch = {"dispatched": False}
     try:
         response = await _dispatch(model, store, settings, request_id, messages, scenario, clock,
@@ -862,6 +871,8 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         response = error.response
         raise
     except CoreError as error:
+        if isinstance(error, ModelTransportError):
+            transport_failure = error.failure
         known_not_sent = (isinstance(error, ModelDispatchRefused)
                           and error.admission is dispatch.get("admission"))
         if (isinstance(model, ModelClient) and (known_not_sent or settings.mode == "live"
@@ -870,7 +881,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         raise
     finally:
         # Cancellation is an unknown outcome too; callers never refund a started attempt.
-        settle(store, settings, request_id, response)
+        settle(store, settings, request_id, response, transport_failure=transport_failure)
         from companion import model_carry
 
         if model_carry.active(settings):
