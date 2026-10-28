@@ -71,6 +71,14 @@ class ModelResponseError(CoreError):
         self.response = response
 
 
+class ModelTransportError(CoreError):
+    """A provider outcome without usage; `failure` is a content-free class or HTTP status."""
+
+    def __init__(self, code: str, status: int, failure: str):
+        super().__init__(code, status)
+        self.failure = failure
+
+
 class ModelAdmission:
     """Single-use payload capability. Accounting and authorization stay in budget."""
 
@@ -249,7 +257,7 @@ class ModelClient:
                 # Explicit usage, even invalid usage, belongs to budget's settlement.
                 if usage_present:
                     raise ModelResponseError(code, status, received)
-                raise CoreError(code, status)
+                raise ModelTransportError(code, status, "HTTP_" + str(response.status_code))
             try:
                 message = body["choices"][0]["message"]
                 if not isinstance(message, dict):
@@ -302,4 +310,5 @@ class ModelClient:
                                       and reason in {"stop", "length", "content_filter"} else None)
             return received
         except (httpx.TimeoutException, httpx.TransportError) as error:
-            raise CoreError("MODEL_RETRYABLE", 503) from error
+            # Only the library exception class is kept; its message may echo request data.
+            raise ModelTransportError("MODEL_RETRYABLE", 503, type(error).__name__) from error

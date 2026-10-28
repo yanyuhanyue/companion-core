@@ -1,6 +1,7 @@
 """The calling seam owns settlement; background work yields before reserving liability."""
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -45,6 +46,40 @@ def test_complete_returns_only_after_settling_usage(core, tmp_path, live):
             )
 
     run(exercise())
+
+
+@pytest.mark.parametrize("outcome,failure", [
+    (httpx.ReadTimeout("synthetic secret prompt"), "ReadTimeout"),
+    (httpx.RemoteProtocolError("synthetic secret prompt"), "RemoteProtocolError"),
+    (httpx.Response(503, text="synthetic secret prompt"), "HTTP_503"),
+    (httpx.Response(400, json={"error": "synthetic secret prompt"}), "HTTP_400"),
+])
+def test_unknown_transport_outcome_records_only_its_failure_class(core, tmp_path, outcome,
+                                                                   failure):
+    approved_live(core, tmp_path)
+    request_id = budget.reserve(core.store, core.settings, authorized_job(core),
+        "chat", MESSAGES, core.clock())
+
+    def provider(request):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def exercise():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+            with pytest.raises(CoreError, match="MODEL_RETRYABLE|MODEL_REJECTED"):
+                await budget.complete(ModelClient(core.settings, client), core.store,
+                                      core.settings, request_id, MESSAGES, "chat", core.clock)
+
+    run(exercise())
+    assert core.store.one("SELECT state FROM model_usage")["state"] == "UNKNOWN"
+    row = core.store.one("SELECT safe_detail_json FROM audit_log WHERE "
+                         "action='model.usage_diagnostic' AND entity_id=?", (request_id,))
+    assert json.loads(row["safe_detail_json"]) == {
+        "code": "TRANSPORT_USAGE_UNKNOWN", "actual_usage_known": False,
+        "transport_failure": failure, "cache_usage_present": None,
+    }
+    assert "secret" not in row["safe_detail_json"]
 
 
 @pytest.mark.parametrize("failure", ["transport", "cancelled", "expired"])
