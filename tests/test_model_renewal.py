@@ -1,4 +1,7 @@
-"""A fresh expiry retains original carry custody and every historical charge."""
+"""Renewal retains original carry custody and every historical charge.
+
+It may happen before or after the old expiry, and the successor may be open-ended.
+"""
 
 import copy
 import json
@@ -26,24 +29,25 @@ from tests.owner_model_fixtures import authorized_job
 from tests.test_owner_authority import activate
 
 
-def renewal(core, case, *, number=1):
+def renewal(core, case, *, number=1, offset=timedelta(seconds=1), open_ended=False):
     active = case.successor["authority"]
     previous = paid_budget.snapshot(core.settings)
     expiry = core.settings.paid_model.expires_at
-    core.clock.now = expiry + timedelta(seconds=1)
+    core.clock.now = expiry + offset
     owner_authority.stop(
         core.store,
         core.settings,
         core.clock,
         AuthorityStop(operation_id=f"stop-renewal-{number}", authority=active),
     )
-    expires = expiry + timedelta(days=1)
+    expires = None if open_ended else expiry + timedelta(days=1)
     core.settings.paid_model = core.settings.paid_model.model_copy(
         update={
             "window_id": f"renewed-window-{number}",
             "approval_sha256": str(number) * 64,
             "expires_at": expires,
-            "rates_valid_until": max(core.settings.paid_model.rates_valid_until, expires),
+            "rates_valid_until": None if open_ended else max(
+                core.settings.paid_model.rates_valid_until, expires),
         }
     )
     items = executors(core.clock())
@@ -148,12 +152,55 @@ def test_renewal_rejects_scope_or_accounting_changes(core, tmp_path, change):
     assert path.read_bytes() == before
 
 
-def test_renewal_waits_for_old_approval_expiry(core, tmp_path):
+def test_renewal_before_old_expiry_keeps_custody_without_a_gap(core, tmp_path):
     case = migrated(core, tmp_path)
-    request, policy, witness = renewal(core, case)
-    core.clock.now -= timedelta(seconds=2)
-    with pytest.raises(CoreError, match="OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED"):
+    before = core.store.rows("SELECT * FROM model_usage")
+    request, policy, witness = renewal(core, case, offset=-timedelta(hours=1))
+    receipt = model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    assert receipt["kind"] == "owner_model_approval_renewal_v1"
+    assert receipt["retained_micro_usd"] == before[0]["billed_micro_usd"]
+    activate(core, policy, revision=4, operation="activate-early-renewal")
+    assert core.store.rows("SELECT * FROM model_usage") == before
+    with core.store.transaction():
+        view = paid_budget.journal(core.store, core.settings.paid_model)
+    assert "successor-window-1" in model_carry.scope_windows(view, "renewed-window-1")
+
+
+@pytest.mark.parametrize("change", ["not_later", "already_past", "rates_shorter"])
+def test_renewal_must_extend_into_the_future(core, tmp_path, change):
+    case = migrated(core, tmp_path)
+    old = core.settings.paid_model
+    request, policy, witness = renewal(core, case, offset=-timedelta(hours=1))
+    updates = {
+        "not_later": {"expires_at": old.expires_at},
+        "already_past": {"expires_at": core.clock.now - timedelta(seconds=1),
+                         "rates_valid_until": old.rates_valid_until},
+        "rates_shorter": {"rates_valid_until": None},
+    }[change]
+    if change == "already_past":
+        core.clock.now = old.expires_at + timedelta(hours=2)
+    core.settings.paid_model = core.settings.paid_model.model_copy(update=updates)
+    request["successor_policy"]["paid_contract_sha256"] = paid_budget.sha(
+        paid_budget.snapshot(core.settings))
+    with pytest.raises(CoreError):
         model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+
+
+def test_open_ended_renewal_keeps_caps_and_has_no_expiry(core, tmp_path):
+    case = migrated(core, tmp_path, window_calls=1)
+    request, policy, witness = renewal(core, case, offset=-timedelta(hours=1), open_ended=True)
+    assert policy.expires_at is None
+    assert "expires_at" not in paid_budget.snapshot(core.settings)
+    model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    active, _ = activate(core, policy, revision=4, operation="activate-open-renewal")
+    core.authorized_model_test_capture = active, case.key
+    core.authorized_model_test_jobs = {}
+    core.clock.now += timedelta(days=3650)
+    assert paid_budget.contract(core.settings, core.clock()) is core.settings.paid_model
+    job = authorized_job(core, number=2)
+    # The window call cap carried across the chain still applies with no expiry.
+    with pytest.raises(CoreError, match="MODEL_WINDOW_BUDGET_EXHAUSTED"):
+        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
 
 
 @pytest.mark.parametrize("current_closed", [False, True])

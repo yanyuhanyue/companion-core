@@ -303,7 +303,7 @@ def guard(
             )
             or paid.window_calls > approval.max_model_attempts
             or paid.starts_at > approval.starts_at
-            or paid.expires_at < approval.ends_at
+            or (paid.expires_at is not None and paid.expires_at < approval.ends_at)
             or paid_budget.sha(paid_budget.snapshot(settings)) != approval.paid_contract_sha256
             or paid.cumulative != approval.cumulative
         ):
@@ -1651,7 +1651,7 @@ def dispatch_fence(
     now = datetime.fromisoformat(clock())
     if not approval.starts_at <= now < approval.ends_at:
         raise CoreError("LIVE_TEXT_APPROVAL_EXPIRED", 503)
-    if not paid.starts_at <= now < paid.expires_at or now >= paid.rates_valid_until:
+    if not paid_budget.active(paid, now) or not paid_budget.rates_valid(paid, now):
         raise CoreError("PAID_APPROVAL_EXPIRED", 503)
     if any(lease <= now for lease in leases):
         raise CoreError("LIVE_TEXT_MODEL_JOB_FENCED", 409)

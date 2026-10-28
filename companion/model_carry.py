@@ -370,9 +370,20 @@ def _same_approval(old, new, *, renewal_at=None):
         "video_credential_tag",
     }
     if renewal_at is not None:
-        if (not timestamp(old["expires_at"]) <= timestamp(renewal_at) < timestamp(new["expires_at"])
-            or timestamp(new["rates_valid_until"]) < timestamp(new["expires_at"])
-            or timestamp(new["rates_valid_until"]) < timestamp(old["rates_valid_until"])):
+        # Renewal may happen before or after the old expiry: liabilities are fenced
+        # by STOP, quiescence and the exact UNKNOWN inventory, not by the clock.
+        # A missing expiry or rate validity is open-ended.
+        def until(value, key):
+            return None if value.get(key) is None else timestamp(value[key])
+
+        now = timestamp(renewal_at)
+        old_end, new_end = until(old, "expires_at"), until(new, "expires_at")
+        old_rates, new_rates = until(old, "rates_valid_until"), until(new, "rates_valid_until")
+        if ((new_end is not None and (
+                new_end <= now or (old_end is not None and new_end <= old_end)
+                or new_rates is None or new_rates < new_end))
+            or (new_rates is not None and (
+                new_rates <= now or (old_rates is not None and new_rates < old_rates)))):
             raise CoreError("OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED", 409)
         allowed.update({"expires_at", "rates_valid_until"})
     if (

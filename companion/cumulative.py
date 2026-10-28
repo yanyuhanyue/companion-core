@@ -507,6 +507,7 @@ def preflight(store, settings, clock):
             return
         check(store, settings, now, custody=view)
         paid = settings.paid_model
+        # Cumulative scopes reject open-ended approvals at configuration time.
         if paid and not instant(paid.starts_at) <= instant(now) < instant(paid.expires_at):
             pause(store, custody, now, "EXPIRED")
             raise CoreError("CUMULATIVE_WINDOW_EXPIRED", 403)

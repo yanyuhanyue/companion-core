@@ -1038,3 +1038,41 @@ def test_unknown_settlement_cannot_be_rolled_back_to_reserved(core, tmp_path):
         assert calls == []
     finally:
         old.close()
+
+
+
+def test_open_ended_approval_keeps_hash_shape_and_caps(core, tmp_path):
+    from datetime import datetime, timedelta
+
+    from companion import paid_budget
+
+    approved_live(core, tmp_path)
+    assert {"expires_at", "rates_valid_until"} <= set(paid_budget.snapshot(core.settings))
+    approval = approved_live(core, tmp_path, expires_at=None, rates_valid_until=None)
+    snapshot = paid_budget.snapshot(core.settings)
+    assert "expires_at" not in snapshot and "rates_valid_until" not in snapshot
+    later = datetime.fromisoformat("2036-10-01T00:00:00+08:00")
+    assert paid_budget.active(approval, later) and paid_budget.rates_valid(approval, later)
+    assert not paid_budget.active(approval, approval.starts_at - timedelta(seconds=1))
+    assert approval.daily_micro_usd == 200000 and approval.window_calls == 20
+
+
+@pytest.mark.parametrize("changes", [
+    {"rates_valid_until": None},
+    {"expires_at": None, "rates_valid_until": "2026-09-01T00:00:00+08:00"},
+])
+def test_finite_approval_needs_rate_validity_and_open_rates_follow_start(core, tmp_path, changes):
+    with pytest.raises(ValueError):
+        approved_live(core, tmp_path, **changes)
+
+
+def test_open_ended_approval_cannot_escape_a_cumulative_scope(core, tmp_path):
+    from companion.config import PaidModelApproval
+    from tests.test_cumulative_budget import policy
+
+    approved_live(core, tmp_path)
+    scope = policy(core)
+    values = core.settings.paid_model.model_dump(mode="json")
+    values.update(expires_at=None, rates_valid_until=None, cumulative=scope.model_dump(mode="json"))
+    with pytest.raises(ValueError, match="cumulative account scope"):
+        PaidModelApproval.model_validate(values)

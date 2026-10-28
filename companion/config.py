@@ -85,8 +85,11 @@ class PaidModelApproval(BaseModel):
     currency: Literal["USD"]
     timezone: str
     starts_at: datetime
-    expires_at: datetime
-    rates_valid_until: datetime
+    # None is an open-ended approval: spend caps, STOP and revocation still bound it.
+    expires_at: datetime | None = Field(default=None, exclude_if=lambda value: value is None)
+    rates_valid_until: datetime | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
     input_rate: int = Field(strict=True, gt=0)
     cached_input_rate: int = Field(strict=True, gt=0)
     output_rate: int = Field(strict=True, gt=0)
@@ -130,9 +133,13 @@ class PaidModelApproval(BaseModel):
     def validate_approval(self):
         ZoneInfo(self.timezone)
         for value in (self.starts_at, self.expires_at, self.rates_valid_until):
-            if value.tzinfo is None or value.utcoffset() is None:
+            if value is not None and (value.tzinfo is None or value.utcoffset() is None):
                 raise ValueError("approval timestamps require timezone offsets")
-        if self.starts_at >= self.expires_at or self.rates_valid_until < self.expires_at:
+        if self.expires_at is None:
+            if self.rates_valid_until is not None and self.rates_valid_until <= self.starts_at:
+                raise ValueError("rate validity must follow the approval start")
+        elif (self.starts_at >= self.expires_at or self.rates_valid_until is None
+              or self.rates_valid_until < self.expires_at):
             raise ValueError("approval interval exceeds configured rate validity")
         if self.cached_input_rate > self.input_rate:
             raise ValueError("cached rate must not exceed uncached admission price")
@@ -152,7 +159,7 @@ class PaidModelApproval(BaseModel):
             (self.provider, self.currency, self.timezone) != (
                 self.cumulative.provider, self.cumulative.currency, self.cumulative.timezone
             ) or self.starts_at < self.cumulative.starts_at
-            or self.expires_at > self.cumulative.expires_at
+            or self.expires_at is None or self.expires_at > self.cumulative.expires_at
         ):
             raise ValueError("paid window must remain inside the cumulative account scope")
         parsed = urlparse(self.endpoint)
