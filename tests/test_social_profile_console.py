@@ -7,8 +7,9 @@ from pydantic import SecretStr
 
 from companion import social_profile_sources
 from companion.contracts import CoreError
+from companion.memory import Memory
 from companion.social_autonomy_protocol import ProfileBaseline
-from companion.store import after, encode
+from companion.store import Store, after, encode
 from tests.conftest import run
 from tests.social_profile_support import confirmed_profile_material
 from tests.test_owner_console import ORIGIN, PASSWORD, login
@@ -165,14 +166,15 @@ def test_console_receipt_and_native_confirmation_share_one_transaction(client, c
     background(core, nickname_enabled=True)
     memory_id = confirmed_profile_material(core, confirm=False)
     headers = login(client)
-    original = client.app_core.store.audit
+    original = Store.audit
 
-    def fail(action, *args, **kwargs):
+    def fail(store, action, *args, **kwargs):
         if action == "memory.owner_decision":
+            assert store is not client.app_core.store and store.db.in_transaction
             raise RuntimeError("synthetic receipt failure")
-        return original(action, *args, **kwargs)
+        return original(store, action, *args, **kwargs)
 
-    monkeypatch.setattr(client.app_core.store, "audit", fail)
+    monkeypatch.setattr(Store, "audit", fail)
     with pytest.raises(RuntimeError, match="synthetic receipt failure"):
         client.post("/v1/console/memories/" + memory_id + "/decision",
                     json={"decision": "confirm"}, headers=headers)
@@ -185,13 +187,14 @@ def test_console_owner_is_rechecked_at_native_commit(client, core, monkeypatch):
     background(core, nickname_enabled=True)
     memory_id = confirmed_profile_material(core, confirm=False)
     headers = login(client)
-    original = client.app_core.memory.decide_from_console
+    original = Memory.decide_from_console
 
-    def rotate(*args, **kwargs):
+    def rotate(memory, *args, **kwargs):
+        assert memory.store is not client.app_core.store and memory.store.db.in_transaction
         core.settings.control_token = SecretStr("rotated-between-auth-and-memory")
-        return original(*args, **kwargs)
+        return original(memory, *args, **kwargs)
 
-    monkeypatch.setattr(client.app_core.memory, "decide_from_console", rotate)
+    monkeypatch.setattr(Memory, "decide_from_console", rotate)
     response = client.post("/v1/console/memories/" + memory_id + "/decision",
                            json={"decision": "confirm"}, headers=headers)
     assert response.status_code == 401, response.text
