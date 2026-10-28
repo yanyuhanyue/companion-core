@@ -175,7 +175,7 @@ def consume_life_draft(store, settings, clock, life_job_id, body):
     data = _life_draft(store, settings, clock, reference)
     if settings.life_loop.mode != "SHADOW" or _paused(store, settings, clock()):
         raise CoreError("LIFE_CONSUMPTION_PAUSED", 409)
-    if _uncertain(store):
+    if _uncertain(store, settings):
         raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
     if budget.chat_pending(store, clock()) or owner_authority.owner_waiting(
         store, settings, clock(), authority=view.authority.as_dict(),
@@ -233,7 +233,7 @@ def check_job(store, settings, clock, job_id, *, lease_token=None):
         life_record(store, settings, clock, row, snapshot)
         if settings.life_loop.mode != "SHADOW" or _paused(store, settings, clock()):
             raise CoreError("LIFE_CONSUMPTION_PAUSED", 409)
-        if _uncertain(store):
+        if _uncertain(store, settings):
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
         if budget.chat_pending(store, clock()) or owner_authority.owner_waiting(
             store, settings, clock(), authority=view.authority.as_dict(),

@@ -56,7 +56,13 @@ async def process_worker(core, tmp_path, scenario, source_id, *, interrupt=None,
                 signal = await child.stdout.readline()
                 while signal and signal.strip() != b"LIFE_PROVIDER_STARTED":
                     signal = await child.stdout.readline()
-                assert signal.strip() == b"LIFE_PROVIDER_STARTED", signal
+                if signal.strip() != b"LIFE_PROVIDER_STARTED":
+                    _, error = await child.communicate()
+                    state = json.loads(result.read_text("utf-8")) if result.exists() else {}
+                    fields = ("state", "job_state", "last_error_code")
+                    failures = [{key: row.get(key) for key in fields}
+                                for row in state.get("results", [])]
+                    raise AssertionError((signal, error.decode(errors="replace"), failures))
                 if interrupt:
                     await interrupt()
             output, error = await child.communicate(None if restart else b"continue\n")
