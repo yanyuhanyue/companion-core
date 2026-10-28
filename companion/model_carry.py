@@ -502,7 +502,8 @@ def prepare(store, settings, request, verified_executors, now, *, request_sha256
         if renewal:
             from companion import model_renewal
 
-            model_renewal.check_policy(store, settings, original.policy, policy, now)
+            model_renewal.check_policy(store, settings, original.policy, policy, now,
+                retained_unknowns={item["request_id"] for item in value["unknowns"]})
             allowed.update({"expires_at", "purposes", "life_shadow"})
         if (
             policy.unknown_carry_sha256 != digest(value)

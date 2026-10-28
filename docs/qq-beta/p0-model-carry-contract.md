@@ -195,6 +195,15 @@ continuation rules, including when the predecessor is itself a renewal. Older jo
 readers must remain stopped after the renewal append; forward repair preserves the
 whole journal.
 
+A retained request can refer to several historical inputs. Each input keeps its own
+native source-work proof, while the request and its charge occur only once in the
+carry receipt. A Life source with its own settled responsibility may still be cited
+by a later UNKNOWN chat. Renewal accepts that history only when the freshly verified
+manifest explicitly retains the later, closed request and the source has its own
+authority-bound primary chat. The source's own UNKNOWN, missing primary custody,
+unfinished work and uncertain delivery still block approval. This does not change
+the original input's financial state or authorize replaying it.
+
 The only optional permission addition in this renewal is bounded private Life:
 the old policy must already grant proactive messages and private history. A fresh
 `life_shadow` authorization may select private owner messages in that same retained
