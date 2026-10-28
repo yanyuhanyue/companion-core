@@ -64,6 +64,32 @@ API alive、schema 可读、空队列及按时采样都不能证明 worker 正�
 业务阻断仍中断 clear segment；若循环本身仍推进，其活动可独立记录。业务成功和发送签收
 须按对应范围核对既有 jobs、usage、outbox 与平台回执，不使用活动序号代替。
 
+## 原生聊天请求阶段耗时
+
+现有 `COMPANION_TELEMETRY=1` 开关同时启用原生聊天的细分阶段日志，沿用原 trace、
+进程 session 和 evidence type。日志不增加数据库记录，不包含正文、工具参数、URL、密钥或身份。
+
+| 阶段 | 测量范围 |
+|---|---|
+| `context_guard` / `context_restore` / `context_tools` / `context_build` | 初始校验、恢复、工具构建、原上下文组装 |
+| `agent_guard` / `agent_setup` | SDK 运行前校验与 Agent/消息结构准备 |
+| `request_guard` / `request_plan` / `request_checkpoint` | 每轮模型请求的校验、规划与原会话保存 |
+| `request_validate` / `request_reserve` / `request_sources` | 实际请求核验、预算预留与来源/准入记录校验 |
+| `dispatch_sources` / `dispatch_scope` / `dispatch_journal` / `dispatch_recheck` | 预派发来源、权限、账本和提交后重新校验 |
+| `transport_custody` / `transport_payload` / `transport_sources` | HTTP 钩子之后的原 custody、payload 与来源校验 |
+| `model_transport` | 最终发送校验之后，调用底层 HTTP transport 到返回响应的耗时；不含响应正文解码 |
+
+每条 phase 的 `monotonic_ns` 是结束时刻，`elapsed_ms` 是该次本地跨度。异常退出也记录跨度，
+因此日志出现不代表操作成功。`request_sources` 可嵌套在派发阶段内，不能将重叠时长相加。
+工具循环会产生多轮请求，同一 trace 内应按时序匹配；跨进程 session 的单调时间不能直接相减。
+`t_model_request` 延续原定义：预算预留之后、进入完整请求路径之前，并非 HTTP 已发出。
+`t_model_done` 包含派发校验、模型响应和原有结算。真实 transport 跨度在返回或异常后才输出，
+最终时限校验与实际发送之间没有新增日志输出、网络操作或 await。
+
+可用现有 `scripts/benchmark_qq_beta.py` 汇总阶段样本数和 nearest-rank P50/P95。
+十几条真实消息只提供初步分位数，需同时报告样本量、请求轮次和失败/缺失日志；阶段 P95
+不是消息端到端 P95，也不能用合成请求替代真实样本。部署后只观察自然收到的已授权消息。
+
 本轮验证使用本地合成 SQLite/HTTP 和秒级实际等待。没有真实 QQ、供应商、付费模型、
 告警联系人或真实小时/天数运行证据。观察文件不是第二份收件、发送或预算账本，
 不会改变任何额度、UNKNOWN、租约、遗忘记录或业务状态。
