@@ -48,7 +48,7 @@ from companion.reply_segments import split_text
 from companion.runtime import Runtime
 from companion.social import SocialPlanner, proactive_allowed
 from companion.store import after, encode, uid, utcnow
-from companion.telemetry import emit
+from companion.telemetry import emit, splits
 from companion.transport import (
     cancel_interrupted_replies,
     cancel_proactive_work,
@@ -646,6 +646,7 @@ class Core(Runtime):
     def context(self, job, memories=None, memory_paused=False, *, snapshots=None, model_tools=(),
                 planning=False):
         s, cfg = self.store, self.settings
+        mark = splits(job.get("trace_id"))
         reply_revision.check_job(s, job)
         authority = self._owner_job_view(job)
         planning = (planning and authority is not None and job["kind"] == "chat"
@@ -698,6 +699,7 @@ class Core(Runtime):
             rules["content"] = "".join([*static_rules, *dynamic_rules])
 
         add_rules("")
+        mark("context_rules")
         references = []
         reference_sources = []
         reference_proofs = []
@@ -776,6 +778,7 @@ class Core(Runtime):
             reference_proofs.append((references[-1], {"kind": "affect", "proof": affect}))
         learned = self._expression_learning_reference(job, affect) if (
             permitted("expression")) else None
+        mark("context_references")
         if learned:
             references.append(learned["message"])
             reference_sources.append((learned["message"], learned["source_event_ids"]))
@@ -825,6 +828,7 @@ class Core(Runtime):
                     | {item["event_id"] for trait in trait_rows for item in trait["evidence"]}))
                 reference_proofs.append((memory_reference,
                                          {"kind": "memory", "proof": memory_proof}))
+        mark("context_memory")
         if authority:
             sources = owner_input.history_sources(s, cfg, self.clock, job) if (
                 job["kind"] == "chat") else []
@@ -847,6 +851,7 @@ class Core(Runtime):
             reference_sources.append((continuation["message"], continuation["source_event_ids"]))
             reference_proofs.append((continuation["message"],
                                      {"kind": "memory", "proof": continuation["proof"]}))
+        mark("context_history")
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             add_rules(qq_rich.RULES)
         quoting = bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"
@@ -890,6 +895,7 @@ class Core(Runtime):
         if quoting:
             current = reply_quote.label(current, job["event_id"])
         current_input.append(current)
+        mark("context_current")
         protected = combined or image_memory or (
             bounded_text and cfg.live_text_window.memory_scope == "approved_facts" and hits
         )
@@ -907,6 +913,7 @@ class Core(Runtime):
 
             if agent_images.enabled(cfg) and permitted("image"):
                 agent_images.attach(self, job, messages, sources, turns, current, snapshots)
+        mark("context_fit")
         if (continuation and continuation["uses_recalled_memory"]
             and not any(message is memory_reference for message in messages)):
             messages = [message for message in messages if message is not continuation["message"]]
@@ -955,6 +962,7 @@ class Core(Runtime):
                               if any(message is turn[0] for message in messages))
                 blocks.append(("current", current_input, True))
                 initialize(self, job, messages, blocks, snapshots)
+        mark("context_planning")
         return messages
 
     async def recall_for_reply(self, job):

@@ -29,12 +29,32 @@ STAGES = {
 }
 PHASES = {
     "context_guard", "context_restore", "context_tools", "context_build",
+    "context_rules", "context_references", "context_memory", "context_history",
+    "context_current", "context_fit", "context_planning",
     "agent_guard", "agent_setup", "request_guard", "request_plan",
     "request_checkpoint", "request_validate", "request_reserve", "request_sources",
     "dispatch_sources", "dispatch_scope", "dispatch_journal", "dispatch_recheck",
     "transport_custody", "transport_payload", "transport_sources", "model_transport",
 }
 STAGES.update(PHASES)
+
+
+def splits(trace_id):
+    """Consecutive local spans within one call; each mark covers time since the last."""
+    enabled = trace_id is not None and api_enabled()
+    last = [time.perf_counter_ns()] if enabled else [0]
+
+    def mark(stage):
+        if not enabled or stage not in PHASES:
+            return
+        now = time.perf_counter_ns()
+        try:
+            emit(stage, trace_id, elapsed_ms=(now - last[0]) / 1e6, at_ns=now)
+        except Exception:
+            pass  # Instrumentation must not change the operation's result.
+        last[0] = now
+
+    return mark
 
 
 @contextmanager
