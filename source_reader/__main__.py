@@ -65,7 +65,8 @@ async def main(args):
                 raise ValueError("Use different Core adapter and source service credentials")
             source = await stack.enter_async_context(SourceAPI(args.source_url, source_token))
         elif args.source == "heybox" and args.heybox_native:
-            source = await stack.enter_async_context(NativeHeyboxSource(args.account_file))
+            source = await stack.enter_async_context(
+                NativeHeyboxSource(args.account_file, topics=args.heybox_topics.split(",")))
         reader = (
             None if args.source == "web"
             else HeyboxReader(public, source,
@@ -131,6 +132,8 @@ if __name__ == "__main__":
                         help="Optional web host restriction; can only narrow the Core lease")
     parser.add_argument("--source-url", help="Explicit two-GET Heybox service origin")
     parser.add_argument("--heybox-native", action="store_true", help="Enable pinned two-GET source")
+    parser.add_argument("--heybox-topics", default="",
+                        help="Comma-separated real topic IDs for native discovery (max 20)")
     parser.add_argument("--public-discovery", action="store_true",
                         help="Allow bounded Heybox public title discovery without an account")
     parser.add_argument("--discussion", action="store_true",

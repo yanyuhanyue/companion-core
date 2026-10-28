@@ -1,7 +1,8 @@
-"""A standalone Reader's two-GET source, with explicitly supplied account authority.
+"""A standalone Reader's GET-only source, with explicitly supplied account authority.
 
 No upstream Agent, login, cookie discovery, repository, or sending code is imported.
-Endpoint/parameter compatibility: astrbot_plugin_xiaoheihe_adapter@90d3c9d4.
+Endpoint/parameter compatibility: astrbot_plugin_xiaoheihe_adapter@90d3c9d4
+(feeds, topic/feeds and link/tree; see its xiaoheihe/topic_service.py).
 """
 
 import json
@@ -16,6 +17,7 @@ from source_reader.heybox_signing import generate_hkey
 from source_reader.network import PublicNetwork, ReadFailure, post_url, response_body
 
 UPSTREAM_COMMIT = HEYBOX_COMMIT
+MAX_TOPICS = 20  # Upstream MAX_TOPIC_SELECTIONS.
 WEB_PARAMS = {
     "os_type": "web",
     "app": "web",
@@ -28,6 +30,22 @@ WEB_PARAMS = {
     "device_info": "Chrome",
     "_notip": "true",
 }
+
+
+def topic_ids(value):
+    """Operator-selected real topic IDs, deduplicated in order; empty keeps the main feed."""
+    result = []
+    for part in (value or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit() or len(part) > 32:
+            raise ValueError("Heybox topic IDs must be 1-32 digit numbers")
+        if part not in result:
+            result.append(part)
+    if len(result) > MAX_TOPICS:
+        raise ValueError(f"Select at most {MAX_TOPICS} Heybox topics")
+    return tuple(result)
 
 
 def source_status(raw):
@@ -49,10 +67,16 @@ def source_status(raw):
 
 
 class NativeHeyboxSource:
-    """One upstream GET per lease, accounted in the existing Core reservation."""
+    """One upstream GET per lease, accounted in the existing Core reservation.
 
-    def __init__(self, account_file=None, pool=None, clock=lambda: datetime.now(UTC)):
+    With topics configured, each discovery lease reads the next topic in turn, so one
+    lease still costs one GET; Core deduplicates repeated post URLs.
+    """
+
+    def __init__(self, account_file=None, pool=None, clock=lambda: datetime.now(UTC),
+                 topics=()):
         self.account_file, self.clock, self.blocked_grant = account_file, clock, None
+        self.topics, self.next_topic = topic_ids(",".join(topics)), 0
         self.pool = pool or httpcore.AsyncConnectionPool(
             network_backend=PublicNetwork(),
             max_connections=1,
@@ -70,7 +94,17 @@ class NativeHeyboxSource:
         await self.pool.aclose()
 
     async def get(self, item, budget):
-        if item["operation"] == "discover":
+        if item["operation"] == "discover" and self.topics:
+            path = "/bbs/app/topic/feeds"
+            params = {
+                "topic_id": self.topics[self.next_topic % len(self.topics)],
+                "offset": 0,
+                "limit": min(30, int(item["max_items"])),
+                "lastval": "",
+                "dw": 720,
+            }
+            self.next_topic += 1
+        elif item["operation"] == "discover":
             path = "/bbs/app/feeds"
             params = {
                 "app": "heybox",

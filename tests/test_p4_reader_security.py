@@ -149,3 +149,43 @@ def test_local_budget_limit_does_not_latch_native_account(tmp_path):
         assert len(backend.requests) == 2
 
     run(scenario())
+
+
+def test_native_discovery_rotates_operator_topics_with_one_get_each(tmp_path):
+    feed = {"status": "ok", "result": {"links": [
+        {"linkid": 168860244, "title": "分区帖子"}, {"linkid": 168860244, "title": "重复"}]}}
+    item = {**HEYBOX_ITEM, "operation": "discover"}
+
+    async def scenario():
+        pool, backend = mock_pool(response(feed), response(feed), response(feed))
+        async with NativeHeyboxSource(grant(tmp_path), pool, clock=lambda: NOW_DT,
+                                      topics=["100", " 200", "100", ""]) as source:
+            reader = HeyboxReader(None, source)
+            results = [await read_result(reader, item) for _ in range(3)]
+        assert [result["items"] for result in results] == [[{
+            "url": "https://www.xiaoheihe.cn/app/bbs/link/168860244", "title": "分区帖子"}]] * 3
+        paths = [request.split(b" ")[1] for request in backend.requests]
+        assert all(path.startswith(b"/bbs/app/topic/feeds?") for path in paths)
+        assert [b"topic_id=100&" in paths[0], b"topic_id=200&" in paths[1],
+                b"topic_id=100&" in paths[2]] == [True, True, True]
+        assert all(b"limit=4&" in path and b"hkey=" in path for path in paths)
+
+    run(scenario())
+
+
+def test_native_discovery_without_topics_keeps_the_main_feed(tmp_path):
+    feed = {"status": "ok", "result": {"links": []}}
+
+    async def scenario():
+        pool, backend = mock_pool(response(feed))
+        async with NativeHeyboxSource(grant(tmp_path), pool, clock=lambda: NOW_DT) as source:
+            await read_result(HeyboxReader(None, source), {**HEYBOX_ITEM, "operation": "discover"})
+        assert backend.requests[0].split(b" ")[1].startswith(b"/bbs/app/feeds?")
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("topics", [["abc"], ["1" * 33], ["12-3"], [str(i) for i in range(21)]])
+def test_native_topics_reject_invalid_or_excess_selection(topics):
+    with pytest.raises(ValueError, match="topic"):
+        NativeHeyboxSource(topics=topics)
