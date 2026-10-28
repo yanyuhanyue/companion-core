@@ -6,6 +6,7 @@ import os
 import re
 import time
 import uuid
+from contextlib import contextmanager
 from itertools import islice
 
 SESSION = uuid.uuid4().hex
@@ -26,6 +27,32 @@ STAGES = {
     "t_job_done",
     "job_failed",
 }
+PHASES = {
+    "context_guard", "context_restore", "context_tools", "context_build",
+    "agent_guard", "agent_setup", "request_guard", "request_plan",
+    "request_checkpoint", "request_validate", "request_reserve", "request_sources",
+    "dispatch_sources", "dispatch_scope", "dispatch_journal", "dispatch_recheck",
+    "transport_custody", "transport_payload", "transport_sources", "model_transport",
+}
+STAGES.update(PHASES)
+
+
+@contextmanager
+def phase(stage, trace_id):
+    """A local span only; a completed span is not proof that its operation succeeded."""
+    if trace_id is None or stage not in PHASES or not api_enabled():
+        yield
+        return
+    started = time.perf_counter_ns()
+    try:
+        yield
+    finally:
+        finished = time.perf_counter_ns()
+        try:
+            emit(stage, trace_id, elapsed_ms=(finished - started) / 1e6, at_ns=finished)
+        except Exception:
+            # Instrumentation must not replace the operation's result or exception.
+            pass
 
 
 def emit(
@@ -56,7 +83,7 @@ def emit(
         record["model_usage_state"] = model_usage_state
     try:
         print(json.dumps(record), flush=True)
-    except OSError:
+    except Exception:
         pass
 
 
