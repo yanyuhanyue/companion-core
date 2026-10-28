@@ -198,7 +198,27 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     carries[row["carry_sha256"]] = {**row, "record_sha256": record_sha}
 
 
-def check_policy(store, settings, old, new, now):
+def _closed_context_models(store, capture, models, retained_unknowns):
+    primary = store.rows(
+        "SELECT job_id,authority_json FROM jobs WHERE event_id=? AND kind='chat' LIMIT 2",
+        (capture.event_id,),
+    )
+    if len(primary) != 1 or json.loads(primary[0]["authority_json"]) != capture.authority:
+        return False
+    # The native manifest already proves these requests closed and explicitly retained.
+    # Only a different chat's use of history is exempt; the source's own attempt is not.
+    return all(
+        item["state"] == "UNKNOWN" and item["request_id"] in retained_unknowns
+        and store.one(
+            "SELECT 1 FROM model_usage m JOIN jobs j USING(job_id) WHERE m.request_id=? "
+            "AND j.job_id<>? AND j.kind='chat' AND j.event_id<>?",
+            (item["request_id"], primary[0]["job_id"], capture.event_id),
+        )
+        for item in models if item["state"] != "SETTLED"
+    )
+
+
+def check_policy(store, settings, old, new, now, *, retained_unknowns):
     """Only expiry and explicitly bounded private Life consent may change."""
     from companion import owner_input_state
     from companion.owner_authority_protocol import OwnerCapture
@@ -268,6 +288,12 @@ def check_policy(store, settings, old, new, now):
             >= min(old.source_retention_days, settings.raw_event_retention_days) * 86400
         ):
             raise CoreError("OWNER_MODEL_RENEWAL_LIFE_SOURCE_REQUIRED", 409)
-        state = owner_input_state.read(store, settings, OwnerCapture.model_validate(captured))
-        if any(state[key] for key in ("unsettled_model", "unsettled_work", "unsettled_delivery")):
+        capture = OwnerCapture.model_validate(captured)
+        models = []
+        state = owner_input_state.read(store, settings, capture, model_requests=models)
+        if (
+            state["unsettled_work"] or state["unsettled_delivery"]
+            or state["unsettled_model"]
+            and not _closed_context_models(store, capture, models, retained_unknowns)
+        ):
             raise CoreError("OWNER_MODEL_RENEWAL_LIFE_SOURCE_REQUIRED", 409)
