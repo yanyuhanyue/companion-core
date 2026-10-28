@@ -214,12 +214,32 @@ async def shared_fee_case(core, tmp_path, monkeypatch):
         yield c
 
 
-def test_failed_early_rows_cannot_starve_later_original_shared_fee(core, tmp_path, monkeypatch):
+async def native_proof_responses(context, client, jobs):
+    """Read real Core proofs before testing projection logic under controlled timing."""
+    lookup = drain.get_responsibility
+    http = SimpleNamespace(window=context.runtime, client=client)
+    catalog = SimpleNamespace(db=context.db)
+    proofs = {job: await lookup(http, catalog, job) for job in jobs}
+
+    async def response(http, catalog, job):
+        if job in proofs:
+            return proofs[job]
+        return await lookup(http, catalog, job)
+
+    return response
+
+
+@pytest.mark.parametrize("slow_response", [False, True])
+def test_failed_early_rows_cannot_starve_later_original_shared_fee(
+    core, tmp_path, monkeypatch, slow_response,
+):
     from companion_onebot_bridge.network import private_http_client
 
     async def scenario():
         async with shared_fee_case(core, tmp_path, monkeypatch) as c:
             with closing(sqlite3.connect(c.database)) as db, db:
+                valid_jobs = {row[0] for row in db.execute(
+                    "SELECT job_id FROM meme_caption_bindings")}
                 original = list(
                     db.execute("SELECT * FROM meme_caption_bindings LIMIT 1").fetchone()
                 )
@@ -231,13 +251,34 @@ def test_failed_early_rows_cannot_starve_later_original_shared_fee(core, tmp_pat
             before = snapshot(core)
             async with private_http_client(c.config.core_url, c.config.bridge_token) as client:
                 with drain.open_existing_accounting_store(c.config) as context:
+                    # Obtain the original proofs over real Core HTTP before testing
+                    # sweep fairness. CI scheduling need not fit its 0.5s request cap.
+                    lookup = await native_proof_responses(context, client, valid_jobs)
+                    delayed = next(row[4] for row in context.inventory if row[4] in valid_jobs)
+                    attempted, timed_out = [], []
+
+                    async def response(http, catalog, job):
+                        attempted.append(job)
+                        if slow_response and job == delayed:
+                            try:
+                                await asyncio.Event().wait()
+                            except asyncio.CancelledError:
+                                timed_out.append(job)
+                                raise
+                        return await lookup(http, catalog, job)
+
+                    monkeypatch.setattr(drain, "get_responsibility", response)
                     assert await drain.drain_pass(context, client) <= 8
                     first = context.index
                     while context.index < len(context.inventory):
                         assert await drain.drain_pass(context, client) > 0
                     report = context.report()
                     assert first > 0 and report["attempted"] == report["inventory"] == 11
-                    assert report["unverified"] == 9 and report["settled"] == report["updated"] == 2
+                    assert len(attempted) == len(set(attempted)) == 11
+                    assert set(attempted[-2:]) == valid_jobs
+                    assert timed_out == ([delayed] if slow_response else [])
+                    assert report["unverified"] == 9 + int(slow_response)
+                    assert report["settled"] == report["updated"] == 2 - int(slow_response)
                     assert report["remaining"] == 0 and report["state"] == "UNVERIFIED"
             assert len(core.store.rows("SELECT request_id FROM model_usage")) == 1
             assert snapshot(core) == before
@@ -335,6 +376,8 @@ def test_sql_surface_is_only_existing_usage_projection_and_original_pending_is_p
             before = snapshot(core)
             async with private_http_client(c.config.core_url, c.config.bridge_token) as client:
                 with drain.open_existing_accounting_store(c.config) as context:
+                    response = await native_proof_responses(context, client, [c.job_id])
+                    monkeypatch.setattr(drain, "get_responsibility", response)
                     statements = []
                     context.db.set_trace_callback(lambda sql: statements.append(sql.split()[0]))
                     await drain.drain_pass(context, client)
