@@ -168,18 +168,31 @@ def build_context(case, empty_database, directory):
         return settings, messages
 
 
+TREATMENTS = ("participation_v1", "participation_v2")
+
+
+def plan_treatment(plan):
+    treatment = plan.get("treatment", "participation_v1")
+    if treatment not in TREATMENTS or plan.get("treatment") == "participation_v1":
+        raise ValueError("Unknown treatment strategy")
+    return treatment
+
+
 def measurement_defaults():
     return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="r1-offline-" * 4,
                     max_output_tokens=2048, context_soft_tokens=16000,
                     input_rate=300000, cached_input_rate=6000, output_rate=1200000)
 
 
-def prepare(cases, output, *, repetitions=1, measurement_settings=None):
+def prepare(cases, output, *, repetitions=1, measurement_settings=None,
+            treatment="participation_v1"):
     output = Path(output).resolve()
     if not output.is_relative_to(ROOT / ".local"):
         raise ValueError("Experiment artifacts must stay in this worktree's .local directory")
     if repetitions < 1 or repetitions > 3:
         raise ValueError("Use one to three predeclared repetitions")
+    if treatment not in TREATMENTS:
+        raise ValueError("Unknown treatment strategy")
     if output.exists():
         raise FileExistsError(output)
     counting = measurement_settings or measurement_defaults()
@@ -197,8 +210,8 @@ def prepare(cases, output, *, repetitions=1, measurement_settings=None):
             directory.mkdir()
             settings, base = build_context(case, empty, directory)
             for repeat in range(repetitions):
-                order = ("baseline", "participation_v1") if (index + repeat) % 2 == 0 else (
-                    "participation_v1", "baseline")
+                order = ("baseline", treatment) if (index + repeat) % 2 == 0 else (
+                    treatment, "baseline")
                 for strategy in order:
                     messages = apply_strategy(base, strategy)
                     payload = model_payload(counting, messages, "evaluation")
@@ -220,6 +233,9 @@ def prepare(cases, output, *, repetitions=1, measurement_settings=None):
                           "Hosted preprocessing and billing equality are unverified.",
             "estimated_reservation_micro_usd": (None if None in costs else sum(costs)),
             "actual_provider_calls": 0, "actual_cost_micro_usd": 0, "requests": records}
+    if treatment != "participation_v1":
+        # Absent for v1 so earlier plans and their digests stay valid.
+        plan["treatment"] = treatment
     plan["plan_sha256"] = sha(plan)
     output.mkdir(parents=True, exist_ok=False)
     (output / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
@@ -234,6 +250,7 @@ def validate_plan(plan, measurement_settings=None):
         raise ValueError("Plan changed after preparation")
     if plan.get("schema_version") not in {1, 2}:
         raise ValueError("Unsupported experiment plan version")
+    treatment = plan_treatment(plan)
     expected = {(r["case"], r["repetition"], r["strategy"]): r for r in plan["requests"]}
     if not expected or len(expected) != len(plan["requests"]):
         raise ValueError("Empty or duplicate planned requests")
@@ -241,15 +258,15 @@ def validate_plan(plan, measurement_settings=None):
     for (case, repeat, strategy), request in expected.items():
         payload = request["payload"]
         messages = payload.get("messages", [])
-        if (strategy not in {"baseline", "participation_v1"} or len(messages) < 2
+        if (strategy not in {"baseline", treatment} or len(messages) < 2
             or messages[0].get("role") != "system"
             or sha(payload) != request["payload_sha256"]
             or sha(messages[1:]) != request["shared_context_sha256"]):
             raise ValueError("Planned payload or shared input mismatch")
         pair = pairs.setdefault((case, repeat), {})
         pair[strategy] = {**payload, "messages": messages[1:]}
-    if any(set(pair) != {"baseline", "participation_v1"}
-           or pair["baseline"] != pair["participation_v1"] for pair in pairs.values()):
+    if any(set(pair) != {"baseline", treatment}
+           or pair["baseline"] != pair[treatment] for pair in pairs.values()):
         raise ValueError("Comparison requires the same input and model parameters")
     if plan["schema_version"] == 2:
         settings = measurement_settings or measurement_defaults()
@@ -264,7 +281,7 @@ def validate_plan(plan, measurement_settings=None):
             or set(expected) != {(case, repeat, strategy)
                 for case in {key[0] for key in expected}
                 for repeat in range(plan["repetitions"])
-                for strategy in ("baseline", "participation_v1")}):
+                for strategy in ("baseline", treatment)}):
             raise ValueError("Plan scope or budget inputs changed")
         costs = []
         for row in expected.values():
@@ -314,7 +331,7 @@ def blind_export(plan, observations, output, seed=20261024, *, measurement_setti
     random.Random(seed).shuffle(positions)
     ballot, mapping = [], []
     for index, ((case, repeat), position) in enumerate(zip(pairs, positions, strict=True)):
-        variants = ["baseline", "participation_v1"]
+        variants = ["baseline", plan_treatment(plan)]
         if position:
             variants.reverse()
         responses = [results[(case, repeat, variant)] for variant in variants]
@@ -352,6 +369,7 @@ def main():
     prepare_parser.add_argument("--dataset", type=Path, default=DATASET)
     prepare_parser.add_argument("--private-baseline", type=Path)
     prepare_parser.add_argument("--repetitions", type=int, default=1)
+    prepare_parser.add_argument("--treatment", choices=TREATMENTS, default="participation_v1")
     prepare_parser.add_argument("--output", type=Path, required=True)
     prepare_parser.add_argument("--measurement-settings", type=Path,
                                 help="Explicit Settings JSON used only for counting/prices")
@@ -367,7 +385,7 @@ def main():
         cases = ([private_case(args.private_baseline)] if args.private_baseline
                  else load_cases(args.dataset))
         plan = prepare(cases, args.output, repetitions=args.repetitions,
-                       measurement_settings=counting)
+                       measurement_settings=counting, treatment=args.treatment)
         print(encode({key: value for key, value in plan.items() if key != "requests"}))
     else:
         plan = json.loads(args.plan.read_text("utf-8"))

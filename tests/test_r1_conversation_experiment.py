@@ -292,3 +292,43 @@ def test_prepare_defaults_to_v2_and_never_rewrites_existing_plan(tmp_path, monke
     with pytest.raises(FileExistsError):
         experiment.prepare(CASES[:1], output)
     assert (output / "plan.json").read_bytes() == original
+
+
+EXPRESSION = experiment.ROOT / "tests/fixtures/r1_expression_cases.json"
+
+
+def test_expression_cases_pair_each_scenario_with_a_no_fabrication_case():
+    cases = experiment.load_cases(EXPRESSION)
+    assert len(cases) == 6 and all("expected_output" not in case for case in cases)
+    categories = [case["metadata"]["category"] for case in cases]
+    assert {category: categories.count(category) for category in categories} == {
+        "lull": 2, "identity": 2, "complaint": 2}
+    assert all(case["metadata"]["rubric"] for case in cases)
+
+
+def test_v2_treatment_plan_validates_and_v1_plan_stays_unchanged(tmp_path, monkeypatch):
+    monkeypatch.setattr(experiment, "ROOT", tmp_path)
+    monkeypatch.setattr(experiment, "build_context", lambda *args: (
+        experiment.measurement_defaults(), [{"role": "system", "content": "rules"},
+                                             {"role": "user", "content": "hello"}]))
+    v1 = experiment.prepare(CASES[:1], tmp_path / ".local/v1")
+    assert "treatment" not in v1
+    plan = experiment.prepare(CASES[:1], tmp_path / ".local/v2t", treatment="participation_v2")
+    assert plan["treatment"] == "participation_v2"
+    assert {row["strategy"] for row in plan["requests"]} == {"baseline", "participation_v2"}
+    experiment.validate_plan(plan)
+    rows = [{"case": row["case"], "repetition": row["repetition"],
+             "strategy": row["strategy"], "payload_sha256": row["payload_sha256"],
+             "evidence_type": "SYNTHETIC_MODEL_RESPONSE", "text": "reply", "state": "SETTLED"}
+            for row in plan["requests"]]
+    experiment.blind_export(plan, rows, tmp_path / ".local/v2-ballot")
+    mapping = json.loads((tmp_path / ".local/v2-ballot/mapping.private.json").read_text("utf-8"))
+    assert {mapping[0]["A"], mapping[0]["B"]} == {"baseline", "participation_v2"}
+    for bad in ("participation_v1", "participation_v3"):
+        changed = {key: value for key, value in plan.items() if key != "plan_sha256"}
+        changed["treatment"] = bad
+        changed["plan_sha256"] = experiment.sha(changed)
+        with pytest.raises(ValueError, match="treatment"):
+            experiment.validate_plan(changed)
+    with pytest.raises(ValueError, match="treatment"):
+        experiment.prepare(CASES[:1], tmp_path / ".local/bad", treatment="participation_v3")

@@ -396,3 +396,20 @@ def test_control_api_rejects_bridge_token_and_does_not_echo_invalid_input(core, 
                                     json={"plan": "PRIVATE-INVALID-TEXT"})
             assert bad.status_code == 400 and "PRIVATE-INVALID-TEXT" not in bad.text
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("treatment", ["participation_v2", "participation_v1", "participation_v3"])
+def test_native_plan_accepts_only_the_declared_v2_treatment(core, tmp_path, treatment):
+    manifest = prepare(core, tmp_path)
+    plan = {key: value for key, value in manifest.plan.items() if key != "plan_sha256"}
+    for row in plan["requests"]:
+        if row["strategy"] == "participation_v1":
+            row["strategy"] = "participation_v2"
+    plan["treatment"] = treatment
+    plan["plan_sha256"] = paid_budget.sha(plan)
+    changed = manifest.model_copy(update={"plan": plan})
+    if treatment == "participation_v2":
+        evaluation.preview(core.store, core.settings, core.clock, changed)
+    else:
+        with pytest.raises(CoreError, match="MANIFEST_INVALID"):
+            evaluation.preview(core.store, core.settings, core.clock, changed)

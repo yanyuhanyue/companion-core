@@ -156,3 +156,29 @@ payload hash、共同输入 hash，并检查同一对的历史、当前输入和
 
 这些离线检查只能证明输入、状态与边界行为，不能证明自然度、幽默或陪伴体验已经改善。
 付费模型评价与真实 QQ 体验仍等待单独授权和真人验收。
+
+## participation_v2 候选策略
+
+`participation_v2` 是主人在 2026-10-28 批准的第二个候选措辞，按处境区分参与方式：
+暂时没话题时由她用上下文里真实存在的细节起头；吐槽时先站在主人这边，不给未请求的建议；
+被问“你是谁”时用自己的话说确实知道的内容，名字只来自记忆或对话，不用“AI 朋友”
+“陪你聊天”这类定位语；细节必须有来源。措辞在 `companion/conversation_policy.py`，
+v1 原文、变换字节和已冻结的 v1 计划保持不变。
+
+`ConversationPolicyConfig.strategy` 默认 `participation_v1`；只有显式设为
+`participation_v2` 且 `mode` 为 `ENABLED` 才改变模型输入。收据记录 `strategy`，
+生成期间切换策略会使 `revalidate` 失败。
+
+`prepare --treatment participation_v2` 生成 baseline 对 v2 的计划，计划带
+`treatment` 字段；v1 计划不写该字段，因此原有哈希不变。盲评映射随计划的 treatment。
+[r1_expression_cases.json](../../../tests/fixtures/r1_expression_cases.json) 收录
+冷场、身份和吐槽三类各两个 SYNTHETIC case：一个检查参与方式，另一个检查没有依据时
+不编造。主人给出的示例回复只作评分锚点，不进入 Prompt 或数据集。
+
+```powershell
+python scripts/evaluate_r1_conversation.py prepare --dataset tests/fixtures/r1_expression_cases.json --treatment participation_v2 --output .local/r1-expression-v2
+```
+
+原生评价入口按原有范围接受 v1 或 v2 计划：主人 pilot 为单 case、六请求；合成计划最多
+36 个 case、216 次请求。上面的 6 case 计划共 12 次请求，本地估算预留约 0.04 美元。
+生产是否启用 v2 由主人在盲评后决定。

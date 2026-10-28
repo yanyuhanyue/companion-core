@@ -97,6 +97,10 @@ def _plan(settings, manifest):
             raise ValueError("measurement policy, source or route changed")
         if synthetic and version != 2:
             raise ValueError("synthetic plans need native measurement")
+        # v1 plans carry no treatment field, so their digests are unchanged.
+        treatment = plan.get("treatment", "participation_v1")
+        if "treatment" in plan and treatment != "participation_v2":
+            raise ValueError("treatment")
         rows = plan["requests"]
         repetitions = plan.get("repetitions", 3) if synthetic else 3
         cases = {row["case"] for row in rows}
@@ -108,7 +112,7 @@ def _plan(settings, manifest):
             or plan["status"] != "PREPARED_NO_MODEL_CALLS"
             or (plan["provider"], plan["model"]) != (settings.provider, settings.model_name)):
             raise ValueError("plan scope")
-        pairs = {(r, s) for r in range(repetitions) for s in ("baseline", "participation_v1")}
+        pairs = {(r, s) for r in range(repetitions) for s in ("baseline", treatment)}
         if any({(row["repetition"], row["strategy"]) for row in rows if row["case"] == case}
                != pairs for case in cases) or len(rows) != len(cases) * len(pairs):
             raise ValueError("pairs")
