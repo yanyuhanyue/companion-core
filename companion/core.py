@@ -22,30 +22,18 @@ from companion import (
     qq_rich,
     reply_revision,
 )
-from companion.affect import NEUTRAL, AffectEngine
+from companion.affect import NEUTRAL
 from companion.commands import command_parts, is_memory_command
-from companion.consolidation import NightlyConsolidator
-from companion.content import CONTEXT_RULES, ContentService
+from companion.content import CONTEXT_RULES, cleanup_images
 from companion.contracts import Candidate, CoreError, MemorySelection
-from companion.diary import DiaryService, is_diary_command
-from companion.executive import Executive
-from companion.exploration import ExplorationService
-from companion.expression import ExpressionEngine
-from companion.goals import GoalEngine
-from companion.growth import ExpressionLearning
-from companion.life import LifeService, is_life_command
-from companion.media import MediaService
-from companion.meme_core import MemeCaptionService
-from companion.memory import Memory
-from companion.memory_context import MemoryContext
+from companion.diary import is_diary_command
+from companion.life import is_life_command
 from companion.model import PRINCIPLES, RECALL_RULES
-from companion.observation import ObservationService
 from companion.privacy import epoch, redact
-from companion.reading import ReadingService
-from companion.reflection import ReflectionService
 from companion.reply_segments import split_text
 from companion.runtime import Runtime
-from companion.social import SocialPlanner, proactive_allowed
+from companion.services import Services
+from companion.social import proactive_allowed
 from companion.store import after, encode, uid, utcnow
 from companion.telemetry import emit
 from companion.transport import (
@@ -57,63 +45,14 @@ from companion.transport import (
     reconcile_delivery,
     recover_deliveries,
 )
-from companion.voice_flow import VoiceFlow
-from companion.wake import WakePlanner
 
 
-class Core(Runtime):
-    def __init__(self, settings, model=None, clock=utcnow):
-        super().__init__(settings, clock)
-        self.model = model
-        try:
-            self.memory = Memory(self.store, settings, self.ledger)
-            self.memory_context = MemoryContext(self.memory)
-            if settings.memory_enabled:
-                self.memory.index.warmup()
-            self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
-            self.observations = ObservationService(self.store, settings, clock)
-            self.media = MediaService(self.store, settings, clock, self.observations)
-            self.affect = AffectEngine(self.store, settings, clock)
-            self.expression_learning = ExpressionLearning(self.store, settings, clock)
-            self.reflections = ReflectionService(
-                self.store, settings, model, self.diary.repo, self.ledger, clock
-            )
-            self.goals = GoalEngine(self.store, settings, self.ledger, clock)
-            self.consolidation = NightlyConsolidator(
-                self.store, settings, self.diary, self.reflections, self.goals,
-                self.extract_step, clock,
-            )
-            self.wake = WakePlanner(self.store, settings, self.goals, self.affect, clock)
-            self.life = LifeService(
-                self.store, settings, self.goals, self.reflections, self.affect, clock,
-            )
-            self.social = SocialPlanner(self.store, settings, clock)
-            from companion.life_topics import LifeTopics
+class CoreSession(Services):
+    """Core orchestration on an initialized, caller-owned Store."""
 
-            self.life_topics = LifeTopics(self.store, settings, clock)
-            # These finite callbacks expose only the read/model operations each service needs.
-            self.content = ContentService(
-                self.store, settings, self.observations,
-                lambda *args, **kwargs: exploration.create(*args, **kwargs), clock,
-                model=lambda: self.model,
-            )
-            exploration = self.exploration = ExplorationService(
-                self.store, settings, self.observations, self.goals, self.social,
-                self.content.register_link_images, clock,
-            )
-            self.reading = ReadingService(self.store, settings, self.exploration, clock)
-            from companion.bili_video import BiliVideoService
-
-            self.bili_video = BiliVideoService(self.store, settings, self.reading, model, clock)
-            self.reading.video = self.bili_video
-            self.content.video = self.bili_video
-            self.expression = ExpressionEngine(self.store, settings, clock)
-            self.memes = MemeCaptionService(self.store, settings, lambda: self.model, clock)
-            self.voice = VoiceFlow(self.store, settings, clock)
-            self.executive = Executive(self.store, settings, clock)
-        except BaseException:
-            self.close()
-            raise
+    def __init__(self, store, settings, model=None, clock=utcnow, *, ledger=None):
+        super().__init__(store, settings, model, clock, ledger=ledger,
+                         extract_step=self.extract_step)
 
     def ingest(self, event, key):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -1698,3 +1637,16 @@ class Core(Runtime):
         from companion.ops_status import runtime_snapshot
 
         return runtime_snapshot(self.store, self.settings, self.clock)
+
+
+class Core(Runtime, CoreSession):
+    """Own process startup and shutdown; domain services are built only when used."""
+
+    def __init__(self, settings, model=None, clock=utcnow):
+        Runtime.__init__(self, settings, clock)
+        try:
+            CoreSession.__init__(self, self.store, settings, model, clock, ledger=self.ledger)
+            cleanup_images(self.store, settings, clock)
+        except BaseException:
+            self.close()
+            raise

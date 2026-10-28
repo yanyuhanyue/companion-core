@@ -15,10 +15,9 @@ from starlette.datastructures import MutableHeaders
 from companion import cloud_budget, console_read, delegation, operator_config
 from companion.affect import AffectEngine
 from companion.contracts import CoreError, StrictModel
-from companion.diary import DiaryCorrection, DiaryService
-from companion.goals import GoalEngine
-from companion.memory import Memory
+from companion.diary import DiaryCorrection
 from companion.privacy import ErasureLedger
+from companion.services import Services
 from companion.source_grants import SourceGrantService
 from companion.store import after, encode
 from companion.transport import cancel_proactive_work, reconcile_delivery
@@ -286,8 +285,7 @@ def register_console_routes(app, settings):
         clock, captured = app.state.core.clock, _request_fields(request)
 
         def execute(store):
-            context = SimpleNamespace(store=store, settings=settings, clock=clock,
-                                      ledger=ErasureLedger(settings.erasure_ledger))
+            context = Services(store, settings, clock=clock)
 
             def owner_check():
                 _check_owner(context, captured)
@@ -322,7 +320,7 @@ def register_console_routes(app, settings):
         def apply(context, owner_check):
             with context.store.transaction():
                 owner_check()
-                return Memory(context.store, settings, context.ledger).decide_from_console(
+                return context.memory.decide_from_console(
                     memory_id, body.decision, context.clock(), body.corrected_content,
                     operation_id=idempotency_key, origin=origin, owner_check=owner_check)
 
@@ -463,9 +461,8 @@ def register_console_routes(app, settings):
     async def correction(day: date, body: DiaryCorrection, request: Request,
                          idempotency_key: str = Header(default="")):
         def apply(context, owner_check):
-            return DiaryService(context.store, settings, None, context.ledger,
-                context.clock).correct(day, body.text, settings.owner_qq_id,
-                                       owner_check=owner_check)
+            return context.diary.correct(day, body.text, settings.owner_qq_id,
+                                         owner_check=owner_check)
 
         return await write(request, idempotency_key, body.model_dump(), apply,
                            rejected_errors={"INVALID_DIARY_CORRECTION"})
@@ -473,8 +470,7 @@ def register_console_routes(app, settings):
     @app.post(prefix + "/diary/{day}/forget", dependencies=auth)
     async def forget(day: date, request: Request, idempotency_key: str = Header(default="")):
         def apply(context, owner_check):
-            return DiaryService(context.store, settings, None, context.ledger,
-                context.clock).forget(day, settings.owner_qq_id, owner_check=owner_check)
+            return context.diary.forget(day, settings.owner_qq_id, owner_check=owner_check)
 
         return await write(request, idempotency_key, {}, apply)
 
@@ -482,10 +478,10 @@ def register_console_routes(app, settings):
     async def mode(body: Mode, request: Request, idempotency_key: str = Header(default="")):
         def apply(core, owner_check):
             if body.target == "diary":
-                return DiaryService(core.store, settings, None, core.ledger, core.clock).set_mode(
+                return core.diary.set_mode(
                     body.enabled, settings.owner_qq_id, owner_check=owner_check)
             if body.target == "life":
-                return GoalEngine(core.store, settings, core.ledger, core.clock).pause_autonomy(
+                return core.goals.pause_autonomy(
                     not body.enabled, owner_check=owner_check)
             if body.enabled and not settings.proactive_enabled:
                 raise CoreError("PROACTIVE_DISABLED_IN_CONFIG", 409)

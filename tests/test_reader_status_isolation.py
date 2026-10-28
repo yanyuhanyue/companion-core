@@ -13,8 +13,8 @@ from companion import api_store, ops_status
 from companion.content import ContentService
 from companion.core import Core
 from companion.exploration import ReadItem, ReadResult
-from companion.reading import service_for_store
 from companion.retrieval import SemanticIndex
+from companion.services import Services
 from companion.store import Store
 from tests.test_exploration import URL, configure
 from tests.test_onebot_capture import real_core_http
@@ -35,7 +35,7 @@ def test_reader_composition_has_no_startup_writes_or_shared_connection(core, mon
     store = Store(core.settings.database)
     try:
         changes = store.db.total_changes
-        service = service_for_store(store, core.settings, core.clock)
+        service = Services(store, core.settings, clock=core.clock).reading
         assert store.db.total_changes == changes
         for native in (service, service.video, service.exploration,
                        service.exploration.observations, service.exploration.goals,

@@ -4,6 +4,28 @@
 
 ## 依赖方向
 
+### 连接生命周期与按需组装
+
+`Runtime` 负责打开/关闭 SQLite 连接、检查主人身份并初始化和回放独立遗忘日志。
+`Core` 保留进程级入口，先完成 Runtime 初始化，再执行一次图片暂存恢复清理；构造时
+不预热语义模型。实际语义检索仍通过 `SemanticIndex` 加载模型，并在依赖不可用时拒绝。
+
+[`Services`](../companion/services.py) 在调用者提供的连接上显式组装原生服务，使用
+Python 标准库 `cached_property` 将每个服务保存在当前实例内。它不负责启动/关闭、
+事务管理、鉴权或结果交付。实例只属于一个请求执行线程或一个 Worker；不跨线程共享，
+也不缓存权限判断。`CoreSession` 在这套组装上提供原来的业务编排，方法体保持不变。
+
+API 有限同步操作继续由 `ApiStore` 在执行线程内创建和关闭连接，回调只返回物化结果。
+请求使用 `CoreSession`，不会重放启动流程。Console 和 Reader 复用同一套服务组装；
+Reader 的图片登记依赖纯函数，Content 通过有限回调请求探索，避免循环构造。
+`ContentService` 构造本身不再清理暂存目录；Core 与独立 Content Worker 显式执行清理。
+
+实施参考了 [DSH 固定版本的请求组装上下文](https://github.com/deepseek-ai/deepseek-harness/blob/22ddee3792402c3e70ec5f86a63c3e3e895a2f60/packages/core/system-prompt/src/index.ts)：
+动态提供者使用当前组装请求的上下文，不把请求控制信号保存为后续请求的权限。
+这里沿用显式依赖与有限作用域，不引入其 Cordis 注册框架。
+[Python 3.12 cached_property](https://docs.python.org/3.12/library/functools.html#functools.cached_property)
+没有线程级初始化锁，因此连接和服务图的单执行者所有权是接口合同的一部分。
+
 ```text
 QQ / NapCat → AstrBot bridge ── HTTP v1 ──→ API
                                               │

@@ -46,7 +46,7 @@ from companion.contracts import (
     SearchRequest,
     StrictModel,
 )
-from companion.core import Core
+from companion.core import Core, CoreSession
 from companion.diary import DiaryCorrection, DiaryMode
 from companion.exploration import METERED_READS_SQL
 from companion.life_protocol import LifeConsumeRequest, TopicClosure
@@ -68,7 +68,7 @@ from companion.owner_authority_protocol import (
 )
 from companion.poke_protocol import OwnerPokeCapture, PokeCapture
 from companion.privacy import ErasureLedger
-from companion.reading import service_for_store as reading_service
+from companion.services import Services
 from companion.transport import begin_send, delivery_result, lease_deliveries
 from companion.voice_jobs import VoiceASRProof
 from companion.voice_node_api import register_voice_node_routes
@@ -186,6 +186,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     )
     app.state.observation_instance = uuid4().hex
     app.state.api_store = ApiStore(settings.database)
+
+    async def run_native(operation):
+        current = app.state.core
+        clock, model = current.clock, current.model
+        return await app.state.api_store.run(lambda store: operation(
+            CoreSession(store, settings, model, clock),
+        ))
     app.add_middleware(
         BodyLimit,
         image_limit=settings.content.max_image_bytes if settings.content_enabled else 131072,
@@ -335,8 +342,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/account-assets", dependencies=control_auth)
     async def register_account_asset(body: ReviewedAvatar):
-        core = app.state.core
-        return SocialAutonomy(core.store, settings, clock=core.clock).register_asset(body)
+        def execute(core):
+            return SocialAutonomy(core.store, settings, clock=core.clock).register_asset(body)
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/tools", dependencies=control_auth)
     async def list_tools():
@@ -348,30 +357,39 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/tools", dependencies=control_auth, status_code=202)
     async def submit_tool(body: ToolRequest):
-        return app.state.core.executive.submit(body)
+        def execute(core):
+            return core.executive.submit(body)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/tools/{task_id}/decision", dependencies=control_auth)
     async def decide_tool(task_id: str, body: ToolDecision):
-        return app.state.core.executive.decide(task_id, body)
+        def execute(core):
+            return core.executive.decide(task_id, body)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/tools/{task_id}/revoke", dependencies=control_auth)
     async def revoke_tool(task_id: str):
-        return app.state.core.executive.revoke(task_id)
+        def execute(core):
+            return core.executive.revoke(task_id)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/readers/{adapter_id}/lease", dependencies=adapter_auth)
     async def reader_lease(adapter_id: str, body: ReaderLeaseRequest | None = None):
         grant = body.source_grant if body else None
         clock = app.state.core.clock
-        return {"item": await app.state.api_store.run(lambda store: reading_service(
-            store, settings, clock,
-        ).exploration.lease(adapter_id, grant))}
+        return {"item": await app.state.api_store.run(lambda store: Services(
+            store, settings, clock=clock,
+        ).reading.exploration.lease(adapter_id, grant))}
 
     @app.post("/internal/v2/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
     async def reader_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
         clock = app.state.core.clock
-        return await app.state.api_store.run(lambda store: reading_service(
-            store, settings, clock,
-        ).exploration.validate_read(adapter_id, request_id, body))
+        return await app.state.api_store.run(lambda store: Services(
+            store, settings, clock=clock,
+        ).reading.exploration.validate_read(adapter_id, request_id, body))
 
     @app.post("/internal/v2/source-grants", dependencies=control_auth, status_code=201)
     async def source_grant_register(body: SourceGrantRegistration):
@@ -408,32 +426,32 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post("/internal/v2/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
     async def reader_result(adapter_id: str, request_id: str, body: ReadResult):
         clock = app.state.core.clock
-        return await app.state.api_store.run(lambda store: reading_service(
-            store, settings, clock,
-        ).exploration.complete(adapter_id, request_id, body))
+        return await app.state.api_store.run(lambda store: Services(
+            store, settings, clock=clock,
+        ).reading.exploration.complete(adapter_id, request_id, body))
 
     @app.post("/internal/v3/readers/{adapter_id}/lease", dependencies=adapter_auth)
     async def reading_lease(adapter_id: str, body: ReadingLeaseRequest | None = None):
         grant = body.source_grant if body else None
         capabilities = body.capabilities if body else ()
         clock = app.state.core.clock
-        return {"item": await app.state.api_store.run(lambda store: reading_service(
-            store, settings, clock,
-        ).lease(adapter_id, grant, capabilities=capabilities))}
+        return {"item": await app.state.api_store.run(lambda store: Services(
+            store, settings, clock=clock,
+        ).reading.lease(adapter_id, grant, capabilities=capabilities))}
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/validate", dependencies=adapter_auth)
     async def reading_validate(adapter_id: str, request_id: str, body: ReaderReadValidation):
         clock = app.state.core.clock
-        return await app.state.api_store.run(lambda store: reading_service(
-            store, settings, clock,
-        ).validate_read(adapter_id, request_id, body))
+        return await app.state.api_store.run(lambda store: Services(
+            store, settings, clock=clock,
+        ).reading.validate_read(adapter_id, request_id, body))
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/result", dependencies=adapter_auth)
     async def reading_result(adapter_id: str, request_id: str, body: ReadObservation):
         clock = app.state.core.clock
-        return await app.state.api_store.run(lambda store: reading_service(
-            store, settings, clock,
-        ).complete(adapter_id, request_id, body))
+        return await app.state.api_store.run(lambda store: Services(
+            store, settings, clock=clock,
+        ).reading.complete(adapter_id, request_id, body))
 
     @app.post("/internal/v3/readers/{adapter_id}/{request_id}/media/prepare",
               dependencies=adapter_auth)
@@ -497,24 +515,43 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/goals", dependencies=control_auth, status_code=202)
     async def propose_goal(body: GoalProposal):
-        return {"goal_id": app.state.core.goals.propose(body)}
+        def execute(core):
+            with core.store.transaction():
+                return {"goal_id": core.goals.propose(body)}
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/goals/{goal_id}/decision", dependencies=control_auth)
     async def decide_goal(goal_id: str, body: GoalDecision):
-        engine = app.state.core.goals
-        return engine.accept(goal_id) if body.decision == "ACCEPT" else engine.cancel(goal_id)
+        def execute(core):
+            with core.store.transaction():
+                engine = core.goals
+                return (engine.accept(goal_id) if body.decision == "ACCEPT"
+                        else engine.cancel(goal_id))
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/goals/{goal_id}/continuation", dependencies=control_auth)
     async def continue_goal(goal_id: str, body: GoalContinuationDecision):
-        return app.state.core.goals.continue_plan(goal_id, body)
+        def execute(core):
+            with core.store.transaction():
+                return core.goals.continue_plan(goal_id, body)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/commitments", dependencies=control_auth, status_code=202)
     async def accept_commitment(body: CommitmentRequest):
-        return app.state.core.goals.accept_commitment(body)
+        def execute(core):
+            return core.goals.accept_commitment(body)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/life/runtime-mode", dependencies=control_auth)
     async def life_mode(body: DiaryMode):
-        return app.state.core.goals.pause_autonomy(not body.enabled)
+        def execute(core):
+            return core.goals.pause_autonomy(not body.enabled)
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/interests", dependencies=control_auth)
     async def interests(response: Response):
@@ -556,13 +593,19 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     @app.post("/internal/v2/life/results/{job_id}/consume", dependencies=control_auth)
     async def consume_life_draft(job_id: str, body: LifeConsumeRequest, response: Response):
         response.headers["Cache-Control"] = "no-store"
-        core = app.state.core
-        return core.life_topics.consume(job_id, body, diary=core.diary)
+        def execute(core):
+            return core.life_topics.consume(job_id, body, diary=core.diary)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/life/topics/{topic_id}/close", dependencies=control_auth)
     async def close_life_topic(topic_id: str, body: TopicClosure, response: Response):
         response.headers["Cache-Control"] = "no-store"
-        return app.state.core.life_topics.close(topic_id, body.source_event_id)
+        def execute(core):
+            with core.store.transaction():
+                return core.life_topics.close(topic_id, body.source_event_id)
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/consolidation", dependencies=control_auth)
     async def consolidation_status():
@@ -570,10 +613,13 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/consolidation/{day}", dependencies=control_auth, status_code=202)
     async def consolidate(day: date):
-        run_id = app.state.core.consolidation.schedule_day(day)
-        if not run_id:
-            raise CoreError("CONSOLIDATION_DISABLED", 403)
-        return {"run_id": run_id}
+        def execute(core):
+            run_id = core.consolidation.schedule_day(day)
+            if not run_id:
+                raise CoreError("CONSOLIDATION_DISABLED", 403)
+            return {"run_id": run_id}
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/reflections", dependencies=control_auth)
     async def reflections(response: Response):
@@ -582,7 +628,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/reflections/{suggestion_id}/decision", dependencies=control_auth)
     async def reflection_decision(suggestion_id: str, body: ReflectionDecision):
-        return app.state.core.reflections.decide(suggestion_id, body.decision)
+        def execute(core):
+            return core.reflections.decide(suggestion_id, body.decision)
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/observations/{adapter_id}/context", dependencies=adapter_auth)
     async def observation_context(adapter_id: str):
@@ -591,11 +640,14 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/observations/{adapter_id}", dependencies=adapter_auth, status_code=202)
     async def observe(adapter_id: str, body: ObservationEvent):
-        if settings.observation_adapters[adapter_id].source == "qq_image":
-            raise CoreError("CONTENT_IMAGE_INTAKE_REQUIRED", 403)
-        if settings.observation_adapters[adapter_id].source == "qq_file":
-            raise CoreError("CONTENT_FILE_INTAKE_REQUIRED", 403)
-        return app.state.core.observations.append(adapter_id, body)
+        def execute(core):
+            if settings.observation_adapters[adapter_id].source == "qq_image":
+                raise CoreError("CONTENT_IMAGE_INTAKE_REQUIRED", 403)
+            if settings.observation_adapters[adapter_id].source == "qq_file":
+                raise CoreError("CONTENT_FILE_INTAKE_REQUIRED", 403)
+            return core.observations.append(adapter_id, body)
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/observations", dependencies=control_auth)
     async def observations():
@@ -603,28 +655,38 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/observations/{event_id}/forget", dependencies=control_auth)
     async def forget_observation(event_id: str):
-        core = app.state.core
-        if not core.store.one("SELECT 1 FROM observations WHERE event_id=?", (event_id,)):
-            raise CoreError("OBSERVATION_NOT_FOUND", 404)
-        with core.store.transaction():
-            core.ledger.expire_events(core.store, [event_id], core.clock())
-        return {"event_id": event_id, "status": "REDACTED"}
+        def execute(core):
+            if not core.store.one("SELECT 1 FROM observations WHERE event_id=?", (event_id,)):
+                raise CoreError("OBSERVATION_NOT_FOUND", 404)
+            with core.store.transaction():
+                core.ledger.expire_events(core.store, [event_id], core.clock())
+            return {"event_id": event_id, "status": "REDACTED"}
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/consents", dependencies=control_auth)
     async def grant_consent(body: ConsentRequest):
-        return app.state.core.observations.consents.grant(body)
+        def execute(core):
+            return core.observations.consents.grant(body)
+
+        return await run_native(execute)
 
     from companion import evaluation
     from companion.evaluation import Manifest, Submission
 
     @app.post("/internal/v2/evaluations/preview", dependencies=control_auth)
     async def evaluation_preview(body: Manifest):
-        core = app.state.core
-        return evaluation.preview(core.store, settings, core.clock, body)
+        def execute(core):
+            return evaluation.preview(core.store, settings, core.clock, body)
+
+        return await run_native(execute)
 
     @app.post("/internal/v2/evaluations", dependencies=control_auth, status_code=202)
     async def evaluation_submit(body: Submission):
-        return evaluation.submit(app.state.core, body)
+        def execute(core):
+            return evaluation.submit(core, body)
+
+        return await run_native(execute)
 
     @app.get("/internal/v2/evaluations/{evaluation_id}", dependencies=control_auth)
     async def evaluation_results(evaluation_id: str, response: Response):
@@ -634,7 +696,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post("/internal/v2/consents/{consent_id}/revoke", dependencies=control_auth)
     async def revoke_consent(consent_id: str):
-        return app.state.core.observations.consents.revoke(consent_id)
+        def execute(core):
+            return core.observations.consents.revoke(consent_id)
+
+        return await run_native(execute)
 
     @app.get(prefix + "/diary", dependencies=diary_auth)
     async def diary_list(limit: int = 7):
@@ -646,7 +711,10 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/diary/runtime-mode", dependencies=diary_auth)
     async def diary_mode(body: DiaryMode):
-        return app.state.core.diary.set_mode(body.enabled, settings.owner_qq_id)
+        def execute(core):
+            return core.diary.set_mode(body.enabled, settings.owner_qq_id)
+
+        return await run_native(execute)
 
     @app.get(prefix + "/diary/{day}", dependencies=diary_auth)
     async def diary_day(day: date):
@@ -657,24 +725,35 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/diary/{day}/recompute", dependencies=diary_auth, status_code=202)
     async def diary_recompute(day: date):
-        core = app.state.core
-        run_id = core.diary.recompute_day(day, settings.owner_qq_id)
-        state = core.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))[
-            "state"
-        ] if run_id else "NOT_SCHEDULED"
-        return {"local_date": day.isoformat(), "run_id": run_id, "state": state}
+        def execute(core):
+            run_id = core.diary.recompute_day(day, settings.owner_qq_id)
+            state = core.store.one("SELECT state FROM diary_runs WHERE run_id=?", (run_id,))[
+                "state"
+            ] if run_id else "NOT_SCHEDULED"
+            return {"local_date": day.isoformat(), "run_id": run_id, "state": state}
+
+        return await run_native(execute)
 
     @app.post(prefix + "/diary/{day}/forget", dependencies=diary_auth)
     async def diary_forget(day: date):
-        return app.state.core.diary.forget(day, settings.owner_qq_id)
+        def execute(core):
+            return core.diary.forget(day, settings.owner_qq_id)
+
+        return await run_native(execute)
 
     @app.post(prefix + "/diary/{day}/correction", dependencies=diary_auth)
     async def diary_correct(day: date, body: DiaryCorrection):
-        return app.state.core.diary.correct(day, body.text, settings.owner_qq_id)
+        def execute(core):
+            return core.diary.correct(day, body.text, settings.owner_qq_id)
+
+        return await run_native(execute)
 
     @app.post(prefix + "/inbox/events", dependencies=auth, status_code=202)
     async def ingest(event: InboundEvent, x_idempotency_key: str = Header()):
-        return app.state.core.ingest(event, x_idempotency_key)
+        def execute(core):
+            return core.ingest(event, x_idempotency_key)
+
+        return await run_native(execute)
 
     @app.post(prefix + "/owner-authority/inputs/approve", dependencies=auth)
     async def owner_input_approve(body: OwnerInputApproval, response: Response):
@@ -993,12 +1072,16 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
 
     @app.post(prefix + "/memories/{memory_id}/decisions", dependencies=auth)
     async def decide(memory_id: str, body: MemoryDecision):
-        core = app.state.core
-        if owner_authority.required(core.store, settings):
-            owner_authority.current(core.store, settings, core.clock, purpose="memory")
-        elif live_text.active(core.store, settings):
-            raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
-        return core.memory.decide(memory_id, body.decision, core.clock(), body.corrected_content)
+        def execute(core):
+            with core.store.transaction():
+                if owner_authority.required(core.store, settings):
+                    owner_authority.current(core.store, settings, core.clock, purpose="memory")
+                elif live_text.active(core.store, settings):
+                    raise CoreError("LIVE_TEXT_MEMORY_API_DISABLED", 403)
+                return core.memory.decide(memory_id, body.decision, core.clock(),
+                                          body.corrected_content)
+
+        return await run_native(execute)
 
     @app.get(prefix + "/ops/status", dependencies=auth)
     async def status(response: Response, summary_only: bool = False):

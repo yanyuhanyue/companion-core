@@ -266,6 +266,14 @@ def register_link_images(store, settings, clock, options, owner_event_id, source
             )
 
 
+def cleanup_images(store, settings, clock, options=None):
+    """Process-start maintenance, separate from constructing a request's services."""
+    from companion import agent_images
+
+    image_spool.cleanup(store, clock(), (options or settings.content).max_image_bytes,
+                        retain_completed=agent_images.enabled(settings))
+
+
 class ContentService:
     def __init__(
         self,
@@ -294,10 +302,6 @@ class ContentService:
         self.provider = provider or HTTPMediaProvider(self.options)
         self.image_transport = image_transport
         self.model = model
-        from companion import agent_images
-
-        image_spool.cleanup(self.store, self.clock(), self.options.max_image_bytes,
-                            retain_completed=agent_images.enabled(self.settings))
 
     def discard_images(self, event_id):
         rows = self.store.rows(

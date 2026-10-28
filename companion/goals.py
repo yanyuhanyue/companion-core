@@ -325,11 +325,11 @@ class GoalEngine:
             return self.get(goal_id)
 
     def accept_commitment(self, request):
-        now = self.clock()
         deadline = request.deadline.astimezone(UTC).isoformat(timespec="microseconds")
-        if not now < deadline <= after(now, 30 * 86400):
-            raise CoreError("INVALID_COMMITMENT_DEADLINE", 400)
         with self.store.transaction():
+            now = self.clock()
+            if not now < deadline <= after(now, 30 * 86400):
+                raise CoreError("INVALID_COMMITMENT_DEADLINE", 400)
             event = self.store.one(
                 "SELECT * FROM events WHERE event_id=? AND actor_id='owner' AND "
                 "source='qq.onebot' AND redacted=0",

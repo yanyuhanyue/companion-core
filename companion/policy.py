@@ -32,8 +32,9 @@ class ConsentService:
             flag = CAPABILITY_FLAGS.get(capability)
             if not flag or not getattr(self.settings, flag):
                 raise CoreError("CAPABILITY_DISABLED", 403)
-        consent_id, now = uid("consent"), self.clock()
+        consent_id = uid("consent")
         with self.store.transaction():
+            now = self.clock()
             self.store.insert(
                 "consents",
                 consent_id=consent_id,
