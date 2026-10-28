@@ -710,7 +710,8 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
         from companion import owner_stop_receipt
 
         response.headers["Cache-Control"] = "no-store"
-        return owner_stop_receipt.read(app.state.core.store, settings, body.authority)
+        return owner_stop_receipt.read(app.state.core.store, settings, body.authority,
+                                       chain=True)
 
     @app.post(prefix + "/owner-authority/model-carry-receipt", dependencies=auth)
     async def owner_model_carry_receipt(body: ModelCarryReference, response: Response):

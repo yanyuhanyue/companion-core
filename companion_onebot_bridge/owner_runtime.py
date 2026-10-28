@@ -233,7 +233,10 @@ class OwnerRuntime:
                 successor = validate_authority_ref(value["authority"])
                 if (state != "STOPPED" or value["previous_authority"] != current
                     or successor["grant_id"] != current["grant_id"]
-                    or successor["revision"] != current["revision"] + 2
+                    # The exact prepared Core STOP (direct or unbound chain) is checked by
+                    # owner_handoff.verify; here the parity keeps ACTIVE references.
+                    or successor["revision"] <= current["revision"]
+                    or (successor["revision"] - current["revision"]) % 2
                     or successor["restore_generation"] != current["restore_generation"]):
                     raise ValueError("OWNER_HANDOFF_BINDING_CHANGED")
                 current = successor

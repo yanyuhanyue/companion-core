@@ -9,7 +9,7 @@ from companion import owner_authority, owner_input, poke
 from companion.contracts import CoreError
 from companion.poke_protocol import OwnerPokeCapture
 from companion.qq_rich import input_digest
-from companion_delivery_protocol.authority import validate_authority_ref
+from companion_delivery_protocol.authority import AuthorityRef, validate_authority_ref
 
 
 def _source(store, original, saved, owner_id):
@@ -81,10 +81,10 @@ def read(store, settings, capture, *, model_requests=None):
                           ((poke.INPUT if native_poke else owner_input.INPUT) + event_id,))
         head = owner_authority._latest(store)
         ref = original.authority
-        stopped = bool(head and head["state"] == "STOPPED"
-            and owner_authority.reference(head).as_dict() == ref | {"revision": ref["revision"] + 1}
-            and head["restore_generation"] == owner_authority._meta(
-                store, owner_authority.GENERATION))
+        from companion import owner_stop_receipt
+
+        stopped = bool(head and owner_stop_receipt.stopped_chain(
+            store, AuthorityRef.from_dict(ref)))
         unadmitted = bool(stopped and event is None)
         if native_poke and event and not erased:
             poke.original_source(store, settings, event_id)

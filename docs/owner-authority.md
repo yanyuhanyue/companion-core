@@ -268,6 +268,21 @@ revision 为 r+2 的后继 authority。使用后继私密配置执行原 `owner-
 `OWNER_REBOUND`。`prepared_sha256` 必须引用对应的新准备记录。旧配置继续被隔离，
 后续普通交接仍保留并校验此前的 carried 证据。
 
+### 未绑定工作的 STOP 链
+
+发布失败时，Core 可能在 Bridge 交接前激活一个后继、又因失败处理再次 STOP，例如
+r → STOP r+1 → ACTIVE r+2 → STOP r+3。Bridge 从未持有 r+2，因此原规则（后继必须为
+r+2）会让交接永久卡住。认证的 `/owner-authority/stop-receipt` 因此接受这样的链：
+从 r 的 STOP 到当前最新 STOPPED，revision 逐一连续、ACTIVE/STOPPED 交替、前驱记录
+逐条相连、grant 与 restore generation 不变，每个 STOPPED 与其前一个 ACTIVE 同一
+policy；并且链中每个中间 ACTIVE revision 在 jobs、goals、exploration_requests、
+model_admissions、outbox、voice_jobs 中都没有绑定任何工作。回执形状不变，
+`stopped_authority` 指向链末的 STOPPED。carry 的 manifest 仍只接受直接 STOP。
+
+Bridge 的 `owner-handoff-prepare` 记录该回执；`owner-handoff` 只接受 revision 等于
+链末 STOPPED + 1 的后继，replay 时同样核对 `OWNER_REBOUND` 与对应准备记录。直接 STOP
+仍要求 policy 不变；只有中间 revision 已证明无工作时才允许 policy 不同。
+
 成功交接后才由 operator 启用 worker 和新的独立输入接收。原输入、媒体、工具及 QQ
 发送均不重放。普通 `OWNER_INPUT_TERMINAL` / `OWNER_HANDOFF_PREPARED`、STOP 签名域、
 AuthorityRef v2 和 capture v2 保持各自原合同。Bridge 复用原独占锁、原 fsync Journal、
