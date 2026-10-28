@@ -99,3 +99,37 @@ def test_native_request_wire_and_ledger_are_unchanged(core, tmp_path, monkeypatc
         assert summarize(rows, "OFFLINE_FIXTURE")["model_budget_estimate_complete"]
     else:
         assert not rows
+
+
+CONTEXT_SPANS = ["context_rules", "context_references", "context_memory", "context_history",
+                 "context_current", "context_fit", "context_planning"]
+
+
+def test_context_split_spans_are_ordered_and_leave_the_context_unchanged(
+        core, tmp_path, monkeypatch):
+    _, job = chat(core, tmp_path)
+    job["trace_id"] = TRACE
+    monkeypatch.setenv("COMPANION_TELEMETRY", "0")
+    expected = core.context(job, snapshots=[], planning=True)
+    rows = []
+    monkeypatch.setenv("COMPANION_TELEMETRY", "1")
+    monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
+    monkeypatch.setattr(telemetry, "print", lambda line, **kwargs: rows.append(json.loads(line)),
+                        raising=False)
+    assert core.context(job, snapshots=[], planning=True) == expected
+    spans = [row for row in rows if row["stage"] in CONTEXT_SPANS]
+    assert [row["stage"] for row in spans] == CONTEXT_SPANS
+    assert all(row["elapsed_ms"] >= 0 and set(row) <= FIELDS for row in spans)
+    assert [row["monotonic_ns"] for row in spans] == sorted(row["monotonic_ns"] for row in spans)
+
+
+def test_split_marks_never_sample_the_clock_when_disabled(monkeypatch):
+    monkeypatch.delenv("COMPANION_TELEMETRY", raising=False)
+
+    def forbidden():
+        raise AssertionError("disabled telemetry sampled a clock")
+
+    monkeypatch.setattr(telemetry.time, "perf_counter_ns", forbidden)
+    mark = telemetry.splits(TRACE)
+    mark("context_rules")
+    telemetry.splits(None)("context_rules")
