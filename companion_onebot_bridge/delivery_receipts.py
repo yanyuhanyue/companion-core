@@ -123,5 +123,8 @@ class DeliveryReceipts:
             state = "accepted"
         with self.db:
             self.db.execute("UPDATE results SET state=? WHERE message_id=?", (state, row[0]))
-        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        # Receipt state is already committed with synchronous=FULL. Maintenance
+        # must not wait for an observer's WAL snapshot on the async send path.
+        # Input-text erasure retains its separate truncating checkpoint.
+        self.db.execute("PRAGMA wal_checkpoint(PASSIVE)")
         return True
