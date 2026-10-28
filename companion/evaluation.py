@@ -7,9 +7,10 @@ provider transport, delivery channel or second task executor.
 import json
 from contextlib import nullcontext
 from datetime import datetime
+from typing import Literal
 
 import httpx
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from companion import input_recall, owner_authority, paid_budget, reply_revision
 from companion.contracts import CoreError, StrictModel
@@ -31,13 +32,33 @@ DEVICE = "core.evaluation"
 CALLS = 6
 COST = 50000
 SHA = r"^[a-f0-9]{64}$"
+# A pilot replays owner turns; a synthetic plan carries only prepared SYNTHETIC cases.
+LIMITS = {
+    "owner_pilot": {"calls": CALLS, "cost": COST, "cases": 1, "bytes": 120000, "input": 2400},
+    "synthetic": {"calls": 216, "cost": 1000000, "cases": 36, "bytes": 1500000, "input": 8000},
+}
+# Requests per worker claim; later batches queue behind ordinary chat.
+BATCH = 6
 
 
 class Manifest(StrictModel):
     plan: dict
-    source_event_ids: list[str] = Field(min_length=1, max_length=12)
+    kind: Literal["owner_pilot", "synthetic"] = Field(
+        default="owner_pilot", exclude_if=lambda value: value == "owner_pilot",
+    )
+    source_event_ids: list[str] = Field(default_factory=list, max_length=12)
     baseline_sha256: str = Field(pattern=SHA)
     source_document_sha256: str = Field(pattern=SHA)
+
+    @model_validator(mode="after")
+    def scoped_sources(self):
+        if (self.kind == "synthetic") != (not self.source_event_ids):
+            raise ValueError("owner pilots need sources; synthetic plans carry none")
+        return self
+
+
+def _limits(manifest):
+    return LIMITS[manifest.get("kind", "owner_pilot")]
 
 
 class Submission(StrictModel):
@@ -59,10 +80,11 @@ def _enabled(settings):
 def _plan(settings, manifest):
     """Validate the prepared plan without rewriting a single provider field."""
     try:
-        plan = manifest["plan"]
-        if len(encode(manifest).encode()) > 120000 or redact(encode(manifest), settings) != (
-            encode(manifest)
-        ):
+        plan, limits = manifest["plan"], _limits(manifest)
+        synthetic = manifest.get("kind", "owner_pilot") == "synthetic"
+        if len(encode(manifest).encode()) > limits["bytes"] or redact(
+            encode(manifest), settings
+        ) != encode(manifest):
             raise ValueError("private input size or credentials")
         if paid_budget.sha({k: v for k, v in plan.items() if k != "plan_sha256"}) != (
             plan["plan_sha256"]
@@ -73,22 +95,29 @@ def _plan(settings, manifest):
             raise ValueError("plan version")
         if version == 2 and plan.get("measurement_profile") != _measurement_profile(settings):
             raise ValueError("measurement policy, source or route changed")
+        if synthetic and version != 2:
+            raise ValueError("synthetic plans need native measurement")
         rows = plan["requests"]
-        if (plan["request_count"] != CALLS or len(rows) != CALLS or plan["case_count"] != 1
+        repetitions = plan.get("repetitions", 3) if synthetic else 3
+        cases = {row["case"] for row in rows}
+        if (type(repetitions) is not int or not 1 <= repetitions <= 3
+            or plan["request_count"] != len(rows) or plan["case_count"] != len(cases)
+            or not 1 <= len(cases) <= limits["cases"] or len(rows) > limits["calls"]
+            or (not synthetic and len(rows) != CALLS)
             or plan["actual_provider_calls"] != 0 or plan["actual_cost_micro_usd"] != 0
             or plan["status"] != "PREPARED_NO_MODEL_CALLS"
             or (plan["provider"], plan["model"]) != (settings.provider, settings.model_name)):
-            raise ValueError("pilot scope")
-        if len({row["case"] for row in rows}) != 1 or {
-            (row["repetition"], row["strategy"]) for row in rows
-        } != {(r, s) for r in range(3) for s in ("baseline", "participation_v1")}:
+            raise ValueError("plan scope")
+        pairs = {(r, s) for r in range(repetitions) for s in ("baseline", "participation_v1")}
+        if any({(row["repetition"], row["strategy"]) for row in rows if row["case"] == case}
+               != pairs for case in cases) or len(rows) != len(cases) * len(pairs):
             raise ValueError("pairs")
         rates = plan["rates_micro_usd_per_million"]
         if (rates["input"], rates["cached_input"], rates["output"]) != (
             settings.input_rate, settings.cached_input_rate, settings.output_rate
         ):
             raise ValueError("configured rates changed")
-        shared = set()
+        shared = {}
         measured_costs = []
         for row in rows:
             messages = row["payload"]["messages"]
@@ -109,16 +138,17 @@ def _plan(settings, manifest):
                 measured = _request_measurement(settings, payload)
                 if measured["budget_input_tokens"] is None or any(
                     row.get(key) != value for key, value in measured.items()
-                ):
-                    raise ValueError("unsupported or changed measurement")
+                ) or measured["budget_input_tokens"] > limits["input"] or measured[
+                    "estimated_reservation_micro_usd"] > 5000:
+                    raise ValueError("unsupported, changed or over-limit measurement")
                 measured_costs.append(measured["estimated_reservation_micro_usd"])
-            shared.add(digest)
-        if version == 2 and (plan.get("repetitions") != 3 or
-            plan.get("estimated_reservation_micro_usd") != sum(measured_costs)):
+            shared.setdefault(row["case"], set()).add(digest)
+        if version == 2 and (plan.get("repetitions") != repetitions
+                             or plan.get("estimated_reservation_micro_usd") != sum(measured_costs)
+                             or sum(measured_costs) > limits["cost"]):
             raise ValueError("measurement total or repetition count")
-        if len(shared) != 1 or len(set(manifest["source_event_ids"])) != len(
-            manifest["source_event_ids"]
-        ):
+        if any(len(digests) != 1 for digests in shared.values()) or len(
+            set(manifest["source_event_ids"])) != len(manifest["source_event_ids"]):
             raise ValueError("shared evidence")
         return rows
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -165,15 +195,27 @@ def _conversation_binding(store, conversation):
         (conversation,))["reply_revision"], "latest_owner_event": latest["event_id"]}
 
 
+def _inputs(store, settings, manifest, now):
+    """Owner sources and conversation fences; a synthetic plan has neither."""
+    if manifest.get("kind", "owner_pilot") == "synthetic":
+        row = store.one("SELECT conversation_id FROM conversations WHERE scope='private' "
+                        "AND owner_actor_id='owner' ORDER BY rowid LIMIT 1")
+        if not row:
+            raise CoreError("EVALUATION_OWNER_SOURCE_REQUIRED", 403)
+        return {}, row["conversation_id"], {}
+    sources, conversation = _sources(store, settings, manifest["source_event_ids"], now)
+    return sources, conversation, _conversation_binding(store, conversation)
+
+
 def preview(store, settings, clock, manifest):
     _enabled(settings)
     data = manifest.model_dump()
-    _plan(settings, data)
-    _sources(store, settings, data["source_event_ids"], clock())
+    rows = _plan(settings, data)
+    _inputs(store, settings, data, clock())
     _authority(store, settings, clock)
     digest = paid_budget.sha(data)
-    return {"manifest_sha256": digest, "request_count": CALLS,
-            "max_cost_micro_usd": COST, "consent_scope": {
+    return {"manifest_sha256": digest, "request_count": len(rows),
+            "max_cost_micro_usd": _limits(data)["cost"], "consent_scope": {
                 "capabilities": [CAPABILITY], "device_id": DEVICE, "session_id": digest}}
 
 
@@ -189,9 +231,9 @@ def submit(core, request):
             return {"evaluation_id": previous["evaluation_id"], "job_id": previous["job_id"],
                     "manifest_sha256": digest, "reused": True}
         manifest = request.manifest.model_dump()
-        sources, conversation = _sources(store, settings, manifest["source_event_ids"], now)
+        sources, conversation, fences = _inputs(store, settings, manifest, now)
         binding = _authority(store, settings, clock)
-        binding.update(_conversation_binding(store, conversation))
+        binding.update(fences)
         evaluation_id, event_id = "eval_" + digest, "evt_eval_" + digest
         store.insert("events", event_id=event_id, schema_version=1, source="system.control",
                      source_event_id=evaluation_id, conversation_id=conversation, actor_id="system",
@@ -209,7 +251,7 @@ def submit(core, request):
                      manifest_json=encode(manifest),
                      sources_json=encode(sources), binding_json=encode(binding), created_at=now)
         store.audit("evaluation.submitted", evaluation_id, evaluation_id, now,
-                    manifest_sha256=digest, request_count=CALLS)
+                    manifest_sha256=digest, request_count=prepared["request_count"])
         return {"evaluation_id": evaluation_id, "job_id": job_id,
                 "manifest_sha256": digest, "reused": False}
 
@@ -230,9 +272,9 @@ def check_job(store, settings, clock, job_id, *, lease_token=None, current_reque
     if paid_budget.sha(manifest) != run["manifest_sha256"]:
         raise CoreError("EVALUATION_MANIFEST_CHANGED", 409)
     _plan(settings, manifest)
-    current, conversation = _sources(store, settings, manifest["source_event_ids"], clock())
+    current, _, fences = _inputs(store, settings, manifest, clock())
     binding = _authority(store, settings, clock, current_request)
-    binding.update(_conversation_binding(store, conversation))
+    binding.update(fences)
     if current != json.loads(run["sources_json"]) or binding != json.loads(run["binding_json"]):
         raise CoreError("EVALUATION_SOURCE_OR_AUTHORITY_CHANGED", 409)
     return run, manifest
@@ -244,9 +286,11 @@ def admit(store, settings, clock, job_id, rid, messages, estimate, estimated_inp
     run, manifest = check_job(store, settings, clock, job_id)
     prior = store.rows("SELECT request_id,state,billed_micro_usd FROM model_usage "
                        "WHERE job_id=? ORDER BY rowid", (job_id,))
-    if (len(prior) >= CALLS or any(row["state"] != "SETTLED" for row in prior)
-        or sum(row["billed_micro_usd"] for row in prior) + estimate > COST
-        or estimate > 5000 or estimated_input > 2400):
+    limits = _limits(manifest)
+    if (len(prior) >= min(limits["calls"], len(manifest["plan"]["requests"]))
+        or any(row["state"] != "SETTLED" for row in prior)
+        or sum(row["billed_micro_usd"] for row in prior) + estimate > limits["cost"]
+        or estimate > 5000 or estimated_input > limits["input"]):
         raise CoreError("EVALUATION_SUBLIMIT_EXHAUSTED", 429)
     ordinal = len(prior)
     if (rid != request_id(run["manifest_sha256"], ordinal)
@@ -265,7 +309,8 @@ def check_request(store, settings, clock, rid):
     if not usage or usage["state"] != "RESERVED":
         raise CoreError("EVALUATION_REQUEST_FENCED", 409)
     run, manifest = check_job(store, settings, clock, usage["job_id"], current_request=rid)
-    matching = [i for i in range(CALLS) if rid == request_id(run["manifest_sha256"], i)]
+    matching = [i for i in range(len(manifest["plan"]["requests"]))
+                if rid == request_id(run["manifest_sha256"], i)]
     admission = store.one("SELECT payload_sha256,authority_json FROM model_admissions "
                           "WHERE request_id=?", (rid,))
     if (len(matching) != 1 or not admission or admission["payload_sha256"] != (
@@ -308,9 +353,16 @@ async def run(core, job):
         with store.transaction():
             row, manifest = check_job(store, settings, clock, job["job_id"],
                                       lease_token=job["lease_token"])
-            if store.one("SELECT 1 FROM model_usage WHERE job_id=?", (job["job_id"],)):
+            prior = store.rows("SELECT state FROM model_usage WHERE job_id=?", (job["job_id"],))
+            stored = store.one("SELECT COUNT(*) AS n FROM evaluation_results "
+                               "WHERE evaluation_id=?", (row["evaluation_id"],))["n"]
+            # Only a cleanly settled prefix with all results continues; never repeat a call.
+            if any(usage["state"] != "SETTLED" for usage in prior) or stored != len(prior):
                 raise CoreError("EVALUATION_PREVIOUS_ATTEMPT_REVIEW_REQUIRED", 409)
-        for ordinal, item in enumerate(manifest["plan"]["requests"]):
+        requests = manifest["plan"]["requests"]
+        stop = min(len(prior) + BATCH, len(requests))
+        for ordinal in range(len(prior), stop):
+            item = requests[ordinal]
             rid = request_id(row["manifest_sha256"], ordinal)
             def source_check(current_request=rid):
                 check_job(store, settings, clock, job["job_id"], lease_token=job["lease_token"],
@@ -341,9 +393,15 @@ async def run(core, job):
                                  httpx.MockTransport) else "MODEL_RESPONSE"), created_at=clock())
         with store.transaction():
             source_check()
-            store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
-                          "WHERE job_id=? AND lease_token=?", (clock(), job["job_id"],
-                                                               job["lease_token"]))
+            if stop < len(requests):
+                # Yield the worker; the next claim resumes after any waiting chat.
+                store.execute("UPDATE jobs SET state='QUEUED',lease_token=NULL,lease_until=NULL,"
+                              "attempts=MAX(0,attempts-1),updated_at=? WHERE job_id=? "
+                              "AND lease_token=?", (clock(), job["job_id"], job["lease_token"]))
+            else:
+                store.execute("UPDATE jobs SET state='SUCCEEDED',lease_token=NULL,updated_at=? "
+                              "WHERE job_id=? AND lease_token=?", (clock(), job["job_id"],
+                                                                   job["lease_token"]))
     except CoreError as exc:
         error = exc.code
     except Exception:
@@ -367,7 +425,7 @@ def results(store, settings, clock, evaluation_id):
     if row["redacted"]:
         raise CoreError("EVALUATION_ERASED", 410)
     manifest = json.loads(row["manifest_json"])
-    sources, _ = _sources(store, settings, manifest["source_event_ids"], clock())
+    sources, _, _ = _inputs(store, settings, manifest, clock())
     if sources != json.loads(row["sources_json"]):
         raise CoreError("EVALUATION_SOURCE_CHANGED", 409)
     outcomes = []
@@ -398,7 +456,7 @@ def results(store, settings, clock, evaluation_id):
                         "WHERE evaluation_id=?", (evaluation_id,))
     if not current or current["redacted"]:
         raise CoreError("EVALUATION_ERASED", 410)
-    current_sources, _ = _sources(store, settings, manifest["source_event_ids"], clock())
+    current_sources, _, _ = _inputs(store, settings, manifest, clock())
     if (current["manifest_sha256"] != row["manifest_sha256"]
         or current["sources_json"] != row["sources_json"] or current_sources != sources):
         raise CoreError("EVALUATION_SOURCE_CHANGED", 409)

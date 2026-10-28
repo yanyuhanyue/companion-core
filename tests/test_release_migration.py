@@ -71,6 +71,7 @@ REVISION_CHAIN = (
     "0046_capability_delegation",
     "0047_meme_assets",
     "0048_meme_vectors",
+    "0049_evaluation_ordinals",
 )
 LEGACY_TABLES = (
     "principals",
