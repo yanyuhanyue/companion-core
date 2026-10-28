@@ -27,6 +27,9 @@ from companion.store import after, encode, uid
 from companion.transport import digest, reply_group
 
 TERMINAL = {"DONE", "FAILED", "CANCELLED"}
+# A revision never rebinds earlier work, so these refusals are final for that goal.
+AUTHORITY_REJECTIONS = {"OWNER_AUTHORITY_REFERENCE_INVALID", "OWNER_AUTHORITY_REVISION_CHANGED",
+                        "OWNER_AUTHORITY_PURPOSE_REQUIRED"}
 
 
 def withdraw_reflection_goals(store, suggestion_id, now):
@@ -196,6 +199,18 @@ class GoalEngine:
         if owner_authority.required(self.store, self.settings):
             owner_authority.current(self.store, self.settings, self.clock, purpose="goals",
                                     authority=json.loads(goal["authority_json"]))
+
+    def reject_authority(self, goal_id, code, *, step_id=None):
+        """Close rejected future work, keeping prior Reader attempts and liability."""
+        s, now = self.store, self.clock()
+        s.execute("UPDATE goal_steps SET state='FAILED',lease_token=NULL,last_error_code=?,"
+                  "updated_at=? WHERE goal_id=? AND (step_id=? OR (? IS NULL AND state IN "
+                  "('QUEUED','RETRY_WAIT','WAITING_RESOURCE')))",
+                  (code, now, goal_id, step_id, step_id))
+        s.execute("UPDATE goals SET state='FAILED',last_error_code=?,version=version+1,"
+                  "updated_at=? WHERE goal_id=?", (code, now, goal_id))
+        self.feedback(goal_id, "EXPLAINED_FAILURE", code, notify=False)
+        s.audit("goal.authority_rejected", goal_id, step_id or "wake", now, error_code=code)
 
     def propose(self, proposal, kind="self", *, reflection_suggestion_id=None):
         if not self.settings.goals_enabled:
@@ -543,21 +558,10 @@ class GoalEngine:
                 try:
                     self.validate_authority(self.get(candidate["goal_id"]))
                 except CoreError as error:
-                    if error.code not in {"OWNER_AUTHORITY_REFERENCE_INVALID",
-                                          "OWNER_AUTHORITY_REVISION_CHANGED",
-                                          "OWNER_AUTHORITY_PURPOSE_REQUIRED"}:
+                    if error.code not in AUTHORITY_REJECTIONS:
                         raise
-                    # Close rejected future work, keeping prior Reader attempts and liability.
-                    s.execute("UPDATE goal_steps SET state='FAILED',lease_token=NULL,"
-                              "last_error_code=?,updated_at=? WHERE step_id=?",
-                              (error.code, now, candidate["step_id"]))
-                    s.execute("UPDATE goals SET state='FAILED',last_error_code=?,"
-                              "version=version+1,updated_at=? WHERE goal_id=?",
-                              (error.code, now, candidate["goal_id"]))
-                    self.feedback(candidate["goal_id"], "EXPLAINED_FAILURE", error.code,
-                                  notify=False)
-                    s.audit("goal.authority_rejected", candidate["goal_id"],
-                            candidate["step_id"], now, error_code=error.code)
+                    self.reject_authority(candidate["goal_id"], error.code,
+                                          step_id=candidate["step_id"])
                     continue
                 if goal_plan.unknown(self, candidate["goal_id"]):
                     s.execute("UPDATE goals SET state='WAITING_INPUT',version=version+1,"
