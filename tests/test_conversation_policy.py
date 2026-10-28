@@ -7,6 +7,7 @@ from companion.affect import NEUTRAL
 from companion.contracts import CoreError
 from companion.conversation_policy import (
     PARTICIPATION_V1,
+    PARTICIPATION_V2,
     ConversationPolicyConfig,
     apply_policy,
     apply_strategy,
@@ -96,3 +97,26 @@ def test_frozen_v1_strategy_and_transformation_are_identical():
     assert hashlib.sha256(candidate).hexdigest() == (
         "f07a941f73fb42ccf59e84c34fae59d351e0e183aed91d6644c5d0da785f7dc1")
     assert apply_strategy(MESSAGES, "baseline") == MESSAGES
+
+
+def test_v2_is_opt_in_and_receipt_names_the_strategy():
+    v1 = ConversationPolicyConfig(mode="ENABLED")
+    v2 = ConversationPolicyConfig(mode="ENABLED", strategy="participation_v2")
+    static, _, decision = prompt_parts(MESSAGES[0]["content"], v2, current_text="当前问题")
+    assert static.endswith("\n" + PARTICIPATION_V2) and PARTICIPATION_V1 not in static
+    assert decision.receipt()["strategy"] == "participation_v2"
+    v1_receipt = prompt_parts(MESSAGES[0]["content"], v1, current_text="当前问题")[2].receipt()
+    assert list(v1_receipt)[:2] == ["version", "strategy"]
+    assert v1_receipt["strategy"] == "participation_v1"
+    assert sum(key == "strategy" for key in v1_receipt) == 1
+    with pytest.raises(CoreError):
+        revalidate(decision.receipt(), v1, current_text="当前问题")
+    with pytest.raises(ValueError):
+        apply_strategy(MESSAGES, "participation_v3")
+
+
+def test_v2_wording_avoids_cold_positioning_and_requires_sources():
+    assert len(PARTICIPATION_V2.splitlines()) == 7
+    assert "不要用“AI 朋友”“陪你聊天”这类定位语" in PARTICIPATION_V2
+    assert "没有就不要装作记得" in PARTICIPATION_V2
+    assert "小肥鱼" not in PARTICIPATION_V2  # Names come from memory, never the prompt.
