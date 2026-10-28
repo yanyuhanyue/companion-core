@@ -234,7 +234,9 @@ def test_real_http_enqueue_new_owner_and_independent_worker_latency(core, tmp_pa
 
     async def scenario():
         async with real_core_http(core) as port:
-            child = await start(core, tmp_path / "chat", duration=4)
+            directory = tmp_path / "chat"
+            # Measured latency starts at enqueue; the child must outlive slow parent setup.
+            child = await start(core, directory, duration=30, controlled=True)
             try:
                 await ready(child)
                 latencies = []
@@ -259,6 +261,7 @@ def test_real_http_enqueue_new_owner_and_independent_worker_latency(core, tmp_pa
                         latency = await state(core, response.json()["job_id"])
                         assert latency < 1.5
                         latencies.append(latency)
+                (directory / "release").touch()
                 result = await finish(child)
                 assert result["total"]["provider_calls"] == 2
                 receipt("enqueue-latency", {"latencies_seconds": latencies, "process": result})
@@ -326,9 +329,17 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
 
     async def scenario():
         async with real_core_http(core) as port:
-            child = await start(core, tmp_path / "forget", duration=3)
+            directory = tmp_path / "forget"
+            # The parent can take seconds to send the decision on a loaded runner; wait for the
+            # worker's own scan progress instead of racing a fixed child lifetime.
+            child = await start(core, directory, duration=30, controlled=True)
             try:
                 await ready(child)
+                async with asyncio.timeout(5):
+                    # Readiness is time-based; take the baseline after the startup scan.
+                    while not (directory / "scans").exists():  # noqa: ASYNC110 - independent worker progress
+                        await asyncio.sleep(0.02)
+                scans = (directory / "scans").read_text(encoding="utf-8")
                 async with httpx.AsyncClient(
                     base_url=f"http://127.0.0.1:{port}", trust_env=False
                 ) as api:
@@ -341,6 +352,10 @@ def test_real_http_forget_wakes_native_control_without_provider(core, tmp_path):
                         },
                     )
                     assert response.status_code == 200, response.text
+                async with asyncio.timeout(5):
+                    while (directory / "scans").read_text(encoding="utf-8") == scans:  # noqa: ASYNC110 - independent worker progress
+                        await asyncio.sleep(0.02)
+                (directory / "release").touch()
                 result = await finish(child)
                 assert result["total"]["provider_calls"] == 0
                 assert result["steady"]["scans"] >= 1
