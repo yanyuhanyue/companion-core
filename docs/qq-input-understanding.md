@@ -63,10 +63,12 @@ Core 终态推进队列，后续附件和文字继续处理。队列 `DONE` 表�
 
 ## 出站原生引用
 
-仅限 OwnerAuthority 私聊回复，由 `quote_policy` 控制，默认 `never`。开启后，上下文中主人每条消息前带一个
-本地编号 `[编号 m加四位十六进制]`（由事件 ID 的 SHA-256 前四位得到，不改变来源证明）。模型想回应较早的
-一句时在回复开头写 `【引用 编号】`；Core 解析后从回复中删除所有此类标记，再用自己记录的来源解析目标
-（`companion/reply_quote.py`）。模型给出的只是编号，QQ 消息 ID 一律取自该会话 `events.source_event_id`。
+仅限 OwnerAuthority 私聊回复，由 `quote_policy` 控制，默认 `never`。开启后，上下文中主人每条消息和小肥鱼先前每条回复前带一个
+本地编号 `[编号 m加四位十六进制]`（主人消息取事件 ID、回复取首个分段 outbox ID 的 SHA-256 前四位，不改变来源证明）。模型想回应较早的
+一句时在回复开头写 `【引用 编号】`；Core 解析后从回复中删除所有引用标记和模型照抄的 `[编号 …]`，再用
+自己记录的来源解析目标（`companion/reply_quote.py`）。模型给出的只是编号：主人消息的 QQ ID 取自该会话
+`events.source_event_id`，小肥鱼回复的 QQ ID 取自已送达首段的 `outbox.provider_message_id`，并要求内容
+哈希仍然有效（擦除后不再可引用）。
 
 | 档位 | 行为 |
 |---|---|
@@ -78,7 +80,7 @@ Core 终态推进队列，后续附件和文字继续处理。队列 `DONE` 表�
 分段回复的第一段 `content.reply_to`，计入 `content_sha256`；重试时目标不同返回 `REPLY_GROUP_CHANGED`，
 不会重复发送。带引用的回复不转语音。Bridge 只在带 OwnerAuthority 的首段 `qq.private.reply` 上接受
 `reply_to`，并在文本前插入 OneBot `{"type": "reply", "data": {"id": ...}}` 段；带表情图的回复和旧窗口
-路径不引用。暂不支持引用小肥鱼自己发出的消息。
+路径不引用。小肥鱼自己消息的撤回尚未跟踪，只能引用历史范围内仍在记录中的回复。
 
 ## 上游依据与验证范围
 
