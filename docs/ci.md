@@ -1,9 +1,68 @@
 # CI validation profiles
 
-Every selected run reports a `preflight` result and a final `ci` result. Configure
-branch protection to require `ci`; repository protection settings are managed
-separately. Integration evidence must identify the exact PR workflow or main
-commit and all of its required jobs.
+Every selected run reports a `preflight` result and a final `ci` result. Main branch
+protection requires `ci` from GitHub Actions and the `review/coordinator` commit
+status; repository protection settings are managed separately. Integration evidence
+must identify the exact PR workflow or main commit and all of its required jobs.
+
+## Main protection and reviewed auto-merge
+
+Main requires a pull request, an up-to-date branch, both required checks, and resolved
+review conversations. These restrictions also apply to administrators. Force pushes
+and branch deletion are disabled. Keep merge commits for the existing CI tree-reuse
+and release evidence flow.
+
+The repository currently uses one GitHub account for submissions and coordination.
+GitHub does not allow a PR author to approve their own PR, so the required formal
+approval count is zero. The independent coordinator's review is represented by the
+native `review/coordinator` commit status instead. This is the user's chosen review
+workflow, not a second GitHub identity: repository write credentials can publish this
+status, and must remain with authorized operators. Product tests and workflows must
+not publish a successful coordinator review automatically.
+
+The release coordinator owns the following sequence:
+
+1. Review the concrete candidate, confirm dependency order and the authorized scope,
+   and inspect its applicable CI validation receipt and any required original artifacts.
+   Keep one review receipt identifying the exact head and the reviewed base/tree.
+2. Re-read the PR's current head and base. If the candidate changed, review and validate
+   it again before approving. Confirm the base is `main` and dependencies are merged.
+3. Publish `review/coordinator=success` on that exact head SHA. Include a concise
+   description and a public, sanitized review or CI evidence URL; keep private local
+   evidence in the coordinator's receipt. A green CI result alone is not a review.
+4. Enable native auto-merge for that PR with `gh pr merge <number> --auto --merge
+   --match-head-commit <reviewed-sha>`. GitHub waits for the required gates and branch
+   freshness. Verify the resulting merge identity before any production release.
+
+Publish the status with the existing GitHub CLI, substituting only values verified
+in the review receipt:
+
+```powershell
+gh api --method POST "repos/yanyuhanyue/companion-core/statuses/$reviewedHead" `
+  -f state=success -f context=review/coordinator `
+  -f description='Coordinator review approved for this commit' `
+  -f "target_url=$reviewEvidenceUrl"
+```
+
+A new head SHA has no inherited approval status and must pass review again. If a
+review is withdrawn on an unchanged head, first set its `review/coordinator` status
+to `pending` or `failure`, then disable that PR's auto-merge. Keep unresolved findings
+blocked; do not mark a review successful merely to unblock a merge. Native status
+contexts attach to a commit, not a PR, so re-check scope, base and dependency order
+before reusing the same head in another PR or enabling auto-merge again. Only the
+coordinator arms auto-merge after this review; new PRs are not automatically enrolled.
+
+The final `ci` job enforces the existing full, selected, docs and exact-tree reuse
+policies. Individual matrix checks are not separately required because some valid
+profiles omit them. Publishing a review status never substitutes for the final `ci`
+gate. Production release remains a separately coordinated action.
+
+Primary references: [protected branches](https://docs.github.com/en/rest/branches/branch-protection),
+[native commit statuses](https://docs.github.com/en/rest/commits/statuses),
+[reviewing PRs](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/reviewing-proposed-changes-in-a-pull-request),
+and [CLI auto-merge](https://cli.github.com/manual/gh_pr_merge).
+
+## Validation selection
 
 | Change / event | Validation |
 |---|---|
