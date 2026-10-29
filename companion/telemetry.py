@@ -107,6 +107,29 @@ def emit(
         pass
 
 
+LOCK_REPORT_MS = 500
+
+
+def emit_lock(site, *, wait_ms, held_ms, outcome):
+    """One slow write transaction: where it was opened, never what it wrote."""
+    if not api_enabled() or wait_ms + held_ms < LOCK_REPORT_MS:
+        return
+    record = {
+        "schema_version": 1,
+        "evidence_type": os.environ.get("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE"),
+        "session": SESSION,
+        "stage": "db_write_lock",
+        "site": site,
+        "wait_ms": round(max(0, wait_ms), 1),
+        "held_ms": round(max(0, held_ms), 1),
+        "outcome": outcome,
+    }
+    try:
+        print(json.dumps(record), flush=True)
+    except Exception:
+        pass  # Instrumentation must not change the transaction's result.
+
+
 def api_enabled():
     return (os.environ.get("COMPANION_TELEMETRY") == "1"
             and os.environ.get("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
