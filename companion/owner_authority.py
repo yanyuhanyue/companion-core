@@ -129,7 +129,6 @@ def custody(store, settings, *, settlement=False):
 
 def current(store, settings, clock, *, purpose=None, authority=None):
     """Current policy plus original journal custody; never returns a synthetic window."""
-    from companion import paid_budget
     from companion.live_text import _ledger_custody
 
     if settings.owner_runtime.mode != "ENABLED" or _meta(store, MODE) != "ENABLED":
@@ -147,13 +146,8 @@ def current(store, settings, clock, *, purpose=None, authority=None):
         if supplied != ref:
             raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
     policy = OwnerGrantPolicy.model_validate_json(row["policy_json"])
-    _check_policy(settings, policy)
-    if settings.paid_model is None or policy.paid_contract_sha256 != _sha(
-        paid_budget.snapshot(settings)
-    ):
-        raise CoreError("OWNER_AUTHORITY_PAID_POLICY_CHANGED", 409)
-    if policy.owner_qq_id != settings.owner_qq_id:
-        raise CoreError("OWNER_AUTHORITY_IDENTITY_CHANGED", 403)
+    if problem := policy_problem(settings, policy):
+        raise problem
     if purpose is not None and purpose not in policy.purposes:
         raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
     custody(store, settings)
@@ -369,6 +363,26 @@ def capability_hashes(settings):
         if settings.bili_video.enabled else None,
         "rem": _sha(settings.rem.model_dump(mode="json")) if settings.rem.enabled else None,
     }
+
+
+def policy_problem(settings, policy):
+    """The error `current()` would raise for this policy under this code and config, or None.
+
+    Release planning uses it to tell whether new code keeps the stored policy valid.
+    """
+    from companion import paid_budget
+
+    try:
+        _check_policy(settings, policy)
+        if settings.paid_model is None or policy.paid_contract_sha256 != _sha(
+            paid_budget.snapshot(settings)
+        ):
+            raise CoreError("OWNER_AUTHORITY_PAID_POLICY_CHANGED", 409)
+        if policy.owner_qq_id != settings.owner_qq_id:
+            raise CoreError("OWNER_AUTHORITY_IDENTITY_CHANGED", 403)
+    except CoreError as error:
+        return error
+    return None
 
 
 def _check_policy(settings, policy):
