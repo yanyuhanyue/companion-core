@@ -1,13 +1,16 @@
 """Permission revisions cannot replace financial, erasure or native closure evidence."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from companion import model_accounting, model_carry, owner_authority, owner_input, paid_budget
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityPreview
+from companion_onebot_bridge.config import BridgeConfig
 from tests.conftest import run
 from tests.model_carry_support import migrated
 from tests.test_evaluation_authority_revision import revise, revised_policy, stop
@@ -17,6 +20,55 @@ from tests.test_model_renewal import renewal
 from tests.test_model_renewal_native import life_case, source_and_renewal
 from tests.test_onebot_capture import real_core_http
 from tests.test_owner_authority import activate
+
+
+def test_discovered_link_and_revision_share_native_terminal_contract(core, tmp_path):
+    from companion import reply_revision
+    from tests.test_carried_capabilities import reader_carry
+    from tests.test_reading_followup import URL, admit
+
+    case = reader_carry(core, tmp_path)
+    core.settings.control_token = SecretStr("synthetic-discovery-revision-control")
+    config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
+        bot_qq_id=core.settings.bot_qq_id,
+        bridge_token=core.settings.bridge_token.get_secret_value(), onebot_token="s" * 32,
+        protocol_epoch=case.policy.capture.protocol_epoch)
+    plan = SimpleNamespace(authority=case.successor["authority"], key=case.key, policy=case.policy)
+
+    async def scenario():
+        async with real_core_http(core) as port, httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}", trust_env=False,
+            headers={"Authorization": "Bearer " + config.bridge_token},
+        ) as client:
+            event, _ = await admit(client, core, config, plan, 2, "看看 " + URL)
+            _, accepted = await admit(client, core, config, plan, 3, "先不读了")
+            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            reply_revision.remember_sources(core.store, job, [event["event_id"]])
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+                               (accepted["job_id"],))
+            item = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+                                  (event["event_id"],))
+            assert item["state"] == "WAITING" and item["read_request_id"] is None
+            original = core.store.rows("SELECT * FROM model_usage")
+            control = {"Authorization": "Bearer synthetic-discovery-revision-control"}
+            stopped = await client.post("/internal/v1/owner-authority/stop", json={
+                "operation_id": "combined-discovery-stop", "authority": plan.authority},
+                headers=control)
+            assert stopped.status_code == 200, stopped.text
+            query = {"expected_revision": 4, "policy": revised_policy(case).model_dump(mode="json")}
+            preview = await client.post("/internal/v1/owner-authority/preview",
+                                         json=query, headers=control)
+            assert preview.status_code == 200, preview.text
+            active = await client.post("/internal/v1/owner-authority/activate", json={
+                **query, "operation_id": "combined-discovery-revision",
+                "preview_sha256": preview.json()["preview_sha256"]}, headers=control)
+            assert active.status_code == 200, active.text
+            assert core.store.rows("SELECT * FROM model_usage") == original
+            assert core.store.one("SELECT * FROM content_items WHERE item_id=?",
+                                  (item["item_id"],)) == item
+            assert not core.store.one("SELECT 1 FROM exploration_requests")
+
+    run(scenario())
 
 
 def test_pending_known_bill_blocks_permission_preview(core, tmp_path, monkeypatch):
@@ -116,7 +168,9 @@ def test_native_source_erasure_keeps_revision_finance_and_blocks_new_authority(
     stop(core, case, "erase-authority-stop")
     before = core.store.rows("SELECT * FROM model_usage")
     with core.store.transaction():
-        owner_authority.erase_sources(core.store, [source])
+        core.ledger.expire_events(core.store, [source], core.clock())
+    assert core.store.one("SELECT redacted FROM events WHERE event_id=?", (source,)) == {
+        "redacted": 1}
     assert len(owner_authority.custody(
         core.store, core.settings, settlement=True)["model_carries"]) == 3
     assert core.store.rows("SELECT * FROM model_usage") == before
