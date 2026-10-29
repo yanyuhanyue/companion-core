@@ -10,6 +10,76 @@ from companion_onebot_bridge.owner_handoff import terminal
 from tests.test_owner_input import captured, inbound
 
 
+def test_discovered_link_can_finish_handoff_through_native_http(core, tmp_path, monkeypatch):
+    import json
+
+    from pydantic import SecretStr
+
+    from companion import reply_revision
+    from tests.conftest import run
+    from tests.test_reading_followup import URL, admit, window
+
+    core.settings.control_token = SecretStr("synthetic-discovered-link-control")
+
+    async def scenario():
+        async with window(core, tmp_path, monkeypatch) as (client, config, plan):
+            original, _ = await admit(client, core, config, plan, 1, "看看 " + URL)
+            item = core.store.one("SELECT * FROM content_items WHERE owner_event_id=?",
+                                  (original["event_id"],))
+            assert item["state"] == "WAITING" and item["read_request_id"] is None
+            assert core.content.status(original["event_id"])["items"][0]["state"] == "DISCOVERED"
+            _, accepted = await admit(client, core, config, plan, 2, "先不读了")
+            job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
+            reply_revision.remember_sources(core.store, job, [original["event_id"]])
+            core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?",
+                               (accepted["job_id"],))
+            stopped = await client.post("/internal/v1/owner-authority/stop", json={
+                "operation_id": "stop-discovered-link", "authority": plan.authority},
+                headers={"Authorization": "Bearer synthetic-discovered-link-control"})
+            assert stopped.status_code == 200, stopped.text
+            saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                    (owner_input.INPUT + original["event_id"],))
+            capture = json.loads(saved["value"])["capture"]
+            before = list(core.store.db.iterdump())
+            response = await client.post("/internal/v1/owner-authority/inputs/state", json=capture)
+            assert response.status_code == 200, response.text
+            receipt = response.json()
+            assert receipt["terminal"] and not receipt["unsettled_work"], receipt
+            terminal(receipt, capture)
+            assert list(core.store.db.iterdump()) == before
+            assert not core.store.one("SELECT 1 FROM exploration_requests")
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"kind": "qq_image"}, {"kind": "link_image"}, {"state": "QUEUED"},
+    {"state": "UNKNOWN"}, {"read_request_id": "read-unconfirmed"},
+    {"lease_token": "lease-unconfirmed"}, {"lease_until": "2026-01-01T00:00:00Z"},
+    {"reserved_bytes": 1}, {"usage_request_id": "model-unconfirmed"},
+    {"started_at": "2026-01-01T00:00:00Z"}, {"media_sha256": "a" * 64},
+    {"fingerprint": "b" * 64}, {"error_code": "CONTENT_PROCESSOR_LOST"},
+])
+def test_only_unstarted_native_link_discovery_is_not_pending(core, tmp_path, change):
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    accepted = core.ingest(inbound(core, capture), "discovered-link-state")
+    core.store.execute("UPDATE jobs SET state='CANCELLED' WHERE job_id=?", (accepted["job_id"],))
+    owner_authority.stop(core.store, core.settings, core.clock,
+        AuthorityStop(operation_id="stop-discovery-proof", authority=capture.authority))
+    now = core.clock()
+    core.store.insert("content_items", **{
+        "item_id": "content-discovered", "owner_event_id": capture.event_id,
+        "kind": "link", "slot": 0, "target_url": "https://example.com/source",
+        "state": "WAITING", "captured_privacy_epoch": 0,
+        "deadline": now, "created_at": now, "updated_at": now, **change})
+    before = list(core.store.db.iterdump())
+    result = owner_input_state.read(core.store, core.settings, capture)
+    assert result["terminal"] is (not change)
+    assert result["unsettled_work"] is bool(change)
+    assert list(core.store.db.iterdump()) == before
+
+
 def test_native_input_state_requires_original_capture_and_terminal_work(core, tmp_path):
     capture, _ = captured(core, tmp_path)
     owner_input.approve(core.store, core.settings, core.clock, capture)
