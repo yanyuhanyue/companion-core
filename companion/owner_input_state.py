@@ -161,9 +161,16 @@ def read(store, settings, capture, *, model_requests=None):
             reads.extend({**item, "active": item["state"] in states
                           or item.get("cleanup_state") == "PENDING"} for item in extra)
         complete = all(len(items) <= maximum for items in (jobs, models, deliveries, reads, tools))
+        # A native agent read keeps its link row WAITING and records progress only on the
+        # exploration request, which `reads` already includes. Judge it there; the digest
+        # keeps the stored rows unchanged.
+        delegated = {row["id"] for row in store.rows(
+            "SELECT item_id AS id FROM content_items WHERE owner_event_id=? AND kind='link' "
+            "AND state='WAITING' AND read_request_id IN (SELECT request_id "
+            "FROM exploration_requests) LIMIT ?", (event_id, maximum + 1))}
         unsettled_work = any(item["state"] not in wire.JOB_TERMINAL
                              for item in jobs + tools) or any(
-            item.get("active", item["state"] in {
+            item["id"] not in delegated and item.get("active", item["state"] in {
                 "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED", "UNKNOWN"})
                 for item in reads)
         unsettled_model = any(item["state"] != "SETTLED" for item in models)

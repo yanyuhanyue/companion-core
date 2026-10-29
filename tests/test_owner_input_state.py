@@ -182,3 +182,29 @@ def test_unknown_or_unconfirmed_source_work_cannot_authorize_handoff(core, tmp_p
     if kind == "cleanup":
         core.store.execute("UPDATE voice_jobs SET cleanup_state='CONFIRMED'")
         assert owner_input_state.read(core.store, core.settings, capture)["terminal"]
+
+
+@pytest.mark.parametrize("read_state", ["DONE", "CANCELLED", "FAILED", "QUEUED", "RUNNING",
+                                        "UNKNOWN"])
+def test_native_agent_read_link_is_judged_by_its_exploration_request(core, tmp_path,
+                                                                      read_state):
+    # Production 2026-10-29: the agent's read finished (DONE/CANCELLED) but the link row
+    # stays WAITING by design, which used to block every STOP -> resume indefinitely.
+    capture, _ = captured(core, tmp_path)
+    owner_input.approve(core.store, core.settings, core.clock, capture)
+    accepted = core.ingest(inbound(core, capture), "agent-read-link-state")
+    core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))
+    owner_authority.stop(core.store, core.settings, core.clock,
+        AuthorityStop(operation_id="stop-agent-read-link", authority=capture.authority))
+    now = core.clock()
+    core.store.insert("exploration_requests", request_id="read-agent", request_key="read-key",
+        adapter_id="bili", operation="read", url="https://example.com/source",
+        state=read_state, captured_privacy_epoch=0, created_at=now, updated_at=now)
+    core.store.insert("content_items", item_id="content-agent-read",
+        owner_event_id=capture.event_id, kind="link", slot=0, read_request_id="read-agent",
+        target_url="https://example.com/source", state="WAITING", captured_privacy_epoch=0,
+        deadline=now, created_at=now, updated_at=now)
+    result = owner_input_state.read(core.store, core.settings, capture)
+    finished = read_state in {"DONE", "CANCELLED", "FAILED"}
+    assert result["unsettled_work"] is not finished
+    assert result["terminal"] is finished

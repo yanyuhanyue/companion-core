@@ -107,6 +107,10 @@ def main():
         carry = sub.add_parser(name)
         carry.add_argument("--request", required=True)
         carry.add_argument("--request-sha256", required=True)
+    unstarted = sub.add_parser("close-unstarted-model-attempt")
+    unstarted.add_argument("--request-id", required=True)
+    unstarted.add_argument("--commit", action="store_true",
+                           help="Append the closure; without it only the record is previewed")
     args = parser.parse_args()
     try:
         settings = (Settings.load(apply_operator_config=False)
@@ -220,6 +224,17 @@ def main():
                         print(encode(model_carry.prepare(runtime.store, settings, request,
                                                        verified, utcnow(),
                                                        request_sha256=args.request_sha256)))
+        elif args.command == "close-unstarted-model-attempt":
+            from companion import model_carry
+
+            with ExitStack() as locks:
+                for kind in ("worker", "diary-worker", "life-worker", "executive-worker",
+                             "content-worker"):
+                    locks.enter_context(single_worker(settings.database, kind))
+                with Runtime(settings) as runtime:
+                    print(encode(model_carry.close_unstarted(
+                        runtime.store, settings, args.request_id, utcnow(),
+                        commit=args.commit)))
         elif args.command in {"preview-model-accounting", "record-model-accounting"}:
             from companion import model_accounting
 
