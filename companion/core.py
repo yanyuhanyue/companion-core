@@ -23,6 +23,7 @@ from companion import (
     qq_rich,
     reply_quote,
     reply_revision,
+    time_context,
     watch_ledger,
 )
 from companion.affect import NEUTRAL, AffectEngine
@@ -844,8 +845,11 @@ class Core(Runtime):
             if hits or traits or memory_paused:
                 memories = [
                     {
-                        k: h[k]
-                        for k in ("subject", "content", "status", "needs_review", "evidence_ids")
+                        **{k: h[k] for k in (
+                            "subject", "content", "status", "needs_review", "evidence_ids")},
+                        **({"recorded_on": time_context.day(h["created_at"], cfg.timezone)}
+                           if job["kind"] == "chat" and cfg.chat_time_labels
+                           and h.get("created_at") else {}),
                     }
                     for h in hits
                 ]
@@ -900,6 +904,10 @@ class Core(Runtime):
                      for turn, source in zip(turns, sources, strict=True)]
             add_rules(reply_quote.RULES)
         current_input = []
+        if job["kind"] == "chat" and cfg.chat_time_labels:
+            turns = [time_context.stamp_turn(turn, source, cfg.timezone)
+                     for turn, source in zip(turns, sources, strict=True)]
+            current_input.append(time_context.now_message(self.clock(), cfg.timezone))
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         if cfg.voice.enabled and permitted("voice") and job["kind"] == "chat":
