@@ -118,6 +118,25 @@ class SourceGrantService:
             )
         return {"grant_id": request.grant_id, "epoch": request.epoch, "duplicate": False}
 
+    def require_available(self, adapter_id):
+        """Before a lease binds one, a required grant only has to exist and be valid now.
+
+        The Reader brings its grant to the lease, which records it on the request; from
+        then on `require` checks that exact binding. Returns the grant that passed.
+        """
+        rows = self.store.rows(
+            "SELECT r.grant_id,r.epoch,r.fingerprint,r.expires_at FROM source_grants g "
+            "JOIN source_grant_revisions r USING(grant_id) WHERE g.adapter_id=? AND "
+            "r.epoch=(SELECT MAX(v.epoch) FROM source_grant_revisions v "
+            "WHERE v.grant_id=g.grant_id) ORDER BY r.grant_id", (adapter_id,))
+        first = None
+        for row in rows:
+            try:
+                return self.require(adapter_id, SourceGrantSnapshot.model_validate(row))
+            except CoreError as error:
+                first = first or error
+        raise first or CoreError("SOURCE_GRANT_REQUIRED", 403)
+
     def require(self, adapter_id, snapshot):
         if snapshot is None:
             raise CoreError("SOURCE_GRANT_REQUIRED", 403)
