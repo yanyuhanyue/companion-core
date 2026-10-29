@@ -149,7 +149,8 @@ def test_live_guard_refuses_segmentation_not_present_in_the_approved_scope(core,
 
 def test_legacy_approval_and_settings_keep_their_serialized_shape(core, tmp_path):
     approval = configure(core, tmp_path)
-    assert "segmented_reply" not in core.settings.model_dump(mode="json")
+    # Single replies are now an explicit off state; the approval keeps its legacy shape.
+    assert core.settings.model_dump(mode="json")["segmented_reply"] is None
     assert {"segmented_reply", "max_send_attempts"}.isdisjoint(approval.model_dump(mode="json"))
 
 
