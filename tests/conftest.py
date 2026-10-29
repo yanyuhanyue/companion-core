@@ -140,6 +140,8 @@ def core_factory(tmp_path_factory, migrated_database):
             database=str(directory / "core.db"), erasure_ledger=str(directory / "privacy.jsonl"),
             input_rate=300000, cached_input_rate=6000, output_rate=1200000,
             proactive_enabled=False,
+            # Exact-message tests predate time labels; tests/test_time_context.py covers them.
+            chat_time_labels=False,
         )
         # SQLite backup includes committed WAL data without copying another test's state.
         with closing(sqlite3.connect(migrated_database)) as source:
