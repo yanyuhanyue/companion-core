@@ -85,11 +85,19 @@ def test_capability_window_limit_includes_carried_predecessor_usage(core, tmp_pa
     assert any("MODEL_WINDOW_BUDGET_EXHAUSTED" in row["reason_codes"] for row in rows)
 
 
+@pytest.mark.parametrize("accounted", [False, True])
 def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, accounted,
 ):
     monkeypatch.setattr(SemanticIndex, "warmup", lambda self: None)
     case = reader_carry(core, tmp_path)
+    if accounted:
+        from companion import model_accounting
+        from tests.test_model_accounting import prepared
+
+        request, private = prepared(core, tmp_path, case.request_id)
+        result = model_accounting.record(core.store, core.settings, request, private, core.clock)
+        assert result["accounted_micro_usd"] > request["previous_accounted_micro_usd"]
     financial = core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,))
     config = BridgeConfig(owner_qq_id=core.settings.owner_qq_id,
         bot_qq_id=core.settings.bot_qq_id,

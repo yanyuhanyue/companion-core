@@ -10,14 +10,16 @@ from pathlib import Path
 
 import pytest
 
-from companion import budget, model_accounting, owner_authority, paid_budget
+from companion import budget, model_accounting, model_carry, owner_authority, paid_budget
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
 from companion.store import encode
-from tests.model_carry_support import MESSAGES, migrated
+from tests.model_carry_support import MESSAGES, migrated, stranded
 from tests.owner_model_fixtures import authorized_job
 from tests.test_model_carry_lifecycle import current_unknown
+from tests.test_model_renewal import renewal
 from tests.test_owner_authority import activate
+from tests.test_paid_model_gate import approved_live
 
 
 def proposal(tmp_path, request_id, *, operation="estimate-first", basis=None):
@@ -181,6 +183,32 @@ def test_no_operator_entry_can_close_an_unfinished_transport(core, tmp_path):
     assert snapshot(core) == before
 
 
+def test_accounting_requires_first_carry_and_preserves_its_prepared_receipt(core, tmp_path):
+    case = stranded(core, tmp_path)
+    assert not custody(core)["model_closures"]
+    before = snapshot(core)
+    with pytest.raises(CoreError, match="MODEL_ACCOUNTING_CLOSED_UNKNOWN_REQUIRED"):
+        prepared(core, tmp_path, case.request_id)
+    assert snapshot(core) == before
+    carried = model_carry.prepare(core.store, core.settings, case.request,
+                                  case.verified, core.clock())
+    request, private = prepared(core, tmp_path, case.request_id)
+    result = model_accounting.record(core.store, core.settings, request, private, core.clock)
+    assert result["accounted_micro_usd"] > carried["retained_micro_usd"]
+    assert model_carry.prepare(core.store, core.settings, case.request,
+                               case.verified, core.clock()) == carried
+    activate(core, case.policy, revision=2, operation="activate-repriced-first-carry")
+    assert core.store.one("SELECT billed_micro_usd,state FROM model_usage") == {
+        "billed_micro_usd": result["accounted_micro_usd"], "state": "UNKNOWN"}
+
+
+def test_local_active_mode_cannot_bootstrap_without_an_approved_carry(core, tmp_path):
+    approved_live(core, tmp_path, concurrency=1, concurrency_basis="local_active_attempts_v2")
+    with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_REQUIRED"):
+        authorized_job(core)
+    assert not core.store.one("SELECT 1 FROM model_admissions")
+
+
 def test_only_identical_operation_repairs_fsync_before_projection_crash(
     core, tmp_path, monkeypatch,
 ):
@@ -265,6 +293,26 @@ def test_same_policy_activation_keeps_repriced_original_liability(core, tmp_path
     activate(core, case.policy, revision=4, operation="resume-repriced-carry")
     assert core.store.one("SELECT billed_micro_usd,state FROM model_usage") == {
         "billed_micro_usd": result["accounted_micro_usd"], "state": "UNKNOWN"}
+
+
+@pytest.mark.parametrize("fresh_unknown", [False, True])
+def test_new_approval_renewal_preserves_accounting_and_original_closure(
+    core, tmp_path, fresh_unknown,
+):
+    case = migrated(core, tmp_path)
+    target = current_unknown(core) if fresh_unknown else case.request_id
+    request, private = prepared(core, tmp_path, target)
+    result = model_accounting.record(core.store, core.settings, request, private, core.clock)
+    before = core.store.rows("SELECT * FROM model_usage ORDER BY request_id")
+    value, policy, witness = renewal(core, case)
+    model_carry.prepare(core.store, core.settings, value, witness, core.clock())
+    activate(core, policy, revision=4, operation="activate-repriced-renewal")
+    assert core.store.rows("SELECT * FROM model_usage ORDER BY request_id") == before
+    view = custody(core)
+    assert view["model_accounting"][request["operation_id"]]["sha256"] == result["receipt_sha256"]
+    assert target in view["model_closures"]
+    assert model_carry.scope_windows(view, core.settings.paid_model.window_id) == [
+        "offline-window-1", "renewed-window-1", "successor-window-1"]
 
 
 def test_real_cli_in_independent_process_previews_and_records_once(core, tmp_path):
