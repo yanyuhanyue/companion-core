@@ -21,7 +21,9 @@ def store(tmp_path, monkeypatch):
 
 
 def records(capsys):
-    return [json.loads(line) for line in capsys.readouterr().out.splitlines()
+    captured = capsys.readouterr()
+    assert '"db_write_lock"' not in captured.out  # stdout stays clean for CLI receipts.
+    return [json.loads(line) for line in captured.err.splitlines()
             if '"db_write_lock"' in line]
 
 

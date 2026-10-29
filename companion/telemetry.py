@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -125,7 +126,8 @@ def emit_lock(site, *, wait_ms, held_ms, outcome):
         "outcome": outcome,
     }
     try:
-        print(json.dumps(record), flush=True)
+        # stderr: CLI commands print their receipts on stdout and parse them there.
+        print(json.dumps(record), file=sys.stderr, flush=True)
     except Exception:
         pass  # Instrumentation must not change the transaction's result.
 
