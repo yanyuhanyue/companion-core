@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 
-from companion import owner_authority
+from companion import owner_authority, shutdown
 from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.model import ModelClient
@@ -30,7 +30,7 @@ async def life_worker(settings):
             )
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
                 scan, deadline = wake.before_scan(), None
-                while True:
+                while not shutdown.requested():
                     selected = await selector.step()
                     hint = selected.result.next_deadline
                     if hint is not None and hint >= scan.started_at:

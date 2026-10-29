@@ -13,6 +13,7 @@ import httpx
 import uvicorn
 from pydantic import ValidationError
 
+from companion import shutdown
 from companion.backup import backup, restore
 from companion.config import Settings
 from companion.contracts import CoreError
@@ -35,7 +36,8 @@ async def worker(settings):
         try:
             maintenance_clock = Maintenance()
             with Wakeup(core.store, settings, "worker", core.clock) as wake:
-                while True:
+                # A stop request is honoured only here, between units.
+                while not shutdown.requested():
                     scan = wake.before_scan()
                     result = await run_native_unit(core.run_once, worker_id)
                     maintenance = not result.progressed and maintenance_clock.due()
@@ -140,6 +142,7 @@ def main():
         elif args.command == "worker":
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database):
+                shutdown.install()
                 asyncio.run(worker(settings))
         elif args.command == "status":
             from companion.ops_status import snapshot
@@ -173,12 +176,14 @@ def main():
             # writing diaries in parallel.
             with (single_worker(settings.database, "life-worker"),
                   single_worker(settings.database, "diary-worker")):
+                shutdown.install()
                 asyncio.run(life_worker(settings))
         elif args.command == "executive-worker":
             from companion.executive_worker import executive_worker
 
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database, "executive-worker"):
+                shutdown.install()
                 asyncio.run(executive_worker(settings))
         elif args.command == "backup":
             backup(settings.database, args.destination, os.environ["COMPANION_BACKUP_KEY"].encode(),
@@ -189,6 +194,7 @@ def main():
 
             logging.getLogger("httpx").setLevel(logging.WARNING)
             with single_worker(settings.database, "content-worker"):
+                shutdown.install()
                 asyncio.run(content_worker(settings))
         elif args.command == "restore":
             restore(
