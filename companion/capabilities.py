@@ -13,6 +13,7 @@ from companion import (
     cumulative,
     delegation,
     live_text,
+    model_carry,
     owner_authority,
     paid_budget,
     private_life,
@@ -47,7 +48,18 @@ def _observation(facts, now):
         return "UNOBSERVED", {}
 
 
-def _live_blocks(store, settings, now, *, cumulative_state=None):
+def _carry_view(store, settings):
+    """Reuse verified native closure; an absent/invalid proof grants no exception."""
+    if not owner_authority.required(store, settings) or not model_carry.active(settings):
+        return {}
+    try:
+        model_carry.supported(store, settings)
+        return paid_budget.journal(store, settings.paid_model, initialize=False)
+    except CoreError:
+        return {}
+
+
+def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None):
     approval = settings.live_text_window
     reasons = []
     if owner_authority.required(store, settings):
@@ -65,7 +77,11 @@ def _live_blocks(store, settings, now, *, cumulative_state=None):
     if store.one("SELECT 1 FROM runtime_meta WHERE key IN "
                  "('model_budget_blocked','model_budget_restore_required')"):
         reasons.append("BUDGET_RECONCILIATION_REQUIRED")
-    if store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN' LIMIT 1"):
+    carry_view = _carry_view(store, settings) if carry_view is None else carry_view
+    closed = sorted(carry_view.get("model_closures", {}))
+    if store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN'"
+                 + (" AND request_id NOT IN (" + ",".join("?" for _ in closed) + ")"
+                    if closed else "") + " LIMIT 1", closed):
         reasons.append("MODEL_USAGE_UNKNOWN")
     if store.one("SELECT 1 FROM model_usage m LEFT JOIN model_admissions a USING(request_id) "
                  "WHERE m.state='RESERVED' AND (a.request_id IS NULL OR a.lease_until<=?) LIMIT 1",
@@ -85,8 +101,11 @@ def _owner_blocks(store, settings, now, purpose=None):
     return []
 
 
-def _model_blocks(store, settings, now, *, live_blocks=None, cumulative_state=None):
-    reasons = list(live_blocks) if live_blocks is not None else _live_blocks(store, settings, now)
+def _model_blocks(store, settings, now, *, live_blocks=None, cumulative_state=None,
+                  carry_view=None):
+    carry_view = _carry_view(store, settings) if carry_view is None else carry_view
+    reasons = (list(live_blocks) if live_blocks is not None else
+               _live_blocks(store, settings, now, carry_view=carry_view))
     reasons += cloud_budget.capacity_blocks(store, settings, now)
     if settings.mode == "live":
         try:
@@ -94,7 +113,7 @@ def _model_blocks(store, settings, now, *, live_blocks=None, cumulative_state=No
         except CoreError as error:
             reasons.append(error.code)
         else:
-            reasons += _paid_capacity_blocks(store, settings, approval, now)
+            reasons += _paid_capacity_blocks(store, settings, approval, now, carry_view=carry_view)
     else:
         reasons.append("DEMO_MODE")
     return reasons + _cumulative_blocks(store, settings, now,
@@ -151,7 +170,7 @@ def _periods(settings, now):
                  for at in (day, day.replace(day=1)))
 
 
-def _paid_capacity_blocks(store, settings, approval, now):
+def _paid_capacity_blocks(store, settings, approval, now, *, carry_view=None):
     """Report exhausted native quotas without estimating or reserving another call."""
     reasons = []
     if store.one(
@@ -174,17 +193,23 @@ def _paid_capacity_blocks(store, settings, approval, now):
             reasons.append("MONTHLY_BUDGET_EXHAUSTED")
         if monthly >= approval.monthly_micro_usd:
             reasons.append("MODEL_MONTHLY_BUDGET_EXHAUSTED")
+    carry_view = _carry_view(store, settings) if carry_view is None else carry_view
+    windows = (model_carry.scope_windows(carry_view, approval.window_id)
+               if carry_view else [approval.window_id])
     window = store.one(
         "SELECT COUNT(*) calls,COALESCE(SUM(m.billed_micro_usd),0) amount "
-        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a.window_id=?",
-        (approval.window_id,),
+        "FROM model_admissions a JOIN model_usage m USING(request_id) WHERE a.window_id IN ("
+        + ",".join("?" for _ in windows) + ")", windows,
     )
     if (window["calls"] >= approval.window_calls
         or (not unlimited and window["amount"] >= approval.window_micro_usd)):
         reasons.append("MODEL_WINDOW_BUDGET_EXHAUSTED")
+    closed = sorted(carry_view.get("model_closures", {}))
     running = store.one(
         "SELECT COUNT(*) n FROM model_usage m JOIN model_admissions a USING(request_id) "
-        "WHERE m.state IN ('RESERVED','UNKNOWN')",
+        "WHERE m.state IN ('RESERVED','UNKNOWN')"
+        + (" AND m.request_id NOT IN (" + ",".join("?" for _ in closed) + ")" if closed else ""),
+        closed,
     )["n"]
     if running >= approval.concurrency:
         reasons.append("MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
@@ -551,8 +576,10 @@ def snapshot(store, settings, clock, *, model_tools=(), integrations=None):
     readers = readers if isinstance(readers, dict) else {}
     rows = []
     quota = cumulative.status(store, cfg, now)
-    live_blocks = _live_blocks(store, cfg, now, cumulative_state=quota)
-    model_blocks = _model_blocks(store, cfg, now, live_blocks=live_blocks, cumulative_state=quota)
+    carry_view = _carry_view(store, cfg)
+    live_blocks = _live_blocks(store, cfg, now, cumulative_state=quota, carry_view=carry_view)
+    model_blocks = _model_blocks(store, cfg, now, live_blocks=live_blocks, cumulative_state=quota,
+                                 carry_view=carry_view)
     send_blocks = _cumulative_blocks(store, cfg, now, dimensions=("send_attempts",), state=quota)
     life_pause = ["LIFE_PAUSED"] if _meta(store, "life_paused") == "1" else []
     native = owner_authority.required(store, cfg)
