@@ -35,6 +35,7 @@ from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.sources import ObservationSource
 from companion.style_distill_config import StyleDistillConfig
+from companion.style_live_config import StyleLiveConfig
 from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
 from companion.video_input import VideoInputPolicy
@@ -402,6 +403,10 @@ class Settings(BaseModel):
         default_factory=StyleDistillConfig,
         exclude_if=lambda value: value == StyleDistillConfig(),
     )
+    style_live: StyleLiveConfig = Field(
+        default_factory=StyleLiveConfig,
+        exclude_if=lambda value: value == StyleLiveConfig(),
+    )
     watch_ledger: WatchLedgerConfig = Field(
         default_factory=WatchLedgerConfig,
         exclude_if=lambda value: value == WatchLedgerConfig(),
@@ -697,6 +702,8 @@ class Settings(BaseModel):
                     data[field] = WatchLedgerConfig.model_validate_json(value)
                 elif field == "style_distill":
                     data[field] = StyleDistillConfig.model_validate_json(value)
+                elif field == "style_live":
+                    data[field] = StyleLiveConfig.model_validate_json(value)
                 elif field == "segmented_reply":
                     data[field] = SegmentedReplyConfig.model_validate_json(value)
                 else:

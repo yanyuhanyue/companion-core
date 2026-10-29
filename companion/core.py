@@ -481,7 +481,8 @@ class Core(Runtime):
         for snapshot in snapshots:
             try:
                 purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
-                           "voice": "voice", "diary": "diary", "images": "image"}.get(
+                           "voice": "voice", "diary": "diary", "images": "image",
+                           "style_observation": "expression"}.get(
                                snapshot["kind"], snapshot.get("purpose"))
                 if authority and purpose and purpose not in authority.policy.purposes:
                     raise CoreError("OWNER_AUTHORITY_PURPOSE_REQUIRED", 403)
@@ -491,6 +492,11 @@ class Core(Runtime):
                     current = self._expression_learning_reference(
                         job, self._affect_context(authority))
                     if current is None or current["snapshot"] != snapshot["proof"]:
+                        raise CoreError("PRIVACY_CHANGED", 409)
+                elif snapshot["kind"] == "style_observation":
+                    current = self._style_live_reference(
+                        job, json.loads(job["body_json"]).get("text", ""))
+                    if current is None or current["proof"] != snapshot["proof"]:
                         raise CoreError("PRIVACY_CHANGED", 409)
                 elif snapshot["kind"] == "affect":
                     self.affect.revalidate(snapshot["proof"])
@@ -557,6 +563,23 @@ class Core(Runtime):
                     "主人长期表达偏好参考（仅调整表达；短时反馈优先，不改变事实或权限）：\n"
                     + encode(selected)}, "source_event_ids": sorted(sources),
                 "snapshot": selected}
+
+    def _style_live_reference(self, job, text):
+        """Owner-approved B站 style candidates for this owner chat turn, or None."""
+        cfg, s = self.settings, self.store
+        if (not cfg.style_live.enabled or job["kind"] != "chat"
+            or not reply_revision.owner_input(s, job["event_id"])
+            or reply_revision.control_job(s, job) or private_life.strict(s, cfg)):
+            return None
+        from companion import style_observation
+
+        segment, used, decision = style_observation.live_segment(s, self.clock(), text)
+        if not used:
+            return None
+        return {"text": segment,
+                "source_event_ids": sorted({ref.event_id for c in used for ref in c.source_refs}),
+                "proof": {"surface_intent": decision.surface_intent,
+                          "candidates": [[c.candidate_id, c.approved_version] for c in used]}}
 
     def _memory_continuation(self, job, history, used_memory_ids=()):
         s, cfg, now = self.store, self.settings, self.clock()
@@ -683,6 +706,10 @@ class Core(Runtime):
             )
             rules += capability_rules
             dynamic_rules.append(capability_data)
+        style = self._style_live_reference(job, text) if permitted("expression") else None
+        if style:
+            # Per-turn guidance stays dynamic so the static prompt prefix is unchanged.
+            dynamic_rules.append(style["text"])
         if (job["kind"] == "chat" and cfg.segmented_reply is not None
             and cfg.segmented_reply.mode == "semantic"):
             from companion.reply_segments import SEMANTIC_RULES
@@ -948,9 +975,13 @@ class Core(Runtime):
                 actual_sources.add(item["event_id"])
                 if item.get("article_event_id"):
                     actual_sources.add(item["article_event_id"])
+        if style:
+            actual_sources.update(style["source_event_ids"])
         reply_revision.remember_sources(s, job, actual_sources)
         retained = [proof for reference, proof in reference_proofs
                     if any(message is reference for message in messages)]
+        if style:
+            retained.append({"kind": "style_observation", "proof": style["proof"]})
         if authority and job["kind"] == "chat":
             selected = [source for source, turn in zip(sources, turns, strict=True)
                         if any(message is turn[0] for message in messages)]

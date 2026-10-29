@@ -7,8 +7,9 @@
 `companion/style_observation.py`：
 
 - **模式：** 只有 `OFF`（默认）和 `SHADOW` 两种，没有 `ENABLED`。
-  - 不接入任何运行时代码；测试会检查 `companion/` 下没有其他模块引用它。
-  - 线上启用要在 ADR 中另行设计：必须走 Context Planner 和付费准入，并且每轮重新校验来源、版本、主人权限和停止状态。
+  - SHADOW 本身不接入运行时。`companion/` 下唯一的引用是 `core.py`，它只在另一个开关 `style_live` 打开时使用（默认关闭，见 05 的"线上使用"）。测试会检查没有其他模块引用它。
+  - 线上使用时复用同一套选择和限额，追加在系统消息动态部分末尾，随整条请求走 Context Planner 和付费准入；需要 `expression` purpose，发送前重新校验候选版本和来源。
+  - 打开 `style_live` 前，主人应先用 `scripts/style_shadow_samples.py` 看离线样例，并参考 04 的评测结果。
 - **`shadow_payload(messages, config, candidates, ...)`：** 先套 `participation_v2`，在 `OFF` 时就停在这一步。在 `SHADOW` 时，再把观察段附加到系统消息末尾。
   - `messages[1:]` 逐字节不变。
   - 不改 `PARTICIPATION_V1`/`V2` 的文本，冻结哈希测试照旧。
@@ -35,7 +36,7 @@
 - 最多 3 条且不超过单位上限；
 - 结果确定；
 - 复验能拒绝失效的候选；
-- 模块没有接入运行时。
+- 除 `style_live` 外模块没有接入运行时。
 
 ```
 python -m pytest -q tests/test_bili_style_observation.py tests/test_bili_style_candidates.py \
