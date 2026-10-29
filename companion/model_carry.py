@@ -6,6 +6,7 @@ refund a model attempt and never authorize replaying its original input or tool.
 
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 from companion import paid_budget
@@ -84,12 +85,75 @@ def _validate_close(store, row, latest):
         or financial["state"] != "UNKNOWN"
         or row["settlement_sha256"] != paid_budget.sha(financial)
         or any(row[k] != v for k, v in _tuple(admission).items())
-        or not admission["io_started_at"]
-        or timestamp(row["closed_at"]) < timestamp(admission["io_started_at"])
+        or not (_unstarted(admission, financial) if not admission["io_started_at"]
+                else timestamp(row["closed_at"]) >= timestamp(admission["io_started_at"]))
     ):
         raise ValueError("model local closure binding")
     if json.loads(admission["snapshot_json"]).get("concurrency_basis") != wire.MODE:
         raise ValueError("local closure requires explicit new approval")
+
+
+def _unstarted(admission, financial):
+    # Provider I/O is journaled (`io_started`) before any HTTP request; the settle record
+    # copies the admission's io_started_at. Both absent proves nothing was sent.
+    return (admission["io_started_at"] is None and "io_started_at" in financial
+            and financial["io_started_at"] is None)
+
+
+def close_unstarted(store, settings, request_id, now, *, commit):
+    """Close one UNKNOWN whose original journal proves provider I/O never began.
+
+    Background yield and similar refusals before `io_started` used to settle such an
+    attempt UNKNOWN. It still occupies the single execution slot and blocks every
+    resume. The closure frees the slot only: the outcome stays UNKNOWN at its retained
+    amount, every budget keeps counting it, and its logical request can never retry.
+    Offline under STOP, with the worker locks held by the caller.
+    """
+    from companion import owner_authority
+
+    if not active(settings):
+        raise CoreError("MODEL_LOCAL_CLOSE_REQUIRES_V2", 409)
+    supported(store, settings)
+    with store.transaction():
+        head = owner_authority._latest(store)
+        if not head or head["state"] != "STOPPED":
+            raise CoreError("OWNER_AUTHORITY_STOP_REQUIRED", 409)
+        admission = store.one("SELECT * FROM model_admissions WHERE request_id=?", (request_id,))
+        usage = store.one("SELECT state FROM model_usage WHERE request_id=?", (request_id,))
+        if not admission or not usage or usage["state"] != "UNKNOWN":
+            raise CoreError("MODEL_UNSTARTED_CLOSE_NOT_ELIGIBLE", 409)
+        custody = SimpleNamespace(journal_path=admission["journal_path"])
+        view = paid_budget.journal(store, custody, allow_settlement=True)
+        financial = view["model_latest"].get(request_id)
+        raw = Path(admission["journal_path"]).read_bytes()
+        started = any(
+            record.get("kind") == "io_started" and record.get("request_id") == request_id
+            for record in map(json.loads, filter(None, raw.splitlines()))
+        )
+        if (started or not financial or financial["kind"] != "settle"
+                or financial["state"] != "UNKNOWN" or not _unstarted(admission, financial)
+                or request_id in view["blocked_request_ids"]
+                or request_id in view["model_closures"]):
+            raise CoreError("MODEL_UNSTARTED_CLOSE_NOT_ELIGIBLE", 409)
+        if json.loads(admission["snapshot_json"]).get("concurrency_basis") != wire.MODE:
+            raise CoreError("MODEL_LOCAL_CLOSE_REQUIRES_V2", 409)
+        if store.one(
+            "SELECT 1 FROM runtime_meta WHERE key IN "
+            "('model_budget_blocked','model_budget_restore_required',"
+            "'cloud_budget_restore_required')"
+        ):
+            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        record = {
+            "kind": CLOSE,
+            "version": 1,
+            **_tuple(admission),
+            "settlement_sha256": paid_budget.sha(financial),
+            "closed_at": now,
+        }
+        if commit:
+            paid_budget.journal(store, custody, record, allow_settlement=True)
+    return {"request_id": request_id, "committed": commit,
+            "retained_micro_usd": financial["minimum_micro_usd"], "record": record}
 
 
 def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closures, carries):

@@ -299,3 +299,24 @@ Do not roll back to an old database or journal prefix: new responsibilities and 
 the conservative rollback. Returning to old bytes requires proving that no new
 responsibility or control record has crossed that boundary. Source retention and
 original image expiry are never extended by this operation.
+
+## Closing an attempt that never started I/O
+
+A refusal after admission but before `io_started` (for example a background yield,
+fixed in #212) used to settle the attempt `UNKNOWN` with `io_started_at` null. No local
+closure follows, so the attempt keeps the single `local_active_attempts_v2` execution
+slot (every later call fails `MODEL_PROVIDER_CONCURRENCY_EXHAUSTED`) and every resume
+fails `OWNER_MODEL_CARRY_NOT_QUIESCENT`.
+
+```sh
+python -m companion close-unstarted-model-attempt --request-id REQUEST_ID
+python -m companion close-unstarted-model-attempt --request-id REQUEST_ID --commit
+```
+
+The command runs offline with the five worker locks, requires the latest authority to
+be `STOPPED`, and accepts only an `UNKNOWN` whose admission and settle record both lack
+`io_started_at` and whose original journal has no `io_started` record for it. Without
+`--commit` it only prints the record. With it, it appends the existing
+`model_local_close` kind. The outcome stays `UNKNOWN` at its retained amount in every
+total, and the logical request still cannot retry. Older journal readers reject this
+closure, so run it only with the old Core stopped and start the new image afterwards.
