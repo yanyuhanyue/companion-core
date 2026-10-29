@@ -322,7 +322,9 @@ def manifest(store, settings, authority, successor_window, witness, view):
                 **_tuple(row),
                 "logical_request_id": row["logical_request_id"],
                 "reserved_micro_usd": row["reserved_micro_usd"],
-                "minimum_micro_usd": row["billed_micro_usd"],
+                # Carry binds the original settlement; later accounting receipts
+                # independently retain any larger booked responsibility.
+                "minimum_micro_usd": financial["minimum_micro_usd"],
                 "settlement_sha256": paid_budget.sha(financial),
                 "tool_sha256": digest(tools),
             }

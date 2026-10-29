@@ -265,14 +265,20 @@ def _live_record(row, digest, current, seen):
 
 
 def journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
-            resolution_replay=None, model_control_replay=None):
+            resolution_replay=None, model_control_replay=None, accounting_replay=None):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
     lower bounds survive outside the DB. A mismatch blocks, never silently repairs.
     """
     try:
-        from companion import cumulative, delivery_reconciliation, model_carry, owner_authority
+        from companion import (
+            cumulative,
+            delivery_reconciliation,
+            model_accounting,
+            model_carry,
+            owner_authority,
+        )
 
         path = Path(approval.journal_path)
         identity = store.one("SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'")
@@ -305,6 +311,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         lifecycle, seen, managed = None, set(), False
         account = cumulative.empty_state()
         model_closures, model_carries, model_controls = {}, {}, {}
+        accounting = {}
         for index, row in enumerate(records):
             digest = row.pop("sha256")
             heads.add(digest)
@@ -319,6 +326,10 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 ):
                     raise ValueError("journal identity")
             else:
+                if row.get("kind") == model_accounting.KIND:
+                    model_accounting.fold(store, row, digest, identity["value"], latest,
+                                          model_closures, blocked, accounting)
+                    continue
                 if row.get("kind") in model_carry.KINDS:
                     model_carry.fold(store, row, digest, identity["value"], authorities, latest,
                                      blocked, model_closures, model_carries)
@@ -363,6 +374,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     measurements[row["request_id"]] = proof["sha256"]
                 latest[row["request_id"]] = row
         model_carry.validate_projection(store, model_controls, replay=model_control_replay)
+        accounting_pending = model_accounting.validate_projection(store, accounting,
+                                                                   accounting_replay)
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
         expected = cumulative.binding(account, path)
@@ -465,7 +478,11 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     lifecycle, identity["value"], authorities,
                 )
             if not authority_record:
-                if record["kind"] in model_carry.KINDS:
+                if record["kind"] == model_accounting.KIND:
+                    model_accounting.fold(store, {k: v for k, v in row.items() if k != "sha256"},
+                        row["sha256"], identity["value"], latest, model_closures, blocked,
+                        accounting)
+                elif record["kind"] in model_carry.KINDS:
                     model_carry.fold(store, {k: v for k, v in row.items() if k != "sha256"},
                         row["sha256"], identity["value"], authorities, latest, blocked,
                         model_closures, model_carries)
@@ -502,6 +519,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 "blocked_request_ids": sorted(blocked), "send_resolutions": resolutions,
                 "model_closures": model_closures, "model_carries": model_carries,
                 "model_controls": model_controls,
+                "model_accounting": accounting,
+                "model_accounting_pending": accounting_pending,
                 "model_latest": latest,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
