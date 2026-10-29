@@ -12,6 +12,8 @@ from source_reader.protocol import decode_lease, exact_hosts
 from source_reader.reading import read_observation
 from source_reader.web import WebHTTP, WebReader
 
+VALIDATION_TIMEOUT = 8.0
+
 
 def validation_error(response):
     try:
@@ -66,10 +68,11 @@ async def tick(
                 raise ReadFailure("STALE_READER_LEASE")
             if snapshot(required=True) != current_grant:
                 raise ReadFailure("SOURCE_GRANT_REVISION_CHANGED")
-            async with asyncio.timeout(min(2.0, remaining)):
-                response = await core_client.post(
-                    path + "/validate", json=binding, timeout=min(2.0, remaining),
-                )
+            # Core answers from a SQLite write transaction; under lock contention that
+            # alone can take seconds, which must not turn into a cancelled read.
+            wait = min(VALIDATION_TIMEOUT, remaining)
+            async with asyncio.timeout(wait):
+                response = await core_client.post(path + "/validate", json=binding, timeout=wait)
             if response.status_code != 200:
                 raise ReadFailure(validation_error(response))
             try:

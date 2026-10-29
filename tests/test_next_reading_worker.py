@@ -291,3 +291,17 @@ def test_grant_changed_after_lease_is_rejected_before_provider_io(tmp_path):
         assert not backend.requests and not core.results
 
     run(scenario())
+
+
+def test_slow_core_validation_under_lock_contention_does_not_cancel_the_read(monkeypatch):
+    # Production saw one validate take 2.1 s while Core waited for its SQLite write lock.
+    backend, _ = public_web(monkeypatch, web_response())
+
+    async def validate(count):
+        if count == 1:
+            await asyncio.sleep(2.5)
+        return httpx.Response(200, json={"valid": True})
+
+    core = MockCore(lease(), validate)
+    assert run(web_tick(core))
+    assert core.results[0]["status"] == "SUCCESS" and len(backend.requests) == 1
