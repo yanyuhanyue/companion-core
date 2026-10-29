@@ -1,5 +1,7 @@
 import json
 import sqlite3
+import sys
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -38,6 +40,22 @@ def migrate(path, revision="head"):
     command.upgrade(cfg, revision)
 
 
+def _lock_report(site, started, locked, finished, outcome):
+    """Content-free timing of one write transaction, reported only when it is slow."""
+    from companion.telemetry import LOCK_REPORT_MS, emit_lock
+
+    wait_ms = (locked - started) * 1000
+    held_ms = 0 if finished is None else (finished - locked) * 1000
+    if wait_ms + held_ms < LOCK_REPORT_MS:
+        return
+    code, line = site
+    try:
+        emit_lock(f"{Path(code.co_filename).stem}:{code.co_name}:{line}", wait_ms=wait_ms,
+                  held_ms=held_ms, outcome=outcome)
+    except Exception:
+        pass  # Instrumentation must not replace the transaction's result or exception.
+
+
 class Store:
     def __init__(self, path):
         self.path = path
@@ -67,11 +85,21 @@ class Store:
 
     @contextmanager
     def transaction(self):
-        self.db.execute("BEGIN IMMEDIATE")
+        caller = sys._getframe(2)  # 0: this generator, 1: contextlib, 2: the `with` site
+        site = (caller.f_code, caller.f_lineno)
+        started = time.perf_counter()
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            _lock_report(site, started, time.perf_counter(), None, "BUSY")
+            raise
+        locked = time.perf_counter()
         self._budget_stops = set()
+        outcome = "ROLLBACK"
         try:
             yield self
             self.db.commit()
+            outcome = "COMMIT"
         except BaseException:
             self.db.rollback()
             if self._budget_stops:
@@ -88,6 +116,7 @@ class Store:
             raise
         finally:
             self._budget_stops = None
+            _lock_report(site, started, locked, time.perf_counter(), outcome)
 
     def retain_budget_stop(self, journal_id, head_sha256):
         value = ("model_budget_stop:" + head_sha256, journal_id)
