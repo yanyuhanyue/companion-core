@@ -133,8 +133,16 @@ def read(store, settings, capture, *, model_requests=None):
             f"json_extract(m.value,'$.job_id') IN ({placeholders or 'NULL'}) ELSE 0 END "
             "ORDER BY o.message_id LIMIT ?", (event_id, event_id, *ids, maximum + 1))
         _deliveries(store, deliveries, job_map, erased=erased)
-        reads = store.rows("SELECT item_id AS id,state FROM content_items "
-            "WHERE owner_event_id=? ORDER BY item_id LIMIT ?", (event_id, maximum + 1))
+        # Native link discovery does not dispatch a read. Retain the row and its
+        # identity while distinguishing pristine declarations from admitted work.
+        reads = store.rows("SELECT item_id AS id,CASE WHEN ? AND kind='link' "
+            "AND state='WAITING' AND redacted=0 AND read_request_id IS NULL "
+            "AND lease_token IS NULL AND lease_until IS NULL AND started_at IS NULL "
+            "AND reserved_bytes=0 AND usage_request_id IS NULL AND source_event_id IS NULL "
+            "AND output_event_id IS NULL AND media_sha256='' AND fingerprint='' "
+            "AND error_code IS NULL THEN 'DISCOVERED' ELSE state END AS state "
+            "FROM content_items WHERE owner_event_id=? ORDER BY item_id LIMIT ?",
+            (settings.owner_runtime.mode == "ENABLED", event_id, maximum + 1))
         reads.extend(store.rows("SELECT request_id AS id,state FROM exploration_requests WHERE "
             "request_id IN (SELECT read_request_id FROM content_items WHERE owner_event_id=?) "
             "ORDER BY request_id LIMIT ?", (event_id, maximum + 1)))
