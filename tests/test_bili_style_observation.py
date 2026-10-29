@@ -98,6 +98,23 @@ def test_closing_only_uses_closing_candidates():
     assert receipt["candidates"] == [[closing.candidate_id, 1]]
 
 
+def test_closing_with_a_reason_still_counts_as_closing():
+    casual, ids = approved()
+    for text in ("先这样，我去洗澡了", "我去睡了", "晚安啦"):
+        assert payload([casual], text=text, live_ids=ids)[1]["candidates"] == []
+
+
+def test_serious_topics_never_get_humor_guidance():
+    humor, ids = approved()
+    calm, more = approved({**GOOD, "context_tags": ["emotion"],
+                           "response_action": "先认真接住对方此刻的担心"},
+                          [pair_rows("evt_b", OTHER, "今天去医院拿了报告单",
+                                     "等结果的时候真的很难熬")])
+    text = "复查结果出来了，医生说要再观察三个月"
+    _, receipt = payload([humor, calm], text=text, live_ids=ids | more)
+    assert receipt["candidates"] == [[calm.candidate_id, 1]]
+
+
 def test_at_most_three_items_and_hard_unit_cap():
     cands, ids = [], set()
     for i in range(5):

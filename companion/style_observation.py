@@ -8,6 +8,7 @@ abstract guidance. No suitable candidate means no segment, never filler.
 
 import copy
 import hashlib
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -33,12 +34,21 @@ class StyleObservationConfig(BaseModel):
     mode: Literal["OFF", "SHADOW"] = "OFF"
 
 
-def wanted(decision):
+# The live intent cues only match a bare closing; here a closing may carry a reason.
+CLOSING = re.compile(r"^(先这样|先聊到这|先不聊了|晚安|回头聊|我先走了|我[去先].{1,8}了)")
+# Serious topics never get humor-style guidance, whatever the candidate claims.
+SERIOUS = re.compile(r"医生|医院|复查|检查结果|住院|手术|去世|葬礼|分手|离婚|失业|裁员|"
+                     r"抑郁|焦虑|想哭|哭了|自残|不想活")
+
+
+def wanted(decision, text=""):
     """Tags a candidate needs for this turn; help and plain acknowledgements get none."""
-    if decision.surface_intent == "closing":
+    if decision.surface_intent == "closing" or CLOSING.match(text.strip()):
         return {"closing"}
     if decision.surface_intent in {"help", "acknowledgement"}:
         return set()
+    if SERIOUS.search(text):
+        return {"complaint", "emotion"}
     return CASUAL
 
 
@@ -47,11 +57,13 @@ def line(candidate):
             f"适合：{candidate.appropriate_when}；避免：{candidate.avoid_when}。")
 
 
-def select(candidates, decision, now, live_event_ids):
-    tags = wanted(decision)
+def select(candidates, decision, now, live_event_ids, text=""):
+    tags = wanted(decision, text)
+    serious = bool(SERIOUS.search(text))
     usable = [c for c in candidates
               if style_candidates.still_usable(c, now, live_event_ids)
-              and not c.risk_flags and tags & set(c.context_tags)]
+              and not c.risk_flags and tags & set(c.context_tags)
+              and not (serious and "light_humor" in c.context_tags)]
     # Deterministic: most specific match first, then id.
     usable.sort(key=lambda c: (-len(tags & set(c.context_tags)), c.candidate_id))
     return usable[:MAX_ITEMS]
@@ -77,7 +89,8 @@ def shadow_payload(messages, config, candidates, *, current_text, now, live_even
     config = config or StyleObservationConfig()
     result = apply_strategy(messages, "participation_v2")
     decision = decide(_policy(), current_text)
-    selected = select(candidates, decision, now, live_event_ids) if config.mode == "SHADOW" else []
+    selected = (select(candidates, decision, now, live_event_ids, current_text)
+                if config.mode == "SHADOW" else [])
     text, used = segment(selected)
     result = copy.deepcopy(result)
     result[0]["content"] += text

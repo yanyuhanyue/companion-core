@@ -20,6 +20,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from companion import style_observation  # noqa: E402
 from companion.config import Settings  # noqa: E402
 from companion.contracts import Candidate, InboundEvent  # noqa: E402
 from companion.conversation_policy import PARTICIPATION_V1, apply_strategy  # noqa: E402
@@ -31,6 +32,7 @@ from companion.evaluation_measurement import (  # noqa: E402
 from companion.model import model_payload  # noqa: E402
 from companion.reply_segments import SegmentedReplyConfig  # noqa: E402
 from companion.store import after, encode, migrate  # noqa: E402
+from companion.style_observation import StyleObservationConfig, shadow_payload  # noqa: E402
 from companion.transport import enqueue  # noqa: E402
 
 DATASET = ROOT / "tests/fixtures/r1_conversation_cases.json"
@@ -168,14 +170,36 @@ def build_context(case, empty_database, directory):
         return settings, messages
 
 
-TREATMENTS = ("participation_v1", "participation_v2")
+STYLE = "participation_v2_bili_style"
+TREATMENTS = ("participation_v1", "participation_v2", STYLE)
+# CC-STYLE-04: the observation segment is compared against v2 itself, not baseline.
+CONTROLS = {STYLE: "participation_v2"}
+AXES = ("naturalness", "desire_to_continue", "deliberateness", "factual_accuracy")
+STYLE_AXES = ("naturalness", "desire_to_continue", "deliberateness", "context_fit",
+              "forced_meme", "factual_accuracy")
+VERDICTS = ("WIN", "TIE", "LOSE", "BOTH_BAD", "UNSCORABLE")
 
 
 def plan_treatment(plan):
     treatment = plan.get("treatment", "participation_v1")
     if treatment not in TREATMENTS or plan.get("treatment") == "participation_v1":
         raise ValueError("Unknown treatment strategy")
+    if plan.get("control", "baseline") != CONTROLS.get(treatment, "baseline"):
+        raise ValueError("Unknown treatment control")
     return treatment
+
+
+def plan_control(plan):
+    return CONTROLS.get(plan_treatment(plan), "baseline")
+
+
+def arm(base, strategy, case, style):
+    """Return (messages, style receipt). Only the system message differs between arms."""
+    if strategy != STYLE:
+        return apply_strategy(base, strategy), None
+    return shadow_payload(base, StyleObservationConfig(mode="SHADOW"), style["candidates"],
+                          current_text=case["inputs"]["text"], now=style["now"],
+                          live_event_ids=style["live_event_ids"])
 
 
 def measurement_defaults():
@@ -185,7 +209,8 @@ def measurement_defaults():
 
 
 def prepare(cases, output, *, repetitions=1, measurement_settings=None,
-            treatment="participation_v1"):
+            treatment="participation_v1", style=None):
+    """`style` = {"candidates", "now", "live_event_ids"} only for the STYLE treatment."""
     output = Path(output).resolve()
     if not output.is_relative_to(ROOT / ".local"):
         raise ValueError("Experiment artifacts must stay in this worktree's .local directory")
@@ -193,6 +218,9 @@ def prepare(cases, output, *, repetitions=1, measurement_settings=None,
         raise ValueError("Use one to three predeclared repetitions")
     if treatment not in TREATMENTS:
         raise ValueError("Unknown treatment strategy")
+    if (treatment == STYLE) != (style is not None):
+        raise ValueError("The bili-style treatment needs its reviewed candidates, others none")
+    control = CONTROLS.get(treatment, "baseline")
     if output.exists():
         raise FileExistsError(output)
     counting = measurement_settings or measurement_defaults()
@@ -210,13 +238,14 @@ def prepare(cases, output, *, repetitions=1, measurement_settings=None,
             directory.mkdir()
             settings, base = build_context(case, empty, directory)
             for repeat in range(repetitions):
-                order = ("baseline", treatment) if (index + repeat) % 2 == 0 else (
-                    treatment, "baseline")
+                order = (control, treatment) if (index + repeat) % 2 == 0 else (
+                    treatment, control)
                 for strategy in order:
-                    messages = apply_strategy(base, strategy)
+                    messages, receipt = arm(base, strategy, case, style)
                     payload = model_payload(counting, messages, "evaluation")
+                    extra = {"style_receipt": receipt} if receipt is not None else {}
                     records.append({"case": case["name"], "repetition": repeat,
-                                    "strategy": strategy, "metadata": case["metadata"],
+                                    "strategy": strategy, "metadata": case["metadata"], **extra,
                                     "payload": payload, "payload_sha256": sha(payload),
                                     "shared_context_sha256": sha(messages[1:]),
                                     "planned_max_output_tokens": settings.max_output_tokens,
@@ -236,11 +265,39 @@ def prepare(cases, output, *, repetitions=1, measurement_settings=None,
     if treatment != "participation_v1":
         # Absent for v1 so earlier plans and their digests stay valid.
         plan["treatment"] = treatment
+    if treatment == STYLE:
+        applied = {r["case"] for r in records if r.get("style_receipt", {}).get("candidates")}
+        if not applied:
+            raise ValueError("No reviewed candidate applies to any case; nothing to compare")
+        plan["control"] = control
+        plan["style_cases_applied"] = len(applied)
+        plan["style_candidates"] = sorted(
+            [c.candidate_id, c.approved_version] for c in style["candidates"])
     plan["plan_sha256"] = sha(plan)
     output.mkdir(parents=True, exist_ok=False)
     (output / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
                                       encoding="utf-8")
     return plan
+
+
+def check_style(plan, expected, control):
+    """The treatment adds only a bounded observation segment after the v2 system text."""
+    for (case, repeat, strategy), row in expected.items():
+        if strategy == control:
+            if "style_receipt" in row:
+                raise ValueError("Control requests carry no style segment")
+            continue
+        base = expected[(case, repeat, control)]["payload"]["messages"][0]["content"]
+        system = row["payload"]["messages"][0]["content"]
+        receipt = row.get("style_receipt") or {}
+        added = system[len(base):]
+        if (not system.startswith(base) or receipt.get("mode") != "SHADOW"
+            or (added and not added.startswith(style_observation.HEADER))
+            or bool(added) != bool(receipt.get("candidates"))
+            or receipt.get("added_units") != style_observation.units(added)
+            or receipt["added_units"] > style_observation.MAX_UNITS
+            or any(ref not in plan["style_candidates"] for ref in receipt["candidates"])):
+            raise ValueError("Style segment does not match its reviewed candidates")
 
 
 def validate_plan(plan, measurement_settings=None):
@@ -250,7 +307,7 @@ def validate_plan(plan, measurement_settings=None):
         raise ValueError("Plan changed after preparation")
     if plan.get("schema_version") not in {1, 2}:
         raise ValueError("Unsupported experiment plan version")
-    treatment = plan_treatment(plan)
+    treatment, control = plan_treatment(plan), plan_control(plan)
     expected = {(r["case"], r["repetition"], r["strategy"]): r for r in plan["requests"]}
     if not expected or len(expected) != len(plan["requests"]):
         raise ValueError("Empty or duplicate planned requests")
@@ -258,16 +315,18 @@ def validate_plan(plan, measurement_settings=None):
     for (case, repeat, strategy), request in expected.items():
         payload = request["payload"]
         messages = payload.get("messages", [])
-        if (strategy not in {"baseline", treatment} or len(messages) < 2
+        if (strategy not in {control, treatment} or len(messages) < 2
             or messages[0].get("role") != "system"
             or sha(payload) != request["payload_sha256"]
             or sha(messages[1:]) != request["shared_context_sha256"]):
             raise ValueError("Planned payload or shared input mismatch")
         pair = pairs.setdefault((case, repeat), {})
         pair[strategy] = {**payload, "messages": messages[1:]}
-    if any(set(pair) != {"baseline", treatment}
-           or pair["baseline"] != pair[treatment] for pair in pairs.values()):
+    if any(set(pair) != {control, treatment}
+           or pair[control] != pair[treatment] for pair in pairs.values()):
         raise ValueError("Comparison requires the same input and model parameters")
+    if treatment == STYLE:
+        check_style(plan, expected, control)
     if plan["schema_version"] == 2:
         settings = measurement_settings or measurement_defaults()
         profile = measurement_profile(settings)
@@ -281,7 +340,7 @@ def validate_plan(plan, measurement_settings=None):
             or set(expected) != {(case, repeat, strategy)
                 for case in {key[0] for key in expected}
                 for repeat in range(plan["repetitions"])
-                for strategy in ("baseline", treatment)}):
+                for strategy in (control, treatment)}):
             raise ValueError("Plan scope or budget inputs changed")
         costs = []
         for row in expected.values():
@@ -327,17 +386,21 @@ def blind_export(plan, observations, output, seed=20261024, *, measurement_setti
     if set(results) != set(expected):
         raise ValueError("All declared observations are required, including failures")
     pairs = sorted({key[:2] for key in expected})
+    style = plan_treatment(plan) == STYLE
+    axes = STYLE_AXES if style else AXES
+    # A/B wording: WIN means A is better; the mapping stays private until scoring.
+    verdicts = {"overall_choices": list(VERDICTS)} if style else {}
     positions = [index % 2 for index in range(len(pairs))]
     random.Random(seed).shuffle(positions)
     ballot, mapping = [], []
     for index, ((case, repeat), position) in enumerate(zip(pairs, positions, strict=True)):
-        variants = ["baseline", plan_treatment(plan)]
+        variants = [plan_control(plan), plan_treatment(plan)]
         if position:
             variants.reverse()
         responses = [results[(case, repeat, variant)] for variant in variants]
         pair_id = f"pair_{index + 1:03}"
         ballot.append({"pair_id": pair_id, "case": case, "repetition": repeat,
-                       "input": expected[(case, repeat, "baseline")]["payload"]["messages"][1:],
+                       "input": expected[(case, repeat, variants[0])]["payload"]["messages"][1:],
                        "A": responses[0]["text"], "B": responses[1]["text"],
                        "A_state": responses[0]["state"], "B_state": responses[1]["state"],
                        "scorable": all(row["state"] == "SETTLED" and row["text"] and (
@@ -347,10 +410,8 @@ def blind_export(plan, observations, output, seed=20261024, *, measurement_setti
                                and row.get("text_redacted") is False
                                and row["evidence_type"] == "MODEL_RESPONSE"))
                            for row in responses),
-                       "ratings": {axis: None for axis in (
-                            "naturalness", "desire_to_continue", "deliberateness",
-                            "factual_accuracy")},
-                       "overall": None, "failure_notes": ""})
+                       "ratings": {axis: None for axis in axes},
+                       "overall": None, **verdicts, "failure_notes": ""})
         mapping.append({"pair_id": pair_id, "A": variants[0], "B": variants[1]})
     output = Path(output).resolve()
     if not output.is_relative_to(ROOT / ".local"):
@@ -369,7 +430,7 @@ def main():
     prepare_parser.add_argument("--dataset", type=Path, default=DATASET)
     prepare_parser.add_argument("--private-baseline", type=Path)
     prepare_parser.add_argument("--repetitions", type=int, default=1)
-    prepare_parser.add_argument("--treatment", choices=TREATMENTS, default="participation_v1")
+    prepare_parser.add_argument("--treatment", choices=TREATMENTS[:2], default="participation_v1")
     prepare_parser.add_argument("--output", type=Path, required=True)
     prepare_parser.add_argument("--measurement-settings", type=Path,
                                 help="Explicit Settings JSON used only for counting/prices")
