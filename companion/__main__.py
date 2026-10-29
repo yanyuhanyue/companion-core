@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 import httpx
@@ -18,7 +18,7 @@ from companion.config import Settings
 from companion.contracts import CoreError
 from companion.model import ModelClient
 from companion.runtime import Runtime
-from companion.store import encode, migrate, uid, utcnow
+from companion.store import Store, encode, migrate, uid, utcnow
 from companion.worker_lock import single_worker
 from companion.worker_loop import Recorder
 from companion.worker_schedule import run_native_unit
@@ -98,6 +98,11 @@ def main():
     correction = sub.add_parser("reconcile-video-rates")
     correction.add_argument("--request", required=True)
     correction.add_argument("--request-sha256", required=True)
+    for name in ("preview-model-accounting", "record-model-accounting"):
+        accounting = sub.add_parser(name)
+        accounting.add_argument("--request", required=True)
+        accounting.add_argument("--request-sha256", required=True)
+        accounting.add_argument("--evidence", required=True)
     for name in ("preview-model-carry", "carry-closed-model-attempts"):
         carry = sub.add_parser(name)
         carry.add_argument("--request", required=True)
@@ -215,6 +220,14 @@ def main():
                         print(encode(model_carry.prepare(runtime.store, settings, request,
                                                        verified, utcnow(),
                                                        request_sha256=args.request_sha256)))
+        elif args.command in {"preview-model-accounting", "record-model-accounting"}:
+            from companion import model_accounting
+
+            request = model_accounting.load_request(args.request, args.request_sha256)
+            action = (model_accounting.preview if args.command == "preview-model-accounting"
+                      else model_accounting.record)
+            with closing(Store(settings.database)) as store:
+                print(encode(action(store, settings, request, args.evidence)))
         elif args.command == "reconcile-video-rates":
             from companion.video_accounting import reconcile
 
