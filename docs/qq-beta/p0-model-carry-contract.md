@@ -93,6 +93,13 @@ checking only the final displayed pause reason is insufficient.
 Historical UNKNOWN and STARTED remain present. New window counters include the
 predecessor's full budget scope; cumulative financial identities are never rewritten.
 
+Capability readiness uses the same verified `model_closures` and predecessor window
+scope as native model admission. A carried or locally closed UNKNOWN does not occupy
+an execution slot or prevent a new authorized Reader request. Its original logical
+request still cannot retry, and its amount remains in all applicable totals. Missing
+or invalid journal proof, an unclosed UNKNOWN, STOP, expired source grants and exhausted
+budgets still block readiness. This projection performs no settlement or I/O.
+
 Integration order is original STOP -> real API/all-model-worker exits -> controlled
 offline carry append -> new API only -> authenticated Bridge carry prepare -> exact
 authority preview/activate -> Bridge handoff -> workers/new independent signed input
