@@ -119,12 +119,27 @@ def _source(runtime, records, message_id):
         "original_result_sha256": wire.digest(body) if body is not None else None, **original}
 
 
+def stop_chain(authority, stopped):
+    """Core's STOP for `authority`, or the last STOP of a Core-proven unbound chain after it.
+
+    The direct STOP keeps the same policy; Core only reports a longer chain once every
+    intermediate ACTIVE revision has bound no work.
+    """
+    if not isinstance(stopped, dict) or set(stopped) != set(authority):
+        return False
+    distance = stopped["revision"] - authority["revision"]
+    return (type(stopped["revision"]) is int and distance > 0 and distance % 2 == 1
+            and all(stopped[key] == authority[key]
+                    for key in ("version", "grant_id", "restore_generation"))
+            and (distance > 1 or stopped["policy_sha256"] == authority["policy_sha256"]))
+
+
 def _confirmation(runtime, value):
     expected = {"authority", "state", "stopped_authority", "core_stop_sha256",
                 "budget_journal_id", "quiescence_proven"}
-    successor = runtime.authority | {"revision": runtime.authority["revision"] + 1}
     if (not isinstance(value, dict) or set(value) != expected
-        or value["authority"] != runtime.authority or value["stopped_authority"] != successor
+        or value["authority"] != runtime.authority
+        or not stop_chain(runtime.authority, value["stopped_authority"])
         or value["state"] != "STOPPED" or value["quiescence_proven"] is not False
         or not wire.hash_value(value["core_stop_sha256"])
         or not wire.identifier(value["budget_journal_id"], r"budget_[a-f0-9]{32}")):

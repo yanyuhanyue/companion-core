@@ -257,6 +257,8 @@ def verify(runtime, records):
             if (not prepared or set(value) != {
                 "authority", "previous_authority", "prepared_sha256", "custody_sha256"}
                 or value["prepared_sha256"] != wire.digest(prepared)
+                or value["authority"]["revision"]
+                != prepared["data"]["core_stop"]["stopped_authority"]["revision"] + 1
                  or proof is not None and value["authority"]["policy_sha256"] != (
                      proof["successor_policy_sha256"])
                  or value["custody_sha256"] != closed_once(index, proof)):
@@ -377,8 +379,9 @@ async def handoff(runtime, client, successor):
         raise ValueError("OWNER_HANDOFF_PREPARATION_REQUIRED")
     proof = (_carry_prepared(records[-1]["data"], runtime.authority)
              if records[-1]["kind"] == "OWNER_CARRY_HANDOFF_PREPARED" else None)
+    stopped = records[-1]["data"]["core_stop"]["stopped_authority"]
     if (successor["grant_id"] != runtime.authority["grant_id"]
-        or successor["revision"] != runtime.authority["revision"] + 2
+        or successor["revision"] != stopped["revision"] + 1
          or successor["restore_generation"] != runtime.authority["restore_generation"]
          or proof is not None and successor["policy_sha256"] != proof["successor_policy_sha256"]):
         raise ValueError("OWNER_HANDOFF_BINDING_CHANGED")

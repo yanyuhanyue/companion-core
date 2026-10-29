@@ -170,3 +170,92 @@ def test_real_core_stop_prepare_and_current_successor_handoff(
                         "closed", None)
                     assert not core.store.one("SELECT 1 FROM events")
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", ["unbound", "bound_work", "stale_target"])
+def test_bridge_hands_off_across_an_unbound_core_stop_chain(core, tmp_path, monkeypatch, case):
+    """A failed release can ACTIVATE and STOP Core again before the Bridge hands off."""
+    from companion import owner_stop_receipt
+    from companion.contracts import CoreError
+    from companion_delivery_protocol.authority import AuthorityRef
+
+    core.settings.control_token = SecretStr("native-handoff-owner-token")
+    owner = {"Authorization": "Bearer native-handoff-owner-token"}
+
+    async def run():
+        async with window(core, tmp_path, monkeypatch) as (client, base, plan):
+            config = replace(base, owner_authority=plan.authority,
+                capture_signing_key=plan.key.private_bytes_raw().hex(),
+                data_dir=str(tmp_path / "chain-bridge"))
+            with Spool(config) as spool:
+                OwnerRuntime(spool, clock=lambda: core.clock.now).stop()
+            policy = plan.policy.model_dump(mode="json")
+
+            async def post(path, value):
+                response = await client.post(path, json=value, headers=owner)
+                assert response.status_code == 200, response.text
+                return response.json()
+
+            async def activate(expected, operation):
+                value = {"expected_revision": expected, "policy": policy}
+                preview = await post("/internal/v1/owner-authority/preview", value)
+                return (await post("/internal/v1/owner-authority/activate", value | {
+                    "operation_id": operation, "preview_sha256": preview["preview_sha256"]}))[
+                        "authority"]
+
+            await post("/internal/v1/owner-authority/stop",
+                       {"authority": plan.authority, "operation_id": "chain-stop-1"})
+            unbound = await activate(2, "chain-activate-unbound")
+            if case == "bound_work":
+                now = core.clock()
+                core.store.execute(
+                    "INSERT INTO jobs(job_id,kind,state,idempotency_key,created_at,updated_at,"
+                    "authority_json) VALUES('job_chain','life','QUEUED','chain-key',?,?,?)",
+                    (now, now, encode(unbound)))
+            await post("/internal/v1/owner-authority/stop",
+                       {"authority": unbound, "operation_id": "chain-stop-2"})
+            core.clock.advance(60)
+            ref = AuthorityRef.from_dict(plan.authority)
+            with core.store.transaction(), pytest.raises(CoreError):
+                owner_stop_receipt.read(core.store, core.settings, plan.authority)
+            with Spool(config, reconciliation_only=True) as spool:
+                runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                if case == "bound_work":
+                    with core.store.transaction():
+                        assert owner_stop_receipt.stopped_chain(core.store, ref) is None
+                    with pytest.raises(httpx.HTTPStatusError) as refused:
+                        await owner_handoff.prepare(runtime, client)
+                    assert refused.value.response.status_code == 409
+                    assert runtime.row()["state"] == "STOPPED"
+                    return
+                prepared = await owner_handoff.prepare(runtime, client)
+                assert prepared["state"] == "HANDOFF_PREPARED"
+                if case == "stale_target":
+                    with pytest.raises(ValueError, match="OWNER_HANDOFF_BINDING_CHANGED"):
+                        await owner_handoff.handoff(runtime, client, unbound)
+                    assert runtime.row()["state"] == "STOPPED"
+                    return
+                successor = await activate(4, "chain-activate-final")
+                assert successor["revision"] == plan.authority["revision"] + 4
+                result = await owner_handoff.handoff(runtime, client, successor)
+                assert result == {"state": "ACTIVE", "authority": successor,
+                                  "journal_head": runtime.row()["journal_head"]}
+            with Spool(replace(config, owner_authority=successor)) as spool:
+                runtime = OwnerRuntime(spool, clock=lambda: core.clock.now)
+                runtime.verify()
+                assert not await runtime.flush_one(client)
+    asyncio.run(run())
+
+
+def test_stop_chain_keeps_the_direct_policy_rule():
+    from companion_onebot_bridge.owner_native_resolution import stop_chain
+
+    authority = {"version": 2, "grant_id": "g", "revision": 7, "policy_sha256": "a" * 64,
+                 "restore_generation": "initial"}
+    assert stop_chain(authority, authority | {"revision": 8})
+    assert not stop_chain(authority, authority | {"revision": 8, "policy_sha256": "b" * 64})
+    assert stop_chain(authority, authority | {"revision": 10, "policy_sha256": "b" * 64})
+    for change in ({"revision": 9}, {"revision": 7}, {"revision": 6},
+                   {"revision": 10, "grant_id": "other"},
+                   {"revision": 10, "restore_generation": "restored"}):
+        assert not stop_chain(authority, authority | change)
