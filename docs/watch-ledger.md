@@ -28,4 +28,4 @@ B站视频或小黑盒帖子读完后，她会对每条内容记一笔自己的�
 
 ## 启用
 
-默认关闭。关闭时付费合同快照不变，部署本功能属于发布预检的 A 或 B 类。启用会把 `watch_review` 的每日上限写进付费合同快照，因此需要新的 OwnerAuthority policy，其中包含 `exploration` purpose，属于 C 类。可以和加入 `evaluation` purpose 的授权修订合并进行。
+默认关闭。启用方式：在配置里设 `[watch_ledger] enabled = true`，或者设环境变量 `COMPANION_WATCH_LEDGER='{"enabled": true}'`。和 `rem` 一样，`watch_review` 不进入付费合同快照，它的每日上限在预留时按配置执行，同时受已批准窗口的总额约束。因此启用后现有 policy 仍然有效，只需要 policy 里已有 `exploration` purpose。

@@ -82,11 +82,8 @@ def snapshot(settings):
     if settings.social_autonomy.enabled:
         value["scenario_daily_micro_usd"]["social_autonomy"] = (
             settings.social_autonomy.model_daily_micro_usd)
-    if settings.style_distill.enabled:
-        value["scenario_daily_micro_usd"]["style_distill"] = settings.style_distill.daily_micro_usd
-    if settings.watch_ledger.enabled:
-        # Only an enabled ledger enters the contract; existing approvals keep their hash.
-        value["scenario_daily_micro_usd"]["watch_review"] = settings.watch_ledger.daily_micro_usd
+    # watch_review and style_distill stay out, like rem: their own daily caps apply at
+    # reservation inside the approved window, and enabling them keeps the policy valid.
     value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
     value["credential_tag"] = hmac.new(

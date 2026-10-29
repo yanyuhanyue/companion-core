@@ -170,4 +170,18 @@ def test_disabled_distillation_does_nothing_and_keeps_the_paid_contract(core, tm
     two_pairs(core)
     assert not step(core) and pairs(core) == []
     core.settings.style_distill = core.settings.style_distill.model_copy(update={"enabled": True})
-    assert paid_budget.sha(paid_budget.snapshot(core.settings)) != before
+    assert paid_budget.sha(paid_budget.snapshot(core.settings)) == before
+
+
+def test_both_switches_can_be_enabled_from_the_environment(monkeypatch, tmp_path):
+    from companion.config import Settings
+
+    monkeypatch.setenv("COMPANION_CONFIG", str(tmp_path / "absent.toml"))
+    for name, value in {"OWNER_QQ_ID": "10001", "BOT_QQ_ID": "10002",
+                        "BRIDGE_TOKEN": "env-switch-token-" * 3,
+                        "WATCH_LEDGER": '{"enabled": true}',
+                        "STYLE_DISTILL": '{"enabled": true, "daily_pairs": 50}'}.items():
+        monkeypatch.setenv("COMPANION_" + name, value)
+    settings = Settings.load(apply_operator_config=False)
+    assert settings.watch_ledger.enabled and settings.style_distill.enabled
+    assert settings.style_distill.daily_pairs == 50

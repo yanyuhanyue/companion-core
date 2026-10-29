@@ -162,7 +162,8 @@ def test_disabled_ledger_does_nothing_and_keeps_the_paid_contract(core, tmp_path
     observe(core, 9)
     assert not step(core) and entries(core) == []
     enable(core)
-    assert paid_budget.sha(paid_budget.snapshot(core.settings)) != before
+    # Like rem, the ledger's own cap applies at reservation; the approved contract holds.
+    assert paid_budget.sha(paid_budget.snapshot(core.settings)) == before
 
 
 def test_erasing_the_source_removes_the_entry(core, tmp_path):

@@ -24,7 +24,7 @@
 
 ## 启用
 
-在配置里设置 `[style_distill] enabled = true`。这会改变付费合同快照，需要新的 OwnerAuthority policy，其中要包含 `expression` purpose。生产当前的 policy 已经包含这个 purpose。启用可以和观看账本放在同一次授权修订里。
+启用方式：在配置里设 `[style_distill] enabled = true`，或者设环境变量 `COMPANION_STYLE_DISTILL='{"enabled": true}'`。和 `rem` 一样，`style_distill` 不进入付费合同快照，每日对数和金额上限在预留时执行，同时受已批准窗口的总额约束。启用后现有 policy 仍然有效，只需要 policy 里已有 `expression` purpose，生产当前的 policy 已经包含。
 
 ## 未覆盖
 

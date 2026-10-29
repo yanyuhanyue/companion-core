@@ -693,6 +693,10 @@ class Settings(BaseModel):
                     data[field] = PaidModelApproval.model_validate_json(value)
                 elif field == "live_text_window":
                     data[field] = LiveTextWindowApproval.model_validate_json(value)
+                elif field == "watch_ledger":
+                    data[field] = WatchLedgerConfig.model_validate_json(value)
+                elif field == "style_distill":
+                    data[field] = StyleDistillConfig.model_validate_json(value)
                 elif field == "segmented_reply":
                     data[field] = SegmentedReplyConfig.model_validate_json(value)
                 else:
