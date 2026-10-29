@@ -10,6 +10,7 @@ from time import monotonic
 from watchfiles._rust_notify import RustNotify
 from watchfiles.main import _default_force_polling, _default_poll_delay_ms
 
+from companion import shutdown
 from companion.worker_deadlines import PROVIDERS
 from companion.worker_schedule import ScanContext, UnitResult
 
@@ -81,6 +82,8 @@ class Wakeup:
         # a timeout with no commit/deadline does not run the business scan or Recorder.
         reconcile_at = started + MAINTENANCE_SECONDS
         while True:
+            if shutdown.requested():
+                return "shutdown"
             if self.data_version() != scan.data_version:
                 return "commit"
             now, mono = datetime.fromisoformat(self.clock()), monotonic()
@@ -98,7 +101,8 @@ class Wakeup:
             if deadline:
                 delay = min(delay, (deadline - now).total_seconds())
             pending = asyncio.create_task(asyncio.to_thread(
-                self.watcher.watch, 50, 50, max(1, math.ceil(delay * 1000)), self.stop,
+                self.watcher.watch, 50, 50, max(1, math.ceil(delay * 1000)),
+                shutdown.StopEvent(self.stop),
             ))
             try:
                 changes = await asyncio.shield(pending)
@@ -106,6 +110,8 @@ class Wakeup:
                 self.stop.set()
                 await pending
                 raise
+            if changes == "stop" and not self.stop.is_set() and shutdown.requested():
+                return "shutdown"
             if changes in ("stop", "signal"):
                 raise asyncio.CancelledError
             if isinstance(changes, set):

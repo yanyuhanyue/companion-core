@@ -17,7 +17,14 @@ x-core: &core
   tmpfs: [/tmp]
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
+  # Python is not PID 1: tini forwards SIGTERM to it and reaps children.
+  init: true
   stop_grace_period: 60s
+# Workers finish the unit in flight on SIGTERM, then exit 0. Their grace period must
+# outlast one unit's model calls (bounded by lease_seconds, default 120, in
+# companion/config.py); a SIGKILL mid-call leaves an UNKNOWN attempt that holds the
+# execution slot until an operator closes it.
+x-worker-grace: &worker-grace 150s
 services:
   migrate:
     <<: *core
@@ -37,6 +44,7 @@ services:
   companion-worker:
     <<: *core
     command: [worker]
+    stop_grace_period: *worker-grace
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped
@@ -44,6 +52,7 @@ services:
     <<: *core
     profiles: [life]
     command: [life-worker]
+    stop_grace_period: *worker-grace
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped
@@ -51,6 +60,7 @@ services:
     <<: *core
     profiles: [tools]
     command: [executive-worker]
+    stop_grace_period: *worker-grace
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped
@@ -58,6 +68,7 @@ services:
     <<: *core
     profiles: [content]
     command: [content-worker]
+    stop_grace_period: *worker-grace
     depends_on:
       companion-api: {condition: service_healthy}
     restart: unless-stopped
