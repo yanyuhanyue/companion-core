@@ -145,6 +145,8 @@ def core_factory(tmp_path_factory, migrated_database):
             # see tests/test_humanlike_defaults.py for the defaults themselves.
             memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
             conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
+            # Exact-message tests predate time labels; tests/test_time_context.py covers them.
+            chat_time_labels=False,
         )
         # SQLite backup includes committed WAL data without copying another test's state.
         with closing(sqlite3.connect(migrated_database)) as source:

@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import pytest
 
 from companion import paid_budget, style_distill, style_observation
 from companion.model import ModelClient
@@ -180,8 +181,116 @@ def test_both_switches_can_be_enabled_from_the_environment(monkeypatch, tmp_path
     for name, value in {"OWNER_QQ_ID": "10001", "BOT_QQ_ID": "10002",
                         "BRIDGE_TOKEN": "env-switch-token-" * 3,
                         "WATCH_LEDGER": '{"enabled": true}',
-                        "STYLE_DISTILL": '{"enabled": true, "daily_pairs": 50}'}.items():
+                        "STYLE_DISTILL": '{"enabled": true, "daily_pairs": 50}',
+                        "STYLE_LIVE": '{"enabled": true}'}.items():
         monkeypatch.setenv("COMPANION_" + name, value)
     settings = Settings.load(apply_operator_config=False)
     assert settings.watch_ledger.enabled and settings.style_distill.enabled
-    assert settings.style_distill.daily_pairs == 50
+    assert settings.style_distill.daily_pairs == 50 and settings.style_live.enabled
+    assert settings.model_dump()["style_live"] == {"enabled": True}
+
+
+SHARE = "今天在楼下看到一只猫把自己卡在纸箱里"
+
+
+def approve_one(core, tmp_path):
+    ready(core, tmp_path, json.dumps(PATTERN, ensure_ascii=False))
+    event_id = thread(core, 6, [comment("1", "这只猫睡觉的姿势也太离谱了"),
+                                comment("2", "像是被谁按了暂停键一样", parent="1")])
+    step(core)
+    key = candidates(core)[0]["pattern_sha256"]
+    assert "已批准" in core.life.command("/批准表达 " + key[:8], "evt_owner")
+    return event_id
+
+
+def owner_turn(core, purposes=("chat", "expression")):
+    """Renew owner authority with `purposes` and return one admitted owner chat job."""
+    from tests.owner_model_fixtures import authorized_job
+
+    revision = core.store.one("SELECT MAX(revision) AS r FROM owner_authority_revisions")["r"]
+    core.authorized_model_test_capture = ({"authority": {"revision": revision}}, None)
+    job_id = authorized_job(core, purposes=purposes, renew=True)
+    return core.store.one("SELECT j.*,e.body_json,e.conversation_id FROM jobs j "
+                          "JOIN events e USING(event_id) WHERE j.job_id=?", (job_id,))
+
+
+def live_on(core):
+    core.settings.style_live = core.settings.style_live.model_copy(update={"enabled": True})
+
+
+def test_live_style_is_off_by_default_and_keeps_every_contract(core, tmp_path):
+    from companion import owner_authority
+
+    approve_one(core, tmp_path)
+    assert "style_live" not in core.settings.model_dump()
+    paid = paid_budget.sha(paid_budget.snapshot(core.settings))
+    capabilities = owner_authority.capability_hashes(core.settings)
+    snapshots = []
+    prompt = json.dumps(core.context(owner_turn(core), snapshots=snapshots),
+                        ensure_ascii=False)
+    assert style_observation.HEADER not in prompt and PATTERN["response_action"] not in prompt
+    assert "style_observation" not in {item["kind"] for item in snapshots}
+    live_on(core)
+    assert paid_budget.sha(paid_budget.snapshot(core.settings)) == paid
+    assert owner_authority.capability_hashes(core.settings) == capabilities
+
+
+def test_live_style_appends_approved_guidance_after_the_static_prefix(core, tmp_path):
+    from companion.model import PRINCIPLES
+
+    approve_one(core, tmp_path)
+    job = owner_turn(core)
+    off = core.context(job)[0]["content"]
+    live_on(core)
+    snapshots = []
+    on = core.context(job, snapshots=snapshots)[0]["content"]
+    [cand] = style_distill.approved(core.store, core.clock())
+    text, _ = style_observation.segment([cand])
+    assert on.startswith(PRINCIPLES) and on == off + text
+    assert PATTERN["response_action"] in on and "暂停键" not in on
+    [proof] = [item for item in snapshots if item["kind"] == "style_observation"]
+    assert proof["proof"]["candidates"] == [[cand.candidate_id, 1]]
+    core._check_context_snapshots(job, snapshots)
+
+
+def test_live_style_needs_the_expression_purpose(core, tmp_path):
+    approve_one(core, tmp_path)
+    live_on(core)
+    prompt = json.dumps(core.context(owner_turn(core, ("chat",))), ensure_ascii=False)
+    assert PATTERN["response_action"] not in prompt
+
+
+def test_an_expired_candidate_or_erased_source_cancels_the_reply(core, tmp_path):
+    from companion.contracts import CoreError
+    from companion.reply_revision import CANCELLED
+
+    event_id = approve_one(core, tmp_path)
+    live_on(core)
+    job = owner_turn(core)
+    snapshots = []
+    core.context(job, snapshots=snapshots)
+    assert "style_observation" in {item["kind"] for item in snapshots}
+    [row] = candidates(core)
+    core.store.execute("UPDATE style_candidates SET expires_at=?", (core.clock(),))
+    with pytest.raises(CoreError, match=CANCELLED):
+        core._check_context_snapshots(job, snapshots)
+    core.store.execute("UPDATE style_candidates SET expires_at=?", (row["expires_at"],))
+    core._check_context_snapshots(job, snapshots)
+    with core.store.transaction():
+        core.ledger.expire_events(core.store, [event_id], core.clock())
+    # The candidate's sources are recorded as reply sources, so erasure recalls the reply.
+    with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
+        core._check_context_snapshots(job, snapshots)
+
+
+def test_offline_samples_script_prints_the_segment_read_only(core, tmp_path, capsys):
+    from scripts import style_shadow_samples
+
+    approve_one(core, tmp_path)
+    before = candidates(core)
+    style_shadow_samples.main(["--db", str(core.store.path), "--now", core.clock(),
+                               "--text", SHARE, "--text", "帮我查一下明天的天气"])
+    shared, help_request = capsys.readouterr().out.split("== ")[1:]
+    assert PATTERN["response_action"] in shared and "暂停键" not in shared
+    assert "无追加段落" in help_request
+    assert candidates(core) == before

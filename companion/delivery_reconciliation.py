@@ -410,11 +410,16 @@ def _input_closure(store, proof, delivery, outcome, account, *, global_models=Tr
     if not primary:
         primary = [job for job in jobs if job["kind"] == "poke"]
     job = primary[0] if len(primary) == 1 else None
+    delegated = {item["id"] for item in reads if "read_request_id" not in item}
     unsettled = {
         "jobs": any(item["state"] not in wire.JOB_TERMINAL for item in jobs),
         "models": bool(global_unsettled) or any(item["state"] != "SETTLED" for item in models),
+        # A native agent read's link row stays WAITING; its exploration request row
+        # (also in `reads`) carries the actual state.
         "reads": any(item.get("active", item["state"] in {
-            "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED", "UNKNOWN"}) for item in reads),
+            "WAITING", "QUEUED", "FETCHING", "RUNNING", "LEASED", "UNKNOWN"})
+            and not (item["state"] == "WAITING" and item.get("read_request_id") in delegated)
+            for item in reads),
         "deliveries": any(item["state"] not in wire.DELIVERY_TERMINAL for item in deliveries),
     }
     input_hash = _input_hash(store, event, proof, account)

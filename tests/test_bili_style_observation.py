@@ -148,11 +148,11 @@ def test_revalidation_rejects_a_payload_whose_candidate_died():
                                          live_event_ids=live_ids)
 
 
-def test_module_is_not_wired_into_runtime():
+def test_only_the_switched_live_context_uses_the_module():
     import pathlib
 
     root = pathlib.Path(style_observation.__file__).parent
     users = [p.name for p in root.rglob("*.py")
              if p.name != "style_observation.py" and "style_observation" in p.read_text(
                  encoding="utf-8")]
-    assert users == []
+    assert users == ["core.py"]
