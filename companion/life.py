@@ -22,6 +22,9 @@ COMMANDS = (
     "安排任务",
     "结束话题",
     "不再跟进",
+    "表达候选",
+    "批准表达",
+    "拒绝表达",
 )
 STATES = {
     "CANDIDATE": "候选",
@@ -139,6 +142,18 @@ class LifeService:
                 )
                 or "目前还没有足够的自主探索记录来形成偏好。"
             )
+        if command in {"表达候选", "批准表达", "拒绝表达"}:
+            from companion import style_distill
+
+            if command == "表达候选":
+                return style_distill.listing(self.store, self.clock())
+            target = re.fullmatch(r"(\S+)\s+([0-9a-f]{6,64})(?:\s+(.{1,200}))?", text)
+            if not target:
+                return "格式：/批准表达 编号 或 /拒绝表达 编号 原因。"
+            with self.store.transaction():
+                return style_distill.review(self.store, self.settings, self.clock(), target[2],
+                                            approve=command == "批准表达",
+                                            reason=target[3] or "")
         decision = re.fullmatch(r"(接受目标|取消目标)\s+(goal_[a-f0-9]+)", text)
         if decision:
             try:

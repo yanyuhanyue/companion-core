@@ -1186,7 +1186,8 @@ class Core(Runtime):
             purpose = ({"目标列表": "goals", "承诺列表": "goals", "接受目标": "goals",
                         "安排任务": "goals", "反思列表": "reflection", "当前交互状态": "affect",
                         "为什么形成偏好": "expression", "恢复自主活动": "life",
-                        "恢复主动分享": "proactive"}.get(command)
+                        "恢复主动分享": "proactive", "表达候选": "expression",
+                        "批准表达": "expression", "拒绝表达": "expression"}.get(command)
                        or ("memory" if is_memory_command(text)
                            and command != "忘记这一条" else None)
                        or ("diary" if is_diary_command(text)

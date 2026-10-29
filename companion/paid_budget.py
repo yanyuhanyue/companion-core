@@ -82,6 +82,8 @@ def snapshot(settings):
     if settings.social_autonomy.enabled:
         value["scenario_daily_micro_usd"]["social_autonomy"] = (
             settings.social_autonomy.model_daily_micro_usd)
+    if settings.style_distill.enabled:
+        value["scenario_daily_micro_usd"]["style_distill"] = settings.style_distill.daily_micro_usd
     if settings.watch_ledger.enabled:
         # Only an enabled ledger enters the contract; existing approvals keep their hash.
         value["scenario_daily_micro_usd"]["watch_review"] = settings.watch_ledger.daily_micro_usd
@@ -207,7 +209,8 @@ def estimate_input_tokens(approval, messages, scenario, *, tools=()):
                 raise ValueError("unsupported message contract")
             estimate += 8 + (len(message["content"].encode("utf-8")) + 2) // 3
         if scenario in {"memory_review", "memory_extract", "diary", "reflection", "meme_caption",
-                        "qq_poke", "social_autonomy", "content_video_preview", "watch_review"}:
+                        "qq_poke", "social_autonomy", "content_video_preview", "watch_review",
+                        "style_distill"}:
             estimate += 32
         return (estimate * approval.input_estimate_safety_percent + 99) // 100
     except (ValueError, TypeError, KeyError, UnicodeError) as error:

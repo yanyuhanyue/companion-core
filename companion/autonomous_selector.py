@@ -289,6 +289,12 @@ def native_selector(core, worker_id) -> RoundRobin:
         return await run_native_unit(watch_ledger.run_once, core.store, core.settings,
                                      core.model, core.clock)
 
+    async def style():
+        from companion import style_distill
+
+        return await run_native_unit(style_distill.run_once, core.store, core.settings,
+                                     core.model, core.clock)
+
     async def meme_caption():
         if core.settings.mode != "live" or not core.settings.meme_semantics_enabled:
             return UnitResult(False)
@@ -307,6 +313,7 @@ def native_selector(core, worker_id) -> RoundRobin:
         lane("poke", poke, ("poke",)),
         lane("meme_caption", meme_caption, ("meme",)),
         lane("watch", watch, ("exploration",)),
+        lane("style", style, ("expression",)),
         lane("diary", diary, ("diary",)),
         lane("consolidation", consolidation, ("consolidation",)),
         lane("memory", memory, ("memory",)),

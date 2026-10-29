@@ -74,6 +74,7 @@ REVISION_CHAIN = (
     "0049_evaluation_ordinals",
     "0050_watch_ledger",
     "0051_exploration_query",
+    "0052_style_distill",
 )
 LEGACY_TABLES = (
     "principals",
