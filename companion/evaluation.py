@@ -39,6 +39,8 @@ LIMITS = {
 }
 # Requests per worker claim; later batches queue behind ordinary chat.
 BATCH = 6
+# Accepted treatments and the arm each is compared against.
+CONTROLS = {"participation_v2": "baseline", "participation_v2_bili_style": "participation_v2"}
 
 
 class Manifest(StrictModel):
@@ -99,8 +101,12 @@ def _plan(settings, manifest):
             raise ValueError("synthetic plans need native measurement")
         # v1 plans carry no treatment field, so their digests are unchanged.
         treatment = plan.get("treatment", "participation_v1")
-        if "treatment" in plan and treatment != "participation_v2":
+        if "treatment" in plan and treatment not in CONTROLS:
             raise ValueError("treatment")
+        # The bili-style arm is compared with v2 itself; older plans have no control key.
+        control = plan.get("control", "baseline")
+        if control != CONTROLS.get(treatment, "baseline"):
+            raise ValueError("treatment control")
         rows = plan["requests"]
         repetitions = plan.get("repetitions", 3) if synthetic else 3
         cases = {row["case"] for row in rows}
@@ -112,7 +118,7 @@ def _plan(settings, manifest):
             or plan["status"] != "PREPARED_NO_MODEL_CALLS"
             or (plan["provider"], plan["model"]) != (settings.provider, settings.model_name)):
             raise ValueError("plan scope")
-        pairs = {(r, s) for r in range(repetitions) for s in ("baseline", treatment)}
+        pairs = {(r, s) for r in range(repetitions) for s in (control, treatment)}
         if any({(row["repetition"], row["strategy"]) for row in rows if row["case"] == case}
                != pairs for case in cases) or len(rows) != len(cases) * len(pairs):
             raise ValueError("pairs")

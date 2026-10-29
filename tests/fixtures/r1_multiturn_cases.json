@@ -1,0 +1,111 @@
+{
+  "name": "r1-multiturn-bili-style",
+  "description": "CC-STYLE-04: 8 fully synthetic multi-turn cases (2-3 prior turns each). Expected responses are intentionally absent. Not owner feedback and never used to debug candidates.",
+  "cases": [
+    {
+      "name": "mt_daily_share_detail",
+      "inputs": {
+        "text": "结果它在纸箱里睡着了，四只脚都露在外面",
+        "history": [
+          {"user": "楼下那只橘猫今天又来了", "assistant": "又来蹭饭了？"},
+          {"user": "对，还自己钻进快递纸箱里", "assistant": "那个箱子是不是比它小一圈"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "daily_share",
+                   "rubric": "接住“四只脚露在外面”这个细节作反应或联想；不讲养猫建议，不反问维持对话。"}
+    },
+    {
+      "name": "mt_light_humor_callback",
+      "inputs": {
+        "text": "今天第三次了，电梯门又在我面前关上",
+        "history": [
+          {"user": "早上电梯门在我面前关上了", "assistant": "差一秒的那种最气人"},
+          {"user": "中午又一次，里面的人还看着我", "assistant": "对视那一下好尴尬"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "light_humor",
+                   "rubric": "可以回扣前两次轻松调侃；玩笑要贴合这件事，不硬套网络梗，不说教。"}
+    },
+    {
+      "name": "mt_complaint_side_with",
+      "inputs": {
+        "text": "改了五版，最后他说还是用第一版",
+        "history": [
+          {"user": "甲方又让我改海报", "assistant": "这次改哪里"},
+          {"user": "说颜色不够高级，又说字太大", "assistant": "高级这个词最难伺候"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "complaint",
+                   "rubric": "站在对方这边接住情绪；不给沟通建议，不劝放宽心，可以轻度吐槽但不攻击第三方人格。"}
+    },
+    {
+      "name": "mt_opinion_disagree",
+      "inputs": {
+        "text": "我觉得这部续集比第一部好看多了",
+        "history": [
+          {"user": "昨晚把那部动画续集看完了", "assistant": "终于追完了"},
+          {"user": "画面升级很明显，打斗也多", "assistant": "听起来制作经费涨了"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "opinion",
+                   "rubric": "可以同意或提出不同看法并给出依据；不编造剧情细节，不确定处要承认没看过。"}
+    },
+    {
+      "name": "mt_help_no_joke",
+      "inputs": {
+        "text": "帮我看看为什么这个表格的求和一直是 0",
+        "history": [
+          {"user": "我在做这个月的记账表", "assistant": "记得挺细的"},
+          {"user": "一列是金额，我用 SUM 求和", "assistant": "嗯，SUM 很常用"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "help_request",
+                   "rubric": "认真排查（如数字被存为文本）；不插玩笑或评论区式调侃，篇幅随问题复杂度。"}
+    },
+    {
+      "name": "mt_lull_initiative",
+      "inputs": {
+        "text": "嗯",
+        "history": [
+          {"user": "周末去爬山了，山顶风特别大", "assistant": "帽子没被吹走吧"},
+          {"user": "差点，最后用手按着拍的照", "assistant": "那张照片表情肯定很用力"},
+          {"user": "哈哈是的", "assistant": "下次可以带个夹子"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "lull",
+                   "rubric": "对方暂时没话题但没说要结束：从前文细节自然起个头；不重复已说过的建议，不用问句硬撑。"}
+    },
+    {
+      "name": "mt_emotion_serious",
+      "inputs": {
+        "text": "今天复查结果出来了，医生说要再观察三个月",
+        "history": [
+          {"user": "最近有点睡不好", "assistant": "是有心事吗"},
+          {"user": "在等一个检查结果", "assistant": "等结果的时候最熬人"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "emotion",
+                   "rubric": "认真承接情绪，不开玩笑、不夸张联想；不给医疗判断，不编造检查细节。"}
+    },
+    {
+      "name": "mt_closing",
+      "inputs": {
+        "text": "先这样，我去洗澡了",
+        "history": [
+          {"user": "今天的晚饭是自己做的番茄炒蛋", "assistant": "糖放了没"},
+          {"user": "放了一点，酸甜刚好", "assistant": "那就是成功了"}
+        ],
+        "memories": []
+      },
+      "metadata": {"evidence_type": "SYNTHETIC", "category": "closing",
+                   "rubric": "顺着收尾，简短自然；不追加新问题或新话题。"}
+    }
+  ]
+}
