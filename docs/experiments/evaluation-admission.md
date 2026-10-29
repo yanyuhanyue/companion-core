@@ -6,6 +6,15 @@ journal 和 cloud/global 预算。`evaluation_enabled=false` 为默认值。部�
 
 ## 控制流程
 
+若当前已接续的授权保留历史 UNKNOWN，可在停止且当前输入全部终态后，通过原
+OwnerAuthority preview/activate 单独新增 `evaluation` 用途和新的授权摘要。
+付费合同、窗口、期限、carry 引用及其他用途和来源范围保持不变；Bridge 使用普通
+prepare/handoff 完成交接。具体约束见[独立授权修订](../qq-beta/p0-model-carry-contract.md#independent-evaluation-permission-revision)。
+此步骤与启用 `evaluation_enabled`、下述每份计划的预览和执行同意分别核对。
+授权修订不提高额度：当前原生每次上限为 5000 microUSD，实际结算仍以同 job 累计
+50000 microUSD 触发停止；即使合成计划预览允许更高总额，也须按这个更严的实际门禁
+安排运行，不能把主人授权的最高金额视为已经修改了运行时上限。
+
 以下接口均使用现有 owner `control_token`，Bridge token 无权调用。服务不提供公共模型
 代理。操作材料与结果只在原私有运行目录或经检查的本地私有目录保留；不进入 Git、
 共享终端日志或公共附件。所有 endpoint 地址均相对当前 Core。

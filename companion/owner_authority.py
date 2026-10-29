@@ -329,6 +329,15 @@ def preview(store, settings, clock, request):
     previous = _latest(store)
     if request.expected_revision != (previous["revision"] if previous else 0):
         raise CoreError("OWNER_AUTHORITY_REVISION_CHANGED", 409)
+    # Permission-only revisions use the same paid/carry approval and must prove
+    # stopped custody at preview as well as in the activation transaction.
+    if policy.unknown_carry_sha256 is not None:
+        from companion import model_carry
+
+        view = custody(store, settings, settlement=True)
+        saved = view["model_carries"].get(policy.unknown_carry_sha256)
+        if saved and saved["successor_policy_sha256"] != _sha(policy.model_dump(mode="json")):
+            model_carry.activation(store, settings, policy)
     value = {"policy": policy.model_dump(mode="json"),
              "expected_revision": request.expected_revision,
              "predecessor_sha256": previous["record_sha256"] if previous else None,

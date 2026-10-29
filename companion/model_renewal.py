@@ -119,7 +119,6 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
     if (
         authority["grant_id"] != origin["grant_id"]
         or authority["restore_generation"] != origin["restore_generation"]
-        or authority["policy_sha256"] != prior["successor_policy_sha256"]
         or len(revisions) != authority["revision"] - origin["revision"]
         or len(revisions) < 2
         or authority != owner_authority.reference(revisions[-2]).as_dict()
@@ -127,12 +126,12 @@ def fold(store, row, record_sha, journal_id, authorities, latest, blocked, closu
         or revisions[-1]["revision"] != authority["revision"] + 1
         or any(
             r["state"] != ("ACTIVE" if index % 2 == 0 else "STOPPED")
-            or r["policy_sha256"] != prior["successor_policy_sha256"]
             or r["restore_generation"] != origin["restore_generation"]
             for index, r in enumerate(revisions)
         )
     ):
         raise ValueError("model renewal authority chain")
+    model_carry.authority_chain(store, prior, revisions)
     if sorted(k for k, v in latest.items() if v["state"] == "UNKNOWN") != [
         item["request_id"] for item in value["unknowns"]
     ] or any(v["state"] == "RESERVED" for v in latest.values()):
