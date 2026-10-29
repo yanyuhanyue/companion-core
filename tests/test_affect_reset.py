@@ -95,7 +95,7 @@ def test_reset_invalidates_prepared_policy_without_deleting_source(core):
 
     core.settings.affect_enabled = True
     ingest(core, 1, "简短一点")
-    config = ConversationPolicyConfig(mode="ENABLED")
+    config = ConversationPolicyConfig(mode="ENABLED", strategy="participation_v1")
     snapshot = core.affect.snapshot()
     core.affect.revalidate(snapshot)
     receipt = decide(config, "怎么做", snapshot).receipt()

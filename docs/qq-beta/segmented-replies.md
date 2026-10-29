@@ -1,6 +1,6 @@
 # 消息分条
 
-普通聊天可以把一次模型生成的文本按句拆成多条 QQ 消息。默认关闭；在 Core 配置文件末尾加入：
+普通聊天可以把一次模型生成的文本按句拆成多条 QQ 消息。2026-10-29 起默认开启，缺省配置等同 `mode="semantic"`、`max_segments=3`、`interval_ms=1500`。要恢复单条回复，在配置文件第一个表之前写 `segmented_reply = false`（环境变量写 `false` 或 `null`）；控制台把该项设为空也会关闭。调整参数时在 Core 配置文件末尾加入：
 
 ```toml
 [segmented_reply]
@@ -18,7 +18,7 @@ mode = "semantic"
 
 `"unlimited"` 不合并超出三条的自然片段，完整文本仍受 20,000 字合同、窗口发送额度和
 `max_reply_chars` 约束。`min_chars` 为 4–100 个非空白字符；`interval_ms` 为 0–3000 毫秒。
-间隔从上一条成功回执开始计算，实际时间还受 Bridge 轮询影响。删除这张配置表即可恢复单条生成；已冻结的待发回复保留原分条结果。
+间隔从上一条成功回执开始计算，实际时间还受 Bridge 轮询影响。删除这张配置表会回到默认分条；写 `segmented_reply = false` 才恢复单条生成；已冻结的待发回复保留原分条结果。
 
 也可通过 `COMPANION_SEGMENTED_REPLY` 环境变量提供同样字段的 JSON 对象，它优先于 TOML 配置。
 

@@ -23,7 +23,11 @@ sys.path.insert(0, str(ROOT))
 from companion import style_observation  # noqa: E402
 from companion.config import Settings  # noqa: E402
 from companion.contracts import Candidate, InboundEvent  # noqa: E402
-from companion.conversation_policy import PARTICIPATION_V1, apply_strategy  # noqa: E402
+from companion.conversation_policy import (  # noqa: E402
+    PARTICIPATION_V1,
+    ConversationPolicyConfig,
+    apply_strategy,
+)
 from companion.core import Core  # noqa: E402
 from companion.evaluation_measurement import (  # noqa: E402
     measurement_profile,
@@ -37,6 +41,11 @@ from companion.transport import enqueue  # noqa: E402
 
 DATASET = ROOT / "tests/fixtures/r1_conversation_cases.json"
 NOW = "2026-10-24T06:30:00.000000+00:00"
+# The frozen R1 comparison keeps its pre-humanlike-defaults baseline explicit.
+FROZEN_BASELINE = {
+    "memory_enabled": False, "chat_thinking": "disabled",
+    "conversation_policy": ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
+}
 STRATEGY = PARTICIPATION_V1
 
 
@@ -118,7 +127,8 @@ def build_context(case, empty_database, directory):
                         expression_enabled=True, expression_selection_probability=0,
                         segmented_reply=SegmentedReplyConfig(mode="semantic"),
                         embedding_cache_dir=str(directory / "unused-embedding-cache"),
-                        input_rate=300000, cached_input_rate=6000, output_rate=1200000)
+                        input_rate=300000, cached_input_rate=6000, output_rate=1200000,
+                        **FROZEN_BASELINE)
     ticks = itertools.count()
     clock_value = [NOW]
     def clock():
@@ -216,7 +226,8 @@ def arm(base, strategy, case, style):
 def measurement_defaults():
     return Settings(owner_qq_id="10001", bot_qq_id="10002", bridge_token="r1-offline-" * 4,
                     max_output_tokens=2048, context_soft_tokens=16000,
-                    input_rate=300000, cached_input_rate=6000, output_rate=1200000)
+                    input_rate=300000, cached_input_rate=6000, output_rate=1200000,
+                    segmented_reply=None, **FROZEN_BASELINE)
 
 
 def prepare(cases, output, *, repetitions=1, measurement_settings=None,

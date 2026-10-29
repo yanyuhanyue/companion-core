@@ -576,7 +576,8 @@ async def native_probe_contracts(tmp_path):
            "COMPANION_MODE": "demo", "COMPANION_OWNER_QQ_ID": "10001",
            "COMPANION_BOT_QQ_ID": "10002", "COMPANION_BRIDGE_TOKEN": secrets.token_urlsafe(32),
            "COMPANION_DATABASE": str(database), "COMPANION_ERASURE_LEDGER": str(ledger),
-           "COMPANION_MEMORY_ENABLED": "false", "COMPANION_MODEL_KEY": "",
+           "COMPANION_MEMORY_ENABLED": "false", "COMPANION_SEGMENTED_REPLY": "false",
+           "COMPANION_MODEL_KEY": "",
            "COMPANION_MODEL_URL": "https://synthetic.invalid/v1",
            "COMPANION_BACKUP_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()}
     children, child_logs, stages = [], {}, []

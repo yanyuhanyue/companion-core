@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from companion import budget  # noqa: E402
 from companion.config import Settings  # noqa: E402
 from companion.contracts import InboundEvent  # noqa: E402
+from companion.conversation_policy import ConversationPolicyConfig  # noqa: E402
 from companion.core import Core  # noqa: E402
 from companion.diary import DIARY_RULES  # noqa: E402
 from companion.model import EXTRACT_RULES, PRINCIPLES, ModelResponse  # noqa: E402
@@ -254,6 +255,9 @@ async def one_case(work, variant, case, catalog, template):
         input_rate=1_000_000,
         cached_input_rate=250_000,
         output_rate=2_000_000,
+        # The frozen benchmark keeps its pre-humanlike-defaults baseline explicit.
+        memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
+        conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
     )
     with closing(sqlite3.connect(template)) as source:
         with closing(sqlite3.connect(cfg.database)) as destination:
@@ -265,7 +269,7 @@ async def one_case(work, variant, case, catalog, template):
     }
     core = Core(cfg, model, lambda: NOW)
     try:
-        # Warmup cannot run: the constructor used default memory_enabled=false.
+        # Warmup cannot run: the constructor set memory_enabled=false.
         # Supplying fixture search makes this a context/call-flow benchmark,
         # NOT a measurement of FTS or BGE retrieval quality/latency.
         cfg.memory_enabled = True
@@ -328,7 +332,8 @@ async def one_case(work, variant, case, catalog, template):
             "missing_ids": missing,
             "forbidden_ids_visible": forbidden,
             "current_input_preserved": messages[-1]["content"] == case["query"],
-            "stable_rules_preserved": messages[0]["content"] == PRINCIPLES,
+            # Memory rules and the message time follow the stable principles.
+            "stable_rules_preserved": messages[0]["content"].startswith(PRINCIPLES),
             "uncertain_reply_leaked": any(
                 "UNCERTAIN_REPLY_CANARY" in m["content"] for m in messages
             ),

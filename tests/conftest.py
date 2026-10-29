@@ -10,6 +10,7 @@ from filelock import FileLock
 
 from companion.config import Settings
 from companion.contracts import InboundEvent
+from companion.conversation_policy import ConversationPolicyConfig
 from companion.core import Core
 from companion.model import ModelResponse
 from companion.store import migrate
@@ -140,6 +141,10 @@ def core_factory(tmp_path_factory, migrated_database):
             database=str(directory / "core.db"), erasure_ledger=str(directory / "privacy.jsonl"),
             input_rate=300000, cached_input_rate=6000, output_rate=1200000,
             proactive_enabled=False,
+            # Scenario tests opt into the humanlike production defaults explicitly;
+            # see tests/test_humanlike_defaults.py for the defaults themselves.
+            memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
+            conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
         )
         # SQLite backup includes committed WAL data without copying another test's state.
         with closing(sqlite3.connect(migrated_database)) as source:

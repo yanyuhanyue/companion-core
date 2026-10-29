@@ -22,6 +22,10 @@ from tests.test_owner_authority import activate
 from tests.test_owner_input import captured, inbound
 
 
+def v1_policy(**values):
+    return ConversationPolicyConfig(strategy="participation_v1", **values)
+
+
 async def child(core, tmp_path, mode):
     config = tmp_path / (mode + ".json")
     process_config(core, config)
@@ -65,7 +69,7 @@ def prepare(core, tmp_path):
 
 def test_owner_reset_after_context_before_dispatch_across_processes(core, tmp_path):
     template, key = prepare(core, tmp_path)
-    core.settings.conversation_policy = ConversationPolicyConfig(mode="ENABLED")
+    core.settings.conversation_policy = v1_policy(mode="ENABLED")
     signed_ingest(core, template, key, 2, "怎么处理这个问题")
 
     async def scenario():

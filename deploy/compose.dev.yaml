@@ -20,6 +20,8 @@ x-dev: &dev
     COMPANION_DATABASE: /data/companion.sqlite3
     COMPANION_ERASURE_LEDGER: /privacy/erasures.jsonl
     COMPANION_EMBEDDING_CACHE_DIR: /data/embedding-cache
+    # The smoke probes follow one Outbox row per reply.
+    COMPANION_SEGMENTED_REPLY: "false"
   volumes: !override
     - type: bind
       source: ./deploy/qq-beta-core.example.toml

@@ -89,6 +89,7 @@ def validate(config, root, project, token):
             "COMPANION_DATABASE": ("/source" if backup else "/data") + "/companion.sqlite3",
             "COMPANION_ERASURE_LEDGER": "/privacy/erasures.jsonl",
             "COMPANION_EMBEDDING_CACHE_DIR": "/data/embedding-cache",
+            "COMPANION_SEGMENTED_REPLY": "false",
         }
         require(set(values) == set(expected) | ({"COMPANION_BACKUP_KEY"} if backup else set()))
         require(all(values.get(key) == value for key, value in expected.items()))

@@ -13,6 +13,10 @@ from companion.core import Core
 from tests.conftest import ingest, run
 
 
+def v1_policy(**values):
+    return ConversationPolicyConfig(strategy="participation_v1", **values)
+
+
 def test_reset_native_ledger_old_backup_and_idempotent_retry(core, tmp_path):
     core.settings.affect_enabled = True
     ingest(core, 1, "简短一点")
@@ -78,9 +82,9 @@ def test_core_shadow_preserves_payload_and_reset_fences_source(core, mode):
     ingest(core, 2, "怎么处理这个问题")
     job = core.claim_job("p1-context")
     original = core.context(job)
-    core.settings.conversation_policy = ConversationPolicyConfig(mode="SHADOW")
+    core.settings.conversation_policy = v1_policy(mode="SHADOW")
     assert core.context(job) == original
-    core.settings.conversation_policy = ConversationPolicyConfig(mode=mode)
+    core.settings.conversation_policy = v1_policy(mode=mode)
     snapshots = []
     candidate = core.context(job, snapshots=snapshots)
     assert candidate[1:] == original[1:]

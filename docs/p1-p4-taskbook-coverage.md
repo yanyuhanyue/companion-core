@@ -17,7 +17,7 @@ UI 结论依据当前源码与既有浏览器回执。
 
 | 任务书项 | 已有原生实现与核对入口 | 尚未闭合的验收或能力 |
 | --- | --- | --- |
-| P1.1 自然交流 | `conversation_policy.py`、Core context 按明确情境调整指令；默认 OFF，SHADOW 可观察 | 不能由策略代码推断自然度改善；同模型、同历史真人对照仍需回执 |
+| P1.1 自然交流 | `conversation_policy.py`、Core context 按明确情境调整指令；默认 ENABLED + `participation_v2`，可配置 OFF/SHADOW | 不能由策略代码推断自然度改善；同模型、同历史真人对照仍需回执 |
 | P1.2 动态表达与节奏 | `expression.py`、Meme host 的目录/发现/选择与 Outbox；foreground 优先检查、回复修订和最终图片投递屏障 | 嵌套附件和 Meme host 已集成；跨情境重复率与节奏体验未验收 |
 | P1.3 Affect | `affect.py`、`social.feedback_paused`；明确反馈、衰减、重置、来源撤回；独立 affect purpose | UI 没有有效来源、衰减、重置结果检查面板 |
 | P1.4 对照实验 | 原生 evaluation、固定上下文和预算计量分片 | UI 缺创建/取消/评分流程；合成测试不证明自然聊天效果 |
