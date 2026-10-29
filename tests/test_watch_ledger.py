@@ -195,3 +195,24 @@ def test_chat_cites_recent_judgements_only_when_enabled(core, enabled):
     prompt = json.dumps(core.context(chat_job(core)), ensure_ascii=False)
     assert (JUDGEMENT["take"] in prompt) is enabled
     assert "watch_obs_11" not in prompt
+
+
+def test_a_later_video_analysis_is_judged_again_but_a_shallower_read_is_not(core, tmp_path):
+    later = {"rating": 2, "take": "看了画面才发现猫是自己钻进去的", "topic_tags": ["猫"]}
+    model = ready(core, tmp_path, json.dumps(JUDGEMENT, ensure_ascii=False),
+                  json.dumps(later, ensure_ascii=False))
+    url = "https://www.bilibili.com/video/BV10000001aa"
+    first = observe(core, 12, url=url)
+    step(core)
+    analysis = observe(core, 13, url=url, text="视频分析：猫自己跳进纸箱后睡着")
+    core.store.execute("UPDATE observations SET evidence_json=json_set(evidence_json,"
+                       "'$.bili_video',json('{\"request_id\":\"x\"}')) WHERE event_id=?",
+                       (analysis,))
+    observe(core, 14, url=url, text="又一次只读到正文")
+    step(core)
+    [row] = entries(core)
+    assert (row["source_event_id"], row["depth"], row["state"], row["take"]) == (
+        analysis, "media_sampled", "JUDGED", later["take"])
+    assert len(model.calls) == 2
+    step(core)
+    assert len(model.calls) == 2 and entries(core)[0]["source_event_id"] != first
