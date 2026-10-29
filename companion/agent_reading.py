@@ -100,8 +100,15 @@ def _reading_result(store, settings, clock, job, request_id, *, executing):
         _read_owner_source(store, settings, clock, job, event_id, executing=executing)
     policy = exploration.adapter(row["adapter_id"])
     captured = observations.grants.captured(row)
-    if captured or policy.source_grant_required:
+    if captured:
         observations.grants.require(row["adapter_id"], captured)
+    elif policy.source_grant_required:
+        if row["state"] == "QUEUED" and row["source_grant_id"] is None:
+            # Not leased yet: no binding exists, only a valid grant must. The lease
+            # binds the Reader's grant and every later check requires that binding.
+            observations.grants.require_available(row["adapter_id"])
+        else:
+            observations.grants.require(row["adapter_id"], None)
     items = []
     if row["state"] == "DONE":
         attempt = store.one("SELECT * FROM reading_attempts WHERE request_id=?",
