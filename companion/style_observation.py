@@ -1,14 +1,18 @@
 """CC-STYLE-03: optional `bili_style_observation` segment after participation_v2.
 
-Offline only. Mode is OFF or SHADOW; there is no ENABLED and nothing here is wired into
-live chat, the Outbox or any model call. SHADOW builds a complete evaluation payload:
+Mode here is OFF or SHADOW, for offline evaluation: SHADOW builds a complete payload,
 participation_v2 unchanged, then at most three approved, still-valid candidates as short
 abstract guidance. No suitable candidate means no segment, never filler.
+
+The only live user is `Core.context` behind the separate `style_live` switch (default off,
+owner purpose `expression`); it reuses `select` and `segment` for owner chat turns and
+revalidates the selection before the reply is sent. Nothing here calls a model or the Outbox.
 """
 
 import copy
 import hashlib
 import re
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -111,6 +115,23 @@ def revalidate(receipt, config, candidates, *, current_text, now, live_event_ids
                               live_event_ids=live_event_ids)
     if encode(fresh) != encode(receipt):
         raise CoreError("STYLE_OBSERVATION_CHANGED", 409)
+
+
+def live_segment(store, now, text):
+    """Return (segment, used, decision) for one owner turn from the store's approved rows.
+
+    Read-only: it reads approved candidates and whether their sources are still live.
+    participation_v2 is not applied; only the surface intent of `text` is used.
+    """
+    from companion import reply_revision, style_distill
+
+    candidates = style_distill.approved(store, now)
+    live = {ref.event_id for c in candidates for ref in c.source_refs
+            if reply_revision.source_active(store, ref.event_id)}
+    decision = decide(_policy(), text)
+    added, used = segment(select(candidates, decision, datetime.fromisoformat(now), live,
+                                 text))
+    return added, used, decision
 
 
 def _policy():
