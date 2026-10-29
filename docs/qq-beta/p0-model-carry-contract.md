@@ -238,6 +238,40 @@ The UNKNOWN charge remains included in all applicable budgets, and its old logic
 request cannot be retried. Daily limits, cooldown, owner-idle and quiet-hour checks
 remain in their existing scheduling and delivery paths.
 
+## Independent evaluation permission revision
+
+After the current authority is stopped and all its inputs are terminal, the owner
+may use the existing authority preview/activate endpoints to add `evaluation` with
+a new authorization digest. Only that purpose and the authorization digest change.
+The paid contract, window, expiry, concurrency, carry reference, source scopes and
+all other policy fields remain identical. This operation uses the existing
+`authority_revision` v2 journal record; it neither renews the approval nor changes
+any original UNKNOWN, charge, closure, carry record or source reference.
+
+Preview and activation both verify current stopped custody. Unclosed work,
+uncertain delivery, a current-authority UNKNOWN, budget blocks, pending accounting,
+restore barriers and missing current policy evidence reject the revision. Historical
+UNKNOWNs already retained in the original carry remain financial responsibility.
+Bridge uses ordinary `owner-handoff-prepare`, then owner activation and
+`owner-handoff`; historical carried inputs retain their existing receipts.
+
+Later same-policy resumes and normal paid renewals validate the continuous
+STOP/ACTIVE authority chain. If a new UNKNOWN occurs under the revised authority,
+its existing v2 LOCAL receipt names that actual authority and policy; it does not
+rewrite the original v1 carry proof. A directly following renewal may retain that
+current-authority responsibility through the existing manifest. The existing
+restriction on renewing fresh responsibility belonging to an earlier, subsequently
+resumed authority remains: it fails closed rather than relabeling the old input.
+
+Source erasure keeps only the original financial hashes and chain evidence. It
+does not restore erased policy bodies; a new activation requiring a missing current
+policy is refused. This permission alone does not enable execution: the deployed
+`evaluation_enabled` setting, each exact plan's preview and consent, original
+worker leases and all native per-call and aggregate budget limits still apply.
+The current evaluation settlement guard retains its 5000 microUSD per-call and
+50000 microUSD per-job limits, including when a synthetic preview admits a larger
+plan. An owner's higher spending ceiling does not raise those runtime limits.
+
 ## Candidate image and migration boundary
 
 The feature was authored on main `90bc5b3`; final integration normally inherits

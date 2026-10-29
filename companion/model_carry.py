@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from companion import paid_budget
 from companion.contracts import CoreError
+from companion.store import encode
 from companion_delivery_protocol import digest, hash_value, identifier, timestamp
 from companion_delivery_protocol import model_carry as wire
 
@@ -636,14 +637,16 @@ def read(store, settings, authority, carry_sha, successor_policy_sha):
         saved = view["model_carries"].get(carry_sha)
         if not saved:
             raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
-        if saved["successor_policy_sha256"] != successor_policy_sha:
-            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
         if (saved["kind"] == RENEW and authority == saved["manifest"]["authority"]
                 and not saved["manifest"]["inputs"]):
             raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
         if authority != saved["manifest"]["authority"]:
+            if authority["policy_sha256"] != successor_policy_sha:
+                raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
             stopped = _continuation(store, settings, authority, saved, view)
             return _local_receipt(store, settings, authority, saved, stopped, view)
+        if saved["successor_policy_sha256"] != successor_policy_sha:
+            raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
         result = _input_receipt(saved)
         head = owner_authority._latest(store)
         if (
@@ -709,6 +712,7 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
         "kind": wire.LOCAL_KIND,
         "version": 2,
         "authority": authority,
+        "successor_policy_sha256": authority["policy_sha256"],
         "origin_authority": saved["manifest"]["authority"],
         "core_stop_sha256": stopped["record_sha256"],
         "inputs": inputs,
@@ -721,8 +725,62 @@ def _local_receipt(store, settings, authority, saved, stopped, view):
     return wire.receipt(result)
 
 
+def evaluation_revision(old, new):
+    """One explicit purpose addition; no paid, identity or source-scope change."""
+    if old == new:
+        return
+    before, after = old.model_dump(mode="json"), new.model_dump(mode="json")
+    if ("evaluation" in old.purposes or new.purposes != [*old.purposes, "evaluation"]
+        or old.authorization_sha256 == new.authorization_sha256
+        or {k: v for k, v in before.items() if k not in {"purposes", "authorization_sha256"}}
+        != {k: v for k, v in after.items() if k not in {"purposes", "authorization_sha256"}}):
+        raise ValueError("only an explicitly authorized evaluation purpose may be added")
+
+
+def authority_chain(store, saved, revisions):
+    """Validate retained authority evidence without resurrecting erased policies.
+
+    Authority records attest each accepted activation. Erasure retains their
+    hashes; fresh activation separately requires the current policy body.
+    """
+    from companion.owner_authority_protocol import OwnerGrantPolicy
+
+    origin = saved["manifest"]["authority"]
+    previous, previous_policy = None, None
+    for index, row in enumerate(revisions):
+        current = store.one("SELECT * FROM owner_authority_revisions "
+                            "WHERE grant_id=? AND revision=?",
+                            (row["grant_id"], row["revision"]))
+        if (not current or row["grant_id"] != origin["grant_id"]
+            or row["restore_generation"] != origin["restore_generation"]
+            or row["revision"] != origin["revision"] + 2 + index
+            or row["state"] != ("ACTIVE" if index % 2 == 0 else "STOPPED")
+            or any(current[k] != row[k] for k in (
+                "record_sha256", "policy_sha256", "state", "predecessor_sha256"))
+            or not index and row["policy_sha256"] != saved["successor_policy_sha256"]
+            or previous and row["predecessor_sha256"] != previous["record_sha256"]
+            or index % 2 and row["policy_sha256"] != previous["policy_sha256"]):
+            raise ValueError("model carry authority chain changed")
+        policy = None
+        if current["policy_redacted"]:
+            if current["policy_json"] != "{}":
+                raise ValueError("invalid erased authority")
+        else:
+            policy = OwnerGrantPolicy.model_validate_json(current["policy_json"])
+            if (digest(policy.model_dump(mode="json")) != row["policy_sha256"]
+                or policy.unknown_carry_sha256 != saved["carry_sha256"]
+                or policy.paid_contract_sha256 != saved["successor_paid_contract_sha256"]):
+                raise ValueError("model carry authority policy changed")
+        if previous and row["policy_sha256"] != previous["policy_sha256"]:
+            if policy is not None and previous_policy is not None:
+                evaluation_revision(previous_policy, policy)
+            elif policy is not None or previous_policy is not None:
+                raise ValueError("incomplete erased authority transition")
+        previous, previous_policy = row, policy
+
+
 def _continuation(store, settings, authority, saved, view, *, approved_contract_sha256=None):
-    """Reuse one approval across native STOP/ACTIVE revisions, never a fresh window."""
+    """Reuse one paid approval across verified STOP/ACTIVE authority revisions."""
     from companion import live_text, owner_authority
 
     origin = saved["manifest"]["authority"]
@@ -740,20 +798,18 @@ def _continuation(store, settings, authority, saved, view, *, approved_contract_
     if (
         authority["grant_id"] != origin["grant_id"]
         or authority["restore_generation"] != origin["restore_generation"]
-        or authority["policy_sha256"] != saved["successor_policy_sha256"]
         or authority["revision"] < origin["revision"] + 2
         or not revisions
         or len(revisions) != authority["revision"] - origin["revision"] - 1
         or any(
-            row["policy_sha256"] != saved["successor_policy_sha256"]
-            or row["restore_generation"] != origin["restore_generation"]
+            row["restore_generation"] != origin["restore_generation"]
             or row["state"] != ("ACTIVE" if index % 2 == 0 else "STOPPED")
             for index, row in enumerate(revisions)
         )
         or not stopped
         or stopped["state"] != "STOPPED"
         or stopped["predecessor_sha256"] != revisions[-1]["record_sha256"]
-        or stopped["policy_sha256"] != saved["successor_policy_sha256"]
+        or stopped["policy_sha256"] != authority["policy_sha256"]
         or stopped["restore_generation"] != origin["restore_generation"]
         or owner_authority._meta(store, owner_authority.GENERATION) != origin["restore_generation"]
         or not head
@@ -763,7 +819,7 @@ def _continuation(store, settings, authority, saved, view, *, approved_contract_
             and head["revision"] == authority["revision"] + 2
             and head["grant_id"] == origin["grant_id"]
             and head["restore_generation"] == origin["restore_generation"]
-            and head["policy_sha256"] == saved["successor_policy_sha256"]
+            and head["policy_sha256"] == authority["policy_sha256"]
             and head["predecessor_sha256"] == stopped["record_sha256"]
         )
         or (approved_contract_sha256 or paid_budget.sha(paid_budget.snapshot(settings)))
@@ -771,6 +827,10 @@ def _continuation(store, settings, authority, saved, view, *, approved_contract_
         or original.policy.unknown_carry_sha256 != saved["carry_sha256"]
     ):
         raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
+    try:
+        authority_chain(store, saved, revisions)
+    except (ValueError, TypeError, KeyError) as error:
+        raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409) from error
     _quiescent(store, view)
     unknown = store.rows("SELECT request_id FROM model_usage WHERE state='UNKNOWN'")
     if any(row["request_id"] not in view["model_closures"] for row in unknown):
@@ -785,7 +845,7 @@ def activation(store, settings, policy):
     supported(store, settings)
     view = owner_authority.custody(store, settings, settlement=True)
     saved = view["model_carries"].get(policy.unknown_carry_sha256)
-    if not saved or saved["successor_policy_sha256"] != digest(policy.model_dump(mode="json")):
+    if not saved:
         raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
     head = owner_authority._latest(store)
     if head and head["record_sha256"] != saved["manifest"]["core_stop_sha256"]:
@@ -799,8 +859,22 @@ def activation(store, settings, policy):
             raise CoreError("OWNER_MODEL_CARRY_CHANGED", 409)
         authority = owner_authority.reference(previous).as_dict()
         _continuation(store, settings, authority, saved, view)
-        _work(store, settings, authority)
+        work = _work(store, settings, authority)
+        old = owner_authority.evidence(store, settings, authority).policy
+        try:
+            evaluation_revision(old, policy)
+        except (ValueError, TypeError, KeyError) as error:
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409) from error
+        if old != policy and any(not state["terminal"] for state in work.values()):
+            raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
+        if old != policy and store.one(
+            "SELECT 1 FROM model_admissions a JOIN model_usage u USING(request_id) "
+            "WHERE u.state='UNKNOWN' AND a.authority_json=?", (encode(authority),)
+        ):
+            raise CoreError("OWNER_MODEL_CARRY_NOT_QUIESCENT", 409)
         return
+    if saved["successor_policy_sha256"] != digest(policy.model_dump(mode="json")):
+        raise CoreError("OWNER_MODEL_CARRY_REQUIRED", 403)
     value = manifest(
         store,
         settings,

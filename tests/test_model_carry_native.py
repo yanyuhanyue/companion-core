@@ -72,12 +72,14 @@ async def stopped(process):
     "meme_enabled", [False, True], ids=["default_scope", "meme_expression_enabled"]
 )
 @pytest.mark.parametrize("current_timeout", [False, True])
+@pytest.mark.parametrize("evaluation_revision", [False, True])
 def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
     core,
     tmp_path,
     monkeypatch,
     current_timeout,
     meme_enabled,
+    evaluation_revision,
 ):
     import tests.test_prepare_owner_input as preparation
 
@@ -321,6 +323,34 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 await retained_scope(successor)
                 newer = replace(config, owner_authority=successor)
                 assert (await bridge(["owner-handoff"], newer))["state"] == "ACTIVE"
+                if evaluation_revision:
+                    revision_stop = await client.post(
+                        "/internal/v1/owner-authority/stop",
+                        json={"authority": successor, "operation_id": "native-evaluation-stop"},
+                        headers=control_headers)
+                    assert revision_stop.status_code == 200, revision_stop.text
+                    with Spool(newer) as spool:
+                        OwnerRuntime(spool, clock=lambda: core.clock.now).stop()
+                    normal = await bridge(["owner-handoff-prepare"], newer)
+                    assert normal["state"] == "HANDOFF_PREPARED"
+                    policy = policy.model_copy(update={
+                        "purposes": [*policy.purposes, "evaluation"],
+                        "authorization_sha256": "a" * 64})
+                    request["successor_policy"] = policy.model_dump(mode="json")
+                    query = {"expected_revision": successor["revision"] + 1,
+                             "policy": policy.model_dump(mode="json")}
+                    preview = await client.post("/internal/v1/owner-authority/preview",
+                                                 json=query, headers=control_headers)
+                    assert preview.status_code == 200, preview.text
+                    revised = await client.post("/internal/v1/owner-authority/activate", json={
+                        **query, "operation_id": "native-evaluation-revision",
+                        "preview_sha256": preview.json()["preview_sha256"]},
+                        headers=control_headers)
+                    assert revised.status_code == 200, revised.text
+                    successor = revised.json()["authority"]
+                    newer = replace(config, owner_authority=successor)
+                    assert (await bridge(["owner-handoff"], newer))["state"] == "ACTIVE"
+                    await retained_scope(successor)
                 # Old source/reference cannot become an independent new input.
                 assert (
                     await client.post(
@@ -473,7 +503,8 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 else:
                     arguments, prepared_state = ["owner-handoff-prepare"], "HANDOFF_PREPARED"
                 assert (await bridge(arguments, newer))["state"] == prepared_state
-                repeated_query = {"expected_revision": 4, "policy": request["successor_policy"]}
+                repeated_query = {"expected_revision": successor["revision"] + 1,
+                                  "policy": request["successor_policy"]}
                 preview = await client.post(
                     "/internal/v1/owner-authority/preview",
                     json=repeated_query,
@@ -492,7 +523,7 @@ def test_native_video_unknown_carry_recovers_only_new_input_and_real_ack(
                 assert activated_again.status_code == 200, activated_again.text
                 final_authority = activated_again.json()["authority"]
                 await retained_scope(final_authority)
-                assert final_authority == successor | {"revision": 5}
+                assert final_authority == successor | {"revision": successor["revision"] + 2}
                 assert core.store.rows("SELECT * FROM model_usage ORDER BY rowid") == preserved
                 assert (
                     core.store.rows("SELECT * FROM model_budget_windows ORDER BY window_id")
