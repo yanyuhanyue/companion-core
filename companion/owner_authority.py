@@ -221,7 +221,8 @@ def model_purpose(store, scenario, job_id):
                "diary": "diary", "reflection": "reflection", "qq_poke": "poke",
                "social_autonomy": "social", "content_vision": "image",
                "content_video": "content", "content_video_preview": "bili_video",
-               "meme_caption": "meme", "evaluation": "evaluation", "rem": "rem"}.get(scenario)
+               "meme_caption": "meme", "evaluation": "evaluation", "rem": "rem",
+               "watch_review": "exploration"}.get(scenario)
     if purpose is None:
         raise CoreError("OWNER_AUTHORITY_MODEL_PURPOSE_REQUIRED", 403)
     return purpose
@@ -252,7 +253,8 @@ def admit_model(store, settings, clock, job_id, scenario):
     purpose = model_purpose(store, scenario, job_id)
     view = current(store, settings, clock, purpose=purpose)
     background = scenario in {"activity", "social_autonomy", "memory_extract", "diary",
-                              "reflection", "rem", "meme_caption", "qq_poke"} or (
+                              "reflection", "rem", "meme_caption", "qq_poke",
+                              "watch_review"} or (
         scenario == "memory_review" and job_id is None)
     if background and owner_waiting(store, settings, clock(), authority=view.authority.as_dict()):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
@@ -276,7 +278,7 @@ def admit_model(store, settings, clock, job_id, scenario):
         if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     elif scenario not in {"memory_extract", "memory_review", "diary", "reflection",
-                          "social_autonomy"}:
+                          "social_autonomy", "watch_review"}:
         raise CoreError("COMPANION_BACKGROUND_SCOPE_REQUIRED", 403)
     return view
 

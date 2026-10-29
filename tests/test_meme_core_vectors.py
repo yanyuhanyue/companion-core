@@ -355,6 +355,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(legacy))) as store:
         c.core.store.db.backup(store.db)
         store.execute("DROP TABLE meme_vectors")
+        store.execute("DROP TABLE watch_ledger")  # Added after 0047 too.
         store.execute("UPDATE alembic_version SET version_num='0047_meme_assets'")
     archive, restored, key = (
         tmp_path / "pre0048.enc",
@@ -368,7 +369,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(restored))) as store:
         assert (
             store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0049_evaluation_ordinals"
+            == "0050_watch_ledger"
         )
         assert not store.rows("SELECT * FROM meme_vectors")
         assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"
