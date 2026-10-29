@@ -246,8 +246,13 @@ def owner_waiting(store, settings, now, *, authority=None):
     ))
 
 
-def admit_model(store, settings, clock, job_id, scenario):
-    """Check the model's independent purpose and its native task before budget admission."""
+def admit_model(store, settings, clock, job_id, scenario, *, yield_to_chat=True):
+    """Check the model's independent purpose and its native task before budget admission.
+
+    Background work yields to a waiting owner at admission and at the HTTP boundary,
+    where the model client can prove the request was never sent. The intermediate
+    recheck (`yield_to_chat=False`) has no such proof; yielding there left calls UNKNOWN.
+    """
     from companion import owner_input, reply_revision
 
     purpose = model_purpose(store, scenario, job_id)
@@ -256,7 +261,8 @@ def admit_model(store, settings, clock, job_id, scenario):
                               "reflection", "rem", "meme_caption", "qq_poke",
                               "watch_review"} or (
         scenario == "memory_review" and job_id is None)
-    if background and owner_waiting(store, settings, clock(), authority=view.authority.as_dict()):
+    if background and yield_to_chat and owner_waiting(
+            store, settings, clock(), authority=view.authority.as_dict()):
         raise CoreError("BACKGROUND_YIELD_TO_CHAT", 409)
     if job_id is not None:
         job = store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
@@ -283,7 +289,7 @@ def admit_model(store, settings, clock, job_id, scenario):
     return view
 
 
-def check_model(store, settings, clock, request_id):
+def check_model(store, settings, clock, request_id, *, yield_to_chat=True):
     """Recheck a reserved admission; historical references never renew an execution lease."""
     row = store.one("SELECT a.*,m.job_id,m.scenario,m.state FROM model_admissions a "
                     "JOIN model_usage m USING(request_id) WHERE request_id=?", (request_id,))
@@ -291,7 +297,8 @@ def check_model(store, settings, clock, request_id):
         raise CoreError("OWNER_AUTHORITY_MODEL_ADMISSION_REQUIRED", 403)
     view = current(store, settings, clock, purpose=model_purpose(
         store, row["scenario"], row["job_id"]), authority=json.loads(row["authority_json"]))
-    admit_model(store, settings, clock, row["job_id"], row["scenario"])
+    admit_model(store, settings, clock, row["job_id"], row["scenario"],
+                yield_to_chat=yield_to_chat)
     deadlines = [datetime.fromisoformat(row["lease_until"])]
     if view.policy.expires_at:
         deadlines.append(view.policy.expires_at)
