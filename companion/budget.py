@@ -898,13 +898,14 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
             model_carry.close_owned(store, settings, request_id, dispatch, clock())
 
 
-def _model_scope(store, settings, clock, request_id, scenario):
+def _model_scope(store, settings, clock, request_id, scenario, *, yield_to_chat=True):
     from companion import evaluation, live_text, owner_authority
 
     if scenario == "evaluation":
         return evaluation.check_request(store, settings, clock, request_id)
     if owner_authority.required(store, settings):
-        return owner_authority.check_model(store, settings, clock, request_id)
+        return owner_authority.check_model(store, settings, clock, request_id,
+                                           yield_to_chat=yield_to_chat)
     return live_text.check_model(store, settings, clock, request_id)
 
 
@@ -1028,7 +1029,9 @@ async def _dispatch(
     with phase("dispatch_recheck", trace_id):
         cumulative.preflight(store, settings, clock)
         paid_budget.contract(settings, clock())
-        _model_scope(store, settings, clock, request_id, scenario)
+        # I/O custody already began and this phase cannot prove non-dispatch, so a late
+        # owner message is left to the HTTP-boundary check, which can.
+        _model_scope(store, settings, clock, request_id, scenario, yield_to_chat=False)
         if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if datetime.fromisoformat(row["lease_until"]) <= datetime.fromisoformat(clock()):
