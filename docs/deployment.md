@@ -34,6 +34,37 @@ UI 也加载本次已验证的原归档；运行时不重新构建。其依赖�
 备份、迁移和交接步骤执行，并保留费用及投递结果不明记录。开发环境继续沿用
 [隔离开发 Compose](../deploy/README.md) 的源码挂载流程。
 
+## 发布预检
+
+镜像加载后、停写前，在部署主机上运行只读预检：
+
+```bash
+python3 scripts/release_plan.py --project companion-main --target core=<镜像ID> --target bridge=<镜像ID> --output <私有目录>
+```
+
+预检不会停止、启动、迁移或写入运行中的服务和数据。流程如下：
+
+1. 读取运行中的容器，找出 API 可写挂载的目录。
+2. 把这些目录复制到 `/dev/shm` 下的私有临时目录。SQLite 文件用 backup API 复制，已提交的 WAL 一并带上。
+3. 用目标 Core 镜像在无网络容器中运行 `companion.release_probe`，检查副本：
+   - 需要迁移时，在副本上执行并计时；
+   - 判断当前 OwnerAuthority policy 在新代码和现有配置下是否仍然有效；
+   - 统计未结任务、待发送消息和 UNKNOWN 模型调用。
+4. 删除副本，输出 `plan.json` 和 `plan.md`。输出只含代码、计数和镜像 ID，不含消息内容或配置值。
+
+预检结论分为以下几类：
+
+| 类型 | 含义 |
+| --- | --- |
+| `NO_CHANGE` | 没有需要部署的变化 |
+| `EDGE` | 只有 Bridge、Reader 或 UI 镜像变化；空闲时只重启这些服务 |
+| `A` | Core 代码变化，不需要迁移，policy 仍然有效：停写，换镜像，用同一份 policy 恢复，交接 |
+| `B` | 在 A 的基础上需要迁移：另需备份，并执行一次 `companion init` |
+| `C` | policy 失效或要求变更（续期、purpose）：需要主人批准新的 policy；有 UNKNOWN 时走 carry |
+| `NOT_READY` | 副本存在发布无法自行解决的阻断项，先处理再重新预检 |
+
+`plan.md` 按类型列出发布步骤。要续期或增加 purpose 时，加 `--policy-change <原因>`。
+
 ## 启动核心容器
 
 ```bash

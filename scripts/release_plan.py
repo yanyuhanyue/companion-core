@@ -1,0 +1,297 @@
+"""Read-only release plan for a running Compose deployment.
+
+Run on the deployment host as the Docker operator. It never stops, starts, migrates or
+writes the running services or their data. It reads the running containers, copies the
+Core data directories into a private tmpfs directory, runs `companion.release_probe`
+from the target Core image against that copy with no network, deletes the copy, and
+writes `plan.json` and `plan.md` that say what the release needs:
+
+- NO_CHANGE: nothing to deploy.
+- EDGE: only Bridge, Reader or UI images change; restart those services when idle.
+- A: Core code changes, no migration, the stored OwnerAuthority policy stays valid.
+- B: as A, plus a schema migration (timed on the copy).
+- C: the policy no longer matches, or a policy change was requested (renewal, purpose).
+- NOT_READY: the copy has blockers the release cannot resolve on its own.
+
+Standard library only, so it runs with the host's Python.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+GROUPS = {"core": "companion-api", "bridge": "bridge", "reader": "bilibili-reader",
+          "ui": "console-ui"}
+MIGRATION_BLOCKERS = {"MIGRATION_REQUIRED"}
+SQLITE_HEADER = b"SQLite format 3\x00"
+SKIP_SUFFIXES = ("-wal", "-shm", "-journal")
+PROBE_TIMEOUT = 900
+
+
+def docker(*args, check=True):
+    result = subprocess.run(["docker", *args], capture_output=True, text=True, check=False)
+    if check and result.returncode:
+        raise RuntimeError(f"docker {args[0]} failed: {result.stderr.strip()[:300]}")
+    return result
+
+
+def containers(project):
+    names = docker("ps", "-a", "--filter", f"label=com.docker.compose.project={project}",
+                   "--format", "{{.Names}}").stdout.split()
+    if not names:
+        raise RuntimeError(f"No containers for Compose project {project}")
+    return json.loads(docker("inspect", *names).stdout)
+
+
+def services(inspected):
+    """service -> image, state, user, entrypoint, env and mounts of one container."""
+    result = {}
+    for item in inspected:
+        labels = item["Config"].get("Labels") or {}
+        service = labels.get("com.docker.compose.service")
+        if not service:
+            continue
+        result[service] = {
+            "container": item["Name"].lstrip("/"),
+            "image": item["Image"],
+            "state": item["State"]["Status"],
+            "user": item["Config"].get("User") or "",
+            "entrypoint": item["Config"].get("Entrypoint") or [],
+            "env": [e for e in item["Config"].get("Env") or [] if e.startswith("COMPANION_")
+                    and not e.startswith("COMPANION_TELEMETRY")],
+            "mounts": [{"type": m["Type"], "source": m.get("Source"),
+                        "destination": m["Destination"], "rw": bool(m.get("RW"))}
+                       for m in item.get("Mounts", [])],
+        }
+    return result
+
+
+def changes(current, targets):
+    """Which services each target image would replace; unknown groups are an error."""
+    result = {}
+    for group, image in targets.items():
+        anchor = GROUPS.get(group)
+        if anchor not in current:
+            raise ValueError(f"Unknown or absent component {group}")
+        old = current[anchor]["image"]
+        replaced = sorted(name for name, svc in current.items() if svc["image"] == old)
+        if image != old:
+            result[group] = {"from": old, "to": image, "services": replaced}
+    return result
+
+
+def copy_file(path, destination):
+    """SQLite through the backup API (committed WAL included); anything else byte for byte."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("rb") as stream:
+        header = stream.read(len(SQLITE_HEADER))
+    if header != SQLITE_HEADER:
+        shutil.copy2(path, destination)
+        return
+    src = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+    dst = sqlite3.connect(destination)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
+def copy_tree(source, target):
+    """Copy a writable bind (directory or single file); WAL side files are folded in."""
+    source, target = Path(source), Path(target)
+    if source.is_file():
+        copy_file(source, target)
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source.rglob("*")):
+        destination = target / path.relative_to(source)
+        if path.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        elif not path.name.endswith(SKIP_SUFFIXES):
+            copy_file(path, destination)
+
+
+def run_probe(api, image, workspace):
+    """Run the target image's probe on copies of the API's writable mounts."""
+    args = ["run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+    if api["user"]:
+        args += ["--user", api["user"]]
+    env_file = Path(workspace, "probe.env")
+    env_file.write_text("".join(line + "\n" for line in api["env"]), encoding="utf-8")
+    os.chmod(env_file, 0o600)
+    args += ["--env-file", str(env_file)]
+    for index, mount in enumerate(api["mounts"]):
+        if mount["type"] != "bind":
+            raise RuntimeError(f"Unsupported mount type {mount['type']} at "
+                               f"{mount['destination']}")
+        if mount["rw"]:
+            copy = Path(workspace, f"mount-{index}")
+            copy_tree(mount["source"], copy)
+            args += ["-v", f"{copy}:{mount['destination']}"]
+        else:
+            args += ["-v", f"{mount['source']}:{mount['destination']}:ro"]
+    if api["user"]:
+        uid, _, gid = api["user"].partition(":")
+        subprocess.run(["chown", "-R", f"{uid}:{gid or uid}", str(workspace)], check=True)
+    python = (api["entrypoint"] or ["/app/.venv/bin/python"])[0]
+    args += ["--entrypoint", python, image, "-m", "companion.release_probe"]
+    try:
+        result = subprocess.run(["docker", *args], capture_output=True, text=True,
+                                timeout=PROBE_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        return {"error": "PROBE_TIMEOUT"}
+    lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
+    if result.returncode or not lines:
+        missing = "No module named companion.release_probe" in result.stderr
+        return {"error": "PROBE_UNAVAILABLE" if missing else "PROBE_FAILED",
+                "exit_code": result.returncode}
+    return json.loads(lines[-1])
+
+
+STEPS = {
+    "EDGE": [
+        "确认没有正在发送的消息、正在进行的读取后，只重启下列服务",
+        "观察健康检查和日志",
+    ],
+    "A": [
+        "Core 执行 STOP（同一份授权）；Bridge 执行 owner-handoff-prepare",
+        "确认 API 以外的 worker、Bridge、Reader 都已退出",
+        "换镜像，用同一份 policy 执行 preview/activate（revision +2）",
+        "Bridge 执行 owner-handoff",
+        "先启动 life-worker，90 秒后启动其余 worker、Bridge 和 Reader",
+        "观察健康检查、STOP 状态和日志",
+    ],
+    "B": [
+        "Core 执行 STOP（同一份授权）；Bridge 执行 owner-handoff-prepare",
+        "确认 API、worker、Bridge、Reader 都已退出",
+        "加密备份数据库，并单独复制最新遗忘日志",
+        "用新镜像执行一次 `companion init` 迁移（API 也停止）",
+        "启动 API，用同一份 policy 执行 preview/activate（revision +2）",
+        "Bridge 执行 owner-handoff",
+        "先启动 life-worker，90 秒后启动其余 worker、Bridge 和 Reader",
+        "观察健康检查、STOP 状态和日志",
+    ],
+    "C": [
+        "准备新的 policy（续期、purpose 或能力配置变化），交主人批准",
+        "Core 执行 STOP；确认所有写入进程已退出",
+        "有未结 UNKNOWN 时走离线 carry 和 owner-carry-handoff-prepare；否则 owner-handoff-prepare",
+        "加密备份数据库，复制最新遗忘日志；需要迁移时执行一次 `companion init`",
+        "启动 API，preview/activate 新 policy",
+        "Bridge 执行 owner-handoff",
+        "先启动 life-worker，90 秒后启动其余 worker、Bridge 和 Reader",
+        "观察健康检查、STOP 状态和日志",
+    ],
+}
+
+
+def classify(changed, probe, policy_change=None):
+    """Return (class, reasons). Pure, so the decision is testable without Docker."""
+    if not changed and not policy_change:
+        return "NO_CHANGE", []
+    if probe is None:
+        return ("EDGE", []) if "core" not in changed and not policy_change else (
+            "NOT_READY", ["PROBE_NOT_RUN"])
+    if probe.get("error"):
+        return "NOT_READY", [probe["error"]]
+    migration = probe["migration"]
+    if migration.get("needed") and not migration.get("ok"):
+        return "NOT_READY", ["MIGRATION_FAILED_ON_COPY"]
+    final = probe.get("after") or probe["before"]
+    blockers = [b for b in final["blockers"] if b not in MIGRATION_BLOCKERS]
+    authority = probe.get("authority", {})
+    if authority.get("state") == "UNREADABLE":
+        blockers.append("AUTHORITY_UNREADABLE")
+    if blockers:
+        return "NOT_READY", blockers
+    reasons = []
+    if policy_change:
+        reasons.append("POLICY_CHANGE_REQUESTED")
+    if authority.get("policy_problem"):
+        reasons.append(authority["policy_problem"])
+    if reasons:
+        return "C", reasons
+    if migration.get("needed"):
+        return "B", [f"SCHEMA {probe['before']['schema']} -> {final['schema']}"]
+    if "core" not in changed:
+        return "EDGE", []
+    return "A", []
+
+
+def report(plan):
+    lines = [f"# 发布预检：{plan['class']}", ""]
+    if plan["reasons"]:
+        lines += ["原因：" + "、".join(plan["reasons"]), ""]
+    lines += ["## 镜像变化", ""]
+    for group, change in plan["changes"].items():
+        lines.append(f"- {group}：{change['from'][:19]} → {change['to'][:19]}"
+                     f"（{', '.join(change['services'])}）")
+    if not plan["changes"]:
+        lines.append("- 无")
+    probe = plan.get("probe") or {}
+    if probe and not probe.get("error"):
+        before, migration = probe["before"], probe["migration"]
+        authority = probe.get("authority", {})
+        lines += ["", "## 副本检查（目标代码，不联网）", "",
+                  f"- schema：{before['schema']} → 目标 {before['expected_schema']}",
+                  "- 迁移：" + (f"需要，副本上耗时 {migration['seconds']} 秒"
+                               if migration.get("ok") else
+                               "需要但失败" if migration.get("needed") else "不需要"),
+                  f"- 授权：{authority.get('state')} r{authority.get('revision')}，"
+                  + ("新代码下仍有效" if not authority.get("policy_problem")
+                     else f"新代码下失效（{authority['policy_problem']}）"),
+                  f"- 未结工作：任务 {before['active_jobs']}，待发送 {before['open_deliveries']}"
+                  f"（不确定 {before['uncertain_deliveries']}），"
+                  f"UNKNOWN 模型调用 {before['unknown_model_calls']}"]
+    lines += ["", "## 步骤", ""]
+    lines += [f"{i}. {step}" for i, step in enumerate(STEPS.get(plan["class"], []), 1)]
+    if plan["class"] == "NOT_READY":
+        lines.append("先处理上面的原因，再重新预检。")
+    if plan["class"] == "C":
+        lines += ["", "需要主人批准新的 policy。"]
+    return "\n".join(lines) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--project", default="companion-main")
+    parser.add_argument("--target", action="append", default=[], metavar="COMPONENT=IMAGE",
+                        help="core, bridge, reader or ui, with a loaded image ID")
+    parser.add_argument("--policy-change", metavar="REASON")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    targets = dict(item.split("=", 1) for item in args.target)
+    args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    current = services(containers(args.project))
+    changed = changes(current, targets)
+    probe = None
+    if "core" in changed or args.policy_change:
+        image = changed["core"]["to"] if "core" in changed else current["companion-api"]["image"]
+        base = "/dev/shm" if Path("/dev/shm").is_dir() else None
+        workspace = Path(tempfile.mkdtemp(prefix="release-plan-", dir=base))
+        try:
+            probe = run_probe(current["companion-api"], image, workspace)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+    kind, reasons = classify(changed, probe, args.policy_change)
+    plan = {"schema_version": 1, "project": args.project, "class": kind, "reasons": reasons,
+            "changes": changed, "probe": probe,
+            "services": {name: {"image": svc["image"], "state": svc["state"]}
+                         for name, svc in current.items()}}
+    (args.output / "plan.json").write_text(json.dumps(plan, indent=2, ensure_ascii=False)
+                                           + "\n", encoding="utf-8")
+    (args.output / "plan.md").write_text(report(plan), encoding="utf-8")
+    print(report(plan))
+    return 0 if kind != "NOT_READY" else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
