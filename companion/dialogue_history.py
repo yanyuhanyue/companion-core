@@ -6,7 +6,7 @@ without settings use the historical byte estimate. Neither grants source authori
 
 import json
 
-from companion import reply_revision
+from companion import qq_quotes, reply_revision
 from companion.budget import token_upper_bound
 from companion.contracts import CoreError
 from companion.qq_rich import context
@@ -19,8 +19,13 @@ def recent_sent_turns(store, conversation_id, current_event_id, max_turns):
     )]
 
 
-def turn_messages(source):
-    rich = context(json.loads(source["body_json"])) if source.get("body_json") else None
+def turn_messages(source, store=None):
+    """With a store, quotes of since erased or recalled messages are withdrawn."""
+    rich = None
+    if source.get("body_json"):
+        body = json.loads(source["body_json"])
+        rich = context(body, qq_quotes.withdrawn(store, source["event_id"], body)
+                       if store is not None else frozenset())
     return [*([rich] if rich else []), {"role": "user", "content": source["user_text"]},
             *([{"role": "assistant", "content": source["reply_text"]}]
               if source["reply_text"] else [])]

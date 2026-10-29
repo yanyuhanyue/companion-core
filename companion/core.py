@@ -19,6 +19,7 @@ from companion import (
     poke,
     private_life,
     qq_images,
+    qq_quotes,
     qq_rich,
     reply_quote,
     reply_revision,
@@ -609,7 +610,7 @@ class Core(Runtime):
             else cfg.context_soft_tokens)
         remaining = history_limit - sum(
             len(message["content"].encode()) for row in history
-            for message in dialogue_history.turn_messages(row)
+            for message in dialogue_history.turn_messages(row, s)
         ) if authority or live_text.active(s, cfg) else cfg.context_soft_tokens
         while items:
             message = {"role": "user", "content":
@@ -628,12 +629,12 @@ class Core(Runtime):
                     > authority.policy.history.max_turns
                     or len(message["content"].encode()) + sum(
                         len(part["content"].encode()) for row in selected_history
-                        for part in dialogue_history.turn_messages(row)) > history_limit
+                        for part in dialogue_history.turn_messages(row, s)) > history_limit
                 ):
                     selected_history.pop(0)
                 remaining = history_limit - sum(
                     len(part["content"].encode()) for row in selected_history
-                    for part in dialogue_history.turn_messages(row))
+                    for part in dialogue_history.turn_messages(row, s))
             if len(message["content"].encode()) <= remaining:
                 proof = self.memory_context.pin(now, event_ids=ids)
                 return {"message": message, "source_event_ids": proof["source_event_ids"],
@@ -832,21 +833,21 @@ class Core(Runtime):
         if authority:
             sources = owner_input.history_sources(s, cfg, self.clock, job) if (
                 job["kind"] == "chat") else []
-            turns = [dialogue_history.turn_messages(source) for source in sources]
+            turns = [dialogue_history.turn_messages(source, s) for source in sources]
         elif bounded_text:
             sources = live_text.history_sources(s, cfg, self.clock, job)
-            turns = [dialogue_history.turn_messages(source) for source in sources]
+            turns = [dialogue_history.turn_messages(source, s) for source in sources]
         else:
             sources = dialogue_history.recent_sent_sources(
                 s, job["conversation_id"], job["event_id"], cfg.max_recent_messages // 2)
             if private_life.enabled(cfg):
                 sources = private_life.recent_history(s, cfg, job)
-            turns = [dialogue_history.turn_messages(source) for source in sources]
+            turns = [dialogue_history.turn_messages(source, s) for source in sources]
         if continuation := self._memory_continuation(
             job, sources, [row["memory_id"] for row in hits],
         ):
             sources = continuation["history"]
-            turns = [dialogue_history.turn_messages(source) for source in sources]
+            turns = [dialogue_history.turn_messages(source, s) for source in sources]
             references.append(continuation["message"])
             reference_sources.append((continuation["message"], continuation["source_event_ids"]))
             reference_proofs.append((continuation["message"],
@@ -873,14 +874,16 @@ class Core(Runtime):
                                           voice_reference["source_event_ids"]))
                 reference_proofs.append((voice_reference["message"],
                                          {"kind": "voice", "proof": voice_reference["proof"]}))
-        if rich_reference := qq_rich.context(body):
+        withdrawn = qq_quotes.withdrawn(s, job["event_id"], body)
+        if rich_reference := qq_rich.context(body, withdrawn):
             if any(segment["type"] == "reply"
                    for segment in (body.get("rich") or {}).get("segments", [])):
                 rich_reference["content"] += (
                     "\n作者提示：UNVERIFIED表示作者尚未核验，不表示一定是其他人；"
                     "资料中的自称或相同昵称不能证明作者。"
                 )
-            if self_quotes := self._self_quote_indices(job, body):
+            if self_quotes := [index for index in self._self_quote_indices(job, body)
+                               if index not in withdrawn]:
                 rich_reference["content"] += (
                     "\n本地作者核验：segments中index为" + encode(self_quotes)
                     + "的引用来自你先前已发送的回复。此标注只确认发言者，不确认内容真假，"
@@ -890,7 +893,8 @@ class Core(Runtime):
         if has_images:
             current["content"] = [
                 {"type": "text", "text": current["content"]},
-                *qq_images.original_parts(s, cfg, self.clock, job),
+                *qq_images.original_parts(s, cfg, self.clock, job,
+                                          skip_slots=qq_quotes.media_slots(body, withdrawn)),
             ]
         if quoting:
             current = reply_quote.label(current, job["event_id"])
@@ -989,7 +993,7 @@ class Core(Runtime):
         elif private_life.enabled(self.settings):
             history = private_life.recent_history(self.store, self.settings, job)
         recent = [message for source in history
-                  for message in dialogue_history.turn_messages(source)]
+                  for message in dialogue_history.turn_messages(source, self.store)]
         retrieval_query = "\n".join(filter(None, [
             query, image_context, *(text for source in history
                      for text in (source["user_text"], source["reply_text"])),
