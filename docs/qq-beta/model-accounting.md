@@ -35,6 +35,11 @@ A later statement may follow an estimate; an estimate cannot replace a confirmed
 statement. Each step retains its predecessor, original admission/settlement,
 closure proof, owner authorization digest and private evidence digest.
 
+A confirmed statement is checked against the original native attempt, window,
+request and period limits. A violation is retained in `budget_limit_codes` and
+sets a persistent budget block. Further confirmed statements can still increase
+the recorded liability, but cannot clear that block or enable another call.
+
 This version uses the existing native `local_active_attempts_v2` custody. It
 requires an original dispatched UNKNOWN with a validated closure record and a
 matching owner identity. It retains the carry contract's rejection of cumulative
@@ -86,7 +91,7 @@ review the displayed basis and retained amount, then run
 --request-sha256 <prepared-file SHA256> --evidence statement-or-pricing-evidence`.
 
 The prepared request binds the journal head, original admission, native settlement,
-closure, preceding accounting receipt and prior amount. Changed state requires a
+closure, preceding accounting receipt, prior amount and budget-limit findings. Changed state requires a
 new preview. Repeating the identical completed operation returns its original
 receipt without another charge or journal append. Reusing an operation ID with
 different material or reusing evidence in another operation is rejected.
@@ -98,8 +103,20 @@ Journal, `runtime_meta` projection witnesses and native cloud-cost synchronizati
 An accounting record is an additional lower-bound receipt; it does not replace the
 original execution settlement used by historical carry proofs. The journal is
 fsynced before projecting the maximum amount and receipt witness into SQLite.
-An interrupted append stops ordinary custody checks. Only the identical reviewed
-operation can finish its projection; explicit restore barriers remain effective.
+If a fully validated provider statement cannot finish its journal append or
+durability confirmation, the command returns `PENDING_JOURNAL`. SQLite retains
+the higher known liability, the exact prepared request and a pending witness;
+native cloud costs are synchronized. Ordinary custody checks reject this pending
+state, so new model admissions cannot spend through the unrecorded liability.
+An estimate does not create a confirmed-liability hold on append failure.
+
+When no bytes were appended, or a complete valid record was written but fsync or
+DB projection was interrupted, retry the identical prepared request and evidence
+to finish durability and projection. A partial or corrupt journal still fails
+closed: this command never truncates or rewrites the old chain. Preserve the
+known-liability hold and original evidence for verified repair before retrying.
+Successful recovery removes only its pending witness; explicit restore barriers,
+STOP and permanent budget blocks remain effective.
 Old journal prefixes, missing projection witnesses, changed admission identity or
 a DB amount below a recorded liability are rejected.
 
@@ -125,3 +142,6 @@ provider confirmation after estimates, zero-price statements without refunds,
 idempotence, changed evidence/route/cutoff, unclosed transports, crash recovery,
 old journal/projection rollback, STOP, source erasure, subsequent same-policy
 activation, cloud cost synchronization, and the real CLI in an independent process.
+Confirmed over-limit statements, additional statements after a block, missing
+block witnesses and known-liability retention during append/fsync failures are
+also covered, including rejection of a corrupt journal during ordinary recovery.

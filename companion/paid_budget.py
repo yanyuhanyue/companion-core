@@ -374,7 +374,8 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                     measurements[row["request_id"]] = proof["sha256"]
                 latest[row["request_id"]] = row
         model_carry.validate_projection(store, model_controls, replay=model_control_replay)
-        model_accounting.validate_projection(store, accounting, accounting_replay)
+        accounting_pending = model_accounting.validate_projection(store, accounting,
+                                                                   accounting_replay)
         projection = store.one("SELECT value FROM runtime_meta WHERE key=?",
                                (cumulative.PROJECTION,))
         expected = cumulative.binding(account, path)
@@ -519,6 +520,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 "model_closures": model_closures, "model_carries": model_carries,
                 "model_controls": model_controls,
                 "model_accounting": accounting,
+                "model_accounting_pending": accounting_pending,
                 "model_latest": latest,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:

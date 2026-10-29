@@ -121,6 +121,112 @@ def test_provider_record_and_operation_cannot_be_reused_for_different_material(c
     assert snapshot(core) == before
 
 
+def test_confirmed_limit_violation_blocks_future_io_and_allows_larger_bill(core, tmp_path):
+    case = migrated(core, tmp_path)
+    job = authorized_job(core, number=2)
+    actual = core.settings.paid_model.per_attempt_micro_usd + 1
+    bill = {"kind": "provider_statement", "provider": "offline-fixture", "model": "offline-text",
+            "currency": "USD", "actual_micro_usd": actual, "provider_record_sha256": "b" * 64}
+    request, private = prepared(core, tmp_path, case.request_id, basis=bill)
+    assert request["budget_limit_codes"] == ["ATTEMPT_AMOUNT"]
+    result = model_accounting.record(core.store, core.settings, request, private, core.clock)
+    assert result["accounted_micro_usd"] == actual
+    assert case.request_id in custody(core)["blocked_request_ids"]
+    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+    with pytest.raises(CoreError, match="RECONCILIATION_REQUIRED"):
+        budget.reserve(core.store, core.settings, job, "chat", MESSAGES, core.clock())
+    before = snapshot(core)
+    assert model_accounting.record(core.store, core.settings, request, private, core.clock) == (
+        result)
+    assert snapshot(core) == before
+    bill.update(actual_micro_usd=actual + 100, provider_record_sha256="c" * 64)
+    request, private = prepared(core, tmp_path, case.request_id,
+                                operation="higher-confirmed-bill", basis=bill)
+    higher = model_accounting.record(core.store, core.settings, request, private, core.clock)
+    assert higher["accounted_micro_usd"] == actual + 100
+    assert higher["budget_limit_codes"] == ["ATTEMPT_AMOUNT"]
+    # A rolled-back DB stop cannot release the independently recorded violation.
+    core.store.execute("DELETE FROM runtime_meta WHERE key='model_budget_blocked'")
+    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+        custody(core)
+
+
+@pytest.mark.parametrize("failure", ["before", "after_fsync", "partial"])
+def test_confirmed_bill_survives_journal_failure_and_exact_recovery(
+    core, tmp_path, monkeypatch, failure,
+):
+    case = migrated(core, tmp_path)
+    owner_authority.stop(core.store, core.settings, core.clock, AuthorityStop(
+        operation_id="stop-before-known-bill", authority=case.successor["authority"]))
+    bill = {"kind": "provider_statement", "provider": "offline-fixture", "model": "offline-text",
+            "currency": "USD", "actual_micro_usd": 5000, "provider_record_sha256": "b" * 64}
+    request, private = prepared(core, tmp_path, case.request_id, basis=bill)
+    original = paid_budget.journal
+    prefix = journal(core).read_bytes()
+
+    def unavailable(store, approval, record=None, **kwargs):
+        if record and record.get("kind") == model_accounting.KIND:
+            if failure == "after_fsync":
+                original(store, approval, record, **kwargs)
+            elif failure == "partial":
+                with journal(core).open("ab") as stream:
+                    stream.write(b'{"kind":')
+            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        return original(store, approval, record, **kwargs)
+
+    monkeypatch.setattr(paid_budget, "journal", unavailable)
+    pending = model_accounting.record(core.store, core.settings, request, private, core.clock)
+    monkeypatch.setattr(paid_budget, "journal", original)
+    assert pending["state"] == "PENDING_JOURNAL"
+    assert core.store.one("SELECT billed_micro_usd,state FROM model_usage") == {
+        "billed_micro_usd": 5000, "state": "UNKNOWN"}
+    assert core.store.one("SELECT accounted_micro_usd FROM cloud_cost_snapshots")[
+        "accounted_micro_usd"] == 5000
+    assert core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                          (model_accounting.PENDING + request["operation_id"],))
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")
+    with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+        custody(core)
+    changed = copy.deepcopy(request)
+    changed["authorization_sha256"] = "c" * 64
+    with pytest.raises(CoreError):
+        model_accounting.record(core.store, core.settings, changed, private, core.clock)
+    if failure == "partial":
+        damaged = journal(core).read_bytes()
+        with pytest.raises(CoreError):
+            model_accounting.record(core.store, core.settings, request, private, core.clock)
+        assert journal(core).read_bytes() == damaged
+        # A trusted repair restores the verified complete prefix; the CLI never truncates it.
+        journal(core).write_bytes(prefix)
+    result = model_accounting.record(core.store, core.settings, request, private, core.clock)
+    assert result["state"] == "RECORDED" and result["accounted_micro_usd"] == 5000
+    assert not core.store.one("SELECT 1 FROM runtime_meta WHERE key=?",
+                              (model_accounting.PENDING + request["operation_id"],))
+    assert owner_authority._latest(core.store)["state"] == "STOPPED"
+    assert len(custody(core)["model_accounting"]) == 1
+    before = snapshot(core)
+    assert model_accounting.record(core.store, core.settings, request, private, core.clock) == (
+        result)
+    assert snapshot(core) == before
+
+
+def test_estimate_append_failure_does_not_create_a_known_bill_hold(core, tmp_path, monkeypatch):
+    case = migrated(core, tmp_path)
+    request, private = prepared(core, tmp_path, case.request_id)
+    original = paid_budget.journal
+
+    def unavailable(store, approval, record=None, **kwargs):
+        if record and record.get("kind") == model_accounting.KIND:
+            raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+        return original(store, approval, record, **kwargs)
+
+    before = snapshot(core)
+    monkeypatch.setattr(paid_budget, "journal", unavailable)
+    with pytest.raises(CoreError):
+        model_accounting.record(core.store, core.settings, request, private, core.clock)
+    assert snapshot(core) == before
+
+
 def test_duplicate_evidence_does_not_create_another_operation(core, tmp_path):
     case = migrated(core, tmp_path)
     value, private = proposal(tmp_path, case.request_id)

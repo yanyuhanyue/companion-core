@@ -12,13 +12,14 @@ from typing import Annotated, Literal
 
 from pydantic import Field, ValidationError
 
-from companion import cloud_budget, model_carry, owner_authority, paid_budget
+from companion import budget, cloud_budget, model_carry, owner_authority, paid_budget
 from companion.contracts import CoreError, StrictModel
 from companion.store import utcnow
 from companion_delivery_protocol import timestamp
 
 KIND = "model_accounting_reconciliation"
 PROJECTION = "model_accounting:"
+PENDING = "model_accounting_pending:"
 MAX_AMOUNT = 9_000_000_000_000_000
 Hash = Annotated[str, Field(pattern=r"^[a-f0-9]{64}$")]
 Amount = Annotated[int, Field(ge=0, le=MAX_AMOUNT, strict=True)]
@@ -60,6 +61,15 @@ class Prepared(Proposal):
     closure_sha256: Hash
     predecessor_sha256: Hash | None
     previous_accounted_micro_usd: Amount
+    budget_limit_codes: Annotated[list[Literal[
+        "ATTEMPT_AMOUNT", "WINDOW_AMOUNT", "REQUEST_AMOUNT", "DAILY_AMOUNT", "MONTHLY_AMOUNT",
+        "SCENARIO_DAILY_AMOUNT", "SCENARIO_MONTHLY_AMOUNT", "EVALUATION_AMOUNT",
+    ]], Field(max_length=8)]
+
+
+class Pending(StrictModel):
+    request: Prepared
+    accounted_micro_usd: Amount
 
 
 def evidence(path, expected):
@@ -126,7 +136,7 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
     previous = _prior(records, request.request_id)
     if (binding != request.binding_sha256 or not financial
         or financial["state"] != "UNKNOWN"
-        or request.request_id in blocked
+        or request.request_id in blocked and isinstance(request.basis, Estimate)
         or paid_budget.sha(financial) != request.native_settlement_sha256
         or closures.get(request.request_id) != request.closure_sha256
         or request.predecessor_sha256 != (previous["sha256"] if previous else None)
@@ -137,6 +147,16 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
             previous["accounted_micro_usd"] if previous else 0)):
         raise ValueError("model accounting original liability changed")
     amount, status = _priced(request, admission, usage)
+    codes = request.budget_limit_codes
+    inherited = set(previous["request"]["budget_limit_codes"]) if previous else set()
+    frozen = json.loads(admission["snapshot_json"])
+    if (codes != sorted(set(codes)) or inherited - set(codes)
+        or isinstance(request.basis, Estimate) and codes
+        or isinstance(request.basis, Statement) and (
+            amount > frozen["per_attempt_micro_usd"] and "ATTEMPT_AMOUNT" not in codes
+            or usage["scenario"] == "evaluation" and amount > 5000
+            and "EVALUATION_AMOUNT" not in codes)):
+        raise ValueError("model accounting budget stop changed")
     if (row["basis_micro_usd"] != amount or type(row["basis_micro_usd"]) is not int
         or row["billing_status"] != status
         or type(row["accounted_micro_usd"]) is not int
@@ -156,6 +176,8 @@ def fold(store, row, record_sha, journal_id, latest, closures, blocked, records)
     ):
         raise ValueError("provider billing record already attributed")
     records[operation] = {**row, "sha256": record_sha}
+    if codes:
+        blocked.setdefault(request.request_id, record_sha)
 
 
 def validate_projection(store, records, replay=None):
@@ -172,8 +194,25 @@ def validate_projection(store, records, replay=None):
                 raise ValueError("accounting replay conflict")
             continue
         if (saved.get(operation) != record["sha256"] or not usage
-            or usage["billed_micro_usd"] < record["accounted_micro_usd"]):
+            or usage["billed_micro_usd"] < record["accounted_micro_usd"]
+            or record["request"]["budget_limit_codes"] and not store.one(
+                "SELECT 1 FROM runtime_meta WHERE key='model_budget_blocked'")):
             raise ValueError("accounting database behind journal")
+    pending = {}
+    for row in store.rows("SELECT key,value FROM runtime_meta WHERE key>=? AND key<?",
+                          (PENDING, "model_accounting_pending;")):
+        item = Pending.model_validate_json(row["value"])
+        request = item.request
+        admission, usage, binding = _original(store, request.request_id)
+        amount, _ = _priced(request, admission, usage)
+        if (row["key"] != PENDING + request.operation_id
+            or not isinstance(request.basis, Statement) or binding != request.binding_sha256
+            or item.accounted_micro_usd != max(amount, request.previous_accounted_micro_usd)
+            or usage["billed_micro_usd"] < item.accounted_micro_usd
+            or paid_budget.sha(request.model_dump(mode="json")) != replay):
+            raise ValueError("known billing responsibility awaits identical journal recovery")
+        pending[request.operation_id] = item.model_dump(mode="json")
+    return pending
 
 
 def _supported(store, settings):
@@ -192,14 +231,22 @@ def _prepare(store, settings, proposal, view):
     financial = view["model_latest"].get(proposal.request_id)
     closure = view["model_closures"].get(proposal.request_id)
     if (usage["state"] != "UNKNOWN" or not financial or financial["state"] != "UNKNOWN"
-        or not closure or proposal.request_id in view["blocked_request_ids"]):
+        or not closure or proposal.request_id in view["blocked_request_ids"]
+        and isinstance(proposal.basis, Estimate)):
         raise CoreError("MODEL_ACCOUNTING_CLOSED_UNKNOWN_REQUIRED", 409)
     previous = _prior(view["model_accounting"], proposal.request_id)
+    codes = []
+    if isinstance(proposal.basis, Statement):
+        codes = budget._actual_limit_violations(store, admission,
+            json.loads(admission["snapshot_json"]), usage, proposal.basis.actual_micro_usd)
+        if previous:
+            codes += previous["request"]["budget_limit_codes"]
     request = Prepared(**proposal.model_dump(), journal_id=admission["journal_id"],
         expected_head_sha256=view["head_sha256"], binding_sha256=binding,
         native_settlement_sha256=paid_budget.sha(financial), closure_sha256=closure,
         predecessor_sha256=previous["sha256"] if previous else None,
-        previous_accounted_micro_usd=usage["billed_micro_usd"])
+        previous_accounted_micro_usd=usage["billed_micro_usd"],
+        budget_limit_codes=sorted(set(codes)))
     amount, status = _priced(request, admission, usage)
     return request, amount, status
 
@@ -214,10 +261,7 @@ def preview(store, settings, value, evidence_path, clock=utcnow):
                                        initialize=False)
             request, amount, status = _prepare(store, settings, proposal, view)
             record = _record(request, amount, status, clock())
-            fold(store, {**record, "previous": view["head_sha256"]}, "0" * 64,
-                 request.journal_id, view["model_latest"], view["model_closures"],
-                 view["blocked_request_ids"],
-                 dict(view["model_accounting"]))
+            _check_record(store, record, view)
             return {"state": "PREVIEW", "prepared_request": request.model_dump(mode="json"),
                     **_receipt(record)}
     except (ValidationError, ValueError, KeyError, TypeError) as error:
@@ -238,7 +282,33 @@ def _receipt(record):
             "billing_status": record["billing_status"],
             "basis_micro_usd": record["basis_micro_usd"],
             "accounted_micro_usd": record["accounted_micro_usd"],
+            "budget_limit_codes": record["request"]["budget_limit_codes"],
             "model_outcome": "UNKNOWN", "provider_calls": 0, "qq_sends": 0}
+
+
+def _check_record(store, record, view):
+    row = {**record, "previous": view["head_sha256"]}
+    fold(store, row, paid_budget.sha(row), record["request"]["journal_id"],
+         view["model_latest"], view["model_closures"],
+         dict.fromkeys(view["blocked_request_ids"]), dict(view["model_accounting"]))
+
+
+def _hold_known_statement(store, request, material, now):
+    """Only reached after complete original/request validation, never for estimates."""
+    held = material["accounted_micro_usd"]
+    store.execute("UPDATE model_usage SET billed_micro_usd=MAX(billed_micro_usd,?) "
+                  "WHERE request_id=?", (held, request.request_id))
+    pending = Pending(request=request, accounted_micro_usd=held)
+    store.execute("INSERT OR REPLACE INTO runtime_meta VALUES (?,?)",
+                  (PENDING + request.operation_id, pending.model_dump_json()))
+    if request.budget_limit_codes:
+        store.execute("INSERT OR REPLACE INTO runtime_meta VALUES ('model_budget_blocked','1')")
+    if not store.one("SELECT 1 FROM audit_log WHERE action='model.accounting_pending' "
+                     "AND entity_id=?", (request.operation_id,)):
+        store.audit("model.accounting_pending", request.operation_id, "operator", now,
+                    request_sha256=material["request_sha256"], accounted_micro_usd=held)
+    cloud_budget.sync_reference(store, "model", request.request_id)
+    return {"state": "PENDING_JOURNAL", **_receipt(material)}
 
 
 def record(store, settings, value, evidence_path, clock=utcnow):
@@ -254,24 +324,49 @@ def record(store, settings, value, evidence_path, clock=utcnow):
             if existing:
                 if existing["request_sha256"] != request_sha:
                     raise CoreError("MODEL_ACCOUNTING_OPERATION_CONFLICT", 409)
-                # Re-fsync the exact durable prefix before completing its DB projection.
-                with Path(settings.paid_model.journal_path).open("r+b") as stream:
-                    os.fsync(stream.fileno())
+                # Completed repeats already have a durable projection; interruptions need fsync.
+                projected = store.one("SELECT value FROM runtime_meta WHERE key=?",
+                                      (PROJECTION + request.operation_id,))
+                if not projected or request.operation_id in view["model_accounting_pending"]:
+                    try:
+                        with Path(settings.paid_model.journal_path).open("r+b") as stream:
+                            os.fsync(stream.fileno())
+                    except OSError:
+                        if isinstance(request.basis, Statement):
+                            return _hold_known_statement(store, request, existing, clock())
+                        raise
                 saved = existing
             else:
                 proposal = Proposal.model_validate(
                     request.model_dump(include=set(Proposal.model_fields)))
                 current, amount, status = _prepare(store, settings, proposal, view)
+                if request.operation_id in view["model_accounting_pending"]:
+                    pending = view["model_accounting_pending"][request.operation_id]
+                    if pending["request"] != request.model_dump(mode="json"):
+                        raise CoreError("MODEL_ACCOUNTING_OPERATION_CONFLICT", 409)
+                    current = current.model_copy(update={
+                        "previous_accounted_micro_usd": request.previous_accounted_micro_usd})
                 if current != request:
                     raise CoreError("MODEL_ACCOUNTING_PREVIEW_CHANGED", 409)
                 material = _record(request, amount, status, clock())
-                view = paid_budget.journal(store, settings.paid_model, material,
-                                           allow_settlement=True, initialize=False)
+                _check_record(store, material, view)
+                try:
+                    view = paid_budget.journal(store, settings.paid_model, material,
+                        allow_settlement=True, initialize=False, accounting_replay=request_sha)
+                except CoreError:
+                    if isinstance(request.basis, Statement):
+                        return _hold_known_statement(store, request, material, clock())
+                    raise
                 saved = view["model_accounting"][request.operation_id]
             store.execute("UPDATE model_usage SET billed_micro_usd=MAX(billed_micro_usd,?) "
                           "WHERE request_id=?", (saved["accounted_micro_usd"], request.request_id))
             store.execute("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
                           (PROJECTION + request.operation_id, saved["sha256"]))
+            if request.budget_limit_codes:
+                store.execute("INSERT OR REPLACE INTO runtime_meta "
+                              "VALUES ('model_budget_blocked','1')")
+            store.execute("DELETE FROM runtime_meta WHERE key=?",
+                          (PENDING + request.operation_id,))
             if not store.one("SELECT 1 FROM audit_log WHERE action='model.accounting_recorded' "
                              "AND entity_id=?", (request.operation_id,)):
                 store.audit("model.accounting_recorded", request.operation_id, "operator", clock(),
