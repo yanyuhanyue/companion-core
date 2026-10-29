@@ -39,7 +39,7 @@ def decode_lease(payload, source, now, *, media_limits=None):
             "max_bytes", "max_requests", "max_items", "context", "allowed_hosts",
         }
         if (not isinstance(item, dict) or not required <= set(item)
-            or set(item) - required - {"source_grant", "media"}
+            or set(item) - required - {"source_grant", "media", "query"}
             or type(item["schema_version"]) is not int or item["schema_version"] != 1):
             raise ValueError("Invalid lease fields")
         for key, minimum in (("request_id", 1), ("lease_token", 8)):
@@ -64,6 +64,12 @@ def decode_lease(payload, source, now, *, media_limits=None):
             or not isinstance(item["url"], str) or len(item["url"]) > 2048
             or item["operation"] == "read" and not item["url"]):
             raise ValueError("Invalid operation")
+        if "query" in item and (
+            item["operation"] != "discover" or item["url"]
+            or not isinstance(item["query"], str) or not 2 <= len(item["query"]) <= 100
+            or not item["query"].strip() or re.search(r"[\x00-\x1f\x7f]", item["query"])
+        ):
+            raise ValueError("Invalid discover query")
         context = item["context"]
         if (not isinstance(context, dict)
             or set(context) != {"root_task_id", "source", "source_event_ids", "privacy_epoch"}

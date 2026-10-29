@@ -1,5 +1,6 @@
 """Public metadata and bounded first-part subtitles; never a claim of watching a video."""
 
+import html
 import json
 import math
 import re
@@ -95,6 +96,33 @@ def subtitle_excerpt(raw, limit=8000, duration=None):
     return "\n".join(lines), spans, len(spans) < len(rows)
 
 
+async def search_videos(public, keyword, count, budget):
+    """One `search/type` page of videos as discovery items; titles lose their HTML marks."""
+    data = api_data(await public.get(
+        "https://api.bilibili.com/x/web-interface/search/type?"
+        + urlencode({"search_type": "video", "keyword": keyword, "page": 1,
+                     "order": "totalrank"}), budget, "search"))
+    rows = data.get("result")
+    if not isinstance(rows, list):
+        raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+    found = {}
+    for row in rows[:40]:
+        if not isinstance(row, dict):
+            raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+        bvid, title = row.get("bvid"), row.get("title")
+        if (row.get("type", "video") != "video" or not isinstance(bvid, str)
+                or not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)
+                or not isinstance(title, str) or not title.strip()):
+            continue
+        url = video_url("https://www.bilibili.com/video/" + bvid)
+        title = html.unescape(re.sub(r"<[^>]*>", "", title)).strip()[:300]
+        if title:
+            found.setdefault(url, {"url": url, "title": title, "text": ""})
+        if len(found) == count:
+            break
+    return list(found.values())
+
+
 class BilibiliReader:
     parser_version = "bilibili/1"
 
@@ -112,6 +140,10 @@ class BilibiliReader:
         self.parser_version = "bilibili/4"
 
     async def read(self, item, budget):
+        if item["operation"] == "discover" and item.get("query"):
+            # Core chose the term; one search page, the same shape as the popular list.
+            return await search_videos(self.public, item["query"], min(20, item["max_items"]),
+                                       budget)
         if item["operation"] == "discover":
             limit = min(20, item["max_items"])
             raw = await self.public.get(

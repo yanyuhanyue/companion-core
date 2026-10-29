@@ -5,15 +5,14 @@ processing deliberately reuses the existing Reader's raw hashes and time spans.
 """
 
 import asyncio
-import html
 import json
 import re
 from datetime import UTC, datetime
 from urllib.parse import urlencode, urlsplit
 
 from source_reader.accounts import account_grant, source_grant
-from source_reader.bilibili import BilibiliReader, api_data
-from source_reader.network import PublicHTTP, ReadFailure, video_url
+from source_reader.bilibili import BilibiliReader, api_data, search_videos
+from source_reader.network import PublicHTTP, ReadFailure
 
 TOOLS = ("bili_search", "bili_subtitle", "bili_comments", "bili_video_info")
 
@@ -134,39 +133,7 @@ class BilibiliTools:
         keyword, count = arguments.get("keyword"), self.count(arguments)
         if not isinstance(keyword, str) or not keyword.strip() or len(keyword) > 100:
             raise ReadFailure("CAPABILITY_ARGUMENT_INVALID")
-        data = api_data(
-            await self.public.get(
-                "https://api.bilibili.com/x/web-interface/search/type?"
-                + urlencode(
-                    {"search_type": "video", "keyword": keyword, "page": 1, "order": "totalrank"}
-                ),
-                budget,
-                "search",
-            )
-        )
-        rows = data.get("result")
-        if not isinstance(rows, list):
-            raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
-        found = {}
-        for row in rows[:40]:
-            if not isinstance(row, dict):
-                raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
-            bvid, title = row.get("bvid"), row.get("title")
-            if (
-                row.get("type", "video") != "video"
-                or not isinstance(bvid, str)
-                or not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)
-                or not isinstance(title, str)
-                or not title.strip()
-            ):
-                continue
-            url = video_url("https://www.bilibili.com/video/" + bvid)
-            title = html.unescape(re.sub(r"<[^>]*>", "", title)).strip()[:300]
-            if title:
-                found.setdefault(url, {"url": url, "title": title, "text": ""})
-            if len(found) == count:
-                break
-        return list(found.values())
+        return await search_videos(self.public, keyword, count, budget)
 
     async def comments(self, arguments, budget):
         item, count = self.video_item(arguments), self.count(arguments)
@@ -209,10 +176,11 @@ class BilibiliToolReader(BilibiliReader):
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
-            if not self.keyword:
+            keyword = item.get("query") or self.keyword  # Core's choice wins over the CLI.
+            if not keyword:
                 raise ReadFailure("DISCOVERY_QUERY_REQUIRED")
             return await self.tools.call(
-                "bili_search", {"keyword": self.keyword, "num": min(20, item["max_items"])}, budget
+                "bili_search", {"keyword": keyword, "num": min(20, item["max_items"])}, budget
             )
         result = await super().read(item, budget)
         if isinstance(self.public, BilibiliAccountHTTP):

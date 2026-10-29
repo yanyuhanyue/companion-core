@@ -174,8 +174,12 @@ class ExplorationService:
             (request["request_id"],),
         )
 
-    def create(self, adapter_id, operation, key, url="", step=None, source_event_ids=None):
+    def create(self, adapter_id, operation, key, url="", step=None, source_event_ids=None,
+               query=None):
+        """`query` is a Core-chosen discover search term; only discover requests carry one."""
         self.adapter(adapter_id)
+        if query is not None and (operation != "discover" or not 2 <= len(query) <= 100):
+            raise CoreError("EXPLORATION_QUERY_INVALID", 400)
         s, now = self.store, self.clock()
         previous = s.one("SELECT request_id FROM exploration_requests WHERE request_key=?", (key,))
         if previous:
@@ -219,6 +223,7 @@ class ExplorationService:
             created_at=now,
             updated_at=now,
             authority_json=encode(authority),
+            query=query,
         )
         for source_id in set(sources):
             s.insert("exploration_evidence", request_id=request_id, event_id=source_id)
@@ -234,11 +239,20 @@ class ExplorationService:
         ]
         if not adapters:
             return
+        from companion import topic_selection
+
         for decision in decisions:
             if decision["decision"] == "OBSERVE":
                 with self.store.transaction():
+                    chosen = topic_selection.choose(self.store, self.settings, self.clock(),
+                                                    adapters)
+                    if chosen:
+                        self.create(chosen[0], "discover", decision["decision_id"],
+                                    query=chosen[1])
+                        continue
                     count = self.store.one(
                         "SELECT COUNT(*) AS n FROM exploration_requests WHERE operation='discover'"
+                        " AND query IS NULL"
                     )["n"]
                     self.create(
                         adapters[count % len(adapters)], "discover", decision["decision_id"]
@@ -470,6 +484,8 @@ class ExplorationService:
                 }
                 if source_grant:
                     item["source_grant"] = source_grant.snapshot()
+                if reading and row["query"] is not None:
+                    item["query"] = row["query"]  # Reading v1 only; older wires never see it.
                 return item
         return None
 
@@ -646,6 +662,9 @@ class ExplorationService:
                             "SELECT 1 FROM goals WHERE redacted=0 "
                             "AND json_extract(scope_json,'$.url')=?",
                             (canonical,),
+                        ) or s.one(
+                            # Already watched: the ledger keeps one entry per item.
+                            "SELECT 1 FROM watch_ledger WHERE item_ref=?", (canonical,),
                         )
                         if not existing and self.settings.goals_enabled:
                             try:
