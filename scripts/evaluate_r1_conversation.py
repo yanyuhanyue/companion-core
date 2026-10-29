@@ -177,7 +177,18 @@ CONTROLS = {STYLE: "participation_v2"}
 AXES = ("naturalness", "desire_to_continue", "deliberateness", "factual_accuracy")
 STYLE_AXES = ("naturalness", "desire_to_continue", "deliberateness", "context_fit",
               "forced_meme", "factual_accuracy")
+# Raters see only A/B; WIN/LOSE for the treatment exist only after unblinding.
+CHOICES = ("A", "B", "TIE", "BOTH_BAD", "UNSCORABLE")
 VERDICTS = ("WIN", "TIE", "LOSE", "BOTH_BAD", "UNSCORABLE")
+
+
+def verdict(mapping_row, overall, treatment):
+    """Unblind one A/B choice into the treatment's WIN/TIE/LOSE/BOTH_BAD/UNSCORABLE."""
+    if overall not in CHOICES:
+        raise ValueError("Unknown overall choice")
+    if overall in {"A", "B"}:
+        return "WIN" if mapping_row[overall] == treatment else "LOSE"
+    return overall
 
 
 def plan_treatment(plan):
@@ -388,8 +399,8 @@ def blind_export(plan, observations, output, seed=20261024, *, measurement_setti
     pairs = sorted({key[:2] for key in expected})
     style = plan_treatment(plan) == STYLE
     axes = STYLE_AXES if style else AXES
-    # A/B wording: WIN means A is better; the mapping stays private until scoring.
-    verdicts = {"overall_choices": list(VERDICTS)} if style else {}
+    # The mapping stays private until every pair is scored; see verdict().
+    verdicts = {"overall_choices": list(CHOICES)} if style else {}
     positions = [index % 2 for index in range(len(pairs))]
     random.Random(seed).shuffle(positions)
     ballot, mapping = [], []

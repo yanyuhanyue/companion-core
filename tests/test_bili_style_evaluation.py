@@ -72,7 +72,7 @@ def test_blind_ballot_has_six_axes_and_verdicts_and_hides_arms(tmp_path, style):
              "text": "reply", "state": "SETTLED"} for r in plan["requests"]]
     ballot = experiment.blind_export(plan, rows, tmp_path / ".local/ballot")
     assert list(ballot[0]["ratings"]) == list(experiment.STYLE_AXES)
-    assert ballot[0]["overall_choices"] == ["WIN", "TIE", "LOSE", "BOTH_BAD", "UNSCORABLE"]
+    assert ballot[0]["overall_choices"] == ["A", "B", "TIE", "BOTH_BAD", "UNSCORABLE"]
     raw = (tmp_path / ".local/ballot/ballot.json").read_text("utf-8")
     assert experiment.STYLE not in raw and "B站评论区观察" not in raw
     mapping = json.loads((tmp_path / ".local/ballot/mapping.private.json").read_text("utf-8"))
@@ -119,3 +119,13 @@ def test_native_plan_accepts_the_registered_pair_only(tmp_path, style):
     for bad in (rehashed(plan, control="baseline"), rehashed(plan, treatment="participation_v3")):
         with pytest.raises(CoreError, match="EVALUATION_MANIFEST_INVALID"):
             evaluation._plan(settings, manifest(bad))
+
+
+def test_unblinding_turns_a_b_choices_into_treatment_verdicts():
+    row = {"pair_id": "pair_001", "A": "participation_v2", "B": experiment.STYLE}
+    assert experiment.verdict(row, "B", experiment.STYLE) == "WIN"
+    assert experiment.verdict(row, "A", experiment.STYLE) == "LOSE"
+    for same in ("TIE", "BOTH_BAD", "UNSCORABLE"):
+        assert experiment.verdict(row, same, experiment.STYLE) == same
+    with pytest.raises(ValueError):
+        experiment.verdict(row, "WIN", experiment.STYLE)
