@@ -143,7 +143,8 @@ def model_payload(settings, messages, scenario, *, tools=()):
         "stream": False,
     }
     if scenario in {"memory_extract", "memory_review", "diary", "reflection", "meme_caption",
-                    "qq_poke", "social_autonomy", "content_video_preview", "rem"}:
+                    "qq_poke", "social_autonomy", "content_video_preview", "rem",
+                    "watch_review"}:
         payload["response_format"] = {"type": "json_object"}
     if settings.provider == "deepseek" and not video:
         payload["thinking"] = {"type": "disabled"}

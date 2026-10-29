@@ -67,6 +67,7 @@ def cleanup_contracts():
     from companion.rem import erase as erase_rem
     from companion.social_autonomy import erase_social_autonomy
     from companion.voice_jobs import erase_voice_jobs
+    from companion.watch_ledger import erase as erase_watch_ledger
 
     return (
         event_cleanup("agent-conversations", erase_conversations),
@@ -98,6 +99,7 @@ def cleanup_contracts():
         event_cleanup("social-autonomy", erase_social_autonomy),
         event_cleanup("voice", erase_voice_jobs),
         event_cleanup("bili-video", erase_bili_video),
+        event_cleanup("watch-ledger", erase_watch_ledger),
         event_cleanup("evaluation", erase_evaluation),
     )
 

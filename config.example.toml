@@ -288,3 +288,13 @@ profile_baseline_seconds = 300
 max_pending_plans = 4
 max_asset_bytes = 2097152
 max_asset_dimension = 2048
+
+[watch_ledger]
+# Her own one-line judgement of each completed Bilibili/Heybox read (docs/watch-ledger.md).
+# Enabling adds watch_review to the paid contract snapshot, so it needs a new
+# OwnerAuthority policy that also holds the exploration purpose.
+enabled = false
+daily_micro_usd = 20000
+max_output_tokens = 200
+lookback_hours = 72
+max_attempts = 2

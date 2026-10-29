@@ -38,6 +38,7 @@ from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
 from companion.video_input import VideoInputPolicy
 from companion.voice_config import VoiceConfig
+from companion.watch_ledger_config import WatchLedgerConfig
 
 
 class ObservationAdapterConfig(BaseModel):
@@ -396,6 +397,10 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
     rem: RemConfig = Field(default_factory=RemConfig)
+    watch_ledger: WatchLedgerConfig = Field(
+        default_factory=WatchLedgerConfig,
+        exclude_if=lambda value: value == WatchLedgerConfig(),
+    )
     _operator_config_version: int = PrivateAttr(default=0)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)
@@ -613,6 +618,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "watch_review":
+            return self.watch_ledger.max_output_tokens
         if scenario == "rem":
             return self.rem.max_output_tokens
         if scenario == "social_autonomy":

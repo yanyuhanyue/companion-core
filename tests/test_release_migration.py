@@ -72,6 +72,7 @@ REVISION_CHAIN = (
     "0047_meme_assets",
     "0048_meme_vectors",
     "0049_evaluation_ordinals",
+    "0050_watch_ledger",
 )
 LEGACY_TABLES = (
     "principals",

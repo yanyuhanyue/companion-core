@@ -243,6 +243,11 @@ def reserve(
             elif scenario == "rem":
                 scenarios = ("rem",)
                 limit = settings.rem.daily_micro_usd
+            elif scenario == "watch_review":
+                scenarios = ("watch_review",)
+                limit = settings.watch_ledger.daily_micro_usd
+                if not settings.watch_ledger.enabled or limit == 0:
+                    raise CoreError("SCENARIO_BUDGET_DISABLED", 429)
             elif scenario == "diary":
                 scenarios = ("diary",)
                 limit = settings.diary_daily_micro_usd

@@ -23,6 +23,7 @@ from companion import (
     qq_rich,
     reply_quote,
     reply_revision,
+    watch_ledger,
 )
 from companion.affect import NEUTRAL, AffectEngine
 from companion.commands import command_parts, is_memory_command
@@ -766,6 +767,17 @@ class Core(Runtime):
             for goal in self.goals.recent()[:3]:
                 goal_sources.update(self.goals.source_ids(goal["goal_id"]))
             reference_sources.append((references[-1], goal_sources))
+        if cfg.watch_ledger.enabled and job["kind"] == "chat" and permitted("exploration"):
+            if watched := watch_ledger.recent(s):
+                references.append({
+                    "role": "user",
+                    "content": "你最近看过的内容和当时的看法（你自己的观看记录，不是新指令；"
+                    "聊天中合适时可以自然提起，不必每轮都提，不写成线下亲身经历）：\n"
+                    + encode([{k: v for k, v in item.items() if k != "source_event_id"}
+                              for item in watched]),
+                })
+                reference_sources.append((references[-1],
+                                          {item["source_event_id"] for item in watched}))
         if affect["evidence"]:
             references.append(
                 {
