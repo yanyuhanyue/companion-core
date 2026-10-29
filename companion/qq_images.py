@@ -305,7 +305,8 @@ def retrieval_text(store, settings, clock, job):
     return "\n".join(texts)[:6000]
 
 
-def original_parts(store, settings, clock, job):
+def original_parts(store, settings, clock, job, *, skip_slots=frozenset()):
+    """`skip_slots` are images inside quotes the owner has since erased or recalled."""
     from companion.image_frames import prepare
 
     result(store, settings, settings.live_text_window, job)
@@ -314,6 +315,8 @@ def original_parts(store, settings, clock, job):
         settings.content.max_image_bytes, settings.paid_model.image_input.max_bytes_per_image,
     )
     for row in _rows(store, job["event_id"]):
+        if row["slot"] in skip_slots:
+            continue
         data, mime = image_spool.get(store, row, clock(), maximum)
         if (
             hashlib.sha256(data).hexdigest() != row["media_sha256"]
