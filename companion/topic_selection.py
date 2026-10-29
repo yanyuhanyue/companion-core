@@ -92,8 +92,9 @@ def recent_queries(store, now):
         "AND query IS NOT NULL AND created_at>=?", (since,))}
 
 
-def choose(store, settings, now, adapters, rng=random):
+def choose(store, settings, now, adapters, rng=None):
     """Return (adapter_id, query) for one discover run, or None for the original rotation."""
+    rng = rng or random  # Looked up per call, so tests can substitute the module's source.
     searchable = [name for name in adapters
                   if settings.observation_adapters[name].source in QUERY_SOURCES]
     if not searchable or rng.random() >= INTEREST_SHARE:
