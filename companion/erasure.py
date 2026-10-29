@@ -66,6 +66,7 @@ def cleanup_contracts():
     from companion.reflection import erase_reflections
     from companion.rem import erase as erase_rem
     from companion.social_autonomy import erase_social_autonomy
+    from companion.style_distill import erase as erase_style_distill
     from companion.voice_jobs import erase_voice_jobs
     from companion.watch_ledger import erase as erase_watch_ledger
 
@@ -100,6 +101,7 @@ def cleanup_contracts():
         event_cleanup("voice", erase_voice_jobs),
         event_cleanup("bili-video", erase_bili_video),
         event_cleanup("watch-ledger", erase_watch_ledger),
+        event_cleanup("style-distill", erase_style_distill),
         event_cleanup("evaluation", erase_evaluation),
     )
 

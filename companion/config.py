@@ -34,6 +34,7 @@ from companion.rem_protocol import RemConfig
 from companion.reply_segments import SegmentedReplyConfig
 from companion.social_autonomy_protocol import SocialAutonomyConfig
 from companion.sources import ObservationSource
+from companion.style_distill_config import StyleDistillConfig
 from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
 from companion.video_input import VideoInputPolicy
@@ -397,6 +398,10 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
     rem: RemConfig = Field(default_factory=RemConfig)
+    style_distill: StyleDistillConfig = Field(
+        default_factory=StyleDistillConfig,
+        exclude_if=lambda value: value == StyleDistillConfig(),
+    )
     watch_ledger: WatchLedgerConfig = Field(
         default_factory=WatchLedgerConfig,
         exclude_if=lambda value: value == WatchLedgerConfig(),
@@ -620,6 +625,8 @@ class Settings(BaseModel):
     def output_tokens(self, scenario):
         if scenario == "watch_review":
             return self.watch_ledger.max_output_tokens
+        if scenario == "style_distill":
+            return self.style_distill.max_output_tokens
         if scenario == "rem":
             return self.rem.max_output_tokens
         if scenario == "social_autonomy":
@@ -686,6 +693,10 @@ class Settings(BaseModel):
                     data[field] = PaidModelApproval.model_validate_json(value)
                 elif field == "live_text_window":
                     data[field] = LiveTextWindowApproval.model_validate_json(value)
+                elif field == "watch_ledger":
+                    data[field] = WatchLedgerConfig.model_validate_json(value)
+                elif field == "style_distill":
+                    data[field] = StyleDistillConfig.model_validate_json(value)
                 elif field == "segmented_reply":
                     data[field] = SegmentedReplyConfig.model_validate_json(value)
                 else:
