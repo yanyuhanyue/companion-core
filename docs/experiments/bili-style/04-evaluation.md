@@ -28,7 +28,20 @@ STYLE 计划的选票有 6 个维度：
 - `forced_meme`
 - `factual_accuracy`
 
-选票带 `overall_choices = WIN/TIE/LOSE/BOTH_BAD/UNSCORABLE`，WIN 表示 A 更好。
+评分者只看到 A/B，`overall` 填 `A`、`B`、`TIE`、`BOTH_BAD` 或 `UNSCORABLE`（与 R1 一致）。
+全部评完后才揭盲，`verdict()` 把 A/B 换算成处理组的 `WIN/LOSE`，其余原样保留，
+这就是 00 §5 预注册的 `WIN/TIE/LOSE/BOTH_BAD/UNSCORABLE`。
+
+每个维度填 `{"A": 分数, "B": 分数, "reason": "具体依据"}`，1–5 分。前四项沿用
+`docs/experiments/r1-natural-conversation/README.md` 的尺度，新增两项：
+
+| 维度 | 1 分 | 3 分 | 5 分 |
+|---|---|---|---|
+| context_fit 贴合语境 | 接错情境（求助时玩笑、严肃时调侃） | 情境对但回应泛泛 | 抓住前文的具体细节，语气合乎当下 |
+| forced_meme 强行玩梗（越低越好） | 没有硬套梗或评论区腔 | 有一处略生硬的梗 | 明显堆梗、套模板或照搬评论区句式 |
+
+`deliberateness` 与 `forced_meme` 越低越好，其余越高越好。没有可核对断言时，
+`factual_accuracy` 填 `null` 并注明“不适用”。
 
 A/B 位置照旧，按种子随机且平衡；对应关系只保存在 `mapping.private.json`。选票里不出现处理组的名字或观察段文字。旧计划仍然是 4 个维度。
 
