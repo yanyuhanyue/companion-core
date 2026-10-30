@@ -178,7 +178,10 @@ required. The new approval is either open-ended (no `expires_at` and no
 `rates_valid_until`) or has a finite expiry that is in the future and later than any
 previous finite expiry, with a rate-validity end at or after it that does not move
 earlier. Prices, starts-at, credentials, provider/model, per-attempt/request limits,
-daily/monthly/window amounts and call limits remain identical. The owner expiry must
+daily/monthly/window amounts and call limits remain identical. The per-call
+`max_output_tokens` ceiling may stay or rise, never fall: every money bound is unchanged,
+so a larger generation allowance cannot raise any liability ceiling (2026-10-30, for chat
+thinking, which shares `max_tokens`). The owner expiry must
 equal the new paid expiry, including both being absent. Every predecessor window,
 including settled calls in the immediately preceding window, remains in the budget scope.
 
