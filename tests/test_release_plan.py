@@ -130,3 +130,32 @@ def test_copy_folds_wal_into_the_copy_and_skips_side_files(tmp_path):
     copy.close()
     assert (target / "nested" / "journal.jsonl").read_text("utf-8") == '{"seq":1}\n'
     assert not any(p.name.endswith(("-wal", "-shm")) for p in target.rglob("*"))
+
+
+@pytest.mark.parametrize(("closed", "expected"), [(True, "R"), (False, "NOT_READY")])
+def test_closed_unknown_calls_do_not_block_a_release(closed, expected):
+    value = {**probe(blockers=["MODEL_USAGE_UNSETTLED"]), "unknown_closed": closed}
+    assert plan.classify(CORE, value, rolling=True)[0] == expected
+
+
+def test_unknown_closure_is_read_from_the_live_journal(tmp_path):
+    import json
+
+    journal = tmp_path / "budget.jsonl"
+    db = sqlite3.connect(tmp_path / "companion.sqlite3")
+    db.execute("CREATE TABLE model_usage(request_id TEXT, state TEXT)")
+    db.execute("CREATE TABLE model_admissions(request_id TEXT, journal_path TEXT)")
+    for request_id in ("model_a", "model_b"):
+        db.execute("INSERT INTO model_usage VALUES(?, 'UNKNOWN')", (request_id,))
+        db.execute("INSERT INTO model_admissions VALUES(?, ?)", (request_id, str(journal)))
+    db.commit()
+    db.close()
+    lines = [{"kind": "settle", "request_id": "model_a"},
+             {"kind": "model_local_close", "request_id": "model_a"},
+             {"kind": "settle", "request_id": "model_b"}]
+    journal.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    api = {"mounts": [{"type": "bind", "source": str(tmp_path)}]}
+    assert plan.closed_unknowns(api) is False
+    with journal.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"kind": "model_unknown_carry", "request_id": "model_b"}) + "\n")
+    assert plan.closed_unknowns(api) is True

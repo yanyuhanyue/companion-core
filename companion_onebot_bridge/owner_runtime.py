@@ -433,8 +433,12 @@ class OwnerRuntime:
         self.verify()
         return result
 
-    def persist_capture(self, event, frame, *, received_at, peer, media=None):
-        """Called only by the authenticated receive boundary after input preparation."""
+    def persist_capture(self, event, frame, *, received_at, peer, media=None, backfill=False):
+        """Called only by the authenticated receive boundary after input preparation.
+
+        `backfill` marks an owner message read back through the protocol's authenticated
+        history API after a restart; the 30 s freshness bound is unchanged.
+        """
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
         from companion_delivery_protocol.authority import capture_signing_payload
@@ -467,7 +471,8 @@ class OwnerRuntime:
                 raise ValueError("SOURCE_EVENT_CONFLICT")
             return False
         frame_bytes = frame.encode() if isinstance(frame, str) else frame
-        receipt = {"authority": self.authority, "kind": "authenticated_onebot_ws",
+        kind = "onebot_history_backfill" if backfill else "authenticated_onebot_ws"
+        receipt = {"authority": self.authority, "kind": kind,
             "event_id": event["event_id"], "source_event_id": event["source_event_id"],
             "input_sha256": input_digest(event["payload"]),
             "frame_sha256": hashlib.sha256(frame_bytes).hexdigest(),
@@ -475,7 +480,8 @@ class OwnerRuntime:
             "protocol_epoch": self.config.protocol_epoch,
             "identity_sha256": journal.digest([self.config.owner_qq_id, self.config.bot_qq_id])}
         receipt["evidence_sha256"] = journal.digest({"receipt": receipt, "peer": list(peer),
-            "endpoint": self.config.onebot_ws_url, "bearer_accepted": True})
+            "endpoint": (self.config.onebot_http_url.rstrip("/") + "/get_friend_msg_history"
+                         if backfill else self.config.onebot_ws_url), "bearer_accepted": True})
         key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(self.config.capture_signing_key))
         receipt["signature"] = key.sign(capture_signing_payload(receipt)).hex()
         body = encode(event)

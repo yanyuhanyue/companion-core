@@ -28,7 +28,8 @@ def test_100_offline_messages_measure_fsync_ingest_and_fifo_while_tools_are_busy
     monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
     monkeypatch.setattr(
         "companion.telemetry.print",
-        lambda line, **kw: records.append(json.loads(line)),
+        # Slow-lock reports go to stderr and are not stage metrics; a busy runner emits them.
+        lambda line, file=None, **kw: file is None and records.append(json.loads(line)),
         raising=False,
     )
     metrics = Metrics("OFFLINE_FIXTURE", records.append)

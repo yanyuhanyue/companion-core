@@ -465,6 +465,8 @@ def test_pre_selector_snapshot_golden_and_history_fallback_are_preserved():
     historical = "88f6dbb70cdcc2987c20a66d584370103298f967372a0f137cf7eba63c89acdd"
     assert bridge_digest(config.snapshot()) == original
     assert config_matches(config, original) and config_matches(config, historical)
+    assert "history_backfill" not in config.snapshot()
+    assert replace(config, history_backfill=True).snapshot()["history_backfill"] is True
     core = replace(config, meme_catalog_owner="core")
     assert core.snapshot()["meme_catalog_owner"] == "core"
     assert not config_matches(core, original) and not config_matches(core, historical)

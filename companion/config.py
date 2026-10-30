@@ -25,6 +25,7 @@ from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
+from companion.input_debounce import InputDebounceConfig
 from companion.jargon_config import JargonConfig
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
@@ -417,6 +418,11 @@ class Settings(BaseModel):
         default_factory=WatchLedgerConfig,
         exclude_if=lambda value: value == WatchLedgerConfig(),
     )
+    # Owner bursts are answered once; see companion/input_debounce.py.
+    input_debounce: InputDebounceConfig = Field(
+        default_factory=InputDebounceConfig,
+        exclude_if=lambda value: value == InputDebounceConfig(),
+    )
     # Local time line and history/memory dates in chat context; on by default.
     chat_time_labels: bool = Field(default=True, exclude_if=lambda value: value is True)
     _operator_config_version: int = PrivateAttr(default=0)
@@ -754,6 +760,8 @@ class Settings(BaseModel):
                     data[field] = StyleDistillConfig.model_validate_json(value)
                 elif field == "style_live":
                     data[field] = StyleLiveConfig.model_validate_json(value)
+                elif field == "input_debounce":
+                    data[field] = InputDebounceConfig.model_validate_json(value)
                 elif field == "segmented_reply":
                     data[field] = TypeAdapter(SegmentedReplyConfig | None | Literal[False]
                                               ).validate_json(value)

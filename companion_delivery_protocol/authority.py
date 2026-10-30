@@ -46,6 +46,11 @@ def validate_authority_ref(value):
     return AuthorityRef.from_dict(value).as_dict()
 
 
+# A live WebSocket frame, or an owner message read back from the protocol's history
+# after a Bridge restart left the socket closed for a few seconds.
+CAPTURE_KINDS = frozenset({"authenticated_onebot_ws", "onebot_history_backfill"})
+
+
 def capture_signing_payload(value):
     """Canonical v2 capture bytes shared by the native Bridge and original-proof reader."""
     from companion_delivery_protocol import canonical, hash_value, identifier
@@ -56,7 +61,7 @@ def capture_signing_payload(value):
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("OWNER_CAPTURE_INVALID")
     result = {**value, "authority": validate_authority_ref(value["authority"])}
-    if (result["kind"] != "authenticated_onebot_ws"
+    if (result["kind"] not in CAPTURE_KINDS
         or not identifier(result["event_id"], r"evt_[a-f0-9]{64}")
         or not isinstance(result["source_event_id"], str)
         or not 1 <= len(result["source_event_id"]) <= 512
