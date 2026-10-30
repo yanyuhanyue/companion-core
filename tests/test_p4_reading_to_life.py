@@ -256,7 +256,7 @@ def test_seven_simulated_days_read_interest_diary_share_and_erasure(
             entry = active.diary.get_day(local_day, cfg.owner_qq_id)
             assert entry is not None
             assert "获取的来源内容" in entry["body_md"] and item.text in entry["body_md"]
-            assert "待探索" in entry["body_md"]
+            assert "还想知道" in entry["body_md"]
             records.append((discovered, fetched, goal_id, message["message_id"], local_day))
             if day == 2:
                 active = Core(cfg, core.model, core.clock)
