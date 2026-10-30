@@ -127,7 +127,7 @@ class ModelCarryReference(AuthorityReference):
 
 
 class OwnerCapture(AuthorityReference):
-    kind: Literal["authenticated_onebot_ws"]
+    kind: Literal["authenticated_onebot_ws", "onebot_history_backfill"]
     event_id: str = Field(pattern=r"^evt_[a-f0-9]{64}$")
     source_event_id: str = Field(min_length=1, max_length=512)
     input_sha256: str = Field(pattern=SHA)

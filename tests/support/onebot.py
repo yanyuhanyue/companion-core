@@ -7,6 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 
+# Owner-conversation history served by `get_friend_msg_history`; tests fill it.
+HISTORY = []
+
 
 def provider(request, sends, receipt=None):
     action = request.url.path
@@ -16,6 +19,9 @@ def provider(request, sends, receipt=None):
         data = {"online": True, "good": True}
     elif action == "/get_version_info":
         data = {"app_name": "SnowLuma", "app_version": "2.0.3-node"}
+    elif action == "/get_friend_msg_history":
+        assert json.loads(request.content) == {"user_id": 10001, "count": 20}
+        data = {"messages": list(HISTORY)}
     elif action in {"/get_msg", "/get_forward_msg"}:
         return httpx.Response(200, json={"status": "failed", "retcode": 100, "data": None})
     elif action == "/send_private_msg":

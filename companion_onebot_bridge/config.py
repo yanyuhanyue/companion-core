@@ -62,6 +62,8 @@ class BridgeConfig:
     meme_enabled: bool = False
     meme_catalog_owner: str = "bridge"
     meme_semantics_enabled: bool = False
+    # Read back owner messages sent while the event socket was closed (backfill.py).
+    history_backfill: bool = False
     meme_discovery_enabled: bool = False
     meme_search_provider: str = "none"
     meme_search_api_key: str | None = None
@@ -112,6 +114,8 @@ class BridgeConfig:
                             (self.account_asset_max_dimension, 8192)):
             if type(value) is not int or not 1 <= value <= high:
                 raise ValueError("INVALID_ACCOUNT_ASSET_LIMIT")
+        if type(self.history_backfill) is not bool:
+            raise ValueError("INVALID_HISTORY_BACKFILL")
         if (type(self.meme_enabled) is not bool or type(self.meme_discovery_enabled) is not bool
             or type(self.meme_semantics_enabled) is not bool
             or self.meme_search_provider not in {"none", "brave"}):

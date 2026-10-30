@@ -76,7 +76,8 @@ def _local(window, bound, original):
             "SELECT i.key FROM inbox i JOIN window_inputs w ON w.event_id=i.key "
             "WHERE i.state='pending' AND w.plan_hash=? AND w.rowid>"
             "(SELECT rowid FROM window_inputs WHERE event_id=?) "
-            "AND json_extract(w.capture_json,'$.kind')='authenticated_onebot_ws' "
+            "AND json_extract(w.capture_json,'$.kind') IN "
+            "('authenticated_onebot_ws','onebot_history_backfill') "
             "ORDER BY w.rowid LIMIT 1", (voice_media.digest(window.authority),
                                         bound.event_id)).fetchone()
         pending = row[0] if row else None

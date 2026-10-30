@@ -113,7 +113,7 @@ Bridge 停顿控制在 10 秒以内，且不丢主人消息、不产生 UNKNOWN 
 - 未做：退出前的 `window_attempts`/inbox 自检和非 0 退出码。新进程启动时
   `OwnerRuntime.__init__` 已经会对未完成的发送执行 STOP，5c 的脚本再按 journal 判定。
 
-**5b：补收停顿期间的消息（新机制，需要评审）**
+**5b：补收停顿期间的消息（已评审，已实现，开关 `history_backfill` 默认关闭）**
 
 已确认 SnowLuma 2.0.3 不缓存：正向 WebSocket 的 `onEvent` 在没有客户端连接时直接返回
 （`if (!this.acceptingActions || this.connections.size === 0) return;`），停顿期间
@@ -125,6 +125,10 @@ Bridge 停顿控制在 10 秒以内，且不丢主人消息、不产生 UNKNOWN 
 - 这会新增一个 OneBot 读接口和一种输入来源，Core 侧的来源校验也要放行这一类。
   补收的消息按 `source_event_id` 去重，不会和实时消息重复入库。
 - 戳一戳和撤回是通知，不在消息历史里，停顿期间的这两类仍会丢。
+- 实现：`companion_onebot_bridge/backfill.py`。每次连上 WebSocket 后读取最近 20 条，
+  只补主人发的、比最后一次 capture 新、在 30 秒内、并且晚于当前授权绑定时间的消息
+  （Core 拒收授权生效前的 capture，上传被拒会让 Bridge 停止）。读取失败只记日志，
+  不影响实时接收。Bridge 配置 `history_backfill = true` 才启用，随下一次停机发布写入。
 
 **5c：发布脚本**
 

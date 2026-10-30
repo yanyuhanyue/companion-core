@@ -38,7 +38,8 @@ class OwnerSendGuard:
         if not prior or prior[2] != "ACK" or event_id is not None and event_id != prior[1]:
             return None
         latest = self.db.execute("SELECT event_id FROM window_inputs WHERE plan_hash=? "
-            "AND json_extract(capture_json,'$.kind')='authenticated_onebot_ws' "
+            "AND json_extract(capture_json,'$.kind') IN "
+            "('authenticated_onebot_ws','onebot_history_backfill') "
             "ORDER BY rowid DESC LIMIT 1", (journal.digest(self.authority),)).fetchone()
         if latest and latest[0] != prior[1]:
             return None
@@ -136,7 +137,8 @@ class OwnerSendGuard:
                     else reply_segments.event_id(item))
         row = self.db.execute("SELECT i.key FROM inbox i JOIN window_inputs w ON w.event_id=i.key "
             "WHERE i.state='pending' AND w.plan_hash=? AND i.key!=? "
-            "AND json_extract(w.capture_json,'$.kind')='authenticated_onebot_ws' "
+            "AND json_extract(w.capture_json,'$.kind') IN "
+            "('authenticated_onebot_ws','onebot_history_backfill') "
             "ORDER BY i.rowid LIMIT 1", (journal.digest(self.authority),
                                         event_id)).fetchone()
         return row[0] if row else None
