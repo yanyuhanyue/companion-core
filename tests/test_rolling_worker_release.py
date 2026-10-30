@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -96,8 +97,13 @@ def test_override_changes_only_rolled_images(tmp_path):
 
 
 def test_life_worker_waits_for_both_of_its_locks():
-    assert [p.name for p in rolling.lock_paths("/data/core.db", "companion-life-worker")] == [
-        "core.db.life-worker.lock", "core.db.diary-worker.lock"]
+    from companion import worker_lock
+
+    paths = rolling.lock_paths("/data/companion.sqlite3", "companion-life-worker")
+    assert [p.name for p in paths] == [
+        "companion.life-worker.lock", "companion.diary-worker.lock"]
+    # Production 2026-10-30: the first rolling run looked for `companion.sqlite3.*.lock`.
+    assert "with_suffix(f\".{kind}.lock\")" in Path(worker_lock.__file__).read_text()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="/proc/locks device numbers are Linux")

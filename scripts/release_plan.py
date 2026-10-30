@@ -158,6 +158,38 @@ def run_probe(api, image, workspace):
     return json.loads(lines[-1])
 
 
+def closed_unknowns(api):
+    """True when every UNKNOWN model call has its journal closure (local close or carry).
+
+    Read-only on the live files: such calls hold no execution slot and are never retried,
+    so they do not make a release unsafe; any unclosed one still blocks.
+    """
+    closures = {"model_local_close", "model_unknown_carry"}
+    for mount in api["mounts"]:
+        database = Path(mount["source"], "companion.sqlite3")
+        if mount["type"] != "bind" or not database.is_file():
+            continue
+        db = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = db.execute("SELECT m.request_id,a.journal_path FROM model_usage m "
+                              "LEFT JOIN model_admissions a USING(request_id) "
+                              "WHERE m.state='UNKNOWN'").fetchall()
+        finally:
+            db.close()
+        journals = {}
+        for request_id, path in rows:
+            if not path or not Path(path).is_file():
+                return False
+            if path not in journals:
+                journals[path] = Path(path).read_text(encoding="utf-8").splitlines()
+            kinds = {json.loads(line).get("kind") for line in journals[path]
+                     if request_id in line}
+            if not kinds & closures:
+                return False
+        return True
+    return False
+
+
 STEPS = {
     "R": [
         "不执行 STOP；授权、Bridge、Reader 和 API 都不动",
@@ -219,7 +251,8 @@ def classify(changed, probe, policy_change=None, rolling=False):
     if migration.get("needed") and not migration.get("ok"):
         return "NOT_READY", ["MIGRATION_FAILED_ON_COPY"]
     final = probe.get("after") or probe["before"]
-    blockers = [b for b in final["blockers"] if b not in MIGRATION_BLOCKERS]
+    blockers = [b for b in final["blockers"] if b not in MIGRATION_BLOCKERS
+                and not (b == "MODEL_USAGE_UNSETTLED" and probe.get("unknown_closed"))]
     authority = probe.get("authority", {})
     if authority.get("state") == "UNREADABLE":
         blockers.append("AUTHORITY_UNREADABLE")
@@ -297,6 +330,8 @@ def main():
         workspace = Path(tempfile.mkdtemp(prefix="release-plan-", dir=base))
         try:
             probe = run_probe(current["companion-api"], image, workspace)
+            if not probe.get("error"):
+                probe["unknown_closed"] = closed_unknowns(current["companion-api"])
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
     kind, reasons = classify(changed, probe, args.policy_change, rolling=args.rolling)
