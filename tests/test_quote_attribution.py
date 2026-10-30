@@ -168,3 +168,23 @@ def test_same_second_quote_uses_local_ingestion_order_not_coarse_protocol_time(c
     core.clock.advance(0.5)
     job, _ = quoted_job(core)
     assert "本地作者核验：" in core.context(job)[-2]["content"]
+
+
+def test_quoting_one_bubble_of_a_segmented_reply_carries_the_whole_reply(core):
+    # Production 2026-10-30: bubbles keep their trailing blank lines but QQ quotes the
+    # stripped text, so a quoted bubble was never attributed and read as truncated.
+    first = delivered(core, quote="前面那段先说清楚。\n\n")
+    second = delivered(core, quote=QUOTE + "\n\n", number=2)
+    group = core.store.one("SELECT job_id FROM jobs ORDER BY rowid LIMIT 1")["job_id"]
+    for message_id, index, provider in ((first, 0, "-41"), (second, 1, "-42")):
+        content = json.loads(core.store.one("SELECT content_json FROM outbox WHERE message_id=?",
+                                            (message_id,))["content_json"])
+        core.store.execute(
+            "UPDATE outbox SET state='SENT',provider_message_id=?,sent_at=?,reply_group_id=?,"
+            "segment_index=?,segment_count=2,content_sha256=? WHERE message_id=?",
+            (provider, core.clock(), group, index, digest(content), message_id))
+    job, _ = quoted_job(core)
+    content = core.context(job)[-2]["content"]
+    assert "本地作者核验：segments中index为[0]" in content
+    assert "分成2个气泡后的第2个" in content and "内容没有缺失" in content
+    assert "前面那段先说清楚。\n" + QUOTE in content
