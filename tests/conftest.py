@@ -12,6 +12,7 @@ from companion.config import Settings
 from companion.contracts import InboundEvent
 from companion.conversation_policy import ConversationPolicyConfig
 from companion.core import Core
+from companion.input_debounce import InputDebounceConfig
 from companion.model import ModelResponse
 from companion.store import migrate
 
@@ -144,6 +145,7 @@ def core_factory(tmp_path_factory, migrated_database):
             # Scenario tests opt into the humanlike production defaults explicitly;
             # see tests/test_humanlike_defaults.py for the defaults themselves.
             memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
+            input_debounce=InputDebounceConfig(enabled=False),
             conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
             # Exact-message tests predate time labels; tests/test_time_context.py covers them.
             chat_time_labels=False,
