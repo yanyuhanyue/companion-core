@@ -30,13 +30,35 @@
 ## 阶段 2：按 worker 角色滚动重启
 
 每次只重启一个 worker 角色，先停后启（`worker_lock.single_worker` 的文件锁不允许新旧进程重叠）。
-只适用于同时满足以下条件的发布：
+API、Bridge、Reader 和 UI 不动，授权不做 STOP/ACTIVE 循环。
 
-- 迁移只做增量（加表、加列、加索引），旧代码在新 schema 上仍正确；
-- 不改变付费合同快照（`paid_budget.snapshot`）和 `owner_authority.capability_hashes`。
+适用条件，由 `scripts/release_plan.py --rolling` 判定，结果为 R 类：
 
-满足时已激活的授权仍然有效，不需要 STOP/ACTIVE 循环。需要在 `release_plan.py` 中增加
-发布分类：比较新旧镜像在数据副本上的快照与能力哈希，并识别迁移是否为增量。分类不确定时按 A/B/C 处理。
+- 只有 Core 镜像变化；Bridge、Reader 或 UI 也要换时仍按 A/B/C；
+- 不需要迁移（新镜像在数据副本上的 schema 与当前一致）；
+- 已存的 OwnerAuthority policy 在新代码和当前配置下仍然有效，即付费合同快照和能力哈希都没变。
+
+分类不确定、预检失败或探测没跑时都不会得到 R。
+
+执行：`scripts/rolling_worker_release.py`，按 content、executive、life、chat worker 的顺序逐个处理。
+
+1. 读库确认授权仍是 ACTIVE，记下 UNKNOWN 模型调用数；
+2. `docker stop --time 150`：worker 做完当前单元后退出，退出码必须是 0，文件锁必须已释放，
+   UNKNOWN 数不能增加；
+3. 用原 Compose 文件加一个只改镜像的覆盖文件启动该服务，等新容器运行、重新持有同样的锁，
+   再观察 20 秒没有重启，并核对环境变量、挂载、用户、命令和重启策略与旧容器完全一致；
+4. 任何一步失败就停止，用旧镜像重新启动这个服务，后面的服务不再处理。
+
+覆盖文件和回执保存在 `--output` 目录；之后的 STOP 发布从容器标签解析 Compose 文件，会带上它。
+
+已知限制：
+
+- API 继续运行旧代码，API 上的修改要等下一次 STOP 发布才生效。滚动期间 API 与 worker 的
+  代码版本不同，但 schema、授权和付费合同相同。
+- worker 停止期间对应的任务暂停，等新进程起来后继续，聊天会延迟几秒到几十秒。
+- 生产容器若由旧的 Compose 渲染结果创建，没有 `init: true` 和 150s 宽限期；脚本显式传
+  `--time 150`，worker 自己处理 SIGTERM，不依赖这两项。
+- 首次用于生产前没有在独立环境演练过整套 Docker 操作，第一次使用要有人在场观察。
 
 ## 阶段 3：API 重启不丢 QQ 输入（需设计评审）
 

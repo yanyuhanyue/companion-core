@@ -9,6 +9,8 @@ writes `plan.json` and `plan.md` that say what the release needs:
 - NO_CHANGE: nothing to deploy.
 - EDGE: only Bridge, Reader or UI images change; restart those services when idle.
 - A: Core code changes, no migration, the stored OwnerAuthority policy stays valid.
+- R: with `--rolling`, an A release done without STOP by restarting one worker role at a
+  time (`scripts/rolling_worker_release.py`); API, Bridge and Readers keep running.
 - B: as A, plus a schema migration (timed on the copy).
 - C: the policy no longer matches, or a policy change was requested (renewal, purpose).
 - NOT_READY: the copy has blockers the release cannot resolve on its own.
@@ -157,6 +159,14 @@ def run_probe(api, image, workspace):
 
 
 STEPS = {
+    "R": [
+        "不执行 STOP；授权、Bridge、Reader 和 API 都不动",
+        "用 scripts/rolling_worker_release.py 依次滚动 content、executive、life、chat worker",
+        "每个 worker 先平滑停止（做完当前单元，退出码 0、释放文件锁、没有新增 UNKNOWN），"
+        "再用新镜像启动并确认它重新持有锁",
+        "API 上的代码改动要等下一次 STOP 发布才生效",
+        "观察日志和 worker 心跳",
+    ],
     "EDGE": [
         "确认没有正在发送的消息、正在进行的读取后，只重启下列服务",
         "观察健康检查和日志",
@@ -192,8 +202,12 @@ STEPS = {
 }
 
 
-def classify(changed, probe, policy_change=None):
-    """Return (class, reasons). Pure, so the decision is testable without Docker."""
+def classify(changed, probe, policy_change=None, rolling=False):
+    """Return (class, reasons). Pure, so the decision is testable without Docker.
+
+    `rolling` turns A into R only when nothing but the Core image changes; a release that
+    also replaces Bridge, Reader or UI images keeps the STOP procedure.
+    """
     if not changed and not policy_change:
         return "NO_CHANGE", []
     if probe is None:
@@ -222,6 +236,8 @@ def classify(changed, probe, policy_change=None):
         return "B", [f"SCHEMA {probe['before']['schema']} -> {final['schema']}"]
     if "core" not in changed:
         return "EDGE", []
+    if rolling and set(changed) == {"core"}:
+        return "R", ["NO_MIGRATION_POLICY_VALID_WORKERS_ONLY"]
     return "A", []
 
 
@@ -266,6 +282,8 @@ def main():
     parser.add_argument("--target", action="append", default=[], metavar="COMPONENT=IMAGE",
                         help="core, bridge, reader or ui, with a loaded image ID")
     parser.add_argument("--policy-change", metavar="REASON")
+    parser.add_argument("--rolling", action="store_true",
+                        help="Plan an A release as a rolling worker restart (class R)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     targets = dict(item.split("=", 1) for item in args.target)
@@ -281,7 +299,7 @@ def main():
             probe = run_probe(current["companion-api"], image, workspace)
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
-    kind, reasons = classify(changed, probe, args.policy_change)
+    kind, reasons = classify(changed, probe, args.policy_change, rolling=args.rolling)
     plan = {"schema_version": 1, "project": args.project, "class": kind, "reasons": reasons,
             "changes": changed, "probe": probe,
             "services": {name: {"image": svc["image"], "state": svc["state"]}
