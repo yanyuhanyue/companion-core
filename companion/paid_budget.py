@@ -7,6 +7,7 @@ No tokenizer download, provider attestation or external account access is requir
 import hashlib
 import hmac
 import json
+import marshal
 import os
 import re
 from datetime import datetime
@@ -267,8 +268,90 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
+IDENTITY = "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
+
+
+def _view_key(store, path, raw):
+    """Everything a read-only view depends on: journal bytes and this connection's DB state.
+
+    `data_version` changes when another connection commits; `total_changes` when this one
+    writes. A saved view is reused only while neither changed and the bytes are identical.
+    """
+    # The table summary also catches content that neither counter sees, such as a page
+    # level restore into this connection.
+    summary = tuple(store.db.execute(
+        "SELECT (SELECT count(*) FROM runtime_meta),"
+        "(SELECT total(length(key)+length(value)) FROM runtime_meta),"
+        "(SELECT count(*) FROM model_admissions),"
+        "(SELECT count(*) FROM model_usage),"
+        "(SELECT total(length(state)+billed_micro_usd) FROM model_usage)").fetchone())
+    version = store.db.execute("PRAGMA data_version").fetchone()[0]
+    return (str(path), hashlib.sha256(raw).hexdigest(), store.db.total_changes, version, summary)
+
+
+def _permit(view, approval, allow_settlement):
+    """The read-only refusals of `_journal`, applied again to a reused view."""
+    authority, lifecycle = view["owner_authority"], view["lifecycle"]
+    if not allow_settlement and (
+        view["blocked_request_ids"]
+        or authority and authority["state"] != "ACTIVE"
+        or lifecycle and not authority and (
+            lifecycle["state"] == "STOPPED"
+            or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"])
+    ):
+        _validated_bytes.cache_clear()
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+
+
 def journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
             resolution_replay=None, model_control_replay=None, accounting_replay=None):
+    """Validated custody view; read-only calls reuse it while journal and DB are unchanged.
+
+    One chat context used to re-validate the whole journal about 180 times (~25 s).
+    Appends, replays and any change to the bytes or the DB still take the full path, and
+    the read-only refusals are applied again on every reuse. Callers get a private copy,
+    so folding into a view never changes the saved one.
+    """
+    if (record is not None or resolution_replay is not None
+            or model_control_replay is not None or accounting_replay is not None):
+        store._journal_view = None
+        return _journal(store, approval, record, allow_settlement=allow_settlement,
+                        initialize=initialize, resolution_replay=resolution_replay,
+                        model_control_replay=model_control_replay,
+                        accounting_replay=accounting_replay)
+    try:
+        path = Path(approval.journal_path)
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            raw = None
+        saved = getattr(store, "_journal_view", None)
+        key = _view_key(store, path, raw) if raw is not None and len(
+            raw) <= CACHE_MAX_BYTES else None
+        if key is not None and saved is not None and saved[0] == key:
+            identity = store.one(IDENTITY)
+    except BaseException:
+        _validated_bytes.cache_clear()
+        raise
+    if key is not None and saved is not None and saved[0] == key and identity == saved[2]:
+        _permit(saved[3], approval, allow_settlement)
+        return marshal.loads(saved[1])
+    store._journal_view = None
+    view = _journal(store, approval, allow_settlement=allow_settlement, initialize=initialize,
+                    raw=raw)
+    if key is not None:
+        try:
+            blob = marshal.dumps(view)
+        except ValueError:
+            return view
+        store._journal_view = (_view_key(store, path, raw), blob, store.one(IDENTITY),
+                               marshal.loads(blob))
+    return view
+
+
+def _journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
+             resolution_replay=None, model_control_replay=None, accounting_replay=None,
+             raw=None):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
@@ -304,7 +387,7 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
                 os.fsync(stream.fileno())
             store.insert("runtime_meta", key="model_budget_journal_id", value=journal_id)
             identity = {"value": journal_id}
-        records, checked = _journal_records(path.read_bytes())
+        records, checked = _journal_records(path.read_bytes() if raw is None else raw)
         previous, latest, blocked = "0" * 64, {}, {}
         corrections = {}
         measurements = {}

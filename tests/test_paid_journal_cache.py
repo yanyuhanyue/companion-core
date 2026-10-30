@@ -1,4 +1,4 @@
-"""Only immutable chain bytes are reusable; accounting and authority remain live."""
+"""Chain bytes are reusable; a whole view only while journal bytes and the DB are unchanged."""
 
 import json
 import os
@@ -67,7 +67,8 @@ def test_warm_chain_reads_complete_bytes_and_skips_only_chain_hashes(core, tmp_p
         core.store.db.set_trace_callback(None)
     assert reads == [path.stat().st_size] * 2
     assert cold == len(path.read_text("utf-8").splitlines()) and len(hashes) == cold
-    assert before == after and before > 0
+    # Unchanged bytes and DB reuse the validated view instead of folding again.
+    assert before > after
     assert second["model_latest"][request]["minimum_micro_usd"] > 0
     assert first["head_sha256"] == second["head_sha256"]
 
@@ -218,12 +219,17 @@ def test_warm_read_failure_clears_cache_and_cannot_return_old_view(core, tmp_pat
 def test_valid_warm_chain_keeps_fold_failure_and_clears_cache(core, tmp_path, monkeypatch):
     approval, _ = settled(core, tmp_path)
     with core.store.transaction():
-        paid_budget.journal(core.store, approval)
+        expected = paid_budget.journal(core.store, approval)
 
     def fold(state, row):
         raise CoreError("SYNTHETIC_CURRENT_FOLD_FAILURE", 409)
 
     monkeypatch.setattr(cumulative, "fold", fold)
+    with core.store.transaction():
+        # Nothing changed: the validated view is reused without folding again.
+        assert paid_budget.journal(core.store, approval) == expected
+    # Any DB write invalidates it; the next read folds and keeps the failure.
+    core.store.execute("INSERT INTO runtime_meta VALUES ('synthetic_db_change','1')")
     with pytest.raises(CoreError, match="SYNTHETIC_CURRENT_FOLD_FAILURE"):
         with core.store.transaction():
             paid_budget.journal(core.store, approval)
@@ -281,6 +287,7 @@ def test_payload_decode_failure_uses_original_line_decoder(core, tmp_path, monke
         return original(value, *args, **kwargs)
 
     monkeypatch.setattr(json, "loads", loads)
+    core.store._journal_view = None  # exercise the cold decode path
     with core.store.transaction():
         assert paid_budget.journal(core.store, approval) == expected
     assert failures == [1]
