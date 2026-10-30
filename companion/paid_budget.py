@@ -84,7 +84,7 @@ def snapshot(settings):
     if settings.social_autonomy.enabled:
         value["scenario_daily_micro_usd"]["social_autonomy"] = (
             settings.social_autonomy.model_daily_micro_usd)
-    # watch_review and style_distill stay out, like rem: their own daily caps apply at
+    # watch_review, style_distill and jargon stay out, like rem: their own daily caps apply at
     # reservation inside the approved window, and enabling them keeps the policy valid.
     value["reflection_monthly_micro_usd"] = settings.reflection_monthly_micro_usd
     # Private per-window credential binding, never the raw key or a public account identifier.
@@ -209,7 +209,7 @@ def estimate_input_tokens(approval, messages, scenario, *, tools=()):
             estimate += 8 + (len(message["content"].encode("utf-8")) + 2) // 3
         if scenario in {"memory_review", "memory_extract", "diary", "reflection", "meme_caption",
                         "qq_poke", "social_autonomy", "content_video_preview", "watch_review",
-                        "style_distill"}:
+                        "style_distill", "jargon"}:
             estimate += 32
         return (estimate * approval.input_estimate_safety_percent + 99) // 100
     except (ValueError, TypeError, KeyError, UnicodeError) as error:

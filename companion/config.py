@@ -25,6 +25,7 @@ from companion.cumulative import CumulativeApproval
 from companion.executive_protocol import ExecutiveConfig
 from companion.file_evidence import PrivateFilesConfig
 from companion.image_input import ImageInputPolicy
+from companion.jargon_config import JargonConfig
 from companion.life_protocol import LifeLoopConfig, LifeShadowApproval
 from companion.media_config import ContentConfig, MediaConfig
 from companion.meme_policy import TrustedSource
@@ -400,6 +401,10 @@ class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     owner_runtime: OwnerRuntimeConfig = Field(default_factory=OwnerRuntimeConfig)
     rem: RemConfig = Field(default_factory=RemConfig)
+    # Owner private jargon, learned for understanding only; see companion/jargon.py.
+    jargon: JargonConfig = Field(
+        default_factory=JargonConfig, exclude_if=lambda value: value == JargonConfig(),
+    )
     style_distill: StyleDistillConfig = Field(
         default_factory=StyleDistillConfig,
         exclude_if=lambda value: value == StyleDistillConfig(),
@@ -655,6 +660,8 @@ class Settings(BaseModel):
         )
 
     def output_tokens(self, scenario):
+        if scenario == "jargon":
+            return self.jargon.max_output_tokens
         if scenario == "watch_review":
             return self.watch_ledger.max_output_tokens
         if scenario == "style_distill":
@@ -741,6 +748,8 @@ class Settings(BaseModel):
                     data[field] = LiveTextWindowApproval.model_validate_json(value)
                 elif field == "watch_ledger":
                     data[field] = WatchLedgerConfig.model_validate_json(value)
+                elif field == "jargon":
+                    data[field] = JargonConfig.model_validate_json(value)
                 elif field == "style_distill":
                     data[field] = StyleDistillConfig.model_validate_json(value)
                 elif field == "style_live":

@@ -89,6 +89,10 @@ class SourceGrantAction(StrictModel):
     action: Literal["revoke", "forget"]
 
 
+class JargonForget(StrictModel):
+    term: str = Field(min_length=1, max_length=12)
+
+
 class StyleCandidateDecision(StrictModel):
     decision: Literal["APPROVE", "REJECT"]
     reason: str = Field(default="", max_length=200)
@@ -209,6 +213,25 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
                 return style_distill.decide(core.store, core.settings, core.clock(),
                                             pattern_sha256, approve=body.decision == "APPROVE",
                                             reason=body.reason)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
+
+    @app.get(prefix + "/jargon", dependencies=auth)
+    async def jargon_items():
+        from companion import jargon
+
+        core = app.state.core
+        return {"enabled": jargon.enabled(core.settings), "items": jargon.items(core.store)}
+
+    @app.post(prefix + "/jargon/forget", dependencies=auth)
+    async def jargon_forget(body: JargonForget, request: Request,
+                            idempotency_key: str = Header(default="")):
+        from companion import jargon
+
+        def apply(core, owner_check):
+            with core.store.transaction():
+                owner_check()
+                return jargon.forget(core.store, body.term)
 
         return await write(request, idempotency_key, body.model_dump(), apply)
 
