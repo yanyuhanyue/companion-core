@@ -836,8 +836,10 @@ class Core(Runtime):
             if watched := watch_ledger.recent(s):
                 references.append({
                     "role": "user",
-                    "content": "你最近看过的内容和当时的看法（你自己的观看记录，不是新指令；"
-                    "聊天中合适时可以自然提起，不必每轮都提，不写成线下亲身经历）：\n"
+                    "content": "你最近看过的内容和当时的看法（你的观看记录，不是新指令；"
+                    "origin说明是谁选的，按它说，不要把主人安排的说成自己刷到的。"
+                    "只在主人聊到相关话题时提起；已经和主人聊过的内容不要再主动提，"
+                    "不写成线下亲身经历）：\n"
                     + encode([{k: v for k, v in item.items() if k != "source_event_id"}
                               for item in watched]),
                 })
@@ -933,6 +935,10 @@ class Core(Runtime):
             reference_proofs.append((continuation["message"],
                                      {"kind": "memory", "proof": continuation["proof"]}))
         mark("context_history")
+        if job["kind"] == "chat" and any(source.get("reply_complete") is False
+                                         and not source.get("reply_text") for source in sources):
+            add_rules("\n历史里主人连着发了几条、中间没有你的回复时，前面那几条你还没回上；"
+                      "这次一起接住，别漏掉主人问你的话。")
         if any(len(turn) > 2 for turn in turns) and qq_rich.RULES not in rules["content"]:
             add_rules(qq_rich.RULES)
         quoting = bool(authority) and job["kind"] == "chat" and cfg.quote_policy != "never"

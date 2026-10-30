@@ -263,3 +263,19 @@ def test_owner_interrupts_dispatched_activity_without_poisoning_observed_usage(
     usage = core.store.one("SELECT * FROM model_usage WHERE job_id=?", (result["job_id"],))
     assert usage["state"] == "SETTLED" and usage["billed_micro_usd"] > 0
     assert not core.store.one("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
+
+
+def test_a_failed_reply_keeps_its_owner_input_in_history_without_inventing_a_reply(core):
+    # Production 2026-10-30: a provider error failed one chat job; the next reply never
+    # saw that question because only superseded inputs were kept as unanswered.
+    first = accept(core, 1, "我什么时候说过凌晨三点")
+    core.store.execute("UPDATE jobs SET state='FAILED',last_error_code='MODEL_RETRYABLE' "
+                       "WHERE job_id=?", (first["job_id"],))
+    accept(core, 2, "？在吗")
+    conversation = core.store.one("SELECT conversation_id FROM events WHERE event_id=?",
+                                  (first["event_id"],))["conversation_id"]
+    history = dialogue_history.recent_context_sources(core.store, conversation, "evt_test_2", 10)
+    assert [row["event_id"] for row in history] == ["evt_test_1"]
+    assert history[0]["reply_text"] == "" and history[0]["reply_complete"] is False
+    roles = [message["role"] for message in dialogue_history.turn_messages(history[0])]
+    assert roles == ["user"]

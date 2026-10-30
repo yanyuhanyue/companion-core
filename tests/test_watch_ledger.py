@@ -217,3 +217,24 @@ def test_a_later_video_analysis_is_judged_again_but_a_shallower_read_is_not(core
     assert len(model.calls) == 2
     step(core)
     assert len(model.calls) == 2 and entries(core)[0]["source_event_id"] != first
+
+
+@pytest.mark.parametrize("kind", ["commitment", "self", None])
+def test_recent_judgements_say_who_chose_the_item(core, kind):
+    configure(core)
+    event_id = observe(core, 12)
+    core.store.execute(
+        "INSERT INTO watch_ledger(entry_id,source_event_id,platform,item_ref,depth,state,rating,"
+        "take,topic_tags_json,created_at,updated_at) VALUES('watch_2',?,'bilibili','u','text',"
+        "'JUDGED',1,'t','[]',?,?)", (event_id, core.clock(), core.clock()))
+    if kind:
+        columns = {row["name"]: row for row in core.store.rows("PRAGMA table_info(goals)")}
+        values = {"goal_id": "goal_watch", "kind": kind, "topic": "t", "scope_json": "{}",
+                  "proposal_key": "k", "state": "DONE", "priority": 1, "version": 1,
+                  "result_event_id": event_id, "next_due_at": core.clock(), "created_at": core.clock(),
+                  "updated_at": core.clock(), "redacted": 0}
+        values = {key: value for key, value in values.items() if key in columns}
+        core.store.execute(f"INSERT INTO goals({','.join(values)}) VALUES "
+                           f"({','.join('?' for _ in values)})", tuple(values.values()))
+    assert [item["origin"] for item in watch_ledger.recent(core.store)] == [
+        watch_ledger.ORIGINS[kind]]
