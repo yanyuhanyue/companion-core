@@ -86,7 +86,8 @@ def plan_services(plan, rows, image):
 
 
 def lock_paths(database, service):
-    return [Path(f"{database}.{kind}.lock") for kind in LOCK_KINDS[service]]
+    # The same naming as companion.worker_lock: the suffix replaces `.sqlite3`.
+    return [Path(database).with_suffix(f".{kind}.lock") for kind in LOCK_KINDS[service]]
 
 
 def lock_holders(path, locks_text):
