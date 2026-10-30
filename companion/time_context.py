@@ -34,7 +34,8 @@ def now_message(now, timezone):
         f"{local.year}年{local.month}月{local.day}日 "
         f"星期{WEEKDAYS[local.weekday()]} {local:%H:%M}（{timezone}）。"
         "历史消息前的【时间】和记忆的记录日期都早于此刻；"
-        "“今天、昨天、刚才”按当前时间换算，几天前的事不要说成今天发生的。")}
+        "“今天、昨天、刚才”按当前时间换算，几天前的事不要说成今天发生的；"
+        "主人说的钟点结合上下文和时间判断上午下午，比如午睡醒来说的三点是下午三点。")}
 
 
 def stamp_turn(turn, source, timezone):

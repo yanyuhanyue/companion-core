@@ -131,7 +131,7 @@ def recent_sent_sources(store, conversation_id, current_event_id, max_turns, *, 
 
 def pending_owner_sources(store, conversation_id, current_event_id, max_turns, *,
                           cutoff_rowid=None):
-    """Keep unanswered admitted inputs in order after their reply was superseded."""
+    """Keep unanswered admitted inputs in order: superseded replies and failed jobs."""
     if max_turns <= 0:
         return []
     cutoff = ("e.rowid<=?" if cutoff_rowid is not None
@@ -142,7 +142,7 @@ def pending_owner_sources(store, conversation_id, current_event_id, max_turns, *
         "AND e.actor_id='owner' AND e.source='qq.onebot' AND e.privacy_scope='private' "
         "AND e.event_type IN ('message.received','message.media_received') "
         "AND e.redacted=0 AND e.reply_revision>0 AND j.kind='chat' "
-        "AND j.state='CANCELLED' AND j.last_error_code=? "
+        "AND ((j.state='CANCELLED' AND j.last_error_code=?) OR j.state='FAILED') "
         "AND " + cutoff + " "
         "AND COALESCE(json_extract(e.body_json,'$.diary_command'),0)=0 "
         "AND COALESCE(json_extract(e.body_json,'$.control_command'),0)=0 "

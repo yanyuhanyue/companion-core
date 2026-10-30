@@ -179,10 +179,9 @@ class LifeService:
                 )
                 self.goals.accept_commitment(request)
                 return (
-                    "已记录这项阅读任务，截止时间为明天此时。完成或无法完成时，我会说明结果。"
+                    "好，记下了，看完跟你说。"
                     if self.settings.exploration_enabled
-                    else "已记录这项任务，但内容读取目前不可用，正在等待资源；"
-                    "明天此时前会说明结果。"
+                    else "记下了，不过现在还读不了，明天这个点前给你个结果。"
                 )
             except ValueError:
                 return "请提供有效的 HTTPS 内容链接，格式：/安排任务 链接 主题。"

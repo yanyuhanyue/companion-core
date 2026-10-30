@@ -85,6 +85,8 @@ class OwnerRuntime:
         self.path = spool.directory / "owner-journal.jsonl"
         self.stop_path = spool.directory / ("owner-" + journal.digest(self.authority) + ".stop")
         self.legacy = legacy
+        # Chain hashes of PROFILE_PROBE_ACCEPTED records whose shape already validated.
+        self._valid_profiles = set()
         # Old evidence must be inspected by explicit cutover before any v2 writer starts.
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='test_window'").fetchone():
             if legacy is not None:
@@ -223,7 +225,7 @@ class OwnerRuntime:
         attempts = {}
         bindings = {}
         inputs = {}
-        for record in records[1:]:
+        for index, record in enumerate(records[1:], start=1):
             if record["kind"] == "OWNER_STOPPED":
                 if record["data"] != {"authority": current}:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
@@ -262,7 +264,13 @@ class OwnerRuntime:
             elif record["kind"] == "PROFILE_PROBE_ACCEPTED":
                 from .profile_probe import validate_record
 
-                validate_record(record["data"])
+                # The chain hash commits to the record's bytes, so a record that already
+                # passed this pure shape check needs no second one; live journals hold
+                # thousands of these and re-checking them dominated every replay.
+                own = records[index + 1]["previous"] if index + 1 < len(records) else head
+                if own not in self._valid_profiles:
+                    validate_record(record["data"])
+                    self._valid_profiles.add(own)
             elif record["kind"] in {"RECALL_RECEIVED", "RECALL_ACCEPTED",
                                     "CORE_STOP_CONFIRMED", "DELIVERY_QUIESCED", "OWNER_RECONCILED",
                                     "OWNER_INPUT_TERMINAL", "OWNER_HANDOFF_PREPARED",

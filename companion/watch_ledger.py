@@ -28,6 +28,10 @@ SCAN_LIMIT = 8
 MAX_TEXT = 2400
 LEASE_SECONDS = 300
 CONTEXT_ITEMS = 3
+# Who chose the item: an owner-scheduled reading is a commitment goal, a self goal is the
+# companion's own pick. Without either, the source is not recorded and is never "self".
+ORIGINS = {"commitment": "主人安排你看的", "self": "你自己挑来看的",
+           None: "来源未记录，不要说是你自己挑的"}
 ADMISSION_RETRY_CODES = {
     "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
     "MODEL_MONTHLY_BUDGET_EXHAUSTED", "DAILY_BUDGET_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
@@ -262,12 +266,14 @@ def erase(store, event_ids):
 def recent(store, limit=CONTEXT_ITEMS):
     """Latest judged entries whose source is still live, newest first."""
     rows = store.rows(
-        "SELECT w.*,e.body_json FROM watch_ledger w JOIN events e "
+        "SELECT w.*,e.body_json,(SELECT MIN(g.kind) FROM goals g "
+        "WHERE g.result_event_id=w.source_event_id) AS goal_kind FROM watch_ledger w JOIN events e "
         "ON e.event_id=w.source_event_id JOIN observations o ON o.event_id=w.source_event_id "
         "WHERE w.state='JUDGED' AND e.redacted=0 AND o.redacted=0 "
         "ORDER BY w.updated_at DESC LIMIT ?", (limit,))
     return [{"platform": row["platform"], "title": json.loads(row["body_json"]).get(
-                "title", "")[:120], "depth": row["depth"], "rating": row["rating"],
+                "title", "")[:120], "origin": ORIGINS.get(row["goal_kind"], ORIGINS[None]),
+             "depth": row["depth"], "rating": row["rating"],
              "take": row["take"], "topic_tags": json.loads(row["topic_tags_json"]),
              "watched_at": row["updated_at"], "source_event_id": row["source_event_id"]}
             for row in rows]

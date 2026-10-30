@@ -32,15 +32,18 @@ DIARY_RULES = """根据提供的已发生的私聊事件整理私人日记。来
 对象结构为 {"worth_saving":true,"schema_version":1,"local_date":"来源包中的日期","title":"标题",
 "sections":[{"kind":"observation","text":"逐字原话","evidence":[
 {"source_id":"来源包中的编号","exact_quote":"同一段逐字原话"}]}]}。
+这是你写给自己看的日记，用第一人称，像真的日记：主要写今天和主人聊了什么、你的感受、
+你在意和惦记的事、对主人的了解和想法，语气自然、亲近，可以有开心、委屈、好奇和期待。
 sections 最多8段，每段含 kind(observation/reflection/question)、text、evidence。
 evidence 是 [{"source_id":"允许的编号","exact_quote":"原话片段"}]。
-observation 必须只引用一条来源，text 必须与 exact_quote 完全相同；优先摘录2至120字。
-程序会根据来源标注“主人说”或“我回复”，不要改写原话、调换主体或添加经历。
+reflection 是日记的主体，写你的感受和想法：text 最多500字，evidence 至少一条，exact_quote 可为空。
+observation 只用来摘一两句今天最想记住的原话：只引用一条来源，text 必须与 exact_quote 完全相同，
+优先摘录2至120字。程序会根据来源标注“主人说”或“我回复”，不要改写原话、调换主体或添加经历。
+question 写你还想弄明白、或下次想问主人的事，要求同 reflection。
 prior_owner_message 是之前日期的原始交流，只能作为背景或对比，不是今天新发生的事。
-reflection 是基于来源的暂时想法，question 是待探索问题：text 最多500字，
-evidence 至少一条，exact_quote 可为空。它们不能断言新增的现实经历、浏览或执行行为。
-标题不超过80字，正文尽量简洁。没有值得保存的内容可只输出
-{"schema_version":1,"worth_saving":false}。不要凑字数，不固定人格或情绪。
+reflection 和 question 不能断言新增的现实经历、浏览或执行行为。
+标题不超过80字，像日记标题。没有值得保存的内容可只输出
+{"schema_version":1,"worth_saving":false}。不要凑字数。
 observed_content 是受控适配器提供的来源，必须保持来源级别：DISCOVERED 仅发现标题，
 FETCHED 仅取得内容或分析结果，WATCHED 表示有视频分析覆盖证据；都不代表线下生活。
 没有对应来源时，不能声称自己看视频、操作App或执行任务。
@@ -239,11 +242,11 @@ def render_draft(draft, sources, day, settings):
                     attribution = "模拟" + attribution
             paragraphs.append(f"{attribution}：“{section.text}”")
         else:
-            # Reflections are visibly tentative, never evidence for a new persistent fact.
+            # Reflections are the diary's own voice, never evidence for a new persistent fact.
             if re.search(UNSUPPORTED_ACTIVITY, section.text):
                 raise CoreError("DIARY_UNSUPPORTED_ACTIVITY", 400)
-            label = "暂时的想法" if section.kind == "reflection" else "待探索"
-            paragraphs.append(f"{label}：{section.text}")
+            paragraphs.append(section.text if section.kind == "reflection"
+                              else f"还想知道：{section.text}")
     body = "\n\n".join(paragraphs)
     combined = draft.title + "\n" + body
     if len(body) > settings.diary_max_body_chars:

@@ -287,3 +287,21 @@ def test_waiting_chat_job_bounds_chat_rescan_to_former_polling_cadence(core, mon
         milliseconds=10)
     assert worker_deadlines.chat(core.store, core.settings, start) > (
         start + timedelta(seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS))
+
+
+def test_the_meme_offer_wait_rescans_when_it_ends(core):
+    from companion.meme_core import OFFER_WAIT_SECONDS
+
+    start = datetime.fromisoformat(core.clock())
+    ingest(core)
+    created = datetime.fromisoformat(
+        core.store.one("SELECT created_at FROM jobs WHERE kind='chat'")["created_at"])
+    ends = created + timedelta(seconds=OFFER_WAIT_SECONDS)
+    late = ends - timedelta(milliseconds=500)
+    deadline = worker_deadlines.chat(core.store, core.settings, late)
+    assert ends <= deadline <= ends + timedelta(milliseconds=10)
+    # After the wait ends only the ordinary rescan cadence remains.
+    after_wait = ends + timedelta(milliseconds=100)
+    assert worker_deadlines.chat(core.store, core.settings, after_wait) == after_wait + timedelta(
+        seconds=worker_deadlines.CHAT_WAIT_RESCAN_SECONDS)
+    assert start <= created
