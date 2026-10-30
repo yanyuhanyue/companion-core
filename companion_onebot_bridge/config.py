@@ -217,6 +217,9 @@ class BridgeConfig:
         value = asdict(self)
         if self.meme_catalog_owner == "bridge":
             value.pop("meme_catalog_owner")
+        # Fields added later stay out at their default, so existing digests still match.
+        if not self.history_backfill:
+            value.pop("history_backfill")
         return value
 
     @property
