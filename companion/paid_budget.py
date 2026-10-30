@@ -10,6 +10,7 @@ import json
 import marshal
 import os
 import re
+import threading
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -269,24 +270,59 @@ def _live_record(row, digest, current, seen):
 
 
 IDENTITY = "SELECT value FROM runtime_meta WHERE key='model_budget_journal_id'"
+SUMMARY = ("SELECT (SELECT count(*) FROM runtime_meta),"
+           "(SELECT total(length(key)+length(value)) FROM runtime_meta),"
+           "(SELECT count(*) FROM model_admissions),"
+           "(SELECT count(*) FROM model_usage),"
+           "(SELECT total(length(state)+billed_micro_usd) FROM model_usage)")
+# Views shared by every connection of this process, for callers such as the API that open
+# one connection per request. Keyed by the journal path.
+_SHARED, _SHARED_LOCK = {}, threading.Lock()
 
 
 def _view_key(store, path, raw):
-    """Everything a read-only view depends on: journal bytes and this connection's DB state.
+    """What a read-only view depends on, as seen by this connection.
 
     `data_version` changes when another connection commits; `total_changes` when this one
-    writes. A saved view is reused only while neither changed and the bytes are identical.
+    writes. The table summary also catches content neither counter sees, such as a page
+    level restore into this connection.
     """
-    # The table summary also catches content that neither counter sees, such as a page
-    # level restore into this connection.
-    summary = tuple(store.db.execute(
-        "SELECT (SELECT count(*) FROM runtime_meta),"
-        "(SELECT total(length(key)+length(value)) FROM runtime_meta),"
-        "(SELECT count(*) FROM model_admissions),"
-        "(SELECT count(*) FROM model_usage),"
-        "(SELECT total(length(state)+billed_micro_usd) FROM model_usage)").fetchone())
+    summary = tuple(store.db.execute(SUMMARY).fetchone())
     version = store.db.execute("PRAGMA data_version").fetchone()[0]
     return (str(path), hashlib.sha256(raw).hexdigest(), store.db.total_changes, version, summary)
+
+
+def _shared_key(store, key):
+    """The same view for any connection: journal bytes, table summary and the DB files.
+
+    Every commit, from any process, writes the WAL (or the DB file after a checkpoint), so
+    their inode, size and modification time change with it. A connection with its own
+    uncommitted writes never uses or fills the shared entry.
+    """
+    if store.db.in_transaction and store.db.total_changes != getattr(store, "_txn_changes", None):
+        return None
+    path = getattr(store, "path", None)
+    if not isinstance(path, (str, os.PathLike)) or str(path).startswith((":memory:", "file:")):
+        return None
+    files = []
+    for name in (path, str(path) + "-wal"):
+        try:
+            info = os.stat(name)
+        except OSError:
+            files.append(None)
+        else:
+            files.append((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+    if files[0] is None:
+        return None
+    return (key[0], key[1], key[4], tuple(files))
+
+
+def forget_views(store=None):
+    """Drop reusable views: one connection's, and every shared one."""
+    if store is not None:
+        store._journal_view = None
+    with _SHARED_LOCK:
+        _SHARED.clear()
 
 
 def _permit(view, approval, allow_settlement):
@@ -307,14 +343,15 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             resolution_replay=None, model_control_replay=None, accounting_replay=None):
     """Validated custody view; read-only calls reuse it while journal and DB are unchanged.
 
-    One chat context used to re-validate the whole journal about 180 times (~25 s).
-    Appends, replays and any change to the bytes or the DB still take the full path, and
-    the read-only refusals are applied again on every reuse. Callers get a private copy,
-    so folding into a view never changes the saved one.
+    One chat context used to re-validate the whole journal about 180 times (~25 s), and the
+    API re-validated it on every Bridge poll while holding the write lock. Appends, replays
+    and any change to the bytes or the DB still take the full path, and the read-only
+    refusals are applied again on every reuse. Callers get a private copy, so folding into
+    a view never changes the saved one.
     """
     if (record is not None or resolution_replay is not None
             or model_control_replay is not None or accounting_replay is not None):
-        store._journal_view = None
+        forget_views(store)
         return _journal(store, approval, record, allow_settlement=allow_settlement,
                         initialize=initialize, resolution_replay=resolution_replay,
                         model_control_replay=model_control_replay,
@@ -325,16 +362,23 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             raw = path.read_bytes()
         except OSError:
             raw = None
-        saved = getattr(store, "_journal_view", None)
-        key = _view_key(store, path, raw) if raw is not None and len(
-            raw) <= CACHE_MAX_BYTES else None
-        if key is not None and saved is not None and saved[0] == key:
-            identity = store.one(IDENTITY)
+        key = shared = saved = None
+        if raw is not None and len(raw) <= CACHE_MAX_BYTES:
+            key = _view_key(store, path, raw)
+            shared = _shared_key(store, key)
+            saved = getattr(store, "_journal_view", None)
+            if saved is None or saved[0] != key:
+                with _SHARED_LOCK:
+                    entry = _SHARED.get(key[0])
+                saved = (key, *entry[1:]) if (
+                    shared is not None and entry is not None and entry[0] == shared) else None
+            identity = store.one(IDENTITY) if saved is not None else None
     except BaseException:
         _validated_bytes.cache_clear()
         raise
-    if key is not None and saved is not None and saved[0] == key and identity == saved[2]:
+    if saved is not None and identity == saved[2]:
         _permit(saved[3], approval, allow_settlement)
+        store._journal_view = saved
         return marshal.loads(saved[1])
     store._journal_view = None
     view = _journal(store, approval, allow_settlement=allow_settlement, initialize=initialize,
@@ -344,8 +388,13 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
             blob = marshal.dumps(view)
         except ValueError:
             return view
-        store._journal_view = (_view_key(store, path, raw), blob, store.one(IDENTITY),
-                               marshal.loads(blob))
+        after = _view_key(store, path, raw)
+        entry = (after, blob, store.one(IDENTITY), marshal.loads(blob))
+        store._journal_view = entry
+        shared = _shared_key(store, after)
+        if shared is not None:
+            with _SHARED_LOCK:
+                _SHARED[after[0]] = (shared, *entry[1:])
     return view
 
 

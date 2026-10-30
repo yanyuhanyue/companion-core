@@ -1082,9 +1082,10 @@ class ContentService:
                         s, cfg, approval, row["owner_event_id"],
                     )
                     prompt += (
-                        "\nunderstand_video 可按需查看本次动图的完整时序。若需要知道动作、"
-                        "互动过程、表情变化或主人问动图含义，就调用它；只需静态内容或图片"
-                        "与当前问题无关时可不调用。未调用时不能猜动作。静态图片不调用。"
+                        "\nunderstand_video 可按需查看本次动图的完整时序，但要多等二三十秒。"
+                        "表情包这类短动图看抽样拼图通常就够接话，不必调用；主人问到具体动作、"
+                        "互动过程，或拼图确实看不懂时再调用。只看拼图时按抽样画面说大意，"
+                        "不声称看过完整动画。静态图片不调用。"
                         "\n主人当前消息（资料）：" + json.dumps(owner_body.get("text", ""),
                                                               ensure_ascii=False)
                     )

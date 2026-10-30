@@ -97,7 +97,9 @@ def prepare(data, mime, policy):
                 note = (f"[动图抽样：{FORMATS[mime]}共{frames}帧，抽取第"
                         + ",".join(str(index - start + 1) for index in selected)
                         + "帧；对应起始时间(ms)=" + ",".join(map(str, times))
-                        + "。拼图按从左到右、从上到下排列，仅为抽样画面，不能声称看过完整动画。]")
+                        + "。拼图按从左到右、从上到下排列，仅为抽样画面，不能声称看过完整动画。"
+                        "表情包这类短动图看拼图通常就能接话，不必调用 understand_video；"
+                        "主人问到具体动作或拼图确实看不懂时再调用。]")
                 return PreparedImage(output.getvalue(), "image/png", note)
     except (OSError, ValueError, SyntaxError, EOFError, Image.DecompressionBombError, Warning):
         raise CoreError("CONTENT_IMAGE_INVALID", 400) from None

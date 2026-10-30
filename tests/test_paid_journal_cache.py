@@ -19,9 +19,11 @@ def clear_cache():
     cache = getattr(paid_budget, "_validated_bytes", None)
     if cache:
         cache.cache_clear()
+    paid_budget.forget_views()
     yield
     if cache:
         cache.cache_clear()
+    paid_budget.forget_views()
 
 
 def settled(core, tmp_path):
@@ -287,8 +289,42 @@ def test_payload_decode_failure_uses_original_line_decoder(core, tmp_path, monke
         return original(value, *args, **kwargs)
 
     monkeypatch.setattr(json, "loads", loads)
-    core.store._journal_view = None  # exercise the cold decode path
+    paid_budget.forget_views(core.store)  # exercise the cold decode path
     with core.store.transaction():
         assert paid_budget.journal(core.store, approval) == expected
     assert failures == [1]
     assert paid_budget._validated_bytes.cache_info().currsize == 0
+
+
+def test_a_new_connection_reuses_the_shared_view_until_any_commit(core, tmp_path):
+    from companion.store import Store
+
+    approval, request = settled(core, tmp_path)
+    with core.store.transaction():
+        expected = paid_budget.journal(core.store, approval)
+    other = Store(core.settings.database)
+    try:
+        queries = []
+        other.db.set_trace_callback(queries.append)
+        with other.transaction():
+            assert paid_budget.journal(other, approval) == expected
+        other.db.set_trace_callback(None)
+        # Reused: no fold or projection query ran on the fresh connection.
+        assert not any("model_admissions a" in query for query in queries)
+        # A commit from another connection invalidates the shared view.
+        core.store.execute("UPDATE model_usage SET billed_micro_usd=0 WHERE request_id=?",
+                           (request,))
+        with pytest.raises(CoreError, match="MODEL_BUDGET_RECONCILIATION_REQUIRED"):
+            with other.transaction():
+                paid_budget.journal(other, approval)
+    finally:
+        other.close()
+
+
+def test_uncommitted_writes_never_fill_or_use_the_shared_view(core, tmp_path):
+    approval, _ = settled(core, tmp_path)
+    paid_budget.forget_views()
+    with core.store.transaction():
+        core.store.execute("INSERT INTO runtime_meta VALUES ('synthetic_pending','1')")
+        paid_budget.journal(core.store, approval)
+        assert paid_budget._SHARED == {}
