@@ -4,6 +4,7 @@ import json
 import os
 import signal
 import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,12 +13,40 @@ from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from .config import BridgeConfig
 from .event_normalizer import decode, normalize, redact
-from .metrics import Metrics
+from .metrics import Metrics, emit
 from .network import private_http_client, websocket
 from .onebot_client import OneBotClient
 from .outbound import deliver_tick
 from .reference_reader import enrich
 from .spool import Spool, encode
+
+# A stop signal lets every loop finish its current unit (one send, one capture, one media
+# transfer); only a unit still running after this long is cancelled. It exceeds one bounded
+# send plus its result report; whoever stops the container must wait longer than this.
+SHUTDOWN_GRACE_SECONDS = 60
+
+
+@asynccontextmanager
+async def close_on_stop(stop, ws):
+    """Close the socket on stop, which ends the frame loop after the frame being persisted."""
+    async def close():
+        await stop.wait()
+        await ws.close()
+
+    task = asyncio.create_task(close())
+    try:
+        yield ws
+    finally:
+        task.cancel()
+
+
+async def drain(tasks):
+    """After stop, wait for each loop's current unit; cancel only what outlives the grace."""
+    _, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_GRACE_SECONDS)
+    for task in pending:
+        task.cancel()
+    emit("bridge_shutdown", status="CANCELLED" if pending else "CLEAN")
+    return not pending
 
 
 async def pause(stop, seconds):
@@ -34,7 +63,8 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
     delay = 0.25
     while not stop.is_set():
         try:
-            async with await websocket(config, check=runtime.verify if runtime else None) as ws:
+            async with (await websocket(config, check=runtime.verify if runtime else None) as ws,
+                        close_on_stop(stop, ws)):
                 metrics.emit("ws_connected")
                 async for frame in ws:
                     received_ns = time.perf_counter_ns()
@@ -271,8 +301,7 @@ async def run(config):
                     group.create_task(discover_memes(memes, stop, profile)),
                 ]
                 await stop.wait()
-                for task in tasks:
-                    task.cancel()
+                await drain(tasks)
 
 
 def main():
