@@ -66,6 +66,11 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
             async with (await websocket(config, check=runtime.verify if runtime else None) as ws,
                         close_on_stop(stop, ws)):
                 metrics.emit("ws_connected")
+                if runtime is not None and onebot is not None and config.history_backfill:
+                    from .backfill import backfill
+
+                    # The socket was closed until now; read back what the owner sent.
+                    await backfill(runtime, core, onebot, wake)
                 async for frame in ws:
                     received_ns = time.perf_counter_ns()
                     received_at = datetime.now(UTC)
