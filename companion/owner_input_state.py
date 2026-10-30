@@ -35,6 +35,11 @@ def _source(store, original, saved, owner_id):
         raise CoreError("OWNER_APPROVED_INPUT_REQUIRED", 409) from None
 
 
+def _cleared_after(store, created_at):
+    return bool(store.one("SELECT 1 FROM privacy_erasure_ledger WHERE state='COMPLETE' "
+                          "AND erased_at>=? LIMIT 1", (created_at,)))
+
+
 def _deliveries(store, rows, jobs, *, erased):
     """Terminal states retain the original native delivery identity and frozen bytes."""
     for row in rows:
@@ -48,7 +53,10 @@ def _deliveries(store, rows, jobs, *, erased):
             content = json.loads(original["content_json"])
             intact = (material.get("content_sha256") == original["content_sha256"]
                       and wire.digest(content) == original["content_sha256"])
-            retired = erased and original["content_sha256"] == "" and content == {}
+            # An erasure of this input, or a later raw-fact erasure (which clears every
+            # earlier reply), retires the text but keeps the delivery identity.
+            retired = original["content_sha256"] == "" and content == {} and (
+                erased or _cleared_after(store, original["created_at"]))
             if (not job or not authority or material.get("authority") != authority
                 or authority != json.loads(job["authority_json"])
                 or any(material.get(key) != original[key] for key in (
