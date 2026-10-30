@@ -182,6 +182,12 @@ def test_commitment_feedback_uncertainty_requires_owner_reconciliation(core):
     core.goals.finish(step, result_for(core, goal))
     job = core.store.one("SELECT job_id FROM jobs WHERE kind='activity' AND state='QUEUED'")
     assert job and run(core.run_once(job_id=job["job_id"]))
+    first = lease_deliveries(
+        core.store, core.settings, LeaseRequest(worker_id="bridge"), core.clock()
+    )["items"][0]
+    begin_send(core.store, first["message_id"], first["lease_token"], core.clock(), core.settings)
+    delivery_result(core.store, core.settings, first["message_id"],
+                    DeliveryResult(lease_token=first["lease_token"], result="SENT"), core.clock())
     delivery = lease_deliveries(
         core.store, core.settings, LeaseRequest(worker_id="bridge"), core.clock()
     )["items"][0]

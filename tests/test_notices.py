@@ -99,7 +99,7 @@ def test_unreserved_slot_refusal_waits_for_the_same_wording_job(core, monkeypatc
     assert len(core.model.calls) == 1
 
 
-def test_accepted_task_feedback_uses_the_model_and_waits_for_its_ack(core):
+def test_accepted_task_feedback_uses_the_model_and_waits_for_both_acks(core):
     goal = setup_goal(core, commitment=True)
     step = core.goals.claim()
     core.goals.finish(step, result_for(core, goal))
@@ -109,16 +109,15 @@ def test_accepted_task_feedback_uses_the_model_and_waits_for_its_ack(core):
     assert not core.store.rows("SELECT * FROM outbox")
     assert run(run_notice(core))
     assert proactive_counts(core.store, core.settings, core.clock())[0] == 0
-    # The owner sent the link with the task, so the result is one message without it.
-    assert len(core.store.rows("SELECT * FROM outbox")) == 1
-    item = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
-                            core.clock())["items"][0]
-    assert item["content"] == {"text": wording}
-    assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
-    begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
-    delivery_result(core.store, core.settings, item["message_id"],
-                    DeliveryResult(lease_token=item["lease_token"], result="SENT"),
-                    core.clock())
+    for index in range(2):
+        item = lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
+                                core.clock())["items"][0]
+        assert item["content"] == {"text": wording if index == 0 else "https://example.org/article"}
+        assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
+        begin_send(core.store, item["message_id"], item["lease_token"], core.clock(), core.settings)
+        delivery_result(core.store, core.settings, item["message_id"],
+                        DeliveryResult(lease_token=item["lease_token"], result="SENT"),
+                        core.clock())
     assert core.store.one("SELECT state FROM commitments")["state"] == "FULFILLED"
     prompt = json.loads(core.model.calls[0][0][-1]["content"])
     assert prompt["outcome"] == "FULFILLED" and "实际获得的天文内容" in prompt["text"]

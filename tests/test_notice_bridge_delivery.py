@@ -104,9 +104,12 @@ def test_required_notice_native_reader_worker_bridge_and_complete_ack(core, tmp_
                     "state": "SUCCEEDED"}
                 assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
                 await window.pump()
-                # The owner sent the task's link; neither outcome sends it back.
-                assert len(sends) == 2
-                assert all(URL not in json.dumps(send, ensure_ascii=False) for send in sends[1:])
+                if outcome == "FULFILLED":
+                    assert len(sends) == 2
+                    assert core.store.one("SELECT state FROM commitments")["state"] == "IN_PROGRESS"
+                    await window.pump()
+                    assert sends[-1]["message"] == [{"type": "text", "data": {"text": URL}}]
+                assert len(sends) == (3 if outcome == "FULFILLED" else 2)
                 assert core.store.one("SELECT state FROM commitments")["state"] == outcome
                 for index, item in enumerate(leased):
                     assert item["authority"] == window.runtime.authority

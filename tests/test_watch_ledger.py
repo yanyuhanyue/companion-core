@@ -231,8 +231,8 @@ def test_recent_judgements_say_who_chose_the_item(core, kind):
         columns = {row["name"]: row for row in core.store.rows("PRAGMA table_info(goals)")}
         values = {"goal_id": "goal_watch", "kind": kind, "topic": "t", "scope_json": "{}",
                   "proposal_key": "k", "state": "DONE", "priority": 1, "version": 1,
-                  "result_event_id": event_id, "next_due_at": core.clock(), "created_at": core.clock(),
-                  "updated_at": core.clock(), "redacted": 0}
+                  "result_event_id": event_id, "next_due_at": core.clock(),
+                  "created_at": core.clock(), "updated_at": core.clock(), "redacted": 0}
         values = {key: value for key, value in values.items() if key in columns}
         core.store.execute(f"INSERT INTO goals({','.join(values)}) VALUES "
                            f"({','.join('?' for _ in values)})", tuple(values.values()))
