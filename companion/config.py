@@ -427,8 +427,10 @@ class Settings(BaseModel):
     model_url: str = "https://api.deepseek.com"
     model_name: str = "deepseek-flash"
     provider: str = "deepseek"
-    conversation_policy: ConversationPolicyConfig | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+    # Always a value, so the console shows and edits the effective policy.
+    conversation_policy: ConversationPolicyConfig = Field(
+        default_factory=ConversationPolicyConfig,
+        exclude_if=lambda value: value == ConversationPolicyConfig(),
     )
     token_measurement: TokenMeasurementConfig | None = Field(
         default=None, exclude_if=lambda value: value is None,
@@ -576,6 +578,12 @@ class Settings(BaseModel):
     lease_seconds: int = Field(default=120, ge=10, le=900)
     max_attempts: int = Field(default=3, ge=1, le=3)
     raw_event_retention_days: int = Field(default=365, ge=1)
+
+    @field_validator("conversation_policy", mode="before")
+    @classmethod
+    def conversation_policy_default(cls, value):
+        # Earlier operator versions could store null; it always meant the default policy.
+        return ConversationPolicyConfig() if value is None else value
 
     @field_validator("segmented_reply", mode="before")
     @classmethod

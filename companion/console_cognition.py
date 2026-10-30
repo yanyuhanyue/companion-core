@@ -6,9 +6,11 @@ new decision path, recomputes history or exposes prompt bodies, credentials or r
 """
 
 import json
+import re
 from typing import Literal
 
 from fastapi import Header, Request
+from pydantic import Field
 
 from companion.affect import feedback_reset_at
 from companion.cognition_read import CognitionRead
@@ -85,6 +87,11 @@ class AffectReset(StrictModel):
 
 class SourceGrantAction(StrictModel):
     action: Literal["revoke", "forget"]
+
+
+class StyleCandidateDecision(StrictModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str = Field(default="", max_length=200)
 
 
 def register_console_cognition_routes(app, prefix, auth, write, reset_affect, grant_action):
@@ -177,6 +184,43 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
                 core.clock).decide(suggestion_id, body.decision, owner_check=owner_check)
 
         return await write(request, idempotency_key, body.model_dump(), apply)
+
+    @app.get(prefix + "/style-candidates", dependencies=auth)
+    async def style_candidates():
+        from companion import style_distill
+
+        core = app.state.core
+        return {"enabled": style_distill.enabled(core.settings),
+                "live_enabled": core.settings.style_live.enabled,
+                "items": style_distill.items(core.store, core.clock())}
+
+    @app.post(prefix + "/style-candidates/{pattern_sha256}/decision", dependencies=auth)
+    async def style_candidate_decision(pattern_sha256: str, body: StyleCandidateDecision,
+                                       request: Request,
+                                       idempotency_key: str = Header(default="")):
+        from companion import style_distill
+
+        if not re.fullmatch(r"[a-f0-9]{64}", pattern_sha256):
+            raise CoreError("STYLE_CANDIDATE_NOT_FOUND", 404)
+
+        def apply(core, owner_check):
+            with core.store.transaction():
+                owner_check()
+                return style_distill.decide(core.store, core.settings, core.clock(),
+                                            pattern_sha256, approve=body.decision == "APPROVE",
+                                            reason=body.reason)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
+
+    @app.get(prefix + "/watch-ledger", dependencies=auth)
+    async def watch_ledger_items():
+        from companion import watch_ledger
+
+        core = app.state.core
+        return {"enabled": watch_ledger.enabled(core.settings),
+                "items": [{key: value for key, value in item.items()
+                           if key != "source_event_id"}
+                          for item in watch_ledger.recent(core.store, limit=20)]}
 
     @app.get(prefix + "/life/topics", dependencies=auth)
     async def life_topics():
