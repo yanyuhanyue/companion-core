@@ -95,6 +95,8 @@ class Store:
             raise
         locked = time.perf_counter()
         self._budget_stops = set()
+        # Lets shared caches tell whether this connection has uncommitted writes.
+        self._txn_changes = self.db.total_changes
         outcome = "ROLLBACK"
         try:
             yield self
