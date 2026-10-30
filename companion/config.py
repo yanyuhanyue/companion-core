@@ -14,6 +14,7 @@ from pydantic import (
     PrivateAttr,
     SecretStr,
     TypeAdapter,
+    field_validator,
     model_validator,
 )
 
@@ -443,8 +444,19 @@ class Settings(BaseModel):
     output_rate: int | None = Field(default=None, ge=0)
     paid_model: PaidModelApproval | None = None
     live_text_window: LiveTextWindowApproval | None = None
+    # On by default; `segmented_reply = false` (or JSON false/null) restores single replies.
+    # An explicit off state serializes as null so a dump/validate roundtrip keeps it off.
     segmented_reply: SegmentedReplyConfig | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default_factory=lambda: SegmentedReplyConfig(mode="semantic"),
+        exclude_if=lambda value: value == SegmentedReplyConfig(mode="semantic"),
+    )
+    # DeepSeek thinking for the chat scenario only; background JSON tasks stay non-thinking.
+    # Reasoning tokens count against max_tokens, so chat gets this extra output allowance.
+    chat_thinking: Literal["disabled", "low", "high", "max"] = Field(
+        default="high", exclude_if=lambda value: value == "high",
+    )
+    chat_thinking_tokens: int = Field(
+        default=3072, ge=0, le=32768, exclude_if=lambda value: value == 3072,
     )
     # Native QQ quote for owner-authority replies; see companion/reply_quote.py.
     quote_policy: Literal["never", "occasionally", "often"] = Field(
@@ -454,7 +466,7 @@ class Settings(BaseModel):
     monthly_limit_micro_usd: int = Field(default=20000000, ge=0)
     autonomous_daily_micro_usd: int = Field(default=200000, ge=0)
     memory_daily_micro_usd: int = Field(default=50000, ge=0)
-    memory_enabled: bool = False
+    memory_enabled: bool = True
     evaluation_enabled: bool = False
     diary_enabled: bool = False
     diary_generate_hour: int = Field(default=2, ge=0, le=23)
@@ -565,6 +577,11 @@ class Settings(BaseModel):
     max_attempts: int = Field(default=3, ge=1, le=3)
     raw_event_retention_days: int = Field(default=365, ge=1)
 
+    @field_validator("segmented_reply", mode="before")
+    @classmethod
+    def segmented_reply_off(cls, value):
+        return None if value is False else value
+
     @model_validator(mode="after")
     def validate_settings(self):
         ZoneInfo(self.timezone)
@@ -648,7 +665,21 @@ class Settings(BaseModel):
             return min(self.max_output_tokens, 300)
         if scenario == "reflection":
             return self.reflection_max_output_tokens
-        return self.diary_max_output_tokens if scenario == "diary" else self.max_output_tokens
+        if scenario == "diary":
+            return self.diary_max_output_tokens
+        if self.thinking_effort(scenario):
+            # Reasoning shares max_tokens; an approved paid ceiling still bounds the total.
+            allowance = self.max_output_tokens + self.chat_thinking_tokens
+            approved = self.paid_model.max_output_tokens if self.paid_model else allowance
+            return max(self.max_output_tokens, min(allowance, approved))
+        return self.max_output_tokens
+
+    def thinking_effort(self, scenario):
+        """The DeepSeek reasoning effort for a scenario, or None for non-thinking requests."""
+        if (scenario != "chat" or self.provider != "deepseek"
+            or self.chat_thinking == "disabled"):
+            return None
+        return self.chat_thinking
 
     def model_timeout(self, scenario):
         if scenario == "social_autonomy":
@@ -707,7 +738,8 @@ class Settings(BaseModel):
                 elif field == "style_live":
                     data[field] = StyleLiveConfig.model_validate_json(value)
                 elif field == "segmented_reply":
-                    data[field] = SegmentedReplyConfig.model_validate_json(value)
+                    data[field] = TypeAdapter(SegmentedReplyConfig | None | Literal[False]
+                                              ).validate_json(value)
                 else:
                     data[field] = value
         from companion.operator_config import load

@@ -13,7 +13,8 @@ def test_history_turns_are_dated_and_the_current_time_precedes_the_new_input(cor
     assert messages[1] == {"role": "user", "content": "【10月19日 周一 12:00】今天去医院复查了"}
     assert messages[2] == {"role": "assistant", "content": "辛苦啦"}
     assert messages[-2]["content"].startswith(
-        "当前时间参考（系统时钟，不是主人原话）：2026年10月22日 星期四 12:00（Asia/Shanghai）")
+        "当前时间参考（主人这条消息的时间，不是主人原话）："
+        "2026年10月22日 星期四 12:00（Asia/Shanghai）")
     assert messages[-1] == {"role": "user", "content": "刚才聊到哪了？"}
 
 

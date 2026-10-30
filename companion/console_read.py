@@ -333,5 +333,8 @@ def decisions(core, limit=40):
     items.sort(key=lambda item: item["occurred_at"] or "", reverse=True)
     return {**collection(core, items[:limit]),
             "reasoning": {"state": "NOT_REQUESTED",
-                          "provider_thinking": "disabled" if core.settings.provider == "deepseek"
-                          else "unknown"}}
+                          "provider_thinking": (
+                              "chat:" + core.settings.thinking_effort("chat")
+                              if core.settings.thinking_effort("chat")
+                              else "disabled" if core.settings.provider == "deepseek"
+                              else "unknown")}}

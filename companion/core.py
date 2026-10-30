@@ -42,7 +42,7 @@ from companion.media import MediaService
 from companion.meme_core import MemeCaptionService
 from companion.memory import Memory
 from companion.memory_context import MemoryContext
-from companion.model import PRINCIPLES, RECALL_RULES
+from companion.model import MEMORY_RULES, PRINCIPLES, RECALL_RULES
 from companion.observation import ObservationService
 from companion.privacy import epoch, redact
 from companion.reading import ReadingService
@@ -690,13 +690,27 @@ class Core(Runtime):
         text = body.get("text", "")
         expression_rules, expression_data = self.expression.instruction_parts(job["event_id"]) if (
             permitted("expression")) else ("", "")
-        rules = PRINCIPLES + expression_rules
+        rules = PRINCIPLES + (MEMORY_RULES if cfg.memory_enabled and permitted("memory")
+                              else "") + expression_rules
         affect = self._affect_context(authority)
         rules, policy_data, conversation_decision = conversation_policy.prompt_parts(
-            rules, cfg.conversation_policy if job["kind"] == "chat" else None,
+            rules, cfg.conversation_policy if job["kind"] == "chat"
+            else conversation_policy.ConversationPolicyConfig(mode="OFF"),
             current_text=text, affect=affect,
         )
         dynamic_rules = [expression_data, policy_data]
+        if job["kind"] == "chat" and not cfg.chat_time_labels:
+            # Stored event times keep a rebuilt context identical to the measured one.
+            current_event = s.one("SELECT rowid,occurred_at FROM events WHERE event_id=?",
+                                  (job["event_id"],))
+            previous = s.one(
+                "SELECT occurred_at FROM events WHERE conversation_id=? AND actor_id='owner' "
+                "AND rowid<? AND redacted=0 ORDER BY rowid DESC LIMIT 1",
+                (job["conversation_id"], current_event["rowid"]),
+            ) if current_event and permitted("history") else None
+            dynamic_rules.append(conversation_policy.time_hint(
+                current_event and current_event["occurred_at"],
+                previous and previous["occurred_at"], cfg.timezone))
         if authority or private_life.enabled(cfg):
             from companion.capabilities import prompt_parts as capability_prompt
             from companion.capabilities import snapshot as capability_snapshot
@@ -907,7 +921,10 @@ class Core(Runtime):
         if job["kind"] == "chat" and cfg.chat_time_labels:
             turns = [time_context.stamp_turn(turn, source, cfg.timezone)
                      for turn, source in zip(turns, sources, strict=True)]
-            current_input.append(time_context.now_message(self.clock(), cfg.timezone))
+            # The owner message's stored time, not the clock: a rebuilt context is identical.
+            received = s.one("SELECT occurred_at FROM events WHERE event_id=?", (job["event_id"],))
+            current_input.append(time_context.now_message(
+                received["occurred_at"] if received else self.clock(), cfg.timezone))
         if content_reference:
             current_input.append({"role": "user", "content": content_reference})
         if cfg.voice.enabled and permitted("voice") and job["kind"] == "chat":

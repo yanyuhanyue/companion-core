@@ -40,7 +40,7 @@ uv run python -m companion life-worker
 
 演示可设 `COMPANION_MODE=demo`，无需模型密钥；回复明确标记为演示。`.env` 仅由 Docker Compose 读取，本地命令需通过环境变量注入。不要提交真实配置、密钥或数据库。
 
-默认 `memory_enabled=false`，先验收 M0 链路，再在 `config.toml` 开启 M1。主模型、费率、预算、时区和频率均可配置，未知字段和非法值会使启动失败。生产配置使用 TOML，原设计 YAML 作为字段语义参考；环境变量覆盖文件值。
+默认 `memory_enabled=true`，同时默认开启 `participation_v2` 对话策略、语义分段回复和聊天 thinking（见 [拟人化默认值](docs/humanlike-defaults.md)）；需要只验收 M0 链路时在 `config.toml` 关闭。主模型、费率、预算、时区和频率均可配置，未知字段和非法值会使启动失败。生产配置使用 TOML，原设计 YAML 作为字段语义参考；环境变量覆盖文件值。
 
 ## QQ 指令
 

@@ -7,6 +7,10 @@ provider = "deepseek"
 model_url = "https://api.deepseek.com"
 model_name = "deepseek-flash"
 max_output_tokens = 768
+# DeepSeek thinking for chat replies: disabled, low, high or max. Reasoning tokens are
+# billed as output; chat may generate max_output_tokens + chat_thinking_tokens in total.
+chat_thinking = "high"
+chat_thinking_tokens = 3072
 context_soft_tokens = 3200
 max_recent_messages = 12
 # Integer micro-USD per million tokens, upper-bound peak rates verified 2026-10-19.
@@ -18,8 +22,8 @@ output_rate = 1200000
 monthly_limit_micro_usd = 20000000
 autonomous_daily_micro_usd = 200000
 memory_daily_micro_usd = 50000
-# Enable after completing M0 checks; run life-worker for background memory extraction.
-memory_enabled = false
+# Long-term memory is on by default; run life-worker for background memory extraction.
+memory_enabled = true
 evaluation_enabled = false # Owner-consented, six-call no-delivery experiments on the same budget.
 embedding_cache_dir = "data/embedding-cache"
 semantic_min_score = 0.5
@@ -140,12 +144,13 @@ wait_seconds = 30
 [content.vision]
 max_request_micro_usd = 0
 
-# Optional text bubbles for generated chat replies. Omitted by default (one reply).
+# Generated chat replies are split into semantic text bubbles by default. To send one
+# message instead, put `segmented_reply = false` above the first [table] of this file.
 # Bounded live windows also need a matching segmented-reply scope and send cap.
 # See docs/qq-beta/segmented-replies.md.
 # [segmented_reply]
+# mode = "semantic"
 # max_segments = 3
-# min_chars = 12
 # interval_ms = 1500
 
 # Optional owner-private media and account actions. All top-level capabilities remain off.

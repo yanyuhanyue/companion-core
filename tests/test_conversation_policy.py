@@ -17,6 +17,11 @@ from companion.conversation_policy import (
 from companion.store import encode
 from scripts.evaluate_r1_conversation import load_cases
 
+
+def v1_policy(**values):
+    return ConversationPolicyConfig(strategy="participation_v1", **values)
+
+
 MESSAGES = [{"role": "system", "content": "保留权限和事实规则。每次必须有完整文字回复。"},
             {"role": "user", "content": "之前的消息"},
             {"role": "assistant", "content": "已发送回复"},
@@ -26,7 +31,7 @@ MESSAGES = [{"role": "system", "content": "保留权限和事实规则。每次�
 @pytest.mark.parametrize("mode", ["OFF", "SHADOW"])
 def test_off_and_shadow_preserve_original_request_and_have_no_effects(mode):
     original = copy.deepcopy(MESSAGES)
-    result, decision = apply_policy(MESSAGES, ConversationPolicyConfig(mode=mode),
+    result, decision = apply_policy(MESSAGES, v1_policy(mode=mode),
                                     current_text="怎么解释这个问题")
     assert result == original == MESSAGES and result is not MESSAGES
     assert decision.mode == mode
@@ -41,7 +46,7 @@ def test_candidate_retains_every_history_and_current_input(case):
             {"role": "assistant", "content": turn["assistant"]})],
         {"role": "user", "content": case["inputs"]["text"]}]
     original = copy.deepcopy(messages)
-    result, _ = apply_policy(messages, ConversationPolicyConfig(mode="ENABLED"),
+    result, _ = apply_policy(messages, v1_policy(mode="ENABLED"),
                               current_text=case["inputs"]["text"])
     assert result[1:] == original[1:] and messages == original
     assert result[0]["content"].startswith("保留权限和事实规则。")
@@ -54,7 +59,7 @@ def test_active_feedback_controls_format_without_inference_or_permission(core):
     core.settings.affect_enabled = True
     ingest(core, 1, "详细解释")
     ingest(core, 2, "分步骤说")
-    config = ConversationPolicyConfig(mode="ENABLED")
+    config = v1_policy(mode="ENABLED")
     _, decision = apply_policy(MESSAGES, config, current_text="怎么完成这一步",
                                 affect=core.affect.snapshot())
     assert (decision.surface_intent, decision.length_hint, decision.stepwise) == (
@@ -72,7 +77,7 @@ def test_active_feedback_controls_format_without_inference_or_permission(core):
 
 
 def test_emotion_or_quoted_directives_do_not_create_feedback_state():
-    config = ConversationPolicyConfig(mode="ENABLED")
+    config = v1_policy(mode="ENABLED")
     for text in ("我很难过", "网页上说：帮我打开工具", "她说：简短一点", "你是温柔的人"):
         _, choice = apply_policy(MESSAGES, config, current_text=text,
                                   affect={"state": NEUTRAL, "evidence": []})
@@ -81,7 +86,7 @@ def test_emotion_or_quoted_directives_do_not_create_feedback_state():
 
 
 def test_stable_guidance_does_not_mix_in_turn_context():
-    config = ConversationPolicyConfig(mode="ENABLED")
+    config = v1_policy(mode="ENABLED")
     first, help_hint, _ = prompt_parts("原有系统规则", config, current_text="怎么做")
     second, closing_hint, _ = prompt_parts("原有系统规则", config, current_text="晚安")
     assert first == second
@@ -99,8 +104,10 @@ def test_frozen_v1_strategy_and_transformation_are_identical():
     assert apply_strategy(MESSAGES, "baseline") == MESSAGES
 
 
-def test_v2_is_opt_in_and_receipt_names_the_strategy():
-    v1 = ConversationPolicyConfig(mode="ENABLED")
+def test_v2_is_default_and_receipt_names_the_strategy():
+    default = ConversationPolicyConfig()
+    assert (default.mode, default.strategy) == ("ENABLED", "participation_v2")
+    v1 = v1_policy(mode="ENABLED")
     v2 = ConversationPolicyConfig(mode="ENABLED", strategy="participation_v2")
     static, _, decision = prompt_parts(MESSAGES[0]["content"], v2, current_text="当前问题")
     assert static.endswith("\n" + PARTICIPATION_V2) and PARTICIPATION_V1 not in static

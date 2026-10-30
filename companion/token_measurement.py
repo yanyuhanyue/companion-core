@@ -146,6 +146,8 @@ def _exact_supported(config, provider, endpoint, payload):
     ):
         return "route_mismatch"
     fields = {"model", "messages", "max_tokens", "stream", "thinking"}
+    if payload.get("thinking") == {"type": "enabled"}:
+        fields.add("reasoning_effort")
     tools = payload.get("tools")
     if tools:
         fields |= {"tools", "tool_choice"}
@@ -154,7 +156,9 @@ def _exact_supported(config, provider, endpoint, payload):
             return "tool_format_not_verified"
     if set(payload) != fields:
         return "request_format_not_verified"
-    if payload["thinking"] != {"type": "disabled"} or payload["stream"] is not False:
+    if (payload["thinking"] not in ({"type": "disabled"}, {"type": "enabled"})
+        or payload.get("reasoning_effort", "high") not in {"low", "high", "max"}
+        or payload["stream"] is not False):
         return "request_mode_not_verified"
     if not payload["messages"] or not all(map(_text_message, payload["messages"])):
         return "message_format_not_verified"
@@ -194,7 +198,10 @@ def measure_payload(settings, payload, scenario, *, tools=()):
                     # onto the first system message before encoding. Wire input
                     # and admission payload remain byte-for-byte unchanged.
                     rendered_messages[0]["tools"] = deepcopy(payload["tools"])
-                rendered = renderer.encode_messages(rendered_messages, thinking_mode="chat")
+                thinking = payload["thinking"] == {"type": "enabled"}
+                rendered = renderer.encode_messages(
+                    rendered_messages, thinking_mode="thinking" if thinking else "chat",
+                    reasoning_effort=payload.get("reasoning_effort"))
                 tokens = len(tokenizer.encode(rendered, add_special_tokens=False).ids)
             except Exception as error:
                 # The pinned renderer is upstream code; any failure means this input
@@ -207,7 +214,8 @@ def measure_payload(settings, payload, scenario, *, tools=()):
                 margin = (tokens * percent + 99) // 100 - tokens
                 tool_history = payload.get("tools") or any(
                     message["role"] == "tool" or "tool_calls" in message for message in messages)
-                method = "deepseek-v41-chat-tools-v1" if tool_history else "deepseek-v41-chat-v1"
+                method = ("deepseek-v41-" + ("thinking" if thinking else "chat")
+                          + ("-tools-v1" if tool_history else "-v1"))
                 return Measurement(**common, count_kind="exact_local_render", input_tokens=tokens,
                                    reservation_margin=margin, method=method,
                                    artifact_revision=REVISION, artifact_hashes=dict(ARTIFACTS))

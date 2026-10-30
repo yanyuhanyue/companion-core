@@ -4,7 +4,9 @@ import copy
 import hashlib
 import re
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict
 
@@ -44,8 +46,8 @@ STRATEGIES = {"participation_v1": PARTICIPATION_V1, "participation_v2": PARTICIP
 
 class ConversationPolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    mode: Literal["OFF", "SHADOW", "ENABLED"] = "OFF"
-    strategy: Literal["participation_v1", "participation_v2"] = "participation_v1"
+    mode: Literal["OFF", "SHADOW", "ENABLED"] = "ENABLED"
+    strategy: Literal["participation_v1", "participation_v2"] = "participation_v2"
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,40 @@ def _context_hint(decision):
     if hints:
         return "\n本轮表达参考（不改变事实、工具权限、承诺或发送规则）：\n" + "\n".join(hints)
     return ""
+
+
+_WEEKDAYS = "一二三四五六日"
+
+
+def _instant(value):
+    moment = datetime.fromisoformat(value)
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def time_hint(current_at, previous_at, timezone):
+    """Local time of the owner's message and the gap since the previous turn.
+
+    Inputs are stored event timestamps, so a rebuilt context renders the same text.
+    """
+    try:
+        current = _instant(current_at).astimezone(ZoneInfo(timezone))
+    except (TypeError, ValueError):
+        return ""
+    text = (f"\n主人这条消息发于 {current:%Y-%m-%d} 周{_WEEKDAYS[current.weekday()]} "
+            f"{current:%H:%M}（{timezone}）。")
+    try:
+        minutes = int((current - _instant(previous_at)).total_seconds() // 60)
+    except (TypeError, ValueError):
+        return text
+    if minutes < 10:
+        return text
+    if minutes < 60:
+        gap = f"{minutes}分钟"
+    elif minutes < 48 * 60:
+        gap = f"约{minutes // 60}小时"
+    else:
+        gap = f"{minutes // (24 * 60)}天"
+    return text + f"距上一轮对话已过{gap}，可以自然地考虑时间变化，不必刻意提起。"
 
 
 def prompt_parts(system_text, config, *, current_text, affect=None):

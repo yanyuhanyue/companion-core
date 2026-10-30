@@ -3,6 +3,7 @@
 The model has no clock of its own. Without these labels, an old turn or a memory about
 "今天去复查" reads as current. History stamps are absolute and never change, which keeps
 the cached prompt prefix stable; only the current-time line before the new input moves.
+That line uses the owner message's stored time, so a rebuilt context renders the same text.
 """
 
 from datetime import datetime
@@ -29,7 +30,8 @@ def day(value, timezone):
 def now_message(now, timezone):
     local = _local(now, timezone)
     return {"role": "user", "content": (
-        f"当前时间参考（系统时钟，不是主人原话）：{local.year}年{local.month}月{local.day}日 "
+        "当前时间参考（主人这条消息的时间，不是主人原话）："
+        f"{local.year}年{local.month}月{local.day}日 "
         f"星期{WEEKDAYS[local.weekday()]} {local:%H:%M}（{timezone}）。"
         "历史消息前的【时间】和记忆的记录日期都早于此刻；"
         "“今天、昨天、刚才”按当前时间换算，几天前的事不要说成今天发生的。")}
