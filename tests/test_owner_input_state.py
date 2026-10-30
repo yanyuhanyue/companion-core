@@ -208,3 +208,32 @@ def test_native_agent_read_link_is_judged_by_its_exploration_request(core, tmp_p
     finished = read_state in {"DONE", "CANCELLED", "FAILED"}
     assert result["unsettled_work"] is not finished
     assert result["terminal"] is finished
+
+
+@pytest.mark.parametrize("erasure", [True, False])
+def test_a_reply_cleared_by_a_later_erasure_keeps_the_input_state_readable(core, tmp_path,
+                                                                           erasure):
+    # Production 2026-10-30: forgetting one memory cleared every earlier reply, and every
+    # current input state then failed OWNER_DELIVERY_BINDING_REQUIRED, blocking handoff.
+    import json
+
+    from companion.owner_authority_protocol import OwnerCapture
+    from companion.privacy import ErasureLedger
+    from tests.test_owner_delivery_reconciliation import pending
+
+    proof, _ = pending(core, tmp_path)
+    saved = core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                           (owner_input.INPUT + proof["event_id"],))
+    capture = OwnerCapture.model_validate(json.loads(saved["value"])["capture"])
+    before = owner_input_state.read(core.store, core.settings, capture)
+    core.clock.advance(1)
+    if erasure:
+        core.store.execute("INSERT INTO privacy_erasure_ledger VALUES (?,?,?,?,?,?)",
+                           ("erase_test", "memory", "mem_test", core.clock(), 1, "COMPLETE"))
+    core.store.execute(ErasureLedger.clear_reply_sql())
+    if erasure:
+        after = owner_input_state.read(core.store, core.settings, capture)
+        assert after["terminal"] == before["terminal"]
+    else:
+        with pytest.raises(CoreError, match="OWNER_DELIVERY_BINDING_REQUIRED"):
+            owner_input_state.read(core.store, core.settings, capture)

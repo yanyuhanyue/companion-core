@@ -9,6 +9,7 @@ from companion import (
     conversation_policy,
     dialogue_history,
     image_spool,
+    input_debounce,
     input_protocol,
     input_recall,
     live_text,
@@ -253,13 +254,20 @@ class Core(Runtime):
                     memory_processed=int(diary_command or control_command),
                 )
                 revision = 0
+                debounce = None
                 if authority or private_life.enabled(cfg):
+                    # Read the waiting batch before the new revision supersedes its job.
+                    debounce = input_debounce.due(s, cfg, conversation_id, event.event_id,
+                                                  body, now)
                     revision = reply_revision.advance(s, conversation_id, event.event_id, now)
                 else:
                     cancel_interrupted_replies(s, conversation_id, now)
                 if authority or private_life.enabled(cfg):
                     cancel_proactive_work(s, now)
                 job_id = self.new_job(event.event_id, "chat", "reply:" + event.event_id, now)
+                if debounce:
+                    s.execute("UPDATE jobs SET next_attempt_at=? WHERE job_id=?",
+                              (debounce, job_id))
                 if authority:
                     owner_authority.bind_job(s, cfg, self.clock, job_id, purpose="chat")
                 if (not diary_command and not control_command

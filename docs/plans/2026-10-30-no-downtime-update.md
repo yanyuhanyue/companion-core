@@ -97,29 +97,38 @@ Bridge 停顿控制在 10 秒以内，且不丢主人消息、不产生 UNKNOWN 
 
 ### 方案
 
-**5a：平滑退出（代码改动，可单独 PR）**
+**5a：平滑退出（已实现，[#225](https://github.com/yanyuhanyue/companion-core/pull/225)）**
 
-- SIGTERM 只设置停止标志，不再取消任务。各循环在两个单元之间检查标志：
+- SIGTERM 只设置停止标志，不再立刻取消任务（`app.run` 改为 `drain`）。各循环本来就在
+  两个单元之间检查标志：
   - 投递：当前 `deliver_tick` 走完（发送、`spool.finish_delivery`、`flush_result`、`ACK`
     写入 journal），不再领取新投递；分段回复中途停止时，剩下的气泡留在 Core 的 PENDING，
     由新进程继续发；
-  - 接收：当前帧持久化（`persist_capture`）后关闭 WebSocket；
+  - 接收：停止时关闭 WebSocket（`close_on_stop`），正在持久化的那一帧处理完后循环结束；
   - 上传、媒体、表情包和资料探测：当前单元完成后退出；
-  - 超过宽限期（建议 60 秒，大于单次发送和媒体上传的上限）才取消任务。
-- 退出前确认 `window_attempts` 中没有 `RESERVED/IO_STARTED/UNKNOWN`，inbox 没有待上传的帧，
-  然后以退出码 0 结束。否则以非 0 退出，发布脚本据此停止并转人工处理。
-- `compose.yaml` 的 bridge 服务设置 `stop_grace_period: 90s`。
+  - 60 秒（`SHUTDOWN_GRACE_SECONDS`）后仍未结束的任务才取消，日志输出
+    `bridge_shutdown` 的 `CLEAN` 或 `CANCELLED`。
+- Bridge 由发布脚本渲染的 compose 启动，不在仓库的 `compose.yaml` 里，所以停止时要由
+  发布脚本传 `docker stop --time 90`。
+- 未做：退出前的 `window_attempts`/inbox 自检和非 0 退出码。新进程启动时
+  `OwnerRuntime.__init__` 已经会对未完成的发送执行 STOP，5c 的脚本再按 journal 判定。
 
-**5b：补收停顿期间的消息（新机制，先验证再决定）**
+**5b：补收停顿期间的消息（已评审，已实现，开关 `history_backfill` 默认关闭）**
 
-先做一次只读验证：确认 SnowLuma 2.0.3 的正向 WebSocket 在没有客户端连接时是否缓存事件。
+已确认 SnowLuma 2.0.3 不缓存：正向 WebSocket 的 `onEvent` 在没有客户端连接时直接返回
+（`if (!this.acceptingActions || this.connections.size === 0) return;`），停顿期间
+主人发的消息会丢。SnowLuma 支持 `get_friend_msg_history`，所以方案是：
 
-- 如果会缓存并在重连后补发：不需要新机制，只要停顿短于 30 秒的时效限制即可。
-- 如果不缓存：新进程连上 WebSocket 后，用 `get_friend_msg_history` 读取主人会话中最后一条
+- 新进程连上 WebSocket 后，用 `get_friend_msg_history` 读取主人会话中最后一条
   已捕获消息之后、30 秒以内的消息，按原有的 `normalize` 和 `persist_capture` 处理，
   capture 记录写 `kind: onebot_history_backfill`，与实时的 `authenticated_onebot_ws` 区分。
-  这会新增一个 OneBot 读接口和一种输入来源，Core 侧的来源校验也要放行这一类，
-  需要单独评审。补收的消息按 `source_event_id` 去重，不会和实时消息重复入库。
+- 这会新增一个 OneBot 读接口和一种输入来源，Core 侧的来源校验也要放行这一类。
+  补收的消息按 `source_event_id` 去重，不会和实时消息重复入库。
+- 戳一戳和撤回是通知，不在消息历史里，停顿期间的这两类仍会丢。
+- 实现：`companion_onebot_bridge/backfill.py`。每次连上 WebSocket 后读取最近 20 条，
+  只补主人发的、比最后一次 capture 新、在 30 秒内、并且晚于当前授权绑定时间的消息
+  （Core 拒收授权生效前的 capture，上传被拒会让 Bridge 停止）。读取失败只记日志，
+  不影响实时接收。Bridge 配置 `history_backfill = true` 才启用，随下一次停机发布写入。
 
 **5c：发布脚本**
 
@@ -141,7 +150,6 @@ spool schema 不变、授权 policy 仍然有效）。执行脚本 `scripts/roll
 
 ### 未解决
 
-- SnowLuma 是否缓存事件（决定 5b 要不要做）；
 - 戳一戳、撤回通知在停顿期间丢失时是否需要补收（`get_friend_msg_history` 不含通知）；
 - 资料探测（profile probe）每分钟写两条 journal 记录，一周约 7000 条。本次已让它们的校验只做一次，
   但 journal 仍在增长；是否改为只在资料变化时记录，另行讨论。

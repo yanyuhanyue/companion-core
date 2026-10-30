@@ -15,6 +15,7 @@ from pathlib import Path
 
 import httpx
 
+from companion_delivery_protocol.authority import CAPTURE_KINDS
 from companion_meme_sources import INTENTS, DiscoveryLimits, ReviewApproval, Usage
 from companion_meme_sources.community import CommunityPacks
 from companion_meme_sources.review import TrustedReviewer
@@ -176,7 +177,7 @@ class MemeRuntime(DeliveryCustody):
                 capture.get("event_id") != event_id
                 or capture.get("source_event_id") != source
                 or capture.get("authority") != self.authority
-                or capture.get("kind") != "authenticated_onebot_ws"
+                or capture.get("kind") not in CAPTURE_KINDS
                 or capture.get("input_sha256") != input_digest(event.get("payload", {}))
             )
         ):

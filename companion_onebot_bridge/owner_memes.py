@@ -26,7 +26,8 @@ class MemePump:
         row = self.owner.db.execute(
             "SELECT w.event_id,w.capture_json,i.state FROM window_inputs w "
             "JOIN inbox i ON i.key=w.event_id WHERE w.plan_hash=? "
-            "AND json_extract(w.capture_json,'$.kind')='authenticated_onebot_ws' "
+            "AND json_extract(w.capture_json,'$.kind') IN "
+            "('authenticated_onebot_ws','onebot_history_backfill') "
             "ORDER BY w.rowid DESC LIMIT 1", (journal.digest(self.owner.authority),)).fetchone()
         return row if row and row[2] == "accepted" else None
 

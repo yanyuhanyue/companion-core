@@ -186,6 +186,28 @@ def test_renewal_must_extend_into_the_future(core, tmp_path, change):
         model_carry.prepare(core.store, core.settings, request, witness, core.clock())
 
 
+@pytest.mark.parametrize("delta", [2048, -1])
+def test_renewal_may_only_raise_the_output_ceiling(core, tmp_path, delta):
+    case = migrated(core, tmp_path)
+    request, policy, witness = renewal(core, case)
+    ceiling = core.settings.paid_model.max_output_tokens + delta
+    core.settings.paid_model = core.settings.paid_model.model_copy(
+        update={"max_output_tokens": ceiling})
+    contract = paid_budget.sha(paid_budget.snapshot(core.settings))
+    request["successor_policy"]["paid_contract_sha256"] = contract
+    policy = policy.model_copy(update={"paid_contract_sha256": contract})
+    path = Path(core.settings.paid_model.journal_path)
+    before = path.read_bytes()
+    if delta < 0:
+        with pytest.raises(CoreError, match="OWNER_MODEL_CARRY_APPROVAL_CHANGED"):
+            model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+        assert path.read_bytes() == before
+        return
+    model_carry.prepare(core.store, core.settings, request, witness, core.clock())
+    activate(core, policy, revision=4, operation="activate-raised-output")
+    assert paid_budget.contract(core.settings, core.clock()).max_output_tokens == ceiling
+
+
 def test_open_ended_renewal_keeps_caps_and_has_no_expiry(core, tmp_path):
     case = migrated(core, tmp_path, window_calls=1)
     request, policy, witness = renewal(core, case, offset=-timedelta(hours=1), open_ended=True)

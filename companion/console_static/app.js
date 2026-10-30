@@ -1901,7 +1901,8 @@ const SUB = {
   strategy: "策略", daily_micro_usd: "每日额度", daily_pairs: "每日评论对数", candidate_days: "候选有效期（天）", lookback_hours: "回看时长（小时）",
   max_attempts: "最多尝试", local_hour: "运行时刻", max_source_memories: "最多来源记忆", source_retention_days: "来源保留（天）",
   record_retention_days: "记录保留（天）", max_input_tokens: "输入上限（token）", source_limit: "来源上限", topic_ttl_seconds: "话题有效期",
-  follow_up_delay_seconds: "跟进延迟", max_daily_decisions: "每日最多决策", min_interval_seconds: "最小间隔", read_goals_enabled: "允许阅读目标",
+  follow_up_delay_seconds: "跟进延迟", quiet_seconds: "安静时先等", active_seconds: "聊得正热时先等",
+  continue_seconds: "每多一条再等", media_seconds: "只发图时至少等", batch_seconds: "一批最多等", active_window_seconds: "算作聊得正热的间隔", max_daily_decisions: "每日最多决策", min_interval_seconds: "最小间隔", read_goals_enabled: "允许阅读目标",
 };
 const TOKENS = { max: "最多", min: "最少", daily: "每日", monthly: "每月", total: "总", seconds: "时长", bytes: "大小", chars: "字数", enabled: "开启", limit: "上限" };
 const subLabel = k => SUB[k] || String(k).split("_").map(t => TOKENS[t] || "").join("") || "其他设置";

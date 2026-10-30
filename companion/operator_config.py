@@ -61,7 +61,8 @@ EXCLUDED = frozenset({
 })
 LABELS = {
     "chat_thinking": "聊天思考强度", "chat_thinking_tokens": "思考额外输出（token）",
-    "chat_time_labels": "对话里标注时间", "conversation_policy": "对话策略",
+    "chat_time_labels": "对话里标注时间",
+    "input_debounce": "连发消息合并回复", "conversation_policy": "对话策略",
     "quote_policy": "回复时引用原消息", "style_live": "聊天时参考已批准的表达",
     "style_distill": "从评论提炼表达候选", "watch_ledger": "观看记录与看法",
     "rem": "夜间 REM 记录", "life_loop": "生活话题循环",
@@ -263,7 +264,8 @@ def load(settings):
 
 GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
           "token_measurement": "model", "chat_time_labels": "expression",
-          "conversation_policy": "expression", "quote_policy": "expression",
+          "conversation_policy": "expression",
+          "input_debounce": "expression", "quote_policy": "expression",
           "style_live": "expression", "style_distill": "expression",
           "watch_ledger": "content", "rem": "autonomy", "life_loop": "autonomy"}
 

@@ -52,6 +52,37 @@ QUERY = "meme_query:"
 OFFER = "meme_offer:"
 # A chat job waits this long after creation for the Bridge meme offer.
 OFFER_WAIT_SECONDS = 2
+
+
+def query_intent(text):
+    """The meme intent of owner text; None means no offer can carry candidates."""
+    return (
+        None
+        if SERIOUS.search(text)
+        else next(
+            (
+                name
+                for name, pattern in (
+                    ("comfort", r"抱抱|安慰|难过|委屈"),
+                    ("sleep", r"晚安|要睡了|睡觉了"),
+                    ("morning", r"早安|早上好"),
+                    ("celebrate", r"恭喜|庆祝|成功了|搞定了|太棒了|开心"),
+                    ("surprised", r"没想到|好意外|惊讶"),
+                    ("like", r"好可爱|爱心|(?<!不)喜欢"),
+                    ("playful", r"开玩笑|逗你|调皮|自嘲"),
+                )
+                if re.search(pattern, text)
+            ),
+            None,
+        )
+    )
+
+
+def offer_possible(text):
+    """Text without a meme intent gets a null offer at best, so chat need not wait."""
+    return query_intent(text[-2000:]) is not None
+
+
 SPEC = EmbeddingSpec(model_version=INDEX_VERSION, dimensions=512)
 MAX_ROWS, MAX_BYTES = 2048, 64 * 1024 * 1024
 
@@ -982,26 +1013,7 @@ class MemeCaptionService:
         if saved:
             return json.loads(saved["value"])
         text = value["text"][-2000:]
-        intent = (
-            None
-            if SERIOUS.search(text)
-            else next(
-                (
-                    name
-                    for name, pattern in (
-                        ("comfort", r"抱抱|安慰|难过|委屈"),
-                        ("sleep", r"晚安|要睡了|睡觉了"),
-                        ("morning", r"早安|早上好"),
-                        ("celebrate", r"恭喜|庆祝|成功了|搞定了|太棒了|开心"),
-                        ("surprised", r"没想到|好意外|惊讶"),
-                        ("like", r"好可爱|爱心|(?<!不)喜欢"),
-                        ("playful", r"开玩笑|逗你|调皮|自嘲"),
-                    )
-                    if re.search(pattern, text)
-                ),
-                None,
-            )
-        )
+        intent = query_intent(text)
         target = "self" if re.search(r"我.{0,8}自嘲|自嘲.{0,8}我", text) else "recipient"
         query = {"text": text, "intent": intent, "target": target}
         result = {
@@ -1099,6 +1111,8 @@ class MemeCaptionService:
             return False
         body = json.loads(job["body_json"])
         if body.get("control_command") or body.get("diary_command") or not body.get("text"):
+            return False
+        if not offer_possible(body["text"]):
             return False
         return now < after(job["created_at"], OFFER_WAIT_SECONDS) and not self.store.one(
             "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)

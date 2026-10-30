@@ -41,12 +41,14 @@ class OneBotClient:
     async def action(self, name, body):
         if name not in {
             "get_login_info", "get_status", "get_version_info", "send_private_msg",
-            "get_msg", "get_forward_msg",
+            "get_msg", "get_forward_msg", "get_friend_msg_history",
         }:
             raise ValueError("ACTION_NOT_ALLOWED")
         result = await bounded_post(
             self.client, "/" + name, body,
-            max_depth=20 if name in {"get_msg", "get_forward_msg"} else 8,
+            max_depth=20 if name in {"get_msg", "get_forward_msg",
+                                     "get_friend_msg_history"} else 8,
+            max_bytes=1048576 if name == "get_friend_msg_history" else 65536,
         )
         if (
             result.get("status") != "ok"
@@ -64,6 +66,13 @@ class OneBotClient:
         # SnowLuma refreshes media URLs internally. Callers project text only and
         # must never download or persist those returned URLs.
         return await self.action("get_msg", {"message_id": int(reference)})
+
+    async def friend_history(self, count):
+        """The owner conversation's latest messages (both directions), newest last."""
+        if type(count) is not int or not 1 <= count <= 20:
+            raise ValueError("INVALID_HISTORY_COUNT")
+        return await self.action("get_friend_msg_history",
+                                 {"user_id": int(self.config.owner_qq_id), "count": count})
 
     async def get_forward_msg(self, reference):
         if not isinstance(reference, str) or not re.fullmatch(

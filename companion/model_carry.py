@@ -453,6 +453,11 @@ def _same_approval(old, new, *, renewal_at=None):
                 new_rates <= now or (old_rates is not None and new_rates < old_rates)))):
             raise CoreError("OWNER_MODEL_RENEWAL_EXPIRY_REQUIRED", 409)
         allowed.update({"expires_at", "rates_valid_until"})
+        # The per-call output ceiling may only rise. Every money amount, call count and
+        # per-attempt/request cap stays identical, so no liability bound can grow.
+        if new["max_output_tokens"] < old["max_output_tokens"]:
+            raise CoreError("OWNER_MODEL_CARRY_APPROVAL_CHANGED", 409)
+        allowed.add("max_output_tokens")
     if (
         new.get("concurrency_basis") != wire.MODE
         or old["concurrency"] != 1

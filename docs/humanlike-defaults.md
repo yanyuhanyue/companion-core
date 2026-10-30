@@ -62,6 +62,15 @@ DeepSeek 文档（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 所以默认值选 `high`。按输出单价 1.2 美元/百万 token 算，每条回复约增加 0.0001 美元；
 月预算 20 美元保持不变。
 
+## 连发消息合并回复（2026-10-30）
+
+主人连发几条消息时，第一条先等 2 秒（最近 30 秒内聊过则等 5 秒），之后每来一条再等 2 秒，
+一批最多等 8 秒；只发图片时至少等 4 秒。等待期间新消息照常取代旧回复，未回的输入进入下一次回复的上下文，
+所以一批消息只调用一次模型。`/` 开头的指令、日记和控制指令不等待。
+时长参照 MaiBot“自然”档（`src/chat/debounce/controller.py`，提交 `c6429547`），
+调研见 [MaiBot 机制调研](plans/2026-10-30-maibot-mechanisms.md)。实现在 `companion/input_debounce.py`，
+只对主人授权或私人生活模式下的私聊生效；配置项 `input_debounce`，在控制台“表达与表情”里可以调整或关闭。
+
 ## 关闭方法
 
 | 项 | 关闭写法（`config.toml` 顶层，第一个 `[table]` 之前） |
@@ -70,6 +79,7 @@ DeepSeek 文档（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 | 记忆 | `memory_enabled = false` |
 | 分段回复 | `segmented_reply = false`；环境变量 `COMPANION_SEGMENTED_REPLY=false`；控制台设为空 |
 | thinking | `chat_thinking = "disabled"` |
+| 连发合并 | `[input_debounce]` 表里写 `enabled = false` |
 
 控制台保存的配置在启动时覆盖文件值。服务器上如果已经显式写了旧值，新默认值不会生效。
 

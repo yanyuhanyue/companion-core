@@ -275,6 +275,9 @@ def test_unknown_usage_is_retained_and_same_asset_never_rebills(core, tmp_path, 
 
 
 def test_queued_offer_wait_is_bounded_and_empty_query_releases_chat(core, tmp_path, monkeypatch):
+    # The fixture text has no intent; treat it as one that could carry an offer.
+    monkeypatch.setattr(meme_core, "offer_possible", lambda text: True)
+
     async def scenario():
         async with caption_environment(core, tmp_path, monkeypatch) as values:
             event, accepted, client, _, _, _, _ = values
@@ -675,3 +678,17 @@ def test_caption_http_accepts_bounded_original_media_above_default_body_limit(
             assert len(calls) == len(core.store.rows("SELECT * FROM model_usage")) == 1
 
     run(scenario())
+
+
+def test_text_without_a_meme_intent_is_claimed_without_waiting(core, tmp_path, monkeypatch):
+    async def scenario():
+        async with caption_environment(core, tmp_path, monkeypatch) as values:
+            _, accepted, _, _, _, _, _ = values
+            core.store.execute(
+                "UPDATE jobs SET state='QUEUED' WHERE job_id=?", (accepted["job_id"],)
+            )
+            with Core(core.settings, clock=core.clock) as independent:
+                assert independent.claim_job("chat")["job_id"] == accepted["job_id"]
+
+    run(scenario())
+    assert meme_core.offer_possible("好可爱的猫") and not meme_core.offer_possible("在吗")
