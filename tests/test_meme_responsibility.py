@@ -349,7 +349,9 @@ def test_actual_tcp_read_denies_all_sql_writes_and_caption_or_event_body_reads(
                     return sqlite3.SQLITE_OK
 
                 store.db.set_authorizer(authorize)
-                store.db.set_trace_callback(lambda sql: statements.append(sql.split()[0]))
+                # The journal view key reads `PRAGMA data_version`, a read-only counter.
+                store.db.set_trace_callback(lambda sql: statements.append(
+                    "SELECT" if sql == "PRAGMA data_version" else sql.split()[0]))
                 try:
                     return read(store, settings, job_id)
                 finally:
