@@ -256,6 +256,7 @@ const api = {
 
 function errorText(error) {
   const messages = {
+    STYLE_CANDIDATE_NOT_FOUND: "这条表达候选已经处理过或已过期。", STYLE_CANDIDATE_RISK_REJECT_ONLY: "这条候选带风险标记或来源理解不一致，只能拒绝。",
     CONSOLE_NETWORK_ERROR: "连接中断了，请检查网络后重试。", CONSOLE_TIMEOUT: "服务器响应超时，请稍后重试。",
     CONSOLE_RESPONSE_INVALID: "服务器返回的数据不完整，请刷新核对。", CONSOLE_HTTPS_REQUIRED: "请通过 HTTPS 打开控制台后再操作。",
     CONSOLE_LOGIN_RATE_LIMIT: "密码错误次数过多，请 5 分钟后再试。", PROACTIVE_DISABLED_IN_CONFIG: "主动私聊在配置里是关闭的，先在配置里开启。",
@@ -477,15 +478,15 @@ const LOADERS = {
     return { ...life, goals: goals.items, reflections: reflections.items, topics };
   },
   content: async signal => {
-    const [content, grants] = await Promise.allSettled([api.get("/content", signal), api.get("/source-grants", signal)]);
+    const [content, grants, watched] = await Promise.allSettled([api.get("/content", signal), api.get("/source-grants", signal), api.get("/watch-ledger", signal)]);
     if (content.status !== "fulfilled") throw content.reason;
-    return { ...content.value, grants: settled(grants) };
+    return { ...content.value, grants: settled(grants), watched: settled(watched) };
   },
   memes: signal => api.get("/memes", signal),
   tools: async signal => { const v = await api.get("/tools", signal); return { tasks: Array.isArray(v.items) ? v.items : [], enabled: v.enabled === true }; },
   self: async signal => {
-    const [affect, interests, expression] = await Promise.allSettled([api.get("/affect", signal), api.get("/interests", signal), api.get("/expression-learning", signal)]);
-    return { affect: settled(affect), interests: settled(interests), expression: settled(expression) };
+    const [affect, interests, expression, styles] = await Promise.allSettled([api.get("/affect", signal), api.get("/interests", signal), api.get("/expression-learning", signal), api.get("/style-candidates", signal)]);
+    return { affect: settled(affect), interests: settled(interests), expression: settled(expression), styles: settled(styles) };
   },
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
@@ -976,10 +977,12 @@ function openModeDialog() {
 const CONTENT_KIND = { link: ["链接", "#3b4070"], qq_image: ["图片", "#2f8a62"], link_image: ["文章图", "#6e9bd0"], file: ["文件", "#6c7190"], video: ["视频", "#fb7299"] };
 PAGES.content = data => {
   const items = (data.items || []).filter(i => state.contentF === "all" || (state.contentF === "running" ? ["run"].includes(statusOf(i.status)[1]) : ["warn", "bad"].includes(statusOf(i.status)[1])));
-  const tabs = el("div", { class: "seg", role: "group", "aria-label": "内容或授权" }, [["items", "内容记录"], ["grants", "来源授权"]].map(([k, n]) =>
+  const tabs = el("div", { class: "seg", role: "group", "aria-label": "内容或授权" }, [["items", "内容记录"], ["watched", "她看过的"], ["grants", "来源授权"]].map(([k, n]) =>
     el("button", { type: "button", "aria-pressed": String(state.contentTab === k), onclick: () => { state.contentTab = k; rerender(); } }, n)));
   if (state.contentTab === "grants") return el("div", {}, head("阅读与文件", "读取程序登记的来源授权。撤回只停止之后的读取，遗忘会同时清除按授权读到的内容。"),
     el("div", { class: "toolbar" }, tabs), grantsView(data.grants));
+  if (state.contentTab === "watched") return el("div", {}, head("阅读与文件", "她读完你分享的视频或文章后记下的看法。只在聊天里合适时提起，不当作线下经历。"),
+    el("div", { class: "toolbar" }, tabs), watchedView(data.watched));
   return el("div", {}, head("阅读与文件", "你分享的链接、图片和文件。外部内容只作为证据进入对话，不能改变权限或人格。"),
     el("div", { class: "toolbar" }, tabs, el("div", { class: "seg" }, [["all", "全部"], ["running", "进行中"], ["attention", "需要留意"]].map(([k, n]) =>
       el("button", { type: "button", "aria-pressed": String(state.contentF === k), onclick: () => { state.contentF = k; rerender(); } }, n)))),
@@ -990,6 +993,22 @@ PAGES.content = data => {
           el("td", {}, tag(i.status)), el("td", { class: "r muted" }, fmtDate(i.occurred_at))); }))))
       : empty("还没有内容记录", state.contentF === "all" ? "你在私聊里分享链接、图片或文件后，会出现在这里。" : "换个筛选条件看看。"));
 };
+const WATCH_DEPTH = { media_sampled: "看了抽样画面", subtitle: "看了字幕", comments: "看了评论", text: "读了正文", title_only: "只看了标题" };
+const WATCH_PLATFORM = { bilibili: "B站", heybox: "小黑盒" };
+const WATCH_RATING = { 2: "很喜欢", 1: "还不错", 0: "一般", "-1": "不太喜欢", "-2": "很不喜欢" };
+function watchedView(w) {
+  if (!w || w.error) return sheet("她看过的", failNote("观看记录", w?.error));
+  const items = w.items || [];
+  return sheet("她看过的", [
+    w.enabled ? null : el("p", { class: "note mb" }, "观看记录没有开启（配置页“观看记录与看法”）。下面是开启期间留下的记录。"),
+    items.length ? el("ul", { class: "rows" }, items.map(i => el("li", { class: "block" },
+      el("div", { class: "row-gap" }, el("b", {}, i.title || "（没有标题）"), el("span", { class: "chip" }, WATCH_PLATFORM[i.platform] || i.platform || "来源"),
+        WATCH_RATING[i.rating] ? el("span", { class: "chip" }, WATCH_RATING[i.rating]) : null),
+      i.take ? el("p", { class: "mt" }, i.take) : null,
+      el("span", { class: "meta-line" }, el("span", { class: "note" }, (WATCH_DEPTH[i.depth] || i.depth || "") + "，" + fmtDate(i.watched_at)),
+        (i.topic_tags || []).map(t => el("span", { class: "chip" }, t))))))
+      : el("p", { class: "note" }, "还没有观看记录。开启后，她读完你分享的视频或文章会在这里记下看法。")], countNote(items.length, 20));
+}
 function contentDrawer(i) {
   drawer(i.title, fmtDate(i.occurred_at), [el("div", { class: "mb" }, tag(i.status)), i.summary ? el("p", { class: "mb" }, "原因：" + reasonText(i.summary)) : null,
     kv("记录编号", el("span", { class: "num" }, String(i.id))), detailList(i.detail)]);
@@ -1817,6 +1836,8 @@ const LIMIT_NAMES = {
   max_concurrent: "并发", deadline_seconds: "处理时限", max_chars: "字数上限", wait_seconds: "等待", daily_queries: "每日搜索", max_active: "同时进行",
 };
 const VALUE_NAMES = { auto: "自动", voice_input: "只回应语音", text_only: "只回文字", poke_only: "只拍回去", none: "不使用", qq_social_v1: "QQ 资料与空间", references_v1: "引用与转发", owner_private_v1: "仅主人私聊", isolated_container: "隔离容器", sentence: "按句子长度分段", semantic: "按语义分段（由她写的换行决定）", unlimited: "不限",
+  OFF: "关闭", SHADOW: "只记录不生效", ENABLED: "开启", PREVIEW: "只预览", participation_v1: "参与式 v1", participation_v2: "参与式 v2",
+  never: "不引用", occasionally: "偶尔引用", often: "经常引用", disabled: "关闭", low: "低", high: "高", max: "最高", bridge: "Bridge 管理", core: "Core 管理",
   happy: "开心", like: "喜欢", surprised: "惊讶", morning: "早安", sleep: "晚安", sad: "难过", angry: "生气", shy: "害羞", tired: "困了", thinking: "思考", love: "爱心", cry: "哭哭" };
 function limitValue(k, v) {
   if (v === null || v === undefined) return "未设置";
@@ -1860,11 +1881,17 @@ const SUB = {
   local_window_seconds: "局部窗口", context_before_seconds: "之前的上下文", context_after_seconds: "之后的上下文", baseline_floor_per_second: "每秒基线",
   focus_terms: "关注词", max_evidence_per_selection: "每次选取最多证据", max_duration_seconds: "最长时长", provider_timeout_seconds: "服务商超时", image_adapter: "图片适配器",
   max_segments_reply: "最多分段", min_chars: "最少字数", interval_ms: "间隔（毫秒）",
+  strategy: "策略", daily_micro_usd: "每日额度", daily_pairs: "每日评论对数", candidate_days: "候选有效期（天）", lookback_hours: "回看时长（小时）",
+  max_attempts: "最多尝试", local_hour: "运行时刻", max_source_memories: "最多来源记忆", source_retention_days: "来源保留（天）",
+  record_retention_days: "记录保留（天）", max_input_tokens: "输入上限（token）", source_limit: "来源上限", topic_ttl_seconds: "话题有效期",
+  follow_up_delay_seconds: "跟进延迟", max_daily_decisions: "每日最多决策", min_interval_seconds: "最小间隔", read_goals_enabled: "允许阅读目标",
 };
 const TOKENS = { max: "最多", min: "最少", daily: "每日", monthly: "每月", total: "总", seconds: "时长", bytes: "大小", chars: "字数", enabled: "开启", limit: "上限" };
 const subLabel = k => SUB[k] || String(k).split("_").map(t => TOKENS[t] || "").join("") || "其他设置";
 /* 与 poke_protocol / voice_config / social_autonomy_protocol 中的 Literal 保持一致 */
-const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"], segmented_reply: ["sentence", "semantic"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
+const SUB_ENUMS = { mode: { poke_policy: ["auto", "text_only", "poke_only", "none"], reply: ["voice_input", "auto"], segmented_reply: ["sentence", "semantic"],
+    conversation_policy: ["OFF", "SHADOW", "ENABLED"], owner_runtime: ["OFF", "SHADOW", "ENABLED"], life_loop: ["OFF", "PREVIEW", "SHADOW"] },
+  strategy: { conversation_policy: ["participation_v1", "participation_v2"] }, scope: { social_autonomy: ["none", "qq_social_v1"] } };
 const isSensitiveSub = k => /(_sha256|private_key|_socket|parser_image|token|secret)$/.test(k) || k === "key";
 
 /* ================= 记忆关系图 =================
@@ -2257,6 +2284,7 @@ Object.assign(STATUS, Object.fromEntries(Object.entries({
   EXPLORING: ["在探索", "run"], FADING: ["渐淡", "off"], SHADOW: ["只记录未执行", "off"], INVALIDATED: ["已作废", "off"],
   WAITING_INPUT: ["等待新输入", "warn"], WAITING_RESOURCE: ["等待资源", "warn"], WAITING_DECISION: ["等你决定", "warn"],
   DEFERRED: ["已推迟", "off"], SCHEDULED: ["已安排", "run"], NOT_RECORDED: ["未记录", "off"],
+  APPROVED: ["已批准", "ok"],
 }).filter(([k]) => !(k in STATUS))));
 Object.assign(REASONS, Object.fromEntries(Object.entries({
   OWNER_REVOKED: "你撤回了", EXECUTION_UNCERTAIN: "执行结果不明", TOOL_SCOPE_CHANGED: "执行内容已变化",
@@ -2471,7 +2499,43 @@ const dimValue = (d, v) => (AFFECT_DIMS[d]?.[1] || {})[v] || v || "—";
 PAGES.self = data => el("div", {}, head("情绪与偏好", "她只根据你明确说过的话调整，不推测你的情绪。偏好来自你，兴趣来自她自己完成的阅读，两者分开记录。"),
   affectSheet(data.affect),
   el("div", { class: "grid-2 mt-lg" }, preferenceSheet(data.interests), interestSheet(data.interests)),
-  expressionSheet(data.expression));
+  expressionSheet(data.expression), styleSheet(data.styles));
+const STYLE_TAGS = { daily_share: "日常分享", complaint: "吐槽", light_humor: "轻松玩笑", opinion: "交换看法", help_request: "求助",
+  lull: "冷场", closing: "收尾", emotion: "情绪", disagreement: "意见不同" };
+const STYLE_RISKS = { circle_meme: "圈子梗", regional_meme: "地域梗", misattribution: "张冠李戴", claims_experience: "声称亲身经历",
+  mocks_third_party: "嘲讽他人", needs_relationship: "要很熟才合适" };
+function styleSheet(x) {
+  if (!x || x.error) return sheet("表达候选", failNote("表达候选", x?.error));
+  const items = x.items || [];
+  const field = (label, text) => text ? el("div", { class: "kv" }, el("span", {}, label), el("span", {}, text)) : null;
+  return sheet("表达候选", [
+    el("p", { class: "note mb" }, "从评论区提炼的说话方式。只有你批准的候选才会用在聊天里" +
+      (x.live_enabled ? "，目前已开启。" : "，需要先在配置页打开“聊天时参考已批准的表达”。") + (x.enabled ? "" : "提炼没有开启，不会产生新候选。")),
+    items.length ? el("ul", { class: "rows" }, items.map(c => el("li", { class: "block" },
+      el("div", { class: "row-gap" }, el("b", {}, (c.context_tags || []).map(t => STYLE_TAGS[t] || t).join("、") || "表达"), tag(c.state), el("span", { class: "num note" }, c.short_id),
+        el("span", { class: "note" }, "来源 " + count(c.source_count) + " 条，" + fmtDate(c.expires_at) + " 到期")),
+      field("留意", c.attention_target), field("回应", c.response_action), field("适合", c.appropriate_when), field("避免", c.avoid_when),
+      (c.risk_flags || []).length || c.disagreement ? el("p", { class: "note" }, "带风险标记" + ((c.risk_flags || []).length ? "（" + c.risk_flags.map(r => STYLE_RISKS[r] || r).join("、") + "）" : "") +
+        (c.disagreement ? "，来源理解不一致" : "") + "，只能拒绝。") : null,
+      c.state === "CANDIDATE" ? el("div", { class: "row-gap mt" },
+        c.approvable ? btn("批准", () => styleDecision(c, "APPROVE"), { cls: "sm primary", symbol: "check" }) : null,
+        btn("拒绝", () => styleDecision(c, "REJECT"), { cls: "sm danger", symbol: "close" })) : null)))
+      : el("p", { class: "note" }, "目前没有待审或已批准的表达候选。")], countNote(items.length, 40));
+}
+function styleDecision(c, decision) {
+  const approve = decision === "APPROVE";
+  const reason = el("input", { class: "input", maxlength: "200", "aria-label": "备注", placeholder: approve ? "备注，可以不填" : "拒绝原因，可以不填" });
+  const form = el("form", { class: "dlg-form" }, el("p", {}, approve ? "批准后这条表达会冻结为一个版本，开启后用于聊天。" : "拒绝后这条候选不再出现。"), reason);
+  const submit = el("button", { type: "submit", class: "btn " + (approve ? "primary" : "danger") }, approve ? "批准" : "拒绝");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/style-candidates/" + encodeURIComponent(c.pattern_sha256) + "/decision",
+      { decision, reason: reason.value.trim() }, "POST", r => typeof r.state === "string"),
+      async r => { closeDialog(); toast(statusOf(r.state)[0]); await loadRoute({ reset: true }); });
+  });
+  openDialog((approve ? "批准" : "拒绝") + "表达候选 " + c.short_id, form);
+}
 function affectSheet(a) {
   if (!a || a.error) return sheet("情绪观察", failNote("情绪观察", a?.error));
   const evidence = a.evidence || [];

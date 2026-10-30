@@ -283,19 +283,53 @@ def listing(store, now):
     return ("\n\n".join(lines) + "\n\n批准：/批准表达 编号；拒绝：/拒绝表达 编号 原因")
 
 
+def items(store, now, limit=40):
+    """Pending and approved unexpired candidates for the console, without source text."""
+    rows = store.rows(
+        "SELECT * FROM style_candidates WHERE state IN ('CANDIDATE','APPROVED') AND expires_at>? "
+        "ORDER BY state='APPROVED',json_array_length(refs_json) DESC,created_at LIMIT ?",
+        (now, limit))
+    result = []
+    for row in rows:
+        pattern = json.loads(row["pattern_json"])
+        result.append({
+            "pattern_sha256": row["pattern_sha256"], "short_id": short(row["pattern_sha256"]),
+            "state": row["state"], "created_at": row["created_at"],
+            "expires_at": row["expires_at"], "source_count": len(json.loads(row["refs_json"])),
+            "disagreement": bool(row["disagreement"]),
+            "approvable": not row["disagreement"] and not pattern.get("risk_flags"),
+            **{key: pattern.get(key) for key in (
+                "context_tags", "attention_target", "response_action", "appropriate_when",
+                "avoid_when", "risk_flags")},
+        })
+    return result
+
+
 def review(store, settings, now, prefix, *, approve, reason=""):
-    """Owner decision by short id. Approval freezes the version and its source refs."""
+    """Owner QQ command by short id; the console uses `decide` with the full id."""
+    try:
+        decided = decide(store, settings, now, prefix, approve=approve, reason=reason)
+    except CoreError as error:
+        if error.code == "STYLE_CANDIDATE_RISK_REJECT_ONLY":
+            return "这条候选带风险标记或来源理解不一致，只能拒绝。"
+        return "没有找到唯一的待审候选：" + prefix
+    verb = "已批准" if approve else "已拒绝"
+    return verb + "表达候选 " + short(decided["pattern_sha256"]) + "。"
+
+
+def decide(store, settings, now, prefix, *, approve, reason=""):
+    """Owner decision. Approval freezes the version and its source refs."""
     rows = store.rows("SELECT * FROM style_candidates WHERE pattern_sha256 LIKE ? "
                       "AND state='CANDIDATE'", (prefix + "%",))
     if len(prefix) < 6 or len(rows) != 1:
-        return "没有找到唯一的待审候选：" + prefix
+        raise CoreError("STYLE_CANDIDATE_NOT_FOUND", 404)
     row = rows[0]
     pattern = style_candidates.Pattern.model_validate_json(row["pattern_json"])
     refs = [style_candidates.SourceRef.model_validate(ref)
             for ref in json.loads(row["refs_json"])]
     refs = sorted({ref.key(): ref for ref in refs}.values(), key=style_candidates.SourceRef.key)
     if approve and (row["disagreement"] or pattern.risk_flags):
-        return "这条候选带风险标记或来源理解不一致，只能拒绝。"
+        raise CoreError("STYLE_CANDIDATE_RISK_REJECT_ONLY", 409)
     candidate = style_candidates.Candidate(
         **pattern.model_dump(), candidate_id=style_candidates.candidate_id(pattern, refs),
         source_refs=refs, source_snapshot_sha256=hashlib.sha256(
@@ -310,8 +344,7 @@ def review(store, settings, now, prefix, *, approve, reason=""):
         (decided.state, decided.candidate_id if approve else None, decided.approved_version,
          decided.reviewer, decided.review_reason,
          encode([ref.model_dump() for ref in refs]), now, row["pattern_sha256"]))
-    verb = "已批准" if approve else "已拒绝"
-    return verb + "表达候选 " + short(row["pattern_sha256"]) + "。"
+    return {"state": decided.state, "pattern_sha256": row["pattern_sha256"]}
 
 
 def approved(store, now):

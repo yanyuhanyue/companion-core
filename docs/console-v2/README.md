@@ -12,8 +12,8 @@
 | 活动时间线 | `activity`（分页） | 无 |
 | 记忆 | `memories`（`q`、`review`） | `memories/{id}/decision` |
 | 日记与成长 | `life`、`diary/{day}`、`goals`、`reflections`、`life/topics` | `diary/{day}/correction`、`diary/{day}/forget`、`mode`、目标决定与续行、反思决定、`life/topics/{id}/close` |
-| 情绪与偏好 | `affect`、`interests`、`expression-learning` | `affect/reset` |
-| 阅读与文件（含来源授权标签） | `content`、`source-grants` | `source-grants/{id}`（撤回或遗忘） |
+| 情绪与偏好 | `affect`、`interests`、`expression-learning`、`style-candidates` | `affect/reset`、`style-candidates/{sha256}/decision`（批准或拒绝表达候选） |
+| 阅读与文件（含“她看过的”和来源授权标签） | `content`、`watch-ledger`、`source-grants` | `source-grants/{id}`（撤回或遗忘） |
 | 表情素材、语音与节点、QQ 资料行为 | `memes`、`voice`、`account-actions` | 无 |
 | 执行任务 | `tools` | `tools/{id}/decision`、`tools/{id}/revoke` |
 | 能力与开关 | `overview` 的能力快照、`configuration`、`autonomy` | `configuration`、`mode`、授权与调整决定 |
@@ -26,7 +26,8 @@
 属于某项能力的开关和参数只在能力页出现，配置页只放模型、费用总额、密钥和运行等系统级设置；两页共用一份配置草稿，保存为一个新的配置版本。云端预算单独保存并立即生效。
 对象型配置按子项显示为开关、数字和名单，也可以切换为 JSON 编辑。模型账本以美元记账，界面可按云端预算里的汇率换算成人民币显示和填写，保存时换算回微美元。
 能力与配置字段的对应关系在 `app.js` 的 `CAP_FIELDS` 中维护，只显示服务端实际返回的字段，
-部署保管的项目（例如 `observation_adapters`、`executive`）仍不进入浏览器。网页阅读的网站名单已从读取适配器配置拆出为 `web_reading_hosts`，在网页阅读能力里填写。
+部署保管的项目（例如 `observation_adapters`、`executive`）仍不进入浏览器。
+其余每个配置字段都必须在 `operator_config.LABELS` 有中文名（`tests/test_console_catch_up.py` 检查），不按前缀归组的字段写进 `operator_config.GROUPS`。`conversation_policy` 总有值，配置页显示的就是实际生效的策略。网页阅读的网站名单已从读取适配器配置拆出为 `web_reading_hosts`，在网页阅读能力里填写。
 
 “交给她决定”在日记和自主活动调度的详情里设置：只由我控制、她提议我批准、她在范围内自己调整。她的调整只能让能力少运行，经每天的反思提出并引用原话，立即生效、可撤销；引用的原话被遗忘时调整撤回，从备份恢复后全部作废。接口为 `autonomy`、`autonomy/{capability}` 和 `autonomy/adjustments/{id}/decision`。
 
