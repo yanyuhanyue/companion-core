@@ -4,9 +4,11 @@ Estimates are planning inputs, not proof of remote tokenization or maximum charg
 No tokenizer download, provider attestation or external account access is required.
 """
 
+import copy
 import hashlib
 import hmac
 import json
+import marshal
 import os
 import re
 from datetime import datetime
@@ -267,8 +269,72 @@ def _live_record(row, digest, current, seen):
             "head_sha256": digest}
 
 
+def _view_key(store, approval):
+    """Everything a read-only view depends on: journal bytes and this connection's DB state.
+
+    `data_version` changes when another connection commits; `total_changes` when this one
+    writes. A cached view is reused only while neither changed and the bytes are identical.
+    """
+    path = Path(approval.journal_path)
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    return (str(path), hashlib.sha256(raw).hexdigest(), store.db.total_changes,
+            store.db.execute("PRAGMA data_version").fetchone()[0])
+
+
+def _permit(view, approval, allow_settlement):
+    """The read-only refusals of `_journal`, applied again to a reused view."""
+    authority, lifecycle = view["owner_authority"], view["lifecycle"]
+    if not allow_settlement and (
+        view["blocked_request_ids"]
+        or authority and authority["state"] != "ACTIVE"
+        or lifecycle and not authority and (
+            lifecycle["state"] == "STOPPED"
+            or getattr(approval, "window_id", lifecycle["window_id"]) != lifecycle["window_id"])
+    ):
+        raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503)
+
+
+def _frozen(view):
+    try:
+        return marshal.dumps(view)
+    except ValueError:
+        return None
+
+
 def journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
             resolution_replay=None, model_control_replay=None, accounting_replay=None):
+    """Validated custody view; read-only calls reuse it while journal and DB are unchanged.
+
+    One chat context used to re-validate the whole journal about 180 times (~25 s).
+    Appends, replays and any change to the bytes or the DB still take the full path.
+    Callers get a private copy, so folding into a view never changes the saved one.
+    """
+    readonly = (record is None and resolution_replay is None and model_control_replay is None
+                and accounting_replay is None)
+    if readonly:
+        saved = getattr(store, "_journal_view", None)
+        if saved is not None and saved[0] == _view_key(store, approval):
+            _permit(saved[2], approval, allow_settlement)
+            return marshal.loads(saved[1]) if saved[1] is not None else copy.deepcopy(saved[2])
+    store._journal_view = None
+    view = _journal(store, approval, record, allow_settlement=allow_settlement,
+                    initialize=initialize, resolution_replay=resolution_replay,
+                    model_control_replay=model_control_replay,
+                    accounting_replay=accounting_replay)
+    if readonly:
+        key = _view_key(store, approval)
+        if key is not None:
+            blob = _frozen(view)
+            store._journal_view = (key, blob, marshal.loads(blob) if blob is not None
+                                   else copy.deepcopy(view))
+    return view
+
+
+def _journal(store, approval, record=None, *, allow_settlement=False, initialize=True,
+             resolution_replay=None, model_control_replay=None, accounting_replay=None):
     """Caller holds BEGIN IMMEDIATE; fsync before DB commit makes failure conservative.
 
     This is not a second queue or message store: only reservation hashes and monetary
