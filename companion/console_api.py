@@ -314,6 +314,14 @@ def register_console_routes(app, settings):
             raise CoreError("INVALID_MEMORY_QUERY", 400)
         return console_read.memories(app.state.core, q, review, limit)
 
+    @app.get(prefix + "/memories/recall", dependencies=auth)
+    async def memory_recall(q: str, limit: int = 10):
+        if not q.strip() or len(q) > 100 or not 1 <= limit <= 20:
+            raise CoreError("INVALID_MEMORY_QUERY", 400)
+        if not settings.memory_enabled:
+            raise CoreError("MEMORY_DISABLED", 409)
+        return console_read.recall(app.state.core, q.strip(), limit)
+
     @app.post(prefix + "/memories/{memory_id}/decision", dependencies=auth)
     async def memory_decision(memory_id: str, body: MemoryChange, request: Request,
                               idempotency_key: str = Header(default="")):

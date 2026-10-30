@@ -70,12 +70,15 @@ class Memory:
             "*", subjects=("project",), limit=limit, memory_ids=memory_ids, now=now,
         ) if row["status"] == "CONFIRMED" and not row["needs_review"]]
 
-    def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None):
+    def search(self, query, actor="owner", subjects=(), limit=6, *, memory_ids=None, now=None,
+               explain=None):
+        """`explain`, when a dict, receives each returned memory's ranking evidence."""
         version, sources, rows, lexical = self._prepare_search(
             query, actor, subjects, limit, memory_ids=memory_ids, now=now,
         )
         similarities = self.index.scores(query, rows) if query != "*" and rows else {}
-        return self._finish_search(query, rows, lexical, similarities, limit, version, sources)
+        return self._finish_search(query, rows, lexical, similarities, limit, version, sources,
+                                   explain=explain)
 
     async def search_async(self, query, actor="owner", subjects=(), limit=6, *,
                            memory_ids=None, now=None, source_check=None, clock=None):
@@ -182,8 +185,10 @@ class Memory:
                 )
         return version, sources, rows, lexical
 
-    def _finish_search(self, query, rows, lexical, similarities, limit, version, sources):
+    def _finish_search(self, query, rows, lexical, similarities, limit, version, sources, *,
+                       explain=None):
         s = self.store
+        ranks = {}
         if query != "*" and rows:
             exact = {row["memory_id"] for row in rows if query in row["content"]}
             # Generic shared phrases (e.g. "most liked") are not enough to change the topic.
@@ -202,6 +207,11 @@ class Memory:
                 reverse=True,
             )
             scores = fuse(lexical, semantic)
+            ranks = {key: {"exact": key in exact,
+                           "lexical_rank": lexical.index(key) + 1 if key in lexical else None,
+                           "semantic_rank": semantic.index(key) + 1 if key in semantic else None,
+                           "similarity": round(similarities[key], 4),
+                           "fused_score": round(scores[key], 5)} for key in scores}
             rows = sorted(
                 (row for row in rows if row["memory_id"] in scores),
                 key=lambda row: (
@@ -223,6 +233,8 @@ class Memory:
             if row["evidence_ids"]:
                 current.append(row)
         check_version(self, version)
+        if explain is not None:
+            explain.update({row["memory_id"]: ranks.get(row["memory_id"], {}) for row in current})
         return current
 
     def validate_candidate(self, candidate, confirmed=False, *, now=None):
@@ -288,9 +300,10 @@ class Memory:
                     same = row
                 else:
                     conflicts.append(row)
-        elif not same:
+        elif not same and candidate.kind != "episode":
+            # An episode is one occurrence, not an attribute value: it never conflicts by key.
             conflicts = [row for row in s.rows(
-                "SELECT * FROM memories WHERE subject=? AND fact_key=? "
+                "SELECT * FROM memories WHERE subject=? AND fact_key=? AND kind<>'episode' "
                 "AND status IN ('HYPOTHESIS','CONFIRMED') AND content<>?",
                 (candidate.subject, candidate.fact_key, content),
             ) if sources.current(row)]
@@ -596,8 +609,24 @@ class Memory:
                 )
                 s.insert("event_dependencies", event_id=event_id,
                          source_event_id=evidence_event_id)
-            s.execute("DELETE FROM conversation_summaries")
-            s.execute("UPDATE episodes SET summary='',status='REDACTED'")
+            # Invalidate only derived text that could restate the corrected attribute: what
+            # covers evidence of any value of this fact key, or quotes the old value.
+            sources = json.dumps(sorted({row["event_id"] for row in s.rows(
+                "SELECT DISTINCT v.event_id FROM memory_evidence v JOIN memories m "
+                "USING(memory_id) WHERE m.subject=? AND m.fact_key=? AND v.event_id<>?",
+                (old["subject"], old["fact_key"], event_id))}))
+            s.execute(
+                "DELETE FROM conversation_summaries WHERE instr(summary_text,?)>0 OR EXISTS ("
+                "SELECT 1 FROM events f JOIN events l ON l.event_id=last_event_id "
+                "JOIN events e ON e.conversation_id=f.conversation_id "
+                "AND e.rowid BETWEEN f.rowid AND l.rowid WHERE f.event_id=first_event_id "
+                "AND e.event_id IN (SELECT value FROM json_each(?)))",
+                (old["content"], sources))
+            s.execute(
+                "UPDATE episodes SET summary='',status='REDACTED' WHERE instr(summary,?)>0 "
+                "OR instr(title,?)>0 OR episode_id IN (SELECT episode_id FROM episode_events "
+                "WHERE event_id IN (SELECT value FROM json_each(?)))",
+                (old["content"], old["content"], sources))
             s.execute(
                 "DELETE FROM trait_evidence WHERE trait_id IN "
                 "(SELECT trait_id FROM traits WHERE topic=?)",

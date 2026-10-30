@@ -10,7 +10,7 @@
 |---|---|---|
 | 今天 | `overview`、`activity`、`diagnostics`、`configuration` | `mode` |
 | 活动时间线 | `activity`（分页） | 无 |
-| 记忆 | `memories`（`q`、`review`） | `memories/{id}/decision` |
+| 记忆（含“召回测试”标签） | `memories`（`q`、`review`）、`memories/recall`（`q`，按聊天检索排序并给出关键词/语义名次、相似度和融合分，不调用模型） | `memories/{id}/decision` |
 | 日记与成长 | `life`、`diary/{day}`、`goals`、`reflections`、`life/topics` | `diary/{day}/correction`、`diary/{day}/forget`、`mode`、目标决定与续行、反思决定、`life/topics/{id}/close` |
 | 情绪与偏好 | `affect`、`interests`、`expression-learning`、`style-candidates` | `affect/reset`、`style-candidates/{sha256}/decision`（批准或拒绝表达候选） |
 | 阅读与文件（含“她看过的”和来源授权标签） | `content`、`watch-ledger`、`source-grants` | `source-grants/{id}`（撤回或遗忘） |
