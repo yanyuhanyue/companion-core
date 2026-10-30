@@ -65,13 +65,54 @@ class _Tables:
                                       _rows(db, f"SELECT * FROM {table}"))
 
 
-def closed(runtime, records, references, *, carry_receipt=None, tables=None):
+def _queue_entries(tables, references, selected):
+    queues = {}
+    for table in ("automatic_recalls", "automatic_media"):
+        if table not in tables.queues:
+            continue
+        has_authority, rows = tables.queues[table]
+        if has_authority:
+            queues[table] = [row for row in rows if row["authority_json"]
+                             and json.loads(row["authority_json"]) in references]
+        else:
+            queues[table] = [row for row in rows if row["plan_hash"] in selected]
+    return queues
+
+
+def _rows_key(tables, inputs, attempts, queues):
+    """Every table value `closed` reads for this selection, as one hashable value."""
+    inbox = tables.inbox
+    results = tables.results
+    return (tuple(tuple(row.values()) for row in inputs),
+            tuple(tuple(inbox[row["event_id"]].values()) if row["event_id"] in inbox else None
+                  for row in inputs),
+            tuple(tuple(row.values()) for row in attempts),
+            tuple(tuple(results[row["message_id"]].values())
+                  if row["message_id"] in results else None for row in attempts),
+            tuple((table, tuple(tuple(row.values()) for row in rows))
+                  for table, rows in sorted(queues.items())))
+
+
+def closed(runtime, records, references, *, carry_receipt=None, tables=None, memo=None,
+           prefix=None):
+    """Digest of the stopped custody; `memo` reuses it for the same prefix and rows.
+
+    `prefix` is the chain hash of `records` (the next record's `previous`), so it fixes
+    every record read here; the key adds the references, the carry receipt and every
+    selected table value, so an equal key always recomputes the same digest.
+    """
     hashes = [wire.digest(ref) for ref in references]
     if tables is None:
         tables = _Tables(runtime.db)
     selected = set(hashes)
     inputs = [row for row in tables.inputs if row["plan_hash"] in selected]
     attempts = [row for row in tables.attempts if row["plan_hash"] in selected]
+    key = None
+    if memo is not None and prefix is not None:
+        key = (prefix, tuple(hashes), wire.digest(carry_receipt),
+               _rows_key(tables, inputs, attempts, _queue_entries(tables, references, selected)))
+        if key in memo:
+            return memo[key]
     receipts = {record["data"]["delivery"]["message_id"]: record["data"] for record in records
                 if record["kind"] == "OWNER_RECONCILED"}
     terminals = {record["data"]["event_id"]: record["data"] for record in records
@@ -122,17 +163,9 @@ def closed(runtime, records, references, *, carry_receipt=None, tables=None):
             raise ValueError("OWNER_HANDOFF_RECONCILIATION_REQUIRED")
         results.extend(result)
     queues = {}
-    for table, done in (("automatic_recalls", {"ACCEPTED"}),
-                        ("automatic_media", {"DONE", "CANCELLED"})):
-        if table not in tables.queues:
-            continue
-        has_authority, rows = tables.queues[table]
-        if has_authority:
-            entries = [row for row in rows
-                       if row["authority_json"] and json.loads(row["authority_json"]) in references]
-        else:
-            entries = [row for row in rows if row["plan_hash"] in selected]
-        if any(row["state"] not in done for row in entries):
+    done_states = {"automatic_recalls": {"ACCEPTED"}, "automatic_media": {"DONE", "CANCELLED"}}
+    for table, entries in _queue_entries(tables, references, selected).items():
+        if any(row["state"] not in done_states[table] for row in entries):
             raise ValueError("OWNER_HANDOFF_QUEUE_RECONCILIATION_REQUIRED")
         queues[table] = sorted(entries, key=wire.canonical)
     custody = {"inputs": inputs, "attempts": attempts, "results": results,
@@ -143,7 +176,12 @@ def closed(runtime, records, references, *, carry_receipt=None, tables=None):
         custody["carried"] = retained
     if carry_receipt is not None:
         custody["carry_receipt"] = carry_receipt
-    return wire.digest(custody)
+    value = wire.digest(custody)
+    if key is not None:
+        if len(memo) >= 256:
+            memo.clear()
+        memo[key] = value
+    return value
 
 
 def _carry_prepared(value, authority):
@@ -207,8 +245,12 @@ def verify(runtime, records):
         tables = tables or _Tables(runtime.db)
         key = (custody_records, len(references), wire.digest(carry_receipt))
         if key not in digests:
+            # A replay after every journal or spool write rechecks each historical
+            # handoff; their rows rarely change, so equal inputs reuse the digest.
+            memo = runtime.__dict__.setdefault("_closed_digests", {})
             digests[key] = closed(runtime, records[:index], references,
-                                  carry_receipt=carry_receipt, tables=tables)
+                                  carry_receipt=carry_receipt, tables=tables, memo=memo,
+                                  prefix=records[index]["previous"])
         return digests[key]
 
     references = []

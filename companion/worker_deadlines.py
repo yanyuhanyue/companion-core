@@ -77,6 +77,18 @@ def chat(store, settings, scan_started_at):
         "OR julianday(next_attempt_at)<=julianday(?)) LIMIT 1", (scan_started_at.isoformat(),),
     ):
         deadline = min(deadline, scan_started_at + timedelta(seconds=CHAT_WAIT_RESCAN_SECONDS))
+        # The meme-offer wait ends at a known time; rescan right after it instead of
+        # up to a full rescan interval later.
+        from companion.meme_core import OFFER_WAIT_SECONDS
+
+        row = store.one(
+            "SELECT MIN(julianday(created_at)) AS at FROM jobs WHERE kind='chat' "
+            "AND state='QUEUED' AND julianday(created_at)>julianday(?)-?/86400.0",
+            (scan_started_at.isoformat(), OFFER_WAIT_SECONDS),
+        )
+        if row["at"]:
+            ends = datetime.fromtimestamp((row["at"] - 2440587.5) * 86400 + 0.002, UTC)
+            deadline = min(deadline, ends + timedelta(seconds=OFFER_WAIT_SECONDS))
     return deadline
 
 

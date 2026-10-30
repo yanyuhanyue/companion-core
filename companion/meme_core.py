@@ -50,6 +50,8 @@ from companion_meme_protocol import (
 
 QUERY = "meme_query:"
 OFFER = "meme_offer:"
+# A chat job waits this long after creation for the Bridge meme offer.
+OFFER_WAIT_SECONDS = 2
 SPEC = EmbeddingSpec(model_version=INDEX_VERSION, dimensions=512)
 MAX_ROWS, MAX_BYTES = 2048, 64 * 1024 * 1024
 
@@ -1098,7 +1100,7 @@ class MemeCaptionService:
         body = json.loads(job["body_json"])
         if body.get("control_command") or body.get("diary_command") or not body.get("text"):
             return False
-        return now < after(job["created_at"], 2) and not self.store.one(
+        return now < after(job["created_at"], OFFER_WAIT_SECONDS) and not self.store.one(
             "SELECT 1 FROM runtime_meta WHERE key=?", (OFFER + job["event_id"],)
         )
 

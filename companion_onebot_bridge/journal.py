@@ -53,29 +53,56 @@ def read(path, *, maximum=32 * 1048576):
         if len(raw) > maximum:
             raise ValueError("INVALID_WINDOW_JOURNAL")
         if len(raw) > CACHE_MAX_BYTES:
-            _validated_bytes.cache_clear()
+            _clear()
             return _decode_lines(raw.decode("utf-8").splitlines())
         payload, head = _validated_bytes(raw)
         return json.loads(payload), head
     except Exception:
-        _validated_bytes.cache_clear()
+        _clear()
         raise
+
+
+# The last validated bytes, payload, head and record count. An append leaves those
+# bytes as an exact prefix, so only the new lines are decoded and chained.
+_previous = None
+
+
+def _clear():
+    global _previous
+    _previous = None
+    _validated_bytes.cache_clear()
 
 
 @lru_cache(maxsize=1)
 def _validated_bytes(raw):
-    lines = raw.decode("utf-8").splitlines()
-    _, head = _decode_lines(lines)
-    # Joining validated object lines preserves their values without mutable aliases.
-    # Replacing line separators with commas and adding brackets costs at most 2 bytes.
-    return ("[" + ",".join(lines) + "]").encode("utf-8"), head
+    global _previous
+    previous, _previous = _previous, None
+    # A prefix ending in LF ends its last line there in every splitlines() reading,
+    # so the whole file's lines are the prefix's lines followed by the tail's.
+    if (previous is not None and previous[0].endswith(b"\n")
+            and len(raw) > len(previous[0]) and raw.startswith(previous[0])):
+        _, old_payload, old_head, count = previous
+        lines = raw[len(previous[0]):].decode("utf-8").splitlines()
+        records, head = _decode_lines(lines, head=old_head, count=count)
+        tail = ",".join(lines).encode("utf-8")
+        payload = old_payload[:-1] + (b"," if count else b"") + tail + b"]"
+        count += len(records)
+    else:
+        lines = raw.decode("utf-8").splitlines()
+        records, head = _decode_lines(lines)
+        count = len(records)
+        # Joining validated object lines preserves their values without mutable aliases.
+        # Replacing line separators with commas and adding brackets costs at most 2 bytes.
+        payload = ("[" + ",".join(lines) + "]").encode("utf-8")
+    _previous = (raw, payload, head, count)
+    return payload, head
 
 
-def _decode_lines(lines):
-    records, head = [], "0" * 64
+def _decode_lines(lines, *, head="0" * 64, count=0):
+    records = []
     for line in lines:
         record = decode(line, 65536)
-        if record.get("previous") != head or record.get("seq") != len(records) + 1:
+        if record.get("previous") != head or record.get("seq") != count + len(records) + 1:
             raise ValueError("INVALID_WINDOW_JOURNAL")
         head = digest(record)
         records.append(record)

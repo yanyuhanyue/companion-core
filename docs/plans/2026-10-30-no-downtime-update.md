@@ -77,6 +77,75 @@ Core 不可达时 `httpx.HTTPError` 会让接收循环退出。
 控制台字段，可以在 worker 的单元边界读取新版本并替换设置，省去为改配置而重启。
 需要先列出可热加载的字段清单。
 
+## 阶段 5：Bridge 单独重启（设计稿，需评审）
+
+目标：只换 Bridge 镜像时不做 OwnerAuthority STOP/ACTIVE，Core、worker、Reader 照常运行，
+Bridge 停顿控制在 10 秒以内，且不丢主人消息、不产生 UNKNOWN 发送。
+
+### 现状和问题
+
+1. **SIGTERM 会打断发送。** `app.run` 收到 SIGTERM 后设置 `stop`，随即取消全部任务
+   （`app.py` 的 `for task in tasks: task.cancel()`）。如果投递任务正处在 `IO_STARTED`
+   与 `ACK` 之间，这次发送就停在 `IO_STARTED`。新进程启动时 `OwnerRuntime.__init__`
+   看到 `RESERVED/IO_STARTED/UNKNOWN` 会直接 `stop()`，之后只能走完整的 reconcile 和
+   handoff 发布。
+2. **停顿期间收不到消息。** Bridge 通过正向 WebSocket 从 SnowLuma 接收消息。Bridge 断开期间
+   SnowLuma 是否缓存事件还没有确认；如果不缓存，这几秒内主人发的消息会丢。
+   Bridge 只接受 30 秒内的帧（`capture.py` 的 `MAX_AGE_SECONDS`）。
+3. **新旧进程不能重叠。** `spool` 的 `instance.lock` 是进程级文件锁，owner journal 只能有一个写入方，
+   所以只能先停后启，不能蓝绿切换。
+
+### 方案
+
+**5a：平滑退出（代码改动，可单独 PR）**
+
+- SIGTERM 只设置停止标志，不再取消任务。各循环在两个单元之间检查标志：
+  - 投递：当前 `deliver_tick` 走完（发送、`spool.finish_delivery`、`flush_result`、`ACK`
+    写入 journal），不再领取新投递；分段回复中途停止时，剩下的气泡留在 Core 的 PENDING，
+    由新进程继续发；
+  - 接收：当前帧持久化（`persist_capture`）后关闭 WebSocket；
+  - 上传、媒体、表情包和资料探测：当前单元完成后退出；
+  - 超过宽限期（建议 60 秒，大于单次发送和媒体上传的上限）才取消任务。
+- 退出前确认 `window_attempts` 中没有 `RESERVED/IO_STARTED/UNKNOWN`，inbox 没有待上传的帧，
+  然后以退出码 0 结束。否则以非 0 退出，发布脚本据此停止并转人工处理。
+- `compose.yaml` 的 bridge 服务设置 `stop_grace_period: 90s`。
+
+**5b：补收停顿期间的消息（新机制，先验证再决定）**
+
+先做一次只读验证：确认 SnowLuma 2.0.3 的正向 WebSocket 在没有客户端连接时是否缓存事件。
+
+- 如果会缓存并在重连后补发：不需要新机制，只要停顿短于 30 秒的时效限制即可。
+- 如果不缓存：新进程连上 WebSocket 后，用 `get_friend_msg_history` 读取主人会话中最后一条
+  已捕获消息之后、30 秒以内的消息，按原有的 `normalize` 和 `persist_capture` 处理，
+  capture 记录写 `kind: onebot_history_backfill`，与实时的 `authenticated_onebot_ws` 区分。
+  这会新增一个 OneBot 读接口和一种输入来源，Core 侧的来源校验也要放行这一类，
+  需要单独评审。补收的消息按 `source_event_id` 去重，不会和实时消息重复入库。
+
+**5c：发布脚本**
+
+`scripts/release_plan.py --rolling` 增加 B 类判定（只有 Bridge 镜像变化、Bridge 配置和
+spool schema 不变、授权 policy 仍然有效）。执行脚本 `scripts/rolling_bridge_release.py`：
+
+1. 确认授权 ACTIVE；Core 中没有 LEASED/SENDING 投递，或等它们结束（最多 60 秒）；
+2. `docker stop --time 90`，要求退出码 0、`instance.lock` 已释放、Bridge journal 中没有未完成的发送；
+3. 用只改镜像的覆盖文件启动新容器，等待：`OwnerRuntime.verify` 通过、`runtime.probe`
+   返回 `connection_ready`、日志出现 `automatic_source_connected`，再观察 20 秒没有重启；
+4. 核对环境变量、挂载、用户、命令与旧容器一致；
+5. 任一步失败：用旧镜像重新启动；旧镜像也起不来时，转为正常的 STOP 发布。
+
+### 预计停顿
+
+旧进程等当前发送完成需要 0–5 秒，新进程启动约 2 秒（`OwnerRuntime` 初始化加首次 probe）。
+本次 journal 校验优化后，每次写入后的全量校验从约 1.3 秒降到约 0.25 秒（生产数据副本实测）。期间 Core 照常生成回复，
+回复留在 PENDING，新 Bridge 起来后立即发出，主人看到的是一次 5–10 秒的延迟。
+
+### 未解决
+
+- SnowLuma 是否缓存事件（决定 5b 要不要做）；
+- 戳一戳、撤回通知在停顿期间丢失时是否需要补收（`get_friend_msg_history` 不含通知）；
+- 资料探测（profile probe）每分钟写两条 journal 记录，一周约 7000 条。本次已让它们的校验只做一次，
+  但 journal 仍在增长；是否改为只在资料变化时记录，另行讨论。
+
 ## 始终需要 STOP 的变更
 
 - 付费合同或能力配置变化（快照或能力哈希改变）；
