@@ -621,6 +621,7 @@ class GoalEngine:
 
     def finish(self, step, result_event_id):
         s, now = self.store, self.clock()
+        goal_id_for_interest = None  # Initialize outside transaction
         with nullcontext() if s.db.in_transaction else s.transaction():
             self.validate_lease(step)
             commitment = s.one(
@@ -680,12 +681,18 @@ class GoalEngine:
             )
             self.feedback(step["goal_id"], "FULFILLED", result_event_id=result_event_id)
             s.audit("goal.completed", step["goal_id"], step["goal_id"], now)
-            if step["kind"] == "self":
-                from companion.interest import record_exploration
 
-                record_exploration(
-                    s, self.settings, self.get(step["goal_id"]), result_event_id, now
-                )
+            # Mark for interest recording but don't do the expensive multi-table join here
+            needs_interest_record = step["kind"] == "self"
+            goal_id_for_interest = step["goal_id"] if needs_interest_record else None
+
+        # Record interest exploration outside the transaction to avoid read-lock escalation
+        if goal_id_for_interest:
+            from companion.interest import record_exploration
+
+            goal = self.get(goal_id_for_interest)
+            record_exploration(s, self.settings, goal, result_event_id, now)
+
         return self.get(step["goal_id"])
 
     def fail(self, step, code, retryable=False, resource=False, *, execution_uncertain=False):
