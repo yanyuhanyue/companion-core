@@ -129,12 +129,16 @@ def test_console_runtime_versions_show_boundary_restart_review_and_restore(core,
         async with console_page(core, tmp_path) as page:
             runtime_config.boundary(core.store, core.settings, core.clock)
             await navigate(page, "配置")
+            guidance = "接住一个具体细节，自然地说自己的看法。\n不必每次追问。"
+            editor = page.get_by_label("交流指导正文", exact=True)
+            assert await editor.get_attribute("maxlength") == "2000"
+            await editor.fill(guidance)
             await page.get_by_role("switch", name="对话里标注时间", exact=True).click()
             await page.get_by_role("button", name="保存为 v1", exact=True).click()
             async with page.expect_response(lambda r: r.url.endswith("/configuration")
                 and r.request.method == "PUT") as response:
                 await page.get_by_role("dialog").get_by_role(
-                    "button", name="保存 1 项修改", exact=True).click()
+                    "button", name="保存 2 项修改", exact=True).click()
             saved = await response.value
             assert saved.status == 200, await saved.text()
             await page.get_by_role("heading", name="v1 已保存 · 等待任务边界",
@@ -144,6 +148,11 @@ def test_console_runtime_versions_show_boundary_restart_review_and_restore(core,
             await page.get_by_role("button", name="刷新当前页面").click()
             await page.get_by_role("heading", name="v1 已保存 · 已生效（新任务）",
                                    exact=True).wait_for()
+            assert await editor.input_value() == guidance
+            assert (await editor.bounding_box())["width"] > (
+                await page.locator("#pf-conversation_guidance").bounding_box())["width"] * .8
+            await page.locator("#pf-conversation_guidance").screenshot(
+                path=str(evidence / "expression-guidance.png"))
             await page.screenshot(path=str(evidence / "active.png"))
             save(1, timeout_seconds=60)
             await page.get_by_role("button", name="刷新当前页面").click()

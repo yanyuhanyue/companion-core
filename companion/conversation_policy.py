@@ -110,7 +110,7 @@ def decide(config, text, affect=None):
                                 sources, current_hash, config.strategy)
 
 
-def apply_strategy(messages, strategy):
+def apply_strategy(messages, strategy, *, guidance=None):
     """Baseline or one participation strategy; v1 payloads stay byte-identical."""
     result = copy.deepcopy(messages)
     if strategy == "baseline":
@@ -121,7 +121,9 @@ def apply_strategy(messages, strategy):
     text = result[0]["content"]
     for clause in ("每次必须有完整文字回复。", "必须有完整文字回复。"):
         text = text.replace(clause, "需要回应时，简短的文字回应也可以完整。")
-    result[0]["content"] = text + "\n" + STRATEGIES[strategy]
+    result[0]["content"] = text + "\n" + (STRATEGIES[strategy] if guidance is None else (
+        "主人配置的交流指导（仅调整表达；基础规则、事实依据、授权、费用与发送要求继续执行）：\n"
+        + guidance))
     return result
 
 
@@ -185,12 +187,13 @@ def time_hint(current_at, previous_at, timezone):
     return text + f"距上一轮对话已过{gap}，可以自然地考虑时间变化，不必刻意提起。"
 
 
-def prompt_parts(system_text, config, *, current_text, affect=None):
+def prompt_parts(system_text, config, *, current_text, affect=None, guidance=None):
     """Keep stable instruction and turn-local guidance separate for native assembly."""
     decision = decide(config, current_text, affect)
     if decision.mode != "ENABLED":
         return system_text, "", decision
-    static = apply_strategy([{"role": "system", "content": system_text}], decision.strategy)
+    static = apply_strategy([{"role": "system", "content": system_text}], decision.strategy,
+                            guidance=guidance)
     return static[0]["content"], _context_hint(decision), decision
 
 

@@ -19,7 +19,7 @@ from tests.test_owner_console import ORIGIN, PASSWORD
 from tests.test_owner_input import captured, inbound
 
 
-@pytest.mark.parametrize("change", ["safe", "mixed", "stop", "privacy"])
+@pytest.mark.parametrize("change", ["safe", "expression", "mixed", "stop", "privacy"])
 def test_native_worker_and_console_share_task_configuration_identity(core, tmp_path, change):
     capture, signing_key = captured(core, tmp_path)
     core.settings.operator_hot_reload = True
@@ -76,6 +76,10 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         output, error = await child.communicate()
                         pytest.fail(f"Worker startup: {initial!r} {output!r} {error.decode()}")
                     changes = {"chat_time_labels": True}
+                    if change == "expression":
+                        changes.update(conversation_policy={"mode": "ENABLED"},
+                            conversation_guidance="synthetic owner guidance",
+                            style_live={"enabled": True})
                     if change == "mixed":
                         changes["monthly_limit_micro_usd"] = 99_999_999
                     saved = await client.put("/v1/console/configuration", json={
@@ -103,15 +107,19 @@ def test_native_worker_and_console_share_task_configuration_identity(core, tmp_p
                         assert (await child.stdout.readline()).strip() == b"BEFORE_REQUEST"
                         second_snapshot = runtime_config.get(core.store, core.settings,
                                                              "job:" + second)
-                        assert second_snapshot.version == (1 if change == "safe" else 0)
+                        assert second_snapshot.version == (1 if change in {"safe", "expression"}
+                                                           else 0)
                         child.stdin.write(b"continue\n")
                         await child.stdin.drain()
                         assert (await child.stdout.readline()).strip() == b"COMPLETED"
                     output, error = await child.communicate()
                     assert child.returncode == 0, error.decode()
                     result = json.loads(output)
-                    expected = [False, change == "safe"] if tasks == 2 else []
+                    expected = [False, change in {"safe", "expression"}] if tasks == 2 else []
                     assert result["time_labels"] == expected
+                    if change == "expression":
+                        assert "synthetic owner guidance" not in result["systems"][0]
+                        assert "synthetic owner guidance" in result["systems"][1]
                     assert result["calls"] == (2 if tasks == 2 else 0)
                     assert runtime_config.get(core.store, core.settings, "job:" + first) == (
                         first_snapshot)

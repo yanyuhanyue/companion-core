@@ -213,11 +213,14 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
 
     @app.get(prefix + "/style-candidates", dependencies=auth)
     async def style_candidates():
-        from companion import style_distill
+        from companion import operator_config, style_distill
 
         core = app.state.core
+        configuration = operator_config.view(core.store, core.settings)
+        live = next(field["active_value"]["enabled"] for field in configuration["fields"]
+                    if field["key"] == "style_live")
         return {"enabled": style_distill.enabled(core.settings),
-                "live_enabled": core.settings.style_live.enabled,
+                "live_enabled": live,
                 "items": style_distill.items(core.store, core.clock())}
 
     @app.post(prefix + "/style-candidates/{pattern_sha256}/decision", dependencies=auth)

@@ -74,6 +74,7 @@ LABELS = {
     "chat_time_labels": "对话里标注时间",
     "input_debounce": "连发消息合并回复", "turn_taking": "话轮与主动接话",
     "conversation_policy": "对话策略",
+    "conversation_guidance": "交流指导正文",
     "quote_policy": "回复时引用原消息", "style_live": "聊天时参考已批准的表达",
     "style_distill": "从评论提炼表达候选",
     "jargon": "学习主人的黑话", "watch_ledger": "观看记录与看法",
@@ -291,8 +292,10 @@ def load(settings):
                 key = json.loads(observed["value"])["snapshot_id"] if observed else None
                 saved = db.execute("SELECT * FROM operator_runtime_snapshots WHERE snapshot_id=?",
                                    (key,)).fetchone()
-                snapshot = runtime_config.validate_record(settings, saved)
-                result = _candidate(settings, {"chat_time_labels": snapshot.chat_time_labels})
+                snapshot = runtime_config.validate_record(settings, saved, lookup=lambda version:
+                    db.execute("SELECT * FROM operator_configuration WHERE version=?",
+                               (version,)).fetchone())
+                result = _candidate(settings, runtime_config.values(snapshot))
                 result._operator_config_version = snapshot.version
                 result._operator_config_base = (settings._operator_config_base
                                                 or encode(_raw(settings)))
@@ -306,7 +309,7 @@ def load(settings):
 
 GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
           "token_measurement": "model", "chat_time_labels": "expression",
-          "conversation_policy": "expression",
+          "conversation_policy": "expression", "conversation_guidance": "expression",
           "input_debounce": "expression", "turn_taking": "expression",
           "quote_policy": "expression",
           "style_live": "expression", "style_distill": "expression", "jargon": "memory",
@@ -354,8 +357,8 @@ def view(store, settings):
     workers = runtime_config.workers(store, settings)
     primary = next((w for w in workers if w["worker"] == "worker"), None)
     active_version = primary["active_version"] if primary else settings._operator_config_version
-    active_labels = (runtime_config._read(store, settings, primary["snapshot_id"]).chat_time_labels
-                     if primary else settings.chat_time_labels)
+    active_settings = runtime_config.effective(settings, runtime_config._read(
+        store, settings, primary["snapshot_id"])) if primary else settings
     document = type(settings).model_json_schema()
     properties, definitions = document["properties"], document.get("$defs", {})
     fields = []
@@ -363,19 +366,22 @@ def view(store, settings):
         if key in EXCLUDED:
             continue
         value, active = getattr(desired, key), getattr(settings, key)
-        if key == "chat_time_labels":
-            active = active_labels
+        if key in runtime_config.HOT_FIELDS:
+            active = getattr(active_settings, key)
         schema = properties[key]
         kind, nullable = _field_type(schema, definitions)
         if isinstance(value, SecretStr):
             kind = "secret"
         item = {"key": key, "label": LABELS.get(key, key), "group": _group(key),
                 "type": kind, "value": _safe(value), "active_value": _safe(active),
-                "active_source": "worker" if key == "chat_time_labels" and primary else "startup",
+                "active_source": ("worker" if key in runtime_config.HOT_FIELDS and primary
+                                  else "startup"),
                 "nullable": nullable,
                 "effect": "task_boundary" if key in runtime_config.HOT_FIELDS else (
                     "restart_and_reapproval" if key in runtime_config.REVIEW_FIELDS
                     else "restart_and_window_handoff"), "schema": schema}
+        if "description" in schema:
+            item["description"] = schema["description"]
         for bound in ("minimum", "maximum"):
             if bound in schema:
                 item[bound] = schema[bound]

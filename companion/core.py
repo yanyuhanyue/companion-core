@@ -518,6 +518,7 @@ class Core(Runtime):
         reply_revision.check_job(self.store, job)
         authority = self._owner_job_view(job)
         configuration = runtime_config.check(self.store, self.settings, "job:" + job["job_id"])
+        task_settings = runtime_config.effective(self.settings, configuration)
         markers = [item for item in snapshots if item["kind"] == "runtime_configuration"]
         if markers and (configuration is None or markers != [{"kind": "runtime_configuration",
                 "snapshot_id": runtime_config.identity(self.settings, configuration)}]):
@@ -553,7 +554,7 @@ class Core(Runtime):
                     self.mood.revalidate(snapshot["proof"])
                 elif snapshot["kind"] == "conversation_policy":
                     conversation_policy.revalidate(snapshot["proof"],
-                        self.settings.conversation_policy,
+                        task_settings.conversation_policy,
                         current_text=json.loads(job["body_json"]).get("text", ""),
                         affect=self._affect_context(authority))
                 elif snapshot["kind"] == "voice":
@@ -617,7 +618,9 @@ class Core(Runtime):
 
     def _style_live_reference(self, job, text):
         """Owner-approved B站 style candidates for this owner chat turn, or None."""
-        cfg, s = self.settings, self.store
+        s = self.store
+        cfg = runtime_config.effective(self.settings, runtime_config.check(
+            s, self.settings, "job:" + job["job_id"]))
         if (not cfg.style_live.enabled or job["kind"] != "chat"
             or not reply_revision.owner_input(s, job["event_id"])
             or reply_revision.control_job(s, job) or private_life.strict(s, cfg)):
@@ -748,6 +751,7 @@ class Core(Runtime):
             rules, cfg.conversation_policy if job["kind"] == "chat"
             else conversation_policy.ConversationPolicyConfig(mode="OFF"),
             current_text=text, affect=affect,
+            guidance=cfg.conversation_guidance if job["kind"] == "chat" else None,
         )
         dynamic_rules = [expression_data, policy_data]
         if job["kind"] == "chat" and not cfg.chat_time_labels:

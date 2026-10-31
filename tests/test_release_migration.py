@@ -79,6 +79,7 @@ REVISION_CHAIN = (
     "0054_life_autonomy_projection",
     "0055_runtime_configuration",
     "0056_watch_ledger_goal_reads",
+    "0057_expression_configuration",
 )
 LEGACY_TABLES = (
     "principals",

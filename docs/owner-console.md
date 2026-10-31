@@ -141,6 +141,14 @@ CI workflow 和通用发布脚本由 CI 负责人接入，本片不修改其队�
 可关闭。该开关属于部署保管，不能从浏览器修改。关闭时新任务使用启动配置，重启仍通过
 原入口读取完整保存版本；已有绑定任务继续使用自己的原版本，不能通过关闭开关改写它。
 
+热加载白名单为 `chat_time_labels`、`conversation_policy`（现有 mode/strategy）、
+`style_live.enabled` 和可选的 `conversation_guidance`。正文最多 2000 字符，仅在 ENABLED
+聊天策略中替换所选内置策略的交流指导段；留空恢复内置策略，OFF/SHADOW 不下发正文。
+基础规则继续保留。正文随 Operator Configuration 加密保存，历史回选生成新的保存版本；
+生效值和来源复验均读取任务绑定，运行中修改不会改变原请求。
+`style_live` 只引用已批准且仍有效的候选，不开启蒸馏任务，也不冻结候选审批或来源权限。
+`input_debounce`、`turn_taking`、`mood_enabled` 仍需重启。
+
 白名单以外一律保守处理。`chat_time_labels` 只改变已获准聊天上下文内的时间表达，
 不增加来源范围或投递动作；上下文仍经过原来的大小限制和实际请求费用预留。
 切换时同时比较所有非白名单实际值、Paid Budget 合同和具体能力哈希。
@@ -155,10 +163,14 @@ CI workflow 和通用发布脚本由 CI 负责人接入，本片不修改其队�
 历史均不可读时，只能恢复最近一次聊天 Worker 报告且 HMAC 与当前部署完整启动身份
 匹配的有效快照；无法重新验证时拒绝启动。关闭热加载保持原启动错误行为。
 
-新增迁移 `0055_runtime_configuration` 仍由正式 `python -m companion init` / 发布流程执行：
+迁移 `0055_runtime_configuration`、`0057_expression_configuration` 仍由正式
+`python -m companion init` / 发布流程执行：
 
 - `operator_runtime_snapshots` 保存版本、启动配置的私有 HMAC 指纹和不可变的安全叶子值。
   明文表不复制凭据、来源正文或授权材料；完整实际值只参与指纹，配置覆盖仍按原机制加密。
+  新表达载荷标记为 format_version=2，正文使用同一 Owner 凭据的 Fernet 机制加密。
+  旧载荷保持原签名和绑定；重启恢复时仅从原部署默认值/对应加密历史恢复新开放的表达叶子，
+  再验证其原冷配置指纹，不能回退权限、凭据或费用合同。无法证明时拒绝恢复。
 - `operator_task_configuration` 将原生任务/模型请求标识绑定到快照，用主人控制凭据派生的
   HMAC 校验身份。上下文证据带同一快照标识；请求准入、最终传输、来源复验和结果提交
   使用同一身份，且仍实时核对 OwnerAuthority、Source Grant、隐私版本和原生租约。
@@ -166,7 +178,7 @@ CI workflow 和通用发布脚本由 CI 负责人接入，本片不修改其队�
   无状态变化时不写入，避免多个 Worker 因互相观测写入而反复唤醒。报告是最近观测，
   不代表进程仍在线，也不代表所有旧任务已经完成。
 
-快照是只含标量的冻结 Pydantic 模型。所有服务与 ModelClient 继续保有原启动 Settings、
+快照和内嵌表达值均为冻结 Pydantic 模型。所有服务与 ModelClient 继续保有原启动 Settings、
 连接和索引；只有生成聊天上下文时按任务快照读取安全叶子。原生 Worker 无须同时切换。
 已运行、重试、SDK 工具等待和重启恢复的同一任务始终保留第一次绑定，不能在下一模型
 step 偷换配置。启动配置的非热字段/部署默认值或凭据变化，无法重新验证原身份时拒绝

@@ -1257,6 +1257,10 @@ function numberInput({ id, key, type, value, nullable, lo, hi, onValue }) {
 }
 function control(f, only) {
   const v = draftVal(f), id = "cf-" + f.key.replace(/[^a-z0-9_]/gi, "-");
+  if (f.key === "conversation_guidance") return el("textarea", { class: "input", id, rows: "7", "data-k": id,
+    "aria-label": f.label, maxlength: f.schema?.anyOf?.find(x => x.type === "string")?.maxLength,
+    placeholder: "留空使用所选内置策略的交流指导", value: v ?? "",
+    oninput: e => setDraft(f, e.target.value.trim() ? e.target.value : null) });
   if (f.key === "expression_meme_categories") return categoryPicker(f, v || []);
   if (f.key === "web_reading_hosts") return hostPicker(f, v || []);
   if (f.type === "boolean") return el("button", { type: "button", class: "switch", role: "switch", id, "aria-checked": String(Boolean(v)), "data-k": id, "aria-label": f.label, onclick: () => setDraft(f, !draftVal(f)) });
@@ -1359,7 +1363,7 @@ function listControl(id, list, onList) {
     el("div", { class: "list-add" }, input, btn("添加", add, { cls: "sm" })), err);
 }
 function fieldRow(f, label, only) {
-  const changed = state.draft.has(f.key), wide = ["object", "array"].includes(f.type);
+  const changed = state.draft.has(f.key), wide = ["object", "array"].includes(f.type) || f.key === "conversation_guidance";
   const active = f.active_value !== undefined && !same(f.value, f.active_value) && f.type !== "secret";
   return el("div", { class: "pf" + (wide ? " wide" : "") + (changed ? " changed" : ""), id: "pf-" + f.key },
     el("div", { class: "pf-l" }, el("b", {}, label || f.label), f.description ? el("span", {}, f.description) : null,
