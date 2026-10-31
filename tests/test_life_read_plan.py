@@ -6,8 +6,11 @@ import os
 import subprocess
 import sys
 
+import httpx
+import pytest
 from pydantic import SecretStr
 
+from companion import owner_authority
 from tests.conftest import run
 from tests.support.goal_read_plan import TOKEN, URLS
 from tests.test_life_decision_context import prepared
@@ -41,9 +44,13 @@ async def reader_child(core, port, url):
     assert result["worked"] and result["calls"] == 3, result
 
 
-def prepare(core, tmp_path):
-    prepared(core, tmp_path, text="可以比较这些恒星资料：\n" + "\n".join(URLS))
+def prepare(core, tmp_path, *, channel=None):
+    core.settings.proactive_enabled = core.settings.diary_enabled = bool(channel)
+    prepared(core, tmp_path, text="可以比较这些恒星资料：\n" + "\n".join(URLS),
+             additional_purposes=["diary", "proactive"] if channel else (),
+             automatic_actions=[channel] if channel else ())
     core.settings.memory_enabled = True
+    core.settings.life_loop.autonomy_enabled = True
     core.settings.life_loop.max_daily_decisions = 10
     core.settings.life_loop.min_interval_seconds = 60
     core.settings.observation_adapters["bili"].token = SecretStr(TOKEN)
@@ -51,8 +58,11 @@ def prepare(core, tmp_path):
     core.settings.exploration_daily_requests = core.settings.exploration_monthly_requests = 40
 
 
-def test_native_life_proposes_reorders_reads_and_finishes_one_plan(core, tmp_path):
-    prepare(core, tmp_path)
+@pytest.mark.parametrize("phase,channel", [
+    ("FINISH", "qq.private.proactive"), ("DIARY", "diary.save"),
+])
+def test_native_life_proposes_reorders_reads_and_finishes_one_plan(core, tmp_path, phase, channel):
+    prepare(core, tmp_path, channel=channel)
 
     async def scenario():
         async with real_core_http(core) as port:
@@ -63,17 +73,21 @@ def test_native_life_proposes_reorders_reads_and_finishes_one_plan(core, tmp_pat
             steps = core.store.rows("SELECT * FROM goal_steps ORDER BY position")
             assert [step["state"] for step in steps] == ["RUNNING", "WAITING_DECISION",
                                                           "WAITING_DECISION"]
+            assert core.store.rows("SELECT * FROM trait_evidence") == []
             original_ids = {step["step_id"] for step in steps}
-            for index, (url, phase) in enumerate(zip(
-                [URLS[0], URLS[2], URLS[1]], ["REORDER", "CONTINUE", "FINISH"], strict=True,
+            for index, (url, next_phase) in enumerate(zip(
+                [URLS[0], URLS[2], URLS[1]], ["REORDER", "CONTINUE", phase], strict=True,
             ), 2):
                 await reader_child(core, port, url)
                 parent = core.goals.get(goal["goal_id"])
-                assert parent["state"] == ("DONE" if phase == "FINISH" else "WAITING_INPUT")
+                finished = index == 4
+                assert parent["state"] == ("DONE" if finished else "WAITING_INPUT")
                 core.clock.advance(61)
-                result = await life_child(core, tmp_path, phase, index)
+                result = await life_child(core, tmp_path, next_phase, index)
                 assert result["provider_calls"] == 1, result
                 assert all(job["state"] != "FAILED" for job in result["jobs"]), result
+                if not finished:
+                    assert core.store.rows("SELECT * FROM trait_evidence") == []
             final = core.goals.plan(goal["goal_id"])
             assert final["state"] == "DONE"
             assert {step["step_id"] for step in final["steps"]} == original_ids
@@ -82,11 +96,43 @@ def test_native_life_proposes_reorders_reads_and_finishes_one_plan(core, tmp_pat
             assert len(core.store.rows("SELECT * FROM exploration_requests")) == 3
             interests = result["materials"][0]["decision_context"]["self_interests"]
             assert len(interests) == 1 and interests[0]["independent_sessions"] == 1
+            guidance = result["materials"][0]["decision_context"]["autonomy_guidance"]
+            assert guidance["depth_control"][0]["independent_sessions"] == 1
             assert len(core.store.rows("SELECT * FROM trait_evidence")) == 1
-            restarted = await life_child(core, tmp_path, "FINISH", 5)
+            source_job = next(row for row in result["results"] if row["destination"] != "NONE")
+            if channel == "diary.save":
+                entries = core.store.rows("SELECT * FROM diary_entries")
+                assert len(entries) == 1 and entries[0]["body_md"] == source_job["text"]
+                assert "我发现自己想继续探索光谱与温度之间的关系。" in entries[0]["body_md"]
+                assert not core.store.rows("SELECT * FROM outbox")
+            else:
+                outbox = core.store.rows("SELECT * FROM outbox")
+                assert len(outbox) == 1 and outbox[0]["action_type"] == channel
+                assert json.loads(outbox[0]["content_json"])["text"] == source_job["text"]
+                ref = owner_authority.current(core.store, core.settings, core.clock,
+                                               purpose="life").authority.as_dict()
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False,
+                    headers={"Authorization": "Bearer "
+                             + core.settings.bridge_token.get_secret_value()}) as client:
+                    leased = await client.post("/internal/v1/deliveries/lease",
+                        json={"worker_id": "autonomy-private-share", "authority": ref})
+                    assert leased.status_code == 200, leased.text
+                    item = leased.json()["items"][0]
+                    path = "/internal/v1/deliveries/" + item["message_id"]
+                    begun = await client.post(path + "/begin-send",
+                                               json={"lease_token": item["lease_token"]})
+                    assert begun.status_code == 200, begun.text
+                    sent = await client.post(path + "/result",
+                        json={"lease_token": item["lease_token"], "result": "SENT"})
+                    assert sent.status_code == 200, sent.text
+                assert core.store.one("SELECT state FROM outbox")["state"] == "SENT"
+            retained = {table: core.store.rows("SELECT * FROM " + table)
+                        for table in ("diary_entries", "outbox", "model_usage", "trait_evidence")}
+            restarted = await life_child(core, tmp_path, phase, 5)
             assert restarted["provider_calls"] == 0
             assert len(core.store.rows("SELECT * FROM model_usage")) == 4
-            assert not core.store.rows("SELECT * FROM outbox")
+            assert {table: core.store.rows("SELECT * FROM " + table)
+                    for table in retained} == retained
     run(scenario())
 
 

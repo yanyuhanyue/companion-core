@@ -14,6 +14,26 @@ by default and a one-hour decision interval. `wake_enabled` must also be on to s
 Quiet hours, owner pause, current input, idle time, existing budget and uncertain outcomes gate
 generation. No eligible source means no Life model call. PREVIEW makes no new tasks or model calls.
 
+`life_loop.autonomy_enabled` defaults to false. When enabled, `life_context.decision_context`
+adds deterministic guidance from the same approved `self.interest` evidence. Both goal roots
+and the final result must belong to the activity's source set. Only completed native self
+goals with independent FETCHED/WATCHED receipts contribute; plans, CONTINUE choices, partial
+steps, DISCOVERED, FAILED and UNKNOWN do not count as completed exploration. Live context
+excludes simulation. Receipt deduplication and retention reuse `interest.exploration_evidence`.
+Guidance carries original source IDs and counts, without claiming expertise from session counts.
+It has no separate clock, model call, persistent progress store, execution queue or cron job.
+Generation and retained-result validation rebuild the same guidance. Native Goals, Reader,
+Diary, Reflection, Outbox and their existing budgets/recovery retain ownership of state.
+Alembic `0054_life_autonomy_projection` securely drops the five ad-hoc derived tables if a
+standalone initializer previously created them. It retains all native evidence and accounting;
+normal databases simply advance the revision. Downgrade does not recreate erased copies.
+
+Interest association on a private draft is derived `related_trait_ids` readback metadata.
+It requires the draft to cite the entire interest source closure; the strict model proposal
+contains only `LifeDecision` fields. `interest_shift` is optional private-diary reflection,
+rendered with the decision's citations and checked for sensitive content. It cannot be carried
+into a private message, QZone or fictional creation, or become owner preference evidence.
+
 - `GET /internal/v2/life/topics` uses the existing control token and `Cache-Control: no-store`.
   It returns currently valid source previews, topic states, and eligible private SHADOW results.
   Preview does not mutate state. Source fingerprints allow a reviewer to bind an exact source.
@@ -94,6 +114,40 @@ cannot reopen that candidate. New independent owner input can form a new candida
 wording is rejected and the prompt excludes guilt, abandonment and demands for replies. Semantic
 appropriateness still needs human evaluation before any live Beta; synthetic outputs do not prove
 real model expression quality.
+
+## 2026-10-31 independent Autonomy review
+
+Comparison: `86737e1..4d743aa` (Autonomy commits `2dc4b10`, `4d743aa`), plus the directly
+connected changes `94d3a6f`, `6fb4786`, `3624e5f`. The existing owner-jargon and memory-review
+implementations remain in place. The following defects were confirmed against native contracts:
+
+| Priority | Original location | Trigger and consequence | Repair |
+| --- | --- | --- | --- |
+| P1 | `autonomy.py`, `life_autonomy.py`, strategic/coordination imports | Enabling guidance imports absent `companion.protocol` / `companion.util`, preventing admission | Guidance uses the original scoped context; unused standalone layers removed |
+| P1 | `autonomy_store.py`, `life_autonomy.py` queries | `Store.all`, `goals.trait_id`, `goals.completed_at`, `events.body` and `events.namespace` do not exist | Reuse native `rows`/`one`, goal evidence and observation contracts |
+| P1 | `autonomy_tasks.py`, `db/autonomy_schema.sql` | Standalone SQL is outside Alembic and the wheel's bundled migrations; persisted derived text has no erasure/restore integration | Retire parallel stores through the native migration chain; native evidence supplies rebuilding |
+| P1 | `life_autonomy.py` global priority/history/feedback scans | Reads unrelated interests and owner messages outside this activity's sources/purposes | Guidance only sees already validated decision context |
+| P1 | `life_topics.py` post-decision hook | CONTINUE/EXPLORE is marked SUCCESS before Reader completion, with no receipt deduplication | Remove decision-time counters; native parent completion records interest once |
+| P1 | `life_context.py`, `goals.py` | Unscoped final results leak into context; completion can commit before its interest evidence | Require final-result source membership; commit provenance with completion |
+| P1 | `life_topics.py` commit/readback | Injected `related_trait_ids` breaks `LifeDecision(extra='forbid')`; clock-generated guidance differs on validation/readback | Derived metadata outside proposals; shared deterministic context builder |
+| P2 | `life_protocol.py`, diary rendering | `interest_shift` accepts other destinations and is silently omitted from the diary body | Constrain, validate and render the private reflection with original citations |
+
+Privacy withdrawal removes native evidence and invalidates retained drafts. A restored older
+backup replays the latest independent erasure ledger before guidance can be read. OFF, PREVIEW,
+pause, explicit closure, budget denial, model/Reader UNKNOWN, owner STOP and restore fences
+continue through existing admission/commit/consume paths. No state in guidance can resume work
+or release a budget/delivery reservation. A standalone initializer is not a startup step.
+
+Regression coverage includes `test_autonomy_migration.py`, `test_life_autonomy.py`,
+`test_life_decision_context.py`,
+`test_life_topics.py`, `test_life_read_plan.py` and the original migration, Goal, consumption,
+owner-jargon and memory-review suites. The plan integration uses actual loopback HTTP,
+independent native Life/Reader processes and mocked external model/Bilibili HTTP. It checks
+that three serial reads yield one interest vote only after parent completion, then save the
+original private diary/reflection or enqueue and acknowledge one authorized private share.
+Restart must preserve the original evidence, usage and channel receipts without duplication.
+These are synthetic acceptance checks; production reading quality and delivery remain a
+separate live acceptance under the deployment coordinator.
 
 ## Authority and QZone draft handoff
 

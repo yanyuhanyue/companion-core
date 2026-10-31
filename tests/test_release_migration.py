@@ -76,6 +76,7 @@ REVISION_CHAIN = (
     "0051_exploration_query",
     "0052_style_distill",
     "0053_owner_jargon",
+    "0054_life_autonomy_projection",
 )
 LEGACY_TABLES = (
     "principals",

@@ -44,6 +44,7 @@ PRIVATE_CREATION是明确获准的私人虚构创作或梦境，text为拟保存
 私人日记是暂时想法，不是新事实。不用被抛弃、失望、内疚或反复催促来索取关注。
 decision_context只含本次来源范围内的明确反馈、自身阅读兴趣与原生执行结果。
 明确反馈用于调整措辞和选题；自身兴趣不是主人的偏好。无回复不能解释成负面反馈。
+autonomy_guidance只解释本次来源中的实际独立阅读；不提供执行、分享或预算许可。
 可选提供interest_shift(200字内)观察自身兴趣变化趋势，仅用于PRIVATE_DIARY记录。
 FAILED只表示执行未完成，应据原因作有限调整或放弃，不能声称读过内容。
 UNKNOWN表示待核对，不能解释为失败、成功或主人的评价，也不能续行或重试。
@@ -95,11 +96,13 @@ def _draft_text(decision, sources, settings, now):
     if decision.destination != "PRIVATE_DIARY":
         return decision.text
     day = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone)).date().isoformat()
+    sections = [{"kind": "reflection", "text": text,
+                 "evidence": [{"source_id": "event:" + key, "exact_quote": ""}
+                              for key in decision.source_event_ids]}
+                for text in (decision.text, decision.interest_shift) if text]
     draft = DiaryDraft(
         schema_version=1, local_date=day, title="生活想法", worth_saving=True,
-        sections=[{"kind": "reflection", "text": decision.text,
-                   "evidence": [{"source_id": "event:" + key, "exact_quote": ""}
-                                for key in decision.source_event_ids]}],
+        sections=sections,
     )
     return render_draft(draft, sources, day, settings)
 
@@ -418,32 +421,20 @@ class LifeTopics:
         approved = authority(s, self.settings, topic["conversation_id"], sources, now,
                              topic_id=topic["topic_id"], check_limit=False)
         material = json.loads(job["body_json"]).get("life_material")
+        context = {}
         if material is not None:
             from companion.life_context import decision_context
 
+            context = decision_context(s, self.settings, sources, approved["sha256"], now)
             if (not isinstance(material, dict) or sha(material) != result["source_sha256"]
-                or material.get("decision_context") != decision_context(
-                    s, self.settings, sources, approved["sha256"], now
-                )):
+                or material.get("decision_context") != context):
                 raise CoreError("LIFE_DRAFT_CHANGED", 409)
         try:
             value = json.loads(result["proposal_json"])
             if not isinstance(value, dict):
                 raise ValueError("draft must be an object")
-            decision = LifeDecision.model_validate({
-                k: v for k, v in value.items() if k not in {"qzone_draft", "related_trait_ids"}
-            })
-            if "related_trait_ids" in value:
-                expected_traits = [
-                    interest["trait_id"]
-                    for interest in (material or {}).get("decision_context", {}).get(
-                        "self_interests", []
-                    )
-                    if set(interest["source_event_ids"]) & set(decision.source_event_ids)
-                ]
-                if (decision.destination != "PRIVATE_MESSAGE_DRAFT"
-                    or not expected_traits or value["related_trait_ids"] != expected_traits):
-                    raise ValueError("related interests must match the retained decision context")
+            decision = LifeDecision.model_validate({k: v for k, v in value.items()
+                                                    if k != "qzone_draft"})
             valid = (
                 approved["sha256"] == result["authority_sha256"]
                 and json.loads(result["source_fingerprints_json"])
@@ -467,7 +458,10 @@ class LifeTopics:
             draft = _qzone_readback(s, self.settings, result, topic, sources, approved, now)
             if draft is None:
                 raise CoreError("LIFE_QZONE_DRAFT_REQUIRED", 403)
+        related = sorted({item["trait_id"] for item in context.get("self_interests", [])
+                          if set(item["source_event_ids"]) <= set(decision.source_event_ids)})
         return {"result": result, "job": job, "topic": topic, "sources": sources,
+                "related_trait_ids": related,
                 "decision": decision, "qzone_draft": draft}
 
     def delivery_material(self, job_id):
@@ -674,6 +668,13 @@ class LifeTopics:
                             "SELECT goal_id,state,result_event_id,last_error_code FROM goals "
                             "WHERE goal_id=? AND redacted=0", (result["goal_id"],)
                         )
+                    if result["destination"] == "PRIVATE_MESSAGE_DRAFT":
+                        try:
+                            visible["related_trait_ids"] = self.retained_result(
+                                result["job_id"], destination="PRIVATE_MESSAGE_DRAFT",
+                            )["related_trait_ids"]
+                        except CoreError:
+                            continue
                     if result["destination"] == "QZONE_DRAFT":
                         draft = _qzone_readback(
                             self.store, self.settings, result, row, sources, approved, now
@@ -1047,11 +1048,6 @@ class LifeTopics:
         if any(item["requires_reconciliation"] for item in context["execution_outcomes"]):
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
 
-        # Enhance context with autonomy guidance (tactical layer)
-        if self.settings.life_loop.autonomy_enabled:
-            from companion.life_autonomy import LifeAutonomy
-            autonomy = LifeAutonomy(s, self.settings, self.clock)
-            context = autonomy.enhance_decision_context(context, sources)
         return {
             "kind": "life",
             "topic_id": topic_id,
@@ -1098,6 +1094,9 @@ class LifeTopics:
             )
             or sensitive(decision.text)
             or redact(decision.text, self.settings) != decision.text
+            or sensitive(decision.interest_shift or "")
+            or redact(decision.interest_shift or "", self.settings)
+            != (decision.interest_shift or "")
         ):
             raise CoreError("LIFE_PROPOSAL_SCOPE_REQUIRED", 403)
         if decision.action == "FOLLOW_UP" and data["topic_kind"] != "conversation":
@@ -1136,16 +1135,6 @@ class LifeTopics:
             raise CoreError("LIFE_PRESSURE_REJECTED", 400)
         prose = _draft_text(decision, data["sources"], self.settings, now)
         proposal = decision.model_dump(mode="json")
-        # Phase 3: Record related trait_id for PRIVATE_MESSAGE_DRAFT
-        if decision.destination == "PRIVATE_MESSAGE_DRAFT" and "decision_context" in data:
-            # Find related interest traits from decision context
-            related_traits = []
-            for interest in data["decision_context"].get("self_interests", []):
-                # Check if this interest's sources overlap with the decision's sources
-                if set(interest["source_event_ids"]) & set(decision.source_event_ids):
-                    related_traits.append(interest["trait_id"])
-            if related_traits:
-                proposal["related_trait_ids"] = related_traits
         if decision.destination == "QZONE_DRAFT":
             expires = min(
                 datetime.fromisoformat(
@@ -1208,18 +1197,6 @@ class LifeTopics:
                 "WHERE topic_id=?",
                 (now, topic["topic_id"]),
             )
-
-        # Update autonomy state after decision (tactical layer)
-        if self.settings.life_loop.autonomy_enabled:
-            from companion.life_autonomy import LifeAutonomy
-            autonomy = LifeAutonomy(s, self.settings, self.clock)
-            outcome = {
-                "status": ("SUCCESS" if decision.action in ["EXPLORE", "CONTINUE", "SHARE"]
-                           else "DEFERRED"),
-                "goal_id": decision.goal_id,
-                "action": decision.action,
-            }
-            autonomy.update_after_decision(decision.model_dump(), outcome)
 
     def submit_goal(self, job, goals):
         """Original activity transaction submits to the existing GoalEngine once."""

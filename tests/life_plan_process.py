@@ -24,9 +24,12 @@ def choice(material, phase, now):
             "topic": "比较恒星颜色资料", "source_event_ids": result["source_event_ids"],
             "scope": {"operation": "read_plan", "urls": material["read_targets"][:3]},
         })
-    elif phase == "FINISH":
-        result.update(action="SHARE", destination="PRIVATE_MESSAGE_DRAFT",
+    elif phase in {"FINISH", "DIARY"}:
+        result.update(action="SHARE", destination=(
+            "PRIVATE_DIARY" if phase == "DIARY" else "PRIVATE_MESSAGE_DRAFT"),
                       text="三篇资料都已读到，恒星颜色和表面温度的关系值得再想一想。")
+        if phase == "DIARY":
+            result["interest_shift"] = "我发现自己想继续探索光谱与温度之间的关系。"
     else:
         plan = next(goal["plan"] for goal in material["goals"] if "plan" in goal)
         result["goal_id"] = plan["goal_id"]
