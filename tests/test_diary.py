@@ -181,12 +181,43 @@ def test_d06_d07_invalid_generated_content_is_not_saved(core, defect, code):
             draft["title"] = "token=private-secret-value"
         else:
             draft["local_date"] = "2026-10-17"
+        if defect in {"fabricated", "source", "quote"}:
+            # A citation defect fails the day only when no checked section is left.
+            draft["sections"] = draft["sections"][:1]
 
     model.transform = change
     result = generate(core)
     assert result["state"] == "FAILED" and result["last_error_code"] == code
     assert not core.store.rows("SELECT * FROM diary_entries")
     assert not core.store.rows("SELECT * FROM outbox")
+
+
+def test_a_miscited_section_is_dropped_and_the_rest_is_saved(core):
+    model = seed_day(core)
+
+    def change(draft):
+        draft["sections"].insert(0, {
+            "kind": "reflection", "text": "引用抄错的一段。",
+            "evidence": [{"source_id": "S1", "exact_quote": "不存在的引文"}]})
+
+    model.transform = change
+    assert generate(core)["state"] == "COMMITTED"
+    body = core.store.one("SELECT body_md FROM diary_entries")["body_md"]
+    assert "引用抄错的一段" not in body and "还想知道" in body
+    audit = core.store.one("SELECT safe_detail_json FROM audit_log WHERE action='diary.committed'")
+    assert json.loads(audit["safe_detail_json"])["dropped_sections"] == 1
+
+
+def test_model_sees_short_source_ids_only(core):
+    model = seed_day(core)
+    assert generate(core)["state"] == "COMMITTED"
+    data = json.loads(model.calls[0][0][-1]["content"])
+    assert [row["source_id"] for row in data["sources"]] == [
+        f"S{index}" for index in range(1, len(data["sources"]) + 1)]
+    assert not any(key in row for row in data["sources"]
+                   for key in ("event_id", "outbox_message_id"))
+    evidence = core.store.rows("SELECT source_id FROM diary_evidence")
+    assert evidence and all(not row["source_id"].startswith("S") for row in evidence)
 
 
 def test_d08_injection_is_filtered_without_new_permissions(core):
