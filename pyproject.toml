@@ -30,6 +30,7 @@ dependencies = [
 onebot = [
     "websockets==15.0.1",
     "silk-python==0.2.8",
+    "schedule>=1.2,<2",
 ]
 voice-node = [
     "faster-whisper==1.2.1",
