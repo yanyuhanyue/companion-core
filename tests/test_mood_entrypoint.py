@@ -62,7 +62,12 @@ def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(
             positive = await worker("feedback")
             assert positive[0]["state"]["pleasure"] == pleasure
             assert positive[0]["state"]["arousal"] == arousal
-            assert positive[0]["causes"][0]["reason"] == reason
+            assert "causes" not in positive[0]
+            snapshots = json.loads(core.store.one(
+                "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1"
+            )["snapshots_json"])
+            proof = next(item["proof"] for item in snapshots if item["kind"] == "mood")
+            assert proof["signals"][0]["reason"] == reason
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             core.clock.advance(3 * 3600)
             await entry.admit(3, "聊一聊今天的阅读吧")

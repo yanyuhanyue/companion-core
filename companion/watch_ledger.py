@@ -275,7 +275,8 @@ def recent(store, limit=CONTEXT_ITEMS):
     from companion.interest import read_origin
 
     rows = store.rows(
-        "SELECT w.*,e.body_json,g.goal_id,g.kind AS goal_kind FROM watch_ledger w JOIN events e "
+        "SELECT w.*,e.body_json,o.evidence_json,g.scope_json,g.goal_id,g.kind AS goal_kind "
+        "FROM watch_ledger w JOIN events e "
         "ON e.event_id=w.source_event_id JOIN observations o ON o.event_id=w.source_event_id "
         "LEFT JOIN goals g ON g.goal_id=(SELECT x.goal_id FROM goals x WHERE x.redacted=0 AND "
         "(x.result_event_id=w.source_event_id OR EXISTS (SELECT 1 FROM goal_steps st WHERE "
@@ -287,7 +288,9 @@ def recent(store, limit=CONTEXT_ITEMS):
     for row in rows:
         origin = row["goal_kind"]
         if origin == "self":
-            origin = read_origin(store, row["goal_id"], [row["item_ref"]])
+            origin = read_origin(store, row["goal_id"], [row["item_ref"],
+                json.loads(row["evidence_json"] or "{}").get("requested_url", ""),
+                json.loads(row["scope_json"] or "{}").get("url", "")])
         items.append({
             "entry_id": row["entry_id"], "platform": row["platform"],
             "title": json.loads(row["body_json"]).get("title", "")[:120],
@@ -296,6 +299,23 @@ def recent(store, limit=CONTEXT_ITEMS):
             "topic_tags": json.loads(row["topic_tags_json"]),
             "watched_at": row["updated_at"], "source_event_id": row["source_event_id"]})
     return items
+
+
+def context_proof(store, entry_id):
+    """Bind quoted judgement to its live row, including withdrawal and deeper rereads."""
+    row = store.one("SELECT w.entry_id,w.source_event_id,w.item_ref,w.depth,w.state,"
+        "w.rating,w.take,"
+        "w.topic_tags_json,w.updated_at,o.canonical_url,o.evidence_json FROM watch_ledger w "
+        "JOIN observations o ON o.event_id=w.source_event_id WHERE w.entry_id=? AND o.redacted=0",
+        (entry_id,))
+    if not row or row["state"] != "JUDGED":
+        raise CoreError("PRIVACY_CHANGED", 409)
+    return row
+
+
+def revalidate_context(store, proof):
+    if context_proof(store, proof["entry_id"]) != proof:
+        raise CoreError("PRIVACY_CHANGED", 409)
 
 
 def withdraw(store, entry_id, now):

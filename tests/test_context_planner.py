@@ -46,12 +46,12 @@ def initial(core, job, *, references=1, turns=1, snapshots=None):
     ]
     current = [{"role": "user", "content": "complete current input"}]
     blocks = [
-        ("rules", rules, True),
-        *(("reference", ref, False) for ref in refs),
-        *(("history", turn, False) for turn in history),
-        ("current", current, True),
+        ("rules", rules, True, 4),
+        *(("reference", ref, False, 1) for ref in refs),
+        *(("history", turn, False, 2) for turn in history),
+        ("current", current, True, 4),
     ]
-    messages = [message for _, block, _ in blocks for message in block]
+    messages = [message for _, block, _, _ in blocks for message in block]
     planner.initialize(core, job, messages, blocks, snapshots)
     return messages, snapshots
 
@@ -259,7 +259,8 @@ def test_required_overflow_refuses_before_reserve_and_retry_keeps_checkpoint(cor
     assert len(provider.requests) == 1
 
 
-@pytest.mark.parametrize("damage", ["job", "epoch", "group", "proof", "wire", "duplicate"])
+@pytest.mark.parametrize("damage", [
+    "job", "epoch", "group", "priority", "assembly", "proof", "wire", "duplicate"])
 def test_recognized_damaged_plan_never_reaches_paid_io(core, tmp_path, damage):
     _, job = chat(core, tmp_path)
     messages, snapshots = initial(core, job)
@@ -270,6 +271,11 @@ def test_recognized_damaged_plan_never_reaches_paid_io(core, tmp_path, damage):
         plan["privacy_epoch"] = epoch(core.store) + 1
     elif damage == "group":
         plan["groups"][1]["wire_count"] = True
+    elif damage == "priority":
+        plan["groups"][1]["priority"] = True
+    elif damage == "assembly":
+        plan["assembly_dropped"] = [{"index": 0, "kind": "history",
+                                     "priority": True, "reason": "SOFT_LIMIT"}]
     elif damage == "proof":
         plan["initial_source_proofs_sha256"] = "f" * 64
     elif damage == "wire":
@@ -292,11 +298,11 @@ def test_unknown_absent_and_oversized_layouts_preserve_all_input(core, tmp_path)
     _, job = chat(core, tmp_path)
     messages, snapshots = initial(core, job)
     core.settings.context_soft_tokens = 1
-    snapshots[-1]["metadata"]["core_context"] = {"version": 2, "groups": "untrusted"}
+    snapshots[-1]["metadata"]["core_context"] = {"version": 999, "groups": "untrusted"}
     context = request_context(messages)
     assert planner.plan_request(core, job, snapshots, context) is context.messages
     inexact = []
-    planner.initialize(core, job, messages, [("rules", [deepcopy(messages[0])], True)], inexact)
+    planner.initialize(core, job, messages, [("rules", [deepcopy(messages[0])], True, 4)], inexact)
     assert inexact == []
     assert planner.plan_request(core, job, [], context) is context.messages
     messages, snapshots = initial(core, job, references=100, turns=0)
@@ -335,10 +341,10 @@ def test_attached_media_pins_entire_history_group_and_retains_honest_estimate(co
         job,
         messages,
         [
-            ("rules", rules, True),
-            ("reference", reference, False),
-            ("history", history, False),
-            ("current", current, True),
+            ("rules", rules, True, 4),
+            ("reference", reference, False, 1),
+            ("history", history, False, 2),
+            ("current", current, True, 4),
         ],
         snapshots,
     )
@@ -349,7 +355,7 @@ def test_attached_media_pins_entire_history_group_and_retains_honest_estimate(co
     plan = planner.check(core, job, snapshots)
     assert plan["groups"][1]["kind"] == "history" and plan["groups"][1]["required"]
     assert plan["pending"]["dropped"] == [
-        {"group_id": "g1", "kind": "reference", "reason": "SOFT_LIMIT"}
+        {"group_id": "g1", "kind": "reference", "reason": "SOFT_LIMIT", "priority": 1}
     ]
     measured = measure_request(
         core.settings, request_wire(selected, context.model_request_parameters)

@@ -104,7 +104,7 @@ def _native_context(view, job_id, current_epoch):
         entries = [item for item in snapshots if item["kind"] == "context_plan"]
         if len(entries) == 1:
             metadata = entries[0]["metadata"]["core_context"]
-            if metadata.get("version") == 1 and metadata.get("privacy_epoch") != current_epoch:
+            if metadata.get("version") in {1, 2} and metadata.get("privacy_epoch") != current_epoch:
                 return {**result, "state": "STALE_EPOCH"}
         job = view.one("SELECT job_id,authority_json FROM jobs WHERE job_id=?", (job_id,))
         plan = check_bound(view, job, snapshots, current_epoch)
@@ -119,6 +119,7 @@ def _native_context(view, job_id, current_epoch):
                     "selected_group_count": len(record["selected"]),
                     "dropped": record["dropped"]}
         return {**result, "state": "RECORDED", "privacy_epoch": plan["privacy_epoch"],
+                "assembly_dropped": plan.get("assembly_dropped", []),
                 "plan_sha256": sha(plan), "payload_sha256": (
                     plan["requests"][-1]["payload_sha256"] if plan["requests"] else None),
                 "groups": dict(Counter(group["kind"] for group in plan["groups"])),

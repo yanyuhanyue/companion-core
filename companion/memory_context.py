@@ -76,22 +76,25 @@ class MemorySources:
                         pending.add(source)
         return found.values()
 
-    def event(self, event_id, *, require_text=True):
-        """Validate source custody independently of whether it has a text excerpt."""
-        root = None
-        for row in self._lineage(event_id):
+    def lineage(self, event_id):
+        """Live private provenance for owner facts and non-owner reference sources."""
+        rows = list(self._lineage(event_id))
+        for row in rows:
             if (row["source_id"] in self.excluded or row["event_id"] is None
                 or row["redacted"] or row["erased"] or row["privacy_scope"] != "private"
                 or row["scope"] != "private" or row["owner_actor_id"] != "owner"):
-                return None
+                return []
             if self.now and (
                 datetime.fromisoformat(row["ingested_at"]) < self.cutoff
                 or datetime.fromisoformat(row["occurred_at"]) > datetime.fromisoformat(self.now)
                 or datetime.fromisoformat(row["ingested_at"]) > datetime.fromisoformat(self.now)
             ):
-                return None
-            if row["event_id"] == event_id:
-                root = row
+                return []
+        return rows
+
+    def event(self, event_id, *, require_text=True):
+        """Only owner-authored roots can establish a memory fact."""
+        root = next((row for row in self.lineage(event_id) if row["event_id"] == event_id), None)
         if not root or root["actor_id"] != "owner":
             return None
         body = json.loads(root["body_json"])
@@ -139,7 +142,9 @@ class MemoryContext:
         correction sources. Callers persist consumed IDs in job_sources, not new edges
         between independent owner inputs. This transient proof does not grant access.
         """
-        version = self._begin("owner")
+        # Source-only pins are also used by independently authorized expression /
+        # exploration consumers. They cannot read facts; Core checks their purpose.
+        version = self._begin("owner") if rows else read_version(self.memory)
         sources = MemorySources(self.memory, now)
         roots, memories = set(event_ids), []
         for expected in rows:
@@ -159,9 +164,10 @@ class MemoryContext:
             roots.update(ids)
         fingerprints = {}
         for event_id in sorted(roots):
-            if not sources.event(event_id, require_text=False):
+            lineage = sources.lineage(event_id)
+            if not lineage:
                 raise CoreError("PRIVACY_CHANGED", 409)
-            for source in sources._lineage(event_id):
+            for source in lineage:
                 material = {key: source[key] for key in (
                     "event_id", "source_event_id", "source", "event_type", "conversation_id",
                     "actor_id", "privacy_scope", "occurred_at", "ingested_at", "body_json",

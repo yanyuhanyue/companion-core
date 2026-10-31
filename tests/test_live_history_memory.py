@@ -509,6 +509,14 @@ def test_soft_capacity_keeps_current_input_and_native_fact_without_rewriting_fac
             await capture()
             assert await core.run_once()
             assert history_snapshot(core) == []
+            snapshots = json.loads(core.store.one(
+                "SELECT snapshots_json FROM agent_conversations ORDER BY rowid DESC LIMIT 1"
+            )["snapshots_json"])
+            plan = next(item["metadata"]["core_context"] for item in snapshots
+                        if item["kind"] == "context_plan")
+            assert not any(group["kind"] == "history" for group in plan["groups"])
+            assert any(item["kind"] == "history" and item["reason"] == "SOFT_LIMIT"
+                       for item in plan["assembly_dropped"])
             assert "白帆九号" not in encode(calls[2:])
             messages = calls[-1]["messages"]
             assert "青竹七号" in messages[-1]["content"]
