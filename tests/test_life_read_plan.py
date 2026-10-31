@@ -95,15 +95,18 @@ def test_native_life_proposes_reorders_reads_and_finishes_one_plan(core, tmp_pat
             assert all(step["state"] == "DONE" for step in final["steps"])
             assert len(core.store.rows("SELECT * FROM exploration_requests")) == 3
             interests = result["materials"][0]["decision_context"]["self_interests"]
-            assert len(interests) == 1 and interests[0]["independent_sessions"] == 1
+            # The owner's message supplied these links: a starting point, not her own pick.
+            assert len(interests) == 1 and (interests[0]["independent_sessions"],
+                                            interests[0]["owner_suggested_sessions"]) == (0, 1)
             guidance = result["materials"][0]["decision_context"]["autonomy_guidance"]
-            assert guidance["depth_control"][0]["independent_sessions"] == 1
+            assert guidance["depth_control"][0]["owner_suggested_sessions"] == 1
             assert len(core.store.rows("SELECT * FROM trait_evidence")) == 1
             source_job = next(row for row in result["results"] if row["destination"] != "NONE")
             if channel == "diary.save":
                 entries = core.store.rows("SELECT * FROM diary_entries")
                 assert len(entries) == 1 and entries[0]["body_md"] == source_job["text"]
-                assert "我发现自己想继续探索光谱与温度之间的关系。" in entries[0]["body_md"]
+                # No judged read recorded a change of view, so no interest shift is claimed.
+                assert "我发现自己想继续探索" not in entries[0]["body_md"]
                 assert not core.store.rows("SELECT * FROM outbox")
             else:
                 outbox = core.store.rows("SELECT * FROM outbox")

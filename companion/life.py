@@ -124,22 +124,13 @@ class LifeService:
                 + "。这些偏好会在到期后回到中性。"
             )
         if text == "为什么形成偏好":
-            from companion.interest import profile
+            from companion.interest import explain, profile
 
             interests = profile(self.store, self.settings, self.clock(), self.settings.owner_qq_id)[
                 "self.interest"
-            ]
-            rows = [
-                {"topic": item["topic"], **evidence}
-                for item in interests
-                for evidence in item["evidence"]
             ][:5]
             return (
-                "\n".join(
-                    f"持续探索的话题：{row['topic']}；依据 {row['occurred_at'][:10]} "
-                    f"的内容记录 {row['canonical_url']}"
-                    for row in rows
-                )
+                "\n".join(line for item in interests for line in explain(item))
                 or "目前还没有足够的自主探索记录来形成偏好。"
             )
         if command in {"表达候选", "批准表达", "拒绝表达"}:

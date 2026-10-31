@@ -33,6 +33,52 @@ It requires the draft to cite the entire interest source closure; the strict mod
 contains only `LifeDecision` fields. `interest_shift` is optional private-diary reflection,
 rendered with the decision's citations and checked for sensitive content. It cannot be carried
 into a private message, QZone or fictional creation, or become owner preference evidence.
+Commit rejects it (`LIFE_INTEREST_SHIFT_UNSUPPORTED`) unless the guidance records a change
+of view whose entire source closure the decision cites; model prose alone is not a change.
+
+## Experiences, views and choices
+
+The four stages stay in their existing owners and are never inferred from each other:
+
+| Stage | Owner | Counts as |
+| --- | --- | --- |
+| Wants to | `life_activity_results` (EXPLORE/CONTINUE) | an intention only |
+| Scheduled or started | `goals` / `goal_steps` QUEUED, RUNNING | work in progress only |
+| Completed | DONE goal with a FETCHED/WATCHED Reader receipt | one experience |
+| New view | JUDGED `watch_ledger` entry for that item | her local judgement |
+
+`interest.exploration_evidence` lists independent experiences (deduplicated by content hash
+and URL, retention and lineage checked) and attaches her live judgement of the same item, if
+any. A self goal whose target URL appears in its owner source message is `owner_suggested`:
+it can start a topic and its judgement shapes her view, but it does not count toward her own
+engagement. Owner commitments never create interests; owner preferences remain in
+`owner.preference`.
+
+`interest.view` replays judged experiences in reading order over a five-experience window.
+A view is `tentative` until at least three judged experiences on two local days agree;
+it is `positive`, `negative`, `mixed`, `neutral` or `undecided`. Each change records the time
+of the judgement and the experience (event, origin, rating, take) that caused it. `tendency`
+counts only her own picks, and marks an interest `FADING` after a settled dislike or 30 days
+without a new self-chosen read; FADING keeps its history. `/为什么形成偏好` renders these
+causes and the underlying content records with `interest.explain`.
+
+Life sees an interest only when an in-scope completed goal anchors it. Earlier experiences of
+the same interest join the view when the same OwnerAuthority admitted their goal; her
+judgements need `watch_ledger.enabled` and the `exploration` purpose. Guidance adds the view,
+its latest reasons and changes, and options (`wait_for_view`, `pivot`, `pause`, `deepen`,
+`continue`, `compare`, `reflect`, `rest`). `rest` is always present. Options carry no score,
+quota, permission or budget, and the strict `LifeDecision`, Goal and destination gates are
+unchanged. Session counts, depth and ROI are not reported as growth.
+Retained-result validation rebuilds the same context, so a draft written on an earlier view
+is suppressed (`LIFE_DRAFT_CHANGED`) once a later judgement, withdrawal or erasure changes it.
+
+Diary and Reflection sources include her own takes for the day as `own_take`
+(`take:<entry_id>`, evidence event = the read observation). They render as "我当时的看法",
+do not count toward minimum sources, and the prompts treat them as views rather than facts or
+growth. Owner withdrawal of a judgement (see `docs/watch-ledger.md`) removes it from views and
+future sources, returns citing reflection hypotheses to `NEED_MORE_EVIDENCE` and withdraws
+their unfinished goals. Erasure, expiry and restore replay act on the underlying evidence;
+no view, change history or option is stored, so none can be restored from a backup.
 
 - `GET /internal/v2/life/topics` uses the existing control token and `Cache-Control: no-store`.
   It returns currently valid source previews, topic states, and eligible private SHADOW results.

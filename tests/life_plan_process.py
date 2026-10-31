@@ -28,7 +28,8 @@ def choice(material, phase, now):
         result.update(action="SHARE", destination=(
             "PRIVATE_DIARY" if phase == "DIARY" else "PRIVATE_MESSAGE_DRAFT"),
                       text="三篇资料都已读到，恒星颜色和表面温度的关系值得再想一想。")
-        if phase == "DIARY":
+        guidance = material["decision_context"].get("autonomy_guidance", {})
+        if phase == "DIARY" and any(item["changes"] for item in guidance.get("depth_control", [])):
             result["interest_shift"] = "我发现自己想继续探索光谱与温度之间的关系。"
     else:
         plan = next(goal["plan"] for goal in material["goals"] if "plan" in goal)

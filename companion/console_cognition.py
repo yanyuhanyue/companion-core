@@ -267,6 +267,21 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
                            if key != "source_event_id"}
                           for item in watch_ledger.recent(core.store, limit=20)]}
 
+    @app.post(prefix + "/watch-ledger/{entry_id}/withdraw", dependencies=auth)
+    async def watch_ledger_withdraw(entry_id: str, request: Request,
+                                    idempotency_key: str = Header(default="")):
+        from companion import watch_ledger
+
+        if not re.fullmatch(r"watch_[A-Za-z0-9_-]{1,120}", entry_id):
+            raise CoreError("WATCH_ENTRY_NOT_FOUND", 404)
+
+        def apply(core, owner_check):
+            with core.store.transaction():
+                owner_check()
+                return watch_ledger.withdraw(core.store, entry_id, core.clock())
+
+        return await write(request, idempotency_key, {"entry_id": entry_id}, apply)
+
     @app.get(prefix + "/life/topics", dependencies=auth)
     async def life_topics():
         core = app.state.core

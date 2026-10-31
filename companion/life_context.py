@@ -59,6 +59,7 @@ def decision_context(store, settings, sources, authority_sha256, now, *, mood_at
         "WHERE e.event_id IN (SELECT value FROM json_each(?)) AND g.kind='self' "
         "AND g.redacted=0 ORDER BY g.updated_at DESC,g.goal_id LIMIT 8", (encode(sorted(ids)),),
     )
+    anchors = {}
     for goal in goals:
         roots = {row["event_id"] for row in store.rows(
             "SELECT event_id FROM goal_evidence WHERE goal_id=?", (goal["goal_id"],))}
@@ -93,19 +94,38 @@ def decision_context(store, settings, sources, authority_sha256, now, *, mood_at
                           (topic,))
         if not trait:
             continue
+        anchor = anchors.setdefault(trait["trait_id"], {"topic": topic, "goal_id": goal["goal_id"],
+                                                        "results": set(), "sources": set()})
+        anchor["results"].add(goal["result_event_id"])
+        anchor["sources"].update(roots | {goal["result_event_id"]})
+    own_views = settings.watch_ledger.enabled and permitted(store, settings, now, "exploration")
+    required = owner_authority.required(store, settings)
+    for trait_id, anchor in sorted(anchors.items()):
         # A plan contributes its final completed result once, never one vote per step.
-        evidence = [row for row in interest.exploration_evidence(
-            store, settings, trait["trait_id"], now,
-        ) if row["event_id"] == goal["result_event_id"]]
-        if evidence:
-            state, sessions, days = interest.tendency(evidence, settings)
-            result["self_interests"].append({
-                "namespace": "self.interest", "topic": topic, "status": state,
-                "trait_id": trait["trait_id"],
-                "goal_id": goal["goal_id"], "independent_sessions": sessions,
-                "independent_days": days,
-                "source_event_ids": sorted(roots | {goal["result_event_id"]}),
-            })
+        # Earlier experiences of the same interest count only when this same approval
+        # admitted their Life choice; her views need the exploration purpose.
+        evidence = []
+        for row in interest.exploration_evidence(store, settings, trait_id, now):
+            if required:
+                goal = store.one("SELECT authority_json FROM goals WHERE goal_id=?",
+                                 (row["goal_id"],))
+                if not goal["authority_json"] or sha(
+                        json.loads(goal["authority_json"])) != authority_sha256:
+                    continue
+            evidence.append(row if own_views else {**row, "judgement": None})
+        if not anchor["results"] & {row["event_id"] for row in evidence}:
+            continue
+        state, sessions, days = interest.tendency(evidence, settings, now)
+        result["self_interests"].append({
+            "namespace": "self.interest", "topic": anchor["topic"], "status": state,
+            "trait_id": trait_id,
+            "goal_id": anchor["goal_id"], "independent_sessions": sessions,
+            "independent_days": days,
+            "owner_suggested_sessions": sum(row["origin"] == "owner_suggested"
+                                            for row in evidence),
+            "view": interest.view(evidence, settings),
+            "source_event_ids": sorted(anchor["sources"]),
+        })
     if settings.life_loop.autonomy_enabled:
         from companion.life_autonomy import enhance_decision_context
 

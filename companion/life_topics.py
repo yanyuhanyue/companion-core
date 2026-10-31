@@ -44,11 +44,23 @@ PRIVATE_CREATION是明确获准的私人虚构创作或梦境，text为拟保存
 私人日记是暂时想法，不是新事实。不用被抛弃、失望、内疚或反复催促来索取关注。
 decision_context只含本次来源范围内的明确反馈、自身阅读兴趣与原生执行结果。
 明确反馈用于调整措辞和选题；自身兴趣不是主人的偏好。无回复不能解释成负面反馈。
-autonomy_guidance只解释本次来源中的实际独立阅读；不提供执行、分享或预算许可。
-可选提供interest_shift(200字内)观察自身兴趣变化趋势，仅用于PRIVATE_DIARY记录。
+autonomy_guidance来自实际完成的阅读回执和你当时的评价：view是暂时或较稳定的看法，
+why是依据，changes是看法变化及原因，options只是可选方向，可以都不选，休息或先不探索也可以。
+它不提供执行、分享或预算许可；阅读次数不代表熟练，也不能据此说自己成长了。
+主人提到后去看的内容可以有你自己的、不同的看法，但不算你自己挑的兴趣。
+只有guidance里有changes时才可提供interest_shift(200字内)，用自己的话说明看法为何变化，
+仅用于PRIVATE_DIARY记录，且source_event_ids要包含该兴趣的全部来源。
 FAILED只表示执行未完成，应据原因作有限调整或放弃，不能声称读过内容。
 UNKNOWN表示待核对，不能解释为失败、成功或主人的评价，也不能续行或重试。
 已经解决或表示不再跟进的内容选SKIP。一个候选最多消费一次，无回复不产生新候选。"""
+
+
+def interest_shift_supported(decision, context):
+    """A described change of view must rest on a recorded change, not on model prose."""
+    return decision.interest_shift is None or any(
+        item["changes"] and set(item["source_event_ids"]) <= set(decision.source_event_ids)
+        for item in context.get("autonomy_guidance", {}).get("depth_control", [])
+    )
 
 
 def _transaction(store):
@@ -1104,6 +1116,8 @@ class LifeTopics:
             != (decision.interest_shift or "")
         ):
             raise CoreError("LIFE_PROPOSAL_SCOPE_REQUIRED", 403)
+        if not interest_shift_supported(decision, data["decision_context"]):
+            raise CoreError("LIFE_INTEREST_SHIFT_UNSUPPORTED", 403)
         if decision.action == "FOLLOW_UP" and data["topic_kind"] != "conversation":
             raise CoreError("LIFE_FOLLOW_UP_SOURCE_REQUIRED", 403)
         if (decision.goal is not None and decision.goal.scope.operation == "read_plan"

@@ -872,7 +872,8 @@ class Core(Runtime):
                     "origin说明是谁选的，按它说，不要把主人安排的说成自己刷到的。"
                     "在当前话题相关或主人邀请你起个话题时可以选用；已经聊过的内容不重复介绍，"
                     "不写成线下亲身经历）：\n"
-                    + encode([{k: v for k, v in item.items() if k != "source_event_id"}
+                    + encode([{k: v for k, v in item.items()
+                               if k not in {"source_event_id", "entry_id"}}
                               for item in watched]),
                 })
                 reference_sources.append((references[-1],
@@ -919,7 +920,11 @@ class Core(Runtime):
                 if bounded_text
                 else profile(s, cfg, self.clock(), cfg.owner_qq_id)["self.interest"][:5]
             )
-            traits = [{k: item[k] for k in ("namespace", "topic", "status", "confidence")}
+            # Her own view is temporary unless several judged reads agree; never a fixed trait.
+            views = cfg.watch_ledger.enabled and permitted("exploration")
+            traits = [{**{k: item[k] for k in ("namespace", "topic", "status", "confidence")},
+                       **({"view": {k: item["view"][k] for k in ("stance", "certainty")}}
+                          if views else {})}
                       for item in trait_rows]
             if hits or traits or memory_paused:
                 memories = [

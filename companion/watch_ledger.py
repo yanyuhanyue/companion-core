@@ -1,11 +1,13 @@
-"""Watch ledger: her own short judgement of each completed Bilibili or Heybox read.
+"""Watch ledger: her own short judgement of each completed Bilibili, Heybox or goal read.
 
-The life worker finds FETCHED/WATCHED observations that have no entry yet, records how
+The life worker finds FETCHED/WATCHED observations that have no entry yet (a web page only
+when it is the result of a completed goal step), records how
 deep the read went (from the evidence, never from the model), and makes one paid
 `watch_review` call per entry for a rating, a one-line take and topic tags. Entries are
 derived data: they are deleted with their source observation, never replace the
 observation as evidence, and an UNKNOWN call is never replayed. Chat may cite the most
-recent judged entries as her own earlier impressions.
+recent judged entries as her own earlier impressions. Interest rebuilds her views from these
+entries; an owner-withdrawn entry stops counting and is never judged again.
 
 Owner decision 2026-10-29: model judgement on, retention follows the source, she may
 mention these unprompted, Heybox posts included.
@@ -23,7 +25,12 @@ from companion.store import after, encode, uid
 SCENARIO = "watch_review"
 DEPTHS = ("title_only", "text", "comments", "subtitle", "media_sampled")
 SETTLED_STATES = ("JUDGED", "SKIPPED", "FAILED", "CANCELLED")
-SOURCES = {"observation.bilibili": "bilibili", "observation.heybox": "heybox"}
+SOURCES = {"observation.bilibili": "bilibili", "observation.heybox": "heybox",
+           "observation.web": "web"}
+# Arbitrary web fetches are not reads she finished; a completed goal step's result is.
+READ = ("e.source IN ('observation.bilibili','observation.heybox','observation.web') AND "
+        "(e.source<>'observation.web' OR EXISTS (SELECT 1 FROM goal_steps st "
+        "WHERE st.outcome_event_id=o.event_id AND st.state='DONE'))")
 SCAN_LIMIT = 8
 MAX_TEXT = 2400
 LEASE_SECONDS = 300
@@ -31,7 +38,7 @@ CONTEXT_ITEMS = 3
 # Who chose the item: an owner-scheduled reading is a commitment goal, a self goal is the
 # companion's own pick. Without either, the source is not recorded and is never "self".
 ORIGINS = {"commitment": "主人安排你看的", "self": "你自己挑来看的",
-           None: "来源未记录，不要说是你自己挑的"}
+           "owner_suggested": "主人发给你后你决定去看的", None: "来源未记录，不要说是你自己挑的"}
 ADMISSION_RETRY_CODES = {
     "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED", "MODEL_DAILY_BUDGET_EXHAUSTED",
     "MODEL_MONTHLY_BUDGET_EXHAUSTED", "DAILY_BUDGET_EXHAUSTED", "BACKGROUND_YIELD_TO_CHAT",
@@ -99,7 +106,7 @@ def scan(store, settings, now):
     rows = store.rows(
         "SELECT o.event_id FROM observations o JOIN events e USING(event_id) "
         "WHERE e.redacted=0 AND o.redacted=0 AND o.result_status IN ('FETCHED','WATCHED') "
-        "AND e.source IN ('observation.bilibili','observation.heybox') AND o.created_at>=? "
+        "AND " + READ + " AND o.created_at>=? "
         "AND NOT EXISTS (SELECT 1 FROM watch_ledger w WHERE w.source_event_id=o.event_id "
         "OR w.item_ref=o.canonical_url) ORDER BY o.created_at LIMIT ?",
         (since, SCAN_LIMIT))
@@ -127,7 +134,7 @@ def deepen(store, since, now):
         "SELECT o.event_id,w.entry_id,w.depth FROM observations o JOIN events e USING(event_id) "
         "JOIN watch_ledger w ON w.item_ref=o.canonical_url "
         "WHERE e.redacted=0 AND o.redacted=0 AND o.result_status IN ('FETCHED','WATCHED') "
-        "AND e.source IN ('observation.bilibili','observation.heybox') AND o.created_at>=? "
+        "AND " + READ + " AND o.created_at>=? "
         "AND w.source_event_id<>o.event_id AND w.state IN (SELECT value FROM json_each(?)) "
         "AND NOT EXISTS (SELECT 1 FROM watch_ledger x WHERE x.source_event_id=o.event_id) "
         "ORDER BY o.created_at LIMIT ?", (since, encode(SETTLED_STATES), SCAN_LIMIT))
@@ -265,15 +272,51 @@ def erase(store, event_ids):
 
 def recent(store, limit=CONTEXT_ITEMS):
     """Latest judged entries whose source is still live, newest first."""
+    from companion.interest import read_origin
+
     rows = store.rows(
-        "SELECT w.*,e.body_json,(SELECT MIN(g.kind) FROM goals g "
-        "WHERE g.result_event_id=w.source_event_id) AS goal_kind FROM watch_ledger w JOIN events e "
+        "SELECT w.*,e.body_json,g.goal_id,g.kind AS goal_kind FROM watch_ledger w JOIN events e "
         "ON e.event_id=w.source_event_id JOIN observations o ON o.event_id=w.source_event_id "
+        "LEFT JOIN goals g ON g.goal_id=(SELECT x.goal_id FROM goals x WHERE x.redacted=0 AND "
+        "(x.result_event_id=w.source_event_id OR EXISTS (SELECT 1 FROM goal_steps st WHERE "
+        "st.goal_id=x.goal_id AND st.outcome_event_id=w.source_event_id)) "
+        "ORDER BY x.kind,x.goal_id LIMIT 1) "
         "WHERE w.state='JUDGED' AND e.redacted=0 AND o.redacted=0 "
         "ORDER BY w.updated_at DESC LIMIT ?", (limit,))
-    return [{"platform": row["platform"], "title": json.loads(row["body_json"]).get(
-                "title", "")[:120], "origin": ORIGINS.get(row["goal_kind"], ORIGINS[None]),
-             "depth": row["depth"], "rating": row["rating"],
-             "take": row["take"], "topic_tags": json.loads(row["topic_tags_json"]),
-             "watched_at": row["updated_at"], "source_event_id": row["source_event_id"]}
-            for row in rows]
+    items = []
+    for row in rows:
+        origin = row["goal_kind"]
+        if origin == "self":
+            origin = read_origin(store, row["goal_id"], [row["item_ref"]])
+        items.append({
+            "entry_id": row["entry_id"], "platform": row["platform"],
+            "title": json.loads(row["body_json"]).get("title", "")[:120],
+            "origin": ORIGINS.get(origin, ORIGINS[None]), "depth": row["depth"],
+            "rating": row["rating"], "take": row["take"],
+            "topic_tags": json.loads(row["topic_tags_json"]),
+            "watched_at": row["updated_at"], "source_event_id": row["source_event_id"]})
+    return items
+
+
+def withdraw(store, entry_id, now):
+    """Owner correction: the judgement stops counting, is not re-judged, and any reflection
+    hypothesis citing it goes back to review. The source observation itself is untouched."""
+    from companion.goals import withdraw_reflection_goals
+
+    changed = store.execute(
+        "UPDATE watch_ledger SET state='WITHDRAWN',rating=NULL,take=NULL,topic_tags_json='[]',"
+        "error_code='OWNER_WITHDRAWN',lease_until=NULL,updated_at=? "
+        "WHERE entry_id=? AND state='JUDGED'", (now, entry_id)).rowcount
+    if not changed:
+        raise CoreError("WATCH_ENTRY_NOT_FOUND", 404)
+    for row in store.rows(
+        "SELECT s.suggestion_id FROM reflection_suggestions s JOIN reflection_evidence r "
+        "USING(run_id) WHERE r.source_id=? AND s.state IN ('PENDING','ACCEPT_AS_HYPOTHESIS') "
+        "AND EXISTS (SELECT 1 FROM json_each(s.evidence_json) j "
+        "WHERE json_extract(j.value,'$.source_id')=?)", ("take:" + entry_id, "take:" + entry_id),
+    ):
+        store.execute("UPDATE reflection_suggestions SET state='NEED_MORE_EVIDENCE',updated_at=? "
+                      "WHERE suggestion_id=?", (now, row["suggestion_id"]))
+        withdraw_reflection_goals(store, row["suggestion_id"], now)
+    store.audit("watch.withdrawn", entry_id, entry_id, now)
+    return {"entry_id": entry_id, "state": "WITHDRAWN"}

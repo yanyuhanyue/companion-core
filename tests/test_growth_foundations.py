@@ -342,7 +342,9 @@ def test_core_context_and_life_explanation_recheck_stale_interest_sources(core, 
         "USING(event_id) WHERE e.event_id='evt_test_10'"
     )
     assert "self.interest" in encode(core.context(job))
-    assert "持续探索的话题" in core.life.command("/为什么形成偏好", "evt_test_10")
+    explanation = core.life.command("/为什么形成偏好", "evt_test_10")
+    assert "「天文研究」：自己挑着看了1次" in explanation
+    assert "https://example.org/1" in explanation and "还没形成自己的评价" in explanation
     core.clock.advance(core.settings.raw_event_retention_days * 86400 + 1)
     # The original job consumed the now-expired interest evidence and must stay fenced.
     with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):

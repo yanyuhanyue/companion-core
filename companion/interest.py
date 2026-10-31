@@ -1,5 +1,16 @@
-"""Self exploration trends use actual completed reads, separately from owner preferences."""
+"""Self interests and views rebuilt from actual completed reads and her own judgements.
 
+Each independent completed self read is one experience; a judged Watch Ledger entry for the
+same item is her local view of it. Interest engagement counts only reads she chose herself; a
+link the owner sent is a starting point whose judgement still shapes her view. Views replay
+the latest judged experiences in reading order, so new evidence can strengthen, weaken or
+revise them, and each change keeps the experience that caused it. Nothing here is stored:
+source erasure, expiry or an owner-withdrawn judgement changes the next rebuild, and a
+restored backup replays the erasure ledger before it is read. Plans, Life choices and model
+prose never count as experiences.
+"""
+
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,12 +19,55 @@ from companion.observation import expired_sources
 from companion.privacy import epoch, redact, sensitive
 from companion.store import after, uid
 
+FADE_DAYS = 30  # No new self-chosen read for this long: the interest rests; nothing is erased.
+VIEW_WINDOW = 5  # Only the latest judged experiences form the current view.
+SETTLED_EXPERIENCES, SETTLED_DAYS = 3, 2  # One judgement is never more than tentative.
+HISTORY_LIMIT = 8
+STANCES = {"positive": "喜欢", "negative": "不太喜欢", "mixed": "看法有分歧",
+           "neutral": "感觉一般", "undecided": "还没形成看法"}
+CERTAINTIES = {"tentative": "暂时的", "settled": "比较稳定的"}
+
+
+def read_origin(store, goal_id, urls):
+    """A self goal whose target the owner sent is her starting point, not her own pick."""
+    urls = {url.rstrip("/") for url in urls if url}
+    for row in store.rows(
+        "SELECT e.body_json FROM goal_evidence ge JOIN events e USING(event_id) "
+        "WHERE ge.goal_id=? AND e.actor_id='owner' AND e.redacted=0", (goal_id,),
+    ):
+        body = json.loads(row["body_json"])
+        said = " ".join(str(body.get(key) or "") for key in ("text", "url"))
+        if any(url in said for url in urls):
+            return "owner_suggested"
+    return "self"
+
+
+def judgement(store, settings, event_id, item_ref, cutoff):
+    """Her live judgement of this read, or of a later deeper read of the same item."""
+    if not store.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_ledger'"):
+        return None
+    entry = store.one(
+        "SELECT w.entry_id,w.source_event_id,w.rating,w.take,w.updated_at "
+        "FROM watch_ledger w JOIN events e ON e.event_id=w.source_event_id "
+        "JOIN observations o ON o.event_id=w.source_event_id WHERE w.state='JUDGED' "
+        "AND e.redacted=0 AND o.redacted=0 AND (w.source_event_id=? OR w.item_ref=?) "
+        "ORDER BY w.updated_at DESC LIMIT 1", (event_id, item_ref),
+    )
+    if (not entry or expired_sources(store, [entry["source_event_id"]], cutoff)
+            or sensitive(entry["take"]) or redact(entry["take"], settings) != entry["take"]):
+        return None
+    return {"entry_id": entry["entry_id"], "rating": entry["rating"], "take": entry["take"],
+            "judged_at": entry["updated_at"]}
+
 
 def exploration_evidence(store, settings, trait_id, now):
-    """Only completed self goals count; repeats never add another independent day."""
+    """Only completed self goals count; repeats never add another independent experience."""
     cutoff = after(now, -86400 * settings.raw_event_retention_days)
     rows = store.rows(
-        "SELECT e.event_id,e.occurred_at,e.source,o.source_sha256,o.canonical_url,o.result_status "
+        "SELECT e.event_id,e.occurred_at,e.source,o.source_sha256,o.canonical_url,"
+        "o.result_status,o.evidence_json,(SELECT MIN(g.goal_id) FROM goals g "
+        "WHERE g.kind='self' AND g.state='DONE' AND g.redacted=0 "
+        "AND g.result_event_id=e.event_id AND substr(g.topic,1,80)=tr.topic) AS goal_id "
         "FROM trait_evidence t JOIN observations o USING(event_id) "
         "JOIN events e USING(event_id) JOIN traits tr USING(trait_id) "
         "WHERE t.trait_id=? AND tr.category='interest' AND o.redacted=0 AND e.redacted=0 "
@@ -35,21 +89,97 @@ def exploration_evidence(store, settings, trait_id, now):
             continue
         hashes.add(row["source_sha256"])
         urls.add(row["canonical_url"])
-        evidence.append(
-            {**row, "evidence_level": ("SIMULATED_" if simulated else "") + row["result_status"]}
-        )
+        requested = json.loads(row.pop("evidence_json") or "{}").get("requested_url", "")
+        evidence.append({
+            **row, "evidence_level": ("SIMULATED_" if simulated else "") + row["result_status"],
+            "origin": read_origin(store, row["goal_id"], [row["canonical_url"], requested]),
+            "judgement": judgement(store, settings, row["event_id"], row["canonical_url"],
+                                   cutoff),
+        })
     return evidence
 
 
-def tendency(evidence, settings):
-    days = {
-        datetime.fromisoformat(row["occurred_at"]).astimezone(ZoneInfo(settings.timezone)).date()
-        for row in evidence
-    }
+def _local_day(value, settings):
+    return datetime.fromisoformat(value).astimezone(ZoneInfo(settings.timezone)).date()
+
+
+def _stance(window, settings):
+    ratings = [row["judgement"]["rating"] for row in window]
+    mean = sum(ratings) / len(ratings)
+    stance = ("mixed" if max(ratings) >= 1 and min(ratings) <= -1 and abs(mean) < 1
+              else "positive" if mean >= 0.75 else "negative" if mean <= -0.75 else "neutral")
+    days = {_local_day(row["occurred_at"], settings) for row in window}
+    settled = len(window) >= SETTLED_EXPERIENCES and len(days) >= SETTLED_DAYS
+    return stance, "settled" if settled else "tentative"
+
+
+def _experience(row):
+    return {"event_id": row["event_id"], "occurred_at": row["occurred_at"],
+            "origin": row.get("origin", "self"), "rating": row["judgement"]["rating"],
+            "take": row["judgement"]["take"]}
+
+
+def view(evidence, settings):
+    """Replay judged experiences in reading order; every change names its cause."""
+    judged = [row for row in evidence if row.get("judgement")]
+    stance, certainty, history = "undecided", "tentative", []
+    for index, row in enumerate(judged):
+        current = _stance(judged[max(0, index + 1 - VIEW_WINDOW):index + 1], settings)
+        if current != (stance, certainty):
+            history.append({
+                "at": row["judgement"]["judged_at"],
+                "from": None if stance == "undecided" else stance,
+                "from_certainty": None if stance == "undecided" else certainty,
+                "to": current[0], "to_certainty": current[1], "because": _experience(row),
+            })
+            stance, certainty = current
+    return {"stance": stance, "certainty": certainty,
+            "judged_experiences": len(judged),
+            "unjudged_experiences": len(evidence) - len(judged),
+            "latest_unjudged": bool(evidence) and not evidence[-1].get("judgement"),
+            "latest": [_experience(row) for row in judged[-3:]],
+            "history": history[-HISTORY_LIMIT:]}
+
+
+def tendency(evidence, settings, now=None):
+    """Engagement from her own picks; a settled dislike or a long rest lets it fade."""
+    own = [row for row in evidence if row.get("origin", "self") == "self"]
+    days = {_local_day(row["occurred_at"], settings) for row in own}
     state = "EXPLORING" if evidence else "FADING"
-    if len(evidence) >= settings.emerging_min_sessions:
+    if len(own) >= settings.emerging_min_sessions:
         state = "STABLE" if len(days) >= settings.stable_min_days else "EMERGING"
-    return state, len(evidence), len(days)
+    current = view(evidence, settings)
+    if (current["stance"], current["certainty"]) == ("negative", "settled") or (
+        now and own and own[-1]["occurred_at"] < after(now, -FADE_DAYS * 86400)
+    ):
+        state = "FADING"
+    return state, len(own), len(days)
+
+
+def explain(item):
+    """Why she follows a topic and why her view changed, from the rebuilt evidence only."""
+    current, suggested = item["view"], item.get("owner_suggested_sessions", 0)
+    lines = [
+        f"「{item['topic']}」：自己挑着看了{item['independent_sessions']}次"
+        f"（{item['independent_days']}天）"
+        + (f"，另有{suggested}次是主人提到后去看的" if suggested else "")
+        + f"；现在是{CERTAINTIES[current['certainty']]}看法：{STANCES[current['stance']]}。"
+    ]
+    for change in current["history"][-3:]:
+        cause = change["because"]
+        if change["from"] is None:
+            moved = f"开始觉得{STANCES[change['to']]}"
+        elif change["from"] == change["to"]:
+            moved = f"“{STANCES[change['to']]}”变成了{CERTAINTIES[change['to_certainty']]}看法"
+        else:
+            moved = f"从{STANCES[change['from']]}变成{STANCES[change['to']]}"
+        lines.append(f"  {change['at'][:10]} {moved}，因为 {cause['occurred_at'][:10]} "
+                     f"读的那次觉得：{cause['take']}")
+    if not current["history"]:
+        lines.append("  读过，但还没形成自己的评价。")
+    lines.append("  依据的内容记录：" + "；".join(
+        f"{row['occurred_at'][:10]} {row['canonical_url']}" for row in item["evidence"][-3:]))
+    return lines
 
 
 def profile(store, settings, now, requester):
@@ -82,7 +212,7 @@ def profile(store, settings, now, requester):
         "ORDER BY updated_at DESC,trait_id LIMIT 40"
     ):
         evidence = exploration_evidence(store, settings, row["trait_id"], now)
-        state, sessions, days = tendency(evidence, settings)
+        state, sessions, days = tendency(evidence, settings, now)
         if (
             evidence
             and not sensitive(row["topic"])
@@ -94,6 +224,9 @@ def profile(store, settings, now, requester):
                     "status": state,
                     "independent_sessions": sessions,
                     "independent_days": days,
+                    "owner_suggested_sessions": sum(
+                        item["origin"] == "owner_suggested" for item in evidence),
+                    "view": view(evidence, settings),
                     "evidence": evidence,
                     "namespace": "self.interest",
                     "confidence": min(0.9, 0.2 + days / 10),
@@ -124,7 +257,7 @@ def record_exploration(store, settings, goal, event_id, now):
         "INSERT OR IGNORE INTO trait_evidence VALUES (?,?,1,0.5,?)", (trait_id, event_id, now)
     )
     evidence = exploration_evidence(store, settings, trait_id, now)
-    state, independent, days = tendency(evidence, settings)
+    state, independent, days = tendency(evidence, settings, now)
     store.execute(
         "UPDATE traits SET status=?,independent_sessions=?,independent_days=?,strength=?,"
         "confidence=?,last_evidence_at=?,updated_at=?,version=version+1 WHERE trait_id=?",
