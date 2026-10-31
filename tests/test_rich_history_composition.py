@@ -74,7 +74,7 @@ def test_native_rich_history_tool_and_delivery_preserve_source_boundaries(
                 assert "青竹七号" in returned(payload)[0]["content"]
             initial = value.calls[2]["messages"]
             assert REFERENCE in encode(initial) and "白帆九号" in encode(initial)
-            assert "非主人" in encode(initial) and "不得" in initial[0]["content"]
+            assert "非主人" in encode(initial) and qq_rich.RULES in initial[0]["content"]
             assert "青竹七号" in encode(initial)
             assert initial[-1] == {"role": "user", "content": OWNER_NOW}
             assert core.store.one("SELECT content FROM memories WHERE memory_id=?",

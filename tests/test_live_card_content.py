@@ -124,11 +124,20 @@ def test_authenticated_card_reader_success_reaches_separate_chat_context(core, t
             assert len(calls) == 1
             context = json.dumps(calls[0]["messages"], ensure_ascii=False)
             assert "作者比较两款耳机的佩戴体验" in context
-            assert "QQ引用资料" in context and "分享内容资料" in context
+            observation = finished.json()["event_ids"][0]
+            references = [json.loads(row["content"])["shared_content"]
+                for row in calls[0]["messages"] if row["role"] == "user"
+                and row["content"].startswith('{"shared_content":')]
+            assert len(references) == 1
+            assert any(item["url"] == URL and item["trust"] == "external_untrusted"
+                       for item in references[0])
+            assert "QQ引用资料" in context
             assert next(row["content"] for row in reversed(calls[0]["messages"])
                 if row["role"] == "user") == "请总结这份分享"
             assert calls[0]["messages"][-1]["role"] == "tool"
-            observation = finished.json()["event_ids"][0]
+            reading = json.loads(calls[0]["messages"][-1]["content"])
+            assert {event["event_id"], observation} <= set(reading["source_event_ids"])
+            assert any(item["event_id"] == observation for item in reading["items"])
             assert core.store.rows(
                 "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (observation,),
             ) == [{"source_event_id": event["event_id"]}]
