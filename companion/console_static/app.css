@@ -545,6 +545,7 @@ dialog .diff { max-height: 320px; overflow-y: auto; }
 
 .pf.wide { grid-template-columns: minmax(0, 1fr); }
 .pf.wide .pf-c { justify-content: stretch; }
+.pf-c #cf-conversation_guidance { width: 100%; }
 .pf-hint { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
 .pf-hint a { color: var(--ink); font-weight: 600; }
 .pf.flash { animation: flash 1.4s ease-out; border-radius: 8px; }

@@ -1,5 +1,8 @@
 # Copy to config.toml; secrets and QQ IDs are environment variables.
 mode = "live"
+# Optional replacement for the selected conversation policy's expression guidance.
+# Only used for ENABLED chat policy; blank restores the built-in strategy (max 2000 chars).
+# conversation_guidance = "Respond to one concrete detail in your own words."
 database = "data/companion.sqlite3"
 erasure_ledger = "privacy/erasures.jsonl"
 timezone = "Asia/Shanghai"

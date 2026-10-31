@@ -1,6 +1,6 @@
 """Task-pinned runtime values over the startup configuration's unchanged cold identity.
 
-Only chat_time_labels is dynamic. Services and ModelClient retain their original
+Only reviewed chat expression values are dynamic. Services and ModelClient retain their original
 settings, clients and stores. No permission, source, budget or delivery check is cached.
 """
 
@@ -8,14 +8,21 @@ import hashlib
 import hmac
 import json
 from contextlib import nullcontext
+from typing import Literal
 
+from cryptography.fernet import InvalidToken
 from pydantic import BaseModel, ConfigDict, Field
 
 from companion import operator_config
 from companion.contracts import CoreError
+from companion.conversation_policy import ConversationPolicyConfig
 from companion.store import encode
+from companion.style_live_config import StyleLiveConfig
 
-HOT_FIELDS = frozenset({"chat_time_labels"})
+HOT_FIELDS = frozenset({"chat_time_labels", "conversation_policy", "style_live",
+                        "conversation_guidance"})
+HOT_OBJECT_FIELDS = {"conversation_policy": frozenset({"mode", "strategy"}),
+                     "style_live": frozenset({"enabled"})}
 REVIEW_FIELDS = frozenset({
     "owner_runtime", "model_url", "model_name", "model_key", "video_model_key", "provider",
     "input_rate", "cached_input_rate", "output_rate", "max_output_tokens", "chat_thinking",
@@ -32,11 +39,28 @@ REVIEW_FIELDS = frozenset({
 PREFIX = "operator_configuration:"
 
 
+class ExpressionValues(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    conversation_policy: ConversationPolicyConfig
+    style_live_enabled: bool
+    conversation_guidance: str | None = Field(max_length=2000)
+
+
+class StoredExpression(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    format_version: Literal[2]
+    conversation_policy: ConversationPolicyConfig
+    style_live_enabled: bool
+    encrypted_guidance: str | None
+
+
 class Snapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
     version: int = Field(ge=0)
     base_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     chat_time_labels: bool
+    format_version: Literal[1, 2]
+    expression: ExpressionValues
 
 
 def _digest(settings, value):
@@ -45,31 +69,72 @@ def _digest(settings, value):
                     hashlib.sha256).hexdigest()
 
 
-def _cold(settings):
+def _cold(settings, *, legacy=False):
     values = operator_config._raw(settings)
-    for key in HOT_FIELDS | {"operator_hot_reload"}:
+    for key in ({"chat_time_labels", "conversation_guidance"} if legacy else HOT_FIELDS) | {
+        "operator_hot_reload",
+    }:
+        if not legacy and key in HOT_OBJECT_FIELDS:
+            values[key] = {name: value for name, value in values[key].items()
+                           if name not in HOT_OBJECT_FIELDS[key]}
+            if values[key]:
+                continue
         values.pop(key)
     base = json.loads(settings._operator_config_base) if settings._operator_config_base else (
         operator_config._raw(settings))
-    values["deployment_chat_time_labels"] = base["chat_time_labels"]
+    if legacy:
+        values["deployment_chat_time_labels"] = base["chat_time_labels"]
+    else:
+        values["deployment_expression"] = {key: base.get(key) for key in sorted(HOT_FIELDS)}
     return _digest(settings, values)
 
 
-def _snapshot(settings, version=None, *, labels=None):
+def _expression(settings):
+    return ExpressionValues(conversation_policy=settings.conversation_policy,
+        style_live_enabled=settings.style_live.enabled,
+        conversation_guidance=settings.conversation_guidance)
+
+
+def _snapshot(settings, version=None, *, candidate=None):
+    candidate = candidate or settings
     return Snapshot(version=settings._operator_config_version if version is None else version,
                     base_sha256=_cold(settings),
-                    chat_time_labels=settings.chat_time_labels if labels is None else labels)
+                    chat_time_labels=candidate.chat_time_labels, format_version=2,
+                    expression=_expression(candidate))
 
 
 def identity(settings, snapshot):
-    return _digest(settings, snapshot.model_dump())
+    value = snapshot.model_dump()
+    if snapshot.format_version == 1:
+        # Original evidence is never re-signed. Its cold hash authenticates these
+        # reconstructed expression values instead of a new payload field.
+        value = {key: value[key] for key in ("version", "base_sha256", "chat_time_labels")}
+    return _digest(settings, value)
+
+
+def values(snapshot):
+    expression = snapshot.expression
+    return {"chat_time_labels": snapshot.chat_time_labels,
+            "conversation_policy": expression.conversation_policy,
+            "style_live": StyleLiveConfig(enabled=expression.style_live_enabled),
+            "conversation_guidance": expression.conversation_guidance}
+
+
+def effective(settings, snapshot):
+    return settings.model_copy(update=values(snapshot)) if snapshot is not None else settings
 
 
 def classify(before, after):
     old, new = operator_config._raw(before), operator_config._raw(after)
     changed = sorted(key for key in old if old[key] != new[key])
+    restart = set(changed) - HOT_FIELDS
+    for key, leaves in HOT_OBJECT_FIELDS.items():
+        if {k: v for k, v in old[key].items() if k not in leaves} != {
+            k: v for k, v in new[key].items() if k not in leaves
+        }:
+            restart.add(key)
     return {"changed_fields": changed,
-            "restart_fields": sorted(set(changed) - HOT_FIELDS),
+            "restart_fields": sorted(restart),
             "review_fields": sorted(set(changed) & REVIEW_FIELDS)}
 
 
@@ -83,32 +148,69 @@ def _persist(store, settings, snapshot, now):
                          (snapshot.version, snapshot.base_sha256, key))
     if conflict:
         raise CoreError("CONFIGURATION_VERSION_CONFLICT", 409)
-    store.execute("INSERT OR IGNORE INTO operator_runtime_snapshots VALUES (?,?,?,?,?)",
-                  (key, snapshot.version, snapshot.base_sha256,
-                   int(snapshot.chat_time_labels), now))
+    expression = snapshot.expression
+    stored = StoredExpression(format_version=2,
+        conversation_policy=expression.conversation_policy,
+        style_live_enabled=expression.style_live_enabled,
+        encrypted_guidance=operator_config._cipher(settings).encrypt(
+            expression.conversation_guidance.encode()).decode()
+        if expression.conversation_guidance is not None else None)
+    store.insert("operator_runtime_snapshots", snapshot_id=key, version=snapshot.version,
+        base_sha256=snapshot.base_sha256, chat_time_labels=int(snapshot.chat_time_labels),
+        created_at=now, expression_json=stored.model_dump_json() if snapshot.format_version == 2
+        else None)
     return key
 
 
 def _read(store, settings, key):
     row = store.one("SELECT * FROM operator_runtime_snapshots WHERE snapshot_id=?", (key,))
-    return validate_record(settings, row)
+    return validate_record(settings, row, lookup=lambda version: store.one(
+        "SELECT * FROM operator_configuration WHERE version=?", (version,)))
 
 
-def validate_record(settings, row):
+def validate_record(settings, row, *, lookup=None):
     """Reconstruct only signed safe leaves under the same validated startup identity."""
     if not row:
         raise CoreError("CONFIGURATION_SNAPSHOT_MISSING", 409)
-    key = row["snapshot_id"]
+    row = dict(row)
+    key, legacy = row["snapshot_id"], row.get("expression_json") is None
     try:
+        if legacy:
+            original = settings
+            if row["base_sha256"] != _cold(original, legacy=True):
+                # Only newly hot leaves may come from history. All authorization,
+                # credentials, paid contracts and deployment baselines stay current.
+                base = (type(settings).model_validate_json(settings._operator_config_base)
+                        if settings._operator_config_base else settings)
+                record = lookup(row["version"]) if lookup and row["version"] else None
+                if row["version"] and record is None:
+                    raise CoreError("CONFIGURATION_STARTUP_IDENTITY_CHANGED", 409)
+                historical = operator_config._candidate(
+                    base, operator_config._decode(record, settings))
+                original = settings.model_copy(update={
+                    "conversation_policy": historical.conversation_policy,
+                    "style_live": historical.style_live,
+                })
+            cold = _cold(original, legacy=True)
+            expression = _expression(original).model_copy(update={"conversation_guidance": None})
+        else:
+            stored = StoredExpression.model_validate_json(row["expression_json"])
+            guidance = (operator_config._cipher(settings).decrypt(
+                stored.encrypted_guidance.encode()).decode()
+                if stored.encrypted_guidance is not None else None)
+            expression = ExpressionValues(conversation_policy=stored.conversation_policy,
+                style_live_enabled=stored.style_live_enabled, conversation_guidance=guidance)
+            cold = _cold(settings)
         snapshot = Snapshot(version=row["version"], base_sha256=row["base_sha256"],
-                            chat_time_labels=bool(row["chat_time_labels"]))
+                            chat_time_labels=bool(row["chat_time_labels"]),
+                            format_version=1 if legacy else 2, expression=expression)
         if row["chat_time_labels"] not in (0, 1) or not hmac.compare_digest(
             identity(settings, snapshot), key,
         ):
             raise ValueError
-    except (ValueError, TypeError):
+    except (InvalidToken, ValueError, TypeError, UnicodeError):
         raise CoreError("CONFIGURATION_SNAPSHOT_INVALID", 409) from None
-    if snapshot.base_sha256 != _cold(settings):
+    if snapshot.base_sha256 != cold:
         raise CoreError("CONFIGURATION_STARTUP_IDENTITY_CHANGED", 409)
     return snapshot
 
@@ -154,7 +256,7 @@ def boundary(store, settings, clock, *, worker=None):
                         raise CoreError("CONFIGURATION_SECURITY_IDENTITY_CHANGED", 409)
                     if version != current.version and owner_authority.required(store, settings):
                         owner_authority.current(store, settings, clock)
-                    proposed = _snapshot(settings, version, labels=candidate.chat_time_labels)
+                    proposed = _snapshot(settings, version, candidate=candidate)
                     _persist(store, settings, proposed, now)
                     current, reason = proposed, None
         except CoreError as error:
@@ -240,7 +342,7 @@ def for_context(store, settings, job, snapshots):
             raise CoreError("CONFIGURATION_CONTEXT_CHANGED", 409)
         if not entries:
             snapshots.append(marker)
-    return settings.model_copy(update={"chat_time_labels": snapshot.chat_time_labels})
+    return effective(settings, snapshot)
 
 
 def check_request(store, settings, request_id):

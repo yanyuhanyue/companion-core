@@ -77,7 +77,8 @@ async def main():
           patch("companion.shutdown.requested", lambda: completed >= args.tasks),
           patch("companion.retrieval.SemanticIndex.warmup", lambda self: None)):
         await worker(settings)
-    print(json.dumps({"calls": len(calls), "time_labels": [any(
+    print(json.dumps({"calls": len(calls),
+        "systems": [call["messages"][0]["content"] for call in calls], "time_labels": [any(
         "当前时间参考" in str(message["content"]) for message in call["messages"])
         for call in calls]}), flush=True)
 

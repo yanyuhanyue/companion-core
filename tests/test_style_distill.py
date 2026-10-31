@@ -260,16 +260,28 @@ def test_live_style_needs_the_expression_purpose(core, tmp_path):
     assert PATTERN["response_action"] not in prompt
 
 
-def test_an_expired_candidate_or_erased_source_cancels_the_reply(core, tmp_path):
+@pytest.mark.parametrize("hot_reload", [False, True])
+def test_an_expired_candidate_or_erased_source_cancels_the_reply(core, tmp_path, hot_reload):
+    from pydantic import SecretStr
+
+    from companion import operator_config, runtime_config
     from companion.contracts import CoreError
     from companion.reply_revision import CANCELLED
 
     event_id = approve_one(core, tmp_path)
     live_on(core)
+    core.settings.operator_hot_reload = hot_reload
+    core.settings.control_token = SecretStr("style-runtime-owner-credential" * 2)
     job = owner_turn(core)
     snapshots = []
     core.context(job, snapshots=snapshots)
     assert "style_observation" in {item["kind"] for item in snapshots}
+    if hot_reload:
+        operator_config.update(core.store, core.settings,
+            operator_config.ConfigurationChange(expected_version=0,
+                changes={"style_live": {"enabled": False}}), "style-off", core.clock())
+        runtime_config.boundary(core.store, core.settings, core.clock)
+        core._check_context_snapshots(job, snapshots)
     [row] = candidates(core)
     core.store.execute("UPDATE style_candidates SET expires_at=?", (core.clock(),))
     with pytest.raises(CoreError, match=CANCELLED):

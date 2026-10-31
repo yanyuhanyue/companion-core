@@ -452,6 +452,9 @@ class Settings(BaseModel):
         default_factory=ConversationPolicyConfig,
         exclude_if=lambda value: value == ConversationPolicyConfig(),
     )
+    conversation_guidance: str | None = Field(default=None, max_length=2000,
+        exclude_if=lambda value: value is None,
+        description="仅在启用对话策略的聊天中替换内置交流指导；留空使用所选内置策略。")
     token_measurement: TokenMeasurementConfig | None = Field(
         default=None, exclude_if=lambda value: value is None,
     )
@@ -605,6 +608,13 @@ class Settings(BaseModel):
     def conversation_policy_default(cls, value):
         # Earlier operator versions could store null; it always meant the default policy.
         return ConversationPolicyConfig() if value is None else value
+
+    @field_validator("conversation_guidance", mode="before")
+    @classmethod
+    def optional_conversation_guidance(cls, value):
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("segmented_reply", mode="before")
     @classmethod

@@ -62,7 +62,10 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
                                                              "job:" + accepted["job_id"])
                 operator_config.update(core.store, core.settings,
                     operator_config.ConfigurationChange(expected_version=0,
-                                                        changes={"chat_time_labels": True}),
+                        changes={"chat_time_labels": True,
+                                 "conversation_policy": {"mode": "ENABLED"},
+                                 "conversation_guidance": "new guidance after Reader wait",
+                                 "style_live": {"enabled": True}}),
                     "reader-wait-config-save", core.clock())
                 assert operator_config.load(core.settings).chat_time_labels
             plan = check_bound(core.store, job, json.loads(checkpoint["snapshots_json"]),
@@ -89,6 +92,7 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
                     "job:" + accepted["job_id"]) == original_configuration
                 assert not any("当前时间参考" in str(row["content"])
                                for row in second[0]["messages"])
+                assert "new guidance after Reader wait" not in json.dumps(second[0]["messages"])
             assert any(row["role"] == "tool" and row.get("tool_call_id") == "read-original"
                        for row in second[0]["messages"])
             assert await lease(client) is None
