@@ -27,6 +27,7 @@ def client(core, monkeypatch):
     app = create_app(core.settings)
     with TestClient(app, base_url=ORIGIN) as http:
         app.state.core.clock = core.clock
+        app.state.core.mood.clock = core.clock
         app.state.core.goals.clock = core.clock
         app.state.core.executive.clock = core.clock
         yield http
@@ -241,3 +242,25 @@ def test_affect_view_distinguishes_disabled_from_neutral(client, core):
     value = client.get("/v1/console/affect").json()
     assert value["enabled"] is False and value["reset_at"] is None
     assert value["state"]["engagement"] == "neutral"
+
+
+def test_mood_console_authentication_controls_and_idempotent_clear(client, core):
+    from tests.test_mood import feedback
+
+    feedback(core)
+    assert client.get("/v1/console/mood").status_code == 401
+    headers = login(client)
+    path = "/v1/console/mood/control"
+    assert client.post(path, json={"action": "clear"}).status_code == 403
+    current = client.get("/v1/console/mood").json()
+    assert current["expression"]["pleasure"] > 0
+    for action in ("pause", "resume", "recompute", "clear"):
+        result = client.post(path, json={"action": action},
+            headers={**headers, "Idempotency-Key": "mood-" + action})
+        assert result.status_code == 200, result.text
+    assert client.get("/v1/console/mood").json()["signals"] == []
+    feedback(core, 2)
+    retry = client.post(path, json={"action": "clear"},
+        headers={**headers, "Idempotency-Key": "mood-clear"})
+    assert retry.status_code == 200
+    assert client.get("/v1/console/mood").json()["expression"]["pleasure"] > 0

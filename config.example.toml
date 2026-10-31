@@ -62,6 +62,8 @@ diary_auto_share = false
 # v0.5: independent observation adapters; never use Bridge or owner control tokens here.
 observation_enabled = false
 affect_enabled = false
+# Companion's own source-bound PAD expression reference; separate from owner feedback.
+mood_enabled = false
 affect_decay_minutes = 180
 affect_max_evidence = 12
 consolidation_enabled = false

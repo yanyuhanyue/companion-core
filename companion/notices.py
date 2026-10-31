@@ -62,11 +62,11 @@ def _source(store, event_id):
     )})
 
 
-def _material(store, settings, kind, ref, now):
+def _material(store, settings, kind, ref, now, *, mood_at=None):
     if kind == "life":
         from companion.life_topics import LifeTopics
 
-        return LifeTopics(store, settings, lambda: now).material(ref)
+        return LifeTopics(store, settings, lambda: now).material(ref, mood_at=mood_at)
     if kind == "share":
         from companion.social import _share_url, share_source, text_key
 
@@ -210,7 +210,9 @@ def validate(store, settings, job, now):
         from companion.life_topics import LifeTopics
 
         return LifeTopics(store, settings, lambda: now).delivery_material(job["job_id"])
-    data = _material(store, settings, value["kind"], value["ref"], now)
+    frozen = json.loads(current["body_json"]).get("life_material", {})
+    mood_at = (frozen.get("decision_context", {}).get("mood") or {}).get("evaluated_at")
+    data = _material(store, settings, value["kind"], value["ref"], now, mood_at=mood_at)
     dependencies = {row["source_event_id"] for row in store.rows(
         "SELECT source_event_id FROM event_dependencies WHERE event_id=?", (current["event_id"],))}
     if value["kind"] == "life":

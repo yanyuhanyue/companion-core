@@ -104,6 +104,7 @@ LABELS = {
     "content_enabled": "分享内容读取", "web_reading_enabled": "指定网站读取",
     "observation_enabled": "来源观察", "voice_enabled": "语音输入",
     "camera_enabled": "摄像头观察", "android_enabled": "Android 观察",
+    "mood_enabled": "小肥鱼的动态心情",
     "affect_enabled": "互动状态调整", "affect_decay_minutes": "互动状态有效期（分钟）",
     "affect_max_evidence": "互动状态证据上限",
     "consolidation_enabled": "记忆整理", "consolidation_local_hour": "记忆整理时刻（小时）",
@@ -280,7 +281,7 @@ def _group(key):
         return "model"
     if key.startswith(("content", "web_reading", "voice", "camera", "video")):
         return "content"
-    if key.startswith(("expression", "meme", "segmented")):
+    if key.startswith(("expression", "meme", "segmented", "mood")):
         return "expression"
     if key.startswith(("memory", "extraction", "semantic", "raw_event")):
         return "memory"

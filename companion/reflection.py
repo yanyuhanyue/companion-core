@@ -21,6 +21,9 @@ text 最多500字，evidence 至少一条 {source_id,exact_quote}，引用原始
 observation 的 text 必须等于唯一引文。其他类型只提出暂时假设，不声明新增现实经历、
 浏览、执行行为或固定性格。主人偏好不等于我的兴趣；标题级来源不等于读过正文。
 日记不是事实证据；不更改记忆、人格、规则、权限或承诺。无值得保留的内容返回空数组。"""
+REFLECTION_RULES += (
+    "\nmood 仅作有来源的短暂心情回顾，可不采纳；仍引用原始来源，"
+    "不把数值或感受自述作为事实或永久性格。")
 
 ADJUSTMENT_RULES = """另外可以提出至多一条 kind 为 capability_adjustment 的建议，
 只在来源明确支持时提出：adjustment={capability,field,value}，只能取 adjustable
@@ -206,6 +209,11 @@ class ReflectionService:
             }
 
     def validate_lease(self, run):
+        if run.get("mood_proof"):
+            from companion.mood import service_for_store
+
+            service_for_store(self.store, self.settings, self.clock, self.ledger).revalidate(
+                run["mood_proof"])
         if owner_authority.required(self.store, self.settings):
             admission = self.store.one(
                 "SELECT a.authority_json FROM model_admissions a JOIN reflection_runs r "
@@ -297,6 +305,18 @@ class ReflectionService:
                 return self.status(day)
             adjustable = delegation.prompt_scope(self.store, self.settings, self.clock())
             context = {"local_date": day.isoformat(), "sources": run["sources"]}
+            if self.settings.mood_enabled:
+                from companion.diary import day_bounds
+                from companion.mood import service_for_store
+
+                end = day_bounds(day, self.settings.timezone)[1]
+                service = service_for_store(self.store, self.settings, self.clock, self.ledger)
+                mood = service.reference(
+                    at=after(end, -0.000001), allowed={s["event_id"] for s in run["sources"]},
+                    text="\n".join(s["text"] for s in run["sources"]))
+                if mood:
+                    run["mood_proof"] = mood["proof"]
+                    context["mood"] = {k: v for k, v in mood.items() if k != "proof"}
             if adjustable:
                 context["adjustable"] = adjustable
             messages = [

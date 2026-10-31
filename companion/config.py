@@ -517,6 +517,7 @@ class Settings(BaseModel):
     camera_enabled: bool = False
     android_enabled: bool = False
     affect_enabled: bool = False
+    mood_enabled: bool = False
     affect_decay_minutes: int = Field(default=180, ge=1, le=1440)
     affect_max_evidence: int = Field(default=12, ge=4, le=100)
     consolidation_enabled: bool = False

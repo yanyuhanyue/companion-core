@@ -28,6 +28,47 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
+    from pathlib import Path
+
+    from tests.test_mood import feedback
+
+    core.clock.now = datetime.now(UTC)
+    feedback(core)
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            await page.evaluate("location.hash = 'self'")
+            await page.locator("#page[aria-busy=false]").wait_for()
+            card = page.locator(".sheet").filter(has=page.get_by_role(
+                "heading", name="小肥鱼的心情", exact=True))
+            await card.wait_for()
+            assert "半衰期 3 小时" in await card.inner_text()
+            await card.get_by_text("最近趋势与变化来源", exact=True).click()
+            assert "明确的正向互动反馈" in await card.inner_text()
+            for label in ("暂停心情滤镜", "恢复心情滤镜", "重新计算心情"):
+                await page.get_by_role("button", name=label, exact=True).click()
+                await page.get_by_role("dialog").get_by_role(
+                    "button", name=label, exact=True).click()
+                await page.get_by_role("dialog").wait_for(state="hidden")
+                await page.locator("#page[aria-busy=false]").wait_for()
+            await page.set_viewport_size({"width": 390, "height": 844})
+            assert await page.evaluate(
+                "document.documentElement.scrollWidth <= innerWidth")
+            target = Path(__file__).parents[1] / ".local/test-results/mood-console-mobile.png"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await page.screenshot(path=str(target), full_page=True)
+            await page.get_by_role("button", name="清除心情", exact=True).click()
+            await page.get_by_role("dialog").get_by_role(
+                "button", name="清除心情", exact=True).click()
+            await page.get_by_role("dialog").wait_for(state="hidden")
+            await page.locator("#page[aria-busy=false]").wait_for()
+            await page.get_by_text("最近趋势与变化来源", exact=True).click()
+            assert "暂无有效的变化来源" in await page.locator("#page").inner_text()
+
+    run(scenario())
+
+
 def test_console_model_measurement_distinguishes_local_counts_and_unknown_usage(core, tmp_path):
     from pathlib import Path
 
@@ -211,7 +252,7 @@ def test_console_affect_reset_clears_feedback_but_retains_preferences_and_intere
             assert "有 3 天的明确反馈" in await expression.inner_text()
             assert "正在形成" in await expression.inner_text()
 
-            await page.get_by_role("button", name="重置情绪观察", exact=True).click()
+            await page.get_by_role("button", name="重置交流偏好", exact=True).click()
             await submit_dialog(page, "重置", "/affect/reset")
             assert core.affect.snapshot()["state"] == NEUTRAL
             assert not core.affect.snapshot()["evidence"]

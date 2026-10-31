@@ -35,10 +35,17 @@ def permitted(store, settings, now, purpose):
         return False
 
 
-def decision_context(store, settings, sources, authority_sha256, now):
+def decision_context(store, settings, sources, authority_sha256, now, *, mood_at=None):
     """Read only evidence already admitted into this exact activity's source set."""
     ids = {source["event_id"] for source in sources}
     result = {"owner_feedback": [], "self_interests": [], "execution_outcomes": []}
+    if settings.mood_enabled:
+        from companion.mood import service_for_store
+
+        mood = service_for_store(store, settings, lambda: now).reference(
+            at=mood_at, allowed=ids, text="\n".join(s.get("text", "") for s in sources))
+        if mood:
+            result["mood"] = mood
     if settings.affect_enabled and permitted(store, settings, now, "affect"):
         feedback = [affect.owner_feedback(store, settings, event_id, now)
                     for event_id in sorted(ids)]

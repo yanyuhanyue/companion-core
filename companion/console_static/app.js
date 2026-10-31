@@ -103,7 +103,7 @@ const ACTIVITY_TITLES = {
   "delivery.result": "消息投递有了结果", "delivery.owner_reconciled": "你核对了一条投递", "delivery.account_not_sent": "账号动作没有发出",
   "job.succeeded": "一项任务已完成", "poke.accepted": "收到拍一拍", "poke.completed": "拍一拍已完成", "poke.failed": "拍一拍失败",
   "goal.proposed": "她提出了一个目标", "goal.completed": "一个目标已完成", "goal.reflection_withdrawn": "一条反思已撤回",
-  "affect.observed": "记录了一次情绪观察", "social.plan_started": "开始规划资料改动", "social.plan_decided": "资料改动计划已确定",
+  "affect.observed": "记录了一条交流偏好", "social.plan_started": "开始规划资料改动", "social.plan_decided": "资料改动计划已确定",
   "social.plan_failed": "资料改动计划失败", "social.action_reserved": "资料改动已预留额度", "social.action_dispatched": "资料改动已发出",
   "social.action_result": "资料改动有了平台回执", "social.avatar_reviewed": "头像素材已审核", "social.profile_observed": "观测了一次 QQ 资料",
   "social.runtime_cancelled": "资料行为已取消", "bili_video.scheduled": "安排了 B 站视频分析", "bili_video.unavailable": "B 站视频暂时无法分析",
@@ -126,7 +126,7 @@ const LANE_ICON = { chat: "send", auto: "spark", read: "book", mind: "memory", c
 
 const CAP_NAMES = {
   "memory.manage": "记忆管理", "memory.recall": "记忆检索", diary: "日记", consolidation: "夜间整理", reflection: "反思",
-  wake: "自主活动调度", affect: "情绪观察", expression: "表情回应", expression_learning: "表达习惯学习", goals: "目标与承诺",
+  wake: "自主活动调度", affect: "交流偏好", expression: "表情回应", expression_learning: "表达习惯学习", goals: "目标与承诺",
   proactive: "主动私聊", social: "社交语义判断", "reading.bilibili": "B 站内容读取", "reading.heybox": "小黑盒内容读取",
   "reading.web": "网页阅读", exploration: "内容发现", "bilibili.video": "B 站视频分析", "qq.files": "私人文件",
   "qq.voice.asr": "语音转写", "qq.voice.tts": "语音回复", "qq.poke": "回应拍一拍", "qq.poke.native": "回拍一下",
@@ -487,8 +487,8 @@ const LOADERS = {
   memes: signal => api.get("/memes", signal),
   tools: async signal => { const v = await api.get("/tools", signal); return { tasks: Array.isArray(v.items) ? v.items : [], enabled: v.enabled === true }; },
   self: async signal => {
-    const [affect, interests, expression, styles] = await Promise.allSettled([api.get("/affect", signal), api.get("/interests", signal), api.get("/expression-learning", signal), api.get("/style-candidates", signal)]);
-    return { affect: settled(affect), interests: settled(interests), expression: settled(expression), styles: settled(styles) };
+    const [affect, interests, expression, styles, mood] = await Promise.allSettled([api.get("/affect", signal), api.get("/interests", signal), api.get("/expression-learning", signal), api.get("/style-candidates", signal), api.get("/mood", signal)]);
+    return { affect: settled(affect), interests: settled(interests), expression: settled(expression), styles: settled(styles), mood: settled(mood) };
   },
   voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
   diagnostics: signal => api.get("/diagnostics", signal),
@@ -1138,7 +1138,7 @@ PAGES["account-actions"] = data => {
 /* ================= 运行诊断 ================= */
 const SCENARIOS = [["chat", "对话"], ["reply", "对话"], ["memory", "记忆整理"], ["diary", "日记"], ["reflection", "反思"], ["meme_caption", "表情理解"],
   ["social_autonomy", "QQ 资料行为"], ["content_vision", "图片理解"], ["content_video", "视频分析"], ["video", "视频分析"], ["media", "媒体会话"], ["tool", "工具任务"],
-  ["wake", "自主活动"], ["autonomous", "自主活动"], ["exploration", "内容发现"], ["consolidation", "夜间整理"], ["goal", "目标"], ["affect", "情绪观察"], ["expression", "表达学习"]];
+  ["wake", "自主活动"], ["autonomous", "自主活动"], ["exploration", "内容发现"], ["consolidation", "夜间整理"], ["goal", "目标"], ["affect", "交流偏好"], ["expression", "表达学习"]];
 const scenarioName = s => (SCENARIOS.find(([k]) => String(s).startsWith(k)) || [, "其他场景"])[1];
 const DELIVERY_ACTIONS = { "qq.private.reply": "私聊回复", "qq.private.proactive": "主动分享", "qq.private.poke": "拍一拍" };
 PAGES.diagnostics = data => {
@@ -2538,8 +2538,9 @@ const AFFECT_REASON = { OWNER_REQUESTED_CONCISE: "你说过“简短一点”", 
   OWNER_REQUESTED_PAUSE: "你说过“先不聊了”", OWNER_REQUESTED_CONTINUE: "你说过“继续聊”", OWNER_REQUESTED_NOVELTY: "你说过“换个新话题”" };
 const dimLabel = d => (AFFECT_DIMS[d] || [d || "其他"])[0];
 const dimValue = (d, v) => (AFFECT_DIMS[d]?.[1] || {})[v] || v || "—";
-PAGES.self = data => el("div", {}, head("情绪与偏好", "她只根据你明确说过的话调整，不推测你的情绪。偏好来自你，兴趣来自她自己完成的阅读，两者分开记录。"),
+PAGES.self = data => el("div", {}, head("情绪与偏好", "交流偏好来自你的明确反馈；她的心情来自有依据的互动和已完成经历，兴趣单独记录。"),
   affectSheet(data.affect),
+  moodSheet(data.mood),
   el("div", { class: "grid-2 mt-lg" }, preferenceSheet(data.interests), interestSheet(data.interests)),
   expressionSheet(data.expression), styleSheet(data.styles));
 const STYLE_TAGS = { daily_share: "日常分享", complaint: "吐槽", light_humor: "轻松玩笑", opinion: "交换看法", help_request: "求助",
@@ -2579,10 +2580,10 @@ function styleDecision(c, decision) {
   openDialog((approve ? "批准" : "拒绝") + "表达候选 " + c.short_id, form);
 }
 function affectSheet(a) {
-  if (!a || a.error) return sheet("情绪观察", failNote("情绪观察", a?.error));
+  if (!a || a.error) return sheet("你的交流偏好", failNote("交流偏好", a?.error));
   const evidence = a.evidence || [];
-  return sheet("情绪观察", [
-    a.enabled ? null : el("p", { class: "note mb" }, "情绪观察没有开启，下面是默认状态。重置仍然可以使用。"),
+  return sheet("你的交流偏好", [
+    a.enabled ? null : el("p", { class: "note mb" }, "交流偏好调整没有开启，下面是默认状态。重置仍然可以使用。"),
     el("div", { class: "affect-dims" }, Object.keys(AFFECT_DIMS).map(d => {
       const v = a.state?.[d], ev = evidence.find(x => x.dimension === d);
       return el("div", { class: "affect-dim" + (ev ? " set" : "") }, el("small", {}, dimLabel(d)), el("b", {}, dimValue(d, v)),
@@ -2590,7 +2591,48 @@ function affectSheet(a) {
     })),
     el("p", { class: "note mt" }, evidence.length ? "每条反馈都来自你的私聊原话，到期后自动恢复默认。" : "最近没有明确反馈。",
       a.reset_at ? "上次重置在 " + fmtDate(a.reset_at) + "。" : ""),
-    el("div", { class: "row-gap mt" }, btn("重置情绪观察", affectReset, { cls: "sm", symbol: "refresh" }))]);
+    el("div", { class: "row-gap mt" }, btn("重置交流偏好", affectReset, { cls: "sm", symbol: "refresh" }))]);
+}
+const MOOD_REASONS = { HELPFUL_FEEDBACK: "明确的正向互动反馈", THANKS_FOR_HELP: "对已送达帮助的感谢",
+  UNHELPFUL_FEEDBACK: "明确的改进反馈", COMPLETED_READ_REVIEW: "完成线上阅读后的评价",
+  VERIFIED_GOAL_COMPLETION: "有执行证据的目标完成", REVIEWED_GOAL_COMPLETION: "完成目标与阅读评价" };
+const padText = value => ["pleasure", "arousal", "dominance"].map(k => Number(value?.[k] || 0).toFixed(3)).join(" / ");
+function moodSheet(m) {
+  if (!m || m.error) return sheet("小肥鱼的心情", failNote("心情", m?.error));
+  const signals = m.signals || [];
+  return sheet("小肥鱼的心情", [
+    el("p", { class: "note mb" }, !m.enabled ? "动态心情未开启，可在配置页开启。" : m.paused ? "心情滤镜已暂停。恢复后根据仍有效的来源重新计算。" : !m.active ? "当前授权不允许使用心情滤镜。" : "表达参考会自然衰减；数值不代表真实情绪体验或固定人格。"),
+    el("p", { class: "note mb" }, "以下依次为愉悦度 / 唤醒度 / 支配感；0 表示没有方向性参考，也可能缺少依据。"),
+    kv("即时心情 · 半衰期 3 小时", padText(m.immediate)),
+    kv("近期底色 · 半衰期 3 天", padText(m.undertone)),
+    kv("当前表达参考", padText(m.expression)),
+    el("details", { class: "mt" }, el("summary", {}, "最近趋势与变化来源"),
+      (m.trend || []).map(t => kv(fmtDate(t.at), "即时 " + padText(t.immediate) + "；底色 " + padText(t.undertone))),
+      signals.length ? signals.slice(-8).reverse().map(s => el("div", { class: "mt" },
+        el("b", {}, MOOD_REASONS[s.reason] || s.reason),
+        el("p", { class: "note" }, fmtDate(s.at) + " · " + s.event_id + " · 初始变化 " + padText(Object.fromEntries(["pleasure", "arousal", "dominance"].map((k, i) => [k, s.delta[i]])))),
+        el("p", { class: "note" }, "即时影响剩余约 " + (100 * Math.pow(2, -(Date.parse(m.evaluated_at) - Date.parse(s.at)) / 10800000)).toFixed(1) + "%")))
+        : el("p", { class: "note mt" }, "暂无有效的变化来源。")),
+    m.truncated ? el("p", { class: "note mt" }, "候选来源超过上限，底色暂不采用；显示有限的近期参考。") : null,
+    m.reset_at ? el("p", { class: "note mt" }, "最近清除：" + fmtDate(m.reset_at)) : null,
+    el("p", { class: "note mt" }, "心绪手札保存在日记与反思中，仍以原始来源为依据。"),
+    el("div", { class: "row-gap mt" },
+      btn(m.paused ? "恢复心情滤镜" : "暂停心情滤镜", () => moodControl(m.paused ? "resume" : "pause"), { cls: "sm" }),
+      btn("重新计算心情", () => moodControl("recompute"), { cls: "sm", symbol: "refresh" }),
+      btn("清除心情", () => moodControl("clear"), { cls: "sm danger" }))]);
+}
+function moodControl(action) {
+  const titles = { pause: "暂停心情滤镜", resume: "恢复心情滤镜", recompute: "重新计算心情", clear: "清除心情" };
+  const descriptions = { pause: "暂停心情对表达的影响，原始互动和阅读仍照常记录。", resume: "从仍有效的原始来源重建，按实际经过的时间衰减。", recompute: "重新核验来源并计算当前状态，保留清除时间边界。", clear: "现在及以前的来源不再影响心情，旧备份恢复也保留这次清除。日记、聊天和记忆仍保留。" };
+  const form = el("form", { class: "dlg-form" }, el("p", {}, descriptions[action]));
+  const submit = el("button", { type: "submit", class: "btn " + (action === "clear" ? "danger" : "primary") }, titles[action]);
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/mood/control", { action }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast("已" + titles[action]); await loadRoute({ reset: true }); });
+  });
+  openDialog(titles[action], form);
 }
 function affectReset() {
   const form = el("form", { class: "dlg-form" }, el("ul", { class: "consequence" },
@@ -2601,9 +2643,9 @@ function affectReset() {
   form.addEventListener("submit", e => {
     e.preventDefault();
     perform(form, submit, () => api.write("/affect/reset", { confirm: true }, "POST", r => typeof r.state === "string"),
-      async () => { closeDialog(); toast("已重置情绪观察"); await loadRoute({ reset: true }); });
+      async () => { closeDialog(); toast("已重置交流偏好"); await loadRoute({ reset: true }); });
   });
-  openDialog("重置情绪观察？", form);
+  openDialog("重置交流偏好？", form);
 }
 function evidenceDates(list) {
   const days = [...new Set((list || []).map(e => localDay(e.occurred_at)).filter(Boolean))].sort();
@@ -2640,7 +2682,7 @@ function expressionSheet(x) {
       el("div", { class: "days" }, (i.local_dates || []).map(d => el("span", { class: "chip" }, d))))))
       : el("p", { class: "note" }, "还没有可以学习的反馈。你说“简短一点”“分步骤说”这类话之后会开始累计。"),
     x.truncated ? el("p", { class: "note mt" }, "反馈太多，只看了最近 500 条，暂时不会判定为稳定。") : null,
-    el("p", { class: "note mt" }, "这里是按保留期内的原话重新算出的当前结果，不另外保存逐日变化。出现相反的反馈或重置情绪观察后，会从那时重新累计。")]);
+    el("p", { class: "note mt" }, "这里是按保留期内的原话重新算出的当前结果，不另外保存逐日变化。出现相反的反馈或重置交流偏好后，会从那时重新累计。")]);
 }
 
 /* ---------- 认知记录：分页、按编号定位、跨记录跳转、目标步骤 ---------- */
