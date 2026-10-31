@@ -1118,6 +1118,16 @@ class LifeTopics:
             raise CoreError("LIFE_PRESSURE_REJECTED", 400)
         prose = _draft_text(decision, data["sources"], self.settings, now)
         proposal = decision.model_dump(mode="json")
+        # Phase 3: Record related trait_id for PRIVATE_MESSAGE_DRAFT
+        if decision.destination == "PRIVATE_MESSAGE_DRAFT" and "decision_context" in data:
+            # Find related interest traits from decision context
+            related_traits = []
+            for interest in data["decision_context"].get("self_interests", []):
+                # Check if this interest's sources overlap with the decision's sources
+                if set(interest["source_event_ids"]) & set(decision.source_event_ids):
+                    related_traits.append(interest["trait_id"])
+            if related_traits:
+                proposal["related_trait_ids"] = related_traits
         if decision.destination == "QZONE_DRAFT":
             expires = min(
                 datetime.fromisoformat(

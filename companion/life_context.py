@@ -99,6 +99,7 @@ def decision_context(store, settings, sources, authority_sha256, now):
             state, sessions, days = interest.tendency(evidence, settings)
             result["self_interests"].append({
                 "namespace": "self.interest", "topic": topic, "status": state,
+                "trait_id": trait["trait_id"],
                 "goal_id": goal["goal_id"], "independent_sessions": sessions,
                 "independent_days": days,
                 "source_event_ids": sorted(roots | {goal["result_event_id"]}),
