@@ -6,12 +6,12 @@ multi-goal coordination) and strategic layer (interest portfolio optimization, s
 on top of the existing Life loop execution layer.
 """
 
-from datetime import datetime, timedelta
-from typing import Literal, Any
-from pydantic import Field, model_validator
+from datetime import datetime
+from typing import Literal
+
+from pydantic import Field
 
 from companion.protocol import StrictModel
-
 
 # ============================================================================
 # Tactical Layer: Exploration Depth Control

@@ -2,20 +2,19 @@
 Autonomy engines: tactical layer algorithms for exploration control and scheduling.
 """
 
-from datetime import datetime, timedelta
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from companion.autonomy import (
-    ExplorationStrategy,
+    DEPTH_LEVELS,
     DepthDecision,
+    ExplorationStrategy,
     InterestPriority,
     SchedulingPolicy,
     calculate_roi,
     days_between,
-    DEPTH_LEVELS,
 )
-
 
 # ============================================================================
 # Exploration Depth Controller
@@ -93,7 +92,6 @@ def should_continue_exploration(
     expected_sessions = DEPTH_LEVELS[strategy.current_depth]["sessions"]
     if strategy.sessions_invested >= expected_sessions * 1.2:  # 120% of expected
         if roi >= strategy.continuation_threshold:
-            next_depth = depth_order[current_idx + 1] if current_idx < len(depth_order) - 1 else strategy.current_depth
             return DepthDecision(
                 action="deepen",
                 reason=f"已完成{strategy.sessions_invested}次探索，准备进入下一深度",

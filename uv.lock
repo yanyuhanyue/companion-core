@@ -416,6 +416,7 @@ dependencies = [
 
 [package.optional-dependencies]
 onebot = [
+    { name = "schedule" },
     { name = "silk-python" },
     { name = "websockets" },
 ]
@@ -466,6 +467,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12,<13" },
     { name = "pydantic", specifier = ">=2.10,<3" },
     { name = "pydantic-ai-slim", specifier = "==2.60.0" },
+    { name = "schedule", marker = "extra == 'onebot'", specifier = ">=1.2,<2" },
     { name = "silk-python", marker = "extra == 'onebot'", specifier = "==0.2.8" },
     { name = "tokenizers", specifier = "==0.23.3" },
     { name = "tzdata", specifier = ">=2025.1" },
@@ -2842,6 +2844,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a6/f1/d17f4f13c69594569b03204dbfdb1aa25c0c227032f8b94ab1cc1ec1dfc1/silk_python-0.2.8-cp314-cp314t-win32.whl", hash = "sha256:3b48706d1e77fc0fe3d093af277becfa230901e138d2d9c2f059e106929d81fd", size = 306923, upload-time = "2025-11-12T12:42:52.596Z" },
     { url = "https://files.pythonhosted.org/packages/69/54/ac87da5cc24d7b5366767408030c5dfa0acdd6dffd4e7a8775aae52ff227/silk_python-0.2.8-cp314-cp314t-win_amd64.whl", hash = "sha256:98195ff54ef6ec09d914f89096af9fd30585116cb6bac9a1a78bdfc1b54c719f", size = 349169, upload-time = "2025-11-12T12:42:53.838Z" },
     { url = "https://files.pythonhosted.org/packages/91/18/62b0c5920bc2a794553479fc77a6cfebdff8bcdaaac14f538e7b1500082e/silk_python-0.2.8-cp314-cp314t-win_arm64.whl", hash = "sha256:53c39e317b7e34741ea1004d0af4c553660f5609d7bdc6e36ed5d91e923acb3e", size = 323269, upload-time = "2025-11-12T12:42:55.081Z" },
+]
+
+[[package]]
+name = "schedule"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0c/91/b525790063015759f34447d4cf9d2ccb52cdee0f1dd6ff8764e863bcb74c/schedule-1.2.2.tar.gz", hash = "sha256:15fe9c75fe5fd9b9627f3f19cc0ef1420508f9f9a46f45cd0769ef75ede5f0b7", size = 26452, upload-time = "2024-06-18T20:03:14.634Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/a7/84c96b61fd13205f2cafbe263cdb2745965974bdf3e0078f121dfeca5f02/schedule-1.2.2-py3-none-any.whl", hash = "sha256:5bef4a2a0183abf44046ae0d164cadcac21b1db011bdd8102e4a0c1e91e06a7d", size = 12220, upload-time = "2024-05-25T18:41:59.121Z" },
 ]
 
 [[package]]

@@ -178,6 +178,20 @@ def test_native_read_receipt_supplies_interest_or_blocks_continuation(core, tmp_
     assert context["self_interests"][0]["independent_days"] == 1
     assert context["execution_outcomes"][0]["state"] == "DONE"
     assert core.life_topics.retained_result(second)["result"]["text"]
+    saved = core.store.one(
+        "SELECT proposal_json FROM life_activity_results WHERE job_id=?", (second,),
+    )
+    proposal = json.loads(saved["proposal_json"])
+    assert proposal["related_trait_ids"] == [context["self_interests"][0]["trait_id"]]
+    for invalid in (["unrelated-trait"], "unrelated-trait", None, []):
+        changed = {**proposal, "related_trait_ids": invalid}
+        core.store.execute("UPDATE life_activity_results SET proposal_json=? WHERE job_id=?",
+                           (json.dumps(changed), second))
+        with pytest.raises(CoreError, match="LIFE_DRAFT_CHANGED"):
+            core.life_topics.retained_result(second)
+    core.store.execute("UPDATE life_activity_results SET proposal_json=? WHERE job_id=?",
+                       (saved["proposal_json"], second))
+    assert core.life_topics.retained_result(second)["result"]["text"]
     with core.store.transaction():
         core.ledger.expire_events(core.store, ["evt_test_1"], core.clock())
     saved = core.store.one("SELECT * FROM life_activity_results WHERE job_id=?", (second,))
