@@ -35,6 +35,8 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
 
     core.clock.now = datetime.now(UTC)
     feedback(core)
+    directory = Path(__file__).parents[1] / ".local/test-results"
+    directory.mkdir(parents=True, exist_ok=True)
 
     async def scenario():
         async with console_page(core, tmp_path) as page:
@@ -46,6 +48,7 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
             assert "半衰期 3 小时" in await card.inner_text()
             await card.get_by_text("最近趋势与变化来源", exact=True).click()
             assert "明确的正向互动反馈" in await card.inner_text()
+            await page.screenshot(path=str(directory / "mood-console-desktop.png"), full_page=True)
             for label in ("暂停心情滤镜", "恢复心情滤镜", "重新计算心情"):
                 await page.get_by_role("button", name=label, exact=True).click()
                 await page.get_by_role("dialog").get_by_role(
@@ -53,11 +56,15 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
                 await page.get_by_role("dialog").wait_for(state="hidden")
                 await page.locator("#page[aria-busy=false]").wait_for()
             await page.set_viewport_size({"width": 390, "height": 844})
+            await page.locator("#side").evaluate(
+                "node => { getComputedStyle(node).transform; return Promise.all("
+                "node.getAnimations().map(a => a.finished.catch(() => {}))); }")
+            await page.locator("#toast").wait_for(state="hidden")
+            await page.get_by_text("最近趋势与变化来源", exact=True).click()
             assert await page.evaluate(
                 "document.documentElement.scrollWidth <= innerWidth")
-            target = Path(__file__).parents[1] / ".local/test-results/mood-console-mobile.png"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            await page.screenshot(path=str(target), full_page=True)
+            await page.evaluate("window.scrollTo({top: 0, left: 0, behavior: 'instant'})")
+            await page.screenshot(path=str(directory / "mood-console-mobile.png"), full_page=True)
             await page.get_by_role("button", name="清除心情", exact=True).click()
             await page.get_by_role("dialog").get_by_role(
                 "button", name="清除心情", exact=True).click()

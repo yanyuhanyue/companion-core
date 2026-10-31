@@ -84,6 +84,19 @@ PAD 依次表示愉悦度、唤醒度、支配感。表达参考为即时值加�
 worker、MockTransport 外部模型和模拟 OneBot 投递，检查三轮聊天只产生三次调用。
 原有相关服务回归和控制台真实浏览器交互另行运行。准确命令与结果见本次本地验证回执。
 
+2026-10-31 本地回执：实现候选 `eeddedf`（main `a64018c` 之上）固定后运行
+`./scripts/check.ps1 -TestFiles ... -JunitXml .local/mood-final-check.xml`：全仓 Ruff 通过，
+22 个相关测试文件 **357 passed**，包含新的 32 个心情/独立 worker 场景、Life 新证据逻辑、
+聊天轮次控制、Ledger/来源遗忘、迁移与原有服务回归。实际完整文件清单保存在该 JUnit。
+该回执是本地相关检查，不代表完整 PR CI。
+
+控制台使用官方 Nginx 1.31.8、锁定哈希的 Playwright 1.64.0 和本机 Edge，在真实 TLS
+代理下验证心情控制与原有交流偏好重置：**2 passed**；回执 `.local/mood-browser.xml`。
+截图保存在 `.local/test-results/mood-console-desktop.png` 和
+`.local/test-results/mood-console-mobile.png`。截图等待侧栏动画和提交提示结束后保存。
+后端与浏览器检查使用相同实现源码；文档检查另以 `./scripts/check.ps1 -Docs` 验证。
+文档检查 **200 passed**；JavaScript 语法与 `git diff --check` 通过。
+
 这类合成检查证明接线和状态性质，不能证明真实模型的表达自然度。真人对照采用相同
 材料各运行“关闭心情”和“开启心情”两组，匿名比较以下场景：
 
