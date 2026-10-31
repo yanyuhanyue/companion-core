@@ -257,6 +257,7 @@ async def one_case(work, variant, case, catalog, template):
         output_rate=2_000_000,
         # The frozen benchmark keeps its pre-humanlike-defaults baseline explicit.
         memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
+        operator_hot_reload=False,  # Fixed configuration; cases bypass native task claiming.
         conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
     )
     with closing(sqlite3.connect(template)) as source:
