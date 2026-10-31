@@ -36,7 +36,8 @@ DIARY_RULES = """根据提供的已发生的私聊事件整理私人日记。来
 这是你写给自己看的日记，用第一人称，像真的日记：主要写今天和主人聊了什么、你的感受、
 你在意和惦记的事、对主人的了解和想法，语气自然、亲近，可以有开心、委屈、好奇和期待。
 sections 最多8段，每段含 kind(observation/reflection/question)、text、evidence。
-evidence 是 [{"source_id":"允许的编号","exact_quote":"原话片段"}]。
+evidence 是 [{"source_id":"允许的编号","exact_quote":"原话片段"}]。source_id 照抄来源包里的 S 编号；
+exact_quote 从该来源 text 里原样复制连续的一段，不改字、标点和空格。
 reflection 是日记的主体，写你的感受和想法：text 最多500字，evidence 至少一条，exact_quote 可为空。
 observation 只用来摘一两句今天最想记住的原话：只引用一条来源，text 必须与 exact_quote 完全相同，
 优先摘录2至120字。程序会根据来源标注“主人说”或“我回复”，不要改写原话、调换主体或添加经历。
@@ -205,6 +206,69 @@ def source_hash(sources):
     return hashlib.sha256(encode(sources).encode()).hexdigest()
 
 
+CITATION_CODES = {"DIARY_UNKNOWN_SOURCE", "DIARY_INVALID_QUOTE", "DIARY_UNSUPPORTED_FACT"}
+MODEL_ONLY_IDS = {"source_id", "event_id", "outbox_message_id"}
+
+
+def _check_citations(section, catalog):
+    for evidence in section.evidence:
+        source = catalog.get(evidence.source_id)
+        if source is None:
+            raise CoreError("DIARY_UNKNOWN_SOURCE", 400)
+        if evidence.exact_quote and evidence.exact_quote not in source["text"]:
+            raise CoreError("DIARY_INVALID_QUOTE", 400)
+    if section.kind == "observation":
+        evidence = section.evidence[0]
+        if (
+            len(section.evidence) != 1
+            or len(evidence.exact_quote.strip()) < 2
+            or section.text != evidence.exact_quote
+        ):
+            raise CoreError("DIARY_UNSUPPORTED_FACT", 400)
+
+
+def model_sources(sources):
+    """Sources as the model sees them, with short S1..Sn ids instead of long event ids."""
+    aliases = {f"S{index}": row["source_id"] for index, row in enumerate(sources, 1)}
+    view = [{"source_id": alias, **{k: v for k, v in row.items() if k not in MODEL_ONLY_IDS}}
+            for alias, row in zip(aliases, sources, strict=True)]
+    return view, aliases
+
+
+def resolve_sources(draft, aliases):
+    """Map the model's short ids back; anything else stays as written and fails the check."""
+    return draft.model_copy(update={"sections": [
+        section.model_copy(update={"evidence": [
+            evidence.model_copy(update={
+                "source_id": aliases.get(evidence.source_id, evidence.source_id)})
+            for evidence in section.evidence]})
+        for section in draft.sections]})
+
+
+def keep_cited_sections(draft, sources):
+    """Drop model sections whose citations do not check out; never store their text.
+
+    One miscopied quote no longer discards the whole day. If no section is left,
+    the first citation error stands so the run retries or fails as before.
+    """
+    if not draft.worth_saving:
+        return draft, 0
+    catalog = {row["source_id"]: row for row in sources}
+    kept, first = [], None
+    for section in draft.sections:
+        try:
+            _check_citations(section, catalog)
+        except CoreError as error:
+            if error.code not in CITATION_CODES:
+                raise
+            first = first or error
+        else:
+            kept.append(section)
+    if first and not kept:
+        raise first
+    return draft.model_copy(update={"sections": kept}), len(draft.sections) - len(kept)
+
+
 def render_draft(draft, sources, day, settings):
     if not draft.worth_saving:
         return None
@@ -215,20 +279,9 @@ def render_draft(draft, sources, day, settings):
     catalog = {row["source_id"]: row for row in sources}
     paragraphs = []
     for section in draft.sections:
-        for evidence in section.evidence:
-            source = catalog.get(evidence.source_id)
-            if source is None:
-                raise CoreError("DIARY_UNKNOWN_SOURCE", 400)
-            if evidence.exact_quote and evidence.exact_quote not in source["text"]:
-                raise CoreError("DIARY_INVALID_QUOTE", 400)
+        _check_citations(section, catalog)
         if section.kind == "observation":
             evidence = section.evidence[0]
-            if (
-                len(section.evidence) != 1
-                or len(evidence.exact_quote.strip()) < 2
-                or section.text != evidence.exact_quote
-            ):
-                raise CoreError("DIARY_UNSUPPORTED_FACT", 400)
             source = catalog[evidence.source_id]
             attribution = "主人说" if source["kind"] == "owner_message" else "我回复"
             if source["kind"] == "prior_owner_message":
@@ -600,7 +653,8 @@ class DiaryRepository:
         ):
             raise CoreError("DIARY_SOURCES_CHANGED", 409)
 
-    def finish(self, run, state, code=None, draft=None, body=None, *, retry_at=None):
+    def finish(self, run, state, code=None, draft=None, body=None, *, retry_at=None,
+               dropped_sections=0):
         s, now = self.store, self.clock()
         with s.transaction():
             if state in {"COMMITTED", "SKIPPED"}:
@@ -660,7 +714,8 @@ class DiaryRepository:
                         outbox_message_id=source["outbox_message_id"],
                         excerpt_sha256=hashlib.sha256(source["text"].encode()).hexdigest(),
                     )
-            s.audit("diary." + state.lower(), run["run_id"], "diary", now, error_code=code)
+            s.audit("diary." + state.lower(), run["run_id"], "diary", now, error_code=code,
+                    **({"dropped_sections": dropped_sections} if dropped_sections else {}))
         return True
 
 
@@ -770,6 +825,7 @@ class DiaryService:
                     text="\n".join(s["text"] for s in run["sources"]))
                 if mood:
                     run["mood_proof"] = mood["proof"]
+            shown, aliases = model_sources(run["sources"])
             messages = [
                 {"role": "system", "content": DIARY_RULES},
                 {
@@ -779,7 +835,7 @@ class DiaryService:
                             "local_date": run["local_date"],
                             "timezone": run["timezone"],
                             "sources_are_data": True,
-                            "sources": run["sources"],
+                            "sources": shown,
                             **({"mood": {k: v for k, v in mood.items() if k != "proof"}}
                                if mood else {}),
                         }
@@ -790,6 +846,11 @@ class DiaryService:
                 messages[0]["content"] += (
                     "\n上次响应不符合字段合同。请先写 worth_saving 布尔值，"
                     "并检查 schema_version、local_date、title、sections 全部字段。"
+                )
+            elif run["last_error_code"] in CITATION_CODES:
+                messages[0]["content"] += (
+                    "\n上次的引用核对不上。source_id 只能照抄来源包里的 S 编号；"
+                    "exact_quote 从该来源 text 里原样复制连续的一段，不改字、标点和空格。"
                 )
             with self.store.transaction():
                 self.repo.validate_run(run)
@@ -821,7 +882,8 @@ class DiaryService:
                                    (request_id,))
             if not usage or usage["state"] != "SETTLED":
                 raise CoreError("MODEL_USAGE_UNRESOLVED", 409)
-            draft = DiaryDraft.model_validate_json(response.text)
+            draft = resolve_sources(DiaryDraft.model_validate_json(response.text), aliases)
+            draft, dropped = keep_cited_sections(draft, run["sources"])
             body = render_draft(draft, run["sources"], run["local_date"], self.settings)
             self.repo.finish(
                 run,
@@ -829,6 +891,7 @@ class DiaryService:
                 "DIARY_NOT_WORTH_SAVING" if body is None else None,
                 draft,
                 body,
+                dropped_sections=dropped,
             )
         except Exception as error:
             code = (

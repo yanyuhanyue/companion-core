@@ -262,7 +262,8 @@ def test_real_http_recall_recompute_and_native_worker_preserve_sources_and_accou
                 during=revoke_in_flight if recall_during_model else None,
             )
             assert len(diary_payloads) == 2
-            assert originals[0] not in {item["event_id"] for item in diary_payloads[-1]["sources"]}
+            # The model sees short source ids only; the recalled event appears nowhere.
+            assert originals[0] not in json.dumps(diary_payloads[-1], ensure_ascii=False)
             assert "准备撤回" not in json.dumps(diary_payloads[-1], ensure_ascii=False)
             if recall_during_model:
                 assert core.diary.get_day(day, core.settings.owner_qq_id) is None
