@@ -2,20 +2,19 @@
 Autonomy engines: tactical layer algorithms for exploration control and scheduling.
 """
 
-from datetime import datetime, timedelta
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from companion.autonomy import (
-    ExplorationStrategy,
+    DEPTH_LEVELS,
     DepthDecision,
+    ExplorationStrategy,
     InterestPriority,
     SchedulingPolicy,
     calculate_roi,
     days_between,
-    DEPTH_LEVELS,
 )
-
 
 # ============================================================================
 # Exploration Depth Controller

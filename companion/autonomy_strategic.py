@@ -2,8 +2,8 @@
 Autonomy engines: strategic layer algorithms for portfolio optimization and self-reflection.
 """
 
-from datetime import datetime, timedelta
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 from companion.autonomy import (
@@ -15,7 +15,6 @@ from companion.autonomy import (
     sessions_to_depth,
 )
 from companion.util import uid
-
 
 # ============================================================================
 # Interest Portfolio Optimizer

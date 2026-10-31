@@ -10,11 +10,11 @@ from urllib.parse import parse_qs
 
 import httpx
 import pytest
+from companion_onebot_bridge.meme_discovery import BraveImages, run_discovery
 
 from companion_meme_sources import DiscoveryLimits, ReviewApproval, Usage
 from companion_meme_sources.fetch import PublicFetcher
 from companion_onebot_bridge.meme_catalog import MemeCatalog
-from companion_onebot_bridge.meme_discovery import BraveImages, run_discovery
 from companion_onebot_bridge.meme_library import MemeLibrary
 from tests.test_next_memes_catalog import check, metadata, png
 

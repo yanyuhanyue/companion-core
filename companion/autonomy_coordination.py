@@ -2,12 +2,11 @@
 Multi-goal coordinator: conflict detection and resolution for concurrent exploration goals.
 """
 
-from typing import Any
 import json
+from typing import Any
 
 from companion.autonomy import GoalConflict, ResourceAllocation
 from companion.util import uid
-
 
 # ============================================================================
 # Conflict Detection

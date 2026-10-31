@@ -7,11 +7,11 @@ on top of the existing Life loop execution layer.
 """
 
 from datetime import datetime, timedelta
-from typing import Literal, Any
+from typing import Any, Literal
+
 from pydantic import Field, model_validator
 
 from companion.protocol import StrictModel
-
 
 # ============================================================================
 # Tactical Layer: Exploration Depth Control

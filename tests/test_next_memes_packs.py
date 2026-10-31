@@ -8,10 +8,10 @@ import zipfile
 
 import httpx
 import pytest
+from companion_onebot_bridge.meme_discovery import run_discovery
 
 from companion_meme_sources.community import CommunityPacks, archive_images, bounded_archive
 from companion_onebot_bridge.meme_catalog import MemeCatalog
-from companion_onebot_bridge.meme_discovery import run_discovery
 from companion_onebot_bridge.meme_library import MemeLibrary
 from tests.test_next_memes_catalog import check, png
 from tests.test_next_memes_discovery import DurableBudget, async_check, resolver, review

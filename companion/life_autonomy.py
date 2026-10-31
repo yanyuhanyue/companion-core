@@ -7,21 +7,21 @@ from typing import Any
 
 from companion.autonomy import (
     ExplorationStrategy,
-    InterestPriority,
     InterestPortfolio,
+    InterestPriority,
     PortfolioStrategy,
     sessions_to_depth,
 )
 from companion.autonomy_store import AutonomyStore
-from companion.autonomy_tactical import (
-    should_continue_exploration,
-    update_exploration_metrics,
-    select_next_exploration_target,
-)
 from companion.autonomy_strategic import (
-    rebalance_portfolio,
     apply_portfolio_changes,
     generate_reflection,
+    rebalance_portfolio,
+)
+from companion.autonomy_tactical import (
+    select_next_exploration_target,
+    should_continue_exploration,
+    update_exploration_metrics,
 )
 from companion.util import uid
 

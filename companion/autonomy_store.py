@@ -2,14 +2,14 @@
 Autonomy store: database operations for tactical and strategic layers.
 """
 
-from datetime import datetime
 import json
+from datetime import datetime
 from typing import Any
 
 from companion.autonomy import (
     ExplorationStrategy,
-    InterestPriority,
     InterestPortfolio,
+    InterestPriority,
     PortfolioChange,
     ReflectionInsight,
 )
