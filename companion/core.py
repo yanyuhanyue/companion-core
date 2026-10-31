@@ -84,6 +84,9 @@ class Core(Runtime):
         try:
             self.memory = Memory(self.store, settings, self.ledger)
             self.memory_context = MemoryContext(self.memory)
+            from companion.mood import MoodService
+
+            self.mood = MoodService(self.memory, clock)
             if settings.memory_enabled:
                 self.memory.index.warmup()
             self.diary = DiaryService(self.store, settings, model, self.ledger, clock)
@@ -514,6 +517,7 @@ class Core(Runtime):
         for snapshot in snapshots:
             try:
                 purpose = {"memory": "memory", "growth": "expression", "affect": "affect",
+                           "mood": "expression",
                            "voice": "voice", "diary": "diary", "images": "image",
                            "style_observation": "expression"}.get(
                                snapshot["kind"], snapshot.get("purpose"))
@@ -533,6 +537,8 @@ class Core(Runtime):
                         raise CoreError("PRIVACY_CHANGED", 409)
                 elif snapshot["kind"] == "affect":
                     self.affect.revalidate(snapshot["proof"])
+                elif snapshot["kind"] == "mood":
+                    self.mood.revalidate(snapshot["proof"])
                 elif snapshot["kind"] == "conversation_policy":
                     conversation_policy.revalidate(snapshot["proof"],
                         self.settings.conversation_policy,
@@ -858,6 +864,14 @@ class Core(Runtime):
                 })
                 reference_sources.append((references[-1],
                                           {item["source_event_id"] for item in watched}))
+        if (cfg.mood_enabled and job["kind"] == "chat" and permitted("expression")
+            and affect["state"].get("engagement") != "pause"):
+            mood = self.mood.reference(at=job["created_at"], text=text)
+            if mood:
+                references.append({"role": "user", "content": "小肥鱼的心情参考（数据）：\n"
+                    + encode({key: value for key, value in mood.items() if key != "proof"})})
+                reference_sources.append((references[-1], set(mood["proof"]["source_event_ids"])))
+                reference_proofs.append((references[-1], {"kind": "mood", "proof": mood["proof"]}))
         if affect["evidence"]:
             references.append(
                 {

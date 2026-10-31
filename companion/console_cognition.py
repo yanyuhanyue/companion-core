@@ -85,6 +85,10 @@ class AffectReset(StrictModel):
     confirm: Literal[True]
 
 
+class MoodControl(StrictModel):
+    action: Literal["pause", "resume", "clear", "recompute"]
+
+
 class SourceGrantAction(StrictModel):
     action: Literal["revoke", "forget"]
 
@@ -122,6 +126,24 @@ def register_console_cognition_routes(app, prefix, auth, write, reset_affect, gr
     async def affect_reset(body: AffectReset, request: Request,
                            idempotency_key: str = Header(default="")):
         return await reset_affect(request, idempotency_key, body.model_dump())
+
+    @app.get(prefix + "/mood", dependencies=auth)
+    async def mood():
+        return app.state.core.mood.snapshot()
+
+    @app.post(prefix + "/mood/control", dependencies=auth)
+    async def mood_control(body: MoodControl, request: Request,
+                           idempotency_key: str = Header(default="")):
+        def apply(core, owner_check):
+            from companion.mood import service_for_store
+
+            with core.store.transaction():
+                owner_check()
+                service = service_for_store(core.store, core.settings, core.clock, core.ledger)
+                return service.control(
+                    body.action, core.settings.owner_qq_id, request_id=idempotency_key)
+
+        return await write(request, idempotency_key, body.model_dump(), apply)
 
     @app.get(prefix + "/goals", dependencies=auth)
     async def goals():

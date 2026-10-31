@@ -425,8 +425,12 @@ class LifeTopics:
         if material is not None:
             from companion.life_context import decision_context
 
-            context = decision_context(s, self.settings, sources, approved["sha256"], now)
-            if (not isinstance(material, dict) or sha(material) != result["source_sha256"]
+            if not isinstance(material, dict):
+                raise CoreError("LIFE_DRAFT_CHANGED", 409)
+            context = decision_context(s, self.settings, sources, approved["sha256"], now,
+                mood_at=(material.get("decision_context", {}).get("mood") or {}).get(
+                    "evaluated_at"))
+            if (sha(material) != result["source_sha256"]
                 or material.get("decision_context") != context):
                 raise CoreError("LIFE_DRAFT_CHANGED", 409)
         try:
@@ -956,7 +960,7 @@ class LifeTopics:
                 return job_id
         return None
 
-    def material(self, topic_id):
+    def material(self, topic_id, *, mood_at=None):
         s, now = self.store, self.clock()
         topic = s.one("SELECT * FROM life_topics WHERE topic_id=?", (topic_id,))
         if (
@@ -1044,7 +1048,8 @@ class LifeTopics:
         )]
         from companion.life_context import decision_context, read_targets
 
-        context = decision_context(s, self.settings, sources, approved["sha256"], now)
+        context = decision_context(s, self.settings, sources, approved["sha256"], now,
+                                   mood_at=mood_at)
         if any(item["requires_reconciliation"] for item in context["execution_outcomes"]):
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
 

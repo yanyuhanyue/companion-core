@@ -161,13 +161,17 @@ class ErasureLedger:
                     raise ValueError("invalid sequence")
                 if record.get("target_type", "memory") not in {
                     "memory", "event_batch", "raw_retention", "diary", "source_grant",
-                    "input_recall", "affect_reset",
+                    "input_recall", "affect_reset", "mood_reset",
                 }:
                     raise ValueError("unknown erasure target")
                 if record.get("target_type") == "affect_reset":
                     from companion.affect import validate_reset_record
 
                     validate_reset_record(record)
+                if record.get("target_type") == "mood_reset":
+                    from companion.mood import validate_reset_record as validate_mood_reset
+
+                    validate_mood_reset(record)
                 if record.get("target_type") == "input_recall":
                     from companion.input_recall import marker_key, validate_source
 
@@ -256,6 +260,26 @@ class ErasureLedger:
                 os.fsync(stream.fileno())
             store.audit("affect.reset", record["erasure_id"], "owner", now)
         result = apply_feedback_reset(store, record)
+        self.record_complete(store, record)
+        return result
+
+    def reset_mood(self, store, request_id, now):
+        from companion.mood import apply_reset, reset_record, reset_target
+
+        if not store.db.in_transaction:
+            raise RuntimeError("ERASURE_REQUIRES_TRANSACTION")
+        target = reset_target(request_id)
+        lines = self.read()
+        record = next((item for item in lines[1:] if
+            item.get("target_type") == "mood_reset" and item["memory_id"] == target), None)
+        if record is None:
+            record = reset_record(len(lines), request_id, now)
+            with self.path.open("a", encoding="utf-8") as stream:
+                stream.write(encode(record) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            store.audit("mood.reset", record["erasure_id"], "owner", now)
+        result = apply_reset(store, record)
         self.record_complete(store, record)
         return result
 
@@ -418,7 +442,7 @@ class ErasureLedger:
             previous = store.one("SELECT value FROM runtime_meta WHERE key=?", (CONTRACT_KEY,))
             repair_contracts = not previous or previous["value"] != signature
             for record in lines[1:]:
-                if record.get("target_type") == "affect_reset":
+                if record.get("target_type") in {"affect_reset", "mood_reset"}:
                     # Rebuild the durable reset barrier even from an older backup.
                     self.apply(store, record)
                     continue
@@ -489,7 +513,7 @@ class ErasureLedger:
             self.apply_input_recall(store, record, repair=True)
             return
 
-        if record.get("target_type") == "affect_reset":
+        if record.get("target_type") in {"affect_reset", "mood_reset"}:
             self.apply(store, record)
             return
 
@@ -530,6 +554,13 @@ class ErasureLedger:
 
         if record.get("target_type") == "input_recall":
             self.apply_input_recall(store, record)
+            return
+
+        if record.get("target_type") == "mood_reset":
+            from companion.mood import apply_reset
+
+            apply_reset(store, record)
+            self.record_complete(store, record)
             return
 
         if record.get("target_type") == "affect_reset":
