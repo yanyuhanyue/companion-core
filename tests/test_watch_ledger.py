@@ -184,7 +184,8 @@ def chat_job(core, text="最近看了什么有意思的"):
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_chat_cites_recent_judgements_only_when_enabled(core, enabled):
+@pytest.mark.parametrize("text", ["最近看了什么有意思的", "你来说点什么"])
+def test_chat_cites_recent_judgements_only_when_enabled(core, enabled, text):
     configure(core)
     event_id = observe(core, 11)
     core.store.execute(
@@ -193,9 +194,19 @@ def test_chat_cites_recent_judgements_only_when_enabled(core, enabled):
         "'JUDGED',1,?,'[]',?,?)", (event_id, JUDGEMENT["take"], core.clock(), core.clock()))
     if enabled:
         enable(core)
-    prompt = json.dumps(core.context(chat_job(core)), ensure_ascii=False)
+    job = chat_job(core, text)
+    messages = core.context(job)
+    prompt = json.dumps(messages, ensure_ascii=False)
     assert (JUDGEMENT["take"] in prompt) is enabled
     assert "watch_obs_11" not in prompt
+    if enabled:
+        reference = next(item["content"] for item in messages
+                         if JUDGEMENT["take"] in item["content"])
+        assert "主人邀请你起个话题时可以选用" in reference
+        assert "来源未记录，不要说是你自己挑的" in reference
+        assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
+                              (job["job_id"], event_id))
+    assert core.model.calls == []
 
 
 def test_a_later_video_analysis_is_judged_again_but_a_shallower_read_is_not(core, tmp_path):

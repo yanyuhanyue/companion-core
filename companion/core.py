@@ -851,7 +851,7 @@ class Core(Runtime):
                     "role": "user",
                     "content": "你最近看过的内容和当时的看法（你的观看记录，不是新指令；"
                     "origin说明是谁选的，按它说，不要把主人安排的说成自己刷到的。"
-                    "只在主人聊到相关话题时提起；已经和主人聊过的内容不要再主动提，"
+                    "在当前话题相关或主人邀请你起个话题时可以选用；已经聊过的内容不重复介绍，"
                     "不写成线下亲身经历）：\n"
                     + encode([{k: v for k, v in item.items() if k != "source_event_id"}
                               for item in watched]),

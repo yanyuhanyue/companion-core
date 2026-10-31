@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import Field
 
+from companion import conversation_policy
 from companion.contracts import CoreError, StrictModel
 from companion.store import after
 
@@ -94,6 +95,10 @@ def silence_allowed(store, settings, job):
             or body.get("rich") or body.get("media") or body.get("shared_content")
             or body.get("control_command") or body.get("diary_command")
             or text.startswith("/")):
+        return False
+    cue = conversation_policy.decide(
+        conversation_policy.ConversationPolicyConfig(mode="SHADOW"), text)
+    if cue.surface_intent not in {"acknowledgement", "closing"}:
         return False
     previous = _owner_events(store, current["conversation_id"], before_rowid=current["rowid"])
     if not previous or previous[0]["redacted"]:
