@@ -1,5 +1,6 @@
 import json
 import re
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,6 +92,7 @@ def check_request_limits(approval, measured, scenario):
 def reserve(
     store, settings, job_id, scenario, messages, now, *, request_id=None, logical_request_id=None,
     clock=None, cloud_task_kind=None, cloud_task_id=None, source_check=None, tools=(),
+    generation=None,
 ):
     from companion import owner_authority
 
@@ -136,15 +138,15 @@ def reserve(
             or settings.live_text_window.image_scope != "owner_image_v1"
         ):
             raise CoreError("MODEL_IMAGE_CHAT_JOB_REQUIRED", 503)
-    autonomous = scenario not in {"chat", "qq_poke", "evaluation"}
+    autonomous = scenario not in {"chat", "qq_poke", "evaluation", "gateway"}
     if autonomous and not settings.pricing_known:
         raise CoreError("UNKNOWN_PRICING", 429)
     local = datetime.fromisoformat(now).astimezone(ZoneInfo(settings.timezone))
     month = local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
     day = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(UTC)
-    measurement = measure_request(settings, messages, scenario, tools=tools)
+    measurement = measure_request(settings, messages, scenario, tools=tools, generation=generation)
     estimated_input = measurement.reserved_input_tokens
-    output_tokens = settings.output_tokens(scenario)
+    output_tokens = measurement.output_allowance
     check_request_limits(approval, measurement, scenario)
     estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
@@ -190,7 +192,12 @@ def reserve(
         ) != video_binding:
             raise CoreError("BILI_VIDEO_MODEL_BINDING_CHANGED", 403)
         owner_view = None
-        if scenario == "evaluation":
+        if scenario == "gateway":
+            from companion import gateway
+
+            gateway.admit(store, settings, clock or (lambda: now), request_id,
+                          estimate, estimated_input)
+        elif scenario == "evaluation":
             from companion import evaluation
 
             evaluation.admit(store, settings, clock, job_id, request_id, messages,
@@ -376,7 +383,7 @@ def reserve(
                 window_id=approval.window_id,
                 contract_sha256=contract_hash,
                 payload_sha256=paid_budget.sha(model_payload(
-                    settings, messages, scenario, tools=tools)),
+                    settings, messages, scenario, tools=tools, generation=generation)),
                 snapshot_json=encode(snapshot),
                 measurement_json=encode(measurement.receipt()),
                 reserved_micro_usd=estimate,
@@ -401,6 +408,8 @@ def reserve(
                     "measurement": {"version": 1, "sha256": paid_budget.sha(
                         measurement.receipt())},
                     **({"quota": quota} if quota else {}),
+                    **({"gateway": gateway.binding(store, request_id)}
+                       if scenario == "gateway" else {}),
                 },
             )
             from companion.private_life import freeze_model
@@ -408,9 +417,9 @@ def reserve(
             if owner_view is not None:
                 store.execute("UPDATE model_admissions SET authority_json=? WHERE request_id=?",
                               (encode(owner_view.authority.as_dict()), request_id))
-            elif scenario != "evaluation":
+            elif scenario not in {"evaluation", "gateway"}:
                 freeze_model(store, settings, request_id)
-            else:
+            elif scenario == "evaluation":
                 from companion import owner_authority
 
                 view = owner_authority.check_job(store, settings, clock,
@@ -510,7 +519,7 @@ def _admit(store, settings, approval, logical, estimate, now, day, month):
 
 
 def settle(store, settings, request_id, response=None, *, transport_failure=None):
-    with store.transaction():
+    with nullcontext() if store.in_write_transaction else store.transaction():
         usage = store.one("SELECT occurred_at FROM model_usage WHERE request_id=?", (request_id,))
         if usage:
             cloud_budget.sync(store, settings, usage["occurred_at"])
@@ -711,6 +720,10 @@ def _actual_limit_violations(store, admission, snapshot, usage, actual):
     day = day.astimezone(UTC).isoformat(timespec="microseconds")
     month = month.astimezone(UTC).isoformat(timespec="microseconds")
     limits = []
+    if usage["scenario"] == "gateway":
+        from companion.gateway import actual_limits
+
+        limits.extend(actual_limits(store, usage, actual))
     if usage["scenario"] == "evaluation":
         from companion.evaluation import COST
 
@@ -854,8 +867,8 @@ def _persist_accounting(
     cloud_budget.sync_reference(store, "model", admission["request_id"])
 
 
-def _check_measurement(settings, admission, messages, scenario, *, tools=()):
-    measured = measure_request(settings, messages, scenario, tools=tools)
+def _check_measurement(settings, admission, messages, scenario, *, tools=(), generation=None):
+    measured = measure_request(settings, messages, scenario, tools=tools, generation=generation)
     check_request_limits(settings.paid_model, measured, scenario)
     if measured.reserved_input_tokens != admission["input_bound"]:
         raise CoreError("MODEL_INPUT_ESTIMATE_CHANGED", 503)
@@ -869,7 +882,7 @@ def _check_measurement(settings, admission, messages, scenario, *, tools=()):
 
 
 async def complete(model, store, settings, request_id, messages, scenario, clock, *,
-                   source_check=None, tools=(), trace_id=None):
+                   source_check=None, tools=(), trace_id=None, generation=None):
     """Dispatch a reservation and settle every outcome before returning to its caller."""
     from companion.model import (
         ModelClient,
@@ -885,7 +898,7 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
     try:
         response = await _dispatch(model, store, settings, request_id, messages, scenario, clock,
                                    dispatch=dispatch, source_check=source_check, tools=tools,
-                                   trace_id=trace_id)
+                                   trace_id=trace_id, generation=generation)
         return response
     except ModelResponseError as error:
         # An unusable reply can still carry observed usage.
@@ -905,13 +918,17 @@ async def complete(model, store, settings, request_id, messages, scenario, clock
         settle(store, settings, request_id, response, transport_failure=transport_failure)
         from companion import model_carry
 
-        if model_carry.active(settings):
+        if model_carry.active(settings) and scenario != "gateway":
             model_carry.close_owned(store, settings, request_id, dispatch, clock())
 
 
 def _model_scope(store, settings, clock, request_id, scenario, *, yield_to_chat=True):
     from companion import evaluation, live_text, owner_authority
 
+    if scenario == "gateway":
+        from companion import gateway
+
+        return gateway.check_model(store, settings, clock, request_id)
     if scenario == "evaluation":
         return evaluation.check_request(store, settings, clock, request_id)
     if owner_authority.required(store, settings):
@@ -922,7 +939,7 @@ def _model_scope(store, settings, clock, request_id, scenario, *, yield_to_chat=
 
 async def _dispatch(
     model, store, settings, request_id, messages, scenario, clock, *, dispatch=None,
-    source_check=None, tools=(), trace_id=None,
+    source_check=None, tools=(), trace_id=None, generation=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
     from companion import live_text, notices, owner_authority, runtime_config
@@ -947,7 +964,7 @@ async def _dispatch(
     from companion.model import ModelAdmission, ModelClient, model_payload
 
     if (owner_authority.required(store, settings) or live_text.active(store, settings)
-        or scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption"}):
+        or scenario in {"content_vision", *VIDEO_SCENARIOS, "meme_caption", "gateway"}):
         if not isinstance(model, ModelClient):
             raise CoreError("LIVE_TEXT_MODEL_ADAPTER_REQUIRED", 503)
         target_url = (settings.paid_model.video_input.endpoint if scenario in VIDEO_SCENARIOS
@@ -1000,9 +1017,9 @@ async def _dispatch(
         if row["contract_sha256"] != paid_budget.sha(snapshot):
             raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
         if row["payload_sha256"] != paid_budget.sha(model_payload(
-            settings, messages, scenario, tools=tools)):
+            settings, messages, scenario, tools=tools, generation=generation)):
             raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-        _check_measurement(settings, row, messages, scenario, tools=tools)
+        _check_measurement(settings, row, messages, scenario, tools=tools, generation=generation)
         if store.one(
             "SELECT 1 FROM runtime_meta WHERE key IN "
             "('model_budget_blocked','model_budget_restore_required')"
@@ -1034,7 +1051,7 @@ async def _dispatch(
         dispatch.update(owned=True, io_started_at=now)
         from companion import model_carry
 
-        if model_carry.active(settings):
+        if model_carry.active(settings) and scenario != "gateway":
             dispatch["owner_tuple"] = model_carry._tuple({**row, "io_started_at": now})
     # Re-read after lock acquisition, input estimation and journal fsync; no stale
     # pre-lock timestamp may authorize an HTTP request after the deadline.
@@ -1098,10 +1115,11 @@ async def _dispatch(
                 if row["contract_sha256"] != paid_budget.sha(paid_budget.snapshot(settings)):
                     raise CoreError("PAID_WINDOW_CONTRACT_CHANGED", 503)
                 if row["payload_sha256"] != paid_budget.sha(
-                    model_payload(settings, messages, scenario, tools=tools),
+                    model_payload(settings, messages, scenario, tools=tools, generation=generation),
                 ):
                     raise CoreError("MODEL_ADMISSION_PAYLOAD_CHANGED", 503)
-                _check_measurement(settings, current, messages, scenario, tools=tools)
+                _check_measurement(settings, current, messages, scenario, tools=tools,
+                                   generation=generation)
             if source_check is not None:
                 # Caller-owned evidence may expire while an HTTP hook awaits.
                 # Keep this synchronous proof inside the existing transport fence.
@@ -1109,7 +1127,8 @@ async def _dispatch(
                     source_check()
             with store.transaction():
                 cloud_budget.mark_dispatched(store, "model", request_id, clock())
-            if live_text.active(store, settings) and not owner_authority.required(store, settings):
+            if (scenario != "gateway" and live_text.active(store, settings)
+                and not owner_authority.required(store, settings)):
                 if settings.live_text_window.execution == "local_synthetic" and not isinstance(
                     model.client._transport_for_url(request.url), httpx.MockTransport
                 ):
@@ -1121,7 +1140,7 @@ async def _dispatch(
             else:
                 paid = paid_budget.contract(settings, clock())
                 lease_deadline = datetime.fromisoformat(current["lease_until"])
-                if owner_authority.required(store, settings):
+                if scenario == "gateway" or owner_authority.required(store, settings):
                     # Budget synchronization can race a separate owner's STOP.
                     # Re-read its native authority/consent before the final clock sample.
                     current_job = _model_scope(store, settings, clock, request_id, scenario)
@@ -1150,7 +1169,8 @@ async def _dispatch(
     if isinstance(model, ModelClient):
         try:
             return await model.complete(messages, scenario, admission=admission,
-                                        **({"tools": tools} if tools else {}))
+                                        **({"tools": tools} if tools else {}),
+                                        **({"generation": generation} if generation else {}))
         finally:
             if dispatch is not None:
                 dispatch["transport_returned"] = True

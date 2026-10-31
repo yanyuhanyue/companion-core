@@ -62,7 +62,7 @@ packages = [
 [tool.hatch.build]
 exclude = [
     ".local/**", ".venv/**", "data/**", "privacy/**", "backups/**", "dist/**",
-    ".env", "config.toml", "**/__pycache__/**", "**/*.py[cod]", "*.sqlite*", "*.log",
+    ".env", "config.toml", "gateway.toml", "**/__pycache__/**", "**/*.py[cod]", "*.sqlite*", "*.log",
     ".pytest_cache/**", ".ruff_cache/**", ".codex-remote-attachments/**",
     ".playwright-cli/**", "output/playwright/**",
     "**/*.owner-images/**",

@@ -3,6 +3,7 @@
 .local
 .env
 config.toml
+gateway.toml
 data
 privacy
 backups

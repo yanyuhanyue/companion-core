@@ -52,9 +52,10 @@ API 可以接收并发事件；数据库事务与唯一索引负责幂等。生�
 
 ## 后续里程碑
 
-[Universal Gateway G0 合同](universal-gateway.md)定义独立客户端、模型别名、模式、会话、
-记忆范围与费用归属。G0 仅提供离线合同和测试；现有内部 model_route、QQ Bridge、自然聊天、
-心情、主观认知和 Life 保持原职责。后续按 Passthrough → Companion → RP 推进。
+[Universal Gateway 合同](universal-gateway.md)定义独立客户端、模型别名、模式、会话、
+记忆范围与费用归属。G1a 提供默认关闭、限回环的独立文本 Passthrough 入口和 worker，
+复用原预算账本与最终派发校验。现有 QQ、自然聊天、心情、主观认知和 Life 保持原职责。
+SSE、Companion 和 RP 分别后续交付。
 
 | 阶段 | 后续能力 | 开启条件 |
 |---|---|---|

@@ -69,6 +69,14 @@ class ModelResponse:
     cache_usage_present: bool | None = None
 
 
+@dataclass(frozen=True)
+class GenerationOptions:
+    """Gateway generation values included in the measured, admitted wire payload."""
+
+    max_tokens: int
+    temperature: float | None = None
+
+
 class ModelResponseError(CoreError):
     """An unusable provider response whose received usage still needs accounting."""
 
@@ -134,11 +142,15 @@ def model_route(settings, scenario):
         settings.provider, settings.model_name, settings.model_url.rstrip("/"))
 
 
-def model_payload(settings, messages, scenario, *, tools=()):
+def model_payload(settings, messages, scenario, *, tools=(), generation=None):
     from companion.agent_messages import tool_payload
 
     if tools and scenario != "chat":
         raise CoreError("MODEL_TOOLS_SCOPE_REQUIRED", 503)
+    if generation is not None and (scenario != "gateway" or not isinstance(
+        generation, GenerationOptions,
+    ) or type(generation.max_tokens) is not int or generation.max_tokens < 1):
+        raise CoreError("MODEL_GENERATION_SCOPE_REQUIRED", 503)
     video = (settings.paid_model.video_input
              if scenario in {"content_video", "content_video_preview"}
              and settings.paid_model else None)
@@ -166,6 +178,10 @@ def model_payload(settings, messages, scenario, *, tools=()):
         payload.update(tools=[TOOL], tool_choice="auto")
     if tools:
         payload.update(tools=tool_payload(tools), tool_choice="auto")
+    if generation is not None:
+        payload["max_tokens"] = generation.max_tokens
+        if generation.temperature is not None:
+            payload["temperature"] = generation.temperature
     return payload
 
 
@@ -174,7 +190,7 @@ class ModelClient:
         self.settings = settings
         self.client = client
 
-    async def complete(self, messages, scenario, *, admission=None, tools=()):
+    async def complete(self, messages, scenario, *, admission=None, tools=(), generation=None):
         if self.settings.mode == "demo":
             if scenario == "qq_poke":
                 return ModelResponse('{"kind":"none"}', 0, 0)
@@ -194,7 +210,8 @@ class ModelClient:
             return ModelResponse(text, 0, 0)
         from companion.paid_budget import sha
 
-        payload = model_payload(self.settings, messages, scenario, tools=tools)
+        payload = model_payload(self.settings, messages, scenario, tools=tools,
+                                generation=generation)
         if (
             not isinstance(admission, ModelAdmission)
             or admission.consumed
@@ -321,6 +338,10 @@ class ModelClient:
             reason = body["choices"][0].get("finish_reason")
             received.finish_reason = (reason if isinstance(reason, str)
                                       and reason in {"stop", "length", "content_filter"} else None)
+            if scenario == "gateway" and (received.finish_reason is None
+                or message.get("role") != "assistant" or len(body["choices"]) != 1
+                or body["choices"][0].get("index", 0) != 0):
+                raise ModelResponseError("MODEL_INVALID_RESPONSE", 502, received)
             return received
         except (httpx.TimeoutException, httpx.TransportError) as error:
             # Only the library exception class is kept; its message may echo request data.
