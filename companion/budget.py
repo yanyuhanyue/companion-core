@@ -148,7 +148,10 @@ def reserve(
     check_request_limits(approval, measurement, scenario)
     estimate = cost(settings, estimated_input, output_tokens, scenario=scenario)
     with store.transaction():
-        from companion import live_text, owner_authority
+        from companion import live_text, owner_authority, runtime_config
+
+        configuration = runtime_config.bind(store, settings, clock or (lambda: now),
+                                           "job:" + job_id) if job_id is not None else None
 
         if job_id is not None:
             from companion.reply_revision import check_job
@@ -352,6 +355,9 @@ def reserve(
             state="RESERVED",
             occurred_at=now,
         )
+        if configuration is not None:
+            runtime_config.bind(store, settings, clock or (lambda: now), "model:" + request_id,
+                                snapshot=configuration)
         if approval:
             from companion.model import model_payload
 
@@ -919,13 +925,14 @@ async def _dispatch(
     source_check=None, tools=(), trace_id=None,
 ):
     """Persisted admission is fenced before adapter I/O."""
-    from companion import live_text, notices, owner_authority
+    from companion import live_text, notices, owner_authority, runtime_config
     from companion.telemetry import phase
 
     if source_check is not None:
         with phase("dispatch_sources", trace_id):
             source_check()
     with phase("dispatch_scope", trace_id):
+        runtime_config.check_request(store, settings, request_id)
         _model_scope(store, settings, clock, request_id, scenario)
         notices.check_request(store, settings, request_id, clock() if callable(clock) else clock)
     if settings.mode != "live":
@@ -1046,6 +1053,7 @@ async def _dispatch(
             # Every user hook has completed. Custody and current runtime checks
             # remain here; the adapter only binds the actual HTTP request bytes.
             with phase("transport_custody", trace_id), store.transaction():
+                runtime_config.check_request(store, settings, request_id)
                 custody = paid_budget.journal(store, approval)
                 quota_state = cumulative.check(store, settings, clock(), custody=custody)
                 current_job = _model_scope(store, settings, clock, request_id, scenario)

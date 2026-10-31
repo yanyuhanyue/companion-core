@@ -1,0 +1,86 @@
+"""The shipped worker loop, isolated clock and mocked provider transport only."""
+
+import argparse
+import asyncio
+import json
+import sys
+import traceback
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+
+from companion import operator_config
+from companion.__main__ import worker
+from companion.config import Settings
+from companion.core import Core
+
+
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--now", required=True)
+    parser.add_argument("--tasks", type=int, default=2)
+    args = parser.parse_args()
+    raw = await asyncio.to_thread(Path(args.config).read_text, "utf-8")
+    settings = operator_config.load(Settings.model_validate_json(raw))
+    if settings.model_url != "https://synthetic.invalid/v1" or (
+        settings.model_key.get_secret_value() != "synthetic-key"
+    ):
+        raise ValueError("SYNTHETIC_PROCESS_ONLY")
+    calls, completed = [], 0
+
+    async def gate():
+        async with asyncio.timeout(25):
+            await asyncio.to_thread(sys.stdin.readline)
+
+    async def hook(request):
+        print("BEFORE_REQUEST", flush=True)
+        await gate()
+
+    def provider(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": "synthetic configuration reply"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 2}})
+
+    class SyntheticCore(Core):
+        def __init__(self, settings, model):
+            super().__init__(settings, model, clock=lambda: args.now)
+
+        def fail_job(self, job, code):
+            traceback.print_exception(sys.exception(), file=sys.stderr)
+            return super().fail_job(job, code)
+
+        async def run_once(self, *worker_args, **kwargs):
+            nonlocal completed
+            result = await super().run_once(*worker_args, **kwargs)
+            terminal = self.store.one("SELECT COUNT(*) n FROM jobs WHERE state IN "
+                                      "('SUCCEEDED','FAILED','CANCELLED')")["n"]
+            if terminal > completed:
+                completed = terminal
+                print("COMPLETED", flush=True)
+                if completed < args.tasks:
+                    await gate()
+            return result
+
+    original = httpx.AsyncClient
+
+    class SyntheticClient(original):
+        def __init__(self, **options):
+            options.setdefault("transport", httpx.MockTransport(provider))
+            options.setdefault("event_hooks", {"request": [hook]})
+            super().__init__(**options)
+
+    with (patch("companion.core.Core", SyntheticCore),
+          patch("companion.__main__.httpx.AsyncClient", SyntheticClient),
+          patch("companion.shutdown.requested", lambda: completed >= args.tasks),
+          patch("companion.retrieval.SemanticIndex.warmup", lambda self: None)):
+        await worker(settings)
+    print(json.dumps({"calls": len(calls), "time_labels": [any(
+        "当前时间参考" in str(message["content"]) for message in call["messages"])
+        for call in calls]}), flush=True)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

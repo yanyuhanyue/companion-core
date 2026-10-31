@@ -404,6 +404,18 @@ def policy_problem(settings, policy):
     return None
 
 
+def stored_policy_problem(store, settings):
+    """Configuration compatibility for display; this never authorizes execution."""
+    row = _latest(store)
+    if row is None or row["policy_redacted"]:
+        return None
+    try:
+        policy = OwnerGrantPolicy.model_validate_json(row["policy_json"])
+    except ValueError:
+        return CoreError("OWNER_AUTHORITY_POLICY_INVALID", 409)
+    return policy_problem(settings, policy)
+
+
 def _check_policy(settings, policy):
     if policy.capture and policy.capture.identity_sha256 != _sha(
         [settings.owner_qq_id, settings.bot_qq_id]

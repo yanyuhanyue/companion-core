@@ -153,6 +153,8 @@ def core_factory(tmp_path_factory, migrated_database):
             conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
             # Exact-message tests predate time labels; tests/test_time_context.py covers them.
             chat_time_labels=False,
+            # Exact-wire/legacy scenarios opt into runtime switching explicitly.
+            operator_hot_reload=False,
         )
         # SQLite backup includes committed WAL data without copying another test's state.
         with closing(sqlite3.connect(migrated_database)) as source:

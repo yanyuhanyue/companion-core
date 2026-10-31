@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 
-from companion import owner_authority, shutdown
+from companion import owner_authority, runtime_config, shutdown
 from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.model import ModelClient
@@ -17,6 +17,7 @@ async def life_worker(settings):
     async with httpx.AsyncClient(timeout=settings.timeout_seconds, trust_env=False) as client:
         core = Core(settings, ModelClient(settings, client))
         worker_id = uid("life_worker")
+        core.store.configuration_worker = "life-worker"
         try:
             selector = native_selector(core, worker_id)
             # Preserve the former Diary worker's startup custody recovery under
@@ -31,6 +32,7 @@ async def life_worker(settings):
             with Wakeup(core.store, settings, "life-worker", core.clock) as wake:
                 scan, deadline = wake.before_scan(), None
                 while not shutdown.requested():
+                    runtime_config.boundary(core.store, settings, core.clock)
                     selected = await selector.step()
                     hint = selected.result.next_deadline
                     if hint is not None and hint >= scan.started_at:

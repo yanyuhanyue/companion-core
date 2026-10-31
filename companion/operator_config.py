@@ -1,4 +1,4 @@
-"""Owner configuration proposals, encrypted at rest and applied on process startup."""
+"""Encrypted owner configuration versions; runtime admission lives in runtime_config."""
 
 import base64
 import hashlib
@@ -6,6 +6,8 @@ import hmac
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -49,7 +51,14 @@ class ConsoleConfig(BaseModel):
 
 class ConfigurationChange(StrictModel):
     expected_version: int = Field(ge=0)
-    changes: dict = Field(min_length=1, max_length=100)
+    changes: dict = Field(default_factory=dict, max_length=100)
+    restore_version: int | None = Field(default=None, ge=0, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def one_operation(self):
+        if bool(self.changes) == (self.restore_version is not None):
+            raise ValueError("provide changes or a historical version")
+        return self
 
 
 # Identity, ledger locations and signed approvals are deployment custody, not browser inputs.
@@ -58,6 +67,7 @@ EXCLUDED = frozenset({
     "database", "erasure_ledger", "embedding_cache_dir", "paid_model", "live_text_window",
     "observation_adapters", "executive", "media", "cloud_budget", "timezone", "mode",
     "diary_auto_share",
+    "operator_hot_reload",
 })
 LABELS = {
     "chat_thinking": "聊天思考强度", "chat_thinking_tokens": "思考额外输出（token）",
@@ -172,15 +182,21 @@ def latest(store):
     return store.one("SELECT * FROM operator_configuration ORDER BY version DESC LIMIT 1")
 
 
-def _raw(value):
+def _raw(value, *, reveal=True):
     if isinstance(value, SecretStr):
-        return value.get_secret_value()
+        return value.get_secret_value() if reveal else value
     if isinstance(value, BaseModel):
-        return _raw(value.model_dump(mode="python"))
+        # Serialization exclusions describe the public wire shape, not effective values.
+        return {name: _raw(getattr(value, name), reveal=reveal)
+                for name in type(value).model_fields}
     if isinstance(value, dict):
-        return {key: _raw(item) for key, item in value.items()}
+        return {key: _raw(item, reveal=reveal) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_raw(item) for item in value]
+        return [_raw(item, reveal=reveal) for item in value]
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return _raw(asdict(value), reveal=reveal)
     return value
 
 
@@ -209,13 +225,7 @@ def _merge(original, changes):
 
 def _candidate(settings, overrides):
     try:
-        values = settings.model_dump(mode="python")
-        # An empty write-only field can be excluded from serialization. Preserve
-        # its actual type so a null roundtrip still means "keep the desired key".
-        for name in type(settings).model_fields:
-            value = getattr(settings, name)
-            if isinstance(value, SecretStr):
-                values[name] = value
+        values = _raw(settings, reveal=False)
         return type(settings).model_validate(_merge(values, overrides))
     except (ValidationError, ValueError, TypeError):
         # Never include rejected input in an exception, even if it contains a credential.
@@ -246,7 +256,7 @@ def _endpoint_changes(before, after, changes):
 
 
 def load(settings):
-    """Read a committed desired version once; in-flight processes retain their settings."""
+    """Startup still applies complete versions, including restart-only fields."""
     path = Path(settings.database).resolve()
     if not path.is_file():
         return settings
@@ -256,12 +266,41 @@ def load(settings):
             "SELECT 1 FROM sqlite_master WHERE name='operator_configuration'",
         ).fetchone():
             return settings
-        row = db.execute("SELECT * FROM operator_configuration ORDER BY version DESC LIMIT 1")
-        record = row.fetchone()
-        if record:
-            result = _candidate(settings, _decode(dict(record), settings))
+        rows = db.execute("SELECT * FROM operator_configuration ORDER BY version DESC")
+        error = None
+        for record in rows:
+            try:
+                result = _candidate(settings, _decode(dict(record), settings))
+            except CoreError as failure:
+                if not settings.operator_hot_reload:
+                    raise
+                error = error or failure.code
+                continue
             result._operator_config_version = record["version"]
+            result._operator_config_base = settings._operator_config_base or encode(_raw(settings))
+            result._operator_config_error = error
             return result
+        if error:
+            # Recover a previously observed effective snapshot only if the deployment
+            # still proves its complete cold identity. No credential or policy is guessed.
+            from companion import runtime_config
+
+            try:
+                observed = db.execute("SELECT value FROM runtime_meta WHERE key=?",
+                                      (runtime_config.PREFIX + "worker",)).fetchone()
+                key = json.loads(observed["value"])["snapshot_id"] if observed else None
+                saved = db.execute("SELECT * FROM operator_runtime_snapshots WHERE snapshot_id=?",
+                                   (key,)).fetchone()
+                snapshot = runtime_config.validate_record(settings, saved)
+                result = _candidate(settings, {"chat_time_labels": snapshot.chat_time_labels})
+                result._operator_config_version = snapshot.version
+                result._operator_config_base = (settings._operator_config_base
+                                                or encode(_raw(settings)))
+                result._operator_config_error = error
+                return result
+            except (CoreError, sqlite3.Error, ValueError, TypeError, KeyError):
+                pass
+            raise CoreError(error, 503)
     return settings
 
 
@@ -302,8 +341,21 @@ def _field_type(schema, definitions):
 
 
 def view(store, settings):
+    from companion import owner_authority, runtime_config
+
     row = latest(store)
-    desired = _candidate(settings, _decode(row, settings))
+    problem = None
+    try:
+        desired = _candidate(settings, _decode(row, settings))
+    except CoreError as error:
+        desired, problem = settings, error.code
+    classification = runtime_config.classify(settings, desired)
+    approval_problem = owner_authority.stored_policy_problem(store, desired)
+    workers = runtime_config.workers(store, settings)
+    primary = next((w for w in workers if w["worker"] == "worker"), None)
+    active_version = primary["active_version"] if primary else settings._operator_config_version
+    active_labels = (runtime_config._read(store, settings, primary["snapshot_id"]).chat_time_labels
+                     if primary else settings.chat_time_labels)
     document = type(settings).model_json_schema()
     properties, definitions = document["properties"], document.get("$defs", {})
     fields = []
@@ -311,13 +363,19 @@ def view(store, settings):
         if key in EXCLUDED:
             continue
         value, active = getattr(desired, key), getattr(settings, key)
+        if key == "chat_time_labels":
+            active = active_labels
         schema = properties[key]
         kind, nullable = _field_type(schema, definitions)
         if isinstance(value, SecretStr):
             kind = "secret"
         item = {"key": key, "label": LABELS.get(key, key), "group": _group(key),
                 "type": kind, "value": _safe(value), "active_value": _safe(active),
-                "nullable": nullable, "effect": "restart_and_window_handoff", "schema": schema}
+                "active_source": "worker" if key == "chat_time_labels" and primary else "startup",
+                "nullable": nullable,
+                "effect": "task_boundary" if key in runtime_config.HOT_FIELDS else (
+                    "restart_and_reapproval" if key in runtime_config.REVIEW_FIELDS
+                    else "restart_and_window_handoff"), "schema": schema}
         for bound in ("minimum", "maximum"):
             if bound in schema:
                 item[bound] = schema[bound]
@@ -326,11 +384,24 @@ def view(store, settings):
         fields.append(item)
     version = row["version"] if row else 0
     history = [{"version": item["version"], "created_at": item["created_at"],
-                "fields": json.loads(item["fields_json"]), "effect": "restart_and_window_handoff"}
+                "fields": json.loads(item["fields_json"])}
                for item in store.rows("SELECT version,created_at,fields_json FROM "
                                       "operator_configuration ORDER BY version DESC LIMIT 20")]
-    return {"version": version, "active_version": settings._operator_config_version,
-            "pending_restart": version != settings._operator_config_version,
+    pending_restart = bool(classification["restart_fields"] or (
+        not settings.operator_hot_reload and version != settings._operator_config_version))
+    pending = version != active_version or any(w["active_version"] != version for w in workers)
+    expected_reasons = {None, "CONFIGURATION_RESTART_REQUIRED", "CONFIGURATION_REAPPROVAL_REQUIRED",
+                        "CONFIGURATION_HOT_RELOAD_DISABLED"}
+    worker_error = next((w["reason"] for w in workers if w["saved_version"] == version
+                         and w["reason"] not in expected_reasons), None)
+    return {"version": version, "active_version": active_version,
+            "startup_version": settings._operator_config_version,
+            "pending_version": version if pending else None,
+            "pending_restart": pending_restart, "pending_reload": pending and not pending_restart,
+            "requires_reapproval": bool(classification["review_fields"] or approval_problem),
+            "approval_reason": approval_problem.code if approval_problem else None,
+            "hot_reload_enabled": settings.operator_hot_reload,
+            "error": problem or worker_error, "workers": workers, **classification,
             "fields": fields, "history": history}
 
 
@@ -354,15 +425,34 @@ def update(store, settings, body, key, now, *, owner_check=None, clock=None):
             version = current["version"] if current else 0
             if body.expected_version != version:
                 raise CoreError("CONFIGURATION_VERSION_CHANGED", 409)
-            overrides = _decode(current, settings)
-            desired = _candidate(settings, overrides)
-            validated = _candidate(desired, body.changes)
-            _endpoint_changes(desired, validated, body.changes)
-            overrides.update({name: _raw(getattr(validated, name)) for name in body.changes})
+            try:
+                overrides = _decode(current, settings)
+                desired = _candidate(settings, overrides)
+            except CoreError:
+                if body.restore_version is None:
+                    raise
+                overrides, desired = {}, settings
+            changes = body.changes
+            if body.restore_version is not None:
+                historical = store.one("SELECT * FROM operator_configuration WHERE version=?",
+                                       (body.restore_version,))
+                if body.restore_version and historical is None:
+                    raise CoreError("CONFIGURATION_VERSION_NOT_FOUND", 404)
+                base = (type(settings).model_validate_json(settings._operator_config_base)
+                        if settings._operator_config_base else settings)
+                selected = _candidate(base, _decode(historical, settings))
+                changes = {name: _raw(getattr(selected, name))
+                           for name in type(settings).model_fields
+                           if name not in EXCLUDED}
+            validated = _candidate(desired, changes)
+            _endpoint_changes(desired, validated, changes)
+            overrides.update({name: _raw(getattr(validated, name)) for name in changes})
             encrypted = _cipher(settings).encrypt(encode(_raw(overrides)).encode()).decode()
             store.insert("operator_configuration", version=version + 1, request_id=key,
                          request_sha256=fingerprint, encrypted_overrides=encrypted,
-                         fields_json=encode(sorted(body.changes)), created_at=now)
+                         fields_json=encode(sorted(name for name in changes if (
+                             _raw(getattr(desired, name)) != _raw(getattr(validated, name))
+                         ))), created_at=now)
             store.audit("configuration.saved", str(version + 1), "console", now,
-                        fields=sorted(body.changes), effect="restart_and_window_handoff")
+                        fields=sorted(changes), effect="saved_pending_validation")
     return view(store, settings)

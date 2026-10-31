@@ -93,6 +93,11 @@ def _sources(store, settings, clock, job, *, executing=False):
             store, job["kind"], job["job_id"]),
         executing=executing)
     reply_revision.check_job(store, job)
+    from companion import runtime_config
+
+    # Older prepared deliveries retain their original responsibility. New tasks
+    # carry a signed configuration binding as well as their existing source proof.
+    runtime_config.get(store, settings, "job:" + job["job_id"])
     if job["kind"] == "chat":
         owner_input.source(store, settings, view, job["event_id"], clock(), allow_commands=True)
         owner_input.check_history(store, settings, clock, job, _history_proof(store, job))

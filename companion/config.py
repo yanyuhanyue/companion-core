@@ -432,6 +432,9 @@ class Settings(BaseModel):
     # Local time line and history/memory dates in chat context; on by default.
     chat_time_labels: bool = Field(default=True, exclude_if=lambda value: value is True)
     _operator_config_version: int = PrivateAttr(default=0)
+    _operator_config_base: str | None = PrivateAttr(default=None)
+    _operator_config_error: str | None = PrivateAttr(default=None)
+    operator_hot_reload: bool = True
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     cloud_budget: CloudBudgetConfig = Field(default_factory=CloudBudgetConfig)
     owner_qq_id: str

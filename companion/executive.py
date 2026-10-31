@@ -288,6 +288,9 @@ class Executive:
             )
             if not row:
                 return None
+            from companion import runtime_config
+
+            runtime_config.bind(self.store, self.settings, self.clock, "tool:" + row["task_id"])
             token = uid("lease")
             self.store.execute(
                 "UPDATE tool_tasks SET state='LEASED',lease_token=?,lease_until=? "
@@ -297,6 +300,9 @@ class Executive:
             return self.get(row["task_id"])
 
     def leased(self, task, state):
+        from companion import runtime_config
+
+        runtime_config.check(self.store, self.settings, "tool:" + task["task_id"])
         current = self.get(task["task_id"])
         if (
             current["state"] != state

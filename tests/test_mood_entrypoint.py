@@ -13,7 +13,9 @@ from tests.conftest import run
 from tests.support.native_consumer_entry import environment
 
 
-def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(core, tmp_path):
+@pytest.mark.parametrize("hot_reload", [False, True])
+def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(core, tmp_path, hot_reload):
+    core.settings.operator_hot_reload = hot_reload
     workspace = Path(__file__).resolve().parents[1]
 
     async def worker(label):
