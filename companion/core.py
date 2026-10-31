@@ -1656,7 +1656,7 @@ class Core(Runtime):
                     self.life_topics.submit_goal(job, self.goals)
                 if notice_parts == []:
                     notices.record(self.store, self.settings, job, [], now)
-                silent = (generated_reply and job["kind"] == "chat"
+                silent = (reply_is_current and generated_reply and job["kind"] == "chat"
                           and turn_taking.skipped(self.store, self.settings, job, reply))
                 if reply_is_current and not silent and (
                     job["kind"] != "activity" or should_send

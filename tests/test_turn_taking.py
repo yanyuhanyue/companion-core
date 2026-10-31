@@ -6,7 +6,9 @@ import pytest
 
 from companion import turn_taking
 from companion.config import Settings
+from companion.contracts import LeaseRequest
 from companion.model import ModelResponse
+from companion.transport import lease_deliveries
 from companion.turn_taking import SILENCE_RULES, TurnTakingConfig
 from tests.conftest import ingest, run
 from tests.notice_owner_fixtures import run_notice
@@ -44,6 +46,11 @@ def turn(core, number, text, answer=None, *, deliver=True):
 
 def system(core, index=-1):
     return core.model.calls[index][0][0]["content"]
+
+
+def lease(core):
+    return lease_deliveries(core.store, core.settings, LeaseRequest(worker_id="bridge"),
+                            core.clock())["items"]
 
 
 def outbox(core):
@@ -135,10 +142,11 @@ def test_a_lull_after_a_lively_chat_gets_one_follow_up(core):
     assert payload["silent_minutes"] == 15
     owner = [item["owner"] for item in payload["turns"]]
     assert owner == ["我刚看完那部电影", "还行，就是有点仓促"]
-    row = core.store.one("SELECT action_type,content_json FROM outbox ORDER BY rowid DESC")
+    row = core.store.one("SELECT action_type FROM outbox ORDER BY rowid DESC")
     assert row["action_type"] == "qq.private.proactive"
-    assert json.loads(row["content_json"])["text"] == "对了，里面那个配角其实挺出彩的。"
-    core.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE state='PENDING'",
+    items = lease(core)  # The delivery recheck accepts the follow-up's own queued row.
+    assert [item["content"] for item in items] == [{"text": "对了，里面那个配角其实挺出彩的。"}]
+    core.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE state='LEASED'",
                        (core.clock(),))
     core.clock.advance(900)
     assert not turn_taking.flush(core.store, core.settings, core.clock())  # No double text.
@@ -157,6 +165,18 @@ def test_the_owner_speaking_first_cancels_the_follow_up(core):
     assert core.store.one("SELECT state FROM jobs WHERE job_id=?",
                           (job["job_id"],))["state"] == "CANCELLED"
     assert not core.store.rows("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
+
+
+def test_the_owner_speaking_before_delivery_withholds_a_queued_follow_up(core):
+    enable(core)
+    lively(core)
+    core.clock.advance(900)
+    core.model.activity.append("对了，里面那个配角其实挺出彩的。")
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    assert run(run_notice(core))
+    ingest(core, 3, "我回来了")
+    assert not any(item["content"]["text"] == "对了，里面那个配角其实挺出彩的。"
+                   for item in lease(core))
 
 
 def test_a_model_skip_sends_nothing_and_the_daily_cap_holds(core):
@@ -208,3 +228,19 @@ def test_erasing_a_turn_cancels_a_queued_follow_up(core):
     run(core.run_once("notice", job_id=job["job_id"]))
     assert len(core.model.calls) == calls
     assert not core.store.rows("SELECT 1 FROM outbox WHERE action_type='qq.private.proactive'")
+
+
+def test_the_life_worker_selector_schedules_and_words_the_follow_up(core):
+    from companion.autonomous_selector import native_selector
+    from tests.test_autonomous_selector import drain
+
+    enable(core)
+    lively(core)
+    core.clock.advance(900)
+    core.model.activity.append("对了，里面那个配角其实挺出彩的。")
+    turns = run(drain(native_selector(core, "life-test")))
+    assert "follow_up" in {turn.lane for turn in turns if turn.result.progressed}
+    items = lease(core)
+    assert [item["content"] for item in items] == [{"text": "对了，里面那个配角其实挺出彩的。"}]
+    assert {row["scenario"] for row in core.store.rows(
+        "SELECT scenario FROM model_usage WHERE state='SETTLED'")} == {"chat", "activity"}

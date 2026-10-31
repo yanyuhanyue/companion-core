@@ -205,6 +205,7 @@ def flush(store, settings, now):
 def follow_up_material(store, ref, now):
     """Recent turns before the lull; any newer owner input supersedes the follow-up."""
     from companion import reply_revision
+    from companion.paid_budget import sha
 
     reply = store.one(
         "SELECT o.rowid,o.*,c.platform,c.scope,c.owner_actor_id FROM outbox o "
@@ -216,8 +217,11 @@ def follow_up_material(store, ref, now):
     owner = _owner_events(store, reply["conversation_id"], limit=FOLLOW_UP_TURNS)
     if not owner or owner[0]["event_id"] != reply["origin_event_id"]:
         raise CoreError(reply_revision.SUPERSEDED, 409)
-    if store.one("SELECT 1 FROM outbox WHERE conversation_id=? AND rowid>? LIMIT 1",
-                 (reply["conversation_id"], reply["rowid"])):
+    # The follow-up's own queued message is the one newer row it may see at delivery.
+    own = "evt_" + sha("notice:followup:" + ref)
+    if store.one("SELECT 1 FROM outbox WHERE conversation_id=? AND rowid>? "
+                 "AND origin_event_id IS NOT ? LIMIT 1",
+                 (reply["conversation_id"], reply["rowid"], own)):
         raise CoreError(reply_revision.SUPERSEDED, 409)
     turns, sources = [], []
     for row in reversed(owner):
