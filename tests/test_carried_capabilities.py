@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from companion import budget, owner_authority
-from companion.capabilities import public_source_readiness, snapshot
+from companion.capabilities import open_unknown, public_source_readiness, snapshot
 from companion.config import ObservationAdapterConfig
 from companion.contracts import CoreError
 from companion.owner_authority_protocol import AuthorityStop
@@ -128,3 +128,36 @@ def test_signed_link_after_carry_reaches_independent_reader_and_sdk_context(
     run(scenario())
     assert core.store.one("SELECT * FROM model_usage WHERE request_id=?", (case.request_id,)) == (
         financial)
+
+
+@pytest.mark.parametrize("later_unknown", [False, True])
+def test_closed_unknown_does_not_block_the_provider_slot_retry(core, tmp_path, later_unknown):
+    # fail_job waits out a provider-slot race unless an UNKNOWN still holds a slot;
+    # journal-closed UNKNOWNs do not, exactly as admission and readiness count them.
+    reader_carry(core, tmp_path)
+    if later_unknown:
+        current_unknown(core)
+    assert core.store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN'")
+    assert open_unknown(core.store, core.settings) is False
+
+
+def test_unclosed_unknown_still_blocks_the_provider_slot_retry(core):
+    now = core.clock()
+    core.store.insert("model_usage", usage_id="usage_open", request_id="model_open",
+                      scenario="chat", provider="test", model="test", input_tokens=0,
+                      cached_input_tokens=0, output_tokens=0, billed_micro_usd=0,
+                      is_estimate=1, occurred_at=now, state="UNKNOWN", pricing_known=1)
+    assert open_unknown(core.store, core.settings) is True
+
+
+def test_owner_authority_chat_waits_out_a_provider_slot_race(core, tmp_path):
+    # Production runs OwnerAuthority without a live text window. A chat that lost the
+    # single provider slot before admission must wait, not fail silently.
+    reader_carry(core, tmp_path)
+    job_id = authorized_job(core, number=3)
+    job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+    attempts = job["attempts"]
+    core.fail_job(job, "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED")
+    assert core.store.one("SELECT state,attempts FROM jobs WHERE job_id=?", (job_id,)) == {
+        "state": "RETRY_WAIT", "attempts": attempts - 1}
+    assert core.store.rows("SELECT * FROM model_usage WHERE job_id=?", (job_id,)) == []

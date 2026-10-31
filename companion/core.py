@@ -1893,11 +1893,14 @@ class Core(Runtime):
                     (code, after(now, 60), now, job["job_id"], job["lease_token"]),
                 )
                 return
+            from companion.capabilities import open_unknown
+
             if (code == "MODEL_PROVIDER_CONCURRENCY_EXHAUSTED"
-                and private_life.enabled(self.settings)
+                and (private_life.enabled(self.settings)
+                     or owner_authority.required(self.store, self.settings))
                 and not self.store.one("SELECT 1 FROM model_usage WHERE job_id=?",
                                        (job["job_id"],))
-                and not self.store.one("SELECT 1 FROM model_usage WHERE state='UNKNOWN'")):
+                and not open_unknown(self.store, self.settings)):
                 # A different process occupied the provider slot after claim. No
                 # attempt was admitted here, so wait without spending a retry or STOP.
                 self.store.execute(

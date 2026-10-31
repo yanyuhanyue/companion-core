@@ -59,6 +59,13 @@ def _carry_view(store, settings):
         return {}
 
 
+def open_unknown(store, settings):
+    """Whether an UNKNOWN call still holds a provider slot, counted as admission counts it."""
+    closed = _carry_view(store, settings).get("model_closures", {})
+    return any(row["request_id"] not in closed
+               for row in store.rows("SELECT request_id FROM model_usage WHERE state='UNKNOWN'"))
+
+
 def _live_blocks(store, settings, now, *, cumulative_state=None, carry_view=None):
     approval = settings.live_text_window
     reasons = []
