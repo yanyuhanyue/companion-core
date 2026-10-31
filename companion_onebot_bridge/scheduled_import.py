@@ -54,7 +54,7 @@ async def run_scheduled_backfill(runtime, core, onebot, wake):
     logger.info(f"Starting scheduled meme import via backfill (run #{state.total_runs + 1})")
 
     try:
-        added = await backfill(runtime, core, onebot, wake)
+        added = (await backfill(runtime, core, onebot, wake))["added"]
         state.last_scan_time = datetime.now(UTC)
         state.total_runs += 1
         state.save()
@@ -89,6 +89,9 @@ def schedule_import_job(
 
 async def run_scheduler_loop(stop):
     """Background task for scheduled jobs."""
+    from .app import pause
+
     while not stop.is_set():
         schedule.run_pending()
-        await asyncio.sleep(60)
+        # A stop must not wait out the minute: drain cancels loops after its grace.
+        await pause(stop, 60)

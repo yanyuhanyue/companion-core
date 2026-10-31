@@ -59,7 +59,7 @@ def test_scheduled_backfill_executes(temp_state_file):
 
     with patch("companion_onebot_bridge.backfill.backfill",
                new_callable=AsyncMock) as mock_backfill:
-        mock_backfill.return_value = 3  # 3 messages added
+        mock_backfill.return_value = {"added": 3}  # 3 messages added
 
         run(run_scheduled_backfill(runtime, core, onebot, wake))
 

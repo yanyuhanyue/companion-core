@@ -81,8 +81,18 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
                             if owner_notices.put(runtime, frame, received_at, ws.remote_address):
                                 wake.set()
                                 continue
-                            if await owner_pokes.put(runtime, core, frame,
-                                                     received_at, ws.remote_address):
+                            try:
+                                poked = await owner_pokes.put(runtime, core, frame,
+                                                              received_at, ws.remote_address)
+                            except httpx.HTTPError as error:
+                                from .held_inputs import transient
+
+                                if not transient(error):
+                                    raise
+                                # Pokes are notices without history; one lost here is logged.
+                                emit("owner_poke", status="CORE_UNAVAILABLE")
+                                continue
+                            if poked:
                                 wake.set()
                                 continue
                         payload = normalize(frame, config)
@@ -94,10 +104,27 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
                         continue
                     if payload:
                         if runtime is not None:
+                            from . import held_inputs
                             from .capture import prepare_owner_input
 
-                            prepared = await prepare_owner_input(
-                                runtime, core, onebot, frame, received_at, ws.remote_address)
+                            # Behind a held frame, or while Core is unreachable, keep the frame
+                            # unverified; upload admits it once Core answers again.
+                            if held_inputs.waiting(runtime):
+                                if held_inputs.hold(runtime, frame, received_at,
+                                                    ws.remote_address):
+                                    wake.set()
+                                continue
+                            try:
+                                prepared = await prepare_owner_input(
+                                    runtime, core, onebot, frame, received_at, ws.remote_address)
+                            except httpx.HTTPError as error:
+                                if not held_inputs.transient(error):
+                                    raise
+                                metrics.emit("core_unavailable")
+                                if held_inputs.hold(runtime, frame, received_at,
+                                                    ws.remote_address):
+                                    wake.set()
+                                continue
                             if prepared is None:
                                 continue
                             payload = prepared["event"]
@@ -160,10 +187,15 @@ async def receive(config, spool, wake, stop, metrics, onebot=None, *, runtime=No
         delay = min(delay * 2, 30)
 
 
-async def upload(client, spool, wake, stop, metrics, *, runtime=None, memes=None):
+async def upload(client, spool, wake, stop, metrics, *, runtime=None, memes=None, onebot=None):
     while not stop.is_set():
         wake.clear()
         try:
+            if runtime is not None and onebot is not None:
+                from .held_inputs import promote_one
+
+                while not stop.is_set() and await promote_one(runtime, client, onebot):
+                    pass
             flush = runtime.flush_one if runtime is not None else spool.flush_one
             while payload := await flush(client):
                 metrics.accepted(payload)
@@ -310,7 +342,7 @@ async def run(config):
                     group.create_task(receive(config, spool, wake, stop, metrics, onebot,
                                               runtime=runtime, core=core)),
                     group.create_task(upload(core, spool, wake, stop, metrics,
-                                             runtime=runtime, memes=memes)),
+                                             runtime=runtime, memes=memes, onebot=onebot)),
                     group.create_task(deliver(core, onebot, spool, stop, metrics,
                                               runtime=runtime, protocol=protocol)),
                     group.create_task(transfer_media(media, stop)),
@@ -319,7 +351,30 @@ async def run(config):
                     group.create_task(run_scheduler_loop(stop)),
                 ]
                 await stop.wait()
-                await drain(tasks)
+                clean = await drain(tasks)
+        return shutdown_report(runtime, clean)
+
+
+def shutdown_report(runtime, clean):
+    """What the stopped process leaves behind; the release script reads the exit code.
+
+    An attempt that started I/O without a platform result is never replayed: the next
+    process stops the authority and the delivery goes to reconciliation.
+    """
+    from . import held_inputs, journal
+
+    plan = journal.digest(runtime.authority)
+    attempts = dict(runtime.db.execute(
+        "SELECT state,COUNT(*) FROM window_attempts WHERE plan_hash=? AND state IN "
+        "('RESERVED','IO_STARTED','UNKNOWN') GROUP BY state", (plan,)))
+    report = {"status": "CLEAN" if clean and not attempts else "UNSETTLED",
+              "cancelled": not clean, "unfinished_sends": attempts,
+              "pending_inputs": runtime.spool.pending_count,
+              "pending_results": runtime.db.execute(
+                  "SELECT COUNT(*) FROM results WHERE state='pending'").fetchone()[0],
+              "held_inputs": held_inputs.counts(runtime).get("HELD", 0)}
+    emit("bridge_shutdown_report", **report)
+    return report
 
 
 def main():
@@ -378,7 +433,9 @@ def main():
     try:
         config = BridgeConfig.load(args.config)
         if args.command == "daemon":
-            asyncio.run(run(config))
+            report = asyncio.run(run(config))
+            if report["status"] != "CLEAN":
+                raise SystemExit(3)
         elif args.command == "owner-meme-accounting-drain":
             from .meme_accounting_drain import command
 

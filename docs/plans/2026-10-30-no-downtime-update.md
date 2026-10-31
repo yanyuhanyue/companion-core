@@ -60,16 +60,32 @@ API、Bridge、Reader 和 UI 不动，授权不做 STOP/ACTIVE 循环。
   `--time 150`，worker 自己处理 SIGTERM，不依赖这两项。
 - 首次用于生产前没有在独立环境演练过整套 Docker 操作，第一次使用要有人在场观察。
 
-## 阶段 3：API 重启不丢 QQ 输入（需设计评审）
+## 阶段 3：API 重启不丢 QQ 输入（已实现）
 
-现状：Bridge 在持久化 capture 之前先向 Core 检查授权（`companion_onebot_bridge/capture.py`
-的 `runtime.check`），并丢弃超过约 30 秒的帧（`capture.py` 的 `MAX_AGE_SECONDS`，
-`owner_runtime.py` 中同样的 30 秒检查）。`app.py` 的接收循环只捕获 WebSocket 与 OS 错误，
-Core 不可达时 `httpx.HTTPError` 会让接收循环退出。
+原来 Bridge 在持久化 capture 之前先向 Core 检查授权（`capture.py` 的 `runtime.check`），
+Core 不可达时 `httpx.HTTPError` 会让接收循环退出，主人在 API 重启期间发的消息只能靠
+30 秒内的历史补收找回。
 
-方向：Core 不可达时 Bridge 先把帧写入本地 spool，Core 恢复后再检查授权并提交；接收循环
-捕获 `httpx.HTTPError` 并退避重试。这会改变授权检查的时序和帧时效规则，属于新机制，
-实现前需要单独讨论。
+现在 [`companion_onebot_bridge/held_inputs.py`](../../companion_onebot_bridge/held_inputs.py)
+把这类消息先暂存：
+
+- 只有传输错误和 5xx 会暂存，4xx（授权被拒）照旧让 Bridge 停止。暂存时只做本地检查
+  （主人私聊、30 秒收到时限），不签名、不进 inbox、不读引用和媒体，什么都不发给 Core。
+- `held_inputs` 表保存原始帧、真实收到时间和对端；Bridge journal 只记哈希（`INPUT_HELD`）。
+  有暂存时，新消息排在后面一起暂存，保持主人的发送顺序。
+- Core 恢复后，上传循环按顺序处理：先重新检查授权和撤回，再走原来的 `prepare_owner_input`
+  和 `persist_capture`，用原始收到时间签名。Core 照常检查 30 秒收到时限、授权生效时间、
+  policy 到期、撤回、擦除和保留期。
+- 每条暂存以一条 `INPUT_HOLD_CLOSED` 结束：`PROMOTED`（正式入库）、`DUPLICATE`（已由实时或
+  补收入库）或 `REJECTED` 加原因（`HOLD_EXPIRED` 超过 10 分钟、`RECALLED`、`CORE_HTTP_403`、
+  `OWNER_STOPPED` 等）。结束时删除原文。
+- OWNER STOP 会把仍在暂存的消息记为 `REJECTED/OWNER_STOPPED`，所以停写发布前要确认预检中
+  暂存输入为 0。
+- 戳一戳在 Core 不可达时记一条 `owner_poke` 日志后丢弃，不再让 Bridge 退出；它没有历史可补。
+- Bridge 启动时仍要求 Core 可达（`runtime.probe`）。
+
+旧 Bridge 镜像不认识 `INPUT_HELD`，一旦产生过暂存记录就不能再回退到旧镜像：它会以
+`OWNER_JOURNAL_RECONCILIATION_REQUIRED` 拒绝启动，不会写坏 journal。
 
 ## 阶段 4：在单元边界重新加载控制台配置
 
@@ -130,17 +146,29 @@ Bridge 停顿控制在 10 秒以内，且不丢主人消息、不产生 UNKNOWN 
   （Core 拒收授权生效前的 capture，上传被拒会让 Bridge 停止）。读取失败只记日志，
   不影响实时接收。Bridge 配置 `history_backfill = true` 才启用，随下一次停机发布写入。
 
-**5c：发布脚本**
+**5c：发布脚本（已实现）**
 
-`scripts/release_plan.py --rolling` 增加 B 类判定（只有 Bridge 镜像变化、Bridge 配置和
-spool schema 不变、授权 policy 仍然有效）。执行脚本 `scripts/rolling_bridge_release.py`：
+沿用 `EDGE` 类，不新增类别。`scripts/release_plan.py` 对只换 Bridge 的发布另外要求：
+Spool 中授权 ACTIVE 且没有 STOP 标记、没有 `RESERVED/IO_STARTED/UNKNOWN` 发送、新 Bridge 镜像与
+运行中 Core 镜像的 `companion_delivery_protocol` 摘要相同；任一项不满足即 `NOT_READY`。
+执行脚本 [`scripts/edge_release.py`](../../scripts/edge_release.py)：
 
-1. 确认授权 ACTIVE；Core 中没有 LEASED/SENDING 投递，或等它们结束（最多 60 秒）；
-2. `docker stop --time 90`，要求退出码 0、`instance.lock` 已释放、Bridge journal 中没有未完成的发送；
-3. 用只改镜像的覆盖文件启动新容器，等待：`OwnerRuntime.verify` 通过、`runtime.probe`
-   返回 `connection_ready`、日志出现 `automatic_source_connected`，再观察 20 秒没有重启；
-4. 核对环境变量、挂载、用户、命令与旧容器一致；
-5. 任一步失败：用旧镜像重新启动；旧镜像也起不来时，转为正常的 STOP 发布。
+1. 重读 Spool，确认授权 ACTIVE、没有未结发送；
+2. `docker stop --time 90`，要求退出码 0（退出报告发现未结发送时为 3）、`instance.lock` 已释放、
+   Spool 中仍没有未结发送；
+3. 用只改镜像的覆盖文件启动新容器，等待它持有 `instance.lock`、日志出现 `ws_connected`，
+   再观察 20 秒没有重启，核对环境变量、挂载、用户、命令与旧容器一致；
+4. 任一步失败：用旧镜像重新启动并停止；旧镜像也起不来时回执写 `STOP_RELEASE_REQUIRED`，
+   转为正常的 STOP 发布。
+
+Reader 和 UI 走同一脚本，只检查退出、健康检查和配置一致。
+
+**5d：补收覆盖报告（已实现）**
+
+`backfill` 每次输出 `owner_backfill`：读到的条数和时间范围、上次 capture 时间、覆盖判断
+（读满 20 条且最早一条仍晚于上次 capture 时为 `PARTIAL`，可能漏掉更早的消息）和按原因计数的
+跳过项（`OLDER_THAN_CAPTURE_BOUND` 是平台保留了但超过 30 秒收到时限的消息，`BEHIND_HELD_INPUTS`
+表示有暂存消息尚未入库）。`notices_recoverable` 恒为 false：戳一戳和撤回通知不在消息历史里。
 
 ### 预计停顿
 
@@ -150,9 +178,39 @@ spool schema 不变、授权 policy 仍然有效）。执行脚本 `scripts/roll
 
 ### 未解决
 
-- 戳一戳、撤回通知在停顿期间丢失时是否需要补收（`get_friend_msg_history` 不含通知）；
+- 戳一戳、撤回通知在停顿期间丢失时无法补收（`get_friend_msg_history` 不含通知），只在补收报告中说明；
 - 资料探测（profile probe）每分钟写两条 journal 记录，一周约 7000 条。本次已让它们的校验只做一次，
   但 journal 仍在增长；是否改为只在资料变化时记录，另行讨论。
+
+## 隔离演练（2026-10-31）
+
+在部署主机上用独立 Compose project `companion-rehearsal`（独立网络、数据目录和合成身份，
+不接触 `companion-main` 与真实 QQ）运行 API、chat worker、Bridge，以及模拟 SnowLuma 和
+HTTPS 模型的 fake 服务。起点是生产正在用的 2026.10.30 镜像，再升级到本分支镜像。
+
+| 情形 | 结果 |
+| --- | --- |
+| Bridge EDGE 升级，每 2 秒一条主人消息 | 停止到就绪 4.4 秒；35 条全部入库，其中停顿期间的 2 条由补收找回 |
+| API 停止 21 秒，持续输入 | Bridge 没有退出；16 条暂存，Core 恢复后全部 `PROMOTED`，25 条全部入库 |
+| SnowLuma 断开 8 秒并重复推送 | 补收找回断开期间的消息，覆盖 `FULL`；重复帧 `duplicate_suppressed`；20 条全部入库 |
+| R 滚动 worker，同时请求分段回复 | worker 0.7 秒退出（退出码 0），无新增 UNKNOWN；分段照常发送 |
+| R 换成无法启动的镜像 | 90 秒内未拿到锁，回到上一镜像，后续回复正常 |
+| Bridge 回退到旧镜像（已有暂存记录） | 旧镜像以 `OWNER_JOURNAL_RECONCILIATION_REQUIRED` 拒绝启动，脚本换回新镜像 |
+| 发送卡住后停止 Bridge | 发送超时记为 UNKNOWN，退出码 3，报告 `unfinished_sends: {UNKNOWN: 1}`；重启后拒绝运行，没有重发；预检 `NOT_READY` |
+| 需要迁移的 Core 镜像加 `--rolling` | 判为 B，滚动脚本拒绝 B 类计划 |
+| `--policy-change` | 判为 C |
+
+演练中发现并已修复：
+
+- 主线 Bridge 镜像缺少 `schedule` 依赖，`scheduled_import` 导入失败，新 Bridge 无法启动；
+  已加入 `deploy/onebot-bridge.lock`。调度循环原来不响应停止，最长拖满 60 秒宽限；
+- API 容器停止后其服务名没有 DNS 记录，`socket.gaierror` 绕过了 httpx 的传输错误分类，
+  使发送循环崩溃、接收循环把正在处理的帧当作断线丢弃；现在归为 `httpx.ConnectError`；
+- 预检和滚动脚本拿镜像标签与容器的镜像 ID 比较，永远等不到就绪；现在先解析为 ID；
+- 一次 R 发布后 worker 与 API 镜像不同，下一次预检找不到 worker；现在 Core 组总是包含 worker。
+
+未覆盖：Reader 和 UI 没有参与演练；配置漂移导致 policy 失效（C）只有单元测试，演练中被
+上面那条 UNKNOWN 发送先行阻断。
 
 ## 始终需要 STOP 的变更
 

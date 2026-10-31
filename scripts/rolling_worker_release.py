@@ -40,6 +40,7 @@ GRACE_SECONDS = 150
 START_SECONDS = 90
 STEADY_SECONDS = 20
 CONFIG_LABEL = "com.docker.compose.project.config_files"
+REVISION_LABELS = ("com.companion.revision", "org.opencontainers.image.revision")
 WORKDIR_LABEL = "com.docker.compose.project.working_dir"
 
 
@@ -79,9 +80,11 @@ def plan_services(plan, rows, image):
     for name, saved in plan["services"].items():
         if name not in rows or rows[name]["Image"] != saved["image"]:
             raise ValueError(f"{name} changed since the plan was made")
-    services = [name for name in ORDER if name in rows and rows[name]["Image"] == change["from"]]
+    # A worker may run a newer image than the API after an earlier rolling release.
+    services = [name for name in ORDER if name in rows and name in change["services"]
+                and rows[name]["Image"] != image]
     if not services:
-        raise ValueError("No Core worker runs the planned source image")
+        raise ValueError("No Core worker needs the planned image")
     return services
 
 
@@ -106,15 +109,21 @@ def lock_holders(path, locks_text):
 
 
 def ledger(database):
-    """Read-only: the latest authority state and the UNKNOWN model call count."""
+    """Read-only: the authority state, UNKNOWN model calls and open jobs and deliveries."""
     db = sqlite3.connect(Path(database).resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
     try:
         authority = db.execute("SELECT revision,state FROM owner_authority_revisions "
                                "ORDER BY revision DESC LIMIT 1").fetchone()
         unknown = db.execute("SELECT count(*) FROM model_usage WHERE state='UNKNOWN'").fetchone()
+        jobs = dict(db.execute("SELECT state,count(*) FROM jobs WHERE state IN "
+                               "('QUEUED','RUNNING','RETRY_WAIT') GROUP BY state"))
+        outbox = dict(db.execute("SELECT state,count(*) FROM outbox WHERE state IN "
+                                 "('PENDING','LEASED','SENDING','RETRY_WAIT',"
+                                 "'DELIVERY_UNCERTAIN') GROUP BY state"))
     finally:
         db.close()
-    return {"authority": list(authority) if authority else None, "unknown": unknown[0]}
+    return {"authority": list(authority) if authority else None, "unknown": unknown[0],
+            "jobs": jobs, "deliveries": outbox}
 
 
 def compose(row, override):
@@ -159,15 +168,22 @@ def roll(project, service, image, database, override, images, receipt):
     before = ledger(database)
     if not before["authority"] or before["authority"][1] != "ACTIVE":
         raise RuntimeError("OwnerAuthority is not ACTIVE; use the STOP procedure")
+    labels = old["Config"].get("Labels") or {}
     step = {"service": service, "old_container": old["Id"], "old_image": old["Image"],
+            # Compose labels; an image-only override does not rewrite them.
+            "deployment_revision": {key: labels[key] for key in REVISION_LABELS
+                                    if key in labels},
             "authority": before["authority"], "unknown_before": before["unknown"],
+            "jobs_before": before["jobs"], "deliveries_before": before["deliveries"],
             "stop_started": datetime.now(UTC).isoformat()}
     receipt["steps"].append(step)
     docker("stop", "--time", str(GRACE_SECONDS), old["Id"], timeout=GRACE_SECONDS + 60)
     stopped = json.loads(docker("inspect", old["Id"]).stdout)[0]["State"]
     locks = Path("/proc/locks").read_text()
     after = ledger(database)
-    step.update(exit_code=stopped["ExitCode"], unknown_after_stop=after["unknown"])
+    step.update(exit_code=stopped["ExitCode"], stopped_at=stopped["FinishedAt"],
+                unknown_after_stop=after["unknown"], jobs_after_stop=after["jobs"],
+                deliveries_after_stop=after["deliveries"])
     if stopped["Running"] or stopped["ExitCode"] != 0:
         raise RuntimeError(f"{service} did not stop cleanly (exit {stopped['ExitCode']})")
     if any(lock_holders(path, locks) for path in lock_paths(database, service)):
@@ -179,7 +195,8 @@ def roll(project, service, image, database, override, images, receipt):
     docker(*compose(old, override), "up", "-d", "--no-deps", "--no-build", "--pull", "never",
            "--force-recreate", service, timeout=300)
     new = wait_started(project, service, image, database, old)
-    step.update(new_container=new["Id"], started=new["State"]["StartedAt"], result="ROLLED")
+    step.update(new_container=new["Id"], started=new["State"]["StartedAt"],
+                ready_at=datetime.now(UTC).isoformat(), result="ROLLED")
 
 
 def restore(project, service, row, override, images):
@@ -203,6 +220,9 @@ def main():
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text(encoding="utf-8"))
     rows = inspect(args.project)
+    # Containers report image IDs; resolve a tag to the loaded image it names.
+    args.core_image = docker("image", "inspect", "--format", "{{.Id}}",
+                             args.core_image).stdout.strip()
     services = plan_services(plan, rows, args.core_image)
     if not Path(args.database).is_file():
         raise SystemExit("Database path not found on this host")
@@ -221,6 +241,8 @@ def main():
                 result="FAILED", error=str(error)[:300])
             if service in images or not inspect(args.project)[service]["State"]["Running"]:
                 restore(args.project, service, rows[service], override, images)
+                # Only the image goes back; jobs, deliveries and ledger rows stay as written.
+                receipt["steps"][-1:] and receipt["steps"][-1].update(rollback="OLD_IMAGE")
             receipt["stopped_at"] = service
             status = 2
             break
