@@ -1,0 +1,649 @@
+{
+  "$defs": {
+    "AuthorityRef": {
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "title": "Version",
+          "type": "integer"
+        },
+        "grant_id": {
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "integer"
+        },
+        "policy_sha256": {
+          "title": "Policy Sha256",
+          "type": "string"
+        },
+        "restore_generation": {
+          "title": "Restore Generation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "grant_id",
+        "revision",
+        "policy_sha256",
+        "restore_generation"
+      ],
+      "title": "AuthorityRef",
+      "type": "object"
+    },
+    "ChatRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Model",
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/TextMessage"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Messages",
+          "type": "array"
+        },
+        "stream": {
+          "const": false,
+          "default": false,
+          "title": "Stream",
+          "type": "boolean"
+        },
+        "max_completion_tokens": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Completion Tokens"
+        },
+        "max_tokens": {
+          "anyOf": [
+            {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Tokens"
+        },
+        "temperature": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Temperature"
+        }
+      },
+      "required": [
+        "model",
+        "messages"
+      ],
+      "title": "ChatRequest",
+      "type": "object"
+    },
+    "ClientBudget": {
+      "additionalProperties": false,
+      "properties": {
+        "budget_journal_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Budget Journal Id",
+          "type": "string"
+        },
+        "paid_contract_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Paid Contract Sha256",
+          "type": "string"
+        },
+        "max_input_tokens": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Max Input Tokens",
+          "type": "integer"
+        },
+        "max_output_tokens": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "max_request_micro_usd": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Max Request Micro Usd",
+          "type": "integer"
+        },
+        "daily_calls": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Daily Calls",
+          "type": "integer"
+        },
+        "daily_micro_usd": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Daily Micro Usd",
+          "type": "integer"
+        },
+        "concurrency": {
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Concurrency",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "budget_journal_id",
+        "paid_contract_sha256",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_request_micro_usd",
+        "daily_calls",
+        "daily_micro_usd",
+        "concurrency"
+      ],
+      "title": "ClientBudget",
+      "type": "object"
+    },
+    "ClientGrant": {
+      "additionalProperties": false,
+      "description": "Only trusted credential lookup can supply this snapshot; it is not a request body.",
+      "properties": {
+        "client_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "client_kind": {
+          "enum": [
+            "api",
+            "web",
+            "qq",
+            "sillytavern",
+            "desktop_pet",
+            "game"
+          ],
+          "title": "Client Kind",
+          "type": "string"
+        },
+        "key_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Key Id",
+          "type": "string"
+        },
+        "grant_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "default_mode": {
+          "enum": [
+            "passthrough",
+            "companion",
+            "rp"
+          ],
+          "title": "Default Mode",
+          "type": "string"
+        },
+        "modes": {
+          "items": {
+            "$ref": "#/$defs/ModeGrant"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "title": "Modes",
+          "type": "array"
+        },
+        "model_aliases": {
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Model Aliases",
+          "type": "array"
+        },
+        "owner_authority": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthorityRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "budget": {
+          "$ref": "#/$defs/ClientBudget"
+        }
+      },
+      "required": [
+        "client_id",
+        "client_kind",
+        "key_id",
+        "grant_id",
+        "revision",
+        "expires_at",
+        "default_mode",
+        "modes",
+        "model_aliases",
+        "budget"
+      ],
+      "title": "ClientGrant",
+      "type": "object"
+    },
+    "GatewayPermissions": {
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "const": false,
+          "default": false,
+          "title": "Tools",
+          "type": "boolean"
+        },
+        "proactive": {
+          "const": false,
+          "default": false,
+          "title": "Proactive",
+          "type": "boolean"
+        },
+        "external_operations": {
+          "const": false,
+          "default": false,
+          "title": "External Operations",
+          "type": "boolean"
+        }
+      },
+      "title": "GatewayPermissions",
+      "type": "object"
+    },
+    "MemoryScope": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "default": "none",
+          "enum": [
+            "none",
+            "owner_private",
+            "world_private"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "read": {
+          "default": false,
+          "title": "Read",
+          "type": "boolean"
+        },
+        "write": {
+          "default": false,
+          "title": "Write",
+          "type": "boolean"
+        }
+      },
+      "title": "MemoryScope",
+      "type": "object"
+    },
+    "ModeGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "passthrough",
+            "companion",
+            "rp"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "memory_scope": {
+          "$ref": "#/$defs/MemoryScope"
+        },
+        "world_ids": {
+          "default": [],
+          "items": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "World Ids",
+          "type": "array"
+        },
+        "permissions": {
+          "$ref": "#/$defs/GatewayPermissions"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "ModeGrant",
+      "type": "object"
+    },
+    "ModelAlias": {
+      "additionalProperties": false,
+      "properties": {
+        "model_alias": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Model Alias",
+          "type": "string"
+        },
+        "route_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Route Id",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model_alias",
+        "route_id",
+        "revision"
+      ],
+      "title": "ModelAlias",
+      "type": "object"
+    },
+    "RequestContext": {
+      "additionalProperties": false,
+      "description": "Untrusted optional HTTP-header selectors, checked against the trusted grant.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "enum": [
+                "passthrough",
+                "companion",
+                "rp"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mode"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Id"
+        },
+        "world_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "World Id"
+        }
+      },
+      "title": "RequestContext",
+      "type": "object"
+    },
+    "RouteIntent": {
+      "additionalProperties": false,
+      "description": "A structural plan never substitutes for current authorization or ModelAdmission.",
+      "properties": {
+        "client_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "grant_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "grant_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Revision",
+          "type": "integer"
+        },
+        "model_alias": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Model Alias",
+          "type": "string"
+        },
+        "alias_revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Alias Revision",
+          "type": "integer"
+        },
+        "route_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Route Id",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "passthrough",
+            "companion",
+            "rp"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "memory_scope": {
+          "$ref": "#/$defs/MemoryScope"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "budget": {
+          "$ref": "#/$defs/ClientBudget"
+        },
+        "max_output_tokens": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "dispatch_allowed": {
+          "const": false,
+          "default": false,
+          "title": "Dispatch Allowed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "client_id",
+        "grant_id",
+        "grant_revision",
+        "model_alias",
+        "alias_revision",
+        "route_id",
+        "mode",
+        "memory_scope",
+        "session",
+        "budget",
+        "max_output_tokens"
+      ],
+      "title": "RouteIntent",
+      "type": "object"
+    },
+    "SessionBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "passthrough",
+            "companion",
+            "rp"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "conversation_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+          "title": "Conversation Id",
+          "type": "string"
+        },
+        "world_id": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "World Id"
+        }
+      },
+      "required": [
+        "client_id",
+        "mode",
+        "conversation_id"
+      ],
+      "title": "SessionBinding",
+      "type": "object"
+    },
+    "TextMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "enum": [
+            "system",
+            "developer",
+            "user",
+            "assistant"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 32000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "TextMessage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "enabled": {
+      "const": false,
+      "default": false,
+      "title": "Enabled",
+      "type": "boolean"
+    },
+    "bind_host": {
+      "default": "127.0.0.1",
+      "enum": [
+        "127.0.0.1",
+        "::1"
+      ],
+      "title": "Bind Host",
+      "type": "string"
+    },
+    "client_grant": {
+      "$ref": "#/$defs/ClientGrant"
+    },
+    "model_alias": {
+      "$ref": "#/$defs/ModelAlias"
+    },
+    "request_context": {
+      "$ref": "#/$defs/RequestContext"
+    },
+    "chat_request": {
+      "$ref": "#/$defs/ChatRequest"
+    },
+    "route_intent": {
+      "$ref": "#/$defs/RouteIntent"
+    }
+  },
+  "required": [
+    "schema_version",
+    "client_grant",
+    "model_alias",
+    "request_context",
+    "chat_request",
+    "route_intent"
+  ],
+  "title": "GatewayContract",
+  "type": "object"
+}
