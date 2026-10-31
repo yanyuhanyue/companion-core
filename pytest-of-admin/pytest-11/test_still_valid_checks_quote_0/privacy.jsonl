@@ -1,0 +1,2 @@
+{"ledger_id":"ledger_25be227adcd34841bd3664511fe21c61"}
+{"at":"2026-10-19T04:00:00.000000+00:00","erasure_id":"erase_09d78d5f93804962ad180ee3b68f8d54","event_ids":["evt_test_1"],"memory_id":"retention_b203fdde54dd44438b51de33562bb508","memory_ids":[],"seq":1,"target_type":"event_batch"}

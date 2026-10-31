@@ -2639,7 +2639,10 @@ const MOOD_REASONS = { HELPFUL_FEEDBACK: "明确的正向互动反馈", THANKS_F
   SHARED_IDEA_INTEREST: "主人明确觉得刚才的想法有趣", DISCUSSION_CURIOSITY: "主人明确想继续探讨问题",
   PERSPECTIVE_SURPRISE: "刚才的新角度带来明确反馈", VIEW_DISAGREEMENT: "主人明确提出观点分歧",
   DISCUSSION_PROGRESS: "主人明确反馈讨论有进展",
-  VERIFIED_GOAL_COMPLETION: "有执行证据的目标完成", REVIEWED_GOAL_COMPLETION: "完成目标与阅读评价" };
+  VERIFIED_GOAL_COMPLETION: "有执行证据的目标完成", REVIEWED_GOAL_COMPLETION: "完成目标与阅读评价",
+  OWNER_AFFECTION: "主人表达亲近或在乎（模型判断）", OWNER_HURT_BY_REPLY: "主人被刚才的回复伤到（模型判断）",
+  OWNER_DISTRESS: "主人难过或压力大（模型判断）", OWNER_EXPECTATION: "主人表达期待或想念（模型判断）",
+  OWNER_PLAYFUL: "主人在逗你玩（模型判断）" };
 const padText = value => ["pleasure", "arousal", "dominance"].map(k => Number(value?.[k] || 0).toFixed(3)).join(" / ");
 function moodSheet(m) {
   if (!m || m.error) return sheet("小肥鱼的心情", failNote("心情", m?.error));

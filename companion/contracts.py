@@ -43,10 +43,9 @@ class SharedFile(StrictModel):
 class Payload(StrictModel):
     text: str = Field(max_length=20000)
     media: list[Media] = Field(max_length=10)
-    shared_content: list[Annotated[SharedLink | SharedImage | SharedFile,
-                                   Field(discriminator="kind")]] = Field(
-        default_factory=list, max_length=64
-    )
+    shared_content: list[
+        Annotated[SharedLink | SharedImage | SharedFile, Field(discriminator="kind")]
+    ] = Field(default_factory=list, max_length=64)
     # Absent plain input serializes exactly as before, including historical fingerprints.
     rich: dict | None = Field(default=None, exclude_if=lambda value: value is None)
 
@@ -77,7 +76,8 @@ class LeaseRequest(StrictModel):
     delivery_lane: Literal["owner_private", "qq_account"] = "owner_private"
     authority: dict | None = None
     account_actions_authorization_sha256: str | None = Field(
-        default=None, pattern=r"^[a-f0-9]{64}$",
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
     )
 
     @field_validator("authority")
@@ -89,10 +89,13 @@ class LeaseRequest(StrictModel):
 
     @model_validator(mode="after")
     def account_authority(self):
-        if (self.delivery_lane == "qq_account" and (
-            self.authority is None or not self.account_actions_authorization_sha256
-        )) or (self.delivery_lane == "owner_private"
-               and self.account_actions_authorization_sha256 is not None):
+        if (
+            self.delivery_lane == "qq_account"
+            and (self.authority is None or not self.account_actions_authorization_sha256)
+        ) or (
+            self.delivery_lane == "owner_private"
+            and self.account_actions_authorization_sha256 is not None
+        ):
             raise ValueError("account delivery requires its owner reference and action authority")
         return self
 
@@ -114,25 +117,31 @@ class DeliveryResult(LeaseToken):
     provider_message_id: str | None = Field(default=None, max_length=128)
     error_code: str | None = Field(default=None, pattern=r"^[A-Z0-9_]{1,64}$")
     native_ack: NativeActionAck | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
     account_action_receipt: ActionReceipt | None = Field(
-        default=None, exclude_if=lambda value: value is None,
+        default=None,
+        exclude_if=lambda value: value is None,
     )
 
     @model_validator(mode="after")
     def native_receipt(self):
         if self.account_action_receipt is not None and (
-            self.native_ack is not None or self.provider_message_id is not None
+            self.native_ack is not None
+            or self.provider_message_id is not None
             or self.lease_token != self.account_action_receipt.lease_token
-            or self.result != {"SUCCEEDED": "SENT", "REJECTED": "PERMANENT_FAILURE",
-                               "UNKNOWN": "DELIVERY_UNCERTAIN"}[
-                self.account_action_receipt.result
-            ]
+            or self.result
+            != {
+                "SUCCEEDED": "SENT",
+                "REJECTED": "PERMANENT_FAILURE",
+                "UNKNOWN": "DELIVERY_UNCERTAIN",
+            }[self.account_action_receipt.result]
         ):
             raise ValueError("account action receipt differs from its native result")
         if self.native_ack is not None and (
-            self.result != "SENT" or self.provider_message_id is not None
+            self.result != "SENT"
+            or self.provider_message_id is not None
             or self.error_code is not None
         ):
             raise ValueError("native action acceptance has no QQ message identifier")
@@ -170,9 +179,24 @@ class EpisodeSummary(StrictModel):
     source_event_ids: list[str] = Field(min_length=1, max_length=20)
 
 
+class InteractionSignal(StrictModel):
+    """What the owner's words meant to her; code, not the model, sets the mood change."""
+
+    event_id: str
+    reason: Literal[
+        "OWNER_AFFECTION",
+        "OWNER_HURT_BY_REPLY",
+        "OWNER_DISTRESS",
+        "OWNER_EXPECTATION",
+        "OWNER_PLAYFUL",
+    ]
+    quote: str = Field(min_length=2, max_length=200)
+
+
 class Extraction(StrictModel):
     memories: list[Candidate] = Field(default_factory=list, max_length=20)
     episode_summaries: list[EpisodeSummary] = Field(default_factory=list, max_length=4)
+    interaction_signals: list[InteractionSignal] = Field(default_factory=list, max_length=8)
 
 
 class MemoryRelation(StrictModel):
