@@ -13,9 +13,11 @@ Purpose = Literal[
     "chat", "history", "memory", "diary", "affect", "consolidation", "reflection", "goals",
     "wake", "exploration", "social", "expression", "proactive", "content", "image", "file",
     "meme", "poke", "voice", "account_actions", "bili_video", "life", "evaluation", "rem",
+    "qzone_publication",
 ]
 CapabilityPolicy = Literal[
     "image", "file", "meme", "poke", "voice", "account_actions", "bili_video", "rem",
+    "qzone_publication",
 ]
 
 
@@ -50,7 +52,7 @@ class OwnerGrantPolicy(StrictModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     owner_qq_id: str = Field(pattern=r"^[1-9][0-9]{4,19}$")
     audience: Literal["owner_only"] = "owner_only"
-    purposes: list[Purpose] = Field(min_length=1, max_length=24)
+    purposes: list[Purpose] = Field(min_length=1, max_length=25)
     authorization_sha256: str = Field(pattern=SHA)
     paid_contract_sha256: str = Field(pattern=SHA)
     unknown_carry_sha256: str | None = Field(
@@ -60,7 +62,7 @@ class OwnerGrantPolicy(StrictModel):
     history: HistoryPolicy = Field(default_factory=HistoryPolicy)
     memory_scope: Literal["none", "owner_private"] = "none"
     source_retention_days: int = Field(default=365, ge=1, le=3650, strict=True)
-    capability_policies: dict[CapabilityPolicy, str] = Field(default_factory=dict, max_length=8)
+    capability_policies: dict[CapabilityPolicy, str] = Field(default_factory=dict, max_length=9)
     life_shadow: LifeShadowApproval | None = None
     max_input_chars: int = Field(default=32000, ge=1, le=32000, strict=True)
     max_reply_chars: int = Field(default=32000, ge=1, le=32000, strict=True)
@@ -85,7 +87,7 @@ class OwnerGrantPolicy(StrictModel):
             raise ValueError("capability policies must match explicit purposes")
         if any(key in self.purposes and key not in self.capability_policies
                for key in ("image", "file", "meme", "poke", "voice", "account_actions",
-                           "bili_video", "rem")):
+                           "bili_video", "rem", "qzone_publication")):
             raise ValueError("capability purpose requires policy fingerprint")
         return self
 

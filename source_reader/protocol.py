@@ -77,6 +77,9 @@ def decode_lease(payload, source, now, *, media_limits=None):
         ):
             raise ValueError("Invalid account discovery")
         context = item["context"]
+        if source == "qzone" and (item["operation"] != "read"
+                                  or item["max_items"] != 1 or not item.get("source_grant")):
+            raise ValueError("QZone requires one account-bound target")
         if (not isinstance(context, dict)
             or set(context) != {"root_task_id", "source", "source_event_ids", "privacy_epoch"}
             or not isinstance(context["source_event_ids"], list) or context["source"] != source):

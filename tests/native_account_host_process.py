@@ -23,6 +23,10 @@ async def main(value):
     def provider(request):
         if request.url.path == "/send_qzone_msg":
             sent.append(json.loads(request.content))
+            if "expected_body" in value:
+                assert sent[-1] == value["expected_body"]
+            if value.get("outcome") == "UNKNOWN":
+                raise httpx.ReadTimeout("Synthetic unknown after public dispatch", request=request)
             data = {"tid": "independent-synthetic-account"}
         else:
             data = {"/get_login_info": {"user_id": int(config.bot_qq_id)},
@@ -49,7 +53,9 @@ async def main(value):
             core.event_hooks["response"].append(completed)
             protocol.event_hooks["request"].append(fence)
             await deliver(core, None, spool, stop, Metrics(), runtime=runtime, protocol=protocol)
-            runtime.verify()
+            if value.get("outcome") == "UNKNOWN":
+                assert runtime.stop_path.exists()
+            runtime.verify(active=value.get("outcome") != "UNKNOWN")
             row = spool.db.execute("SELECT state FROM window_attempts").fetchone()
             print(json.dumps({"sent": len(sent), "attempt": row[0]}), flush=True)
 

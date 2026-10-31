@@ -38,6 +38,9 @@ def authorize(core, tmp_path, *, life=None, account=True, module=None, additiona
         purposes.append("account_actions")
     if "account_actions" in purposes:
         capability["account_actions"] = core.settings.social_autonomy.authorization_sha256
+    if "qzone_publication" in purposes:
+        capability["qzone_publication"] = owner_authority.capability_hashes(core.settings)[
+            "qzone_publication"]
     policy = OwnerGrantPolicy(
         owner_qq_id=core.settings.owner_qq_id, purposes=purposes,
         authorization_sha256="d" * 64,

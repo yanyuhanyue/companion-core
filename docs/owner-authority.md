@@ -131,6 +131,12 @@ IO_STARTED。实现复用了已检查的 DSH QQ
 接收 JSON 编码的 `authority` 查询参数及 `authorization_sha256`。
 账户通道要求当前 `social` 和 `account_actions` 用途及冻结策略摘要匹配。
 
+纯文本公开说说另要求显式 `qzone_publication` 用途，其能力摘要绑定完整
+`social_autonomy` 策略，并同时打开默认关闭的 `qzone_public_enabled`。
+主人逐稿确认完整正文、来源快照、公开受众与有效期后，Core 才创建原账号 Outbox。
+原 `audience=owner_only` 表示主人控制边界；公开副作用仅由此单独用途与精确批准授权，
+不改变私聊、来源读取或私人生活记忆的处理范围。见[逐稿公开审批](qq-beta/qzone-publication.md)。
+
 `tests/test_account_owner_transport.py` 使用真实 TCP 与独立 Bridge 测试进程覆盖
 租用、开始发送、最终账户校验以及校验前 STOP；模型传输仅使用 synthetic MockTransport，
 测试进程不调用 QQ 或 QZone provider。

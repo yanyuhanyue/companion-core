@@ -30,8 +30,10 @@ HEYBOX = "https://www.xiaoheihe.cn/app/bbs/link/123456"
 
 
 def test_fixed_definitions_and_protocol_source_types_cannot_enable_third_platform():
-    assert source_names("get") == source_names("read") == ("bilibili", "heybox", "web")
-    assert source_names("source_grant") == ("bilibili", "heybox")
+    assert source_names("get") == ("bilibili", "heybox", "web", "qzone")
+    assert source_names("read") == ("bilibili", "heybox", "web")
+    assert source_names("source_grant") == ("bilibili", "heybox", "qzone")
+    assert not any(supports("qzone", kind) for kind in ("read", "share", "discover"))
     assert source_names("reading") == ("bilibili",)
     assert source_names("article") == ("heybox",)
     assert observation_sources("share") == ("observation.bilibili", "observation.heybox")

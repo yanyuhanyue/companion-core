@@ -9,7 +9,9 @@ from pydantic import AwareDatetime, BeforeValidator, Field, field_validator, mod
 from companion.contracts import StrictModel
 from companion.observation import ArticleEvidence as HeyboxArticleEvidence
 from companion.observation import ReadingEvidence, SubtitleSpan
+from companion.qzone_protocol import QZoneEvidence
 from companion.source_grants import SourceGrantSnapshot
+from companion.source_policy import ContentSource
 
 
 def _false_claim(value):
@@ -24,7 +26,7 @@ SourceEventId = Annotated[str, Field(min_length=1, max_length=128)]
 
 class ReadingContext(StrictModel):
     root_task_id: str = Field(min_length=1, max_length=128)
-    source: Literal["bilibili", "heybox", "web"]
+    source: ContentSource
     source_event_ids: list[SourceEventId] = Field(max_length=256)
     privacy_epoch: int = Field(ge=0, strict=True)
 
@@ -91,7 +93,7 @@ class VideoCoverage(StrictModel):
 
 class TextCoverage(StrictModel):
     level: Literal["TEXT"]
-    scope: Literal["article_text", "extracted_page_text"]
+    scope: Literal["article_text", "extracted_page_text", "latest_post_text"]
     truncated: bool = Field(strict=True)
     images_analyzed: FalseClaim
 
@@ -129,7 +131,9 @@ class ObservationEvidence(StrictModel):
     provenance: ReadingProvenance
     trust: Literal["untrusted_external"]
     result_status: Literal["DISCOVERED", "FETCHED"]
-    evidence: ReadingEvidence | HeyboxArticleEvidence | WebEvidence | DiscoveryEvidence
+    evidence: (
+        ReadingEvidence | HeyboxArticleEvidence | WebEvidence | QZoneEvidence | DiscoveryEvidence
+    )
 
     @field_validator("evidence", mode="before")
     @classmethod
@@ -205,6 +209,15 @@ class ObservationEvidence(StrictModel):
                 raise ValueError("Bilibili coverage differs from its evidence")
             if self.evidence.method == "account_api" and self.provenance.source_grant is None:
                 raise ValueError("Account reading evidence requires its source grant")
+        elif self.provenance.source == "qzone":
+            if (not isinstance(self.evidence, QZoneEvidence)
+                or not isinstance(self.coverage, TextCoverage)
+                or self.coverage.scope != "latest_post_text"
+                or self.coverage.truncated != self.evidence.truncated
+                or self.provenance.source_grant is None
+                or self.url != "https://user.qzone.qq.com/" + self.evidence.author_uin
+                or self.evidence.published_at > self.fetched_at):
+                raise ValueError("QZone requires bound account text evidence")
         else:
             evidence_type, scope = ((HeyboxArticleEvidence, "article_text")
                 if self.provenance.source == "heybox" else (WebEvidence, "extracted_page_text"))

@@ -490,7 +490,12 @@ const LOADERS = {
     const [affect, interests, expression, styles, mood] = await Promise.allSettled([api.get("/affect", signal), api.get("/interests", signal), api.get("/expression-learning", signal), api.get("/style-candidates", signal), api.get("/mood", signal)]);
     return { affect: settled(affect), interests: settled(interests), expression: settled(expression), styles: settled(styles), mood: settled(mood) };
   },
-  voice: signal => api.get("/voice", signal), "account-actions": signal => api.get("/account-actions", signal),
+  voice: signal => api.get("/voice", signal),
+  "account-actions": async signal => {
+    const [account, publications, topics] = await Promise.allSettled([
+      api.get("/account-actions", signal), api.get("/qzone/publications", signal), api.get("/life/topics", signal)]);
+    return { ...settled(account), publications: settled(publications), publicationTopics: settled(topics) };
+  },
   diagnostics: signal => api.get("/diagnostics", signal),
   thinking: async signal => {
     // 隐私版本变化时整页重读一次，不把不同代次的记录拼在一起
@@ -1132,8 +1137,84 @@ PAGES["account-actions"] = data => {
       el("div", { class: "compare" }, el("div", {}, el("h4", {}, "计划状态"), el("p", {}, statusOf(p.detail?.plan_state)[0])), el("div", {}, el("h4", {}, "平台回执"), el("p", {}, statusOf(p.detail?.receipt_state)[0]))),
       p.summary ? el("div", { class: "sheet-body acct-foot" }, el("span", { class: "note" }, p.summary)) : null)) : el("p", { class: "note" }, "还没有改动计划。"),
     assets.length ? [el("h2", { class: "section-title" }, "头像素材"), el("div", { class: "nodes" }, assets.map(a => el("section", { class: "node" }, el("h3", {}, a.title, tag(a.status)),
-      detailList(a.detail, ["asset_sha256", "review_receipt_sha256"]))))] : null);
+      detailList(a.detail, ["asset_sha256", "review_receipt_sha256"]))))] : null,
+    publicationSection(data.publications, data.publicationTopics));
 };
+
+function publicationSection(value, topics) {
+  const used = new Set((value?.items || []).map(p => p.source_job_id));
+  const drafts = (topics?.items || []).flatMap(t => (t.results || []).filter(r => r.qzone_draft && !used.has(r.qzone_draft.draft_id)));
+  const labels = { WAITING_APPROVAL: "待你审阅", PENDING: "已批准，等待发送", LEASED: "已领取", SENDING: "发送中",
+    SENT: "平台已接受", DELIVERY_UNCERTAIN: "发布结果待核对", CANCELLED: "已取消", UNAVAILABLE: "当前不可发布", UNVERIFIED: "发布记录待核对", FAILED: "平台拒绝" };
+  return sheet("QQ 空间公开发布", [
+    el("p", { class: "note mb" }, "逐稿审阅全文、来源和有效期，再批准为所有人可见。生成草稿和保存待审稿都不会发布。"),
+    value?.error ? failNote("公开发布", value.error) : (value?.items || []).map(p => el("article", { class: "topic" },
+      el("div", { class: "topic-head" }, el("b", {}, labels[p.state] || "发布记录"), el("span", { class: "note" }, "有效期至 " + fmtDate(p.expires_at))),
+      p.text ? el("p", { class: "vtext" }, p.text) : null,
+      p.receipt?.resource_id ? kv("平台说说编号", p.receipt.resource_id) : null,
+      p.state === "WAITING_APPROVAL" ? btn("审阅公开稿", () => publicationDialog(p), { cls: "sm primary" }) : null,
+      ["PENDING", "LEASED", "SENDING", "DELIVERY_UNCERTAIN"].includes(p.state)
+        ? btn("撤销批准", () => publicationDecision(p, "REVOKE"), { cls: "sm danger" }) : null)),
+    drafts.length ? el("div", { class: "stack mt" }, el("h3", {}, "可准备的空间草稿"), drafts.map(r => el("div", { class: "row-gap" },
+      el("span", {}, String(r.qzone_draft.text).slice(0, 100)), btn("准备公开发布", () => publicationPrepare(r.qzone_draft), { cls: "sm" })))) : null]);
+}
+
+function publicationPrepare(draft) {
+  const input = el("textarea", { class: "input", rows: 8, value: draft.text, required: true, maxLength: 5000 });
+  const form = el("form", { class: "dlg-form publication-review" }, el("p", {}, "保存后还需审阅来源并批准，才会安排公开发布。"),
+    el("label", { class: "field" }, el("span", {}, "完整正文"), input));
+  const submit = el("button", { type: "submit", class: "btn primary" }, "保存待审稿");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/qzone/publications", { job_id: draft.draft_id,
+      expected_content_sha256: draft.content_sha256, text: input.value }, "POST", r => r.state === "WAITING_APPROVAL"),
+      async () => { closeDialog(); toast("已保存待审稿"); await loadRoute({ reset: true }); });
+  });
+  openDialog("准备公开发布", form, { wide: true });
+}
+
+function publicationDialog(p) {
+  const input = el("textarea", { class: "input", rows: 8, value: p.text, required: true, maxLength: 5000 });
+  const consent = el("input", { type: "checkbox" });
+  const form = el("form", { class: "dlg-form publication-review" }, kv("发布账号", p.bot_qq_id), kv("受众", "所有人可见"),
+    kv("有效期至", fmtDate(p.expires_at)), el("label", { class: "field" }, el("span", {}, "完整正文"), input),
+    el("h3", {}, "本稿来源快照"),
+    el("div", { class: "stack" }, (p.sources || []).map(s => el("section", {}, el("b", {}, s.title),
+      el("p", { class: "vtext" }, s.text), el("small", { class: "note" }, "来源指纹：" + s.source_sha256),
+      safeUrl(s.url) ? el("a", { href: safeUrl(s.url), target: "_blank", rel: "noopener noreferrer" }, "查看来源") : null))),
+    el("label", { class: "row-gap" }, consent, el("span", {}, "我确认这份稿件可以公开分享上述来源")));
+  const submit = el("button", { type: "submit", class: "btn primary", disabled: true }, "批准公开发布");
+  const update = () => { const changed = input.value !== p.text; submit.textContent = changed ? "保存修改，重新审阅" : "批准公开发布"; submit.disabled = !input.value.trim() || (!changed && !consent.checked); };
+  input.addEventListener("input", () => { consent.checked = false; update(); });
+  consent.addEventListener("change", update);
+  form.append(el("div", { class: "dlg-acts" }, btn("拒绝此稿", () => publicationDecision(p, "REJECT"), { cls: "danger" }), submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    const changed = input.value !== p.text;
+    if (!changed && !consent.checked) { formError(form, "请先确认本稿的来源分享范围。"); return; }
+    const path = "/qzone/publications/" + encodeURIComponent(p.plan_id);
+    const body = changed ? { expected_payload_sha256: p.payload_sha256, text: input.value }
+      : { expected_payload_sha256: p.payload_sha256, decision: "APPROVE", source_sharing_confirmed: true };
+    perform(form, submit, () => api.write(path + (changed ? "" : "/decision"), body, changed ? "PUT" : "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast(changed ? "修改已保存，请重新审阅" : "已批准本稿公开发布"); await loadRoute({ reset: true }); });
+  });
+  openDialog("审阅公开发布稿", form, { wide: true });
+}
+
+function publicationDecision(p, decision) {
+  const form = el("form", { class: "dlg-form" }, el("p", {}, decision === "REVOKE"
+    ? "撤销后停止新发送。已经开始的发布仍需核对平台结果，已发布的说说不会因此删除。" : "拒绝后不会发布这份稿件。"));
+  const submit = el("button", { type: "submit", class: "btn danger" }, decision === "REVOKE" ? "撤销批准" : "拒绝此稿");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/qzone/publications/" + encodeURIComponent(p.plan_id) + "/decision",
+      { expected_payload_sha256: p.payload_sha256, decision }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast(decision === "REVOKE" ? "批准已撤销" : "已拒绝此稿"); await loadRoute({ reset: true }); });
+  });
+  openDialog(decision === "REVOKE" ? "撤销公开发布批准" : "拒绝公开稿", form);
+}
 
 /* ================= 运行诊断 ================= */
 const SCENARIOS = [["chat", "对话"], ["reply", "对话"], ["memory", "记忆整理"], ["diary", "日记"], ["reflection", "反思"], ["meme_caption", "表情理解"],
@@ -1948,7 +2029,7 @@ const SUB = {
   cpu_seconds: "CPU 时间", wall_seconds: "总时长", memory_bytes: "内存上限", scratch_bytes: "临时空间", max_processes: "最多进程",
   signing_private_key: "签名私钥", job_ttl_seconds: "任务有效期", lease_ttl_seconds: "租约有效期", result_ttl_seconds: "结果有效期", max_pending_jobs: "排队上限",
   max_private_blob_bytes: "私有数据上限", max_chars: "字数上限", max_context_chars: "带入对话的字数", authorization_sha256: "授权摘要", asset_policy_sha256: "素材策略摘要",
-  policy_version: "策略版本", qzone_enabled: "允许 QQ 空间发布", nickname_enabled: "允许改昵称", signature_enabled: "允许改签名", avatar_enabled: "允许改头像",
+  policy_version: "策略版本", qzone_enabled: "允许 QQ 空间发布", qzone_public_enabled: "允许空间公开发布（逐稿审批）", nickname_enabled: "允许改昵称", signature_enabled: "允许改签名", avatar_enabled: "允许改头像",
   qzone_daily_limit: "QQ 空间每天最多", profile_daily_limit: "资料每天最多改", qzone_cooldown_seconds: "QQ 空间冷却", profile_cooldown_seconds: "资料改动冷却",
   model_daily_calls: "模型每日调用", model_daily_micro_usd: "模型每日额度", decision_interval_seconds: "决策间隔", max_publish_chars: "发布字数上限",
   max_nickname_chars: "昵称字数上限", max_signature_chars: "签名字数上限", max_source_refs: "最多引用来源", max_source_chars: "来源字数上限", max_input_bytes: "输入上限",

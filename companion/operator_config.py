@@ -113,6 +113,7 @@ LABELS = {
     "diary_max_attempts": "日记最大尝试次数",
     "diary_daily_micro_usd": "日记日额度（微美元）",
     "content_enabled": "分享内容读取", "web_reading_enabled": "指定网站读取",
+    "qzone_reading_enabled": "授权读取 QQ 空间正文",
     "observation_enabled": "来源观察", "voice_enabled": "语音输入",
     "camera_enabled": "摄像头观察", "android_enabled": "Android 观察",
     "mood_enabled": "小肥鱼的动态心情",

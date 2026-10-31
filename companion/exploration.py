@@ -86,6 +86,10 @@ class ExplorationService:
         """Recheck the current signed card before bounded Reader work can proceed."""
         from companion import live_text, owner_authority, qq_source
 
+        if self.adapter(row["adapter_id"]).source == "qzone":
+            from companion.qzone import validate_target
+
+            validate_target(self.store, self.settings, self.clock, row)
         if owner_authority.required(self.store, self.settings):
             ref = json.loads(row["authority_json"])
             owner_authority.current(self.store, self.settings, self.clock,
@@ -178,6 +182,10 @@ class ExplorationService:
                query=None):
         """`query` is a Core-chosen discover search term; only discover requests carry one."""
         policy = self.adapter(adapter_id)
+        if policy.source == "qzone" and (
+            operation != "read" or not key.startswith("qzone:") or step or source_event_ids
+        ):
+            raise CoreError("QZONE_TARGET_SELECTION_REQUIRED", 403)
         if query is not None and (operation != "discover" or not 2 <= len(query) <= 100):
             raise CoreError("EXPLORATION_QUERY_INVALID", 400)
         s, now = self.store, self.clock()
@@ -349,7 +357,7 @@ class ExplorationService:
         from companion import live_text
 
         policy = self.adapter(adapter_id)
-        if policy.source == "web" and not reading:
+        if policy.source in {"web", "qzone"} and not reading:
             raise CoreError("READER_PROTOCOL_REQUIRED", 409)
         cfg, s = self.settings, self.store
         with nullcontext() if s.db.in_transaction else s.transaction():

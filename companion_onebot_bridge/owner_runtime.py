@@ -16,7 +16,7 @@ from .spool import encode
 
 def check_receipt(config, authority, purpose, result, now):
     known_policies = {"image", "file", "meme", "poke", "voice", "account_actions",
-                      "bili_video", "rem"}
+                      "bili_video", "rem", "qzone_publication"}
     policies = result.get("capability_policies") if isinstance(result, dict) else None
     expected_capture = {"public_key": config.capture_public_key,
         "identity_sha256": journal.digest([config.owner_qq_id, config.bot_qq_id]),

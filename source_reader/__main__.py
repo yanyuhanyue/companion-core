@@ -17,6 +17,7 @@ from source_reader.heybox import HeyboxReader, SourceAPI
 from source_reader.heybox_source import NativeHeyboxSource
 from source_reader.network import PublicHTTP, ReadFailure
 from source_reader.protocol import exact_hosts
+from source_reader.qzone import QZoneHTTP, QZoneReader
 from source_reader.worker import read_result, tick
 from source_reader.worker_v1 import tick as tick_reading
 
@@ -54,6 +55,7 @@ async def main(args):
         public = None
         if args.source != "web":
             public = await stack.enter_async_context(
+                QZoneHTTP(args.account_file) if args.source == "qzone" else
                 BilibiliAccountHTTP(args.account_file)
                 if args.source == "bilibili" and args.account_file
                 else PublicHTTP()
@@ -69,6 +71,7 @@ async def main(args):
                 NativeHeyboxSource(args.account_file, topics=args.heybox_topics.split(",")))
         reader = (
             None if args.source == "web"
+            else QZoneReader(public) if args.source == "qzone"
             else HeyboxReader(public, source,
                               public_discovery=getattr(args, "public_discovery", False))
             if args.source == "heybox"
@@ -126,7 +129,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Bounded Bilibili / Heybox source reader; opt-in reading-v1 web support"
     )
-    parser.add_argument("--source", choices=["bilibili", "heybox", "web"], default="bilibili")
+    parser.add_argument("--source", choices=["bilibili", "heybox", "web", "qzone"],
+                        default="bilibili")
     parser.add_argument("--protocol", choices=["legacy", "reading-v1"], default="legacy")
     parser.add_argument("--allow-host", action="append",
                         help="Optional web host restriction; can only narrow the Core lease")
@@ -151,6 +155,9 @@ if __name__ == "__main__":
     parser.add_argument("--once", action="store_true")
     try:
         args = parser.parse_args()
+        if args.source == "qzone" and (args.protocol != "reading-v1" or not args.account_file
+                                        or args.probe):
+            parser.error("QZone requires reading-v1, an explicit account file and a Core lease")
         if args.source_url and args.source != "heybox":
             parser.error("--source-url requires --source heybox")
         if args.public_discovery and (args.source != "heybox" or args.source_url
@@ -179,8 +186,9 @@ if __name__ == "__main__":
             parser.error("--heybox-native requires Heybox without --source-url")
         if args.bili_tools and (args.source != "bilibili" or args.browser):
             parser.error("--bili-tools requires Bilibili API mode")
-        if args.account_file and args.source != "bilibili" and not args.heybox_native:
-            parser.error("--account-file requires Bilibili or the native Heybox reader")
+        if (args.account_file and args.source not in {"bilibili", "qzone"}
+            and not args.heybox_native):
+            parser.error("--account-file requires Bilibili, QZone or the native Heybox reader")
         if args.search_keyword and not args.bili_tools:
             parser.error("--search-keyword requires --bili-tools")
         asyncio.run(main(args))

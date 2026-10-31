@@ -42,7 +42,7 @@ class LifeShadowApproval(StrictModel):
     conversation_id: str = Field(min_length=1, max_length=128)
     source_event_ids: list[str] = Field(min_length=1, max_length=64)
     purposes: list[Literal["PRIVATE_DIARY", "PRIVATE_MESSAGE_DRAFT", "PRIVATE_CREATION"]] = Field(
-        min_length=1,
+        min_length=0,
         max_length=3,
     )
     expires_at: AwareDatetime
@@ -54,6 +54,8 @@ class LifeShadowApproval(StrictModel):
 
     @model_validator(mode="after")
     def unique_scope(self):
+        if not self.purposes and not self.qzone_draft_sources:
+            raise ValueError("Life requires at least one explicitly approved destination")
         if (
             len(set(self.source_event_ids)) != len(self.source_event_ids)
             or len(set(self.purposes)) != len(self.purposes)

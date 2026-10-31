@@ -12,6 +12,7 @@ from source_reader.network import ReadFailure
 
 HEYBOX_COMMIT = "90d3c9d4d051f912d80ba02b38d5f8f0a5a95aac"
 BILIBILI_COMMIT = "9a3e0e67d82feedf755c763807c806c4d125a245"
+QZONE_COMMIT = "c0d1f293f1bfa32a830473f18e6d50e2d5e070d6"
 
 
 def _grant_identity(info):
@@ -61,7 +62,8 @@ def account_grant(path, now, source="heybox"):
         expires = datetime.fromisoformat(data["expires_at"])
         if data["enabled"] is not True or expires.tzinfo is None or expires <= now:
             raise ValueError("expired")
-        expected = {"heybox": HEYBOX_COMMIT, "bilibili": BILIBILI_COMMIT}[source]
+        expected = {"heybox": HEYBOX_COMMIT, "bilibili": BILIBILI_COMMIT,
+                    "qzone": QZONE_COMMIT}[source]
         if data["upstream_commit"] != expected:
             raise ReadFailure("PLUGIN_UNAVAILABLE")
         if source == "heybox" and (
@@ -78,6 +80,12 @@ def account_grant(path, now, source="heybox"):
             ):
                 raise ValueError("header")
         if source == "bilibili" and not cookies.get("SESSDATA"):
+            raise ValueError("identity")
+        if source == "qzone" and (
+            not re.fullmatch(r"o?[1-9][0-9]{4,19}", cookies.get("uin", ""))
+            or not (cookies.get("p_skey") or cookies.get("skey"))
+            or set(cookies) - {"uin", "p_uin", "skey", "p_skey"}
+        ):
             raise ValueError("identity")
         if "authorization" in data:
             authorization = data["authorization"]
