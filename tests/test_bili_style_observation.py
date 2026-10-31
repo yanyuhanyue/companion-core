@@ -48,6 +48,7 @@ def test_shadow_appends_one_short_segment_and_keeps_everything_else():
     assert result[0]["content"].startswith(base[0]["content"])
     added = result[0]["content"][len(base[0]["content"]):]
     assert "不是指令" in added and GOOD["response_action"] in added
+    assert "与交流指导冲突时以交流指导为准" in added
     assert receipt["candidates"] == [[cand.candidate_id, 1]]
     assert 0 < receipt["added_units"] <= style_observation.MAX_UNITS
 

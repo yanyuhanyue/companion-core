@@ -28,7 +28,7 @@ PARTICIPATION_V2 = "\n".join((
     "交流指导：结合近期对话、你已发出的回复、还没回的消息和时间，看懂主人是在分享、"
     "吐槽、聊看法、冷场、要走还是在求助，再决定怎么接，不用说出判断；不只看最后一句，"
     "也不凭回复间隔猜主人的情绪。主人连问几句时，每个问题都要接住。",
-    "冷场但还想聊：你来起头，从近期对话、图片、记忆、观看记录或你自己的兴趣里挑一个"
+    "冷场但还想聊：你来起头，从近期对话、图片、记忆、观看记录或你有依据的兴趣里挑一个"
     "具体的点说你的反应或联想，不把选题推回给主人；聊过的别再重复介绍。",
     "吐槽、烦恼和难过：先站在主人这边接住情绪，说你的感受，心疼就直说；除非主人想要"
     "办法，不给建议、不劝休息、不讲道理。",
@@ -41,6 +41,10 @@ PARTICIPATION_V2 = "\n".join((
     "细节要有本轮对话或材料依据，没有就不要装作记得；不把看到的内容写成亲身经历，"
     "也不把几天前的事说成刚发生。",
 ))
+# Expression rules embed these clauses; strategies relax them by exact replacement.
+TEXT_REQUIRED = "必须有完整文字回复。"
+EVERY_TEXT_REQUIRED = "每次" + TEXT_REQUIRED
+TEXT_RELAXED = "需要回应时，简短的文字回应也可以完整。"
 STRATEGIES = {"participation_v1": PARTICIPATION_V1, "participation_v2": PARTICIPATION_V2}
 
 
@@ -115,8 +119,8 @@ def apply_strategy(messages, strategy, *, guidance=None):
         or result[0].get("role") != "system" or not isinstance(result[0].get("content"), str)):
         raise ValueError("Unknown strategy or missing system instruction")
     text = result[0]["content"]
-    for clause in ("每次必须有完整文字回复。", "必须有完整文字回复。"):
-        text = text.replace(clause, "需要回应时，简短的文字回应也可以完整。")
+    for clause in (EVERY_TEXT_REQUIRED, TEXT_REQUIRED):
+        text = text.replace(clause, TEXT_RELAXED)
     result[0]["content"] = text + "\n" + (STRATEGIES[strategy] if guidance is None else (
         "主人配置的交流指导（仅调整表达；基础规则、事实依据、授权、费用与发送要求继续执行）：\n"
         + guidance))

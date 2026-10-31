@@ -10,6 +10,12 @@ from pydantic import ValidationError
 from astrbot_plugin_companion_bridge.expression_adapter import MemeLibrary
 from companion.backup import backup, restore
 from companion.contracts import CoreError, DeliveryResult
+from companion.conversation_policy import (
+    EVERY_TEXT_REQUIRED,
+    TEXT_RELAXED,
+    TEXT_REQUIRED,
+    apply_strategy,
+)
 from companion.core import Core
 from companion.expression import ExpressionEngine, ImageIntent, ResponseIntent
 from companion.store import Store
@@ -79,6 +85,14 @@ def test_expression_freezes_one_intent_under_existing_delivery_key(core):
     assert repeated == row["message_id"]
     assert core.store.one("SELECT content_json FROM outbox")["content_json"] == row["content_json"]
     assert "表情和语气选择不是情绪记录或事实依据" in engine(core).instruction()
+
+
+def test_participation_strategies_relax_the_real_text_requirement(core):
+    rules = engine(core).instruction_parts()[0]
+    assert EVERY_TEXT_REQUIRED in rules
+    relaxed = apply_strategy([{"role": "system", "content": rules}], "participation_v2")
+    assert TEXT_REQUIRED not in relaxed[0]["content"]
+    assert TEXT_RELAXED in relaxed[0]["content"]
 
 
 @pytest.mark.parametrize(
