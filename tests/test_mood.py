@@ -183,6 +183,19 @@ def test_delayed_ingestion_uses_actual_event_time_and_cannot_cross_reset(core):
     assert core.mood.snapshot()["signals"] == []
 
 
+def test_uncertain_new_reply_cannot_retarget_feedback_to_an_older_sent_reply(core):
+    first = feedback(core)
+    core.clock.advance(1)
+    ingest(core, 10, "再讨论一下这个问题")
+    event = core.store.one("SELECT * FROM events WHERE event_id='evt_test_10'")
+    mid = enqueue(core.store, event["event_id"], event["conversation_id"],
+                  "这一次的回答", core.clock())
+    core.store.execute("UPDATE outbox SET state='DELIVERY_UNCERTAIN' WHERE message_id=?", (mid,))
+    core.clock.advance(1)
+    ingest(core, 11, "这个回答很有帮助")
+    assert [item["event_id"] for item in core.mood.snapshot()["signals"]] == [first]
+
+
 @pytest.mark.parametrize("action", ["forget", "clear"])
 def test_latest_ledger_blocks_old_backup_and_recompute_cannot_undo_clear(core, tmp_path, action):
     key = feedback(core)

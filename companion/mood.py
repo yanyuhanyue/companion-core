@@ -240,6 +240,19 @@ class MoodService:
                 )
                 if not reply or not (prior := self._lineage(reply["origin_event_id"], sources)):
                     continue
+                # A possibly delivered newer reply makes the feedback target ambiguous.
+                # Never silently attribute it to an older known SENT reply instead.
+                uncertain = s.one(
+                    "SELECT 1 FROM outbox o JOIN events original "
+                    "ON original.event_id=o.origin_event_id WHERE o.conversation_id=? "
+                    "AND o.action_type='qq.private.reply' "
+                    "AND o.state IN ('SENDING','DELIVERY_UNCERTAIN') "
+                    "AND o.created_at>=? AND o.created_at<=? "
+                    "AND original.rowid<(SELECT rowid FROM events WHERE event_id=?) LIMIT 1",
+                    (event["conversation_id"], reply["created_at"], candidate["at"], key),
+                )
+                if uncertain:
+                    continue
                 lineage += prior
                 identity = "reply:" + reply["message_id"]
                 detail, reason, delta = sha(reply), rule[0], rule[1]
