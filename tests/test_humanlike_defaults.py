@@ -38,6 +38,15 @@ def test_principles_keep_feelings_out_of_evidence_rules():
     assert PRINCIPLES.index("往近了说") < PRINCIPLES.index("完成回执")
 
 
+def test_memories_are_written_as_shared_recollection():
+    from companion.model import EXTRACT_RULES, REVIEW_RULES
+    from companion.mood import FILTER_RULES
+
+    assert "称“主人”和“你”" in EXTRACT_RULES and "归档评语" in EXTRACT_RULES
+    assert "“主人”" in REVIEW_RULES  # Old 用户/AI and new 主人/你 wording still match as same.
+    assert "依恋" not in FILTER_RULES and "不限制你表达在乎" in FILTER_RULES
+
+
 @pytest.mark.parametrize("value", [False, None])
 def test_segmented_reply_can_be_turned_off(value):
     off = plain(segmented_reply=value)
