@@ -829,12 +829,10 @@ def prompt_parts(summary, *, compact=False):
         "不表示这些能力未接入。没有本次回执只表示尚未确认执行结果；"
         "单次读取失败只说明该次失败，不能据此否定整个读取通道。"
     )
-    lines = ["\n当前能力事实：可用表示本地可接纳相应任务，不代表已经执行或远端在线。",
+    lines = ["\n当前能力：可用表示这边能接这类事，不代表已经做了；被问能做什么时用自己的话说。",
              answer_rules,
-             "系统流程和主人指令不等于模型工具。只有标记为可用的本轮工具可直接调用。",
-             "没有回执不要声称看过、听过、试过或完成。B站字幕不代表看过完整视频；"
-             "画面分析只覆盖回执列出的采样帧和短片段。",
-             "UNOBSERVED 只表示没有进程运行观测，不等于功能关闭；实际素材和覆盖以回执为准。"]
+             "系统流程和主人指令不等于模型工具。只有本轮可调用工具能直接调用。",
+             "没有回执不要声称看过、听过、试过或完成；B站字幕不代表看过完整视频。"]
     tools = [row["id"] for row in summary["capabilities"]
              if row["state"] == "READY" and "model_callable" in row["invocation"]]
     dynamic = ["本轮可调用工具：" + ("、".join(tools) if tools else "无") + "。"]
@@ -865,13 +863,13 @@ def prompt_parts(summary, *, compact=False):
         return "\n".join(lines), "\n" + "\n".join(dynamic)
     omitted = "部分能力未列出；未列出的能力不推定可用。"
     for row in summary["capabilities"]:
+        if row["state"] == "READY" and row["invocation"] == ["model_callable"]:
+            continue  # Already named on the callable-tools line.
         line = f"- {row['id']}：{labels[row['state']]}"
         if row["state"] == "READY":
             line += f"（{'/'.join(routes[value] for value in row['invocation'])}）{row['summary']}"
         if row["reason_codes"]:
             line += "（" + row["reason_codes"][0] + "）"
-        if row["state"] == "READY" and row["runtime_observation"] != "OBSERVED":
-            line += " [" + row["runtime_observation"] + "]"
         if len(("\n".join([*lines, *dynamic, line, omitted])).encode("utf-8")) > 6000:
             dynamic.append(omitted)
             break

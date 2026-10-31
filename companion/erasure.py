@@ -59,6 +59,7 @@ def cleanup_contracts():
     from companion.meme_core import erase_captions
     from companion.memory_enrichment import erase as erase_memory_enrichment
     from companion.memory_work import erase_memory_work
+    from companion.mood_appraisals import erase as erase_mood_appraisals
     from companion.observation import erase_observations
     from companion.owner_authority import erase_sources as erase_owner_authority
     from companion.owner_input import erase as erase_owner_inputs
@@ -88,6 +89,7 @@ def cleanup_contracts():
         event_cleanup("rem", erase_rem),
         event_cleanup("memory-work", erase_memory_work),
         event_cleanup("memory-enrichment", erase_memory_enrichment),
+        event_cleanup("mood-appraisals", erase_mood_appraisals),
         event_cleanup("goals", erase_goals),
         event_cleanup("life-topics", erase_topics),
         event_cleanup("reading", erase_reading),

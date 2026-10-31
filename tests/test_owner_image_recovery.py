@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from companion import qq_rich
 from companion_delivery_protocol.authority import capture_signing_payload
 from companion_onebot_bridge import capture, pending_media
 from companion_onebot_bridge.event_normalizer import normalize
@@ -153,9 +154,7 @@ def test_owner_ws_survives_unknown_images_and_replay_with_independent_worker(cor
                 assert not any(isinstance(item["content"], list) for item in context)
                 if number < 3:
                     assert "UNSUPPORTED" in encode(context)
-                    assert "未取得的正文/图片/视频不能声称读过" in context[0]["content"]
-                    assert "若本条仅有未解析图片，应明确说明本次读不到图片" in (
-                        context[0]["content"])
+                    assert qq_rich.RULES in context[0]["content"]
                 if number == 1:
                     assert context[-1]["content"] == "继续处理这段原文"
                 assert await active.pump()
