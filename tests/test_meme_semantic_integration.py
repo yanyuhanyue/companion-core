@@ -1,9 +1,11 @@
 """Signed WS to independent API/worker to original OneBot delivery, with synthetic I/O."""
 
+import asyncio
 import base64
 import hashlib
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -13,6 +15,7 @@ from companion.autonomous_selector import native_selector
 from companion.core import Core
 from companion.image_input import ImageInputPolicy
 from companion.model import ModelClient
+from companion_onebot_bridge import app
 from companion_onebot_bridge.meme_catalog import key_hash
 from companion_onebot_bridge.owner_memes import MemePump
 from tests.conftest import run
@@ -25,9 +28,10 @@ from tests.test_onebot_direct import raw_event
 from tests.test_private_companion import companion_options
 
 
-@pytest.mark.parametrize("handoff", [False, True], ids=["ordinary", "cancelled-before-usage"])
+@pytest.mark.parametrize("handoff,deferred", [(False, False), (True, False), (False, True)],
+                         ids=["ordinary", "cancelled-before-usage", "query-unavailable"])
 def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
-    core, tmp_path, handoff,
+    core, tmp_path, handoff, deferred,
 ):
     now = datetime.now(UTC).replace(microsecond=0)
     core.clock.now = now
@@ -117,13 +121,24 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
             runtime = window.runtime.memes
             pump = MemePump(window.runtime, client)
 
+            async def unavailable_query(request):
+                if request.url.path == "/internal/v1/memes/query":
+                    raise httpx.ReadTimeout("synthetic unavailable optional query", request=request)
+
+            if deferred:
+                client.event_hooks["request"].append(unavailable_query)
+
             async def admit_current():
                 await window.capture_once(client, protocol)
-                try:
-                    assert await window.runtime.flush_one(client)
-                except httpx.HTTPStatusError as error:
-                    await error.response.aread()
-                    raise AssertionError(error.response.text) from error
+                stop, wake = asyncio.Event(), asyncio.Event()
+
+                def accepted(payload):
+                    assert payload["payload"]["text"] == text
+                    stop.set()
+                    wake.set()
+
+                await app.upload(client, window.spool, wake, stop,
+                    SimpleNamespace(accepted=accepted), runtime=window.runtime, memes=pump)
                 event_id = pump.latest()[0]
                 row = window.db.execute(
                     "SELECT state,capture_json FROM window_inputs WHERE event_id=?", (event_id,),
@@ -134,7 +149,6 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                 assert window.db.execute(
                     "SELECT state FROM inbox WHERE key=?", (event_id,),
                 ).fetchone()[0] == "accepted"
-                pump.admitted(event_id)
                 task = pump.query_task
                 assert task is not None
                 pump.tick(idle=False)
@@ -144,11 +158,12 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     "SELECT state,offer_json FROM meme_runtime_semantic_offers WHERE event_id=?",
                     (event_id,),
                 ).fetchone()
-                assert offered is not None and offered[0] == "ACCEPTED", offered
+                expected = "DEFERRED" if deferred and number == 1 else "ACCEPTED"
+                assert offered is not None and offered[0] == expected, offered
                 assert window.db.execute(
                     "SELECT state FROM window_inputs WHERE event_id=?", (event_id,),
                 ).fetchone()[0] == "CAPTURED"
-                return event_id, json.loads(offered[1])
+                return event_id, json.loads(offered[1]) if offered[1] else None
 
             try:
                 with Core(core.settings, ModelClient(core.settings, provider),
@@ -157,20 +172,24 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     caption_lane = next(lane for lane in native_selector(worker,
                         "meme-integration").lanes if lane.name == "meme_caption")
                     first, offer = await admit_current()
-                    assert offer["candidates"] == [] and public_calls == visual_calls == []
+                    assert (offer is None if deferred else offer["candidates"] == [])
+                    assert public_calls == visual_calls == []
+                    if deferred:
+                        client.event_hooks["request"].remove(unavailable_query)
+                        assert api_core.store.one("SELECT value FROM runtime_meta WHERE key=?",
+                            ("meme_offer:" + first,)) is None
+                        core.clock.advance(2)
                     assert await worker.run_once("meme-integration-chat")
                     assert (await window.send(client, protocol))["worked"]
                     assert len(sends) == 1 and len(sends[0]["message"]) == 1
                     assert (await pump.state(pump.latest()))["terminal"]
 
-                    submitted = await runtime.submit_missing(
-                        client, first, runtime.missing_offer(first), reply_revision=1,
-                    )
-                    assert submitted.get("state") == "QUEUED", submitted
-                    discovered = await runtime.run_once(client)
-                    assert discovered["status"] == "completed", discovered
-                    assert discovered["accepted"] == []
-                    assert discovered["pending_caption"] == [asset_sha]
+                    pump.next_run = 0
+                    pump.tick(idle=True)
+                    await pump.task
+                    submitted = core.store.one("SELECT state FROM jobs WHERE kind='meme_discovery'")
+                    assert submitted is not None, "optional query failure stranded an empty catalog"
+                    assert submitted["state"] == "SUCCEEDED"
                     assert len(public_calls) == 5
                     assert core.store.one(
                         "SELECT state,queries,requests FROM meme_discovery_reservations",
@@ -287,9 +306,9 @@ def test_signed_capture_caption_index_current_offer_and_original_image_delivery(
                     assert len(vector) == 512 and any(value != 0 for value in vector)
                     queries = [json.loads(row["value"]) for row in core.store.rows(
                         "SELECT value FROM runtime_meta WHERE key LIKE 'meme_query:%'")]
-                    assert len(queries) == 3 + handoff
+                    assert len(queries) == 3 + handoff - deferred
                     embedded = [query["embedding"] for query in queries if query["embedding"]]
-                    assert len(embedded) == 2 + handoff
+                    assert len(embedded) == 2 + handoff - deferred
                     assert all(value["local"] is True and value["dimensions"] == 512
                                for value in embedded)
             finally:

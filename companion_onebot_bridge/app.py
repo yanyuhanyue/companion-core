@@ -200,7 +200,7 @@ async def upload(client, spool, wake, stop, metrics, *, runtime=None, memes=None
             while payload := await flush(client):
                 metrics.accepted(payload)
                 if memes is not None:
-                    memes.admitted(payload["event_id"])
+                    memes.admitted(payload["event_id"], payload=payload)
         except httpx.TransportError:
             metrics.emit("core_unavailable")
             await pause(stop, 1)

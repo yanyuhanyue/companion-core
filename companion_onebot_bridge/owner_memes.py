@@ -7,9 +7,11 @@ import time
 import companion_delivery_protocol as wire
 
 from . import journal, pending_media
+from .meme_runtime import infer_intent
 from .metrics import emit
 from .onebot_client import bounded_post
 from .owner_handoff import terminal
+from .rich_input import input_digest
 
 
 class MemePump:
@@ -20,6 +22,7 @@ class MemePump:
         self.task = self.query_task = None
         self.query_tasks = set()
         self.query_event = self.submitted_event = None
+        self.discovery_intent = None
         self.next_run = 0
 
     def latest(self):
@@ -56,14 +59,24 @@ class MemePump:
             if task is not None and not task.done() and not task.cancelling():
                 task.cancel()
 
-    def admitted(self, event_id):
+    def admitted(self, event_id, *, payload=None):
         if self.runtime is None or event_id == self.query_event:
             return
         row = self.latest()
         if row is None or row[0] != event_id:
             return
+        intent = None
+        if payload is not None:
+            capture = json.loads(row[1])
+            if (payload.get("event_id") != event_id
+                or input_digest(payload["payload"]) != capture["input_sha256"]):
+                raise ValueError("MEME_INPUT_INVALID")
+            intent = infer_intent(payload["payload"].get("text"))
         self.interrupt()
         self.query_event = event_id
+        # Accepted inbox text has already been erased. Keep only this enum in RAM,
+        # so optional retrieval failure cannot strand an otherwise empty catalog.
+        self.discovery_intent = intent
         if self.runtime.semantics_enabled:
             self.query_task = asyncio.create_task(self.query(row))
             self.query_tasks.add(self.query_task)
@@ -80,12 +93,26 @@ class MemePump:
         except Exception:
             emit("meme_semantic_offer", status="DEFERRED")
 
+    def discovery_offer(self, event_id):
+        """A discovery hint only; never creates a current-turn offer receipt."""
+        offer = self.runtime.missing_offer(event_id)
+        if (offer is None and event_id == self.query_event and self.discovery_intent is not None
+            and self.runtime.semantics_enabled and not self.owner.db.execute(
+                "SELECT 1 FROM meme_assets WHERE active=1 LIMIT 1").fetchone()
+            and not self.owner.db.execute(
+                "SELECT 1 FROM meme_runtime_semantic_offers WHERE event_id=? "
+                "AND query_binding IS NOT NULL AND json_type(offer_json)='null'",
+                (event_id,)).fetchone()):
+            self.runtime._admitted_check(event_id)
+            return {"intent": self.discovery_intent, "candidates": []}
+        return offer
+
     async def execute(self, row):
         try:
             state = await self.state(row)
             if (row[0] != self.submitted_event and state["terminal"]
                 and state["state"] == "COMPLETE"):
-                offer = self.runtime.missing_offer(row[0])
+                offer = self.discovery_offer(row[0])
                 result = await self.runtime.submit_missing(self.client, row[0], offer,
                     reply_revision=state["reply_revision"]) if offer else {}
                 if result.get("status") != "DEFERRED":
@@ -132,3 +159,4 @@ class MemePump:
         self.interrupt()
         await asyncio.gather(*self.query_tasks, *([self.task] if self.task else []),
                              return_exceptions=True)
+        self.discovery_intent = None
