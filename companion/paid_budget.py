@@ -377,6 +377,20 @@ def journal(store, approval, record=None, *, allow_settlement=False, initialize=
         _validated_bytes.cache_clear()
         raise
     if saved is not None and identity == saved[2]:
+        if saved[3].get("gateway_clients"):
+            from companion.gateway import validate_clients
+
+            try:
+                validate_clients(store, saved[3]["gateway_clients"])
+            except (ValueError, KeyError, TypeError):
+                raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from None
+        if saved[3].get("gateway_bindings"):
+            from companion.gateway import validate_projection
+
+            try:
+                validate_projection(store, saved[3]["gateway_bindings"])
+            except (ValueError, KeyError, TypeError):
+                raise CoreError("MODEL_BUDGET_RECONCILIATION_REQUIRED", 503) from None
         _permit(saved[3], approval, allow_settlement)
         store._journal_view = saved
         return marshal.loads(saved[1])
@@ -440,6 +454,8 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
         previous, latest, blocked = "0" * 64, {}, {}
         corrections = {}
         measurements = {}
+        gateway_bindings = {}
+        gateway_clients = {}
         resolutions = {}
         authorities = []
         heads = set()
@@ -461,6 +477,10 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                 ):
                     raise ValueError("journal identity")
             else:
+                if row.get("kind") == "gateway_client":
+                    client = row["client"]
+                    gateway_clients[client["client_id"]] = client
+                    continue
                 if row.get("kind") == model_accounting.KIND:
                     model_accounting.fold(store, row, digest, identity["value"], latest,
                                           model_closures, blocked, accounting)
@@ -507,7 +527,20 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                         or row["request_id"] in measurements):
                         raise ValueError("measurement journal evidence")
                     measurements[row["request_id"]] = proof["sha256"]
+                if "gateway" in row:
+                    if row["kind"] != "reserve" or row["request_id"] in gateway_bindings:
+                        raise ValueError("duplicate gateway attribution")
+                    gateway_bindings[row["request_id"]] = row["gateway"]
                 latest[row["request_id"]] = row
+        if gateway_bindings or record and "gateway" in record or store.one(
+            "SELECT 1 FROM model_usage WHERE scenario='gateway' LIMIT 1"
+        ):
+            from companion.gateway import validate_projection
+
+            gateway_bindings = validate_projection(store, gateway_bindings, record)
+        from companion.gateway import validate_clients
+
+        gateway_clients = validate_clients(store, gateway_clients, record)
         model_carry.validate_projection(store, model_controls, replay=model_control_replay)
         accounting_pending = model_accounting.validate_projection(store, accounting,
                                                                    accounting_replay)
@@ -657,6 +690,8 @@ def _journal(store, approval, record=None, *, allow_settlement=False, initialize
                 "model_accounting": accounting,
                 "model_accounting_pending": accounting_pending,
                 "model_latest": latest,
+                "gateway_bindings": gateway_bindings,
+                "gateway_clients": gateway_clients,
                 "owner_authority": authorities[-1] if authorities else None}
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
         _validated_bytes.cache_clear()

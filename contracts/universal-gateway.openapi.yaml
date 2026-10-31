@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: Companion Universal Gateway
-  version: 1.0.0-g0
+  version: 1.0.0-g1a
   description: >
-    G0 interface contract only. No routes are registered by this slice.
-    G1 targets authenticated, non-streaming text Passthrough requests.
+    G1a authenticated, non-streaming text Passthrough in a separate loopback app.
+    Disabled by default. Core's QQ app registers none of these routes.
     Alias selection does not grant a mode, identity or memory access.
-x-implementation-stage: G0-contract-only
+x-implementation-stage: G1a-passthrough
 servers:
   - url: http://127.0.0.1:8780
 security:
@@ -90,7 +90,7 @@ paths:
               $ref: './universal-gateway.v1.schema.json#/$defs/ChatRequest'
       responses:
         '200':
-          description: G1 non-streaming completion after native settlement
+          description: Non-streaming completion after native settlement and durable receipt
           headers:
             X-Request-Id:
               description: Original Gateway request/receipt identity, not proof the user read it.
@@ -138,6 +138,54 @@ paths:
         '404': {$ref: '#/components/responses/Error'}
         '409': {$ref: '#/components/responses/Error'}
         '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/gateway/requests/{request_id}:
+    get:
+      operationId: gatewayRequestReceipt
+      description: >
+        Current authenticated client's bounded original receipt. No provider replay.
+        Completion is available only after settlement, within retention. Key rotation
+        does not transfer an original attempt's execution rights.
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: {type: string, pattern: '^gateway_[a-f0-9]{32}$'}
+      responses:
+        '200':
+          description: Original state and retained result, without prompt or upstream secrets
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [id, object, status, created, expires_at, error_code, error_status,
+                           completion, accounting]
+                properties:
+                  id: {type: string}
+                  object: {const: gateway.request}
+                  status: {enum: [QUEUED, RUNNING, SUCCEEDED, FAILED, UNKNOWN, EXPIRED]}
+                  created: {type: integer, minimum: 0}
+                  expires_at: {type: string, format: date-time}
+                  error_code: {type: [string, 'null']}
+                  error_status: {type: [integer, 'null'], minimum: 400, maximum: 599}
+                  completion:
+                    oneOf:
+                      - {type: 'null'}
+                      - $ref: '#/paths/~1v1~1chat~1completions/post/responses/200/content/application~1json/schema'
+                  accounting:
+                    oneOf:
+                      - {type: 'null'}
+                      - type: object
+                        additionalProperties: false
+                        required: [state, micro_usd, currency, basis]
+                        properties:
+                          state: {enum: [RESERVED, SETTLED, UNKNOWN]}
+                          micro_usd: {type: integer, minimum: 0}
+                          currency: {const: USD}
+                          basis: {const: configured_rates_not_invoice}
+        '401': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
 components:
   securitySchemes:

@@ -247,7 +247,8 @@ def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expans
 
 
 @pytest.mark.parametrize("value", [
-    "private.key", "config.toml", ".env.production", "dump.sqlite3", "client.pem", "runtime.log",
+    "private.key", "config.toml", "gateway.toml", ".env.production", "dump.sqlite3",
+    "client.pem", "runtime.log",
     "keys/nested.txt", "CONFIG.TOML", "__pycache__/module.pyc",
 ])
 @pytest.mark.parametrize("source_root", ["source_reader", "companion_meme_sources"])

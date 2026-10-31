@@ -1,0 +1,13 @@
+# Independent, loopback-only G1a listener. Uses the Core's currently approved model route.
+enabled = false
+bind_host = "127.0.0.1"
+port = 8780
+wait_seconds = 120
+execution_seconds = 120
+receipt_seconds = 3600
+pending_per_client = 16
+
+[[aliases]]
+model_alias = "xiaofeiyuv3"
+route_id = "approved_default"
+revision = 1

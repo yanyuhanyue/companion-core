@@ -66,6 +66,9 @@ def restore(source, destination, key, ledger_path):
                 from companion.owner_authority import restore as restore_owner_authority
 
                 restore_owner_authority(store)
+                from companion.gateway import restore as restore_gateway
+
+                restore_gateway(store)
                 store.execute(
                     "UPDATE outbox SET state='DELIVERY_UNCERTAIN',lease_token=NULL,"
                     "last_error_code='RESTORED_DELIVERY_REQUIRES_RECONCILIATION' "

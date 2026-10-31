@@ -1,9 +1,9 @@
-# Universal Gateway：G0 统一接入合同
+# Universal Gateway：统一合同与 G1a Passthrough
 
-2026-10-31，基于主分支 `f33f939`。G0 交付架构、接口、权限矩阵和可执行合同测试。
-这一切片没有 HTTP 处理器、客户端 Key 签发、模型调用、数据库迁移或现有 Settings 接线。
-`GatewayContract.enabled` 固定为 false，绑定地址只允许回环地址。
-后续按 G1 Passthrough → G2 Companion → G3 RP → G4 工具与主动事件交付。
+2026-10-31。G0（`75a4cf0`）建立合同；G1a 实现非流式文本 Passthrough。
+独立 GatewayConfig 默认 enabled=false，绑定地址只允许回环，不注册到 QQ 的 Core HTTP 应用。
+GatewayContract 是纯结构的 Schema 目录；route_intent() 仍不产生执行许可。
+后续分别交付 G1b SSE → G2 Companion → G3 RP → G4 工具与主动事件。
 
 ## 职责与现有实现
 
@@ -22,8 +22,8 @@
 | 模型适配器 | 提供者协议与响应标准化，继续不拥有存储、权限和投递职责 |
 | 外部执行方 | 后续 G4 在 Core 许可下完成明确工具工作，交回证据；不成为另一个主脑 |
 
-G0 的 `companion/gateway_contract.py` 是无 I/O 的类型和路由意图规范。
-它复用 Pydantic、原 AuthorityRef，未被生产服务导入或调用。
+`companion/gateway_contract.py` 是无 I/O 的类型和路由意图规范。
+它复用 Pydantic、原 AuthorityRef，由独立 Gateway 应用和 worker 使用。
 `route_intent()` 返回的 `dispatch_allowed` 固定为 false；它不是认证结果、预算预留、
 有限执行租约或 `ModelAdmission`。伪造或过期的快照也不能用它发起执行。
 
@@ -44,9 +44,9 @@ G0 的 `companion/gateway_contract.py` 是无 I/O 的类型和路由意图规范
 | `budget` | 同一 client 的调用、金额、输入/输出和并发上限，并引用原付费合同与 Budget Journal |
 
 Key 只用于受控 Gateway 入口，不复用 owner-control、Bridge、Reader、执行器或模型供应商凭据。
-G1 由已认证的凭据查询提供 ClientGrant；客户端正文或普通 `X-Client-Id` 不能提供该对象。
+G1a 由已认证的凭据查询提供 ClientGrant；客户端正文或普通 `X-Client-Id` 不能提供该对象。
 轮换 Key 或授权修订不得重置同一 client 的用量，也不能续接旧尝试的执行权。
-G0 没有设计新的凭据格式、授权账本或自动签发机制。
+Key 由本地管理命令生成；凭据摘要和授权修订的投影进入原 Budget Journal。
 
 有效模型为配置别名与客户端模型白名单的交集；模式选择单独核对。
 例如，Passthrough 客户端获准访问三个别名时，请求任何一个都仍是 Passthrough，记忆范围为 none。
@@ -114,10 +114,10 @@ G2/G3 的正文、摘要、向量、观察、反思和日记派生必须进入�
 输入限制覆盖最终实际发送的全部上下文，Companion 内部注入内容也须计入该请求。
 价格未知、批准路由不符、额度不足或账本状态不明时不派发。
 
-G1 须复用原预算预留/结算、原始请求身份及 ModelAdmission 的最终派发检查，
+G1a 复用原预算预留/结算、原始请求身份及 ModelAdmission 的最终派发检查，
 在同一原生交易语义下更新 client 配额投影，不能先发后记账，也不能把同一请求作为两笔支出重复累计。
-现有准入绑定原生 job/scenario，尚不能直接服务任意外部 Passthrough 请求；
-G1 必须补齐这个原生消费者，不能伪造聊天任务、源事件或临时 OwnerAuthority。
+Gateway 是独立原生消费者，使用自己的请求/有限 worker 租约和客户端授权检查；
+不创建聊天任务、源事件或临时 OwnerAuthority。
 外部请求导致的后续付费处理也必须明确原来源和预算责任，不能隐入 QQ 额度。
 
 | 时点 | 必须保留的语义 |
@@ -133,7 +133,7 @@ G1 必须补齐这个原生消费者，不能伪造聊天任务、源事件或�
 记忆范围、预算引用及输入摘要；同键不同请求拒绝。缺少该 Header 时每次提交是新意图，
 不能承诺客户端自动重试不会成为新请求。G1 不实现网关侧自动供应商重试；
 客户端获得原 X-Request-Id 后，应核对原回执而不是重造执行。
-G1 需一并明确有界的回执查询/保管方式，不能把响应缓存当作新的记忆库。
+GET /v1/gateway/requests/{request_id} 提供有界回执查询，不形成记忆库。
 
 模型结果已结算、HTTP 响应已写出、客户端确认接收及主人已读分别判断。
 不借用 QQ 的 SENT 证明外部 HTTP 送达，也不为 HTTP 回包创建 QQ Outbox。
@@ -148,7 +148,7 @@ JSON Schema 由 GatewayContract.model_json_schema() 导出，合同测试核对�
 
 | 阶段 | 可调用接口/范围 | 上线前必须成立 |
 |---|---|---|
-| G0，本 PR | 仅离线结构验证，无服务端路由 | 权限矩阵、归属与禁用测试通过；QQ 入口保持原样 |
+| G0，已合并 | 离线结构合同 | 权限矩阵、归属与禁用测试通过；QQ 入口保持原样 |
 | G1a | GET /v1/models、POST /v1/chat/completions；文本 Passthrough、非流式 | 独立 Key、别名与路由配置、原生付费准入、client 额度、幂等/UNKNOWN、回执恢复、真实 API + 独立 worker 合成验收 |
 | G1b | 真正 SSE | 原提供者增量传输、背压、取消、用量终态和中断/未知责任测试；不能将完整响应切片冒充流式 |
 | G2 | 获准 Companion 客户端 | 外部身份和来源、独立会话映射、当前用途、现实记忆范围、擦除/恢复及同一 Core 上下文验证 |
@@ -177,7 +177,7 @@ G1 即使收到 G2/G3 模式的结构合法授权，也不能开放尚未实现�
 
 合同测试覆盖全部别名与三种模式、请求不能提供身份/记忆权限、现实与虚构隔离、
 跨 client/mode/world 的会话归属、预算边界、过期快照不构成执行许可，以及未注册外部 HTTP 路由。
-G0 不经过 API/config/worker 执行交接，不声称完成真实外部客户端或费用验收。
+G1a 的合成验收使用真实 HTTP 入口、独立 worker 和模拟供应商传输；不进行真实付费调用。
 
 - 官方 [Chat Completions 创建接口](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create/)
   和 [模型列表接口](https://developers.openai.com/api/reference/resources/models/methods/list/)：
@@ -185,20 +185,80 @@ G0 不经过 API/config/worker 执行交接，不声称完成真实外部客户�
 - [原生 SDK 运行合同](plans/2026-10-25-sdk-owner-runtime.md)所记录的 DSH 与 Pydantic AI 实现：
   沿用单一 Core 编排、原始准入、终态责任与提供者协议分离，未引入 DSH 到 Gateway 入口。
 - [主人授权](owner-authority.md)、[现有架构](architecture.md)、[来源授权](source-grants.md)：
-  当前授权、来源处理、预算和遗忘保持各自原生归属；G1/G2 的接入缺口必须在相应切片闭合。
+  当前授权、来源处理、预算和遗忘保持各自原生归属；Companion 的来源接线留在 G2。
 
-## G1a 实现方案，待讨论
+## G1a 运行与管理
 
-G0 已合并为 `75a4cf0`。G1a 的目标是两个 OpenAI 兼容入口、独立客户端 Key、
-可配置别名，以及预算/回执约束下的非流式文本 Passthrough。
-以下是针对已核实接线缺口的建议范围，尚未实现运行时。
+G1a 使用独立入口、原生消费者和有界回执；范围已经主人确认。
+不增加供应商依赖。独立配置文件通过 COMPANION_GATEWAY_CONFIG 指定，默认 gateway.toml。
 
-### 已有机制与缺口
+1. 先配置原 Core 的 live 模式、有效 PaidModelApproval、已知价格、足够长的独立 control_token。
+   复制 [gateway.example.toml](../gateway.example.toml) 为 gateway.toml，按需调整别名并显式开启 enabled。
+   上游路由仍来自原 Core 的已批准配置；route_id 仅支持 approved_default。
+2. 运行 `python -m companion.gateway_worker init`，迁移数据库并返回原 budget_journal_id
+   与 paid_contract_sha256。把这两个真实值填入本地 ClientGrant JSON。
+3. 运行 `python -m companion.gateway_worker client-put --grant .local/gateway-client.json`。
+   命令仅在本地使用，一次输出 client_id 与 api_key；数据库和 Journal 只保存 Key 摘要。
+4. 分别运行 `python -m companion.gateway_worker serve` 和
+   `python -m companion.gateway_worker worker`。API 监听配置的回环地址，默认端口 8780。
+   原 QQ 服务与 worker 不需要改为 Gateway 入口。
+
+ClientGrant 示例中的三个占位值必须替换；expires_at 是带时区的有效期：
+
+```json
+{
+  "client_id": "desktop-test", "client_kind": "api", "key_id": "desktop-test-key-1",
+  "grant_id": "desktop-test-grant", "revision": 1,
+  "expires_at": "<UTC expiry>", "default_mode": "passthrough",
+  "modes": [{"mode": "passthrough"}], "model_aliases": ["xiaofeiyuv3"],
+  "budget": {
+    "budget_journal_id": "<budget_journal_id>",
+    "paid_contract_sha256": "<paid_contract_sha256>",
+    "max_input_tokens": 4000, "max_output_tokens": 128,
+    "max_request_micro_usd": 20000, "daily_calls": 5,
+    "daily_micro_usd": 100000, "concurrency": 1
+  }
+}
+```
+
+客户端使用 base_url=http://127.0.0.1:8780/v1 与独立 Bearer Key。
+先 GET /v1/models，再 POST /v1/chat/completions，例如：
+
+```json
+{"model":"xiaofeiyuv3","messages":[{"role":"user","content":"你好"}],"max_completion_tokens":128}
+```
+
+需要防止重复付费时，为同一意图提供稳定 Idempotency-Key。HTTP 200 只在原生结算和回执保存后返回。
+有界等待结束而请求仍排队/执行时，返回 503 GATEWAY_REQUEST_PENDING 和 X-Request-Id；
+使用同一 Key 及原请求核对，或 GET /v1/gateway/requests/{request_id} 查询。
+SDK 若对 503 自动重试且未携带同一 Idempotency-Key，可能提交新意图；应关闭其自动重试或设置稳定键。
+UNKNOWN 只提供状态与费用责任，不重发；SETTLED 后、回执保存前崩溃也不重新生成结果。
+后者返回 GATEWAY_RESULT_UNAVAILABLE，原已结算费用保持原样。
+
+回执只对当前有效 Key 所属的 client 可见；字段包括状态、错误码/状态码、到期时间、
+原账本的费用状态/微美元责任金额及尚在保留期的 completion。金额按配置价格计算，不代表提供者发票。
+不返回请求正文、授权快照或上游凭据。Key 轮换后，新 Key 可读取同 client 的已结算回执，
+不能续接旧授权下尚未执行的尝试。同幂等键改变授权/别名修订或请求内容时返回 409。
+模型列表的 created=0 表示未维护别名创建时间。
+
+客户端每日限额使用 Core 时区；并发计入 RESERVED/UNKNOWN 的原 model_usage，Key 轮换不重置。
+实际费用超过客户端请求/日金额上限时，沿用原生 UNKNOWN/阻塞机制保留完整责任。
+客户端 Key 修订、撤销和原请求归属也受原 Budget Journal 的投影检查，旧数据库不能恢复已撤销 Key。
+备份恢复会更换 Gateway 恢复代际、清除正文并禁用旧 Key；费用仍须通过原恢复/核对流程。
+
+默认回执保留 3600 秒，最多 86400 秒；到期后不再交付正文，worker 和查询入口触发实际清理。
+停机期间的实际清理在下次处理时完成；关闭入口时也可本地运行 `python -m companion.gateway_worker expire`。
+正文使用独立用途派生的现有 Fernet 加密方式，依赖 Core control_token；轮换它后旧正文可能不可解密，
+仍保留费用与摘要且不重试。`client-revoke --client-id desktop-test` 停止访问，
+`client-purge --client-id desktop-test` 同时清除该 client 的请求/结果正文，均通过上述模块命令执行。
+原摘要、Key 控制记录和费用责任保留用于核对。
+
+### 复用依据
 
 - `budget.reserve()`、`budget.complete()`、`paid_budget.journal()` 和 ModelAdmission
   已提供预留、结算、UNKNOWN、追加式费用责任和最终 HTTP 派发检查，继续作为唯一费用机制。
 - 原生准入中的 `_model_scope()` 和 `owner_authority.admit_model()` 目前要求原生任务及来源。
-  外部文本请求需要真实的客户端消费者身份，不能套用 `chat`、`evaluation` 或 QQ 来源证明。
+  G1a 为外部文本补齐客户端消费者身份，不套用 `chat`、`evaluation` 或 QQ 来源证明。
 - Budget Journal 会检查数据库投影是否落后于账本。客户端与请求的关联也必须纳入这项核对，
   否则旧备份可能丢失客户端用量和幂等归属，而费用记录仍然存在。
 - 执行器私有代理使用内存任务凭据和计数，无法提供持久的客户端配额、回执和恢复责任。
@@ -207,7 +267,7 @@ G0 已合并为 `75a4cf0`。G1a 的目标是两个 OpenAI 兼容入口、独立�
   列出 system/user/assistant/tool 消息及 temperature；不能假设其支持 OpenAI 的所有角色或字段。
   最终实际 payload 必须一致地进入计量、预算摘要和派发校验；未支持的参数在 I/O 前明确拒绝。
 
-### 建议范围
+### 实现范围
 
 1. 新增独立、默认关闭、限回环地址的 Gateway 入口和独立 worker，不修改 QQ HTTP/Bridge 链路。
    API 认证及冻结请求，worker 负责受控生成；两者共享现有 Core 数据库。
@@ -231,5 +291,5 @@ G0 已合并为 `75a4cf0`。G1a 的目标是两个 OpenAI 兼容入口、独立�
 
 直接开放执行器代理代码改动较少，但会绕开原持久准入与回执责任，因此不采用。
 把所有内部任务一起改成通用调度器会扩大到 QQ 和 Life 的职责，不属于本切片。
-建议只补齐上述 Gateway 原生消费者，并保持现有预算和模型适配器职责。
+本轮补齐上述 Gateway 原生消费者，保持现有预算和模型适配器职责。
 SSE、更多上游路由、Companion/RP 和客户端 UI 分别后续交付。
