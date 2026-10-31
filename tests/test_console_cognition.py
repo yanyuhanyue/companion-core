@@ -244,10 +244,11 @@ def test_affect_view_distinguishes_disabled_from_neutral(client, core):
     assert value["state"]["engagement"] == "neutral"
 
 
-def test_mood_console_authentication_controls_and_idempotent_clear(client, core):
+@pytest.mark.parametrize("appraisal", ["这个回答很有帮助", "这个想法很有意思"])
+def test_mood_console_authentication_controls_and_idempotent_clear(client, core, appraisal):
     from tests.test_mood import feedback
 
-    feedback(core)
+    feedback(core, text=appraisal)
     assert client.get("/v1/console/mood").status_code == 401
     headers = login(client)
     path = "/v1/console/mood/control"
